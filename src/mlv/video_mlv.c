@@ -520,13 +520,18 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
         return video->playback_scale_factor_active >= 1;
     }
 
-    /* Standard sharp/smooth playback is still the common case for the
-     * priority x1/x2 lanes. Let those scales use the same prefetch overlap
-     * so the foreground render path can spend more time presenting frames
-     * instead of rebuilding the next processed8 result. */
+    /* Standard sharp/smooth playback. x2/x4/x8 land hundreds of processed8
+     * prefetch hits, so overlapping the next processed8 result there lets the
+     * foreground spend more time presenting frames. x1 (full resolution) is
+     * different: producing a full-res processed8 frame costs about as much as
+     * the foreground frame itself, so the worker never gets ahead. Across the
+     * standard M16 trio the x1 lane measured processed8_prefetch_hits=0 on
+     * every clip while the worker still ran a full background RGB/dual-ISO/
+     * shadows-highlights pipeline, stealing cores and disk reads from the
+     * slowest priority lane for no benefit. Keep the prefetch off at x1. */
     return video
         && processingPlaybackPreviewModeEnabled()
-        && (video->playback_scale_factor_active <= 2
+        && (video->playback_scale_factor_active == 2
             || video->playback_scale_factor_active >= 4);
 }
 

@@ -1,3 +1,33 @@
+# 2026-06-09 - dropping the inert x1 processed8 prefetch worker is a large keeper-safe x1 win (+55-66%)
+
+### Verified locally
+
+- Next-bottleneck decision (processing tail vs disk I/O): chose the **shared processing tail**. Per-stage telemetry shows `render_total` dominated by `processed16`; the no-screenshot disk trace held `AvgDiskQueueLength < 1` (disk keeps up, not gating cadence); playback reads are largely intrinsic and the screenshot harness only inflates the write side. Disk is a separate, riskier track the data does not yet justify prioritizing.
+- Confirmed from on-disk telemetry (`.claude-state/profiling/20260608-x1x2-quarterres-validation`) that standard-preview **x1 lands `processed8_prefetch_hits=0` on all three clips** (M16-1327/1347/1446) while x2 lands 148-250. The processed8 prefetch worker was enabled at x1, running the full background RGB/dual-ISO/shadows-highlights pipeline at full resolution, so it can never get ahead of the equally-expensive x1 foreground frame and only steals cores/IO from the slowest priority lane.
+- Narrowed the standard-preview branch of `mlv_processed8_prefetch_enabled()` in [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) from `scale<=2 || scale>=4` to `scale==2 || scale>=4`, excluding x1 only. The aggressive-preview branch is unchanged. Updated the pinning regression to `DualIsoPipeline.Processed8PrefetchEnablesStandardScaleTwoFourAndEightButNotOne` in [`tests/pipeline/test_dual_iso_pipeline.cpp`](C:/!Layi%20Wkspc/MLV-App/tests/pipeline/test_dual_iso_pipeline.cpp) (x1=0; x2/x4/x8=1).
+- Rebuilt the user-facing release tree:
+  - [`platform\qt\build-release\release\MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe)
+  - `LastWriteTime=6/8/2026 7:52:08 PM`
+  - `Length=9113600`
+  - `SHA256=BC888E7560900D0B4772357120134EA161EBF9E8279C235695C70ACF44A9208E`
+- Qt-linked focused pipeline regression green via [`tools\testing\run-windows-test.ps1`](C:/!Layi%20Wkspc/MLV-App/tools/testing/run-windows-test.ps1) (`Processed8PrefetchEnables*`, `RawUint16Prefetch*`, `Phase4Bv4_*`, `StandardPreviewScale*`).
+- The full pipeline suite still reports the same 17 pre-existing failures (direct8 byte-identity, AVX2 parity, foreground processed8/16 cache, aggressive recon). None invoke the x1 prefetch gate: those tests use the foreground `renderFrame8` path, not `mlv_processed8_prefetch_enabled` (consulted only on the live playback path at `video_mlv.c:5181`), and the cache tests' own in-code comments attribute their changed behavior to the pre-existing direct8 (Phase E7) work. Confirmed unrelated.
+- Screenshot-backed same-build smoke (`.claude-state/profiling/20260609-x1prefetch-drop`):
+  - x1 (changed lane): `M16-1327 9.103 fps` (baseline 5.86, +55%), `M16-1347 8.92 fps` (baseline 5.366, +66%), `M16-1446 8.871 fps` (baseline 5.342, +66%); all `validation.ok=true`, `colorArtifactScan.verdict=clear-heuristic`, `raw_prefetch_hits` intact (108-129), x1 `avg_render_total_ms` ~88 (vs ~140 baseline).
+  - x8 canary: `M16-1327 26.068 fps`, `M16-1347 26.595 fps`, `M16-1446 32.142 fps`; `processed8_prefetch_hits` still 783-883, so the x8 worker is untouched.
+- Manually inspected presented frames: all three x1 frames are clean, sharp, natural color; all three x8 canary frames are coherent (M16-1327 aquarium and M16-1347 lobby both clean this run; M16-1446 very dark but coherent with no new bar/block artifact).
+
+### Cross-checked from prior analysis
+
+- This is the largest single x1 gain found so far and it is zero-pixel-risk: the win comes from removing a background pipeline that never served a hit, not from altering the presented frame.
+- x2/x4/x8 standard-preview prefetch behavior is byte-identical (only the x1 branch changed), so the other lanes are unaffected by construction; the x8 canary was still inspected per the mandatory loop.
+- The longstanding x8 corruption pattern did not appear on this run, consistent with it being intermittent / IO-pressure-dependent rather than a deterministic gate failure.
+
+### Needs runtime profiling
+
+- The next bottleneck on the priority lanes is now squarely `processed16` (x1 `render_total` ~88 ms is ~82 ms `processed16`); the next candidate should target the processed16 / shadows-highlights tail.
+- Keep the x8 canary screenshot review in every future candidate; keep x4 quarter-res off by default.
+
 # 2026-06-08 - x1/x2 quarter-res default-on remains the keeper-safe gain; x8 canary corruption and SSD pressure are still live
 
 ### Verified locally
