@@ -38,12 +38,19 @@ param(
     [bool]$RequireLookAssist = $true,
     [bool]$RequireCpuSettled = $true,
     [string[]]$AdditionalArgs = @(),
+    [switch]$DetectPlaybackArtifacts,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+
+# Opt-in temporal-artifact gate: turn on the interactive trace so the post-run detector can measure
+# flicker / stalls / cadence jitter from per-present events. Auto-discounts the screenshot grab.
+if ($DetectPlaybackArtifacts -and -not ($ExtraEnvironment | Where-Object { $_ -match '^MLVAPP_INTERACTIVE_TRACE=' })) {
+    $ExtraEnvironment += 'MLVAPP_INTERACTIVE_TRACE=1'
+}
 
 if (($CaptureScreenshot -or $FrameTelemetry) -and $Seconds -lt $settledValidationRecommendedSeconds) {
     $validationWarnings += (
@@ -1153,6 +1160,45 @@ $screenshotAspectEvidence = if ($CaptureScreenshot) {
     $null
 }
 
+# Temporal playback-artifact gate (flicker / stall / cadence jitter) parsed from the interactive trace.
+$playbackArtifacts = $null
+if ($DetectPlaybackArtifacts) {
+    $detectorScript = Join-Path $root "tools/profiling/detect-playback-artifacts.ps1"
+    $traceLogPath = if ($logFile) { $logFile.FullName } else { $null }
+    if ((Test-Path -LiteralPath $detectorScript) -and $traceLogPath -and (Test-Path -LiteralPath $traceLogPath)) {
+        $detectorPwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+        if (-not $detectorPwsh) { $detectorPwsh = (Get-Command powershell.exe).Source }
+        $detectorOut = & $detectorPwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $detectorScript -TraceLog $traceLogPath 2>&1
+        $detectorExit = $LASTEXITCODE
+        $detectorText = ($detectorOut | Out-String).Trim()
+        $checkLine = ($detectorOut | Where-Object { $_ -match '^ARTIFACT-CHECK ' } | Select-Object -First 1)
+        $getField = { param($text, $key) $m = [regex]::Match([string]$text, $key + '=([^\s]+)'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
+        $playbackArtifacts = [pscustomobject]@{
+            enabled = $true
+            verdict = (& $getField $checkLine 'verdict')
+            presents = [int](& $getField $checkLine 'presents')
+            medianFps = [double](& $getField $checkLine 'median_fps')
+            p90Ms = [int](& $getField $checkLine 'p90_ms')
+            p99Ms = [int](& $getField $checkLine 'p99_ms')
+            maxIntervalMs = [int](& $getField $checkLine 'max_interval_ms')
+            hitchFraction = [double](& $getField $checkLine 'hitch_frac')
+            flickerBackJumps = [int](& $getField $checkLine 'flicker_back_jumps')
+            maxBackJump = [int](& $getField $checkLine 'max_back_jump')
+            maxLag = [int](& $getField $checkLine 'max_lag')
+            detectorExitCode = $detectorExit
+            traceLogPath = $traceLogPath
+            detectorScript = $detectorScript
+            detail = $detectorText
+        }
+    } else {
+        $playbackArtifacts = [pscustomobject]@{
+            enabled = $true
+            verdict = "no-data"
+            detail = "detector or trace log not found (detector=$detectorScript, trace=$traceLogPath)"
+        }
+    }
+}
+
 $result = [pscustomobject]@{
     schema = "mlvapp-gui-smoke-result.v1"
     capturedAtUtc = $endUtc.ToString("o")
@@ -1242,6 +1288,7 @@ $result = [pscustomobject]@{
         reportGuidance = "When citing bottom-left GUI FPS, cite sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps and include the sustainedBottomLeftGuiProofPath/*-fps-status.png crop. For stable FPS, run long enough for playback to settle, for example -Seconds 30. Do not use the presented-frame screenshot as FPS proof because it intentionally omits GUI chrome."
         note = "sustainedBottomLeftGuiFps/visibleBottomLeftGuiFps/screenshotGuiStatusValue is the bottom-left Playback FPS label visible after the requested playback duration in screenshot.windowCapture and enlarged in playbackFps.sustainedBottomLeftGuiProof; guiStatusValue is the later end-of-run summary sample and can differ; smokePresentedFps and smokeTimelineFps are smoke-run telemetry over the full requested duration, and per-stage FPS-equivalent values are 1000 / stage_ms."
     }
+    playbackArtifacts = $playbackArtifacts
     process = [pscustomobject]@{
         id = $process.Id
         exitCode = $process.ExitCode
@@ -1301,6 +1348,10 @@ $result = [pscustomobject]@{
             windowScreenshotEvent = $windowScreenshotLine
         }
     }
+}
+
+if ($DetectPlaybackArtifacts -and $playbackArtifacts -and $playbackArtifacts.verdict -eq "FAIL") {
+    $validationFailures += ("Playback artifact detector verdict FAIL: " + (($playbackArtifacts.detail) -replace '\s+', ' '))
 }
 
 $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomobject]@{
