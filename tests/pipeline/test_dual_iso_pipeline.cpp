@@ -4663,7 +4663,7 @@ TEST(DualIsoPipeline, Processed8PrefetchEnablesAggressiveScaleOneTwoAndFour)
     ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
 }
 
-TEST(DualIsoPipeline, Processed8PrefetchEnablesStandardScaleOneTwoFourAndEight)
+TEST(DualIsoPipeline, Processed8PrefetchEnablesStandardScaleTwoFourAndEightButNotOne)
 {
     MlvPipelineFixture fixture;
     QString error_message;
@@ -4676,8 +4676,12 @@ TEST(DualIsoPipeline, Processed8PrefetchEnablesStandardScaleOneTwoFourAndEight)
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(0);
 
+    /* x1 (full resolution) measured processed8_prefetch_hits=0 across the
+     * standard M16 trio: the worker cannot get ahead of a full-res foreground
+     * frame, so standard preview keeps the processed8 prefetch off at x1 to
+     * avoid stealing cores/IO from the slowest priority lane. */
     fixture.video()->playback_scale_factor_active = 1;
-    ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
+    ASSERT_EQ(0, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 2;
     ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
