@@ -1,3 +1,30 @@
+# 2026-06-09 - conclusive playback ceiling: x2/x4/x8 are already real-time, x1 is compute-bound with no safe lever, and the "present bottleneck" was a measurement artifact
+
+### Verified locally
+
+- Measurement methodology correction (this changes how every prior FPS number should be read):
+  - Screenshot-backed smoke distorts FPS. Same-session A/B on `M16-1347` (default threads): x2 ~24.6 fps no-screenshot vs ~25.0 fps with-screenshot (render 7.7 -> 14.8 ms, but x2 has budget headroom so FPS holds); x1 8.30 fps no-screenshot vs 6.71 fps with-screenshot (-19%, no headroom). Use screenshots only for visual/canary; measure FPS with `-FrameTelemetry` and NO `-CaptureScreenshot`.
+  - Single-run/single-clip A/B is unreliable. A one-clip M16-1327 "+12.6% playback thread-cap win" was a transient anomaly (that t16 run had 27 skips + elevated render); the full trio debunked it (M16-1347/1446 x2 t16 >= t12, 0 skips). No thread-cap change made; `mlvappDefaultPlaybackWorkerThreadCapFor()` left as-is.
+- In real (no-screenshot) playback, **x2/x4/x8 already run at the clip native rate (~24-26 fps = real-time)**. They are not bottlenecked. The earlier "x2 = ~15 fps / ~29 ms present overhead" was a high-load profiling session (x2 render was 34 ms that day vs ~8 ms on a quiet session) plus screenshot overhead. `present_pacing` is largely real-time pacing residual (derived as `interval - render - measured-present-components` at `MainWindow.cpp:16752`), not a fixable defect; the render->UI->prep-worker->UI pipeline is a deliberately race-engineered concurrency system, not the cause of the apparent gap.
+- **x1 (full resolution) is the only sub-real-time lane** (~8.6 fps, `render_total` ~88-104 ms). It has no safe FPS lever, proven multiple ways:
+  - The half-res preview-recon machinery (`phase4bv2/v3/v4`) excludes `scaleFactor <= 1` by design at [`src/mlv/video_mlv.c`](C:/!Layi%20Wkspc/MLV-App/src/mlv/video_mlv.c) line 3695 - x1 output is full-res, so there is nothing to downsample-then-upsample.
+  - The debayer already uses the fast basic AVX2 path: `avg_debayer_exclusive_ms ~6.5`, `debayer_engine_mode_last=0`, 185/185 frames AVX2 (not AMaZE).
+  - OpenMP threads are already maxed (16, `openmp_thread_cap_active_last=0`); capping does not help.
+  - No usable GPU in this environment (backend tests skip on llvmpipe software raster).
+  - The dominant x1 costs - dual-ISO recon ~24 ms (`llrawproc_dual_iso`) and colour ~21 ms (`processing_core`) - are full-res per-pixel and irreducible without an algorithm/quality change.
+- "Glitchy / not rendering properly" at 1x = this choppiness (~2/3 of frames dropped to hold timeline sync), plus a one-time ~0.85 s startup stall (only a single present interval >=500 ms per run). It is NOT pixel corruption: captured 1x/2x frames are clean.
+- The landed x1 prefetch-drop change is exonerated as a cause of any glitch: the foreground render syncs black/white levels unconditionally at `video_mlv.c:5056` (the sync I bypassed at 5195 was on the now-disabled prefetch path x1 never renders from), and the cache key is provably identical (`mlv_processed_frame_signature_with_scale` is defined as `from_state(state_signature_with_scale(...), frameIndex)`).
+
+### Cross-checked from prior analysis
+
+- The only remaining x1 speedup is a deliberate faster/lower-quality PREVIEW recon (softer while playing, sharp when paused) - a speed/quality tradeoff in the fragile, contested Phase4Bv2/v3 dual-ISO code whose guardrail tests already fail. "Faster x1" and "no quality regression" are mutually exclusive; this needs explicit user buy-in and is not a smallest-safe change.
+- For smooth playback today, 2x is already real-time. The autonomous smallest-safe-change loop has reached its boundary on the priority lanes.
+
+### Needs runtime profiling
+
+- If the x1 preview-quality tradeoff is approved, validate it no-screenshot (FPS) plus a separate screenshot pass (visual/canary), compare before/after 1x frames for softness, and keep the x8 canary in the loop.
+- Re-confirm the landed x1 prefetch-drop magnitude with averaged no-screenshot A/B (it was measured with screenshots, which inflate the contention the change relieves; the win is real but the +55-66% figure is screenshot-measured).
+
 # 2026-06-09 - dropping the inert x1 processed8 prefetch worker is a large keeper-safe x1 win (+55-66%)
 
 ### Verified locally
