@@ -2273,6 +2273,9 @@ void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
 {
     const uint64_t newGeneration =
         m_playbackPresentationGeneration.fetch_add( 1, std::memory_order_acq_rel ) + 1;
+    // A display change re-renders the current frame; clear the forward-only present
+    // guard so the next (correct) frame is shown regardless of the previous run.
+    m_lastPresentedPlaybackFrame = -1;
     std::vector<uint64_t> serialsToRelease;
     bool droppedPending = false;
     size_t droppedResults = 0;
@@ -19453,6 +19456,38 @@ void MainWindow::drawFrameReady()
     }
 
     const uint64_t display_frame = readyFrame.frameNumber;
+
+    // Forward-only present guard: during forward playback never present a frame older
+    // than the one already on screen. A backward-jumping display frame is a stale,
+    // out-of-order render (the playback position briefly moved back when this frame was
+    // requested) and shows on screen as a "flicker to an older frame". Loop-wrap and
+    // scrubbing move the slider position itself backward, so they pass (the position is
+    // not still ahead of the last shown frame); paused/scrub (play unchecked) passes too.
+    if( ui->actionPlay->isChecked()
+     && m_lastPresentedPlaybackFrame >= 0
+     && static_cast<long long>( display_frame ) < m_lastPresentedPlaybackFrame
+     && static_cast<long long>( ui->horizontalSliderPosition->value() ) >= m_lastPresentedPlaybackFrame )
+    {
+        m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("draw_frame_ready.skip_backward"),
+                QStringLiteral("display_frame=%1 last_presented=%2 position=%3 serial=%4")
+                    .arg( static_cast<qulonglong>( display_frame ) )
+                    .arg( static_cast<qlonglong>( m_lastPresentedPlaybackFrame ) )
+                    .arg( ui->horizontalSliderPosition->value() )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) ),
+                true );
+        }
+        if( m_pRenderThread )
+            m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
+        m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
+        m_frameChanged = true;
+        return;
+    }
+    m_lastPresentedPlaybackFrame = static_cast<long long>( display_frame );
+
     const double display_start = mlv_stage_timing_now();
     if( interactiveTraceEnabled() )
     {

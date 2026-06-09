@@ -851,6 +851,9 @@ private:
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;
     double m_phase3LastPresentedStageTime = 0.0;
     bool m_playbackFrameAdvancePending = false;
+    // Last playback frame number accepted for presentation; drives the forward-only
+    // present guard in drawFrameReady() that drops stale backward-jumping renders.
+    long long m_lastPresentedPlaybackFrame = -1;
     bool m_skipImmediateTimecodeLabel = false;
     bool m_playToFirstFramePending = false;
     bool m_playToFirstFrameTargetFrameValid = false;
