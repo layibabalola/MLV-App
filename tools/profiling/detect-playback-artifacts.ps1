@@ -13,8 +13,9 @@ param(
     [int]$MaxLagFramesAllowed = 10,        # present lagging the seek bar by >= this many frames = stall
     [int]$MaxBackJumpAllowed  = 2,         # presented frame going backward by > this = flicker
     [double]$MaxHitchFractionAllowed = 0.05, # > this fraction of frames hitching = jittery FAIL
-    [int]$HitchFreezeMs = 250              # any single present interval >= this = a visible freeze
-)
+    [int]$HitchFreezeMs = 250,             # any single present interval >= this = a visible freeze
+    [int]$MaxPlausibleHitchMs = 2000       # intervals above this are playback discontinuities (pause/seek/
+)                                          # settle/end boundary), excluded from cadence stats as long_gaps
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $TraceLog)) { Write-Error "trace log not found: $TraceLog"; exit 2 }
 
@@ -60,13 +61,26 @@ $avgLag = [math]::Round($lagSum / $n, 2)
 # harness freezing the UI ~2.5 s, not a playback stutter, so it is excluded from the cadence stats.
 $iv = New-Object System.Collections.Generic.List[double]
 $shotIntervals = 0
+$longGaps = 0
+$maxGap = 0.0
+$interiorLongGap = $false
 for ($i=1; $i -lt $n; $i++) {
     if ($ts[$i] -ge 0 -and $ts[$i-1] -ge 0) {
         $d = $ts[$i]-$ts[$i-1]
         if ($d -gt 0) {
             $spansShot = $false
             foreach ($st in $shotTs) { if ($st -ge $ts[$i-1] -and $st -le $ts[$i]) { $spansShot = $true; break } }
-            if ($spansShot) { $shotIntervals++ } else { $iv.Add($d) }
+            if ($spansShot) { $shotIntervals++; continue }
+            if ($d -gt $MaxPlausibleHitchMs) {
+                # A multi-second gap is a playback discontinuity (pause/seek/settle/end), not a frame hitch.
+                # If it sits between real playback on BOTH sides it is a genuine mid-playback freeze (FAIL);
+                # at the sequence start/end it is just a boundary and is discounted.
+                $longGaps++
+                if ($d -gt $maxGap) { $maxGap = $d }
+                if ($i -ge 3 -and $i -le ($n - 3)) { $interiorLongGap = $true }
+                continue
+            }
+            $iv.Add($d)
         }
     }
 }
@@ -88,15 +102,16 @@ if ($maxLagAt -ge 0 -and $ts[$maxLagAt] -ge 0) {
 
 $realStall = ($maxLag -ge $MaxLagFramesAllowed) -and (-not $stallIsScreenshot)
 $flicker   = ($backJumps -gt 0)
-$jittery   = ($hitchFrac -gt $MaxHitchFractionAllowed) -or ($maxIv -ge $HitchFreezeMs -and -not $stallIsScreenshot)
+$jittery   = ($hitchFrac -gt $MaxHitchFractionAllowed) -or ($maxIv -ge $HitchFreezeMs -and -not $stallIsScreenshot) -or $interiorLongGap
 $verdict = if ($realStall -or $flicker -or $jittery) { 'FAIL' } else { 'PASS' }
 $medFps = if ($median -gt 0) { [math]::Round(1000.0/$median,1) } else { 0 }
 
-Write-Host ("ARTIFACT-CHECK verdict={0} presents={1} median_fps={2} p90_ms={3} p99_ms={4} max_interval_ms={5} hitch_frac={6} flicker_back_jumps={7} max_back_jump={8} max_lag={9}{10}" -f `
-    $verdict, $n, $medFps, [int]$p90, [int]$p99, [int]$maxIv, $hitchFrac, $backJumps, $maxBack, $maxLag, $(if($stallIsScreenshot){' (max_lag is screenshot-grab, discounted)'}else{''}))
+Write-Host ("ARTIFACT-CHECK verdict={0} presents={1} median_fps={2} p90_ms={3} p99_ms={4} max_interval_ms={5} hitch_frac={6} flicker_back_jumps={7} max_back_jump={8} max_lag={9} long_gaps={10} max_gap_ms={11}{12}" -f `
+    $verdict, $n, $medFps, [int]$p90, [int]$p99, [int]$maxIv, $hitchFrac, $backJumps, $maxBack, $maxLag, $longGaps, [int]$maxGap, $(if($stallIsScreenshot){' (max_lag is screenshot-grab, discounted)'}else{''}))
 if ($flicker)   { Write-Host ("  FLICKER: presented frame jumped backward by up to {0} frames {1} time(s)" -f $maxBack, $backJumps) }
 if ($realStall) { Write-Host ("  STALL: image fell {0} frames behind the seek bar (~{1:N1}s freeze)" -f $maxLag, ($maxLag/24.0)) }
 if ($jittery)   { Write-Host ("  JITTER: {0:P1} of frames hitch (interval > 2.5x median); worst {1} ms - visible micro-stutter" -f $hitchFrac, [int]$maxIv) }
 if ($stallIsScreenshot) { Write-Host "  NOTE: max-lag spike coincides with a window-screenshot grab (harness artifact); re-run without -CaptureScreenshot for clean stall detection" }
 if ($shotIntervals -gt 0) { Write-Host ("  NOTE: excluded {0} present interval(s) spanning a window-screenshot grab from the cadence stats (harness UI freeze, not playback)" -f $shotIntervals) }
+if ($longGaps -gt 0) { Write-Host ("  NOTE: {0} long gap(s) > {1} ms excluded from cadence stats as playback discontinuities (worst {2} ms){3}" -f $longGaps, $MaxPlausibleHitchMs, [int]$maxGap, $(if($interiorLongGap){' - at least one is mid-playback, counted as a freeze (FAIL)'}else{' - sequence boundary only, discounted'})) }
 if ($verdict -eq 'FAIL') { exit 1 } else { exit 0 }
