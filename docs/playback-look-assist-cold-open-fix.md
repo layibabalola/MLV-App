@@ -32,6 +32,30 @@ made it worse). The fix is in the full-res + scaled cold dual-ISO recon / map-in
 risk of regressing the recon) — deserves its own focused session. Repro: cold-capture with look-assist
 on, view f000 (pink) vs f015 (clean).
 
+## Playback-loop bugs (separate from the clip-open fix; NOT fixed here — 2026-06-10)
+
+After the clip-open freeze was fixed, the user pressed Play and two playback-LOOP problems remained,
+distinct from the (now fixed) clip-open freeze:
+
+**Stuck-frame — the user's core "frozen frame".** Chipped as task_d2c52e6c. During playback the
+displayed image freezes on frame 0 while the engine advances: GUI shows "Playback: 25-27 fps" and
+"Frame N/1081" climbing, timecode advancing, but the on-screen pixels never change. Trace proof
+(.claude-state/profiling/20260610-visval/jitter-x4-cool): the render renders 747 DISTINCT advancing
+frames; drawFrameReady (MainWindow.cpp:19472) paints all 822 with NO drops (empty/drop_generation=0,
+skip_backward=1) and display_frame==position; DropFrameMode advances position correctly (5816/5835/5837)
+- YET the displayed pixels are stale (viewport span=0; frames sampled at different timecodes were
+pixel-identical; user-confirmed via screenshot). So the async present pipeline (acquireLatestReadyFrame
++ the 2026-04-23 "safe overlap playback handoff" + 2026-06-08 forward-only guard) is delivering a stale
+image buffer, OR the paint body doesn't refresh the widget. Very likely the "used to drop frames, now
+it freezes" regression. NOT fixed - it's a focused change in ~250 lines of fragile GPU/CPU present code
+that should be done fresh, not at the tail of this long session.
+
+**x2 ~9 fps compute ceiling.** Re-measured on a COOLED machine: mean 111ms/frame, 66% of frames
+80-150ms - cooling did NOT help, so it is NOT thermal (I was wrong about that). The heavy dual-ISO
+recon at half-res is inherently ~9 fps; CPU threads maxed, no usable GPU. No free fix. Levers: lower
+preview scale (export + paused/scrub stay full quality) or a deliberate quality-tradeoff faster preview.
+x4 renders ~22 fps (mean 46ms) but is hit by the stuck-frame bug above.
+
 ---
 
 ## 1. The bug
