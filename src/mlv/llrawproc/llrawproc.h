@@ -189,6 +189,12 @@ void llrpSetDualIsoValidity(mlvObject_t * video, int diso_force);
 
 int llrpHQDualIso(mlvObject_t * video);
 
+/* Detect+seed shared->diso_pattern from a full-res raw frame when unseeded, so
+ * the scaled playback recon does not mis-detect the dual-ISO row pattern from
+ * downsampled data (the x8/x4 cold pink). No-op when not dual-ISO, already
+ * seeded, or detection fails. */
+void llrpEnsureDualIsoPatternSeeded(mlvObject_t * video, uint16_t * raw_full, int full_w, int full_h);
+
 void llrpResetDngBWLevels(mlvObject_t * video);
 
 /* reset focus/bad pixel map status */

@@ -16,7 +16,7 @@
 #define MLV_FRAME_NOT_CACHED 0
 #define MLV_FRAME_IS_CACHED 1
 #define MLV_FRAME_BEING_CACHED 2
-#define MLV_PROCESSED_8BIT_CACHE_SLOTS 8
+#define MLV_PROCESSED_8BIT_CACHE_SLOTS 8 /* original known-good. A 2026-06-10 bump to 16 appeared to collapse prefetch hits, but that A/B was THERMALLY CONFOUNDED - a cache-8 control run on the same heat-soaked machine degraded identically (99%->56% hit). Cache size NOT proven to matter; re-test only from a cooled machine before changing. */
 #define MLV_PROCESSED_16BIT_CACHE_SLOTS 2
 #define MLV_RAW_UINT16_PREFETCH_SLOTS 4
 

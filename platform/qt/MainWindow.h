@@ -846,6 +846,10 @@ private:
     int m_lastLookAssistChromaSmooth = 0;
     bool m_lastLookAssistChromaSmoothAutoApplied = false;
     int m_lookAssistUnsettledAnalysisCount = 0;
+    // De-dupe guard: the receipt whose Auto Look Assist analysis already ran this clip-open. A second
+    // setSliders/deferral must not re-run the ~3s auto-WB analysis (it derives the same look and just
+    // re-freezes the UI). Keyed on the receipt pointer so different clips re-analyze naturally.
+    ReceiptSettings *m_lookAssistAppliedReceipt = nullptr;
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;

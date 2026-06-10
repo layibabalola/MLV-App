@@ -128,7 +128,7 @@ static uint64_t file_get_pos(FILE *stream)
 #define MLV_PROCESSED_8BIT_PREFETCH_EMPTY 0
 #define MLV_PROCESSED_8BIT_PREFETCH_READY 1
 #define MLV_PROCESSED_8BIT_PREFETCH_RENDERING 2
-#define MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD 2
+#define MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD 2 /* default; runtime-tunable via env MLVAPP_PROCESSED8_LOOKAHEAD (clamped 1..MLV_PROCESSED_8BIT_CACHE_SLOTS-1) for A/B without rebuilds - see mlv_processed8_prefetch_lookahead_value(). */
 
 #if defined(_MSC_VER)
 #define MLV_THREAD_LOCAL __declspec(thread)
@@ -2138,6 +2138,21 @@ typedef struct
                       * lookup-with-scale=1 misses every time. */
 } mlv_processed8_prefetch_task_t;
 
+static int mlv_processed8_prefetch_lookahead_value(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        int v = MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD;
+        const char * e = getenv("MLVAPP_PROCESSED8_LOOKAHEAD");
+        if (e && e[0]) { int n = atoi(e); if (n > 0) v = n; }
+        if (v < 1) v = 1;
+        if (v > MLV_PROCESSED_8BIT_CACHE_SLOTS - 1) v = MLV_PROCESSED_8BIT_CACHE_SLOTS - 1;
+        cached = v;
+    }
+    return cached;
+}
+
 static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_task_t * task)
 {
     if (!task || !task->video || !task->processing)
@@ -2146,7 +2161,7 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
     }
 
     for (uint32_t offset = task->offsetStart;
-         offset <= MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD;
+         offset <= (uint32_t)mlv_processed8_prefetch_lookahead_value();
          offset += task->offsetStep)
     {
         uint64_t targetFrame = task->baseFrame + offset;
@@ -3443,6 +3458,11 @@ static int mlv_render_scaled_rgb16_v3_full_xy(mlvObject_t * video,
     g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
     mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
 
+    /* Seed the dual-ISO row pattern from the full-res raw before downsampling
+     * (mirrors the v4_x8 core), so the x4 scaled recon does not mis-detect it
+     * from 4x-downsampled data (the cold-pass pink). */
+    llrpEnsureDualIsoPatternSeeded(video, full_bayer, full_w, full_h);
+
     /* Step 2: bayer→bayer 4x (full XY) downsample, viewing the full bayer
      * as (full_w, eff_h). The kernel reads only rows 0..eff_h-1 — rows
      * eff_h..full_h-1 are simply ignored. (Reading less data than the
@@ -3997,6 +4017,11 @@ static int mlv_render_scaled_rgb16_v3_full_xy_from_raw(mlvObject_t * video,
     uint16_t * mid_rgb = mlv_ensure_thread_rgb_u16_buffer(mid_rgb_words);
     if (!mid_bayer || !mid_rgb) return 0;
 
+    /* Seed the dual-ISO row pattern from the full-res raw before downsampling
+     * (mirrors the v4_x8 core); this x4 from-raw path is used by the processed8
+     * prefetch worker — the cold-pass corruption source. */
+    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)decodedRawFrame, full_w, full_h);
+
     const double downsample_start = mlv_stage_timing_now();
     int actual_mid_w = 0, actual_mid_h = 0;
     int rc = pl_downsample_bayer_to_bayer_4x(decodedRawFrame, full_w, eff_h,
@@ -4100,6 +4125,12 @@ static int mlv_render_scaled_rgb16_v4_x8_full_xy_core(mlvObject_t * video,
         mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
         raw_source = full_bayer;
     }
+
+    /* Seed the dual-ISO row pattern from the full-res raw BEFORE downsampling,
+     * so the scaled recon below does not mis-detect it from 8x-downsampled data
+     * (the intermittent cold-pass x8 pink). Read-only; no-op unless dual-ISO and
+     * the pattern is still unseeded. */
+    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)raw_source, full_w, full_h);
 
     uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
     if (!mid_bayer) return 0;

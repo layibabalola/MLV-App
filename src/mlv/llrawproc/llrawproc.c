@@ -2218,6 +2218,59 @@ int llrpHQDualIso(mlvObject_t * video)
     return (video->llrawproc->dual_iso == 1) && video->llrawproc->diso_validity && (llrpGetFixRawMode(video));
 }
 
+/* Seed shared->diso_pattern from a FULL-RESOLUTION raw frame when it is still
+ * unseeded (0). The scaled (reduced-resolution) playback recon detects the
+ * dual-ISO bright/dark row pattern from the data it is handed; on 8x/4x
+ * downsampled data that detection is unreliable (the row distinction is
+ * averaged away), so on the cold pass — before any full-res render has seeded
+ * the pattern, e.g. the processed8 prefetch worker reconstructing scaled frames
+ * at play start — it mis-detects and emits the green-dropped "x8 cold pink".
+ * Detecting once from the full-res raw (row pattern intact) and publishing the
+ * SAME negative -1..-4 encoding that diso_get_full20bit / diso_get_preview both
+ * consume gives the scaled recon a correct seed. diso_check=1 is detect-only and
+ * READ-ONLY on raw_full. No-op when not dual-ISO, already seeded, or detection
+ * fails — so it can only improve, never regress (and never returns failure to a
+ * caller, unlike the reverted defer guard). */
+void llrpEnsureDualIsoPatternSeeded(mlvObject_t * video, uint16_t * raw_full, int full_w, int full_h)
+{
+    if (!video || !video->llrawproc || !raw_full) return;
+    llrawprocObject_t * shared = video->llrawproc;
+    if (!shared->fix_raw || !shared->diso_validity || shared->dual_iso != 1) return;
+    if (shared->diso_pattern != 0) return;
+    if (full_w <= 0 || full_h <= 0 || full_w > 65535 || full_h > 65535) return;
+
+    int detected = 0;
+    if (diso_get_preview(raw_full,
+                         (uint16_t)full_w,
+                         (uint16_t)full_h,
+                         (int32_t)video->RAWI.raw_info.black_level,
+                         (int32_t)video->RAWI.raw_info.white_level,
+                         &detected,
+                         1 /* diso_check: detect-only, read-only on raw_full */,
+                         NULL)
+        && detected != 0)
+    {
+        pthread_mutex_lock(&video->llrawproc_mutex);
+        if (shared->diso_pattern == 0)
+        {
+            shared->diso_pattern = detected;
+        }
+        pthread_mutex_unlock(&video->llrawproc_mutex);
+
+        static int s_log_diso_seed = -1;
+        if (s_log_diso_seed < 0)
+        {
+            const char * v = getenv("MLVAPP_LOG_DISO_SEED");
+            s_log_diso_seed = (v && v[0] && v[0] != '0') ? 1 : 0;
+        }
+        if (s_log_diso_seed)
+        {
+            fprintf(stderr, "[DISO_SEED] seeded diso_pattern=%d from full-res %dx%d\n",
+                    detected, full_w, full_h);
+        }
+    }
+}
+
 void llrpResetDngBWLevels(mlvObject_t * video)
 {
     video->llrawproc->dng_bit_depth = video->RAWI.raw_info.bits_per_pixel;
