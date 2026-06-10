@@ -9974,28 +9974,46 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 return;
             }
 
-            logInteractionEvent(
-                QStringLiteral("look_assist.setSliders.frame_ready_apply"),
-                QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
-                    .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
-                    .arg( ui->horizontalSliderExposure->value() )
-                    .arg( ui->horizontalSliderContrast->value() )
-                    .arg( ui->horizontalSliderTemperature->value() )
-                    .arg( ui->horizontalSliderTint->value() )
-                    .arg( ui->horizontalSliderRawBlack->value() )
-                    .arg( ui->horizontalSliderRawWhite->value() )
-                    .arg( baselineFrame ) );
+            // Decouple: run the (now single) ~3s auto-look analysis on a later event-loop turn so the
+            // just-settled first frame PAINTS first - the user sees the clip immediately instead of a
+            // black screen held while the synchronous analysis blocks the UI thread. Re-validate inside
+            // since ACTIVE_RECEIPT / enabled state could change during the short delay.
+            QTimer::singleShot( 50, this, [this, activeReceiptAtLoad, baselineFrame]()
+            {
+                if( !m_fileLoaded
+                 || SESSION_CLIP_COUNT <= 0
+                 || SESSION_ACTIVE_CLIP_ROW < 0
+                 || !ACTIVE_RECEIPT
+                 || ACTIVE_RECEIPT != activeReceiptAtLoad
+                 || !ACTIVE_RECEIPT->lookAssistEnabled()
+                 || m_lookAssistAppliedReceipt == ACTIVE_RECEIPT )
+                {
+                    return;
+                }
 
-            if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
-                restoreLookAssistBaseline( ACTIVE_RECEIPT );
-            else
-                captureLookAssistBaseline( ACTIVE_RECEIPT );
+                logInteractionEvent(
+                    QStringLiteral("look_assist.setSliders.frame_ready_apply"),
+                    QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
+                        .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
+                        .arg( ui->horizontalSliderExposure->value() )
+                        .arg( ui->horizontalSliderContrast->value() )
+                        .arg( ui->horizontalSliderTemperature->value() )
+                        .arg( ui->horizontalSliderTint->value() )
+                        .arg( ui->horizontalSliderRawBlack->value() )
+                        .arg( ui->horizontalSliderRawWhite->value() )
+                        .arg( baselineFrame ) );
 
-            applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
-            m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
-            syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
-            setReceipt( ACTIVE_RECEIPT );
-            requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
+                if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
+                    restoreLookAssistBaseline( ACTIVE_RECEIPT );
+                else
+                    captureLookAssistBaseline( ACTIVE_RECEIPT );
+
+                applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
+                m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
+                syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
+                setReceipt( ACTIVE_RECEIPT );
+                requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
+            } );
         };
 
         *readyConnection = connect(

@@ -5,8 +5,32 @@ reverted, and why* for the playback-freeze work. This is the human-readable trai
 diff is in git once committed, and durable one-line lessons are in the agent memory
 (`memory/playback_cold_open_freeze_look_assist.md` and siblings).
 
-**Status:** IN PROGRESS as of 2026-06-10. Root cause found and the first fix (de-dupe) validated;
-decouple + dead-code cleanup pending. Nothing committed yet — all changes are in the working tree.
+**Status:** as of 2026-06-10, the clip-open freeze is FIXED on branch
+`fix/playback-look-assist-cold-open-freeze` (de-dupe halves the analysis; decouple shows the first
+frame immediately). One accepted caveat remains: a brief one-frame pink flash on open — see
+"Cold frame-0 pink (separate bug)" below.
+
+**Commits on this branch (newest first):**
+- checkpoint 2 — Decouple the (single) analysis from the first-frame paint: the clip paints its first
+  frame immediately on open instead of holding black. Trace: analysis delayed ~50ms after the frame,
+  frozen window ~6s -> ~1.8s. Accepted brief frame-0 pink-flash caveat.
+- `d2301d5c` — checkpoint 1: Auto Look Assist de-dupe + dual-ISO seed fix + automation hooks +
+  `MLVAPP_NO_LOOK_ASSIST` gate + this log. Dead drop-on-miss code removed (never committed).
+
+## Cold frame-0 pink (separate bug, NOT fixed here)
+
+Surfaced by the decouple (the black freeze used to hide it). On clip OPEN, the very first painted
+frame is the COLD dual-ISO render — recon + focus/bad-pixel maps not yet settled — which the Auto
+Look Assist night preset's **+187 exposure boost** amplifies into a brief magenta/pink band. It
+clears the instant the clip advances (frame 1+ are clean); it is a **one-frame flash**.
+
+Key facts for whoever fixes it: it appears at **all scales including x1**, so it is NOT the committed
+scaled-seed fix's territory (that only covers the x4/x8 downsample paths, video_mlv.c:3464/4023/4133).
+look-assist OFF = clean (the artifact is dark/hidden without the boost). Ruled out: WB (auto-WB was
+rejected as extreme-color-cast), and slider settings (skipping the baseline restore did not help and
+made it worse). The fix is in the full-res + scaled cold dual-ISO recon / map-init path (fragile;
+risk of regressing the recon) — deserves its own focused session. Repro: cold-capture with look-assist
+on, view f000 (pink) vs f015 (clean).
 
 ---
 
