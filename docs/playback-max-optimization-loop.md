@@ -157,6 +157,26 @@ tearing (likely the same cold-path complex: look-assist settle + worker warm-up 
 all compete in the first seconds). Deserves its own session; not a regression of a measured gate
 (content/span/suite all clean warm), but user-visible on first play.
 
+## APPROVED-MENU PHASE (user granted all four items 2026-06-11; driver plans, Sonnet implements)
+
+Iteration A1 (wb-ae312bc0d9da4605, 76d45430): cold-first-play INSTRUMENT + DIAGNOSIS (no code change).
+New tool: .claude-state/scripts/cold-firstplay-capture.ps1 (cold-copy launch, PrintWindow burst from
+window-appearance, 100 ms cadence, trace capture). Findings:
+- STALL (item 1b) ROOT CAUSE: residual Auto Look Assist auto_wb analysis blocks the UI thread
+  683-901 ms at first Play (look_assist.apply.unsettled -> auto_wb complete; x8-cold 683 ms,
+  x4-cold 874 ms) - the playback timer freezes, then catch-up drops 17-22 frames in one jump
+  (time_diff_ms=719/897). Same residual the cold-open fix deferred ('move off-thread' option).
+  Fix planned for next firing: compute the analysis on a worker thread, apply on the UI thread
+  via queued signal; kill-switch env.
+- TEARING (item 1a): pixel-buffer race RULED OUT by code map - FrameSlots are pin-protected while
+  presenting (RenderFrameThread.cpp:261-309), zero-copy QImage lifetime is guarded
+  (PlaybackScaling.h:902, displayImageOwnsData=false + releasePresentedFrameForRequestSerial).
+  Not reproduced by the 100 ms instrument in 5 s windows (2 near-threshold flags appear in BOTH
+  cold and warm arms = likely scene content). Working hypothesis: QGraphicsView minimal-viewport
+  partial update across a DWM frame on maximal content changes. Candidate fix (next firings):
+  full-viewport update mode on present (cheap, gateable); needs a 50 ms-cadence first-500 ms
+  capture to confirm repro first.
+
 ## ATTEMPTS log
 
 One row per candidate, appended BEFORE measuring (cols 1-9), completed with the result after
