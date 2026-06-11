@@ -148,6 +148,9 @@ Cold first-runs of a clip can read 30-40% low (sentinel + 1327 re-anchor lesson)
   behavior predating the loop. Bisect: reproduce with MLVAPP_PLAYBACK_TIMER_POLL_MS=-1 (legacy
   timer, prefetch on) and with MLVAPP_PROCESSED8_PREFETCH_INDIRECT=0 (worker off, fast timer).
   Tearing only with the fast timer => presentation race; tearing in both => pre-existing.
+  BISECT VERDICT (user-run, 2026-06-11): tearing in BOTH arms => PRE-EXISTING first-play
+  presentation behavior, not introduced by any keeper. Standalone correctness item (chip
+  task_8a246aa5 queued: cold first-play stall + tearing, one cold-path investigation).
 
 **Open follow-ups from the human gate:** cold first-play x8 frame-progression stall + first-play
 tearing (likely the same cold-path complex: look-assist settle + worker warm-up + coldest decode
