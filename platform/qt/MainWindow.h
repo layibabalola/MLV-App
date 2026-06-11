@@ -850,6 +850,10 @@ private:
     // setSliders/deferral must not re-run the ~3s auto-WB analysis (it derives the same look and just
     // re-freezes the UI). Keyed on the receipt pointer so different clips re-analyze naturally.
     ReceiptSettings *m_lookAssistAppliedReceipt = nullptr;
+    // Generation counter bumped on every clip open/close. The async look-assist
+    // worker captures it at dispatch; the queued apply lambda re-checks before
+    // touching any UI state, ensuring stale results from a previous clip are dropped.
+    std::atomic<int> m_lookAssistAsyncGeneration{0};
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;
