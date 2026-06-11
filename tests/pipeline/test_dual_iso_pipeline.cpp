@@ -11,10 +11,12 @@
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptLoader.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <string>
 #include <vector>
 #include <QFile>
@@ -3079,7 +3081,19 @@ TEST(DualIsoPipeline, Phase4A_TestProcessed8CacheScaleKeyIsolation)
     /* Phase 4A/4B: render at scale=1, then at scale=2, then again at
      * scale=1. The cache key MUST differ between scale=1 and scale=2
      * (Phase 4A guarantee). Phase 4B further makes the scale=2 output
-     * actually half-W half-H — proven by the buffer size differing. */
+     * actually half-W half-H — proven by the buffer size differing.
+     *
+     * 2026-06-11: the prefetch worker is quiesced for this test. Its
+     * signature-stability assertions assume no background render runs
+     * between the foreground renders; any worker render (direct8 or the
+     * new indirect processed16->8 path) advances shared llrawproc status
+     * fields that are part of the state hash, drifting later signatures
+     * (the documented Phase E7 behavior — stores recompute post-render
+     * signatures, costing one transient miss). The synchronous cache-key
+     * contract under test is independent of the async worker, which has
+     * its own coverage (Processed8PrefetchIndirect* and the prefetch
+     * gate tests). */
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
     MlvPipelineFixture fixture;
     QString error_message;
     ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
@@ -3150,6 +3164,8 @@ TEST(DualIsoPipeline, Phase4A_TestProcessed8CacheScaleKeyIsolation)
      * the public-API surface stays compatible. */
     const std::vector<uint8_t> nonScaled_frame = fixture.renderFrame8(0, 1);
     ASSERT_TRUE(scale1_frame == nonScaled_frame);
+
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
 }
 
 TEST(DualIsoPipeline, DualIsoPlaybackOverrideRespectsMean23DisableEnv)
@@ -4693,6 +4709,196 @@ TEST(DualIsoPipeline, Processed8PrefetchEnablesStandardScaleTwoFourAndEightButNo
     ASSERT_EQ(1, getMlvProcessed8PrefetchEnabledForTesting(fixture.video()));
 
     processingSetPlaybackPreviewMode(0);
+}
+
+/* 2026-06-11: the prefetch worker learned the indirect processed16->8 render
+ * for direct8-incompatible processing states (the default Auto Look Assist
+ * preset is the common real-world case). Three contracts are pinned here:
+ *   1. A worker-prefetched cache hit is byte-identical to the foreground
+ *      reference render for a supported incompatible state (a wrong-content
+ *      hit is worse than a miss - the 2026-06-10 stuck-frame lesson).
+ *   2. MLVAPP_PROCESSED8_PREFETCH_INDIRECT=0 restores the old skip.
+ *   3. States the partial prefetch processing-state copy cannot faithfully
+ *      represent (e.g. LUT enabled) keep the old skip.
+ * use_cam_matrix=0 is the test's incompatible-but-supported state: it fails
+ * processingCanUseDirect8BitOutput while every field the indirect render
+ * consumes is carried by the prefetch state copy. */
+TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundReference)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    reference_fixture.processing()->use_cam_matrix = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(reference_fixture.processing()) == 0);
+
+    /* The indirect worker render is scoped to x4/x8; follow the house x4
+     * divisibility guard for this fixture. */
+    if ((reference_fixture.width() % 4) != 0 || (reference_fixture.height() % 4) != 0)
+    {
+        std::printf("Processed8PrefetchIndirect: fixture not x4-divisible, guarded out\n");
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    const uint64_t total_frames = getMlvFrames(reference_fixture.video());
+    const uint64_t frame_count = (total_frames < 8) ? total_frames : 8;
+    ASSERT_TRUE(frame_count >= 2);
+
+    std::vector<std::vector<uint8_t>> expected;
+    for (uint64_t f = 0; f < frame_count; ++f)
+    {
+        const std::vector<uint16_t> ref16 = reference_fixture.renderFrame16Scaled(f, 1, 4);
+        std::vector<uint8_t> ref8(ref16.size(), 0);
+        for (std::size_t i = 0; i < ref16.size(); ++i)
+        {
+            ref8[i] = static_cast<uint8_t>(ref16[i] >> 8);
+        }
+        expected.push_back(std::move(ref8));
+    }
+
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    fixture.processing()->use_cam_matrix = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) == 0);
+
+    int prefetched_hits = 0;
+    uint64_t mismatched_bytes = 0;
+    for (int pass = 0; pass < 3 && prefetched_hits == 0; ++pass)
+    {
+        for (uint64_t f = 0; f < frame_count; ++f)
+        {
+            const std::vector<uint8_t> got = fixture.renderFrame8Scaled(f, 1, 4);
+            if (getMlvLastProcessed8PrefetchHit())
+            {
+                ++prefetched_hits;
+                ASSERT_EQ(expected[f].size(), got.size());
+                for (std::size_t i = 0; i < got.size(); ++i)
+                {
+                    if (got[i] != expected[f][i])
+                    {
+                        ++mismatched_bytes;
+                    }
+                }
+            }
+            /* Give the worker time to land the next lookahead frame before
+             * the foreground asks for it. */
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
+    }
+
+    std::printf("Processed8PrefetchIndirect: prefetched_hits=%d mismatched_bytes=%llu\n",
+                prefetched_hits,
+                static_cast<unsigned long long>(mismatched_bytes));
+    ASSERT_TRUE(prefetched_hits >= 1);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), mismatched_bytes);
+
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
+TEST(DualIsoPipeline, Processed8PrefetchIndirectDisableEnvKeepsSkip)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    MLVAPP_TEST_SETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT", "0");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    fixture.processing()->use_cam_matrix = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) == 0);
+
+    if ((fixture.width() % 4) != 0 || (fixture.height() % 4) != 0)
+    {
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    const uint64_t total_frames = getMlvFrames(fixture.video());
+    const uint64_t frame_count = (total_frames < 8) ? total_frames : 8;
+
+    int prefetched_hits = 0;
+    for (uint64_t f = 0; f < frame_count; ++f)
+    {
+        (void)fixture.renderFrame8Scaled(f, 1, 4);
+        if (getMlvLastProcessed8PrefetchHit())
+        {
+            ++prefetched_hits;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    }
+
+    ASSERT_EQ(0, prefetched_hits);
+
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
+TEST(DualIsoPipeline, Processed8PrefetchIndirectUnsupportedStateKeepsSkip)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    /* Incompatible AND outside the faithful-copy subset: the prefetch state
+     * copy does not carry LUT data, so the worker must keep skipping. */
+    fixture.processing()->use_cam_matrix = 0;
+    fixture.processing()->lut_on = 1;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) == 0);
+
+    if ((fixture.width() % 4) != 0 || (fixture.height() % 4) != 0)
+    {
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    const uint64_t total_frames = getMlvFrames(fixture.video());
+    const uint64_t frame_count = (total_frames < 8) ? total_frames : 8;
+
+    int prefetched_hits = 0;
+    for (uint64_t f = 0; f < frame_count; ++f)
+    {
+        (void)fixture.renderFrame8Scaled(f, 1, 4);
+        if (getMlvLastProcessed8PrefetchHit())
+        {
+            ++prefetched_hits;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    }
+
+    ASSERT_EQ(0, prefetched_hits);
+
+    fixture.processing()->lut_on = 0;
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
 }
 
 TEST(DualIsoPipeline, Phase4B_NonDualIsoScaleEightAggressiveSkipsProcessed8CacheBookkeeping)
