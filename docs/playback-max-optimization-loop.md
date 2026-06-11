@@ -132,8 +132,27 @@ Cold first-runs of a clip can read 30-40% low (sentinel + 1327 re-anchor lesson)
 4. Measurement-infra (non-pixel, anytime): lane-aware detector freeze threshold for honest slow
    lanes; per-clip warm-up runs in sweep scripts.
 
-**Human spot-checks pending** for every CURRENT row updated by wb-a5315ef858a645b2 /
-wb-412cff70908e4a7e / wb-daff43758c844f74 (x2/x4/x8 Sharp + x4/x8 Aggressive).
+**Human spot-checks COMPLETED 2026-06-11 (M16-1327, user-driven GUI):**
+- x2 Sharp: PASS. x4 Aggr: PASS. x8 Aggr: PASS (no corruption on the historical lane).
+- x4 Sharp: PASS with note - the bottom-left fps readout swings high/low. Matches the measured
+  p99 spread (miss-bursts on the heavy clip) AND the readout itself: under the 8 ms timer the
+  status text shows near-instantaneous frame-to-frame rates, which swing even when the median is
+  steady. A rolling-average fps readout is a small UI follow-up (menu item 5).
+- x8 Sharp: CONDITIONAL - first cold play did not progress displayed frames until ~25% of the
+  clip had played; second play smooth. Cold-start-only; automated gates are blind here by
+  construction (the smoke pre-settles, spans/sweeps ran warm). OPEN FINDING, see below.
+- NEW USER OBSERVATION (all lanes): brief HORIZONTAL TEARING right after pressing Play on a
+  fresh clip. Not a wrong-content prefetch artifact (hit bytes are test-pinned + hash-gated);
+  ranked suspects: (1) display-buffer write/paint overlap that the 8 ms present cadence exposes
+  while first-play renders are slowest (widest overlap window), (2) pre-existing first-play
+  behavior predating the loop. Bisect: reproduce with MLVAPP_PLAYBACK_TIMER_POLL_MS=-1 (legacy
+  timer, prefetch on) and with MLVAPP_PROCESSED8_PREFETCH_INDIRECT=0 (worker off, fast timer).
+  Tearing only with the fast timer => presentation race; tearing in both => pre-existing.
+
+**Open follow-ups from the human gate:** cold first-play x8 frame-progression stall + first-play
+tearing (likely the same cold-path complex: look-assist settle + worker warm-up + coldest decode
+all compete in the first seconds). Deserves its own session; not a regression of a measured gate
+(content/span/suite all clean warm), but user-visible on first play.
 
 ## ATTEMPTS log
 
