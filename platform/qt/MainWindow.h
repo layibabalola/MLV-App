@@ -700,6 +700,8 @@ private:
     QLabel *m_pCachingStatus;
     QLabel *m_pFpsStatus;
     QString m_lastPlaybackFpsStatusText;
+    double m_playbackFpsEmaFrameMs = 0.0;
+    QTime m_lastPlaybackFpsStatusUpdateTime;
     QLabel *m_pFrameNumber;
     QLabel *m_pChosenDebayer;
     QLabel *m_pPlaybackQualityIndicator = nullptr; // Phase 4E

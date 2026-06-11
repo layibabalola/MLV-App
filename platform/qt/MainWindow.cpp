@@ -1613,14 +1613,31 @@ void MainWindow::timerFrameEvent( void )
         const int measuredFrameMs = lastTime.msecsTo( nowTime );
         if( timeDiff != 0 )
         {
-            const double measuredFps = measuredFrameMs > 0
-                ? 1000.0 / static_cast<double>( measuredFrameMs )
-                : 0.0;
-            const QString playbackFpsText = playbackFpsStatusText( measuredFps );
-            if( m_lastPlaybackFpsStatusText != playbackFpsText )
+            if( measuredFrameMs > 0 )
             {
-                m_pFpsStatus->setText( playbackFpsText );
-                m_lastPlaybackFpsStatusText = playbackFpsText;
+                if( m_playbackFpsEmaFrameMs <= 0.0 )
+                {
+                    m_playbackFpsEmaFrameMs = static_cast<double>( measuredFrameMs );
+                }
+                else
+                {
+                    m_playbackFpsEmaFrameMs =
+                        ( m_playbackFpsEmaFrameMs * 0.9 ) + ( static_cast<double>( measuredFrameMs ) * 0.1 );
+                }
+            }
+            const bool shouldUpdateFpsText =
+                !m_lastPlaybackFpsStatusUpdateTime.isValid()
+                || m_lastPlaybackFpsStatusUpdateTime.msecsTo( nowTime ) >= 250;
+            if( shouldUpdateFpsText && m_playbackFpsEmaFrameMs > 0.0 )
+            {
+                const double smoothedFps = 1000.0 / m_playbackFpsEmaFrameMs;
+                const QString playbackFpsText = playbackFpsStatusText( smoothedFps );
+                if( m_lastPlaybackFpsStatusText != playbackFpsText )
+                {
+                    m_pFpsStatus->setText( playbackFpsText );
+                    m_lastPlaybackFpsStatusText = playbackFpsText;
+                }
+                m_lastPlaybackFpsStatusUpdateTime = nowTime;
             }
         }
         lastTime = nowTime;
@@ -1648,6 +1665,8 @@ void MainWindow::timerFrameEvent( void )
             m_pFpsStatus->setText( playbackFpsText );
             m_lastPlaybackFpsStatusText = playbackFpsText;
         }
+        m_playbackFpsEmaFrameMs = 0.0;
+        m_lastPlaybackFpsStatusUpdateTime = QTime();
         lastTime = QTime::currentTime(); //do that for calculation of timeDiff for DropFrameMode;
 
     }
