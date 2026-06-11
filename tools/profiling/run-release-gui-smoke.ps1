@@ -1185,6 +1185,10 @@ if ($DetectPlaybackArtifacts) {
             flickerBackJumps = [int](& $getField $checkLine 'flicker_back_jumps')
             maxBackJump = [int](& $getField $checkLine 'max_back_jump')
             maxLag = [int](& $getField $checkLine 'max_lag')
+            contentEvents = [int](& $getField $checkLine 'content_events')
+            distinctHashes = [int](& $getField $checkLine 'distinct_hashes')
+            frozenContentRuns = [int](& $getField $checkLine 'frozen_content_runs')
+            longestFrozenRun = [int](& $getField $checkLine 'longest_frozen_run')
             detectorExitCode = $detectorExit
             traceLogPath = $traceLogPath
             detectorScript = $detectorScript
