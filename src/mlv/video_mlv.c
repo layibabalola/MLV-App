@@ -535,6 +535,71 @@ static int mlv_processed8_prefetch_enabled(const mlvObject_t * video)
             || video->playback_scale_factor_active >= 4);
 }
 
+/* MLVAPP_PREFETCH_DEBUG=1: stderr signature/decision tracing for the
+ * processed8 prefetch worker and the foreground lookup. Diagnostic only. */
+static int mlv_processed8_prefetch_debug_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char * value = getenv("MLVAPP_PREFETCH_DEBUG");
+        cached = (value && value[0] != '\0' && strcmp(value, "0") != 0) ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Worker-side fallback for direct8-incompatible processing states: render the
+ * prefetch frame through the same indirect processed16->8 composition the
+ * foreground uses. Default ON; MLVAPP_PROCESSED8_PREFETCH_INDIRECT=0/false/off
+ * restores the pre-2026-06-11 behavior (worker skips incompatible states). */
+static int mlv_processed8_prefetch_indirect_enabled(void)
+{
+    const char * value = getenv("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    if (value && value[0] != '\0')
+    {
+        return (strcmp(value, "0") != 0
+             && strcasecmp(value, "false") != 0
+             && strcasecmp(value, "off") != 0)
+            ? 1
+            : 0;
+    }
+    return 1;
+}
+
+/* The prefetch worker renders with a PARTIAL copy of the foreground
+ * processing state (mlv_copy_processed8_prefetch_processing_state): values,
+ * curves, precalc tables, and matrices are carried, but LUT data, filter
+ * internals, CS-zone data, gradient parameters, toning, hue-vs curves,
+ * denoiser state, and grain are NOT. The full 16-bit pipeline consumes those,
+ * so the indirect worker render is allowed only for states the copy provably
+ * represents; anything else keeps the old skip and the foreground renders
+ * honestly. A wrong-content cache hit is worse than a miss - fail closed. */
+static int mlv_processed8_prefetch_indirect_state_supported(const processingObject_t * processing)
+{
+    if (!processing) return 0;
+    if (processing->lut_on) return 0;
+    if (processing->filter_on) return 0;
+    if (processing->gradient_enable) return 0;
+    if (processing->vignette_strength != 0) return 0;
+    if (processing->denoiserStrength > 0) return 0;
+    if (processing->rbfDenoiserLuma > 0) return 0;
+    if (processing->rbfDenoiserChroma > 0) return 0;
+    if (processing->grainStrength > 0) return 0;
+    if (processing->ca_desaturate > 0) return 0;
+    if (processingUsesChromaSeparation((processingObject_t *)processing)) return 0;
+    if (processingGetSharpening((processingObject_t *)processing) > 0.005) return 0;
+    if (processing->allow_creative_adjustments
+        && (processing->hue_vs_luma_used
+            || processing->hue_vs_saturation_used
+            || processing->hue_vs_hue_used
+            || processing->luma_vs_saturation_used)) return 0;
+    if (processing->toning_dry < 0.998f) return 0;
+    if (fabsf(processing->toning_wet[0]) > 0.0005f
+     || fabsf(processing->toning_wet[1]) > 0.0005f
+     || fabsf(processing->toning_wet[2]) > 0.0005f) return 0;
+    return 1;
+}
+
 static uint64_t mlv_hash_bytes(uint64_t hash, const void * data, size_t size)
 {
     const uint8_t * bytes = (const uint8_t *)data;
@@ -2093,6 +2158,12 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
                                                               int threads,
                                                               int scaleFactor,
                                                               int recordTelemetry);
+static int mlv_render_processed_frame8_indirect_with_processing(mlvObject_t * video,
+                                                                processingObject_t * processing,
+                                                                uint64_t frameIndex,
+                                                                uint8_t * outputFrame,
+                                                                int threads,
+                                                                int scaleFactor);
 static int mlv_start_processed8_prefetch_thread(mlvObject_t * video);
 
 static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
@@ -2186,12 +2257,48 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
         return;
     }
 
-    /* The direct8 render is this worker's only render path; when the copied
-     * processing state is direct8-incompatible it cannot produce a frame, so
-     * there is nothing to warm. (The render itself also fails closed on this
-     * gate; this check just skips the doomed decode/recon work.) */
-    if (!processingCanUseDirect8BitOutput(task->processing))
+    /* The playback preview policy flags are THREAD-LOCAL. The direct8 gate's
+     * local-tone clause only disqualifies when preview mode is active (the
+     * default Auto Look Assist preset is the common case), so the gate MUST
+     * be evaluated inside the same preview-policy envelope the render uses.
+     * Historically this check ran with the worker thread's envelope unset:
+     * the gate reported compatible, the direct8 render then failed closed
+     * inside the envelope, and the worker silently warmed nothing for
+     * look-assist states (wasted decodes, zero stores). Set the envelope for
+     * the whole task and restore it on every exit path. */
+    const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
+    const int previous_aggressive_preview_mode =
+        processingPlaybackAggressivePreviewModeEnabled();
+    const int previous_preview_scale_factor =
+        processingPlaybackPreviewScaleFactor();
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
+    processingSetPlaybackPreviewScaleFactor(task->scaleFactor);
+
+    /* When the copied processing state is direct8-incompatible, the direct8
+     * render cannot produce a frame. Since 2026-06-11 the worker renders
+     * those frames through the same indirect processed16->8 composition the
+     * foreground uses, so the cache still serves honest hits - but only for
+     * states the partial processing-state copy provably represents, and only
+     * while MLVAPP_PROCESSED8_PREFETCH_INDIRECT (default on) allows it. Both
+     * renders fail closed: a frame is stored only on reported success.
+     *
+     * Scope (2026-06-11 interleaved A/B on the M16 trio): x4/x8 Sharp only.
+     * At x2 the worker's indirect render costs about as much as the
+     * foreground frame, so it cannot get ahead and only splits cores
+     * (measured wash-to-negative). In Aggressive Performance the foreground
+     * skips the processed8 main cache for direct8-incompatible x2/x4/x8, so
+     * worker renders would never be consumed - pure contention. */
+    const int direct8Compatible = processingCanUseDirect8BitOutput(task->processing);
+    if (!direct8Compatible
+        && !(task->scaleFactor >= 4
+             && !mlvPlaybackAggressivePreviewMode()
+             && mlv_processed8_prefetch_indirect_enabled()
+             && mlv_processed8_prefetch_indirect_state_supported(task->processing)))
     {
+        processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
+        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
+        processingSetPlaybackPreviewMode(previous_preview_mode);
         return;
     }
 
@@ -2242,34 +2349,29 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
             continue;
         }
 
-        /* The processed8 prefetch worker runs on its own thread, so the
-         * render-thread-local playback preview flag would otherwise be lost
-         * here. Keep the same playback preview policy active while the
-         * background worker renders the cached frame so it does not spend
-         * export-grade CPU on preview-only playback work. */
-        const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
-        const int previous_aggressive_preview_mode =
-            processingPlaybackAggressivePreviewModeEnabled();
-        const int previous_preview_scale_factor =
-            processingPlaybackPreviewScaleFactor();
-        processingSetPlaybackPreviewMode(1);
-        processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
-        processingSetPlaybackPreviewScaleFactor(task->scaleFactor);
-        int renderOk = mlv_render_processed_frame8_direct_with_processing(
-            task->video,
-            task->processing,
-            0,
-            targetFrame,
-            prefetchBuffer,
-            task->threads,
-            task->scaleFactor,
-            0);
+        /* The task-level preview-policy envelope (set before the gate above)
+         * is active here, matching what the foreground render uses. */
+        int renderOk = direct8Compatible
+            ? mlv_render_processed_frame8_direct_with_processing(
+                  task->video,
+                  task->processing,
+                  0,
+                  targetFrame,
+                  prefetchBuffer,
+                  task->threads,
+                  task->scaleFactor,
+                  0)
+            : mlv_render_processed_frame8_indirect_with_processing(
+                  task->video,
+                  task->processing,
+                  targetFrame,
+                  prefetchBuffer,
+                  task->threads,
+                  task->scaleFactor);
         const int phase4bPath = renderOk ? mlv_phase4bv2_last_path_taken() : 0;
         const int phase4bYCropRows = renderOk ? mlv_phase4bv3_last_y_crop_rows() : 0;
-        processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
-        processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
-        processingSetPlaybackPreviewMode(previous_preview_mode);
 
+        int debugStored = 0;
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
         if (renderOk
             && !task->video->processed8_prefetch_stop
@@ -2292,9 +2394,26 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
                                                                    task->scaleFactor,
                                                                    phase4bPath,
                                                                    phase4bYCropRows);
+            debugStored = 1;
         }
         pthread_mutex_unlock(&task->video->processed8_prefetch_mutex);
+        if (mlv_processed8_prefetch_debug_enabled())
+        {
+            fprintf(stderr,
+                    "[P8PF] frame=%llu renderOk=%d stored=%d direct8=%d sig=%016llx scale=%d threads=%d\n",
+                    (unsigned long long)targetFrame,
+                    renderOk,
+                    debugStored,
+                    direct8Compatible,
+                    (unsigned long long)targetSignature,
+                    task->scaleFactor,
+                    task->threads);
+        }
     }
+
+    processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
+    processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
+    processingSetPlaybackPreviewMode(previous_preview_mode);
 }
 
 static void * mlv_processed8_prefetch_thread_main(void * opaque)
@@ -4746,10 +4865,13 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
     const uint64_t pixels_count = (uint64_t)full_w * (uint64_t)full_h;
     float * raw_frame = mlv_ensure_thread_float_buffer(pixels_count);
-    /* The TLS rgb_u16 buffer grows to the largest size requested across
-     * calls; oversize for scaled output is harmless (we only fill the
-     * scaled-W * scaled-H * 3 prefix). */
-    const uint64_t rgb_buf_words = (eff_scale > 1) ? rgb_frame_size : ((uint64_t)full_w * (uint64_t)full_h * 3u);
+    /* Pre-grow the TLS rgb_u16 slot to full-res before capturing: the
+     * scaled decode's internals ensure mid-res intermediates from the SAME
+     * thread-local slot, and a growth realloc would move the buffer out
+     * from under this captured pointer (silent use-after-free; on a fresh
+     * worker thread the slot starts at zero capacity, so scaled renders
+     * were exposed). Full-res RGB bounds every intermediate. */
+    const uint64_t rgb_buf_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
     uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
     if (!raw_frame || !unprocessed_frame || !processing)
     {
@@ -4872,6 +4994,115 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
     return 1;
 }
 
+/* Indirect (processed16 -> 8) render for the prefetch worker. Mirrors the
+ * foreground fallback in getMlvProcessedFrame8_with_scale: scaled RGB16
+ * decode/recon, full 16-bit applyProcessingObject on the worker's private
+ * processing copy, then the same >>8 packdown. Worker-thread-safe by
+ * construction: TLS buffers only, never video->rgb_processed_current_frame.
+ * Scale 1 is rejected (a full-res prefetch render costs about a foreground
+ * frame, and the standard prefetch gate keeps x1 off anyway). Fails closed:
+ * returns 0 unless outputFrame was fully written. */
+static int mlv_render_processed_frame8_indirect_with_processing(mlvObject_t * video,
+                                                                processingObject_t * processing,
+                                                                uint64_t frameIndex,
+                                                                uint8_t * outputFrame,
+                                                                int threads,
+                                                                int scaleFactor)
+{
+    if (!video || !processing || !outputFrame)
+    {
+        return 0;
+    }
+
+    const int eff_scale = mlv_normalize_playback_scale_factor(scaleFactor);
+    if (eff_scale <= 1)
+    {
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int out_w = full_w / eff_scale;
+    const int out_h = full_h / eff_scale;
+    if (out_w <= 0 || out_h <= 0)
+    {
+        return 0;
+    }
+
+    const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
+    /* Pre-grow the TLS slot to full-res RGB before capturing the pointer:
+     * the scaled decode's internals ensure mid-res intermediates from the
+     * SAME thread-local slot, and a growth realloc would move the buffer
+     * out from under the captured pointer (silent use-after-free until the
+     * heap reuses the block). Full-res RGB is the supremum of every
+     * intermediate, so one capture stays valid for the whole render. */
+    const uint64_t rgb_full_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
+    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_full_words);
+    if (!unprocessed_frame)
+    {
+        return 0;
+    }
+
+    if (!mlv_render_scaled_rgb16(video, frameIndex, unprocessed_frame, eff_scale, threads))
+    {
+        return 0;
+    }
+
+    /* The scaled decode used the bayer-side TLS u16 slot as scratch; that
+     * data is dead once the decode returns, so the slot is reused as the
+     * processed16 output. Input and output must stay distinct buffers (the
+     * processing stages read source neighborhoods while writing). */
+    uint16_t * processed_frame = mlv_ensure_thread_u16_buffer(rgb_frame_size);
+    if (!processed_frame)
+    {
+        return 0;
+    }
+
+    applyProcessingObject(processing,
+                          out_w,
+                          out_h,
+                          unprocessed_frame,
+                          processed_frame,
+                          threads,
+                          1,
+                          frameIndex);
+
+    const size_t row_words = (size_t)out_w * 3u;
+    #pragma omp parallel for schedule(static)
+    for (int y = 0; y < out_h; ++y)
+    {
+        const uint16_t * __restrict src_row = processed_frame + ((size_t)y * row_words);
+        uint8_t * __restrict dst_row = outputFrame + ((size_t)y * row_words);
+        for (size_t x = 0; x < row_words; ++x)
+        {
+            dst_row[x] = (uint8_t)(src_row[x] >> 8);
+        }
+    }
+
+    /* SDBG_indirect8_out capture: worker-side indirect output (inert unless
+     * MLVAPP_PIPELINE_CAPTURE_DIR is set) so hit-content forensics work on
+     * this path exactly like the direct8 one. */
+    if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+    {
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = "SDBG_indirect8_out_pf";
+        meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+        meta.format_label = "uint8_rgb_processed16_packdown";
+        meta.width = out_w;
+        meta.height = out_h;
+        meta.bytes_per_line = out_w * 3;
+        meta.bytes_per_pixel = 3;
+        meta.channels = 3;
+        meta.bit_depth = 8;
+        meta.scaler = "playback_downsample";
+        meta.path_label = "prefetch_indirect8";
+        mlv_pipeline_capture(frameIndex, outputFrame, &meta);
+    }
+
+    return 1;
+}
+
 static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject_t * video,
                                                                        processingObject_t * processing,
                                                                        int syncProcessingLevels,
@@ -4891,9 +5122,9 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
     const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
 
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
-    const uint64_t rgb_buf_words = (eff_scale > 1)
-        ? rgb_frame_size
-        : ((uint64_t)full_w * (uint64_t)full_h * 3u);
+    /* Pre-grow to full-res before capturing (same TLS realloc hazard as the
+     * sibling helpers: internals grow this slot for mid-res intermediates). */
+    const uint64_t rgb_buf_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
     uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
     if (!decodedRawFrame || !unprocessed_frame || !processing || eff_scale <= 1)
     {
@@ -5380,9 +5611,30 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
         {
             mlv_phase4bv2_set_fallback_reason("none");
         }
+        if (mlv_processed8_prefetch_debug_enabled() && processed8PrefetchActive)
+        {
+            fprintf(stderr,
+                    "[P8FG] frame=%llu HIT prefetched=%d sig=%016llx scale=%d threads=%d\n",
+                    (unsigned long long)frameIndex,
+                    prefetched_hit,
+                    (unsigned long long)requested_signature,
+                    normalizedScale,
+                    threads);
+        }
         g_mlv_last_processed8_total_ms = (mlv_stage_timing_now() - total_start) * 1000.0;
         mlv_stage_timing_note("processed8_total", frameIndex, total_start);
         goto cleanup;
+    }
+
+    if (mlv_processed8_prefetch_debug_enabled() && processed8PrefetchActive)
+    {
+        fprintf(stderr,
+                "[P8FG] frame=%llu MISS sig=%016llx scale=%d threads=%d direct8=%d\n",
+                (unsigned long long)frameIndex,
+                (unsigned long long)requested_signature,
+                normalizedScale,
+                threads,
+                direct8PathActive);
     }
 
     if (direct8PathActive)

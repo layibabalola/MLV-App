@@ -141,9 +141,14 @@ static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_scale_facto
 
 static int g_processing_shadows_highlights_probe_initialized = 0;
 static int g_processing_shadows_highlights_probe_mode = -1;
-static int g_processing_standard_x1_shadows_highlights_quarterres_cache = -1;
-static int g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
-static int g_processing_standard_x4_shadows_highlights_quarterres_cache = -1;
+/* THREAD-LOCAL since 2026-06-11: these cache a policy derived from the
+ * THREAD-LOCAL playback preview flags. As shared statics, a background
+ * render thread (the processed8 prefetch worker now runs the full 16-bit
+ * pipeline) could recompute them under ITS flag state and poison the
+ * foreground's answer whenever the two threads' modes differ. */
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x1_shadows_highlights_quarterres_cache = -1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x4_shadows_highlights_quarterres_cache = -1;
 
 static int processing_env_flag_enabled(const char * value)
 {
@@ -226,8 +231,8 @@ static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
 
 static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
 {
-    static int cached_preview_mode_enabled = -1;
-    static int cached_aggressive_preview_enabled = -1;
+    static MLV_PROCESSING_THREAD_LOCAL int cached_preview_mode_enabled = -1;
+    static MLV_PROCESSING_THREAD_LOCAL int cached_aggressive_preview_enabled = -1;
     const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
     const int aggressive_preview_enabled = preview_mode_enabled
         && processingPlaybackAggressivePreviewModeEnabled();
@@ -251,8 +256,8 @@ static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
 
 static int processing_standard_x2_shadows_highlights_quarterres_enabled(void)
 {
-    static int cached_preview_mode_enabled = -1;
-    static int cached_aggressive_preview_enabled = -1;
+    static MLV_PROCESSING_THREAD_LOCAL int cached_preview_mode_enabled = -1;
+    static MLV_PROCESSING_THREAD_LOCAL int cached_aggressive_preview_enabled = -1;
     const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
     const int aggressive_preview_enabled = preview_mode_enabled
         && processingPlaybackAggressivePreviewModeEnabled();
