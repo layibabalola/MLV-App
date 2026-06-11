@@ -32,23 +32,44 @@ made it worse). The fix is in the full-res + scaled cold dual-ISO recon / map-in
 risk of regressing the recon) — deserves its own focused session. Repro: cold-capture with look-assist
 on, view f000 (pink) vs f015 (clean).
 
-## Playback-loop bugs (separate from the clip-open fix; NOT fixed here — 2026-06-10)
+## Playback-loop bugs (separate from the clip-open fix — 2026-06-10)
 
 After the clip-open freeze was fixed, the user pressed Play and two playback-LOOP problems remained,
 distinct from the (now fixed) clip-open freeze:
 
-**Stuck-frame — the user's core "frozen frame".** Chipped as task_d2c52e6c. During playback the
-displayed image freezes on frame 0 while the engine advances: GUI shows "Playback: 25-27 fps" and
-"Frame N/1081" climbing, timecode advancing, but the on-screen pixels never change. Trace proof
-(.claude-state/profiling/20260610-visval/jitter-x4-cool): the render renders 747 DISTINCT advancing
-frames; drawFrameReady (MainWindow.cpp:19472) paints all 822 with NO drops (empty/drop_generation=0,
-skip_backward=1) and display_frame==position; DropFrameMode advances position correctly (5816/5835/5837)
-- YET the displayed pixels are stale (viewport span=0; frames sampled at different timecodes were
-pixel-identical; user-confirmed via screenshot). So the async present pipeline (acquireLatestReadyFrame
-+ the 2026-04-23 "safe overlap playback handoff" + 2026-06-08 forward-only guard) is delivering a stale
-image buffer, OR the paint body doesn't refresh the widget. Very likely the "used to drop frames, now
-it freezes" regression. NOT fixed - it's a focused change in ~250 lines of fragile GPU/CPU present code
-that should be done fresh, not at the tail of this long session.
+**Stuck-frame — the user's core "frozen frame". FIXED 2026-06-10** (branch
+`fix/playback-stuck-frame-display`, work block wb-97bb261fce6a45d0; was chipped as task_d2c52e6c).
+During playback the displayed image froze on ~frame 0 while the engine advanced: GUI showed
+"Playback: 25-27 fps" and "Frame N/1081" climbing, timecode advancing, but the on-screen pixels never
+changed (viewport span=0; user-confirmed via screenshot).
+
+**Root cause — a poisoned processed8 prefetch cache, NOT the present pipeline.** The MainWindow-side
+suspects (acquireLatestReadyFrame, the 2026-04-23 overlap handoff, the 2026-06-08 forward-only guard)
+were all exonerated by pipeline-stage captures (`MLVAPP_PIPELINE_CAPTURE_DIR`): S0 raw decode advanced
+per frame, S6 displayImage was byte-identical for every frame, and the new SDBG probes showed the
+prefetch worker's direct8 render input (scaled RGB16) ADVANCING while its output stayed frozen with
+`direct8_gate_fail`. Chain: `applyProcessingObject8` (raw_processing.c) silently returns WITHOUT
+writing the output buffer when the processing state is direct8-incompatible (the Auto Look Assist
+preset makes it incompatible on this clip); `mlv_render_processed_frame8_direct_with_processing`
+reported success anyway; the processed8 prefetch worker (video_mlv.c) then stored its unchanged
+thread-local buffer under every advancing frame index with a valid signature; the foreground hit those
+poisoned entries every frame and faithfully presented the same stale pixels. Engine/fps/timecode all
+ran off frame NUMBERS, which advanced fine.
+
+**Fix (smallest safe):** fail closed — the three direct8 render functions in `src/mlv/video_mlv.c`
+now return 0 without claiming success when `processingCanUseDirect8BitOutput()` fails, and the
+prefetch task skips rendering entirely in that state (the foreground falls back to the proven indirect
+processed16→8 path). Validated by pixels (validate-visible-playback span): x8 0→44.75, x4 43.87,
+x2 47.18, x8-no-look-assist (gate-pass side) 34.82 — all SMOOTH, filmstrips visually clean, S6
+display bytes now distinct per frame. Pipeline suite: 16 failures with fix vs 17 at baseline (strict
+subset — zero new failures, Phase4A cache-scale-isolation now passes).
+
+**Measurement caveat this creates (2026-06-10):** every earlier FPS number measured with the
+processed8 prefetch serving hits on a look-assist'd dual-ISO clip (e.g. iteration 12/13's "Sharp
+presents prefetch-cached frames at ~7 ms / 24-26 fps") was presenting FROZEN pixels — the hits were
+real but the content was poisoned, and single-frame screenshots could not see it. The x2 "real-time
+when cool" conclusion and the quarter-res-vs-prefetch comparison need re-measurement on the fixed
+build (the prefetch is now inert whenever look assist makes the state direct8-incompatible).
 
 **x2 ~9 fps compute ceiling.** Re-measured on a COOLED machine: mean 111ms/frame, 66% of frames
 80-150ms - cooling did NOT help, so it is NOT thermal (I was wrong about that). The heavy dual-ISO
