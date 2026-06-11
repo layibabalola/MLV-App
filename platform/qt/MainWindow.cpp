@@ -1477,6 +1477,28 @@ MainWindow::~MainWindow()
 }
 
 //Called from timer and frame ready: initiate drawing next frame
+/* Playback timer poll interval (2026-06-11 de-quantization, loop iteration 3).
+ * Polling at the clip rate quantizes presents to whole frame periods: a render
+ * that finishes just after a tick waits out the remainder of a full ~42 ms
+ * period before the next tick presents it (the measured ~2-tick / half-rate
+ * playback on render costs near one period). playbackHandling() paces by
+ * ELAPSED time (DropFrameMode), so a faster poll does not advance frames
+ * faster - it only services a finished render sooner; the forward-only
+ * present guard (m_lastPresentedPlaybackFrame) keeps stale frames from
+ * presenting out of order, and the m_frameStillDrawing early-out keeps busy
+ * ticks trivial. MLVAPP_PLAYBACK_TIMER_POLL_MS: >0 explicit poll ms,
+ * -1 legacy clip-rate poll (A/B + kill switch), unset/0 = fast default. */
+static int mlvappPlaybackTimerIntervalMs( double framerate )
+{
+    const int native = ( framerate > 1.0 ) ? (int)( 1000.0 / framerate ) : 40;
+    bool ok = false;
+    const int env = qEnvironmentVariableIntValue( "MLVAPP_PLAYBACK_TIMER_POLL_MS", &ok );
+    if( ok && env > 0 ) return qBound( 1, env, 1000 );
+    if( ok && env < 0 ) return ( native > 0 ) ? native : 40;
+    const int fastPollMs = 8;
+    return qMin( fastPollMs, ( native > 0 ) ? native : 40 );
+}
+
 void MainWindow::timerFrameEvent( void )
 {
     static QTime lastTime;              //Last Time a picture was rendered
@@ -1551,9 +1573,28 @@ void MainWindow::timerFrameEvent( void )
     }
 
     //Trigger Drawing
+    static int lastDrawnPlaybackPosition = -1;
+    if( !ui->actionPlay->isChecked() )
+    {
+        lastDrawnPlaybackPosition = -1;
+    }
+    else if( m_frameChanged
+          && ui->horizontalSliderPosition->value() == lastDrawnPlaybackPosition )
+    {
+        /* Fast timer polling (mlvappPlaybackTimerIntervalMs) can mark the
+         * frame changed on ticks where elapsed-time pacing advanced zero
+         * frames; re-presenting the identical frame is wasted draw work
+         * (~20% duplicate presents measured at x4/x8). Paused/scrub
+         * repaints keep the old behavior via the play-checked guard. */
+        m_frameChanged = false;
+    }
     if( m_frameChanged && !m_dontDraw && !m_inOpeningProcess )
     {
         m_frameChanged = false; //first do this, if there are changes between rendering
+        if( ui->actionPlay->isChecked() )
+        {
+            lastDrawnPlaybackPosition = ui->horizontalSliderPosition->value();
+        }
         if( interactiveTraceEnabled() )
         {
             logInteractionEvent(
@@ -5687,7 +5728,7 @@ int MainWindow::openMlv( QString fileName )
     ui->horizontalSliderPosition->setMaximum( getMlvFrames( m_pMlvObject ) - 1 );
 
     //Restart timer
-    m_timerId = startTimer( (int)( 1000.0 / getFramerate() ) );
+    m_timerId = startTimer( mlvappPlaybackTimerIntervalMs( getFramerate() ) );
 
     if( ui->actionDontSwitchDebayerForPlayback->isChecked() )
     {
@@ -14845,7 +14886,7 @@ void MainWindow::on_actionExportSettings_triggered()
     {
         //Restart timer with chosen framerate
         killTimer( m_timerId );
-        m_timerId = startTimer( (int)( 1000.0 / getFramerate() ) );
+        m_timerId = startTimer( mlvappPlaybackTimerIntervalMs( getFramerate() ) );
 
         //Refresh Timecode Label
         if( m_tcModeDuration )
