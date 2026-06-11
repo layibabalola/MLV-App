@@ -3362,6 +3362,15 @@ static int mlv_phase4bv2_x2_fullres_fix_via_env(void)
     return g_mlv_phase4bv2_x2_fullres_fix_env_cache;
 }
 
+/* Quarter-res x2 playback preview: default on for playback, with a kill
+ * switch for comparison runs. Read fresh each call so tests can flip it
+ * without a cache reset. */
+static int mlv_quarterres_x2_preview_enabled(void)
+{
+    const char * v = getenv("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
+    return (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+}
+
 static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
 
 static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
@@ -3390,7 +3399,9 @@ static int mlv_phase4bv2_quality_allows_pre_recon(mlvObject_t * video,
      && scaleFactor != 8
      && !mlv_phase4bv2_allow_fast_hq_via_env(scaleFactor)
      && !(scaleFactor == 4 && mlv_phase4bv2_x4_fullres_fix_via_env())
-     && !(scaleFactor == 2 && mlv_phase4bv2_x2_fullres_fix_via_env()))
+     && !(scaleFactor == 2
+       && (mlv_quarterres_x2_preview_enabled()
+        || mlv_phase4bv2_x2_fullres_fix_via_env())))
     {
         mlv_phase4bv2_log_rejection("HQ mean23 playback uses full-recon x4 fallback");
         return 0;
@@ -3816,6 +3827,154 @@ static int mlv_render_scaled_rgb16_x2_full_xy_from_raw(mlvObject_t * video,
                                                   outputFrame, threads);
 }
 
+/* Edge-clamped bilinear upscale of an interleaved RGB16 image to an explicit
+ * target size. Used to expand the quarter-res recon to the x2 display size. */
+static void mlv_rgb_u16_upscale_to_size(const uint16_t * __restrict src,
+                                        int src_w, int src_h,
+                                        uint16_t * __restrict dst,
+                                        int dst_w, int dst_h, int threads)
+{
+    if (!src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) return;
+    const size_t src_stride = (size_t)src_w * 3u;
+    const size_t dst_stride = (size_t)dst_w * 3u;
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        int y0 = y >> 1; if (y0 >= src_h) y0 = src_h - 1;
+        const int y_odd = y & 1;
+        const int y1 = (y_odd && y0 + 1 < src_h) ? (y0 + 1) : y0;
+        const uint16_t * row0 = src + (size_t)y0 * src_stride;
+        const uint16_t * row1 = src + (size_t)y1 * src_stride;
+        uint16_t * drow = dst + (size_t)y * dst_stride;
+        for (int x = 0; x < dst_w; ++x)
+        {
+            int x0 = x >> 1; if (x0 >= src_w) x0 = src_w - 1;
+            const int x_odd = x & 1;
+            const int x1 = (x_odd && x0 + 1 < src_w) ? (x0 + 1) : x0;
+            const uint16_t * p00 = row0 + (size_t)x0 * 3u;
+            const uint16_t * p01 = row0 + (size_t)x1 * 3u;
+            const uint16_t * p10 = row1 + (size_t)x0 * 3u;
+            const uint16_t * p11 = row1 + (size_t)x1 * 3u;
+            uint16_t * out = drow + (size_t)x * 3u;
+            if (x_odd && y_odd)
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + p01[0] + p10[0] + p11[0]) >> 2);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + p01[1] + p10[1] + p11[1]) >> 2);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + p01[2] + p10[2] + p11[2]) >> 2);
+            }
+            else if (x_odd)
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + p01[0]) >> 1);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + p01[1]) >> 1);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + p01[2]) >> 1);
+            }
+            else if (y_odd)
+            {
+                out[0] = (uint16_t)(((uint32_t)p00[0] + p10[0]) >> 1);
+                out[1] = (uint16_t)(((uint32_t)p00[1] + p10[1]) >> 1);
+                out[2] = (uint16_t)(((uint32_t)p00[2] + p10[2]) >> 1);
+            }
+            else
+            {
+                out[0] = p00[0]; out[1] = p00[1]; out[2] = p00[2];
+            }
+        }
+    }
+}
+
+/* Quarter-res x2 preview core: 4x Bayer downsample -> HQ Dual ISO recon at
+ * quarter res -> debayer -> 2x bilinear upscale to the x2 display size. Mirrors
+ * the buffer discipline of the proven x2 / v3 cores. Returns 1 on success, 0 to
+ * fall back to the half-res x2 path. */
+static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
+                                                           uint64_t frameIndex,
+                                                           const uint16_t * decodedRawFrame,
+                                                           uint16_t * outputFrame,
+                                                           int threads)
+{
+    if (!video || !outputFrame) return 0;
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int eff_h = (full_h / 16) * 16;            /* 16-aligned: dual-ISO 4-row phase */
+    if ((full_w % 4) != 0 || eff_h < 16) return 0;
+
+    g_mlv_phase4bv3_y_crop_rows = full_h - eff_h;
+
+    const int q_w = full_w / 4;
+    const int q_h = eff_h / 4;
+    const int q_out_h = full_h / 4;                  /* padded quarter height */
+    const int x2_out_w = full_w / 2;
+    const int x2_out_h = full_h / 2;                 /* x2 display dims (matches x2 core) */
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t q_pixels = (uint64_t)q_w * (uint64_t)q_h;
+    const uint64_t q_rgb_words = (uint64_t)q_w * (uint64_t)q_out_h * 3u;
+
+    const uint16_t * raw_source = decodedRawFrame;
+    uint16_t * full_bayer = NULL;
+    if (!raw_source)
+    {
+        full_bayer = mlv_ensure_thread_u16_buffer(full_pixels);
+        if (!full_bayer) return 0;
+        const double raw_start = mlv_stage_timing_now();
+        if (getMlvRawFrameUint16(video, frameIndex, full_bayer)) return 0;
+        g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+        raw_source = full_bayer;
+    }
+
+    uint16_t * q_bayer = mlv_ensure_thread_scaled_bayer_buffer(q_pixels);
+    if (!q_bayer) return 0;
+    const double downsample_start = mlv_stage_timing_now();
+    int actual_q_w = 0, actual_q_h = 0;
+    if (pl_downsample_bayer_to_bayer_4x(raw_source, full_w, eff_h, q_bayer,
+                                        &actual_q_w, &actual_q_h, threads) != 0
+        || actual_q_w != q_w || actual_q_h != q_h)
+    {
+        mlv_phase4bv2_log_rejection("x2-quarter bayer 4x kernel rejected");
+        return 0;
+    }
+    const double downsample_ms = (mlv_stage_timing_now() - downsample_start) * 1000.0;
+
+    const double llraw_start = mlv_stage_timing_now();
+    mlv_pipeline_capture_set_current_frame(frameIndex);
+    const size_t q_bytes = (size_t)q_pixels * sizeof(uint16_t);
+    if (!applyLLRawProcObject_with_dims(video, q_bayer, q_bytes, q_w, q_h))
+    {
+        mlv_phase4bv2_log_rejection("x2-quarter applyLLRawProcObject_with_dims rejected");
+        return 0;
+    }
+    const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
+    g_mlv_last_llrawproc_ms = llrawproc_ms;
+
+    uint16_t * q_rgb = mlv_ensure_thread_rgb_u16_buffer(q_rgb_words);
+    if (!q_rgb) return 0;
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    const double debayer_start = mlv_stage_timing_now();
+    debayerBasicU16(q_rgb, q_bayer, q_w, q_h, threads, bit_shift);
+    const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+
+    /* Pad the cropped rows (q_h .. q_out_h) from the last valid row, matching v3. */
+    const size_t q_row_words = (size_t)q_w * 3u;
+    if (q_h > 0)
+    {
+        const uint16_t * last_row = q_rgb + (size_t)(q_h - 1) * q_row_words;
+        for (int y = q_h; y < q_out_h; ++y)
+        {
+            memcpy(q_rgb + (size_t)y * q_row_words, last_row, q_row_words * sizeof(uint16_t));
+        }
+    }
+
+    const double upscale_start = mlv_stage_timing_now();
+    mlv_rgb_u16_upscale_to_size(q_rgb, q_w, q_out_h, outputFrame, x2_out_w, x2_out_h, threads);
+    const double upscale_ms = (mlv_stage_timing_now() - upscale_start) * 1000.0;
+
+    g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms + upscale_ms;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    g_mlv_phase4bv2_path_taken = 5;                  /* x2-quarter preview */
+    return 1;
+}
+
 static int mlv_render_scaled_rgb16_v3_full_xy_from_raw(mlvObject_t * video,
                                                        uint64_t frameIndex,
                                                        const uint16_t * decodedRawFrame,
@@ -3873,10 +4032,10 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
     }
     if (scaleFactor == 2
      && !mlvPlaybackAggressivePreviewMode()
-     && !mlv_phase4bv2_x2_fullres_fix_via_env())
+     && !mlv_phase4bv2_x2_fullres_fix_via_env()
+     && !mlv_quarterres_x2_preview_enabled())
     {
-        /* Sharp/Smooth x2 remains the full-recon downsample. Aggressive x2
-         * is allowed to take the early Bayer-domain approximation below. */
+        /* Sharp/Smooth x2 falls back only when neither preview shortcut is enabled. */
         mlv_phase4bv2_log_rejection("scale=2 uses full-recon post-downsample fallback");
         return 0;
     }
@@ -3965,7 +4124,13 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
                 }
             }
         }
-        else if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
+        if (!mlvPlaybackAggressivePreviewMode()
+         && mlv_quarterres_x2_preview_enabled()
+         && mlv_render_scaled_rgb16_x2_quarter_preview_core(video, frameIndex, NULL, outputFrame, threads))
+        {
+            return 1;
+        }
+        if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
         {
             return 1;
         }
@@ -4437,7 +4602,33 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                     }
                 }
             }
-            else if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
+            if (!mlvPlaybackAggressivePreviewMode()
+             && mlv_quarterres_x2_preview_enabled())
+            {
+                const uint16_t * x2_quarter_source = decodedRawFrame;
+                uint16_t * x2_fix_buffer = NULL;
+                if (!receiptCompatible && !x2ReceiptBypassActive)
+                {
+                    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+                    const size_t full_bytes = (size_t)full_pixels * sizeof(uint16_t);
+                    x2_fix_buffer = mlv_ensure_thread_u16_buffer(full_pixels);
+                    if (x2_fix_buffer)
+                    {
+                        memcpy(x2_fix_buffer, decodedRawFrame, full_bytes);
+                        applyLLRawProcObjectPreDualIsoFixes(video, x2_fix_buffer, full_bytes);
+                        x2_quarter_source = x2_fix_buffer;
+                    }
+                }
+                if (mlv_render_scaled_rgb16_x2_quarter_preview_core(video,
+                                                                    frameIndex,
+                                                                    x2_quarter_source,
+                                                                    outputFrame,
+                                                                    threads))
+                {
+                    return 1;
+                }
+            }
+            if (mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
             {
                 return 1;
             }
