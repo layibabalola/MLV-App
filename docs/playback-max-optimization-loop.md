@@ -45,27 +45,27 @@ parentheses where it needs context. Native = 23.976.
 | 1 | x1 Sharp | M16-1327 | 5.4 cold / 8.1 warm | 168.5 / 102.5 | 354 / 172 | content OK; span 51.4 SMOOTH; (detector FAIL = absolute >=250 ms rule, see notes) | 8.1 | baseline |
 | 2 | x1 Sharp | M16-1347 | 6.5 | 131.7 | 246 | content OK (PASS) | 6.5 | baseline |
 | 3 | x1 Sharp | M16-1446 | 7.1 | 117.4 | 201 | content OK (PASS) | 7.1 | baseline |
-| 4 | x2 Sharp | M16-1327 | 11.0 | 68.7 | 170 | content OK; span 40.8 SMOOTH (PASS) | 13.5 | wb-412cff70908e4a7e, pending human |
-| 5 | x2 Sharp | M16-1347 | 11.0 | 65.4 | 154 | content OK (PASS) | 14.9 | wb-412cff70908e4a7e, pending human |
-| 6 | x2 Sharp | M16-1446 | 10.9 | 70.3 | 155 | content OK (PASS) | 15.0 | wb-412cff70908e4a7e, pending human |
-| 7 | x4 Sharp | M16-1327 | 13.0 | 47.1 | 146 | content OK; span 49.4 SMOOTH (PASS) | 20.9 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
-| 8 | x4 Sharp | M16-1347 | 13.7 | 42.1 | 121 | content OK (PASS) | 21.7 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
-| 9 | x4 Sharp | M16-1446 | 11.0 | 65.5 | 199 | content OK (PASS, hitch 0.63%) | 18.3 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
-| 10 | x8 Sharp | M16-1327 | 13.0 | 49.4 | 158 | content OK; span 48.7 SMOOTH; x8 canary clean (PASS) | 21.1 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
-| 11 | x8 Sharp | M16-1347 | 15.9 | 34.7 | 94 | content OK; span 63.3 SMOOTH; x8 canary clean (PASS) | 20.9 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
-| 12 | x8 Sharp | M16-1446 | 13.0 | 47.5 | 153 | content OK; span 39.7 SMOOTH; x8 canary clean (PASS) | 19.4 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, pending human |
+| 4 | x2 Sharp | M16-1327 | 11.0 | 68.7 | 170 | content OK; span 40.8 SMOOTH (PASS) | 13.5 | wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 5 | x2 Sharp | M16-1347 | 11.0 | 65.4 | 154 | content OK (PASS) | 14.9 | wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 6 | x2 Sharp | M16-1446 | 10.9 | 70.3 | 155 | content OK (PASS) | 15.0 | wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 7 | x4 Sharp | M16-1327 | 13.0 | 47.1 | 146 | content OK; span 49.4 SMOOTH (PASS) | 20.9 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 8 | x4 Sharp | M16-1347 | 13.7 | 42.1 | 121 | content OK (PASS) | 21.7 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 9 | x4 Sharp | M16-1446 | 11.0 | 65.5 | 199 | content OK (PASS, hitch 0.63%) | 18.3 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 10 | x8 Sharp | M16-1327 | 13.0 | 49.4 | 158 | content OK; span 48.7 SMOOTH; x8 canary clean (PASS) | 21.1 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 11 | x8 Sharp | M16-1347 | 15.9 | 34.7 | 94 | content OK; span 63.3 SMOOTH; x8 canary clean (PASS) | 20.9 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 12 | x8 Sharp | M16-1446 | 13.0 | 47.5 | 153 | content OK; span 39.7 SMOOTH; x8 canary clean (PASS) | 19.4 | wb-a5315ef858a645b2 + wb-412cff70908e4a7e, human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
 | 13 | x1 Aggr | M16-1327 | 7.2 | 114.5 | 197 | content OK; span 41.3 SMOOTH (PASS) | 7.2 | baseline |
 | 14 | x1 Aggr | M16-1347 | 7.2 | 114.3 | 215 | content OK (PASS) | 7.2 | baseline |
 | 15 | x1 Aggr | M16-1446 | 7.2 | 123.7 | 245 | content OK (PASS) | 7.2 | baseline |
 | 16 | x2 Aggr | M16-1327 | 12.3 | 58.4 | 135 | content OK; span 40.1 SMOOTH (PASS) | 12.3 | baseline |
 | 17 | x2 Aggr | M16-1347 | 12.8 | 57.5 | 145 | content OK (PASS) | 12.8 | baseline |
 | 18 | x2 Aggr | M16-1446 | 12.8 | 55.1 | 140 | content OK (PASS) | 12.8 | baseline |
-| 19 | x4 Aggr | M16-1327 | 17.5 | 30.8 | 105 | content OK (249/257 hashes, benign dup presents, visual clean); span 40.7 SMOOTH (PASS) | 16.4 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
-| 20 | x4 Aggr | M16-1347 | 13.2 | 43.8 | 149 | content OK (PASS) | 16.7 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
-| 21 | x4 Aggr | M16-1446 | 13.9 | 38.0 | 109 | content OK (PASS) | 20.0 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
-| 22 | x8 Aggr | M16-1327 | 13.0 | 49.2 | 138 | content OK; span 40.2 SMOOTH; x8 canary clean (PASS) | 14.0 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
-| 23 | x8 Aggr | M16-1347 | 13.0 | 52.1 | 139 | content OK; span 64.7 SMOOTH; x8 canary clean (PASS) | 18.6 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
-| 24 | x8 Aggr | M16-1446 | 13.3 | 43.1 | 108 | content OK; span 42.7 SMOOTH; x8 canary clean (PASS) | 18.4 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), pending human |
+| 19 | x4 Aggr | M16-1327 | 17.5 | 30.8 | 105 | content OK (249/257 hashes, benign dup presents, visual clean); span 40.7 SMOOTH (PASS) | 16.4 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 20 | x4 Aggr | M16-1347 | 13.2 | 43.8 | 149 | content OK (PASS) | 16.7 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 21 | x4 Aggr | M16-1446 | 13.9 | 38.0 | 109 | content OK (PASS) | 20.0 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 22 | x8 Aggr | M16-1327 | 13.0 | 49.2 | 138 | content OK; span 40.2 SMOOTH; x8 canary clean (PASS) | 14.0 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 23 | x8 Aggr | M16-1347 | 13.0 | 52.1 | 139 | content OK; span 64.7 SMOOTH; x8 canary clean (PASS) | 18.6 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
+| 24 | x8 Aggr | M16-1446 | 13.3 | 43.1 | 108 | content OK; span 42.7 SMOOTH; x8 canary clean (PASS) | 18.4 | wb-daff43758c844f74, hot-machine A/B values (cool re-anchor pending), human PASS 2026-06-11 (x8 Sharp: cold-first-play finding open) |
 
 **Lanes already at native rate: NONE.** Honest summary: every lane is below the ~23.976 native
 target. x1 ~5-8 fps (compute-bound, render 102-168 ms); x2 ~11-13; x4 ~11-17.5; x8 ~13-16.
@@ -132,8 +132,27 @@ Cold first-runs of a clip can read 30-40% low (sentinel + 1327 re-anchor lesson)
 4. Measurement-infra (non-pixel, anytime): lane-aware detector freeze threshold for honest slow
    lanes; per-clip warm-up runs in sweep scripts.
 
-**Human spot-checks pending** for every CURRENT row updated by wb-a5315ef858a645b2 /
-wb-412cff70908e4a7e / wb-daff43758c844f74 (x2/x4/x8 Sharp + x4/x8 Aggressive).
+**Human spot-checks COMPLETED 2026-06-11 (M16-1327, user-driven GUI):**
+- x2 Sharp: PASS. x4 Aggr: PASS. x8 Aggr: PASS (no corruption on the historical lane).
+- x4 Sharp: PASS with note - the bottom-left fps readout swings high/low. Matches the measured
+  p99 spread (miss-bursts on the heavy clip) AND the readout itself: under the 8 ms timer the
+  status text shows near-instantaneous frame-to-frame rates, which swing even when the median is
+  steady. A rolling-average fps readout is a small UI follow-up (menu item 5).
+- x8 Sharp: CONDITIONAL - first cold play did not progress displayed frames until ~25% of the
+  clip had played; second play smooth. Cold-start-only; automated gates are blind here by
+  construction (the smoke pre-settles, spans/sweeps ran warm). OPEN FINDING, see below.
+- NEW USER OBSERVATION (all lanes): brief HORIZONTAL TEARING right after pressing Play on a
+  fresh clip. Not a wrong-content prefetch artifact (hit bytes are test-pinned + hash-gated);
+  ranked suspects: (1) display-buffer write/paint overlap that the 8 ms present cadence exposes
+  while first-play renders are slowest (widest overlap window), (2) pre-existing first-play
+  behavior predating the loop. Bisect: reproduce with MLVAPP_PLAYBACK_TIMER_POLL_MS=-1 (legacy
+  timer, prefetch on) and with MLVAPP_PROCESSED8_PREFETCH_INDIRECT=0 (worker off, fast timer).
+  Tearing only with the fast timer => presentation race; tearing in both => pre-existing.
+
+**Open follow-ups from the human gate:** cold first-play x8 frame-progression stall + first-play
+tearing (likely the same cold-path complex: look-assist settle + worker warm-up + coldest decode
+all compete in the first seconds). Deserves its own session; not a regression of a measured gate
+(content/span/suite all clean warm), but user-visible on first play.
 
 ## ATTEMPTS log
 
