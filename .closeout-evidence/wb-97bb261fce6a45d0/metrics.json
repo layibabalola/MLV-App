@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "fix/playback-stuck-frame-display",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 7,
+  "createdAt": "2026-06-11T00:27:33+00:00",
+  "detectorHash": "3e3098926db53421ed77b414b3e2871f",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "850794fca269a9f20936906c9656a548bb250df7",
+  "schemaVersion": "1.0",
+  "targetHead": "765ed4a3d066b3996d46f45cbf97a2c6da335445",
+  "workBlockId": "wb-97bb261fce6a45d0"
+}
