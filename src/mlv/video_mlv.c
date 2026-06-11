@@ -128,7 +128,7 @@ static uint64_t file_get_pos(FILE *stream)
 #define MLV_PROCESSED_8BIT_PREFETCH_EMPTY 0
 #define MLV_PROCESSED_8BIT_PREFETCH_READY 1
 #define MLV_PROCESSED_8BIT_PREFETCH_RENDERING 2
-#define MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD 2
+#define MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD 2 /* default; runtime-tunable via env MLVAPP_PROCESSED8_LOOKAHEAD (clamped 1..MLV_PROCESSED_8BIT_CACHE_SLOTS-1) for A/B without rebuilds - see mlv_processed8_prefetch_lookahead_value(). */
 
 #if defined(_MSC_VER)
 #define MLV_THREAD_LOCAL __declspec(thread)
@@ -2039,6 +2039,32 @@ static int mlv_processed_frame_8bit_cache_try_copy(mlvObject_t * video,
                 *phase4bYCropRows = video->processed_8bit_cache_phase4b_y_crop_rows[slot];
             }
             hit = 1;
+
+            /* SDBG_p8cache_hit capture: the exact bytes served on a
+             * processed8 cache hit. Inert when MLVAPP_PIPELINE_CAPTURE_DIR
+             * is unset. Frozen bytes here while the prefetch-side direct8
+             * output advances pinpoint a serve defect; frozen on both sides
+             * pinpoint the prefetch render itself. */
+            if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+            {
+                const int hit_scale = mlv_normalize_playback_scale_factor(scaleFactor);
+                const int hit_w = (int)getMlvWidth(video) / hit_scale;
+                const int hit_h = (int)getMlvHeight(video) / hit_scale;
+                mlv_pipeline_capture_meta_t meta;
+                memset(&meta, 0, sizeof meta);
+                meta.stage = "SDBG_p8cache_hit";
+                meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+                meta.format_label = "uint8_rgb_processed8_cache_hit";
+                meta.width = hit_w;
+                meta.height = hit_h;
+                meta.bytes_per_line = hit_w * 3;
+                meta.bytes_per_pixel = 3;
+                meta.channels = 3;
+                meta.bit_depth = 8;
+                meta.path_label = is_prefetched ? "prefetched" : "foreground_stored";
+                meta.settings_hash = (uint64_t)signature;
+                mlv_pipeline_capture(frameIndex, cached_frame, &meta);
+            }
         }
         else
         {
@@ -2138,6 +2164,21 @@ typedef struct
                       * lookup-with-scale=1 misses every time. */
 } mlv_processed8_prefetch_task_t;
 
+static int mlv_processed8_prefetch_lookahead_value(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        int v = MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD;
+        const char * e = getenv("MLVAPP_PROCESSED8_LOOKAHEAD");
+        if (e && e[0]) { int n = atoi(e); if (n > 0) v = n; }
+        if (v < 1) v = 1;
+        if (v > MLV_PROCESSED_8BIT_CACHE_SLOTS - 1) v = MLV_PROCESSED_8BIT_CACHE_SLOTS - 1;
+        cached = v;
+    }
+    return cached;
+}
+
 static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_task_t * task)
 {
     if (!task || !task->video || !task->processing)
@@ -2145,8 +2186,17 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
         return;
     }
 
+    /* The direct8 render is this worker's only render path; when the copied
+     * processing state is direct8-incompatible it cannot produce a frame, so
+     * there is nothing to warm. (The render itself also fails closed on this
+     * gate; this check just skips the doomed decode/recon work.) */
+    if (!processingCanUseDirect8BitOutput(task->processing))
+    {
+        return;
+    }
+
     for (uint32_t offset = task->offsetStart;
-         offset <= MLV_PROCESSED_8BIT_PREFETCH_LOOKAHEAD;
+         offset <= (uint32_t)mlv_processed8_prefetch_lookahead_value();
          offset += task->offsetStep)
     {
         uint64_t targetFrame = task->baseFrame + offset;
@@ -3443,6 +3493,11 @@ static int mlv_render_scaled_rgb16_v3_full_xy(mlvObject_t * video,
     g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
     mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
 
+    /* Seed the dual-ISO row pattern from the full-res raw before downsampling
+     * (mirrors the v4_x8 core), so the x4 scaled recon does not mis-detect it
+     * from 4x-downsampled data (the cold-pass pink). */
+    llrpEnsureDualIsoPatternSeeded(video, full_bayer, full_w, full_h);
+
     /* Step 2: bayer→bayer 4x (full XY) downsample, viewing the full bayer
      * as (full_w, eff_h). The kernel reads only rows 0..eff_h-1 — rows
      * eff_h..full_h-1 are simply ignored. (Reading less data than the
@@ -3997,6 +4052,11 @@ static int mlv_render_scaled_rgb16_v3_full_xy_from_raw(mlvObject_t * video,
     uint16_t * mid_rgb = mlv_ensure_thread_rgb_u16_buffer(mid_rgb_words);
     if (!mid_bayer || !mid_rgb) return 0;
 
+    /* Seed the dual-ISO row pattern from the full-res raw before downsampling
+     * (mirrors the v4_x8 core); this x4 from-raw path is used by the processed8
+     * prefetch worker — the cold-pass corruption source. */
+    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)decodedRawFrame, full_w, full_h);
+
     const double downsample_start = mlv_stage_timing_now();
     int actual_mid_w = 0, actual_mid_h = 0;
     int rc = pl_downsample_bayer_to_bayer_4x(decodedRawFrame, full_w, eff_h,
@@ -4100,6 +4160,12 @@ static int mlv_render_scaled_rgb16_v4_x8_full_xy_core(mlvObject_t * video,
         mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
         raw_source = full_bayer;
     }
+
+    /* Seed the dual-ISO row pattern from the full-res raw BEFORE downsampling,
+     * so the scaled recon below does not mis-detect it from 8x-downsampled data
+     * (the intermittent cold-pass x8 pink). Read-only; no-op unless dual-ISO and
+     * the pattern is still unseeded. */
+    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)raw_source, full_w, full_h);
 
     uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
     if (!mid_bayer) return 0;
@@ -4691,6 +4757,17 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
         return 0;
     }
 
+    /* applyProcessingObject8 is a silent no-op when the processing state is
+     * direct8-incompatible; reporting success with an unwritten outputFrame
+     * lets callers cache and present stale pixels (the processed8 prefetch
+     * stored the same frozen frame under every advancing frame index). Fail
+     * closed instead. */
+    if (!processingCanUseDirect8BitOutput(processing))
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+
     const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     if (eff_scale > 1)
@@ -4718,6 +4795,29 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
         mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
     }
 
+    /* SDBG_direct8_in capture: the scaled RGB16 fed into the direct8
+     * processing stage. Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset.
+     * The stage name encodes the caller (foreground render vs processed8
+     * prefetch worker) so concurrent captures of the same frame don't
+     * collide on the output filename. */
+    if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+    {
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = recordTelemetry ? "SDBG_direct8_in_fg" : "SDBG_direct8_in_pf";
+        meta.format = MLV_PIPELINE_FORMAT_UINT16_RGB;
+        meta.format_label = "uint16_rgb_direct8_input";
+        meta.width = out_w;
+        meta.height = out_h;
+        meta.bytes_per_line = out_w * 3 * (int)sizeof(uint16_t);
+        meta.bytes_per_pixel = 3 * (int)sizeof(uint16_t);
+        meta.channels = 3;
+        meta.bit_depth = 16;
+        meta.scaler = (eff_scale > 1) ? "playback_downsample" : "none";
+        meta.path_label = recordTelemetry ? "foreground" : "prefetch";
+        mlv_pipeline_capture(frameIndex, unprocessed_frame, &meta);
+    }
+
     if (syncProcessingLevels)
     {
         mlv_sync_processing_black_white_levels(video);
@@ -4732,6 +4832,30 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
                            threads,
                            1,
                            frameIndex);
+
+    /* SDBG_direct8_out capture: the direct8 8-bit output right after the
+     * processing stage. Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset.
+     * If _in advances across frames while _out stays frozen, the direct8
+     * stage did not write outputFrame (path_label records the gate). */
+    if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+    {
+        mlv_pipeline_capture_meta_t meta;
+        memset(&meta, 0, sizeof meta);
+        meta.stage = recordTelemetry ? "SDBG_direct8_out_fg" : "SDBG_direct8_out_pf";
+        meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+        meta.format_label = "uint8_rgb_direct8_output";
+        meta.width = out_w;
+        meta.height = out_h;
+        meta.bytes_per_line = out_w * 3;
+        meta.bytes_per_pixel = 3;
+        meta.channels = 3;
+        meta.bit_depth = 8;
+        meta.scaler = (eff_scale > 1) ? "playback_downsample" : "none";
+        meta.path_label = processingCanUseDirect8BitOutput(processing)
+            ? "direct8_gate_pass"
+            : "direct8_gate_fail";
+        mlv_pipeline_capture(frameIndex, outputFrame, &meta);
+    }
     if (recordTelemetry)
     {
         g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
@@ -4772,6 +4896,14 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
         : ((uint64_t)full_w * (uint64_t)full_h * 3u);
     uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
     if (!decodedRawFrame || !unprocessed_frame || !processing || eff_scale <= 1)
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+
+    /* Same direct8 gate as mlv_render_processed_frame8_direct_with_processing:
+     * never report success without writing outputFrame. */
+    if (!processingCanUseDirect8BitOutput(processing))
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
         return 0;
@@ -4846,6 +4978,14 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
     uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_frame_size);
     if (!unprocessed_frame || eff_scale <= 1)
+    {
+        memset(outputFrame, 0, (size_t)rgb_frame_size);
+        return 0;
+    }
+
+    /* Same direct8 gate as mlv_render_processed_frame8_direct_with_processing:
+     * never report success without writing outputFrame. */
+    if (!processingCanUseDirect8BitOutput(processing))
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
         return 0;

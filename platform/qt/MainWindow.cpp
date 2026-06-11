@@ -1366,7 +1366,43 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
             startupFiles.append( fileName );
         }
 
-        if( !startupFiles.empty() ) openMlvSet( startupFiles );
+        if( !startupFiles.empty() )
+        {
+            openMlvSet( startupFiles );
+
+            // Automation hook (test/headless): MLVAPP_AUTOPLAY_SECONDS auto-plays the opened clip via
+            // the REAL Play action on the NORMAL event loop after a settle delay, then stops - so
+            // automation drives playback without synthesizing keystrokes or stealing window focus.
+            // Pairs with MLVAPP_PLAYBACK_SCALE_FACTOR / MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW.
+            //   MLVAPP_AUTOPLAY_SECONDS   >0 enables; seconds to play after settling
+            //   MLVAPP_AUTOPLAY_SETTLE_MS settle delay before Play (default 2500)
+            //   MLVAPP_AUTOPLAY_EXIT      >0 quits the app shortly after the auto-stop
+            //   MLVAPP_AUTOPLAY_LOOP      >0 enables loop playback (a short clip then plays
+            //                             continuously for the whole capture window)
+            const int autoplaySeconds = qEnvironmentVariableIntValue( "MLVAPP_AUTOPLAY_SECONDS" );
+            if( autoplaySeconds > 0 )
+            {
+                int autoplaySettleMs = qEnvironmentVariableIntValue( "MLVAPP_AUTOPLAY_SETTLE_MS" );
+                if( autoplaySettleMs <= 0 ) autoplaySettleMs = 2500;
+                const bool autoplayExit = qEnvironmentVariableIntValue( "MLVAPP_AUTOPLAY_EXIT" ) > 0;
+                const bool autoplayLoop = qEnvironmentVariableIntValue( "MLVAPP_AUTOPLAY_LOOP" ) > 0;
+                QTimer::singleShot( autoplaySettleMs, this, [this, autoplaySeconds, autoplayExit, autoplayLoop]()
+                {
+                    if( autoplayLoop && !ui->actionLoop->isChecked() ) ui->actionLoop->trigger();
+                    if( !ui->actionPlay->isChecked() ) ui->actionPlay->trigger();
+                    logInteractionEvent( QStringLiteral("autoplay.play"),
+                        QStringLiteral("seconds=%1 playing=%2")
+                            .arg( autoplaySeconds )
+                            .arg( ui->actionPlay->isChecked() ? 1 : 0 ) );
+                    QTimer::singleShot( autoplaySeconds * 1000, this, [this, autoplayExit]()
+                    {
+                        if( ui->actionPlay->isChecked() ) { ui->actionPlay->setChecked( false ); on_actionPlay_triggered( false ); }
+                        logInteractionEvent( QStringLiteral("autoplay.stop"), QString() );
+                        if( autoplayExit ) QTimer::singleShot( 400, this, [](){ qApp->quit(); } );
+                    } );
+                } );
+            }
+        }
     }
 
     //Update check, if autocheck enabled, once a day
@@ -9854,9 +9890,11 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
         else
             captureLookAssistBaseline( receipt );
 
-        if( !deferLookAssistUntilBaselineFrame )
+        if( !deferLookAssistUntilBaselineFrame
+         && m_lookAssistAppliedReceipt != receipt )
         {
             applyLookAssistToReceipt( receipt );
+            m_lookAssistAppliedReceipt = receipt;
         }
         syncLookAssistDerivedUiToReceipt( receipt );
     }
@@ -9927,27 +9965,55 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 return;
             }
 
-            logInteractionEvent(
-                QStringLiteral("look_assist.setSliders.frame_ready_apply"),
-                QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
-                    .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
-                    .arg( ui->horizontalSliderExposure->value() )
-                    .arg( ui->horizontalSliderContrast->value() )
-                    .arg( ui->horizontalSliderTemperature->value() )
-                    .arg( ui->horizontalSliderTint->value() )
-                    .arg( ui->horizontalSliderRawBlack->value() )
-                    .arg( ui->horizontalSliderRawWhite->value() )
-                    .arg( baselineFrame ) );
+            if( m_lookAssistAppliedReceipt == ACTIVE_RECEIPT )
+            {
+                // De-dupe: the auto-look analysis already ran for this clip this open.
+                logInteractionEvent(
+                    QStringLiteral("look_assist.apply.dedup_skip"),
+                    QStringLiteral("where=frame_ready frame=%1").arg( baselineFrame ) );
+                return;
+            }
 
-            if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
-                restoreLookAssistBaseline( ACTIVE_RECEIPT );
-            else
-                captureLookAssistBaseline( ACTIVE_RECEIPT );
+            // Decouple: run the (now single) ~3s auto-look analysis on a later event-loop turn so the
+            // just-settled first frame PAINTS first - the user sees the clip immediately instead of a
+            // black screen held while the synchronous analysis blocks the UI thread. Re-validate inside
+            // since ACTIVE_RECEIPT / enabled state could change during the short delay.
+            QTimer::singleShot( 50, this, [this, activeReceiptAtLoad, baselineFrame]()
+            {
+                if( !m_fileLoaded
+                 || SESSION_CLIP_COUNT <= 0
+                 || SESSION_ACTIVE_CLIP_ROW < 0
+                 || !ACTIVE_RECEIPT
+                 || ACTIVE_RECEIPT != activeReceiptAtLoad
+                 || !ACTIVE_RECEIPT->lookAssistEnabled()
+                 || m_lookAssistAppliedReceipt == ACTIVE_RECEIPT )
+                {
+                    return;
+                }
 
-            applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
-            syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
-            setReceipt( ACTIVE_RECEIPT );
-            requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
+                logInteractionEvent(
+                    QStringLiteral("look_assist.setSliders.frame_ready_apply"),
+                    QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
+                        .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
+                        .arg( ui->horizontalSliderExposure->value() )
+                        .arg( ui->horizontalSliderContrast->value() )
+                        .arg( ui->horizontalSliderTemperature->value() )
+                        .arg( ui->horizontalSliderTint->value() )
+                        .arg( ui->horizontalSliderRawBlack->value() )
+                        .arg( ui->horizontalSliderRawWhite->value() )
+                        .arg( baselineFrame ) );
+
+                if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
+                    restoreLookAssistBaseline( ACTIVE_RECEIPT );
+                else
+                    captureLookAssistBaseline( ACTIVE_RECEIPT );
+
+                applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
+                m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
+                syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
+                setReceipt( ACTIVE_RECEIPT );
+                requestFrameRefresh( true, "look-assist-baseline-frame-ready" );
+            } );
         };
 
         *readyConnection = connect(
@@ -10087,7 +10153,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistColorCastWarning.clear();
     m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
     m_lastLookAssistChromaSmoothAutoApplied = false;
-    if( !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
+    // Diagnostic gate: MLVAPP_NO_LOOK_ASSIST=1 skips the auto-look analysis entirely so its
+    // clip-open cost can be measured/disabled without touching the GUI checkbox.
+    static const bool s_noLookAssist = qEnvironmentVariableIntValue( "MLVAPP_NO_LOOK_ASSIST" ) != 0;
+    if( s_noLookAssist || !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
             QStringLiteral("look_assist.apply.skip"),
