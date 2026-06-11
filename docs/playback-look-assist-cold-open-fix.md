@@ -70,6 +70,55 @@ presents prefetch-cached frames at ~7 ms / 24-26 fps") was presenting FROZEN pix
 real but the content was poisoned, and single-frame screenshots could not see it. The x2 "real-time
 when cool" conclusion and the quarter-res-vs-prefetch comparison need re-measurement on the fixed
 build (the prefetch is now inert whenever look assist makes the state direct8-incompatible).
+The full audit of which prior conclusions survive is in the next section.
+
+## Audit of prior performance conclusions (2026-06-10, post stuck-frame fix)
+
+**Why this section exists.** A documented dead end is a *conditional* claim: "X didn't help, as
+measured by instrument I, against baseline B, on build S." It is never invalidated in the abstract —
+it falls when I or B turns out to have been broken. The stuck-frame fix broke one of each: the fps/
+cadence **instrument** never validated displayed content, and the prefetch-cached default **baseline**
+achieved its speed by not doing the work (serving one frozen frame). This audit sweeps every prior
+conclusion that cited either.
+
+**How to run this audit after any future instrument/baseline fix:** (1) name the invalidated layer;
+(2) classify each documented conclusion by what killed it — code-reading/theory, direct measurement,
+baseline comparison, or attribution — the first is immune to measurement bugs, the last three are
+not; (3) grep the decision log / handoff / memories for conclusions citing the fallen layer and
+annotate tainted-vs-survives in place (never delete history); (4) re-run the cheapest discriminating
+experiment for each tainted item (dead ends kept re-runnable behind env gates or in git history make
+this cheap); (5) when documenting any new conclusion, record metric + baseline + build SHA + one
+"holds only if..." sentence. Re-audit triggers: an instrument fix, a baseline-participant fix, two
+instruments disagreeing (headless fps vs GUI fps vs the user's eyes), or a too-convenient result
+("heavy dual-ISO presents in 7 ms" deserved a content check).
+
+| Prior conclusion (where) | Verdict | Why |
+|---|---|---|
+| "Default Sharp x2 presents prefetch-cached frames at ~7 ms, 24-26 fps real-time when cool" (iter 12/13) | **TAINTED** | The ~7 ms "presents" were poisoned-cache hits displaying one frozen frame; cost and fps reflect skipped work, not rendering. |
+| Quarter-res x2 revert: "cannot beat the prefetch-cached default" (iter 13, revert of af40fe88/0123fef9) | **TAINTED basis** | Unfair A/B: quarter-res arm got 0 hits (honest renders) vs default arm's poisoned hits. The revert may still be the right call — re-decide against an honest baseline (chip task_ea437ff2). |
+| "x2/x4/x8 already real-time, not bottlenecked" (iter 2 reframe; `playback_optimization_ceiling` memory) | **PARTIALLY TAINTED** | Cadence was inflated by cheap poisoned hits. Post-fix spot checks (span metric) still show x2/x4/x8 SMOOTH, but the honest fps baseline is pending re-measurement. |
+| Thermal/load drift: "cool 12-20 ms vs hot 40-47 ms render for identical config" (iter 9) | **PARTIALLY TAINTED** | `render_total` on hit-frames measures a cache copy, not a render; hit rate itself varies with load, conflating with thermals. Mechanism plausible; the numbers need re-anchoring. |
+| x1 prefetch-drop win, +55-66% x1 FPS (landed 2026-06-09) | **SURVIVES** | x1 measured `processed8_prefetch_hits=0` in both arms — both arms were honest renders; the win came from freeing cores/disk from a useless background pipeline. |
+| "x1 has no safe (non-pixel) FPS lever; ~8-9 fps compute-bound" (iter 3) | **SURVIVES** | Killed by code-reading (half-res recon excludes scale<=1 by design; threads maxed; AVX2 debayer already fast) plus honest x1 renders (no prefetch at x1). |
+| Forward-only present guard + flicker findings (iter 5/6) | **SURVIVES (scope-limited)** | Frame-ORDER claims measured real frame numbers. They say nothing about content — that blindness is now closed by the frozen-content gate below. |
+| Timer-quantization model: "render just over one 42 ms tick → wait for second tick → ~12 fps" (iter 4/8) | **PARTIALLY TAINTED** | The mechanism is real and re-derivable; the specific render/fps numbers came from hit-era runs. |
+| Screenshot grab freezes UI ~2.5 s and distorts fps; thermal session drift (`playback_fps_measurement_reliability`) | **SURVIVES** | Independently demonstrated from timer-event gaps; content-independent. |
+
+## Tooling added so this bug class is caught headlessly (2026-06-10)
+
+1. **Presented-content hash telemetry**: `presentPlaybackPreparedFrame` (MainWindow.cpp) logs
+   `draw_frame_ready.present_content display_frame=N play_checked=B position=P hash=H` per present
+   when `MLVAPP_INTERACTIVE_TRACE=1` — a sampled FNV-1a over the bytes actually handed to the
+   display, computed while the source buffer is still held. Zero cost when the trace is off; the
+   experimental gpu16 viewport path is not hashed.
+2. **Frozen-content detector check**: `tools/profiling/detect-playback-artifacts.ps1` now FAILs when
+   the content hash stays identical across >=10 consecutive presents while the position advances,
+   and reports `content_events / distinct_hashes / frozen_content_runs / longest_frozen_run` on the
+   machine-readable ARTIFACT-CHECK line (consumed into the gui-smoke `playbackArtifacts` JSON).
+   Logs from older builds get an explicit "telemetry missing" NOTE instead of a silent pass.
+   Validated three ways: live x8 run = 389 presents / 381 distinct hashes / PASS; synthetic
+   frozen log = FAIL with `frozen_content_runs=1`; the original stuck-frame trace (which PASSes
+   every cadence metric at "28.6 fps") is exactly the blind spot the check closes.
 
 **x2 ~9 fps compute ceiling.** Re-measured on a COOLED machine: mean 111ms/frame, 66% of frames
 80-150ms - cooling did NOT help, so it is NOT thermal (I was wrong about that). The heavy dual-ISO
