@@ -3048,6 +3048,42 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QStringLiteral("draw_frame_ready_present_top_magenta_band_rows"),
         suppressedPresentedTopMagentaBandRows );
 
+    /* Presented-content hash: a sampled FNV-1a over the bytes about to be
+     * shown, while the source buffer is still held (pre-release, so the
+     * render thread cannot be rewriting it). Frame numbers, fps and timecode
+     * all advance on metadata and stayed "healthy" while the poisoned
+     * processed8 prefetch froze the picture (2026-06-10); this hash is the
+     * trace-level ground truth that the displayed CONTENT changes. Parsed by
+     * tools/profiling/detect-playback-artifacts.ps1 (frozen-content check).
+     * The experimental gpu16 viewport path has no displayImage and is not
+     * hashed. */
+    if( interactiveTraceEnabled() && !displayImage.isNull() )
+    {
+        const uchar *contentBits = displayImage.constBits();
+        const size_t contentBytes =
+            static_cast<size_t>( displayImage.bytesPerLine() )
+            * static_cast<size_t>( displayImage.height() );
+        uint64_t contentHash = 1469598103934665603ull;
+        if( contentBits && contentBytes > 0 )
+        {
+            const size_t contentStep =
+                std::max( static_cast<size_t>( 1 ), contentBytes / 8192 );
+            for( size_t i = 0; i < contentBytes; i += contentStep )
+            {
+                contentHash ^= contentBits[i];
+                contentHash *= 1099511628211ull;
+            }
+        }
+        logInteractionEvent(
+            QStringLiteral("draw_frame_ready.present_content"),
+            QStringLiteral("display_frame=%1 play_checked=%2 position=%3 hash=%4")
+                .arg( static_cast<qulonglong>( display_frame ) )
+                .arg( bool01( ui->actionPlay->isChecked() ) )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( QString::number( contentHash, 16 ) ),
+            true );
+    }
+
     bool imagePresentedByViewport = false;
     if( !framePresentedByViewport )
     {
