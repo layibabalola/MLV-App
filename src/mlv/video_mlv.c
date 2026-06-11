@@ -2283,16 +2283,15 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
      * while MLVAPP_PROCESSED8_PREFETCH_INDIRECT (default on) allows it. Both
      * renders fail closed: a frame is stored only on reported success.
      *
-     * Scope (2026-06-11 interleaved A/B on the M16 trio): x4/x8 Sharp only.
-     * At x2 the worker's indirect render costs about as much as the
-     * foreground frame, so it cannot get ahead and only splits cores
-     * (measured wash-to-negative). In Aggressive Performance the foreground
-     * skips the processed8 main cache for direct8-incompatible x2/x4/x8, so
-     * worker renders would never be consumed - pure contention. */
+     * Scope (2026-06-11 interleaved A/Bs on the M16 trio): scale>=4 only -
+     * Sharp since iteration 2, Aggressive since iteration 4 (the foreground
+     * consults the cache again for aggressive x4/x8 now that honest worker
+     * fills exist; its own stores stay skipped). At x2 the worker's indirect
+     * render costs about as much as the foreground frame, so it cannot get
+     * ahead and only splits cores (measured wash-to-negative, both modes). */
     const int direct8Compatible = processingCanUseDirect8BitOutput(task->processing);
     if (!direct8Compatible
         && !(task->scaleFactor >= 4
-             && !mlvPlaybackAggressivePreviewMode()
              && mlv_processed8_prefetch_indirect_enabled()
              && mlv_processed8_prefetch_indirect_state_supported(task->processing)))
     {
@@ -5555,10 +5554,17 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
      * stays conservative; the worker only warms the cache and does not
      * change the pixels we present. */
     const int processed8PrefetchActive = mlv_processed8_prefetch_enabled(video);
+    /* 2026-06-11 (loop iteration 4): aggressive x4/x8 consult the cache again.
+     * The skip existed because nothing useful ever landed in the cache for
+     * direct8-incompatible aggressive lanes (the foreground store stays
+     * skipped below - see mlv_store_processed_frame_8bit_cache_with_scale).
+     * The prefetch worker's indirect render now fills honest frames ahead at
+     * scale>=4, so the lookup is worth its mutex check there. x2 keeps the
+     * skip: the worker cannot outpace the foreground at x2 (iteration 2). */
     const int skip_processed8_main_cache =
         mlvPlaybackAggressivePreviewMode()
      && ((normalizedScale == 1)
-      || (!direct8PathActive && (normalizedScale == 2 || normalizedScale == 4 || normalizedScale == 8)));
+      || (!direct8PathActive && normalizedScale == 2));
     uint64_t requested_state_signature = 0;
 
     if (direct8PathActive || processed8PrefetchActive)
