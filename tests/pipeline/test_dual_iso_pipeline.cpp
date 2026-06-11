@@ -4809,6 +4809,91 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
     MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
 }
 
+/* Iteration 4 (2026-06-11): aggressive x4/x8 consult the cache again, served
+ * by worker indirect fills. Same byte-identity contract as the Sharp-mode
+ * test above, under ambient Aggressive Performance. */
+TEST(DualIsoPipeline, Processed8PrefetchIndirectAggressiveX4WorkerHitMatchesReference)
+{
+    ScopedAggressivePreviewMode aggressivePreview(1);
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    processingSetPlaybackPreviewMode(1);
+
+    QString error_message;
+
+    MlvPipelineFixture reference_fixture;
+    ASSERT_TRUE(reference_fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(reference_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                              &error_message));
+    ASSERT_TRUE(reference_fixture.applyReceipt(&error_message));
+    reference_fixture.processing()->use_cam_matrix = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(reference_fixture.processing()) == 0);
+
+    if ((reference_fixture.width() % 4) != 0 || (reference_fixture.height() % 4) != 0)
+    {
+        std::printf("Processed8PrefetchIndirectAggressive: fixture not x4-divisible, guarded out\n");
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    const uint64_t total_frames = getMlvFrames(reference_fixture.video());
+    const uint64_t frame_count = (total_frames < 8) ? total_frames : 8;
+    ASSERT_TRUE(frame_count >= 2);
+
+    std::vector<std::vector<uint8_t>> expected;
+    for (uint64_t f = 0; f < frame_count; ++f)
+    {
+        const std::vector<uint16_t> ref16 = reference_fixture.renderFrame16Scaled(f, 1, 4);
+        std::vector<uint8_t> ref8(ref16.size(), 0);
+        for (std::size_t i = 0; i < ref16.size(); ++i)
+        {
+            ref8[i] = static_cast<uint8_t>(ref16[i] >> 8);
+        }
+        expected.push_back(std::move(ref8));
+    }
+
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    fixture.processing()->use_cam_matrix = 0;
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) == 0);
+
+    int prefetched_hits = 0;
+    uint64_t mismatched_bytes = 0;
+    for (int pass = 0; pass < 3 && prefetched_hits == 0; ++pass)
+    {
+        for (uint64_t f = 0; f < frame_count; ++f)
+        {
+            const std::vector<uint8_t> got = fixture.renderFrame8Scaled(f, 1, 4);
+            if (getMlvLastProcessed8PrefetchHit())
+            {
+                ++prefetched_hits;
+                ASSERT_EQ(expected[f].size(), got.size());
+                for (std::size_t i = 0; i < got.size(); ++i)
+                {
+                    if (got[i] != expected[f][i])
+                    {
+                        ++mismatched_bytes;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
+    }
+
+    std::printf("Processed8PrefetchIndirectAggressive: prefetched_hits=%d mismatched_bytes=%llu\n",
+                prefetched_hits,
+                static_cast<unsigned long long>(mismatched_bytes));
+    ASSERT_TRUE(prefetched_hits >= 1);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), mismatched_bytes);
+
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
 TEST(DualIsoPipeline, Processed8PrefetchIndirectDisableEnvKeepsSkip)
 {
     MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
