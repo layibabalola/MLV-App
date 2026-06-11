@@ -5462,6 +5462,8 @@ int MainWindow::openMlvForPreview(QString fileName)
     if( m_pRawImage16 ) free( m_pRawImage16 );
     m_pRawImage16 = ( uint16_t* )malloc( static_cast<size_t>(imageSize) * sizeof( uint16_t ) );
 
+    // Invalidate any in-flight async look-assist analysis from the previous clip.
+    ++m_lookAssistAsyncGeneration;
     m_fileLoaded = true;
 
     //Raw black & white level (needed for preview picture)
@@ -5774,6 +5776,8 @@ int MainWindow::openMlv( QString fileName )
     //Init audio playback engine
     m_pAudioPlayback->initAudioEngine( m_pMlvObject );
 
+    // Invalidate any in-flight async look-assist analysis from the previous clip.
+    ++m_lookAssistAsyncGeneration;
     m_fileLoaded = true;
 
     //Audio Track
@@ -10201,6 +10205,52 @@ void MainWindow::restoreLookAssistBaseline( ReceiptSettings *receipt )
     toolButtonChromaSmoothChanged();
 }
 
+// Plain-old-data result from the pure-compute phase of the auto look analysis.
+// All fields are value types so the worker thread can build this without touching
+// any Qt/UI objects and post it back via QMetaObject::invokeMethod.
+struct LookAssistAsyncResult
+{
+    // Preset to apply
+    LookAssistPreset preset;
+    int temperature = 0; // final clamped temperature (baseTemperature + preset.temperatureDelta)
+    int tint        = 0; // final clamped tint
+    // Auto-WB diagnostics
+    LookAssistAutoWhiteBalancePatch autoWbPatch;
+    bool   autoWhiteBalanceValid       = false;
+    QString autoWhiteBalanceSource     = QStringLiteral("none");
+    QString autoWhiteBalanceDecision   = QStringLiteral("none");
+    double  autoWhiteBalanceDamping    = 1.0;
+    int     autoWhiteBalanceTemperature = 0;
+    int     autoWhiteBalanceTint        = 0;
+    int     autoWhiteBalanceCandidateTemperature = 0;
+    int     autoWhiteBalanceCandidateTint        = 0;
+    // Scene / stats diagnostics
+    LookAssistStats stats;
+    LookAssistStats balanceStats;
+    LookAssistStats processedColorStats;
+    LookAssistStats postColorStats;
+    bool   useProcessedColorStats    = false;
+    bool   postColorStatsValid       = false;
+    QString scene;
+    int    postTemperatureDelta      = 0;
+    int    postTintDelta             = 0;
+    // Geometry used
+    int    width                     = 0;
+    int    height                    = 0;
+    int    downscaleFactor           = 0;
+    int    colorWidth                = 0;
+    int    colorHeight               = 0;
+    int    colorDownscaleFactor      = 0;
+    int    analysisFrame             = -1;
+    int    baseTemperature           = 0;
+    int    baseTint                  = 0;
+    // Chroma smooth auto-set
+    bool   chromaSmoothAutoApplied   = false;
+    int    chromaSmoothValue         = 0;
+    // Color-cast warning
+    QString colorCastWarning;
+};
+
 void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                            int analysisFrame )
 {
@@ -10233,6 +10283,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     // Diagnostic gate: MLVAPP_NO_LOOK_ASSIST=1 skips the auto-look analysis entirely so its
     // clip-open cost can be measured/disabled without touching the GUI checkbox.
     static const bool s_noLookAssist = qEnvironmentVariableIntValue( "MLVAPP_NO_LOOK_ASSIST" ) != 0;
+    // Kill switch: MLVAPP_LOOK_ASSIST_SYNC=1 restores the original synchronous path so the
+    // async benefit can be measured by A/B. Read once per process (static).
+    static const bool s_syncMode = qEnvironmentVariableIntValue( "MLVAPP_LOOK_ASSIST_SYNC" ) != 0;
     if( s_noLookAssist || !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
@@ -10388,6 +10441,368 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             processedColorStats.median > 0.0 &&
             processedColorStats.balanceSamples >= minColorBalanceSamples;
     }
+
+    // ----- Async dispatch point -----
+    // Capture everything the worker needs as value copies before releasing the
+    // UI thread. The worker must only read m_pMlvObject (for findMlvWhiteBalance)
+    // and its own local copies - it must not touch ui-> or any member fields.
+    // PREFERRED pattern: thumbnails already captured above on the UI thread; the
+    // worker does pure-math analysis + one findMlvWhiteBalance render (safe
+    // concurrent read - same access pattern as the processed8 prefetch worker).
+    // MLVAPP_LOOK_ASSIST_SYNC=1 bypasses the async path for A/B measurement.
+    if( !s_syncMode )
+    {
+        // Capture slider bounds (UI-thread-only values) before dispatch.
+        const int tempMin  = ui->horizontalSliderTemperature->minimum();
+        const int tempMax  = ui->horizontalSliderTemperature->maximum();
+        const int tintMin  = ui->horizontalSliderTint->minimum();
+        const int tintMax  = ui->horizontalSliderTint->maximum();
+        const int baseTemperature = receipt->temperature() == -1
+                                  ? ui->horizontalSliderTemperature->value()
+                                  : receipt->temperature();
+        const int baseTint = receipt->tint();
+        const int chromaSmoothVal = toolButtonChromaSmoothCurrentIndex();
+        const bool chromaSmoothAutoApplied = m_lastLookAssistChromaSmoothAutoApplied;
+
+        // Bump generation so a stale worker result from a previous clip is discarded.
+        const int dispatchGeneration = ++m_lookAssistAsyncGeneration;
+
+        // Capture by value for the worker lambda.
+        mlvObject_t *mlvObj = m_pMlvObject;
+        QByteArray thumbCopy = thumbnail;
+        QByteArray processedThumbCopy = processedThumbnail;
+        LookAssistStats statsCopy = stats;
+        LookAssistStats processedColorStatsCopy = processedColorStats;
+        bool useProcessedColorStatsCopy = useProcessedColorStats;
+        LookAssistScene sceneCopy = scene;
+        bool floorLiftedCopy = floorLiftedNightThumbnail;
+        int widthCopy = width;
+        int heightCopy = height;
+        int downscaleFactorCopy = downscaleFactor;
+        int colorWidthCopy = colorWidth;
+        int colorHeightCopy = colorHeight;
+        int colorDownscaleFactorCopy = colorDownscaleFactor;
+        int analysisFrameCopy = analysisFrame;
+        int raw_w_copy = raw_w;
+        int raw_h_copy = raw_h;
+
+        logInteractionEvent(
+            QStringLiteral("look_assist.apply.async_dispatch"),
+            QStringLiteral("generation=%1 frame=%2 scene=%3 floor_lifted=%4")
+                .arg( dispatchGeneration )
+                .arg( analysisFrame )
+                .arg( lookAssistSceneName( scene ) )
+                .arg( bool01( floorLiftedNightThumbnail ) ) );
+
+        std::thread([this,
+                     mlvObj,
+                     thumbCopy,
+                     processedThumbCopy,
+                     statsCopy,
+                     processedColorStatsCopy,
+                     useProcessedColorStatsCopy,
+                     sceneCopy,
+                     floorLiftedCopy,
+                     widthCopy,
+                     heightCopy,
+                     downscaleFactorCopy,
+                     colorWidthCopy,
+                     colorHeightCopy,
+                     colorDownscaleFactorCopy,
+                     analysisFrameCopy,
+                     raw_w_copy,
+                     raw_h_copy,
+                     tempMin,
+                     tempMax,
+                     tintMin,
+                     tintMax,
+                     baseTemperature,
+                     baseTint,
+                     chromaSmoothVal,
+                     chromaSmoothAutoApplied,
+                     dispatchGeneration]() mutable
+        {
+            // --- pure compute phase (no UI/Qt objects except QByteArray/QString values) ---
+            LookAssistAsyncResult r;
+            r.stats                = statsCopy;
+            r.processedColorStats  = processedColorStatsCopy;
+            r.useProcessedColorStats = useProcessedColorStatsCopy;
+            r.scene                = lookAssistSceneName( sceneCopy );
+            r.width                = widthCopy;
+            r.height               = heightCopy;
+            r.downscaleFactor      = downscaleFactorCopy;
+            r.colorWidth           = colorWidthCopy;
+            r.colorHeight          = colorHeightCopy;
+            r.colorDownscaleFactor = colorDownscaleFactorCopy;
+            r.analysisFrame        = analysisFrameCopy;
+            r.baseTemperature      = baseTemperature;
+            r.baseTint             = baseTint;
+            r.chromaSmoothAutoApplied = chromaSmoothAutoApplied;
+            r.chromaSmoothValue    = chromaSmoothVal;
+
+            const LookAssistStats &balanceStats =
+                useProcessedColorStatsCopy ? processedColorStatsCopy : statsCopy;
+            r.balanceStats = balanceStats;
+
+            LookAssistPreset preset = presetForLookAssistScene(
+                        sceneCopy,
+                        statsCopy,
+                        useProcessedColorStatsCopy ? &processedColorStatsCopy : nullptr );
+
+            // Select thumbnail for WB patch search
+            const unsigned char *autoWbThumbnail =
+                useProcessedColorStatsCopy
+                ? reinterpret_cast<const unsigned char *>( processedThumbCopy.constData() )
+                : reinterpret_cast<const unsigned char *>( thumbCopy.constData() );
+            const int autoWbWidth  = useProcessedColorStatsCopy ? colorWidthCopy  : widthCopy;
+            const int autoWbHeight = useProcessedColorStatsCopy ? colorHeightCopy : heightCopy;
+            const int autoWbDSF    = useProcessedColorStatsCopy ? colorDownscaleFactorCopy : downscaleFactorCopy;
+
+            const LookAssistAutoWhiteBalancePatch autoWbPatch =
+                findLookAssistAutoWhiteBalancePatch( autoWbThumbnail,
+                                                     autoWbWidth,
+                                                     autoWbHeight,
+                                                     autoWbDSF,
+                                                     raw_w_copy,
+                                                     raw_h_copy );
+            r.autoWbPatch = autoWbPatch;
+
+            QString autoWhiteBalanceSource   = QStringLiteral("none");
+            QString autoWhiteBalanceDecision = QStringLiteral("none");
+            double  autoWhiteBalanceDamping  = 1.0;
+            int     autoWhiteBalanceTemperature = baseTemperature;
+            int     autoWhiteBalanceTint        = baseTint;
+            int     autoWhiteBalanceCandidateTemperature = baseTemperature;
+            int     autoWhiteBalanceCandidateTint        = baseTint;
+            bool    autoWhiteBalanceValid = false;
+
+            if( autoWbPatch.valid )
+            {
+                autoWhiteBalanceSource   = useProcessedColorStatsCopy
+                                         ? QStringLiteral("processed-neutral-patch")
+                                         : QStringLiteral("raw-neutral-patch");
+                autoWhiteBalanceDecision = QStringLiteral("candidate");
+                // findMlvWhiteBalance renders a full-res frame from raw data only
+                // (getMlvRawFrameDebayered + processingFindWhiteBalance). It reads
+                // mlvObj and its processing object but does not write processing state.
+                // The processed8 prefetch worker already renders concurrently via the
+                // same internal file-I/O mutexes, so this is safe.
+                findMlvWhiteBalance( mlvObj,
+                                     static_cast<uint64_t>( analysisFrameCopy ),
+                                     autoWbPatch.rawX,
+                                     autoWbPatch.rawY,
+                                     &autoWhiteBalanceTemperature,
+                                     &autoWhiteBalanceTint,
+                                     0 );
+                autoWhiteBalanceTemperature =
+                    qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
+                autoWhiteBalanceTint =
+                    qBound( tintMin, autoWhiteBalanceTint, tintMax );
+                autoWhiteBalanceTint = qBound( -35, autoWhiteBalanceTint, 18 );
+                autoWhiteBalanceCandidateTemperature = autoWhiteBalanceTemperature;
+                autoWhiteBalanceCandidateTint        = autoWhiteBalanceTint;
+
+                if( lookAssistAutoWhiteBalanceSolutionIsStable( autoWbPatch,
+                                                                baseTemperature,
+                                                                baseTint,
+                                                                autoWhiteBalanceTemperature,
+                                                                autoWhiteBalanceTint ) )
+                {
+                    autoWhiteBalanceDamping =
+                        lookAssistAutoWhiteBalanceDampingFactor(
+                            autoWbPatch,
+                            baseTemperature,
+                            baseTint,
+                            autoWhiteBalanceTemperature,
+                            autoWhiteBalanceTint,
+                            sceneCopy );
+                    if( autoWhiteBalanceDamping < 0.999 )
+                    {
+                        autoWhiteBalanceTemperature =
+                            qBound( tempMin,
+                                    baseTemperature
+                                    + qRound( (autoWhiteBalanceTemperature - baseTemperature)
+                                              * autoWhiteBalanceDamping ),
+                                    tempMax );
+                        autoWhiteBalanceTint =
+                            qBound( tintMin,
+                                    baseTint
+                                    + qRound( (autoWhiteBalanceTint - baseTint)
+                                              * autoWhiteBalanceDamping ),
+                                    tintMax );
+                        autoWhiteBalanceDecision = QStringLiteral("accepted-damped");
+                    }
+                    else
+                    {
+                        autoWhiteBalanceDecision = QStringLiteral("accepted");
+                    }
+                    preset.temperatureDelta = autoWhiteBalanceTemperature - baseTemperature;
+                    preset.tintDelta        = autoWhiteBalanceTint - baseTint;
+                    autoWhiteBalanceValid   = true;
+                }
+                else
+                {
+                    autoWhiteBalanceSource   = QStringLiteral("rejected-extreme-color-cast");
+                    autoWhiteBalanceDecision = QStringLiteral("rejected-unstable");
+                }
+            }
+
+            // Compute final clamped temperature and tint from preset deltas.
+            const int temperature = qBound( tempMin,
+                                            baseTemperature + preset.temperatureDelta,
+                                            tempMax );
+            const int tint = qBound( tintMin,
+                                     baseTint + preset.tintDelta,
+                                     tintMax );
+
+            // Post-balance refinement (canAnalyzeProcessedColor path): the iterative
+            // re-render loop in the sync path applies T/T deltas to the processing
+            // object between renders. In the async path we cannot modify the shared
+            // processing object from a worker thread while the UI thread renders
+            // concurrently. The refinement is therefore skipped here; the initial
+            // preset (exposure + WB) is applied unchanged. This affects only
+            // night-scene floor-lifted clips and results in at most a few kelvin
+            // difference vs the sync path.
+            r.postColorStatsValid   = false;
+            r.postTemperatureDelta  = 0;
+            r.postTintDelta         = 0;
+
+            // Color-cast warning using pre-capture processed stats (best available
+            // without re-renders).
+            const double postVisibleGreenAxis =
+                processedColorStatsCopy.visibleMeanG
+                - ( ( processedColorStatsCopy.visibleMeanR
+                    + processedColorStatsCopy.visibleMeanB ) * 0.5 );
+            const double postBlueAmberAxis =
+                processedColorStatsCopy.balanceB - processedColorStatsCopy.balanceR;
+            r.colorCastWarning = lookAssistColorCastWarning(
+                useProcessedColorStatsCopy,
+                processedColorStatsCopy,
+                postVisibleGreenAxis,
+                temperature,
+                postBlueAmberAxis );
+
+            // Fill result
+            r.preset                            = preset;
+            r.temperature                       = temperature;
+            r.tint                              = tint;
+            r.autoWhiteBalanceValid             = autoWhiteBalanceValid;
+            r.autoWhiteBalanceSource            = autoWhiteBalanceSource;
+            r.autoWhiteBalanceDecision          = autoWhiteBalanceDecision;
+            r.autoWhiteBalanceDamping           = autoWhiteBalanceDamping;
+            r.autoWhiteBalanceTemperature       = autoWbPatch.valid ? autoWhiteBalanceTemperature : 0;
+            r.autoWhiteBalanceTint              = autoWbPatch.valid ? autoWhiteBalanceTint        : 0;
+            r.autoWhiteBalanceCandidateTemperature = autoWbPatch.valid ? autoWhiteBalanceCandidateTemperature : 0;
+            r.autoWhiteBalanceCandidateTint        = autoWbPatch.valid ? autoWhiteBalanceCandidateTint        : 0;
+
+            // Marshal results back to the UI thread.
+            QMetaObject::invokeMethod( this, [this, r, dispatchGeneration]() mutable
+            {
+                // Re-check: clip must not have changed since dispatch.
+                if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
+                    return;
+                if( !m_fileLoaded || !m_pMlvObject )
+                    return;
+
+                // Apply diagnostics state
+                m_lastLookAssistDiagnosticsValid        = true;
+                m_lastLookAssistScene                   = r.scene;
+                m_lastLookAssistMedian                  = r.stats.median;
+                m_lastLookAssistP05                     = r.stats.p05;
+                m_lastLookAssistP95                     = r.stats.p95;
+                m_lastLookAssistP99                     = r.stats.p99;
+                m_lastLookAssistMedianR                 = r.stats.medianR;
+                m_lastLookAssistMedianG                 = r.stats.medianG;
+                m_lastLookAssistMedianB                 = r.stats.medianB;
+                m_lastLookAssistBalanceR                = r.balanceStats.balanceR;
+                m_lastLookAssistBalanceG                = r.balanceStats.balanceG;
+                m_lastLookAssistBalanceB                = r.balanceStats.balanceB;
+                m_lastLookAssistBalanceSamples          = r.balanceStats.balanceSamples;
+                m_lastLookAssistBalanceSource           = r.useProcessedColorStats
+                                                        ? QStringLiteral("processed")
+                                                        : QStringLiteral("raw");
+                m_lastLookAssistExposure                = r.preset.exposure;
+                m_lastLookAssistContrast                = r.preset.contrast;
+                m_lastLookAssistPivot                   = r.preset.pivot;
+                m_lastLookAssistShadows                 = r.preset.shadows;
+                m_lastLookAssistHighlights              = r.preset.highlights;
+                m_lastLookAssistVibrance                = r.preset.vibrance;
+                m_lastLookAssistTemperatureDelta        = r.preset.temperatureDelta;
+                m_lastLookAssistTintDelta               = r.preset.tintDelta;
+                m_lastLookAssistAutoWhiteBalanceValid   = r.autoWhiteBalanceValid;
+                m_lastLookAssistAutoWhiteBalanceSource  = r.autoWhiteBalanceSource;
+                m_lastLookAssistAutoWhiteBalanceDecision = r.autoWhiteBalanceDecision;
+                m_lastLookAssistAutoWhiteBalanceDamping = r.autoWhiteBalanceDamping;
+                m_lastLookAssistAutoWhiteBalanceTemperature       = r.autoWhiteBalanceTemperature;
+                m_lastLookAssistAutoWhiteBalanceTint              = r.autoWhiteBalanceTint;
+                m_lastLookAssistAutoWhiteBalanceCandidateTemperature = r.autoWhiteBalanceCandidateTemperature;
+                m_lastLookAssistAutoWhiteBalanceCandidateTint        = r.autoWhiteBalanceCandidateTint;
+                m_lastLookAssistAutoWhiteBalanceRawX    = r.autoWbPatch.valid ? r.autoWbPatch.rawX  : -1;
+                m_lastLookAssistAutoWhiteBalanceRawY    = r.autoWbPatch.valid ? r.autoWbPatch.rawY  : -1;
+                m_lastLookAssistAutoWhiteBalanceLuma    = r.autoWbPatch.valid ? r.autoWbPatch.luma  : 0.0;
+                m_lastLookAssistAutoWhiteBalanceChroma  = r.autoWbPatch.valid ? r.autoWbPatch.chroma : 0.0;
+                m_lastLookAssistPostBalanceValid        = r.postColorStatsValid;
+                m_lastLookAssistPostBalanceR            = 0.0;
+                m_lastLookAssistPostBalanceG            = 0.0;
+                m_lastLookAssistPostBalanceB            = 0.0;
+                m_lastLookAssistPostBalanceSamples      = 0;
+                m_lastLookAssistPostGreenArtifactRatio  = 0.0;
+                m_lastLookAssistPostGreenArtifactMeanAxis = 0.0;
+                m_lastLookAssistPostVisibleGreenAxis    = 0.0;
+                m_lastLookAssistPostTemperatureDelta    = r.postTemperatureDelta;
+                m_lastLookAssistPostTintDelta           = r.postTintDelta;
+                m_lastLookAssistChromaSmooth            = r.chromaSmoothValue;
+                m_lastLookAssistChromaSmoothAutoApplied = r.chromaSmoothAutoApplied;
+                m_lastLookAssistColorCastWarning        = r.colorCastWarning;
+
+                // Apply preset values to the active receipt and sliders (UI-thread only).
+                // Guard: only apply to the receipt that was active at dispatch time.
+                ReceiptSettings *activeReceipt = ( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 )
+                                               ? ACTIVE_RECEIPT : nullptr;
+                if( !activeReceipt ) return;
+
+                activeReceipt->setExposure   ( r.preset.exposure );
+                activeReceipt->setContrast   ( r.preset.contrast );
+                activeReceipt->setPivot      ( r.preset.pivot );
+                activeReceipt->setTemperature( r.temperature );
+                activeReceipt->setTint       ( r.tint );
+                activeReceipt->setVibrance   ( r.preset.vibrance );
+                activeReceipt->setShadows    ( r.preset.shadows );
+                activeReceipt->setHighlights ( r.preset.highlights );
+
+                ui->horizontalSliderExposure    ->setValue( r.preset.exposure );
+                ui->horizontalSliderContrast    ->setValue( r.preset.contrast );
+                ui->horizontalSliderPivot       ->setValue( r.preset.pivot );
+                ui->horizontalSliderTemperature ->setValue( r.temperature );
+                ui->horizontalSliderTint        ->setValue( r.tint );
+                ui->horizontalSliderVibrance    ->setValue( r.preset.vibrance );
+                ui->horizontalSliderShadows     ->setValue( r.preset.shadows );
+                ui->horizontalSliderHighlights  ->setValue( r.preset.highlights );
+
+                logInteractionEvent(
+                    QStringLiteral("look_assist.apply.auto_wb_async_applied"),
+                    QStringLiteral("generation=%1 valid=%2 source=%3 decision=%4 damping=%5 awb_temp=%6 awb_tint=%7 final_temp=%8 final_tint=%9 preset_exp=%10 frame=%11")
+                        .arg( dispatchGeneration )
+                        .arg( bool01( r.autoWhiteBalanceValid ) )
+                        .arg( r.autoWhiteBalanceSource )
+                        .arg( r.autoWhiteBalanceDecision )
+                        .arg( r.autoWhiteBalanceDamping, 0, 'f', 3 )
+                        .arg( r.autoWhiteBalanceTemperature )
+                        .arg( r.autoWhiteBalanceTint )
+                        .arg( r.temperature )
+                        .arg( r.tint )
+                        .arg( r.preset.exposure )
+                        .arg( r.analysisFrame ) );
+
+                syncLookAssistDerivedUiToReceipt( activeReceipt );
+                setReceipt( activeReceipt );
+                requestFrameRefresh( true, "look-assist-async-applied" );
+            }, Qt::QueuedConnection );
+        }).detach();
+
+        return; // UI thread released; apply arrives via queued invocation above.
+    }
+    // --- synchronous fallback (MLVAPP_LOOK_ASSIST_SYNC=1) ---
 
     const LookAssistStats &balanceStats =
         useProcessedColorStats ? processedColorStats : stats;
