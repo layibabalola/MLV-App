@@ -19,8 +19,12 @@ param(
     [int]$MaxBackJumpAllowed  = 2,         # presented frame going backward by > this = flicker
     [double]$MaxHitchFractionAllowed = 0.05, # > this fraction of frames hitching = jittery FAIL
     [int]$HitchFreezeMs = 250,             # any single present interval >= this = a visible freeze
-    [int]$MaxPlausibleHitchMs = 2000       # intervals above this are playback discontinuities (pause/seek/
-)                                          # settle/end boundary), excluded from cadence stats as long_gaps
+    [int]$MaxPlausibleHitchMs = 2000,      # intervals above this are playback discontinuities (pause/seek/
+                                           # settle/end boundary), excluded from cadence stats as long_gaps
+    [string]$Session = 'latest'            # 'latest' (default), 'all' (legacy whole-file), or 1-based index.
+                                           # The day log appends across launches; inter-launch idle reads as
+                                           # a mid-playback freeze unless sessions are segmented.
+)
 $ErrorActionPreference = 'Stop'
 if (-not (Test-Path -LiteralPath $TraceLog)) { Write-Error "trace log not found: $TraceLog"; exit 2 }
 
@@ -39,8 +43,18 @@ $ts = New-Object System.Collections.Generic.List[double]
 $shotTs = New-Object System.Collections.Generic.List[double]
 $chPos = New-Object System.Collections.Generic.List[int]
 $chHash = New-Object System.Collections.Generic.List[string]
+# Every app launch writes run_metadata= as its first log line (CrashForensics::logStartupMetadata,
+# called once from main() right after the message handler is installed), so it is a reliable
+# session boundary. Record the parallel-list COUNTS at each marker; they become slice indices.
+$rxSessionMarker = [regex]'^\[[^\]]+\] \[INFO\] \[0x[0-9a-fA-F]+\] run_metadata=\{'
+$sessBoundDf = New-Object System.Collections.Generic.List[int]
+$sessBoundCh = New-Object System.Collections.Generic.List[int]
+$sessBoundShot = New-Object System.Collections.Generic.List[int]
 foreach ($line in [System.IO.File]::ReadLines((Resolve-Path $TraceLog))) {
     $tm = $rxTs.Match($line); $lineMs = if ($tm.Success) { Get-TsMs $tm } else { [double]-1 }
+    if ($rxSessionMarker.IsMatch($line)) {
+        $sessBoundDf.Add($df.Count); $sessBoundCh.Add($chHash.Count); $sessBoundShot.Add($shotTs.Count)
+    }
     if ($line -like '*gui_smoke.window_screenshot*' -and $lineMs -ge 0) { $shotTs.Add($lineMs) }
     $m = $rxBegin.Match($line)
     if ($m.Success -and $m.Groups[2].Value -eq '1') {
@@ -51,8 +65,51 @@ foreach ($line in [System.IO.File]::ReadLines((Resolve-Path $TraceLog))) {
         $chPos.Add([int]$cm.Groups[3].Value); $chHash.Add($cm.Groups[4].Value)
     }
 }
+# --- Session segmentation ---------------------------------------------------
+# The crash-forensics log file is per-DAY and append-mode: multiple launches into
+# the same log dir append sessions, and the inter-launch idle time is
+# indistinguishable from a mid-playback freeze to the long-gap rule below (the
+# round-1 item-3 false FAIL, max_gap_ms=190289). Default: analyze ONLY the
+# latest session. -Session all restores the legacy whole-file behavior.
+$segStartsDf = New-Object System.Collections.Generic.List[int]
+$segStartsCh = New-Object System.Collections.Generic.List[int]
+$segStartsShot = New-Object System.Collections.Generic.List[int]
+if ($sessBoundDf.Count -eq 0 -or $sessBoundDf[0] -gt 0 -or $sessBoundCh[0] -gt 0 -or $sessBoundShot[0] -gt 0) {
+    # Data precedes the first marker (or no marker at all): implicit leading session.
+    $segStartsDf.Add(0); $segStartsCh.Add(0); $segStartsShot.Add(0)
+}
+for ($b = 0; $b -lt $sessBoundDf.Count; $b++) {
+    $segStartsDf.Add($sessBoundDf[$b]); $segStartsCh.Add($sessBoundCh[$b]); $segStartsShot.Add($sessBoundShot[$b])
+}
+$sessionCount = $segStartsDf.Count
+$analyzedSession = if ($Session -eq 'all') { 'all' } else { "$sessionCount" }
+if ($Session -ne 'all' -and $Session -ne 'latest') {
+    $parsedIndex = 0
+    if (-not [int]::TryParse($Session, [ref]$parsedIndex) -or $parsedIndex -lt 1 -or $parsedIndex -gt $sessionCount) {
+        Write-Error ("invalid -Session '{0}': expected 'latest', 'all', or 1..{1}" -f $Session, $sessionCount); exit 2
+    }
+    $analyzedSession = "$parsedIndex"
+}
+if ($Session -ne 'all' -and $sessionCount -gt 1) {
+    $segIndex = [int]$analyzedSession
+    $sDf = $segStartsDf[$segIndex-1]
+    $eDf = if ($segIndex -lt $sessionCount) { $segStartsDf[$segIndex] } else { $df.Count }
+    $sCh = $segStartsCh[$segIndex-1]
+    $eCh = if ($segIndex -lt $sessionCount) { $segStartsCh[$segIndex] } else { $chHash.Count }
+    $sShot = $segStartsShot[$segIndex-1]
+    $eShot = if ($segIndex -lt $sessionCount) { $segStartsShot[$segIndex] } else { $shotTs.Count }
+    $df = $df.GetRange($sDf, $eDf - $sDf); $pos = $pos.GetRange($sDf, $eDf - $sDf); $ts = $ts.GetRange($sDf, $eDf - $sDf)
+    $chPos = $chPos.GetRange($sCh, $eCh - $sCh); $chHash = $chHash.GetRange($sCh, $eCh - $sCh)
+    $shotTs = $shotTs.GetRange($sShot, $eShot - $sShot)
+    Write-Host ("MULTI-SESSION TRACE: {0} app sessions found in {1}; analyzing session {2} of {3}{4}. Use -Session all for the legacy whole-file behavior." -f `
+        $sessionCount, $TraceLog, $segIndex, $sessionCount, $(if($segIndex -eq $sessionCount){' (latest)'}else{''}))
+}
+elseif ($sessionCount -gt 1) {
+    Write-Host ("MULTI-SESSION TRACE: {0} app sessions found in {1}; -Session all requested - analyzing the whole file as one stream (inter-session gaps may read as freezes)." -f $sessionCount, $TraceLog)
+}
+
 $n = $df.Count
-if ($n -lt 5) { Write-Host 'ARTIFACT-CHECK verdict=no-data (too few playing presents traced)'; exit 0 }
+if ($n -lt 5) { Write-Host ("ARTIFACT-CHECK verdict=no-data (too few playing presents traced) sessions={0} analyzed_session={1}" -f $sessionCount, $analyzedSession); exit 0 }
 
 # lag (stall) + backward (flicker)
 $lagSum=0; $maxLag=0; $maxLagAt=-1; $lagGE=0; $backJumps=0; $maxBack=0; $prevDf=-1
@@ -144,8 +201,8 @@ $jittery   = ($hitchFrac -gt $MaxHitchFractionAllowed) -or ($maxIv -ge $HitchFre
 $verdict = if ($realStall -or $flicker -or $jittery -or $frozenContent) { 'FAIL' } else { 'PASS' }
 $medFps = if ($median -gt 0) { [math]::Round(1000.0/$median,1) } else { 0 }
 
-Write-Host ("ARTIFACT-CHECK verdict={0} presents={1} median_fps={2} p90_ms={3} p99_ms={4} max_interval_ms={5} hitch_frac={6} flicker_back_jumps={7} max_back_jump={8} max_lag={9} long_gaps={10} max_gap_ms={11} content_events={12} distinct_hashes={13} frozen_content_runs={14} longest_frozen_run={15}{16}" -f `
-    $verdict, $n, $medFps, [int]$p90, [int]$p99, [int]$maxIv, $hitchFrac, $backJumps, $maxBack, $maxLag, $longGaps, [int]$maxGap, $contentEvents, $distinctHashes, $frozenRuns, $longestFrozenRun, $(if($stallIsScreenshot){' (max_lag is screenshot-grab, discounted)'}else{''}))
+Write-Host ("ARTIFACT-CHECK verdict={0} presents={1} median_fps={2} p90_ms={3} p99_ms={4} max_interval_ms={5} hitch_frac={6} flicker_back_jumps={7} max_back_jump={8} max_lag={9} long_gaps={10} max_gap_ms={11} content_events={12} distinct_hashes={13} frozen_content_runs={14} longest_frozen_run={15} sessions={16} analyzed_session={17}{18}" -f `
+    $verdict, $n, $medFps, [int]$p90, [int]$p99, [int]$maxIv, $hitchFrac, $backJumps, $maxBack, $maxLag, $longGaps, [int]$maxGap, $contentEvents, $distinctHashes, $frozenRuns, $longestFrozenRun, $sessionCount, $analyzedSession, $(if($stallIsScreenshot){' (max_lag is screenshot-grab, discounted)'}else{''}))
 if ($flicker)   { Write-Host ("  FLICKER: presented frame jumped backward by up to {0} frames {1} time(s)" -f $maxBack, $backJumps) }
 if ($realStall) { Write-Host ("  STALL: image fell {0} frames behind the seek bar (~{1:N1}s freeze)" -f $maxLag, ($maxLag/24.0)) }
 if ($jittery)   { Write-Host ("  JITTER: {0:P1} of frames hitch (interval > 2.5x median); worst {1} ms - visible micro-stutter" -f $hitchFrac, [int]$maxIv) }

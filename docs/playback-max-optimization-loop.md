@@ -157,6 +157,60 @@ tearing (likely the same cold-path complex: look-assist settle + worker warm-up 
 all compete in the first seconds). Deserves its own session; not a regression of a measured gate
 (content/span/suite all clean warm), but user-visible on first play.
 
+## ROUND-2 IN-SESSION LOOP (ACTIVE 2026-06-11; user-directed)
+
+**Goal.** Execute every item of
+[playback-improvement-plan-round2.md](playback-improvement-plan-round2.md) in this session
+(driver implements directly, no executor handoff), in order: item 0 (detector segmentation,
+BLOCKING) -> 1a-dead-end re-audit (cheap legitimacy check, added by the round-2 review) ->
+item 1 (x1 half-res proxy re-land) -> item 2 (x2 prefetch re-A/B) -> item 3 (composition,
+conditional on 1+2) -> item 4 (stall-tail diagnosis). One brokered work block per item; all
+round-2 Common Rules and STANDING GATES apply; every attempt gets an ATTEMPTS row; CURRENT
+updated only by validated keepers; smoke + suite no-regress required before each finalize.
+
+**Stop conditions.** (a) all items dispositioned (KEEP / DEAD END / N/A), (b) a gate failure
+that needs a user decision, or (c) user stop. Pixel items (1-3) land default-on with kill
+switches but end "pending user softness sign-off" — sign-off requests are batched at loop end.
+
+### Round-2 Item 0 results (detector session segmentation + smoke-wrapper apply-evidence fix)
+
+- What changed (harness only, zero app code): (1) `tools/profiling/detect-playback-artifacts.ps1`
+  splits the trace into app sessions on the `run_metadata=` launch stamp (written exactly once
+  per launch by `CrashForensics::logStartupMetadata`, main.cpp:935 — no new app trace line was
+  needed), analyzes ONLY the latest session by default, accepts `-Session <N|all|latest>`,
+  prints a loud `MULTI-SESSION TRACE` warning when more than one session is present, and emits
+  `sessions=` / `analyzed_session=` in the ARTIFACT-CHECK line (extra fields are ignored by the
+  smoke wrapper's per-key parser). (2) `tools/profiling/run-release-gui-smoke.ps1` look-assist
+  validation now accepts the async apply's terminal event `look_assist.apply.auto_wb_async_applied`
+  (+ settle-line scene) as apply evidence — the old predicate required `look_assist.apply.result`,
+  which the async Look Assist path (master 8ddddce2, default-on) NEVER emits (sync-fallback-only),
+  so every default `-RequireLookAssist` run failed validation structurally; round-1 executor runs
+  bypassed it with `-RequireLookAssist:$false` (e.g. item-2a v5 result.json:
+  `lookAssistApplied: False` + `ok: True`) instead of fixing it. Result JSON now also records
+  `lookAssist.asyncApplied` / `asyncDecision`.
+- Validation (all PASS):
+  - Archived item-3 false-FAIL input (`.claude-state/profiling/logs/mlvapp-20260611.log`,
+    14 sessions): `-Session all` reproduces the legacy FAIL (interior long gaps, worst now
+    898771 ms); default latest = honest no-data (last session had <5 playing presents);
+    `-Session 1..4` (the item-3-era runs) each PASS individually with long_gaps=0 — the
+    190289 ms "freeze" never existed inside any session.
+  - Archived 1a v1 log (2 sessions): default latest PASS (median 20.4 fps), `-Session all`
+    reproduces the 713886 ms false FAIL.
+  - Synthetic concatenation of two known single-session logs (v3+v2 and v2+v3): latest-session
+    metrics byte-exact vs the second log analyzed alone, both orderings.
+  - Fresh traced smoke end-to-end (x4 Sharp M16-1327, fresh -Output): wrapper exit 0,
+    `validation.ok=true`, `lookAssistApplied=true` (async evidence), detector PASS
+    `median_fps=22.7 sessions=1 analyzed_session=1` — within noise of the x4 CURRENT row (20.9).
+    A second run reusing the same -Output dir produced a genuine 2-session day log live and the
+    detector segmented it correctly (PASS, median 21.3, analyzed_session=2).
+  - ASCII-only + PSParser checks clean on both scripts; no app source touched, so the TESTS
+    gate baseline is unaffected by construction.
+- DISCOVERY (flagged for the 1a re-audit, next work block): the item-1a async cold-open code is
+  LIVE on master — 599b1dd2/8ddddce2 (wb-22cbaaa29f964c2a) landed the +415-line MainWindow.cpp
+  async apply; the later item-1a commits e48085ba/edde9819/c29b5a46 (wb-0c019d8fdf2d4d51) are
+  docs/evidence-only and recorded a "code was then reverted" claim that is FALSE. The Item 1a
+  results section above therefore misstates the tree state; correction lands with the re-audit.
+
 ## APPROVED-MENU PHASE (user granted all four items 2026-06-11; driver plans, Sonnet implements)
 
 Iteration A1 (wb-ae312bc0d9da4605, 76d45430): cold-first-play INSTRUMENT + DIAGNOSIS (no code change).
@@ -304,3 +358,4 @@ One row per candidate, appended BEFORE measuring (cols 1-9), completed with the 
 | 2026-06-11 | x8 Aggr (x4 Aggr co-benefit) | Aggressive x4/x8 consult the processed8 cache again (foreground lookup re-enabled at scale>=4; foreground stores stay skipped) + worker indirect gate drops the !aggressive clause at scale>=4. Re-anchored honest aggressive standings first on 552cc2a7: x2 Aggr 12.7/11.4/13.0 render 59-69 ms (render-bound, perf-mode inversion persists), x4 Aggr 22.2/21.7/20.4, x8 Aggr 18.2/17.2/18.5 render 36-39 ms. New aggressive-ambient byte-identity test. | x8 Aggr ~17-18.5 -> ~21+ (worker hides the 36-39 ms render); x4 Aggr toward native; x2 Aggr unchanged (excluded: contention wall). | detector median_fps + hit content + all gates, interleaved indirect-on/off A/B; x8 Aggr is THE historical corruption canary - visual gate extra-strict | rows 19-24 target (anchors above supersede stale Phase-0 CURRENT); rows 4-12 no-regress | code on top of 552cc2a7 | Holds only if worker aggressive-envelope renders are byte-faithful to foreground aggressive renders (test-pinned) and x8 aggressive stays artifact-free under prefetch fills (canary). | PIXELS spans x8a1 68.0/67.1/41.5 SMOOTH; CONTENT hashes==presents all 22 A/B runs, frozen=0, flicker=0; VISUAL x8 aggressive trio inspected CLEAN (the historical corruption path, prefetch fills active); TESTS suite run1 = baseline16 + known ProcessingFilters flake + ONE new name (StandardPreviewScaleTwo...SH) that passed in isolation, passed in TU order, and passed in suite run2 -> one-off order/timing flake in the documented SH-fragility family (iter-4 code provably inert for its mode); 4 prefetch tests pass incl. new aggressive byte-identity (hits=1, mismatched=0) | Interleaved A/B (hot machine, exe 614A8D02): x8 Aggr on 13.5-19.6 vs off 12-15.2 (+18% mean, 5/6 pairs); x4 Aggr on 16.4-20.0 vs off 14.3-14.9 (+12-34%); x2 Aggr 13.9 vs 13.5 unchanged (excluded); x8 Sharp no-regress (20.8 on). Renders absorbed: x8a1 23-29 ms vs 45-62 off. Pre-change cool anchors were x4a1 20.4-22.2 / x8a1 17.2-18.5 - absolute CURRENT values below carry a hot-machine caveat; next firing re-anchors cool. | KEEP | wb-daff43758c844f74 |
 | 2026-06-11 | x4/x8 on M16-1327 (the heavy-clip laggard) | Cool re-anchor first (7dbb7326: 1347/1446 x8 Sharp AT native 23.3/22.2; 1327 lags every prefetch-fed lane: x4a0 12.7, x8a0 14.5, ~1% hitch FAILs). Hit-rate probe 1327 x8: 276 hits / 5 misses (98%) - misses are NOT the residual; ranked bottleneck = worker/UI contention (heavy dual-ISO worker renders saturate 16 OpenMP threads while the UI presents). Candidate: env-tunable worker render-thread cap MLVAPP_PROCESSED8_PREFETCH_THREADS (unset = legacy full threads; cache keys unchanged). | Capping worker parallelism leaves UI headroom: 1327 x4/x8 toward 18+. | interleaved env A/B (unset vs 12 vs 8) on 1327 x8/x4 | rows 7/10/19/22 | 7dbb7326 + cap patch | Holds only if processing output is thread-count-invariant (static scheduling; content gates + visual verify) AND the slower worker still outpaces playback (98% hit margin currently thin: render 35-50 ms vs 42 ms budget). | content gates clean all 6 runs (hashes==presents) | Interleaved 1327 x8: full 23.8/23.8 vs t12 22.7/23.3 vs t8 23.3/22.7 - NO cap benefit, and the LEGACY arm hit native: the re-anchor's 1327 sag (14.5 FAIL) was a COLD-CACHE transient (its rows were the clip's first runs of the session), not clip character. Warm, 1327 x8 = native. | DEAD END (no-keep; cap code reverted, tree clean). Kill-category: measurement (cold-state contamination of the re-anchor) + theory (contention hypothesis dead on warm runs). LESSON: re-anchor sweeps need a warm-up run per clip before citable rows. | reverted in wb-91d04bf1a7f64803 |
 | 2026-06-11 | x2 Sharp/Aggr (all three clips) | Quarter-res x2 playback preview default-on for playback preview; `MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW` kill switch. `src/mlv/video_mlv.c` quarter preview core + x2 dispatcher + default-on quality gate; `tests/pipeline/test_dual_iso_pipeline.cpp` sharp keeper and aggressive full-XY fallback coverage. | x2 Sharp should take path 5 by default; aggressive x2 was re-audited and remains on path 4 because the quarter-res aggressive arm regressed the detector gate. | detector median_fps + render ms + path tag + content gates, interleaved on/off A/B on all three clips; x4/x8 no-regress single runs; no-screenshot smoke; pipeline suite subset check | rows 4-6 and 16-18 (x2 Sharp/Aggr) | ce343bb1402b3affb049b7de93ee9bfb314584ed | Holds only if x2 Sharp stays cleaner/faster than the revert path and aggressive x2 does not regress content or hitch gates while staying on the full-XY fallback. | pipeline filter PASS; smoke PASS on x2 Sharp 1327/1347/1446 and aggressive 1327/1347/1446 current builds; aggressive dead-end evidenced by path 4 fallback after the quarter-res route was gated off. Artifact paths: `.claude-state/profiling/20260611-item2a/x2-sharp-on-1327-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-sharp-off-1327-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-sharp-on-1347-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-sharp-off-1347-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-sharp-on-1446-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-sharp-off-1446-v5/result.json`, `.claude-state/profiling/20260611-item2a/x2-aggr-current-1327-on/result.json`, `.claude-state/profiling/20260611-item2a/x2-aggr-current-1327-off/result.json`, `.claude-state/profiling/20260611-item2a/x2-aggr-current-1347-on/result.json`, `.claude-state/profiling/20260611-item2a/x2-aggr-current-1446-on/result.json` | current smoke on/off median fps: x2 Sharp 1327 `14.1/13.5`, 1347 `12.5/13.5`, 1446 `14.5/13.9`; aggressive current PASS runs 1327 `13.0/14.1`, 1347 `13.2`, 1446 `13.5`. The malformed 1347 off-arm attempt was discarded. | DEAD-END for the aggressive inversion; KEEP for the x2 Sharp keeper | wb-5e98908e8af245c2 (item 2a revalidation), aggressive arm recorded as measurement dead-end |
+| 2026-06-11 | harness (all lanes; measurement-infra) | Round-2 item 0: session-segment `detect-playback-artifacts.ps1` on the per-launch `run_metadata=` stamp (latest-session default, `-Session <N|all>`, MULTI-SESSION warning, `sessions=`/`analyzed_session=` fields) + fix `run-release-gui-smoke.ps1` look-assist validation to accept the async apply terminal event (`auto_wb_async_applied` + settle scene) that replaced `apply.result` since master 8ddddce2. No app code. | Multi-session day logs stop producing interior-long-gap false FAILs (the round-1 item-3 killer); default-invocation smoke validation works again without `-RequireLookAssist:$false` bypasses. | detector verdicts on archived false-FAIL logs + synthetic concat + fresh e2e smoke | instrument row (no lane baseline) | exe unchanged 555B118A (no rebuild needed) | Holds only if `run_metadata=` stays the guaranteed first line per launch (single call site, main.cpp:935) and the ARTIFACT-CHECK consumer keeps per-key parsing (extra fields ignored). | day log 14 sessions: all=legacy FAIL (worst 898771 ms) / sessions 1-4 individually PASS long_gaps=0; 1a v1 2-session log: latest PASS 20.4 fps vs all FAIL 713886 ms; synthetic concat both orderings byte-exact vs second-log-alone; fresh e2e smoke x4 Sharp 1327 PASS (validation.ok=true, lookAssistApplied=true async, median 22.7, sessions=1) + live 2-session rep segmented correctly (median 21.3, analyzed_session=2); ASCII+PSParser clean | false FAILs eliminated; legacy behavior preserved under `-Session all`; no app pixel/timing change by construction | KEEP (instrument) | wb-d7392bd007c84a80 |
