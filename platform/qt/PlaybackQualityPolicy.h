@@ -62,6 +62,19 @@ enum class PlaybackPreviewMode : int
     AggressivePerformance = 1
 };
 
+/* Round-3 item 1: GUI-selected playback preview resolution (proxy level).
+ * Auto keeps each scale's tuned default; Full disables preview proxies
+ * (sharpest, slowest); Half allows one internal halving per axis; Quarter
+ * allows two where a core exists (falls back to Half otherwise). Pause,
+ * scrub, and export are NEVER proxied regardless of this setting. */
+enum class PlaybackPreviewResolution : int
+{
+    Auto = 0,
+    Full = 1,
+    Half = 2,
+    Quarter = 3
+};
+
 enum class PlaybackQualityTier : int
 {
     Dev = 0,
@@ -76,6 +89,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kKeyQualityMode() { return "Playback/QualityMode"; }
     inline constexpr const char * kKeyPreviewMode() { return "Playback/PreviewMode"; }
     inline constexpr const char * kKeyScaleFactorOverride() { return "Playback/ScaleFactorOverride"; }
+    inline constexpr const char * kKeyPreviewResolution() { return "Playback/PreviewResolution"; }
     inline constexpr const char * kKeyAutoTargetFps() { return "Playback/AutoTargetFps"; }
     inline constexpr const char * kKeyShowQualityIndicator() { return "Playback/ShowQualityIndicator"; }
     inline constexpr const char * kKeyShowExperimentalPhase3Modes() { return "Playback/ShowExperimentalPhase3Modes"; }
@@ -93,6 +107,7 @@ namespace PlaybackQualitySettings
     inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
     inline constexpr int kDefaultPreviewMode() { return static_cast<int>( PlaybackPreviewMode::SharpSmooth ); }
     inline constexpr int kDefaultScaleFactorOverride() { return 0; }
+    inline constexpr int kDefaultPreviewResolution() { return static_cast<int>( PlaybackPreviewResolution::Auto ); }
     inline constexpr int kDefaultAutoTargetFps() { return 30; }
     inline constexpr int kDefaultShowQualityIndicator() { return 1; }
     inline constexpr int kDefaultShowExperimentalPhase3Modes() { return 0; }
@@ -364,6 +379,40 @@ inline void playbackPreviewModeWriteToSettings( PlaybackPreviewMode mode )
                    PlaybackQualitySettings::kApplication() );
     set.setValue( PlaybackQualitySettings::kKeyPreviewMode(),
                   static_cast<int>( mode ) );
+}
+
+inline PlaybackPreviewResolution playbackPreviewResolutionFromSettings()
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    const int raw = set.value( PlaybackQualitySettings::kKeyPreviewResolution(),
+                               PlaybackQualitySettings::kDefaultPreviewResolution() ).toInt();
+    if ( raw < 0 || raw > 3 ) return PlaybackPreviewResolution::Auto;
+    return static_cast<PlaybackPreviewResolution>( raw );
+}
+
+inline void playbackPreviewResolutionWriteToSettings( PlaybackPreviewResolution res )
+{
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyPreviewResolution(),
+                  static_cast<int>( res ) );
+}
+
+/* Maps the GUI enum to the C-side proxy level (mlvSetPlaybackProxyLevel):
+ * Auto -> -1, Full -> 0, Half -> 1, Quarter -> 2. */
+inline int playbackPreviewResolutionToProxyLevel( PlaybackPreviewResolution res )
+{
+    switch ( res )
+    {
+    case PlaybackPreviewResolution::Full:    return 0;
+    case PlaybackPreviewResolution::Half:    return 1;
+    case PlaybackPreviewResolution::Quarter: return 2;
+    case PlaybackPreviewResolution::Auto:
+    default:                                 return -1;
+    }
 }
 
 inline void playbackQualityAutoTargetFpsWriteToSettings( int targetFps )

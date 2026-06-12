@@ -236,6 +236,15 @@
       <addaction name="actionPlaybackPreviewSharpSmooth"/>
       <addaction name="actionPlaybackPreviewAggressive"/>
      </widget>
+     <widget class="QMenu" name="menuPlaybackPreviewResolution">
+      <property name="title">
+       <string>Preview Resolution</string>
+      </property>
+      <addaction name="actionPlaybackPreviewResAuto"/>
+      <addaction name="actionPlaybackPreviewResFull"/>
+      <addaction name="actionPlaybackPreviewResHalf"/>
+      <addaction name="actionPlaybackPreviewResQuarter"/>
+     </widget>
      <addaction name="actionPlaybackQualityFast"/>
      <addaction name="actionPlaybackQualityHQ"/>
      <addaction name="actionPlaybackQualityAuto"/>
@@ -244,6 +253,7 @@
      <addaction name="separator"/>
      <addaction name="actionPlaybackShowQualityIndicator"/>
      <addaction name="menuPlaybackPreviewMode"/>
+     <addaction name="menuPlaybackPreviewResolution"/>
      <addaction name="menuPlaybackScaleFactor"/>
      <addaction name="menuPlaybackAutoTargetFps"/>
     </widget>
@@ -11221,6 +11231,62 @@ QGroupBox::indicator:checked:disabled {
    </property>
    <property name="statusTip">
     <string>Playback scale: force x8.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewResAuto">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Auto</string>
+   </property>
+   <property name="toolTip">
+    <string>Use each scale's tuned default preview resolution during playback.</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview resolution: per-scale tuned default.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewResFull">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Full (sharpest, slowest)</string>
+   </property>
+   <property name="toolTip">
+    <string>Disable preview proxies: playback renders at the full internal resolution for the chosen scale.</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview resolution: full internal resolution, no proxy.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewResHalf">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Half (soft, fast)</string>
+   </property>
+   <property name="toolTip">
+    <string>Allow one internal halving per axis during playback (paused frames, scrubbing and export stay full quality).</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview resolution: one internal halving per axis during playback.</string>
+   </property>
+  </action>
+  <action name="actionPlaybackPreviewResQuarter">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Quarter (softest, fastest)</string>
+   </property>
+   <property name="toolTip">
+    <string>Allow two internal halvings per axis where supported (falls back to Half elsewhere). Paused frames, scrubbing and export stay full quality.</string>
+   </property>
+   <property name="statusTip">
+    <string>Preview resolution: deepest preview proxy during playback.</string>
    </property>
   </action>
   <action name="actionPlaybackShowQualityIndicator">

@@ -6010,6 +6010,13 @@ void MainWindow::initGui( void )
     m_playbackPreviewModeGroup->addAction( ui->actionPlaybackPreviewSharpSmooth );
     m_playbackPreviewModeGroup->addAction( ui->actionPlaybackPreviewAggressive );
 
+    m_playbackPreviewResolutionGroup = new QActionGroup( this );
+    m_playbackPreviewResolutionGroup->setExclusive( true );
+    m_playbackPreviewResolutionGroup->addAction( ui->actionPlaybackPreviewResAuto );
+    m_playbackPreviewResolutionGroup->addAction( ui->actionPlaybackPreviewResFull );
+    m_playbackPreviewResolutionGroup->addAction( ui->actionPlaybackPreviewResHalf );
+    m_playbackPreviewResolutionGroup->addAction( ui->actionPlaybackPreviewResQuarter );
+
     m_playbackScaleFactorGroup = new QActionGroup( this );
     m_playbackScaleFactorGroup->setExclusive( true );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScaleAuto );
@@ -6218,6 +6225,13 @@ void MainWindow::initGui( void )
         pPreviewModeSub->addAction( ui->actionPlaybackPreviewSharpSmooth );
         pPreviewModeSub->addAction( ui->actionPlaybackPreviewAggressive );
         m_pPlaybackQualityToolButtonMenu->addMenu( pPreviewModeSub );
+        QMenu *pPreviewResSub = new QMenu( tr( "Preview Resolution" ),
+                                           m_pPlaybackQualityToolButtonMenu );
+        pPreviewResSub->addAction( ui->actionPlaybackPreviewResAuto );
+        pPreviewResSub->addAction( ui->actionPlaybackPreviewResFull );
+        pPreviewResSub->addAction( ui->actionPlaybackPreviewResHalf );
+        pPreviewResSub->addAction( ui->actionPlaybackPreviewResQuarter );
+        m_pPlaybackQualityToolButtonMenu->addMenu( pPreviewResSub );
         QMenu *pScaleFactorSub = new QMenu( tr( "Scale Factor" ),
                                             m_pPlaybackQualityToolButtonMenu );
         pScaleFactorSub->addAction( ui->actionPlaybackScaleAuto );
@@ -6271,6 +6285,7 @@ void MainWindow::initGui( void )
     //Must run AFTER initGui() (action groups exist) and AFTER readSettings()
     //(though Playback Quality keys are independent of legacy keys).
     initPlaybackPreviewModeFromSettings();
+    initPlaybackPreviewResolutionFromSettings();
     initPlaybackQualityFromSettings();
     initPlaybackScaleFactorFromSettings();
 
@@ -14468,6 +14483,99 @@ void MainWindow::applyPlaybackPreviewMode( int mode, bool persist, bool forceRef
     updatePlaybackQualityIndicator();
 }
 
+//Round-3 item 1: apply the GUI-selected playback preview resolution (proxy
+//level). Mirrors applyPlaybackPreviewMode: updates the C-side policy, action
+//checks, QSettings persistence, and invalidates render caches on change so
+//the new path takes effect immediately. Pause/scrub/export are never
+//proxied (the proxy cores engage only in playback preview mode).
+void MainWindow::applyPlaybackPreviewResolution( int res, bool persist, bool forceRefresh )
+{
+    if( res < 0 || res > 3 )
+    {
+        res = static_cast<int>( PlaybackPreviewResolution::Auto );
+    }
+
+    const int previousRes = m_playbackPreviewResolution;
+    const bool changed = ( res != previousRes ) || forceRefresh;
+    m_playbackPreviewResolution = res;
+
+    const PlaybackPreviewResolution previewRes =
+        static_cast<PlaybackPreviewResolution>( res );
+    mlvSetPlaybackProxyLevel( playbackPreviewResolutionToProxyLevel( previewRes ) );
+
+    if( ui->actionPlaybackPreviewResAuto )
+        ui->actionPlaybackPreviewResAuto->setChecked(
+            previewRes == PlaybackPreviewResolution::Auto );
+    if( ui->actionPlaybackPreviewResFull )
+        ui->actionPlaybackPreviewResFull->setChecked(
+            previewRes == PlaybackPreviewResolution::Full );
+    if( ui->actionPlaybackPreviewResHalf )
+        ui->actionPlaybackPreviewResHalf->setChecked(
+            previewRes == PlaybackPreviewResolution::Half );
+    if( ui->actionPlaybackPreviewResQuarter )
+        ui->actionPlaybackPreviewResQuarter->setChecked(
+            previewRes == PlaybackPreviewResolution::Quarter );
+
+    if( persist )
+    {
+        playbackPreviewResolutionWriteToSettings( previewRes );
+    }
+
+    const char * resName = "auto";
+    switch( previewRes )
+    {
+    case PlaybackPreviewResolution::Full:    resName = "full";    break;
+    case PlaybackPreviewResolution::Half:    resName = "half";    break;
+    case PlaybackPreviewResolution::Quarter: resName = "quarter"; break;
+    case PlaybackPreviewResolution::Auto:    resName = "auto";    break;
+    }
+    const bool envPrecedence =
+        qEnvironmentVariableIsSet( "MLVAPP_DISABLE_HALFRES_X1_PREVIEW" )
+        || qEnvironmentVariableIsSet( "MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW" );
+    qInfo().noquote()
+        << "Playback preview resolution ="
+        << QString::fromLatin1( resName )
+        << ( envPrecedence
+             ? QStringLiteral( "(ui setting loaded; MLVAPP_DISABLE_*_PREVIEW env currently has precedence)." )
+             : QStringLiteral( "(ui setting)." ) );
+
+    if( changed )
+    {
+        logInteractionEvent(
+            QStringLiteral("playback_preview_resolution.change"),
+            QStringLiteral("res=%1->%2 proxy_level=%3 file_loaded=%4 still_drawing=%5 latest_serial=%6 next_serial=%7 generation_before=%8")
+                .arg( previousRes )
+                .arg( res )
+                .arg( mlvPlaybackProxyLevel() )
+                .arg( bool01( m_fileLoaded ) )
+                .arg( bool01( m_frameStillDrawing ) )
+                .arg( static_cast<qulonglong>( m_latestRequestedSerial.load( std::memory_order_acquire ) ) )
+                .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
+                .arg( static_cast<qulonglong>( m_playbackPresentationGeneration.load( std::memory_order_acquire ) ) ),
+            true );
+        if( m_fileLoaded || m_pMlvObject )
+        {
+            invalidateDisplayPreviewCache();
+            invalidatePlaybackPrepForDisplayChange( "playback-preview-resolution-change" );
+            if( m_pMlvObject )
+            {
+                waitForRenderThreadIdleBeforeCoreMutation( "playback-preview-resolution-change" );
+                resetMlvCache( m_pMlvObject );
+                resetMlvCachedFrame( m_pMlvObject );
+            }
+            m_frameChanged = true;
+            requestFrameRefresh( false, "playback-preview-resolution-change" );
+        }
+    }
+    updatePlaybackQualityIndicator();
+}
+
+void MainWindow::initPlaybackPreviewResolutionFromSettings( void )
+{
+    const PlaybackPreviewResolution res = playbackPreviewResolutionFromSettings();
+    applyPlaybackPreviewResolution( static_cast<int>( res ), false, false );
+}
+
 void MainWindow::initPlaybackScaleFactorFromSettings( void )
 {
     QSettings set( QSettings::UserScope,
@@ -15026,6 +15134,30 @@ void MainWindow::on_actionPlaybackPreviewAggressive_triggered()
         static_cast<int>( PlaybackPreviewMode::AggressivePerformance ),
         /*persist*/true,
         /*forceRefresh*/false );
+}
+
+void MainWindow::on_actionPlaybackPreviewResAuto_triggered()
+{
+    applyPlaybackPreviewResolution(
+        static_cast<int>( PlaybackPreviewResolution::Auto ), true, false );
+}
+
+void MainWindow::on_actionPlaybackPreviewResFull_triggered()
+{
+    applyPlaybackPreviewResolution(
+        static_cast<int>( PlaybackPreviewResolution::Full ), true, false );
+}
+
+void MainWindow::on_actionPlaybackPreviewResHalf_triggered()
+{
+    applyPlaybackPreviewResolution(
+        static_cast<int>( PlaybackPreviewResolution::Half ), true, false );
+}
+
+void MainWindow::on_actionPlaybackPreviewResQuarter_triggered()
+{
+    applyPlaybackPreviewResolution(
+        static_cast<int>( PlaybackPreviewResolution::Quarter ), true, false );
 }
 
 void MainWindow::on_actionPlaybackScaleAuto_triggered()

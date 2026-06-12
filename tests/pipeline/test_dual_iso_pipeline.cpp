@@ -4812,6 +4812,98 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfResPreviewKillSwitchWins)
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint16_t v) { return v != 0; }));
 }
 
+/* Round-3 item 1: the GUI proxy-level policy (mlvSetPlaybackProxyLevel).
+ * Contracts: Full (0) disables the preview proxy cores at x1 and x2 even
+ * mid-clip (the state signature must isolate the cached frames of each
+ * level); Auto (-1) keeps the tuned defaults (x1 path 6, x2 path 5); the
+ * MLVAPP_DISABLE_* env kill switches still win over the GUI level. */
+TEST(DualIsoPipeline, PlaybackProxyLevelFullDisablesPreviewCoresMidClip)
+{
+    struct ProxyLevelResetGuard {
+        ~ProxyLevelResetGuard()
+        {
+            mlvSetPlaybackProxyLevel(-1);
+            processingSetPlaybackPreviewMode(0);
+            processingSetPlaybackAggressivePreviewMode(0);
+        }
+    } proxy_level_reset_guard;
+
+    mlvSetPlaybackProxyLevel(-1);
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h / 16) * 16 < 16) {
+        return;
+    }
+
+    /* Auto: x1 takes the half-res proxy (path 6). */
+    (void)fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_EQ(6, mlv_phase4bv2_last_path_taken());
+
+    /* Flip to Full MID-CLIP and re-render the SAME frame: the proxy must
+     * disengage (path 0) - a stale cache hit here means the signature does
+     * not isolate the levels. */
+    mlvSetPlaybackProxyLevel(0);
+    (void)fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+
+    /* Same contract at x2: Auto = quarter-res path 5, Full = full-xy path 4. */
+    mlvSetPlaybackProxyLevel(-1);
+    if ((full_w % 2) == 0 && (full_h % 2) == 0)
+    {
+        (void)fixture.renderFrame16Scaled(0, 1, 2);
+        ASSERT_EQ(5, mlv_phase4bv2_last_path_taken());
+
+        mlvSetPlaybackProxyLevel(0);
+        (void)fixture.renderFrame16Scaled(0, 1, 2);
+        ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
+    }
+}
+
+TEST(DualIsoPipeline, PlaybackProxyLevelEnvKillSwitchStillWins)
+{
+    struct ProxyLevelResetGuard {
+        ~ProxyLevelResetGuard()
+        {
+            mlvSetPlaybackProxyLevel(-1);
+            processingSetPlaybackPreviewMode(0);
+            processingSetPlaybackAggressivePreviewMode(0);
+            MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_HALFRES_X1_PREVIEW");
+        }
+    } proxy_level_reset_guard;
+
+    /* GUI says Half (proxies on) but the env kill switch must still win. */
+    mlvSetPlaybackProxyLevel(1);
+    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_HALFRES_X1_PREVIEW", "1");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 1) {
+        return;
+    }
+
+    (void)fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+}
+
 TEST(DualIsoPipeline, StandardPreviewScaleFourKeepsQuarterResShadowsHighlightsOffByDefault)
 {
     MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
