@@ -1208,9 +1208,18 @@ void processing_object_thread(apply_processing_parameters_t * p)
  * (the PhaseE9 parity failures). Identical inputs through THIS one function
  * produce identical blur bytes for both consumers - and the direct8 path
  * gets the half-res perf win it was missing. */
+/* force_export_policy (round-4 item 2): the direct8 kernel's blurImage
+ * contract is only byte-identity-proven against the export blur
+ * configuration (PhaseE9 families: halfres/fullres by dimensions, no
+ * preview-scale lanes). The standard-x2 quarterres lane writes content the
+ * kernel misreads - VIEWED x2 filmstrips collapsed whole row-blocks to
+ * lifted-black tan while x8 (which never takes the quarterres lane) stayed
+ * clean. applyProcessingObject8 passes 1; the 16-bit path passes 0 and
+ * keeps its scale-aware preview lanes. */
 static void processing_compute_shadows_highlights_blur( processingObject_t * processing,
                                                         uint16_t * __restrict inputImage,
-                                                        int imageX, int imageY, int threads )
+                                                        int imageX, int imageY, int threads,
+                                                        int force_export_policy )
 {
     const int shadows_highlights_probe_enabled =
         processing_shadows_highlights_probe_mode() >= 0;
@@ -1218,7 +1227,8 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
         (imageX >= 2) && (imageY >= 2)
      && ((imageX & 1) == 0)
      && ((imageY & 1) == 0);
-    const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+    const int preview_mode_enabled = !force_export_policy
+        && processingPlaybackPreviewModeEnabled();
     const int aggressive_preview_enabled = preview_mode_enabled
         && processingPlaybackAggressivePreviewModeEnabled();
     const int halfres_aggressive_preview_odd_height =
@@ -1505,7 +1515,7 @@ void applyProcessingObject( processingObject_t * processing,
      * computes byte-identical blur bytes (the PhaseE9 parity fix). */
     if( shadows_highlights_active && imageChanged )
     {
-        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads );
+        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads, 0 );
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
@@ -2092,17 +2102,22 @@ static int processing_has_direct8_supported_local_tone_adjustments(const process
 {
     if( !processing ) return 0;
 
-    if( processingPlaybackPreviewModeEnabled() )
-    {
-        /* Playback-preview direct8 is only safe when local tone stays
-         * neutral. The current broad pink wash comes from letting the fast
-         * preview path claim support for non-neutral contrast / shadows /
-         * highlights, which the visible smoke set shows as a color
-         * regression. Fall back to the shared reference path until the fast
-         * route proves parity for those settings. */
-        return processing_has_neutral_local_tone_adjustments(processing);
-    }
-
+    /* Round-4 item 2: SHARP preview uses the SAME contract as export/pause
+     * now. The historical "broad pink wash" that forced preview to
+     * neutral-only local tone dated to the era when preview hard-wired EVERY
+     * receipt onto the AVX2 intrinsics kernel (see the removed preview
+     * bypass in processing_direct8_requires_shared_kernel) while that kernel
+     * skipped pre_calc_levels and tonemapped green with the blue Reinhard
+     * curve - all fixed in round-4 items 0b/0c and pinned by the
+     * DirectProcessed8* and PhaseE7/E8/E9 byte-identity families. Contrast
+     * and shadows / highlights route to the shared C kernel in preview
+     * exactly as they do for exports; only clarity has no direct8
+     * implementation at all.
+     *
+     * Lane economics (when direct8 actually wins for a given clip/scale/
+     * decode regime) are NOT this gate's job: the video layer decides that
+     * in mlv_preview_direct8_input_is_cheap (video_mlv.c), where the input
+     * path is known. This gate stays a pure receipt-capability contract. */
     return fabs(processing->clarity) < 0.01;
 }
 
@@ -2110,11 +2125,9 @@ static int processing_has_direct8_shadow_highlight_adjustments(const processingO
 {
     if( !processing || !processing->allow_creative_adjustments ) return 0;
 
-    if( processingPlaybackPreviewModeEnabled() )
-    {
-        return 0;
-    }
-
+    /* Round-4 item 2: no preview exception - SH receipts are direct8-eligible
+     * in preview now (gate above), so the blur pre-pass must run for them
+     * exactly as it does for exports (shared helper, round-4 item 0c). */
     return fabs(processing->shadows_highlights.shadows) >= 0.01
         || fabs(processing->shadows_highlights.highlights) >= 0.01;
 }
@@ -2309,11 +2322,11 @@ const char * processingGetDirect8IncompatibilityReason(const processingObject_t 
 
 static int processing_direct8_requires_shared_kernel(const processingObject_t * processing)
 {
-    if( processingPlaybackPreviewModeEnabled() )
-    {
-        return 0;
-    }
-
+    /* Round-4 item 2: the preview bypass that returned 0 here routed EVERY
+     * preview receipt onto the intrinsics kernel - including AgX, which the
+     * intrin kernel does not implement at all (silently un-tonemapped
+     * preview pixels on neutral AgX receipts). Preview now routes by kernel
+     * capability exactly like export/pause. */
     return processing
         && ( processing->AgX
           || processing_has_direct8_shadow_highlight_adjustments(processing)
@@ -2327,25 +2340,12 @@ static int processing_direct8_requires_shared_kernel(const processingObject_t * 
                   || processing->contrast >= 0.01 ) ) );
 }
 
-static int processing_direct8_preview_requires_serial_render(const processingObject_t * processing)
-{
-    if( !processing || !processingPlaybackPreviewModeEnabled() )
-    {
-        return 0;
-    }
-
-    if( !processing->allow_creative_adjustments )
-    {
-        return 0;
-    }
-
-    return fabs(processing->contrast) >= 0.01
-        || fabs(processing->clarity) >= 0.01
-        || fabs(processing->shadows_highlights.shadows) >= 0.01
-        || fabs(processing->shadows_highlights.highlights) >= 0.01
-        || fabs(processing->vibrance - 1.0) >= 0.01
-        || fabs(processing->saturation - 1.0) >= 0.01;
-}
+/* Round-4 item 2: processing_direct8_preview_requires_serial_render is gone.
+ * It forced threads=1 in preview for contrast / SH / vibrance / saturation
+ * receipts - a 06976e82-era band-aid from the same firefight as the neutral-
+ * only preview gate. Those receipts now route to the shared C kernel, which
+ * already runs them row-partitioned and multi-threaded for exports with
+ * byte-identity coverage. */
 
 /*
  * Runtime-dispatched direct processed8 fast path.
@@ -3741,8 +3741,10 @@ void applyProcessingObject8( processingObject_t * processing,
          * used to keep a full-res-only copy of the policy, which drifted
          * when 25795f27 moved the 16-bit side to half-res - the PhaseE9
          * direct8 parity break). Also a perf win: even-dimension frames now
-         * get the half-res RBF here too. */
-        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads );
+         * get the half-res RBF here too. force_export_policy=1: only the
+         * dimension-based halfres/fullres blur lanes are byte-identity-
+         * proven against this kernel (see the helper comment). */
+        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads, 1 );
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
@@ -3753,10 +3755,6 @@ void applyProcessingObject8( processingObject_t * processing,
     const int direct8_profile_subloops =
         (threads == 1) && processing_profile_direct8_subloops_enabled();
     processing_direct8_kernel_timing_t direct8_timing = { 0.0, 0.0, 0.0 };
-    if( threads > 1 && processing_direct8_preview_requires_serial_render(processing) )
-    {
-        threads = 1;
-    }
     if( threads == 1 )
     {
         apply_processing_object_8bit_fast(processing,

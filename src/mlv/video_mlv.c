@@ -890,6 +890,8 @@ static int mlv_halfres_x1_preview_enabled(void);
 static int mlv_halfres_x1_processing_enabled(void);
 static int mlv_quarterres_x2_preview_enabled(void);
 static int mlv_quarterres_x2_processing_enabled(void);
+static int mlv_x1_reduced_proxy_would_engage(mlvObject_t * video);
+static int mlv_preview_direct8_input_is_cheap(mlvObject_t * video, int normalizedScale);
 
 static uint64_t mlv_processed_frame_state_signature(mlvObject_t * video)
 {
@@ -1205,6 +1207,22 @@ static uint8_t * mlv_ensure_thread_u8_buffer(uint64_t required_bytes)
     static MLV_THREAD_LOCAL uint8_t * tls_buffer = NULL;
     static MLV_THREAD_LOCAL uint64_t tls_capacity_bytes = 0;
     return mlv_ensure_u8_buffer(&tls_buffer, &tls_capacity_bytes, required_bytes);
+}
+
+/* Round-4 item 2: dedicated TLS slot for the scaled-input frame of the
+ * direct8 / worker-indirect render helpers. The scaled-render cores ensure
+ * mlv_ensure_thread_rgb_u16_buffer for their OWN intermediates (e.g. the x2
+ * quarter core's q_rgb) and then upscale INTO the caller's output buffer;
+ * handing those cores the same TLS slot as their output self-aliases that
+ * upscale (read and write on one allocation) - the x2 direct8 input
+ * rendered near-flat garbage (3 distinct values across 100k pixels at
+ * threads=1, partial fills at threads=16 = the VIEWED banding). A separate
+ * slot makes caller-output and core-intermediate disjoint by construction. */
+static uint16_t * mlv_ensure_thread_scaled_input_buffer(uint64_t required_words)
+{
+    static MLV_THREAD_LOCAL uint16_t * tls_buffer = NULL;
+    static MLV_THREAD_LOCAL uint64_t tls_capacity_words = 0;
+    return mlv_ensure_u16_buffer(&tls_buffer, &tls_capacity_words, required_words);
 }
 
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame);
@@ -2413,7 +2431,11 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
      * warm runs SLOWER (the original wash mechanism at a lower price point).
      * Aggressive x2 stays excluded unconditionally: its incompatible lanes
      * skip the main cache, so worker fills would be unreachable waste. */
-    const int direct8Compatible = processingCanUseDirect8BitOutput(task->processing);
+    /* Round-4 item 2: mirror the foreground's lane-economics guard - when a
+     * cheaper foreground lane owns the dispatch, a direct8 worker fill would
+     * be stored under a never-matched envelope (wasted core-split at best). */
+    const int direct8Compatible = processingCanUseDirect8BitOutput(task->processing)
+        && mlv_preview_direct8_input_is_cheap(task->video, task->scaleFactor);
     if (!direct8Compatible
         && !((task->scaleFactor >= 4
               || (task->scaleFactor == 2
@@ -5414,6 +5436,93 @@ static int mlv_can_use_direct_processed_frame8_path(mlvObject_t * video)
         && processingCanUseDirect8BitOutput(video->processing);
 }
 
+/* Round-4 item 2 (x1 scope guard): the direct8 fused path renders at FULL
+ * resolution at scale 1, while the x1 reduced proxy processes 1/4 (half) or
+ * 1/16 (quarter) of the pixels. When the preview unlock let direct8 preempt
+ * the proxy, x1 dropped 13 -> 9 fps on all three M16 clips (processed16
+ * 48-52ms -> 84-90ms): the fused-pipeline win cannot beat a 4x pixel
+ * reduction. Direct8 keeps its dispatch priority at x1 only when the reduced
+ * proxy would NOT engage (preview off, proxy disabled / level Full, or the
+ * clip ineligible for the reduced core - mirrors the eligibility checks at
+ * the top of mlv_render_scaled_rgb16_x1_half_preview_core). */
+static int mlv_x1_reduced_proxy_would_engage(mlvObject_t * video)
+{
+    if (!processingPlaybackPreviewModeEnabled()) return 0;
+    if (!mlv_halfres_x1_preview_enabled()) return 0;
+    if (!video || !llrpHQDualIso(video)) return 0;
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int eff_h = (full_h / 16) * 16;
+    if ((full_w % 4) != 0 || eff_h < 16) return 0;
+    return 1;
+}
+
+/* Round-4 item 2 scope: preview direct8 wins only where its INPUT side stays
+ * on a cheap path. Two measured loss regimes on the M16 trio:
+ *   (a) x1 with the reduced proxy available - the proxy processes 1/4-1/16
+ *       of the pixels (guard above);
+ *   (b) dual-ISO clips outside HQ recon (the mean23 preview-decode regime,
+ *       Playback quality "preview"): mlv_render_scaled_rgb16 cannot take the
+ *       bayer-downsample shortcut there and falls back to full recon + full
+ *       debayer (llrawproc ~30ms + debayer ~32ms measured), while the
+ *       indirect dispatcher still has its cheap mean23-aware scaled cores -
+ *       x2 sagged 14.9 -> 11.4 when direct8 preempted them.
+ * Pause/export calls (preview mode off) are not a dispatch decision here. */
+static int mlv_preview_direct8_input_is_cheap(mlvObject_t * video, int normalizedScale)
+{
+    if (!processingPlaybackPreviewModeEnabled())
+    {
+        return 1;
+    }
+    if (normalizedScale == 1 && mlv_x1_reduced_proxy_would_engage(video))
+    {
+        return 0;
+    }
+    if (video && video->llrawproc
+        && video->llrawproc->diso_validity
+        && video->llrawproc->dual_iso != 0
+        && !llrpHQDualIso(video))
+    {
+        return 0;
+    }
+    return 1;
+}
+
+/* Round-4 item 2: never let the direct8 kernel write the caller's buffer in
+ * place across the full render duration. The playback caller hands the LIVE
+ * presented frame buffer down here; the row-parallel kernel writes it over
+ * ~10-20ms, and out-of-band paints (window captures, compositor reads)
+ * sample a torn mix of old and new row blocks - VIEWED x2 filmstrips showed
+ * multi-band temporal tearing on every capture, with or without the prefetch
+ * worker. The indirect path only exposes its ~2ms packdown window; render
+ * into TLS scratch and publish with one memcpy to match that window. The
+ * prefetch worker already passes this thread's TLS u8 slot as outputFrame -
+ * same pointer, so the publish copy self-elides there. */
+static void mlv_apply_processing_object8_published(processingObject_t * processing,
+                                                   int out_w,
+                                                   int out_h,
+                                                   uint16_t * unprocessed_frame,
+                                                   uint8_t * outputFrame,
+                                                   uint64_t rgb_frame_size,
+                                                   int threads,
+                                                   uint64_t frameIndex)
+{
+    uint8_t * scratch = mlv_ensure_thread_u8_buffer(rgb_frame_size);
+    uint8_t * target = scratch ? scratch : outputFrame;
+    applyProcessingObject8(processing,
+                           out_w,
+                           out_h,
+                           unprocessed_frame,
+                           target,
+                           threads,
+                           1,
+                           frameIndex);
+    if (target != outputFrame)
+    {
+        memcpy(outputFrame, target, (size_t)rgb_frame_size);
+    }
+}
+
 static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * video,
                                                               processingObject_t * processing,
                                                               int syncProcessingLevels,
@@ -5439,7 +5548,7 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
      * worker thread the slot starts at zero capacity, so scaled renders
      * were exposed). Full-res RGB bounds every intermediate. */
     const uint64_t rgb_buf_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_buf_words);
     if (!raw_frame || !unprocessed_frame || !processing)
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
@@ -5513,14 +5622,14 @@ static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * vide
     }
 
     const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
-    applyProcessingObject8(processing,
-                           out_w,
-                           out_h,
-                           unprocessed_frame,
-                           outputFrame,
-                           threads,
-                           1,
-                           frameIndex);
+    mlv_apply_processing_object8_published(processing,
+                                           out_w,
+                                           out_h,
+                                           unprocessed_frame,
+                                           outputFrame,
+                                           rgb_frame_size,
+                                           threads,
+                                           frameIndex);
 
     /* SDBG_direct8_out capture: the direct8 8-bit output right after the
      * processing stage. Inert when MLVAPP_PIPELINE_CAPTURE_DIR is unset.
@@ -5604,7 +5713,7 @@ static int mlv_render_processed_frame8_indirect_with_processing(mlvObject_t * vi
      * heap reuses the block). Full-res RGB is the supremum of every
      * intermediate, so one capture stays valid for the whole render. */
     const uint64_t rgb_full_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_full_words);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_full_words);
     if (!unprocessed_frame)
     {
         return 0;
@@ -5692,7 +5801,7 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
     /* Pre-grow to full-res before capturing (same TLS realloc hazard as the
      * sibling helpers: internals grow this slot for mid-res intermediates). */
     const uint64_t rgb_buf_words = (uint64_t)full_w * (uint64_t)full_h * 3u;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_buf_words);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_buf_words);
     if (!decodedRawFrame || !unprocessed_frame || !processing || eff_scale <= 1)
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
@@ -5731,14 +5840,14 @@ static int mlv_render_processed_frame8_direct_with_processing_from_raw(mlvObject
     }
 
     const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
-    applyProcessingObject8(processing,
-                           out_w,
-                           out_h,
-                           unprocessed_frame,
-                           outputFrame,
-                           threads,
-                           1,
-                           frameIndex);
+    mlv_apply_processing_object8_published(processing,
+                                           out_w,
+                                           out_h,
+                                           unprocessed_frame,
+                                           outputFrame,
+                                           rgb_frame_size,
+                                           threads,
+                                           frameIndex);
     if (recordTelemetry)
     {
         g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
@@ -5774,7 +5883,7 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
 
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_rgb_u16_buffer(rgb_frame_size);
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_frame_size);
     if (!unprocessed_frame || eff_scale <= 1)
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
@@ -5824,14 +5933,14 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     }
 
     const double processing_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
-    applyProcessingObject8(processing,
-                           out_w,
-                           out_h,
-                           unprocessed_frame,
-                           outputFrame,
-                           threads,
-                           1,
-                           frameIndex);
+    mlv_apply_processing_object8_published(processing,
+                                           out_w,
+                                           out_h,
+                                           unprocessed_frame,
+                                           outputFrame,
+                                           rgb_frame_size,
+                                           threads,
+                                           frameIndex);
     if (recordTelemetry)
     {
         g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
@@ -6302,7 +6411,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     const int out_h  = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
     uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
     uint16_t * processed_frame = NULL;
-    const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video);
+    const int direct8PathActive = mlv_can_use_direct_processed_frame8_path(video)
+        && mlv_preview_direct8_input_is_cheap(video, normalizedScale);
     /* Processed8 prefetch can run even when the foreground direct8 path
      * stays conservative; the worker only warms the cache and does not
      * change the pixels we present. */
