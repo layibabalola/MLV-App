@@ -1106,6 +1106,37 @@ static uint64_t mlv_processed_frame_signature_with_scale(mlvObject_t * video,
         frameIndex);
 }
 
+/* Round-4 item R4-1: cheap fingerprint over the ONLY hashed state a render
+ * itself can mutate -- the llrawproc status words (fpm_status/bpm_status flip
+ * on the first frame, see the Phase E7 note at the direct8 store) plus the
+ * black/white levels that llrawproc dual ISO rewrites and
+ * mlv_sync_processing_black_white_levels copies into the processing object.
+ * The full signature additionally hashes ~1.1MB of curves/HSL tables that
+ * only change through setters between renders, never inside one, so
+ * re-hashing all of it at the store site duplicated the entry hash on every
+ * frame. If this fingerprint is unchanged across the render the entry
+ * signature is still valid at store time; any drift falls back to the full
+ * recompute, so a field missing here costs one redundant cache miss on the
+ * next lookup, never a stale hit. */
+static uint64_t mlv_render_mutable_state_fingerprint(mlvObject_t * video)
+{
+    uint64_t hash = MLV_FNV1A_OFFSET_BASIS;
+    if (!video)
+    {
+        return hash;
+    }
+    hash = mlv_hash_bytes(hash, &video->RAWI.raw_info.black_level, sizeof(video->RAWI.raw_info.black_level));
+    hash = mlv_hash_bytes(hash, &video->RAWI.raw_info.white_level, sizeof(video->RAWI.raw_info.white_level));
+    hash = mlv_hash_llrawproc_state(hash, video->llrawproc);
+    processingObject_t * processing = video->processing;
+    if (processing)
+    {
+        hash = mlv_hash_bytes(hash, &processing->black_level, sizeof(processing->black_level));
+        hash = mlv_hash_bytes(hash, &processing->white_level, sizeof(processing->white_level));
+    }
+    return hash;
+}
+
 static int mlv_ensure_reusable_buffer(void ** buffer,
                                       uint64_t * capacity_elements,
                                       uint64_t required_elements,
@@ -1393,7 +1424,16 @@ static void * mlv_raw_uint16_prefetch_thread_main(void * opaque)
 
         for (uint32_t offset = 1; offset <= lookahead; ++offset)
         {
-            uint64_t targetFrame = baseFrame + ((uint64_t)offset * requestStride);
+            /* Round-4 item 1: drop-frame playback advances by an alternating
+             * 1..3-frame pattern, so extrapolating the LAST delta as a fixed
+             * stride misses most next requests (measured 36-64% hit rate at
+             * x1/x2). A contiguous window contains every possible next
+             * request for small strides; keep the stride extrapolation only
+             * for genuinely large jumps (fast scrubs). */
+            uint64_t targetFrame =
+                (requestStride <= 4)
+                ? baseFrame + offset
+                : baseFrame + ((uint64_t)offset * requestStride);
             if (targetFrame >= getMlvFrames(video))
             {
                 break;
@@ -5815,7 +5855,8 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
                                               uint16_t * outputFrame,
                                               int threads,
                                               int scaleFactor,
-                                              int store_processed16_cache)
+                                              int store_processed16_cache,
+                                              uint64_t precomputed_signature)
 {
     const double total_start = mlv_stage_timing_now();
     g_mlv_phase4bv2_path_taken = 0;
@@ -5853,11 +5894,19 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     /* Size of RAW frame */
     uint64_t rgb_frame_size = (uint64_t)height * width * 3;
     uint64_t requested_signature = 0;
+    uint64_t entry_state_fingerprint = 0;
     if (store_processed16_cache)
     {
-        requested_signature = mlv_processed_frame_signature_with_scale(video,
-                                                                       frameIndex,
-                                                                       normalizedScale);
+        /* Round-4 item R4-1: the playback 8-bit entry already computed this
+         * exact signature against the same pre-render state; recomputing the
+         * ~1.1MB state hash here doubled the per-frame hashing cost on the
+         * indirect path. 0 means "no precomputed signature available". */
+        requested_signature = precomputed_signature
+            ? precomputed_signature
+            : mlv_processed_frame_signature_with_scale(video,
+                                                       frameIndex,
+                                                       normalizedScale);
+        entry_state_fingerprint = mlv_render_mutable_state_fingerprint(video);
 
         if (video->current_processed_frame_active
             && video->current_processed_frame == frameIndex
@@ -6128,9 +6177,19 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
 processed16_store:
     if (store_processed16_cache)
     {
-        const uint64_t final_signature = mlv_processed_frame_signature_with_scale(video,
-                                                                                  frameIndex,
-                                                                                  normalizedScale);
+        /* Phase E7 recompute, narrowed by round-4 item R4-1: a render can
+         * mutate llrawproc status words / black-white levels (first frame of
+         * a clip), which made a pre-render signature unfindable on the next
+         * lookup. Only that small mutable subset can change inside a render,
+         * so pay the full ~1.1MB recompute only when the fingerprint actually
+         * drifted (once per clip/state change) instead of on every frame. */
+        const uint64_t final_signature =
+            (requested_signature != 0
+             && mlv_render_mutable_state_fingerprint(video) == entry_state_fingerprint)
+            ? requested_signature
+            : mlv_processed_frame_signature_with_scale(video,
+                                                       frameIndex,
+                                                       normalizedScale);
         uint16_t * processed_cache = mlv_ensure_u16_buffer(&video->rgb_processed_current_frame,
                                                            &video->rgb_processed_current_frame_words,
                                                            rgb_frame_size);
@@ -6172,7 +6231,7 @@ processed16_store:
 /* Phase 4A: scale-1 entrypoint preserves the original public API. */
 void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t * outputFrame, int threads)
 {
-    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, 1, 1);
+    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, 1, 1, 0);
 }
 
 /* Phase 4A: scale-aware variant. The pipeline still renders at full
@@ -6183,7 +6242,7 @@ void getMlvProcessedFrame16Scaled(mlvObject_t * video,
                                   int threads,
                                   int scaleFactor)
 {
-    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, scaleFactor, 1);
+    getMlvProcessedFrame16_with_scale(video, frameIndex, outputFrame, threads, scaleFactor, 1, 0);
 }
 
 /* Get a processed frame in 8 bit */
@@ -6282,6 +6341,11 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
             ? 0
             : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale));
 
+    /* Round-4 item R4-1: snapshot for the direct8 store below -- see
+     * mlv_render_mutable_state_fingerprint. */
+    const uint64_t entry_state_fingerprint =
+        direct8PathActive ? mlv_render_mutable_state_fingerprint(video) : 0;
+
     int prefetched_hit = 0;
     int cached_phase4b_path = 0;
     int cached_phase4b_y_crop_rows = 0;
@@ -6362,11 +6426,14 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
          * state hash. Storing with the PRE-render `requested_signature` makes
          * the slot unfindable on the next call -- the second call computes a
          * fresh signature against the post-render state and misses the slot.
-         * The indirect path already handles this by recomputing
-         * `final_signature` after the render (line ~3467); mirror that here so
-         * cache reuse works for the direct8 path as well. */
+         * Round-4 item R4-1 narrows the recompute: only the small mutable
+         * fingerprint subset can drift inside a render, so pay the full hash
+         * only when it actually did (once per clip/state change). */
         const uint64_t stored_signature =
-            mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
+            (requested_signature != 0
+             && mlv_render_mutable_state_fingerprint(video) == entry_state_fingerprint)
+            ? requested_signature
+            : mlv_processed_frame_signature_with_scale(video, frameIndex, normalizedScale);
         const int stored_phase4b_path = mlv_phase4bv2_last_path_taken();
         const int stored_phase4b_y_crop_rows = mlv_phase4bv3_last_y_crop_rows();
 
@@ -6439,7 +6506,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
                                       processed_frame,
                                       threads,
                                       normalizedScale,
-                                      skip_processed8_main_cache ? 0 : 1);
+                                      skip_processed8_main_cache ? 0 : 1,
+                                      requested_signature);
     g_mlv_last_processed16_for_8bit_ms = (mlv_stage_timing_now() - processed16_start) * 1000.0;
     mlv_stage_timing_note_elapsed("processed16_for_8bit", frameIndex, g_mlv_last_processed16_for_8bit_ms);
 
