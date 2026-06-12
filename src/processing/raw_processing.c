@@ -1199,10 +1199,270 @@ void processing_object_thread(apply_processing_parameters_t * p)
                              p->core_timing );
 }
 
+/* Round-4 item 0c: the ONE shadows/highlights blur pre-pass, shared by the
+ * 16-bit pipeline (applyProcessingObject) and the direct8 8-bit fast path
+ * (applyProcessingObject8). The two paths used to carry separate copies of
+ * the resolution policy; commit 25795f27 moved the 16-bit copy to half-res
+ * for even-dimension frames and the 8-bit copy silently stayed full-res,
+ * which broke direct8-vs-16-bit byte identity on every SH-active receipt
+ * (the PhaseE9 parity failures). Identical inputs through THIS one function
+ * produce identical blur bytes for both consumers - and the direct8 path
+ * gets the half-res perf win it was missing. */
+static void processing_compute_shadows_highlights_blur( processingObject_t * processing,
+                                                        uint16_t * __restrict inputImage,
+                                                        int imageX, int imageY, int threads )
+{
+    const int shadows_highlights_probe_enabled =
+        processing_shadows_highlights_probe_mode() >= 0;
+    const int halfres_even_dimensions =
+        (imageX >= 2) && (imageY >= 2)
+     && ((imageX & 1) == 0)
+     && ((imageY & 1) == 0);
+    const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
+    const int aggressive_preview_enabled = preview_mode_enabled
+        && processingPlaybackAggressivePreviewModeEnabled();
+    const int halfres_aggressive_preview_odd_height =
+        aggressive_preview_enabled
+     && (imageX >= 2) && (imageY >= 3)
+     && ((imageX & 1) == 0)
+     && ((imageY & 1) != 0);
+    const int preview_scale_factor = processingPlaybackPreviewScaleFactor();
+    const int use_quarterres_rbf =
+        (
+            (preview_mode_enabled
+             && !aggressive_preview_enabled
+             && preview_scale_factor == 1
+             && processing_standard_x1_shadows_highlights_quarterres_enabled())
+         || (preview_mode_enabled
+             && !aggressive_preview_enabled
+             && preview_scale_factor == 2
+             && processing_standard_x2_shadows_highlights_quarterres_enabled())
+         || (preview_mode_enabled
+             && !aggressive_preview_enabled
+             && preview_scale_factor == 4
+             && processing_standard_x4_shadows_highlights_quarterres_enabled())
+         || (aggressive_preview_enabled
+             && (
+                    (preview_scale_factor == 2
+                     && processing_aggressive_x2_shadows_highlights_quarterres_enabled())
+                 || (preview_scale_factor >= 8
+                     && processing_aggressive_x8_shadows_highlights_quarterres_enabled())
+                ))
+        )
+     && imageX >= 4
+     && imageY >= 4;
+    const int use_halfres_rbf =
+        halfres_even_dimensions || halfres_aggressive_preview_odd_height;
+
+    const double shadows_highlights_filter_start = omp_get_wtime();
+    if( use_quarterres_rbf )
+    {
+        const double quarterres_downsample_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        const int half_w = imageX >> 1;
+        const int half_h = imageY >> 1;
+        const int quarter_w = half_w >> 1;
+        const int quarter_h = half_h >> 1;
+        const float quarter_sigma_spatial = 0.0025f;
+        buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+        buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
+        buffer_set_size(processing->shadows_highlights.blur_image_half_out, quarter_w, quarter_h);
+
+        rgb_u16_downsample_2x_box(inputImage,
+                                  get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                  imageX,
+                                  imageY,
+                                  threads);
+        rgb_u16_downsample_2x_box(get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                  get_buffer(processing->shadows_highlights.blur_image_half_out),
+                                  half_w,
+                                  half_h,
+                                  threads);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_quarterres_downsample_ms +=
+                (omp_get_wtime() - quarterres_downsample_start) * 1000.0;
+        }
+
+        const double quarterres_rbf_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        buffer_set_size(processing->shadows_highlights.blur_image_half_in, quarter_w, quarter_h);
+        if( processing_shadows_highlights_curve_index_mask_enabled() )
+            recursive_bf_wrap_with_curve_index_lut(
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    get_buffer(processing->shadows_highlights.blur_image_half_in),
+                    quarter_sigma_spatial,
+                    0.075f+(((float)100.0-40.0f)/666.6f),
+                    quarter_w,
+                    quarter_h,
+                    3,
+                    processing->pre_calc_levels,
+                    processing->pre_calc_matrix[0],
+                    processing->pre_calc_matrix[4],
+                    processing->pre_calc_matrix[8]);
+        else
+            recursive_bf_wrap_with_output_lut(
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    get_buffer(processing->shadows_highlights.blur_image_half_in),
+                    quarter_sigma_spatial,
+                    0.075f+(((float)100.0-40.0f)/666.6f),
+                    quarter_w,
+                    quarter_h,
+                    3,
+                    processing->pre_calc_levels);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_quarterres_rbf_ms +=
+                (omp_get_wtime() - quarterres_rbf_start) * 1000.0;
+        }
+
+        const double quarterres_upsample_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
+        rgb_u16_upsample_2x_bilinear_to_size(
+            get_buffer(processing->shadows_highlights.blur_image_half_in),
+            get_buffer(processing->shadows_highlights.blur_image_half_out),
+            quarter_w,
+            quarter_h,
+            half_w,
+            half_h,
+            threads);
+        rgb_u16_upsample_2x_bilinear_to_size(
+            get_buffer(processing->shadows_highlights.blur_image_half_out),
+            get_buffer(processing->shadows_highlights.blur_image),
+            half_w,
+            half_h,
+            imageX,
+            imageY,
+            threads);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_quarterres_upsample_ms +=
+                (omp_get_wtime() - quarterres_upsample_start) * 1000.0;
+        }
+    }
+    else if( use_halfres_rbf )
+    {
+        const double halfres_downsample_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        const int half_w = imageX >> 1;
+        const int half_h = imageY >> 1;
+        const int halfres_output_h = half_h << 1;
+        const float half_sigma_spatial = 0.0025f * 0.5f;
+        buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
+        buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
+        buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
+
+        rgb_u16_downsample_2x_box(inputImage,
+                                  get_buffer(processing->shadows_highlights.blur_image_half_in),
+                                  imageX,
+                                  imageY,
+                                  threads);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_halfres_downsample_ms +=
+                (omp_get_wtime() - halfres_downsample_start) * 1000.0;
+        }
+        const double halfres_rbf_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        if( processing_shadows_highlights_curve_index_mask_enabled() )
+            recursive_bf_wrap_with_curve_index_lut(
+                    get_buffer(processing->shadows_highlights.blur_image_half_in),
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    half_sigma_spatial,
+                    0.075f+(((float)100.0-40.0f)/666.6f),
+                    half_w,
+                    half_h,
+                    3,
+                    processing->pre_calc_levels,
+                    processing->pre_calc_matrix[0],
+                    processing->pre_calc_matrix[4],
+                    processing->pre_calc_matrix[8]);
+        else
+            recursive_bf_wrap_with_output_lut(
+                    get_buffer(processing->shadows_highlights.blur_image_half_in),
+                    get_buffer(processing->shadows_highlights.blur_image_half_out),
+                    half_sigma_spatial,
+                    0.075f+(((float)100.0-40.0f)/666.6f),
+                    half_w,
+                    half_h,
+                    3,
+                    processing->pre_calc_levels);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_halfres_rbf_ms +=
+                (omp_get_wtime() - halfres_rbf_start) * 1000.0;
+        }
+        const double halfres_upsample_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        rgb_u16_upsample_2x_bilinear(get_buffer(processing->shadows_highlights.blur_image_half_out),
+                                     get_buffer(processing->shadows_highlights.blur_image),
+                                     half_w,
+                                     half_h,
+                                     threads);
+        if( halfres_output_h < imageY )
+        {
+            uint16_t * blur = get_buffer(processing->shadows_highlights.blur_image);
+            const size_t row_words = (size_t)imageX * 3u;
+            const uint16_t * src_row =
+                blur + (size_t)(halfres_output_h - 1) * row_words;
+            for( int y = halfres_output_h; y < imageY; ++y )
+            {
+                memcpy(blur + (size_t)y * row_words,
+                       src_row,
+                       row_words * sizeof(uint16_t));
+            }
+        }
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_halfres_upsample_ms +=
+                (omp_get_wtime() - halfres_upsample_start) * 1000.0;
+        }
+    }
+    else if( processing_shadows_highlights_curve_index_mask_enabled() )
+    {
+        const double fullres_rbf_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        recursive_bf_wrap_with_curve_index_lut(
+                inputImage,
+                get_buffer(processing->shadows_highlights.blur_image),
+                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
+                imageX, imageY, 3,
+                processing->pre_calc_levels,
+                processing->pre_calc_matrix[0],
+                processing->pre_calc_matrix[4],
+                processing->pre_calc_matrix[8]);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_fullres_ms +=
+                (omp_get_wtime() - fullres_rbf_start) * 1000.0;
+        }
+    }
+    else
+    {
+        const double fullres_rbf_start =
+            shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
+        recursive_bf_wrap_with_output_lut(
+                inputImage,
+                get_buffer(processing->shadows_highlights.blur_image),
+                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
+                imageX, imageY, 3,
+                processing->pre_calc_levels);
+        if( shadows_highlights_probe_enabled )
+        {
+            g_processing_last_shadows_highlights_filter_fullres_ms +=
+                (omp_get_wtime() - fullres_rbf_start) * 1000.0;
+        }
+    }
+    processing_capture_last_shadows_highlights_rbf_timing();
+    g_processing_last_shadows_highlights_filter_ms +=
+        (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
+}
+
 /* Apply it with multiple threads */
-void applyProcessingObject( processingObject_t * processing, 
-                            int imageX, int imageY, 
-                            uint16_t * __restrict inputImage, 
+void applyProcessingObject( processingObject_t * processing,
+                            int imageX, int imageY,
+                            uint16_t * __restrict inputImage,
                             uint16_t * __restrict outputImage,
                             int threads, int imageChanged, uint64_t frameIndex )
 {
@@ -1235,266 +1495,17 @@ void applyProcessingObject( processingObject_t * processing,
         ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
      || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
      || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 );
-    const int shadows_highlights_probe_enabled =
-        processing_shadows_highlights_probe_mode() >= 0;
 
     /* When shadows/highlights and clarity are inactive, the blur buffer is not
      * read by the 16-bit path. Keep the resized scratch buffer around, but skip
      * the frame-sized copy. */
 
-    if( shadows_highlights_active )
+    /* Round-4 item 0c: the blur pre-pass lives in
+     * processing_compute_shadows_highlights_blur so the direct8 8-bit path
+     * computes byte-identical blur bytes (the PhaseE9 parity fix). */
+    if( shadows_highlights_active && imageChanged )
     {
-        const int halfres_even_dimensions =
-            (imageX >= 2) && (imageY >= 2)
-         && ((imageX & 1) == 0)
-         && ((imageY & 1) == 0);
-        const int preview_mode_enabled = processingPlaybackPreviewModeEnabled();
-        const int aggressive_preview_enabled = preview_mode_enabled
-            && processingPlaybackAggressivePreviewModeEnabled();
-        const int halfres_aggressive_preview_odd_height =
-            aggressive_preview_enabled
-         && (imageX >= 2) && (imageY >= 3)
-         && ((imageX & 1) == 0)
-         && ((imageY & 1) != 0);
-        const int preview_scale_factor = processingPlaybackPreviewScaleFactor();
-        const int use_quarterres_rbf =
-            (
-                (preview_mode_enabled
-                 && !aggressive_preview_enabled
-                 && preview_scale_factor == 1
-                 && processing_standard_x1_shadows_highlights_quarterres_enabled())
-             || (preview_mode_enabled
-                 && !aggressive_preview_enabled
-                 && preview_scale_factor == 2
-                 && processing_standard_x2_shadows_highlights_quarterres_enabled())
-             || (preview_mode_enabled
-                 && !aggressive_preview_enabled
-                 && preview_scale_factor == 4
-                 && processing_standard_x4_shadows_highlights_quarterres_enabled())
-             || (aggressive_preview_enabled
-                 && (
-                        (preview_scale_factor == 2
-                         && processing_aggressive_x2_shadows_highlights_quarterres_enabled())
-                     || (preview_scale_factor >= 8
-                         && processing_aggressive_x8_shadows_highlights_quarterres_enabled())
-                    )
-                )
-            )
-         && imageX >= 4
-         && imageY >= 4;
-        const int use_halfres_rbf =
-            halfres_even_dimensions || halfres_aggressive_preview_odd_height;
-
-        /* Reblur if image changed */
-        if (imageChanged)
-        {
-            const double shadows_highlights_filter_start = omp_get_wtime();
-            //memcpy(get_buffer(processing->shadows_highlights.blur_image), inputImage, imageX * imageY * sizeof(uint16_t) * 3);
-            //blur_image(get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, blur_radius, 1, 1, 1, 0, imageY-1);
-            if(0) blur_image_threaded( get_buffer(processing->shadows_highlights.blur_image), outputImage, imageX, imageY, 0, threads );
-            else if( use_quarterres_rbf )
-            {
-                const double quarterres_downsample_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                const int half_w = imageX >> 1;
-                const int half_h = imageY >> 1;
-                const int quarter_w = half_w >> 1;
-                const int quarter_h = half_h >> 1;
-                const float quarter_sigma_spatial = 0.0025f;
-                buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
-                buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
-                buffer_set_size(processing->shadows_highlights.blur_image_half_out, quarter_w, quarter_h);
-
-                rgb_u16_downsample_2x_box(inputImage,
-                                          get_buffer(processing->shadows_highlights.blur_image_half_in),
-                                          imageX,
-                                          imageY,
-                                          threads);
-                rgb_u16_downsample_2x_box(get_buffer(processing->shadows_highlights.blur_image_half_in),
-                                          get_buffer(processing->shadows_highlights.blur_image_half_out),
-                                          half_w,
-                                          half_h,
-                                          threads);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_quarterres_downsample_ms +=
-                        (omp_get_wtime() - quarterres_downsample_start) * 1000.0;
-                }
-
-                const double quarterres_rbf_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                buffer_set_size(processing->shadows_highlights.blur_image_half_in, quarter_w, quarter_h);
-                if( processing_shadows_highlights_curve_index_mask_enabled() )
-                    recursive_bf_wrap_with_curve_index_lut(
-                            get_buffer(processing->shadows_highlights.blur_image_half_out),
-                            get_buffer(processing->shadows_highlights.blur_image_half_in),
-                            quarter_sigma_spatial,
-                            0.075f+(((float)100.0-40.0f)/666.6f),
-                            quarter_w,
-                            quarter_h,
-                            3,
-                            processing->pre_calc_levels,
-                            processing->pre_calc_matrix[0],
-                            processing->pre_calc_matrix[4],
-                            processing->pre_calc_matrix[8]);
-                else
-                    recursive_bf_wrap_with_output_lut(
-                            get_buffer(processing->shadows_highlights.blur_image_half_out),
-                            get_buffer(processing->shadows_highlights.blur_image_half_in),
-                            quarter_sigma_spatial,
-                            0.075f+(((float)100.0-40.0f)/666.6f),
-                            quarter_w,
-                            quarter_h,
-                            3,
-                            processing->pre_calc_levels);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_quarterres_rbf_ms +=
-                        (omp_get_wtime() - quarterres_rbf_start) * 1000.0;
-                }
-
-                const double quarterres_upsample_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
-                rgb_u16_upsample_2x_bilinear_to_size(
-                    get_buffer(processing->shadows_highlights.blur_image_half_in),
-                    get_buffer(processing->shadows_highlights.blur_image_half_out),
-                    quarter_w,
-                    quarter_h,
-                    half_w,
-                    half_h,
-                    threads);
-                rgb_u16_upsample_2x_bilinear_to_size(
-                    get_buffer(processing->shadows_highlights.blur_image_half_out),
-                    get_buffer(processing->shadows_highlights.blur_image),
-                    half_w,
-                    half_h,
-                    imageX,
-                    imageY,
-                    threads);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_quarterres_upsample_ms +=
-                        (omp_get_wtime() - quarterres_upsample_start) * 1000.0;
-                }
-            }
-            else if( use_halfres_rbf )
-            {
-                const double halfres_downsample_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                const int half_w = imageX >> 1;
-                const int half_h = imageY >> 1;
-                const int halfres_output_h = half_h << 1;
-                const float half_sigma_spatial = 0.0025f * 0.5f;
-                buffer_set_size(processing->shadows_highlights.blur_image, imageX, imageY);
-                buffer_set_size(processing->shadows_highlights.blur_image_half_in, half_w, half_h);
-                buffer_set_size(processing->shadows_highlights.blur_image_half_out, half_w, half_h);
-
-                rgb_u16_downsample_2x_box(inputImage,
-                                          get_buffer(processing->shadows_highlights.blur_image_half_in),
-                                          imageX,
-                                          imageY,
-                                          threads);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_halfres_downsample_ms +=
-                        (omp_get_wtime() - halfres_downsample_start) * 1000.0;
-                }
-                const double halfres_rbf_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                if( processing_shadows_highlights_curve_index_mask_enabled() )
-                    recursive_bf_wrap_with_curve_index_lut(
-                            get_buffer(processing->shadows_highlights.blur_image_half_in),
-                            get_buffer(processing->shadows_highlights.blur_image_half_out),
-                            half_sigma_spatial,
-                            0.075f+(((float)100.0-40.0f)/666.6f),
-                            half_w,
-                            half_h,
-                            3,
-                            processing->pre_calc_levels,
-                            processing->pre_calc_matrix[0],
-                            processing->pre_calc_matrix[4],
-                            processing->pre_calc_matrix[8]);
-                else
-                    recursive_bf_wrap_with_output_lut(
-                            get_buffer(processing->shadows_highlights.blur_image_half_in),
-                            get_buffer(processing->shadows_highlights.blur_image_half_out),
-                            half_sigma_spatial,
-                            0.075f+(((float)100.0-40.0f)/666.6f),
-                            half_w,
-                            half_h,
-                            3,
-                            processing->pre_calc_levels);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_halfres_rbf_ms +=
-                        (omp_get_wtime() - halfres_rbf_start) * 1000.0;
-                }
-                const double halfres_upsample_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                rgb_u16_upsample_2x_bilinear(get_buffer(processing->shadows_highlights.blur_image_half_out),
-                                             get_buffer(processing->shadows_highlights.blur_image),
-                                             half_w,
-                                             half_h,
-                                             threads);
-                if( halfres_output_h < imageY )
-                {
-                    uint16_t * blur = get_buffer(processing->shadows_highlights.blur_image);
-                    const size_t row_words = (size_t)imageX * 3u;
-                    const uint16_t * src_row =
-                        blur + (size_t)(halfres_output_h - 1) * row_words;
-                    for( int y = halfres_output_h; y < imageY; ++y )
-                    {
-                        memcpy(blur + (size_t)y * row_words,
-                               src_row,
-                               row_words * sizeof(uint16_t));
-                    }
-                }
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_halfres_upsample_ms +=
-                        (omp_get_wtime() - halfres_upsample_start) * 1000.0;
-                }
-            }
-            else if( processing_shadows_highlights_curve_index_mask_enabled() )
-            {
-                const double fullres_rbf_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                recursive_bf_wrap_with_curve_index_lut(
-                        inputImage,
-                        get_buffer(processing->shadows_highlights.blur_image),
-                        0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
-                        imageX, imageY, 3,
-                        processing->pre_calc_levels,
-                        processing->pre_calc_matrix[0],
-                        processing->pre_calc_matrix[4],
-                        processing->pre_calc_matrix[8]);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_fullres_ms +=
-                        (omp_get_wtime() - fullres_rbf_start) * 1000.0;
-                }
-            }
-            else
-            {
-                const double fullres_rbf_start =
-                    shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
-                recursive_bf_wrap_with_output_lut(
-                        inputImage,
-                        get_buffer(processing->shadows_highlights.blur_image),
-                        0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
-                        imageX, imageY, 3,
-                        processing->pre_calc_levels);
-                if( shadows_highlights_probe_enabled )
-                {
-                    g_processing_last_shadows_highlights_filter_fullres_ms +=
-                        (omp_get_wtime() - fullres_rbf_start) * 1000.0;
-                }
-            }
-            processing_capture_last_shadows_highlights_rbf_timing();
-            g_processing_last_shadows_highlights_filter_ms +=
-                (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
-        }
+        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads );
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
@@ -3726,31 +3737,12 @@ void applyProcessingObject8( processingObject_t * processing,
         processing_has_direct8_shadow_highlight_adjustments(processing);
     if( shadows_highlights_active && imageChanged )
     {
-        const double shadows_highlights_filter_start = omp_get_wtime();
-        if( processing_shadows_highlights_curve_index_mask_enabled() )
-        {
-            recursive_bf_wrap_with_curve_index_lut(
-                inputImage,
-                get_buffer(processing->shadows_highlights.blur_image),
-                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
-                imageX, imageY, 3,
-                processing->pre_calc_levels,
-                processing->pre_calc_matrix[0],
-                processing->pre_calc_matrix[4],
-                processing->pre_calc_matrix[8]);
-        }
-        else
-        {
-            recursive_bf_wrap_with_output_lut(
-                inputImage,
-                get_buffer(processing->shadows_highlights.blur_image),
-                0.0005f, 0.075f+(((float)100.0-40.0f)/666.6f),
-                imageX, imageY, 3,
-                processing->pre_calc_levels);
-        }
-        processing_capture_last_shadows_highlights_rbf_timing();
-        g_processing_last_shadows_highlights_filter_ms +=
-            (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
+        /* Round-4 item 0c: SAME pre-pass as the 16-bit pipeline (this path
+         * used to keep a full-res-only copy of the policy, which drifted
+         * when 25795f27 moved the 16-bit side to half-res - the PhaseE9
+         * direct8 parity break). Also a perf win: even-dimension frames now
+         * get the half-res RBF here too. */
+        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads );
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 

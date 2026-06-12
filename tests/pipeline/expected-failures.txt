@@ -12,14 +12,10 @@
 #        changes - adjudicate and either fix the test or remove the line.
 #   [FLAKE] documented order/timing flake with a known root-cause family.
 
-# --- [D8] direct8 byte-identity cluster ---
-# 2026-06-12 round-4 item 0b: SIX FIXED (pre_calc_levels port + Reinhard
-# green-channel fix in the intrin kernel + non-preview contract restored for
-# the unscaled entry) - pruned. The PhaseE9 pair remains: local-tone (SH)
-# blur-source divergence between the direct8 8-bit path and the 16-bit
-# reference, dedicated investigation in flight.
-DualIsoPipeline.PhaseE9_Direct8LookAssistToneSubsetMatchesIndirectPathByteIdentity
-DualIsoPipeline.PhaseE9_Direct8LookAssistToneSubsetWithAgxAndThreadsMatchesIndirectPathByteIdentity
+# --- [D8] direct8 byte-identity cluster: ALL EIGHT FIXED 2026-06-12 ---
+# (round-4 items 0b/0c: pre_calc_levels port + Reinhard green fix in the
+# intrin kernel, non-preview contract for the unscaled entry, and the shared
+# shadows/highlights blur pre-pass that ended the 16-bit/8-bit policy drift.)
 
 # --- [STALE?] dispatch/contract pins predating the 2026-06-10 baseline ---
 Phase3_PAR.SerialPathByteIdentity
