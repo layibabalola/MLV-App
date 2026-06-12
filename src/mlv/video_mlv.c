@@ -5892,6 +5892,7 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
          * core degrades to half when the clip dims reject the 4x kernel. */
         const int proxyHalvings = (mlvPlaybackProxyLevel() == 2) ? 2 : 1;
         int mid_w = 0, mid_h = 0;
+        int usedHalvings = 0;
         int reducedRenderOk = 0;
         if (halfProcessingWanted)
         {
@@ -5900,6 +5901,7 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
                 reducedRenderOk = mlv_render_scaled_rgb16_x1_half_preview_core(
                     video, frameIndex, NULL, unprocessed_frame, threads,
                     /*upscale_to_full*/0, h, &mid_w, &mid_h);
+                if (reducedRenderOk) usedHalvings = h;
             }
         }
         if (reducedRenderOk)
@@ -5917,41 +5919,55 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
             uint16_t * processed_mid = mlv_ensure_thread_rgb_u16_buffer(rgb_full_words);
             if (processed_mid)
             {
-                /* applyProcessingObject biases DARK below half dimensions
-                 * (round-3 item-3 balance trace: ~30% luminance loss at
-                 * quarter dims with identical look state; quarter RENDER
-                 * proven innocent via the path-10 probe). Until that
-                 * dimension dependence is fixed (round-3 item 4), processing
-                 * always runs at HALF dims or larger: a quarter render is
-                 * first upscaled 2x, processed at half, then upscaled to
-                 * full. */
-                int proc_w = mid_w;
-                int proc_h = mid_h;
-                const uint16_t * proc_input = unprocessed_frame;
-                if (mid_w < full_w / 2)
-                {
-                    proc_w = full_w / 2;
-                    proc_h = full_h / 2;
-                    mlv_rgb_u16_upscale_to_size(unprocessed_frame, mid_w, mid_h,
-                                                processed_mid, proc_w, proc_h, threads);
-                    /* Swap: the half-res image now lives in the TLS slot;
-                     * processing writes back into the video temp buffer. */
-                    proc_input = processed_mid;
-                    processed_mid = unprocessed_frame;
-                }
+                /* Round-3 item 4 root cause of the item-3 dark bias: the
+                 * shadows/highlights machinery selects its internal
+                 * resolution path from processingPlaybackPreviewScaleFactor
+                 * and assumes the input matches that scale
+                 * (raw_processing.c:1260-1284). A reduced proxy input
+                 * reported as scale 1 made SH double-reduce and mis-blur.
+                 * Report the EFFECTIVE scale instead: half input behaves
+                 * like the proven x2 lane, quarter like the proven x4 lane.
+                 * This also re-enables true mid-dim processing for the
+                 * Quarter level (the item-3 upscale-first workaround is
+                 * gone). */
                 mlv_sync_processing_black_white_levels(video);
                 const double processing_start = mlv_stage_timing_now();
                 const int previous_preview_scale_factor =
                     processingPlaybackPreviewScaleFactor();
-                processingSetPlaybackPreviewScaleFactor(normalizedScale);
+                processingSetPlaybackPreviewScaleFactor(normalizedScale << usedHalvings);
                 applyProcessingObject( video->processing,
-                                       proc_w, proc_h,
-                                       (uint16_t *)proc_input,
+                                       mid_w, mid_h,
+                                       unprocessed_frame,
                                        processed_mid,
                                        threads, 1, frameIndex );
                 processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
-                mlv_rgb_u16_upscale_to_size(processed_mid, proc_w, proc_h,
-                                            outputFrame, width, height, threads);
+                if (usedHalvings >= 2)
+                {
+                    /* Two verified 2x passes for the quarter level; the
+                     * intermediate half image reuses the bayer-side TLS u16
+                     * slot (dead after the decode). */
+                    const int half_w = full_w / 2;
+                    const int half_h = full_h / 2;
+                    uint16_t * tmp_half = mlv_ensure_thread_u16_buffer(
+                        (uint64_t)half_w * (uint64_t)half_h * 3u);
+                    if (tmp_half)
+                    {
+                        mlv_rgb_u16_upscale_to_size(processed_mid, mid_w, mid_h,
+                                                    tmp_half, half_w, half_h, threads);
+                        mlv_rgb_u16_upscale_to_size(tmp_half, half_w, half_h,
+                                                    outputFrame, width, height, threads);
+                    }
+                    else
+                    {
+                        mlv_rgb_u16_upscale_to_size(processed_mid, mid_w, mid_h,
+                                                    outputFrame, width, height, threads);
+                    }
+                }
+                else
+                {
+                    mlv_rgb_u16_upscale_to_size(processed_mid, mid_w, mid_h,
+                                                outputFrame, width, height, threads);
+                }
                 g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
                 mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
                 goto processed16_store;
