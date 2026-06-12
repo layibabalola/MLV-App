@@ -889,6 +889,7 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
 static int mlv_halfres_x1_preview_enabled(void);
 static int mlv_halfres_x1_processing_enabled(void);
 static int mlv_quarterres_x2_preview_enabled(void);
+static int mlv_quarterres_x2_processing_enabled(void);
 
 static uint64_t mlv_processed_frame_state_signature(mlvObject_t * video)
 {
@@ -929,8 +930,10 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
          * so the cache key must distinguish the two render paths. */
         const int previewMode = processingPlaybackPreviewModeEnabled();
         const int quarterresX2Preview = mlv_quarterres_x2_preview_enabled();
+        const int quarterresX2Processing = mlv_quarterres_x2_processing_enabled();
         hash = mlv_hash_bytes(hash, &previewMode, sizeof(previewMode));
         hash = mlv_hash_bytes(hash, &quarterresX2Preview, sizeof(quarterresX2Preview));
+        hash = mlv_hash_bytes(hash, &quarterresX2Processing, sizeof(quarterresX2Processing));
     }
 
     if (!video)
@@ -2375,7 +2378,14 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
         && !((task->scaleFactor >= 4
               || (task->scaleFactor == 2
                   && !mlvPlaybackAggressivePreviewMode()
-                  && mlv_processed8_prefetch_indirect_x2_enabled()))
+                  && mlv_processed8_prefetch_indirect_x2_enabled()
+                  /* Round-3 item 5: the foreground x2 render now processes at
+                   * quarter dims (path 11) by default; the worker's indirect
+                   * render would produce the old path-5 composition and the
+                   * fills would be byte-mismatched. Keep the opt-in worker
+                   * coherent: it engages only when quarter processing is
+                   * killed (the path-5 foreground it matches). */
+                  && !mlv_quarterres_x2_processing_enabled()))
              && mlv_processed8_prefetch_indirect_enabled()
              && mlv_processed8_prefetch_indirect_state_supported(task->processing)))
     {
@@ -3491,6 +3501,20 @@ static int mlv_halfres_x1_processing_enabled(void)
     return 1;
 }
 
+/* Round-3 item 5: the same lever at x2 Sharp - process at the quarter
+ * render's native dims (the proven SH x4 lane via the effective-scale
+ * envelope) and upscale the PROCESSED result to the x2 display size.
+ * Default on; the kill switch restores process-at-x2-out for A/Bs. */
+static int mlv_quarterres_x2_processing_enabled(void)
+{
+    const char * v = getenv("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING");
+    if (v && *v)
+    {
+        return (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+    }
+    return 1;
+}
+
 static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
 
 static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
@@ -4005,12 +4029,20 @@ static void mlv_rgb_u16_upscale_to_size(const uint16_t * __restrict src,
 /* Quarter-res x2 preview core: 4x Bayer downsample -> HQ Dual ISO recon at
  * quarter res -> debayer -> 2x bilinear upscale to the x2 display size. Mirrors
  * the buffer discipline of the proven x2 / v3 cores. Returns 1 on success, 0 to
- * fall back to the half-res x2 path. */
+ * fall back to the half-res x2 path.
+ * Round-3 item 5: when upscale_to_out is 0 the core stops after the debayer
+ * + row padding and leaves the QUARTER image at the start of outputFrame
+ * (dims via the out-params); the caller processes at quarter dims (the
+ * proven SH x4 lane via the effective-scale envelope) and upscales the
+ * PROCESSED result - the same pattern that took x1 from ~9 to ~17. */
 static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
                                                            uint64_t frameIndex,
                                                            const uint16_t * decodedRawFrame,
                                                            uint16_t * outputFrame,
-                                                           int threads)
+                                                           int threads,
+                                                           int upscale_to_out,
+                                                           int * out_q_w,
+                                                           int * out_q_h)
 {
     if (!video || !outputFrame) return 0;
     const int full_w = (int)getMlvWidth(video);
@@ -4067,9 +4099,35 @@ static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
     mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
     g_mlv_last_llrawproc_ms = llrawproc_ms;
 
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    if (!upscale_to_out)
+    {
+        /* Reduced-processing mode: debayer + pad straight into the caller's
+         * buffer at quarter layout; the caller upscales after processing. */
+        const double debayer_start = mlv_stage_timing_now();
+        debayerBasicU16(outputFrame, q_bayer, q_w, q_h, threads, bit_shift);
+        const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+        const size_t q_row_words_direct = (size_t)q_w * 3u;
+        if (q_h > 0)
+        {
+            const uint16_t * last_row =
+                outputFrame + (size_t)(q_h - 1) * q_row_words_direct;
+            for (int y = q_h; y < q_out_h; ++y)
+            {
+                memcpy(outputFrame + (size_t)y * q_row_words_direct,
+                       last_row, q_row_words_direct * sizeof(uint16_t));
+            }
+        }
+        g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms;
+        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+        if (out_q_w) *out_q_w = q_w;
+        if (out_q_h) *out_q_h = q_out_h;
+        g_mlv_phase4bv2_path_taken = 11;             /* x2-quarter preview, quarter processing */
+        return 1;
+    }
+
     uint16_t * q_rgb = mlv_ensure_thread_rgb_u16_buffer(q_rgb_words);
     if (!q_rgb) return 0;
-    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
     const double debayer_start = mlv_stage_timing_now();
     debayerBasicU16(q_rgb, q_bayer, q_w, q_h, threads, bit_shift);
     const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
@@ -4091,6 +4149,8 @@ static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
 
     g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms + upscale_ms;
     mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    if (out_q_w) *out_q_w = q_w;
+    if (out_q_h) *out_q_h = q_out_h;
     g_mlv_phase4bv2_path_taken = 5;                  /* x2-quarter preview */
     return 1;
 }
@@ -4399,7 +4459,8 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
         }
         if (!mlvPlaybackAggressivePreviewMode()
          && mlv_quarterres_x2_preview_enabled()
-         && mlv_render_scaled_rgb16_x2_quarter_preview_core(video, frameIndex, NULL, outputFrame, threads))
+         && mlv_render_scaled_rgb16_x2_quarter_preview_core(video, frameIndex, NULL, outputFrame, threads,
+                                                            /*upscale_to_out*/1, NULL, NULL))
         {
             return 1;
         }
@@ -4896,7 +4957,10 @@ static int mlv_render_scaled_rgb16_from_raw(mlvObject_t * video,
                                                                     frameIndex,
                                                                     x2_quarter_source,
                                                                     outputFrame,
-                                                                    threads))
+                                                                    threads,
+                                                                    /*upscale_to_out*/1,
+                                                                    NULL,
+                                                                    NULL))
                 {
                     return 1;
                 }
@@ -5873,6 +5937,52 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
      * dimensions. The debayer step is skipped entirely on this path. */
     if (normalizedScale > 1)
     {
+        /* Round-3 item 5: at x2 Sharp playback preview, process at the
+         * quarter render's native dims (effective scale 4 = the proven SH
+         * x4 lane) and upscale the PROCESSED result - the same lever that
+         * took x1 from ~9 to ~17 fps. Fail-open: any rejection falls
+         * through to the unchanged full dispatcher below. */
+        if (normalizedScale == 2
+         && processingPlaybackPreviewModeEnabled()
+         && !mlvPlaybackAggressivePreviewMode()
+         && mlv_quarterres_x2_preview_enabled()
+         && mlv_quarterres_x2_processing_enabled()
+         && llrpHQDualIso(video))
+        {
+            int q_w = 0, q_h = 0;
+            if (mlv_render_scaled_rgb16_x2_quarter_preview_core(video,
+                                                                frameIndex,
+                                                                NULL,
+                                                                unprocessed_frame,
+                                                                threads,
+                                                                /*upscale_to_out*/0,
+                                                                &q_w,
+                                                                &q_h))
+            {
+                const uint64_t rgb_out_words =
+                    (uint64_t)width * (uint64_t)height * 3u;
+                uint16_t * processed_q = mlv_ensure_thread_rgb_u16_buffer(rgb_out_words);
+                if (processed_q)
+                {
+                    mlv_sync_processing_black_white_levels(video);
+                    const double processing_start = mlv_stage_timing_now();
+                    const int previous_preview_scale_factor =
+                        processingPlaybackPreviewScaleFactor();
+                    processingSetPlaybackPreviewScaleFactor(4);
+                    applyProcessingObject( video->processing,
+                                           q_w, q_h,
+                                           unprocessed_frame,
+                                           processed_q,
+                                           threads, 1, frameIndex );
+                    processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
+                    mlv_rgb_u16_upscale_to_size(processed_q, q_w, q_h,
+                                                outputFrame, width, height, threads);
+                    g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
+                    mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
+                    goto processed16_store;
+                }
+            }
+        }
         if (!mlv_render_scaled_rgb16(video, frameIndex, unprocessed_frame, normalizedScale, threads))
         {
             memset(outputFrame, 0, (size_t)rgb_frame_size * sizeof(uint16_t));
