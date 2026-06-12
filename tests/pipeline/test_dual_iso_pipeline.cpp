@@ -4639,6 +4639,12 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
     ASSERT_TRUE(processing != nullptr);
     processing->shadows_highlights.shadows = 0.5;
     processing->shadows_highlights.highlights = -0.5;
+    /* Round-4 item 2: SH-active receipts are direct8-eligible in preview now,
+     * and the direct8 blur pre-pass pins itself to the export policy (no
+     * quarterres lane). The path-5 quarterres-SH composition this test
+     * preserves is only reachable through the indirect render - keep the
+     * receipt direct8-INeligible so that composition stays exercised. */
+    processingSetSharpening(processing, 0.5);
 
     const int previous_preview_scale_factor = processingPlaybackPreviewScaleFactor();
     processingSetPlaybackPreviewScaleFactor(2);
