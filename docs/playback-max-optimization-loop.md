@@ -157,7 +157,30 @@ tearing (likely the same cold-path complex: look-assist settle + worker warm-up 
 all compete in the first seconds). Deserves its own session; not a regression of a measured gate
 (content/span/suite all clean warm), but user-visible on first play.
 
-## ROUND-3 AUTONOMOUS MAX-OUT (ACTIVE 2026-06-12; user-directed)
+## ROUND-3 AUTONOMOUS MAX-OUT (COMPLETE 2026-06-12 — stop condition met)
+
+**Stop condition:** no keeper-grade non-regressive lever remains without new instrumentation.
+The last candidate (present-pacing median, p50 14-16 ms) has unknown semantics in the
+thrice-reverted present-pipeline zone and is queued as the top NEXT-round item (diagnosis
+first, instrument-row class). All five R3 items dispositioned: R3-1 KEEP (Preview Resolution
+UI), R3-2 KEEP (x1 half-dim processing, +23/+25/+45 Sharp, +53/+28/+55 Aggr), R3-3 KEEP
+(x1 Quarter level, color-corrected after the dark-bug isolation), R3-4 KEEP (SH effective-scale
+root fix; unlocked Quarter to 16.9/16.7), R3-5 re-ranked KEEP (x2 quarter-dim processing,
++7-12% all pairs; aggressive-inversion premise dissolved).
+
+**FINAL STANDINGS (warm M16 trio medians, native 23.976; baseline = 2026-06-10):**
+x1 Sharp 5.4-8.1 -> 12.5-15 Auto / ~17 Quarter opt-in · x1 Aggr 7.2 -> 13.5-16.6 ·
+x2 Sharp 11 -> 16.8-17.2 (warm runs touch native) · x2 Aggr 12.3-12.8 -> ~14.9 ·
+x4 13-13.7 -> 21-23 (native) · x8 13-15.9 -> 21-24.4 (native). Every quality/scale/proxy
+tradeoff is a persisted GUI setting (Playback Quality menu); pause/scrub/export always full
+quality; every proxy path has an env kill switch for the harness.
+
+**Open follow-ups:** present-pacing diagnosis (top next-round item) · SH below-quarter-dims
+dark bias root question (worked around via effective-scale; the gate-level cause in
+raw_processing.c:1260-1284 remains for a processing-side fix) · 2a test-debt chip
+task_72067605 · cold-first-play complex incl. the ~1/36 look-assist-never-applied race.
+
+## (was) ROUND-3 AUTONOMOUS MAX-OUT (ACTIVE 2026-06-12; user-directed)
 
 **Goal (user direction, 2026-06-12):** iterate autonomously until playback performance is truly
 maxed — NO approval stops, NO sign-off ceremony (the round-2 "pending user softness sign-off"
