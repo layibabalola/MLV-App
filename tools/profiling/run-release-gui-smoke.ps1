@@ -1044,6 +1044,14 @@ $lookAssistSettleLine = $recentLines |
 $lookAssistApplyLine = $recentLines |
     Where-Object { $_ -like "*look_assist.apply.result*" } |
     Select-Object -Last 1
+# Since the async Look Assist apply (master 8ddddce2), the default path finishes with
+# look_assist.apply.auto_wb_async_applied and never emits look_assist.apply.result
+# (that event is sync-fallback-only). Accept the async terminal event as apply
+# evidence; the scene then comes from the settle line, which fires only after the
+# diagnostics turned valid.
+$lookAssistAsyncApplyLine = $recentLines |
+    Where-Object { $_ -like "*look_assist.apply.auto_wb_async_applied*" } |
+    Select-Object -Last 1
 $visualStateLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.visual_state*" } |
     Select-Object -Last 1
@@ -1070,6 +1078,7 @@ $dualIsoFull20Summary = if ($dualIsoSummaryLine) { Convert-PlaybackLogLineToObje
 $dualIsoMixChromaSummary = if ($dualIsoMixChromaSummaryLine) { Convert-PlaybackLogLineToObject $dualIsoMixChromaSummaryLine } else { $null }
 $lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject $lookAssistSettleLine } else { $null }
 $lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
+$lookAssistAsyncApply = if ($lookAssistAsyncApplyLine) { Convert-PlaybackLogLineToObject $lookAssistAsyncApplyLine } else { $null }
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
@@ -1080,11 +1089,13 @@ $sustainedGuiFpsSample =
     "end-of-requested-duration window screenshot after ${Seconds}s playback"
 
 $lookAssistApplied =
-    ($null -ne $lookAssistApply) -and
     ($null -ne $lookAssistSettle) -and
     ($lookAssistSettle.enabled -eq 1) -and
     ($lookAssistSettle.diagnostics_valid -eq 1) -and
-    (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene))
+    ( ( ($null -ne $lookAssistApply) -and
+        (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene)) ) -or
+      ( ($null -ne $lookAssistAsyncApply) -and
+        (-not [string]::IsNullOrWhiteSpace([string]$lookAssistSettle.scene)) ) )
 
 $scaleRequestStart = Get-ObjectPropertyValue $playbackStart "scale_request"
 $scaleRequestLast = Get-ObjectPropertyValue $playbackSummary "scale_request_last"
@@ -1245,6 +1256,8 @@ $result = [pscustomobject]@{
         colorArtifactScan = $colorArtifactScan
         lookAssist = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
+            asyncApplied = [bool]($null -ne $lookAssistAsyncApply)
+            asyncDecision = Get-ObjectPropertyValue $lookAssistAsyncApply "decision"
             enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
             diagnosticsValid = Get-ObjectPropertyValue $lookAssistSettle "diagnostics_valid"
             waitMs = Get-ObjectPropertyValue $lookAssistSettle "wait_ms"

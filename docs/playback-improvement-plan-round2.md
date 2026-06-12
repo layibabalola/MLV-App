@@ -41,6 +41,12 @@ ASCII-only .ps1). Additions for round 2:
 
 ## Item 0 — Detector session segmentation (harness fix; BLOCKING, no pixel changes)
 
+**STATUS: LANDED 2026-06-11 (wb-d7392bd007c84a80) — all validations PASS; results in the ledger
+("Round-2 Item 0 results"). No app trace line was needed: `run_metadata=` is already a guaranteed
+per-launch first line. Scope grew by one harness defect found during validation: the smoke
+wrapper's look-assist apply-evidence predicate was structurally broken since the async Look
+Assist apply (master 8ddddce2) and is fixed in the same work block.**
+
 Problem: `tools/profiling/detect-playback-artifacts.ps1` treats any >2000 ms gap with playback
 events on both sides as a mid-playback freeze (FAIL). When the supplied `-TraceLog` contains
 multiple app sessions (the per-day `mlvapp-<date>.log` appends across runs), inter-run idle time
