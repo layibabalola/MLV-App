@@ -157,7 +157,22 @@ tearing (likely the same cold-path complex: look-assist settle + worker warm-up 
 all compete in the first seconds). Deserves its own session; not a regression of a measured gate
 (content/span/suite all clean warm), but user-visible on first play.
 
-## ROUND-2 IN-SESSION LOOP (ACTIVE 2026-06-11; user-directed)
+## ROUND-2 IN-SESSION LOOP (COMPLETE 2026-06-12 — stop condition (a), all items dispositioned)
+
+**Final dispositions:** item 0 KEEP (instrument; detector session segmentation + smoke-wrapper
+look-assist predicate fix) · 1a re-audit CORRECTED (LANDED, PARTIAL WIN — was falsely recorded
+as reverted dead end) · item 1 KEEP both x1 modes (half-res proxy; +13/+19/+29% Sharp,
++50/+23/+19% Aggressive; PENDING user softness sign-off) · item 2 DEAD END (budget-relative
+wash; opt-in mechanism kept, test-pinned) · item 3 N/A (prerequisite failed) · item 4 DELIVERED
+(tail = processing, 94-99% of slow-decile render; three ranked levers recorded). New standing
+infra: filmstrip + color-balance-trace visual sweep beside every pixel item
+(`tools/profiling/filmstrip-balance-trace.ps1`), per-frame telemetry analyzer
+(`tools/profiling/analyze-frame-telemetry.py`), session-segmented detector. Open follow-ups:
+user softness sign-off (x1), 2a test-debt chip task_72067605, cold-first-play complex (incl.
+the look-assist-never-applied race seen once in 36 runs), and the three item-4 levers as
+candidate next-round items.
+
+## (was) ROUND-2 IN-SESSION LOOP (ACTIVE 2026-06-11; user-directed)
 
 **Goal.** Execute every item of
 [playback-improvement-plan-round2.md](playback-improvement-plan-round2.md) in this session
