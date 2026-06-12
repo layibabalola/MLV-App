@@ -4620,6 +4620,11 @@ TEST(DualIsoPipeline, RawUint16PrefetchAllowsStandardDualIsoScaleFourWhenReduced
 TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDefault)
 {
     MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    /* Round-3 item 5: the default x2 render now processes at the quarter
+     * render's dims under the SH x4 gating (path 11), so the x2-specific
+     * SH-quarterres telemetry this test pins only fires on the preserved
+     * path-5 composition behind the quarter-processing kill switch. */
+    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING", "1");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 
@@ -4645,6 +4650,7 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
 
     processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 }
@@ -4894,12 +4900,13 @@ TEST(DualIsoPipeline, PlaybackProxyLevelFullDisablesPreviewCoresMidClip)
     (void)fixture.renderFrame16Scaled(0, 1, 1);
     ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
 
-    /* Same contract at x2: Auto = quarter-res path 5, Full = full-xy path 4. */
+    /* Same contract at x2: Auto = quarter render + quarter processing
+     * (path 11 since round-3 item 5), Full = full-xy path 4. */
     mlvSetPlaybackProxyLevel(-1);
     if ((full_w % 2) == 0 && (full_h % 2) == 0)
     {
         (void)fixture.renderFrame16Scaled(0, 1, 2);
-        ASSERT_EQ(5, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(11, mlv_phase4bv2_last_path_taken());
 
         mlvSetPlaybackProxyLevel(0);
         (void)fixture.renderFrame16Scaled(0, 1, 2);
@@ -5364,6 +5371,9 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectX2WorkerHitMatchesForegroundRefe
     MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
     MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
     MLVAPP_TEST_SETENV("MLVAPP_PREFETCH_INDIRECT_X2", "1");
+    /* Round-3 item 5: the opt-in x2 worker matches the path-5 foreground,
+     * which now requires the quarter-processing kill switch. */
+    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING", "1");
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(0);
 
