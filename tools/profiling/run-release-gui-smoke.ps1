@@ -1018,7 +1018,12 @@ $summaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.summary*" } |
     Select-Object -Last 1
 $cpuSummaryLine = $recentLines |
-    Where-Object { $_ -like "*playback_smoke.cpu_summary*" } |
+    Where-Object { $_ -like "*playback_smoke.cpu_summary *" } |
+    Select-Object -Last 1
+# Round-4: fields that used to sit beyond QString::arg's %99 limit (garbage)
+# now arrive on a continuation line; merged into the same cpuSummary object.
+$cpuSummaryExtLine = $recentLines |
+    Where-Object { $_ -like "*playback_smoke.cpu_summary_ext*" } |
     Select-Object -Last 1
 $stageSplitSummaryLine = $recentLines |
     Where-Object { $_ -like "*playback_smoke.stage_split_summary*" } |
@@ -1070,6 +1075,16 @@ if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})'
 $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
 $cpuSummary = if ($cpuSummaryLine) { Convert-PlaybackLogLineToObject $cpuSummaryLine } else { $null }
+if ($cpuSummary -and $cpuSummaryExtLine) {
+    $cpuSummaryExt = Convert-PlaybackLogLineToObject $cpuSummaryExtLine
+    if ($cpuSummaryExt) {
+        foreach ($p in $cpuSummaryExt.PSObject.Properties) {
+            if ($p.Name -ne 'session') {
+                $cpuSummary | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+            }
+        }
+    }
+}
 $stageSplitSummary = if ($stageSplitSummaryLine) { Convert-PlaybackLogLineToObject $stageSplitSummaryLine } else { $null }
 $processingDetailSummary = if ($processingDetailSummaryLine) { Convert-PlaybackLogLineToObject $processingDetailSummaryLine } else { $null }
 $debayerDetailSummary = if ($debayerDetailSummaryLine) { Convert-PlaybackLogLineToObject $debayerDetailSummaryLine } else { $null }
