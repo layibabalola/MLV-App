@@ -833,6 +833,7 @@ static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requeste
 
 static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * video,
                                                                int scaleFactor);
+static int mlv_halfres_x1_preview_enabled(void);
 
 static uint64_t mlv_processed_frame_state_signature(mlvObject_t * video)
 {
@@ -855,6 +856,13 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
     hash = mlv_hash_bytes(hash, &aggressivePreview, sizeof(aggressivePreview));
     const int fastX4HqPath = mlvPlaybackFastX4HqPathMode();
     hash = mlv_hash_bytes(hash, &fastX4HqPath, sizeof(fastX4HqPath));
+    if (normalizedScale == 1)
+    {
+        const int previewMode = processingPlaybackPreviewModeEnabled();
+        const int halfresX1Preview = mlv_halfres_x1_preview_enabled();
+        hash = mlv_hash_bytes(hash, &previewMode, sizeof(previewMode));
+        hash = mlv_hash_bytes(hash, &halfresX1Preview, sizeof(halfresX1Preview));
+    }
 
     if (!video)
     {
@@ -3371,6 +3379,15 @@ static int mlv_quarterres_x2_preview_enabled(void)
     return (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
 }
 
+/* Half-res x1 playback preview: default on for playback, with a kill switch
+ * for comparison runs. This is the user-approved x1 quality trade and only
+ * applies while playback preview mode is active. */
+static int mlv_halfres_x1_preview_enabled(void)
+{
+    const char * v = getenv("MLVAPP_DISABLE_HALFRES_X1_PREVIEW");
+    return (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+}
+
 static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;
 
 static int mlv_phase4bv2_x4_fullres_fix_via_env(void)
@@ -3972,6 +3989,96 @@ static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
     g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms + upscale_ms;
     mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
     g_mlv_phase4bv2_path_taken = 5;                  /* x2-quarter preview */
+    return 1;
+}
+
+/* Half-res x1 preview core: 2x Bayer downsample -> HQ Dual ISO recon at half
+ * res -> debayer -> 2x bilinear upscale back to the full display size.
+ * Mirrors the preview-only tradeoff pattern used by the x2 quarter-res path,
+ * but keeps the user-facing output at full dimensions. Returns 1 on success,
+ * 0 to fall back to the original full-res x1 path. */
+static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
+                                                        uint64_t frameIndex,
+                                                        const uint16_t * decodedRawFrame,
+                                                        uint16_t * outputFrame,
+                                                        int threads)
+{
+    if (!video || !outputFrame || !llrpHQDualIso(video)) return 0;
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int eff_h = (full_h / 16) * 16;            /* 16-aligned: dual-ISO 4-row phase */
+    if ((full_w % 4) != 0 || eff_h < 16) return 0;
+
+    g_mlv_phase4bv3_y_crop_rows = full_h - eff_h;
+
+    const int mid_w = full_w / 2;
+    const int mid_h = eff_h / 2;
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t mid_pixels = (uint64_t)mid_w * (uint64_t)mid_h;
+    const uint64_t mid_rgb_words = mid_pixels * 3u;
+
+    const uint16_t * raw_source = decodedRawFrame;
+    uint16_t * full_bayer = NULL;
+    if (!raw_source)
+    {
+        full_bayer = mlv_ensure_thread_u16_buffer(full_pixels);
+        if (!full_bayer) return 0;
+
+        const double raw_start = mlv_stage_timing_now();
+        if (getMlvRawFrameUint16(video, frameIndex, full_bayer))
+        {
+            return 0;
+        }
+        g_mlv_last_raw_uint16_ms = (mlv_stage_timing_now() - raw_start) * 1000.0;
+        mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, g_mlv_last_raw_uint16_ms);
+        raw_source = full_bayer;
+    }
+
+    /* Seed the dual-ISO row pattern from the full-res raw before reduction so
+     * the half-res recon sees the same row phase contract as the deeper
+     * pre-recon paths. */
+    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)raw_source, full_w, full_h);
+
+    uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
+    if (!mid_bayer) return 0;
+
+    const double downsample_start = mlv_stage_timing_now();
+    int actual_mid_w = 0, actual_mid_h = 0;
+    int rc = pl_downsample_bayer_to_bayer_2x(raw_source, full_w, eff_h,
+                                             mid_bayer, &actual_mid_w, &actual_mid_h, threads);
+    if (rc != 0 || actual_mid_w != mid_w || actual_mid_h != mid_h)
+    {
+        mlv_phase4bv2_log_rejection("x1 half-res bayer 2x kernel rejected");
+        return 0;
+    }
+    const double downsample_ms = (mlv_stage_timing_now() - downsample_start) * 1000.0;
+
+    const double llraw_start = mlv_stage_timing_now();
+    mlv_pipeline_capture_set_current_frame(frameIndex);
+    const size_t mid_bytes = (size_t)mid_pixels * sizeof(uint16_t);
+    if (!applyLLRawProcObject_with_dims(video, mid_bayer, mid_bytes, mid_w, mid_h))
+    {
+        mlv_phase4bv2_log_rejection("x1 half-res applyLLRawProcObject_with_dims rejected");
+        return 0;
+    }
+    const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
+    g_mlv_last_llrawproc_ms = llrawproc_ms;
+
+    uint16_t * mid_rgb = mlv_ensure_thread_rgb_u16_buffer(mid_rgb_words);
+    if (!mid_rgb) return 0;
+    const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    const double debayer_start = mlv_stage_timing_now();
+    debayerBasicU16(mid_rgb, mid_bayer, mid_w, mid_h, threads, bit_shift);
+    const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+
+    const double upscale_start = mlv_stage_timing_now();
+    mlv_rgb_u16_upscale_to_size(mid_rgb, mid_w, mid_h, outputFrame, full_w, full_h, threads);
+    const double upscale_ms = (mlv_stage_timing_now() - upscale_start) * 1000.0;
+
+    g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms + upscale_ms;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+    g_mlv_phase4bv2_path_taken = 6;                  /* x1-half preview */
     return 1;
 }
 
@@ -5481,6 +5588,9 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
                                               int store_processed16_cache)
 {
     const double total_start = mlv_stage_timing_now();
+    g_mlv_phase4bv2_path_taken = 0;
+    g_mlv_phase4bv3_y_crop_rows = 0;
+    g_mlv_phase4bv2_last_fallback_reason = "none";
     mlv_reset_last_raw_stage_telemetry();
     g_mlv_last_llrawproc_ms = 0.0;
     g_mlv_last_debayered_frame_ms = 0.0;
@@ -5608,10 +5718,23 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
     }
     else
     {
-        const double debayer_start = mlv_stage_timing_now();
-        getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
-        g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
-        mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+        if (processingPlaybackPreviewModeEnabled()
+         && mlv_halfres_x1_preview_enabled()
+         && mlv_render_scaled_rgb16_x1_half_preview_core(video,
+                                                         frameIndex,
+                                                         NULL,
+                                                         unprocessed_frame,
+                                                         threads))
+        {
+            /* Preview proxy already populated unprocessed_frame and path 6. */
+        }
+        else
+        {
+            const double debayer_start = mlv_stage_timing_now();
+            getMlvRawFrameDebayered(video, frameIndex, unprocessed_frame);
+            g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+            mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+        }
     }
 
     mlv_sync_processing_black_white_levels(video);

@@ -77,6 +77,14 @@ is indistinguishable from a freeze and produces false FAILs — this killed roun
 
 ## Item 1 — Re-land the x1 half-res playback proxy (round-1 item 3, corrected gates)
 
+**STATUS: LANDED 2026-06-12 (wb-88ca635c67fe4e4c) — KEEP both x1 modes, pending user softness
+sign-off. Measured +13/+19/+29% Sharp and +50/+23/+19% Aggressive (on/off means per clip); the
+13-15 fps expectation was NOT reached (full-res applyProcessingObject dominates the remaining
+render — see the ledger results section). The diff was recovered from the round-1 executor
+session rollout (it was never in git); its pre-existing-test edits were dropped as debugging
+artifacts. New standing gate added mid-item: filmstrip + color-balance-trace visual sweep
+(tools/profiling/filmstrip-balance-trace.ps1) beside every pixel item's measurement matrix.**
+
 The implementation spec is **unchanged** from round-1
 [playback-improvement-plan.md item 3](playback-improvement-plan.md): at scale==1 + playback
 preview mode + not disabled: downsample bayer 2x (write the 2x variant of
