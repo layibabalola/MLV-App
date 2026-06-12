@@ -196,6 +196,36 @@ void mlvSetPlaybackAggressivePreviewMode(int enabled)
 #endif
 }
 
+/* Round-3 item 1: GUI-selected playback preview resolution (proxy level).
+ * -1 = Auto (each scale keeps its tuned default proxy), 0 = Full (no proxy,
+ * sharpest/slowest), 1 = Half (one internal halving per axis vs the output -
+ * the x1 half-res and x2 quarter-res preview cores), 2 = Quarter (two
+ * halvings; falls back to Half until a quarter core exists for the scale).
+ * The MLVAPP_DISABLE_* env kill switches still take precedence so harness
+ * A/Bs and tests keep their exact contracts. */
+static int g_mlv_playback_proxy_level = -1;
+
+void mlvSetPlaybackProxyLevel(int level)
+{
+    int normalized = level;
+    if (normalized < -1) normalized = -1;
+    if (normalized > 2) normalized = 2;
+#if defined(__GNUC__)
+    __atomic_store_n(&g_mlv_playback_proxy_level, normalized, __ATOMIC_RELEASE);
+#else
+    g_mlv_playback_proxy_level = normalized;
+#endif
+}
+
+int mlvPlaybackProxyLevel(void)
+{
+#if defined(__GNUC__)
+    return __atomic_load_n(&g_mlv_playback_proxy_level, __ATOMIC_ACQUIRE);
+#else
+    return g_mlv_playback_proxy_level;
+#endif
+}
+
 static int mlv_playback_aggressive_preview_env_override(void)
 {
     const char * value = getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
@@ -857,6 +887,7 @@ static int mlv_effective_playback_scale_factor(mlvObject_t * video, int requeste
 static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * video,
                                                                int scaleFactor);
 static int mlv_halfres_x1_preview_enabled(void);
+static int mlv_quarterres_x2_preview_enabled(void);
 
 static uint64_t mlv_processed_frame_state_signature(mlvObject_t * video)
 {
@@ -885,6 +916,16 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
         const int halfresX1Preview = mlv_halfres_x1_preview_enabled();
         hash = mlv_hash_bytes(hash, &previewMode, sizeof(previewMode));
         hash = mlv_hash_bytes(hash, &halfresX1Preview, sizeof(halfresX1Preview));
+    }
+    if (normalizedScale == 2)
+    {
+        /* Round-3 item 1: the GUI proxy-level setting can flip the quarter-res
+         * x2 preview at runtime (the env kill switch never could mid-process),
+         * so the cache key must distinguish the two render paths. */
+        const int previewMode = processingPlaybackPreviewModeEnabled();
+        const int quarterresX2Preview = mlv_quarterres_x2_preview_enabled();
+        hash = mlv_hash_bytes(hash, &previewMode, sizeof(previewMode));
+        hash = mlv_hash_bytes(hash, &quarterresX2Preview, sizeof(quarterresX2Preview));
     }
 
     if (!video)
@@ -3402,20 +3443,32 @@ static int mlv_phase4bv2_x2_fullres_fix_via_env(void)
 
 /* Quarter-res x2 playback preview: default on for playback, with a kill
  * switch for comparison runs. Read fresh each call so tests can flip it
- * without a cache reset. */
+ * without a cache reset. Round-3 item 1: when the env is unset, the
+ * GUI-selected proxy level decides - Full (0) disables the preview core,
+ * Auto (-1) / Half (1) / Quarter (2) keep it on (one internal halving is
+ * this scale's only proxy step today). */
 static int mlv_quarterres_x2_preview_enabled(void)
 {
     const char * v = getenv("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
-    return (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+    if (v && *v)
+    {
+        return (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+    }
+    return (mlvPlaybackProxyLevel() == 0) ? 0 : 1;
 }
 
 /* Half-res x1 playback preview: default on for playback, with a kill switch
  * for comparison runs. This is the user-approved x1 quality trade and only
- * applies while playback preview mode is active. */
+ * applies while playback preview mode is active. Round-3 item 1: when the
+ * env is unset, the GUI-selected proxy level decides (Full disables). */
 static int mlv_halfres_x1_preview_enabled(void)
 {
     const char * v = getenv("MLVAPP_DISABLE_HALFRES_X1_PREVIEW");
-    return (v && *v && strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+    if (v && *v)
+    {
+        return (strcmp(v, "0") != 0 && strcmp(v, "false") != 0) ? 0 : 1;
+    }
+    return (mlvPlaybackProxyLevel() == 0) ? 0 : 1;
 }
 
 static int g_mlv_phase4bv2_x4_fullres_fix_env_cache = -1;

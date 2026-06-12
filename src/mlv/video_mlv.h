@@ -193,6 +193,14 @@ int mlv_phase4bv3_last_y_crop_rows(void);
 void mlvSetPlaybackAggressivePreviewMode(int enabled);
 int mlvPlaybackAggressivePreviewMode(void);
 
+/* Round-3 item 1: GUI-selected playback preview resolution (proxy level).
+ * -1 = Auto (per-scale tuned default), 0 = Full (no preview proxy),
+ * 1 = Half (one internal halving per axis), 2 = Quarter (two halvings where
+ * a core exists; falls back to Half otherwise). The MLVAPP_DISABLE_* env
+ * kill switches keep precedence over this value. */
+void mlvSetPlaybackProxyLevel(int level);
+int mlvPlaybackProxyLevel(void);
+
 /* Fast-mode x4 HQ escape hatch: when enabled, scale=4 Dual ISO playback may
  * use the same pre-recon fast-HQ gate as Aggressive preview without forcing
  * the preview rowscale override. */
