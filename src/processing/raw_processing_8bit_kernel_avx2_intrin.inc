@@ -123,6 +123,11 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
     int32_t * pm4 = pm[4];
     int32_t * pm8 = pm[8];
     uint16_t * pre_calc_gamma = processing->pre_calc_gamma;
+    /* Round-4 item 0b: the black/white-level stretch the scalar kernel
+     * applies before the matrix gathers (raw_processing_8bit_kernel.inc:34,
+     * 154-156). Skipping it was the mean-37 whole-frame levels error behind
+     * the DirectProcessed8FastPath* parity failures. */
+    uint16_t * pre_calc_levels = processing->pre_calc_levels;
     float rgb_to_Y[3] = {0.0f, 0.0f, 0.0f};
     double inverse_mat[9];
     invertMatrix(colour_gamuts[processing->colour_gamut], inverse_mat);
@@ -206,9 +211,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             int32_t b_idx[8] __attribute__((aligned(32)));
             for( int k = 0; k < 8; ++k )
             {
-                r_idx[k] = (int32_t)p[k * 3 + 0];
-                g_idx[k] = (int32_t)p[k * 3 + 1];
-                b_idx[k] = (int32_t)p[k * 3 + 2];
+                /* Levels stretch BEFORE the matrix lookups - matches the
+                 * scalar kernel's pm0[pre_calc_levels[pix[0]]]. The leveled
+                 * indices also feed the per-lane Reinhard re-derivation. */
+                r_idx[k] = (int32_t)pre_calc_levels[p[k * 3 + 0]];
+                g_idx[k] = (int32_t)pre_calc_levels[p[k * 3 + 1]];
+                b_idx[k] = (int32_t)pre_calc_levels[p[k * 3 + 2]];
             }
             __m256i v_r_idx = _mm256_load_si256((const __m256i*)r_idx);
             __m256i v_g_idx = _mm256_load_si256((const __m256i*)g_idx);
@@ -362,7 +370,12 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                         {
                             const float inv_y = 1.0f / Y_s;
                             const float result2_0 = Y_s - (Reinhard_for_colour((Y_s - result0) * inv_y) * Y_s);
-                            const float result2_1 = Y_s - (Reinhard_for_blue((Y_s - result1) * inv_y) * Y_s);
+                            /* Round-4 item 0b: green uses the neutral tonemap
+                             * like the shared kernel (ReinhardTonemap_f, see
+                             * raw_processing_8bit_kernel.inc:477); the
+                             * Reinhard_for_blue here was a copy-paste error -
+                             * the deterministic ~130k-pixel parity residual. */
+                            const float result2_1 = Y_s - (ReinhardTonemap_f((Y_s - result1) * inv_y) * Y_s);
                             const float result2_2 = Y_s - (Reinhard_for_blue((Y_s - result2) * inv_y) * Y_s);
                             const float desaturate_factor =
                                 (Y_s - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
@@ -479,9 +492,9 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
             uint16_t * p = pix + x * 3;
             uint8_t * o = out + x * 3;
 
-            const float pix0 = (float)pm0[p[0]];
-            const float pix1 = (float)pm4[p[1]];
-            const float pix2 = (float)pm8[p[2]];
+            const float pix0 = (float)pm0[pre_calc_levels[p[0]]];
+            const float pix1 = (float)pm4[pre_calc_levels[p[1]]];
+            const float pix2 = (float)pm8[pre_calc_levels[p[2]]];
             float result0 = pix0 * proper_wb_0 + pix1 * proper_wb_1 + pix2 * proper_wb_2;
             float result1 = pix0 * proper_wb_3 + pix1 * proper_wb_4 + pix2 * proper_wb_5;
             float result2 = pix0 * proper_wb_6 + pix1 * proper_wb_7 + pix2 * proper_wb_8;
