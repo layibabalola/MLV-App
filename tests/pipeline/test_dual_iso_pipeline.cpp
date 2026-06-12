@@ -4907,6 +4907,58 @@ TEST(DualIsoPipeline, PlaybackProxyLevelFullDisablesPreviewCoresMidClip)
     }
 }
 
+/* Round-3 item 3: the UI Quarter level engages a real x1 quarter core
+ * (path 9 with reduced processing; falls back to half when the dims reject
+ * the 4x kernel), and toggling back to Half mid-clip returns path 7 with
+ * no stale cache hits (the signature hashes the proxy level). */
+TEST(DualIsoPipeline, PlaybackProxyLevelQuarterEngagesX1QuarterCore)
+{
+    struct ProxyLevelResetGuard {
+        ~ProxyLevelResetGuard()
+        {
+            mlvSetPlaybackProxyLevel(-1);
+            processingSetPlaybackPreviewMode(0);
+            processingSetPlaybackAggressivePreviewMode(0);
+        }
+    } proxy_level_reset_guard;
+
+    mlvSetPlaybackProxyLevel(2);
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || (full_h / 16) * 16 < 16) {
+        return;
+    }
+    const bool quarterCapable = ((full_w % 8) == 0) && ((full_h / 16) * 16 >= 32);
+
+    const std::vector<uint16_t> got = fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_FALSE(got.empty());
+    if (quarterCapable)
+    {
+        ASSERT_EQ(9, mlv_phase4bv2_last_path_taken());
+    }
+    else
+    {
+        /* Dims reject the 4x kernel: must degrade to the half path. */
+        ASSERT_EQ(7, mlv_phase4bv2_last_path_taken());
+    }
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint16_t v) { return v != 0; }));
+
+    /* Mid-clip toggle back to Half: path 7, same frame, no stale hit. */
+    mlvSetPlaybackProxyLevel(1);
+    (void)fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_EQ(7, mlv_phase4bv2_last_path_taken());
+}
+
 TEST(DualIsoPipeline, PlaybackProxyLevelEnvKillSwitchStillWins)
 {
     struct ProxyLevelResetGuard {

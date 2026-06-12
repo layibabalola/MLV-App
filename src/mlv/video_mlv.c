@@ -916,9 +916,11 @@ static uint64_t mlv_processed_frame_state_signature_with_scale(mlvObject_t * vid
         const int previewMode = processingPlaybackPreviewModeEnabled();
         const int halfresX1Preview = mlv_halfres_x1_preview_enabled();
         const int halfresX1Processing = mlv_halfres_x1_processing_enabled();
+        const int proxyLevel = mlvPlaybackProxyLevel();
         hash = mlv_hash_bytes(hash, &previewMode, sizeof(previewMode));
         hash = mlv_hash_bytes(hash, &halfresX1Preview, sizeof(halfresX1Preview));
         hash = mlv_hash_bytes(hash, &halfresX1Processing, sizeof(halfresX1Processing));
+        hash = mlv_hash_bytes(hash, &proxyLevel, sizeof(proxyLevel));
     }
     if (normalizedScale == 2)
     {
@@ -4099,30 +4101,37 @@ static int mlv_render_scaled_rgb16_x2_quarter_preview_core(mlvObject_t * video,
  * but keeps the user-facing output at full dimensions. Returns 1 on success,
  * 0 to fall back to the original full-res x1 path. */
 /* Round-3 item 2: when upscale_to_full is 0, the core stops after the
- * debayer and leaves the HALF-RES image at the start of outputFrame (mid_w x
+ * debayer and leaves the REDUCED image at the start of outputFrame (mid_w x
  * mid_h reported via the out-params); the caller then runs processing at mid
  * dimensions and upscales the PROCESSED result, cutting the dominant
- * processing cost ~4x. With upscale_to_full=1 the round-2 behavior is
- * byte-identical (full-size output, out-params optional). */
+ * processing cost. With upscale_to_full=1 the round-2 behavior is
+ * byte-identical (full-size output, out-params optional).
+ * Round-3 item 3: halvings selects the proxy depth - 1 = half res (2x bayer
+ * kernel), 2 = quarter res (4x kernel, needs full_w%8==0 and eff_h>=32;
+ * the caller degrades to halvings=1 when rejected). The full-size upscale
+ * for halvings=2 runs as two verified 2x passes. */
 static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
                                                         uint64_t frameIndex,
                                                         const uint16_t * decodedRawFrame,
                                                         uint16_t * outputFrame,
                                                         int threads,
                                                         int upscale_to_full,
+                                                        int halvings,
                                                         int * out_mid_w,
                                                         int * out_mid_h)
 {
     if (!video || !outputFrame || !llrpHQDualIso(video)) return 0;
+    if (halvings != 1 && halvings != 2) return 0;
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int eff_h = (full_h / 16) * 16;            /* 16-aligned: dual-ISO 4-row phase */
     if ((full_w % 4) != 0 || eff_h < 16) return 0;
+    if (halvings == 2 && ((full_w % 8) != 0 || eff_h < 32)) return 0;
 
     g_mlv_phase4bv3_y_crop_rows = full_h - eff_h;
 
-    const int mid_w = full_w / 2;
-    const int mid_h = eff_h / 2;
+    const int mid_w = full_w >> halvings;
+    const int mid_h = eff_h >> halvings;
     const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
     const uint64_t mid_pixels = (uint64_t)mid_w * (uint64_t)mid_h;
     const uint64_t mid_rgb_words = mid_pixels * 3u;
@@ -4146,19 +4155,31 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
 
     /* Seed the dual-ISO row pattern from the full-res raw before reduction so
      * the half-res recon sees the same row phase contract as the deeper
-     * pre-recon paths. */
-    llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)raw_source, full_w, full_h);
+     * pre-recon paths. The 4x reduction (halvings==2) must NOT seed here:
+     * the proven x2 quarter core runs the 4x kernel unseeded, and seeding
+     * before a 4x Y-reduction mis-phases the bright/dark row pairing, which
+     * biases the recon's exposure fusion dark (~30% luminance loss, caught
+     * by the round-3 item-3 balance trace). */
+    if (halvings == 1)
+    {
+        llrpEnsureDualIsoPatternSeeded(video, (uint16_t *)raw_source, full_w, full_h);
+    }
 
     uint16_t * mid_bayer = mlv_ensure_thread_scaled_bayer_buffer(mid_pixels);
     if (!mid_bayer) return 0;
 
     const double downsample_start = mlv_stage_timing_now();
     int actual_mid_w = 0, actual_mid_h = 0;
-    int rc = pl_downsample_bayer_to_bayer_2x(raw_source, full_w, eff_h,
-                                             mid_bayer, &actual_mid_w, &actual_mid_h, threads);
+    int rc = (halvings == 2)
+        ? pl_downsample_bayer_to_bayer_4x(raw_source, full_w, eff_h,
+                                          mid_bayer, &actual_mid_w, &actual_mid_h, threads)
+        : pl_downsample_bayer_to_bayer_2x(raw_source, full_w, eff_h,
+                                          mid_bayer, &actual_mid_w, &actual_mid_h, threads);
     if (rc != 0 || actual_mid_w != mid_w || actual_mid_h != mid_h)
     {
-        mlv_phase4bv2_log_rejection("x1 half-res bayer 2x kernel rejected");
+        mlv_phase4bv2_log_rejection(halvings == 2
+                                    ? "x1 quarter-res bayer 4x kernel rejected"
+                                    : "x1 half-res bayer 2x kernel rejected");
         return 0;
     }
     const double downsample_ms = (mlv_stage_timing_now() - downsample_start) * 1000.0;
@@ -4178,8 +4199,9 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
     const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
     if (!upscale_to_full)
     {
-        /* Half-processing mode: debayer straight into the caller's buffer at
-         * mid layout; no upscale here (the caller upscales after processing). */
+        /* Reduced-processing mode: debayer straight into the caller's buffer
+         * at mid layout; no upscale here (the caller upscales after
+         * processing). */
         const double debayer_start = mlv_stage_timing_now();
         debayerBasicU16(outputFrame, mid_bayer, mid_w, mid_h, threads, bit_shift);
         const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
@@ -4187,7 +4209,8 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
         mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
         if (out_mid_w) *out_mid_w = mid_w;
         if (out_mid_h) *out_mid_h = mid_h;
-        g_mlv_phase4bv2_path_taken = 7;              /* x1-half preview, half processing */
+        /* 7 = x1-half preview + half processing; 9 = x1-quarter + quarter. */
+        g_mlv_phase4bv2_path_taken = (halvings == 2) ? 9 : 7;
         return 1;
     }
 
@@ -4198,14 +4221,30 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
     const double debayer_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
 
     const double upscale_start = mlv_stage_timing_now();
-    mlv_rgb_u16_upscale_to_size(mid_rgb, mid_w, mid_h, outputFrame, full_w, full_h, threads);
+    if (halvings == 2)
+    {
+        /* Two verified 2x passes: quarter -> half (bayer-side TLS scratch,
+         * dead after the decode above) -> full. */
+        const int half_w = full_w / 2;
+        const int half_h = full_h / 2;
+        uint16_t * tmp_half = mlv_ensure_thread_u16_buffer(
+            (uint64_t)half_w * (uint64_t)half_h * 3u);
+        if (!tmp_half) return 0;
+        mlv_rgb_u16_upscale_to_size(mid_rgb, mid_w, mid_h, tmp_half, half_w, half_h, threads);
+        mlv_rgb_u16_upscale_to_size(tmp_half, half_w, half_h, outputFrame, full_w, full_h, threads);
+    }
+    else
+    {
+        mlv_rgb_u16_upscale_to_size(mid_rgb, mid_w, mid_h, outputFrame, full_w, full_h, threads);
+    }
     const double upscale_ms = (mlv_stage_timing_now() - upscale_start) * 1000.0;
 
     g_mlv_last_debayered_frame_ms = downsample_ms + debayer_ms + upscale_ms;
     mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
     if (out_mid_w) *out_mid_w = mid_w;
     if (out_mid_h) *out_mid_h = mid_h;
-    g_mlv_phase4bv2_path_taken = 6;                  /* x1-half preview */
+    /* 6 = x1-half preview (full-res processing); 10 = x1-quarter variant. */
+    g_mlv_phase4bv2_path_taken = (halvings == 2) ? 10 : 6;
     return 1;
 }
 
@@ -5849,16 +5888,21 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
             processingPlaybackPreviewModeEnabled()
             && mlv_halfres_x1_preview_enabled()
             && mlv_halfres_x1_processing_enabled();
+        /* Round-3 item 3: the UI Quarter level requests two halvings; the
+         * core degrades to half when the clip dims reject the 4x kernel. */
+        const int proxyHalvings = (mlvPlaybackProxyLevel() == 2) ? 2 : 1;
         int mid_w = 0, mid_h = 0;
-        if (halfProcessingWanted
-         && mlv_render_scaled_rgb16_x1_half_preview_core(video,
-                                                         frameIndex,
-                                                         NULL,
-                                                         unprocessed_frame,
-                                                         threads,
-                                                         /*upscale_to_full*/0,
-                                                         &mid_w,
-                                                         &mid_h))
+        int reducedRenderOk = 0;
+        if (halfProcessingWanted)
+        {
+            for (int h = proxyHalvings; h >= 1 && !reducedRenderOk; --h)
+            {
+                reducedRenderOk = mlv_render_scaled_rgb16_x1_half_preview_core(
+                    video, frameIndex, NULL, unprocessed_frame, threads,
+                    /*upscale_to_full*/0, h, &mid_w, &mid_h);
+            }
+        }
+        if (reducedRenderOk)
         {
             /* Round-3 item 2: the proxy left the HALF-RES image in
              * unprocessed_frame. Process at mid dimensions into the TLS rgb
@@ -5873,18 +5917,40 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
             uint16_t * processed_mid = mlv_ensure_thread_rgb_u16_buffer(rgb_full_words);
             if (processed_mid)
             {
+                /* applyProcessingObject biases DARK below half dimensions
+                 * (round-3 item-3 balance trace: ~30% luminance loss at
+                 * quarter dims with identical look state; quarter RENDER
+                 * proven innocent via the path-10 probe). Until that
+                 * dimension dependence is fixed (round-3 item 4), processing
+                 * always runs at HALF dims or larger: a quarter render is
+                 * first upscaled 2x, processed at half, then upscaled to
+                 * full. */
+                int proc_w = mid_w;
+                int proc_h = mid_h;
+                const uint16_t * proc_input = unprocessed_frame;
+                if (mid_w < full_w / 2)
+                {
+                    proc_w = full_w / 2;
+                    proc_h = full_h / 2;
+                    mlv_rgb_u16_upscale_to_size(unprocessed_frame, mid_w, mid_h,
+                                                processed_mid, proc_w, proc_h, threads);
+                    /* Swap: the half-res image now lives in the TLS slot;
+                     * processing writes back into the video temp buffer. */
+                    proc_input = processed_mid;
+                    processed_mid = unprocessed_frame;
+                }
                 mlv_sync_processing_black_white_levels(video);
                 const double processing_start = mlv_stage_timing_now();
                 const int previous_preview_scale_factor =
                     processingPlaybackPreviewScaleFactor();
                 processingSetPlaybackPreviewScaleFactor(normalizedScale);
                 applyProcessingObject( video->processing,
-                                       mid_w, mid_h,
-                                       unprocessed_frame,
+                                       proc_w, proc_h,
+                                       (uint16_t *)proc_input,
                                        processed_mid,
                                        threads, 1, frameIndex );
                 processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
-                mlv_rgb_u16_upscale_to_size(processed_mid, mid_w, mid_h,
+                mlv_rgb_u16_upscale_to_size(processed_mid, proc_w, proc_h,
                                             outputFrame, width, height, threads);
                 g_mlv_last_processing_ms = (mlv_stage_timing_now() - processing_start) * 1000.0;
                 mlv_stage_timing_note_elapsed("processing", frameIndex, g_mlv_last_processing_ms);
@@ -5893,18 +5959,20 @@ static void getMlvProcessedFrame16_with_scale(mlvObject_t * video,
             /* TLS allocation failed: fall back to the full-res pipeline by
              * re-rendering the proxy with its internal upscale. */
         }
+        int proxyRenderOk = 0;
         if (processingPlaybackPreviewModeEnabled()
-         && mlv_halfres_x1_preview_enabled()
-         && mlv_render_scaled_rgb16_x1_half_preview_core(video,
-                                                         frameIndex,
-                                                         NULL,
-                                                         unprocessed_frame,
-                                                         threads,
-                                                         /*upscale_to_full*/1,
-                                                         NULL,
-                                                         NULL))
+         && mlv_halfres_x1_preview_enabled())
         {
-            /* Preview proxy already populated unprocessed_frame and path 6. */
+            for (int h = proxyHalvings; h >= 1 && !proxyRenderOk; --h)
+            {
+                proxyRenderOk = mlv_render_scaled_rgb16_x1_half_preview_core(
+                    video, frameIndex, NULL, unprocessed_frame, threads,
+                    /*upscale_to_full*/1, h, NULL, NULL);
+            }
+        }
+        if (proxyRenderOk)
+        {
+            /* Preview proxy already populated unprocessed_frame (path 6/10). */
         }
         else
         {

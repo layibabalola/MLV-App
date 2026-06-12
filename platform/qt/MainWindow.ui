@@ -11280,10 +11280,10 @@ QGroupBox::indicator:checked:disabled {
     <bool>true</bool>
    </property>
    <property name="text">
-    <string>Quarter (softest, fastest)</string>
+    <string>Quarter (softest)</string>
    </property>
    <property name="toolTip">
-    <string>Allow two internal halvings per axis where supported (falls back to Half elsewhere). Paused frames, scrubbing and export stay full quality.</string>
+    <string>Deepest preview proxy: the playback image is rendered from a quarter-resolution decode (currently performs close to Half; falls back to Half where unsupported). Paused frames, scrubbing and export stay full quality.</string>
    </property>
    <property name="statusTip">
     <string>Preview resolution: deepest preview proxy during playback.</string>
