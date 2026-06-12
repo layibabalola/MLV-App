@@ -159,6 +159,12 @@ default off until the verdict). Same gates as item 2 scaled to x1. Expected: x1 
 
 ## Item 4 — Stall-tail diagnosis (read-mostly; report deliverable, no keeper expected)
 
+**STATUS: DELIVERED 2026-06-12 (wb-767c872b724749f5) — the tail is PROCESSING (94-99% of
+slow-decile render on all four runs), not decode/queue/present. Full attribution table + the
+three ranked levers are in the ledger ("Round-2 Item 4 results"). Note: MLVAPP_PHASE3_TEL_PATH
+was inert in normal playback until this item's trace-only opener fix; use playback_smoke.frame
+telemetry + tools/profiling/analyze-frame-telemetry.py for attribution, not the stage CSV.**
+
 The remaining cross-scale perceptual defect is the stall TAIL, not the median: known
 `m_frameStillDrawing` render-thread busy spikes of 80-209 ms on some frames (round-1 era
 diagnosis), which median fps hides.
