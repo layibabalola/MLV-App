@@ -113,6 +113,13 @@ VALIDATE (corrected vs round 1):
 
 ## Item 2 — Re-A/B the indirect prefetch worker at x2 (post-quarter-res foreground)
 
+**STATUS: DEAD END 2026-06-12 (wb-76d50eef9d8b472d) — keeper bar not met (+3/-24/+1% per clip).
+The wash is budget-relative, not cost-relative: the quarter-res foreground (~33 ms) already fits
+the 42 ms frame budget warm, so the worker buys render-ms but no median fps, and its core-split
+slows warm runs (1347: on 13.0 vs off 22.2). Mechanism kept behind opt-in
+MLVAPP_PREFETCH_INDIRECT_X2=1, byte-identity test-pinned, for future re-audits. Hit-rate when
+enabled: 143/143 foreground requests served.**
+
 Context: the processed8 indirect prefetch worker (ledger row wb-a5315ef858a645b2) is gated to
 scale>=4 because at x2 the worker's render cost equaled the then-full-cost foreground render and
 split cores (wash-to-negative). Item 2a has since made the x2 playback foreground quarter-res
@@ -140,6 +147,10 @@ split cores (wash-to-negative). Item 2a has since made the x2 playback foregroun
 Expected if it flips: x2 Sharp 13.5-15 -> toward 18-20.
 
 ## Item 3 — x1 proxy + prefetch composition (CONDITIONAL on items 1 and 2 both keeping)
+
+**STATUS: N/A 2026-06-12 — prerequisite failed (item 1 KEPT, but item 2 dead-ended). Recorded in
+the ledger; the budget-relative wash mechanism applies a fortiori at x1 (foreground 62-96 ms,
+already over budget). Not attempted, per the plan.**
 
 Only if item 1 kept AND item 2 flipped to a win: A/B the indirect worker at x1 with the half-res
 proxy active (worker renders the same half-res proxy path; env `MLVAPP_PREFETCH_INDIRECT_X1`,
