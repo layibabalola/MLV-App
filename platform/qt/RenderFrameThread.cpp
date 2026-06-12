@@ -442,6 +442,12 @@ void RenderFrameThread::unlock()
 //Main loop of the thread
 void RenderFrameThread::run(void)
 {
+    /* Round-2 item 4: the stage CSV sink used to open only inside the
+     * Phase-3-mode telemetry emitter, so MLVAPP_PHASE3_TEL_PATH was inert
+     * during normal Sharp/Aggressive playback even though the per-stage
+     * enter/leave writes are already wired for it. Opening here is
+     * trace-only and default-off: the helper no-ops unless the env is set. */
+    (void)phase3StageCsvSinkEnsureOpen();
     runPhase3();
 }
 
