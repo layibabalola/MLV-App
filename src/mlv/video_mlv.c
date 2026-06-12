@@ -566,6 +566,29 @@ static int mlv_processed8_prefetch_indirect_enabled(void)
     return 1;
 }
 
+/* Round-2 item 2: the indirect worker render at x2 Sharp, re-A/B'd after the
+ * quarter-res preview cheapened the worker's render. VERDICT (2026-06-12
+ * interleaved A/B, M16 trio): DEAD END - the quarter-res foreground render
+ * (~33 ms) already fits the 42 ms frame budget, so warm runs reach native
+ * WITHOUT the worker, and with it the original wash-to-negative core-split
+ * reappears on warm runs (1347: on 13.0 vs off 22.2 median fps) even though
+ * worker hits are byte-faithful and can serve 100% of requests. Default OFF;
+ * MLVAPP_PREFETCH_INDIRECT_X2=1 opts in for future re-audits (the mechanism
+ * stays test-pinned). Read fresh each call so tests can flip it. */
+static int mlv_processed8_prefetch_indirect_x2_enabled(void)
+{
+    const char * value = getenv("MLVAPP_PREFETCH_INDIRECT_X2");
+    if (value && value[0] != '\0')
+    {
+        return (strcmp(value, "0") != 0
+             && strcasecmp(value, "false") != 0
+             && strcasecmp(value, "off") != 0)
+            ? 1
+            : 0;
+    }
+    return 0;
+}
+
 /* The prefetch worker renders with a PARTIAL copy of the foreground
  * processing state (mlv_copy_processed8_prefetch_processing_state): values,
  * curves, precalc tables, and matrices are carried, but LUT data, filter
@@ -2291,15 +2314,22 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
      * while MLVAPP_PROCESSED8_PREFETCH_INDIRECT (default on) allows it. Both
      * renders fail closed: a frame is stored only on reported success.
      *
-     * Scope (2026-06-11 interleaved A/Bs on the M16 trio): scale>=4 only -
+     * Scope (2026-06-11 interleaved A/Bs on the M16 trio): scale>=4 -
      * Sharp since iteration 2, Aggressive since iteration 4 (the foreground
      * consults the cache again for aggressive x4/x8 now that honest worker
-     * fills exist; its own stores stay skipped). At x2 the worker's indirect
-     * render costs about as much as the foreground frame, so it cannot get
-     * ahead and only splits cores (measured wash-to-negative, both modes). */
+     * fills exist; its own stores stay skipped). x2 Sharp was re-A/B'd by
+     * round-2 item 2 post-quarter-res and stays OFF by default (env opt-in
+     * MLVAPP_PREFETCH_INDIRECT_X2=1): the cheap quarter-res foreground
+     * already fits the frame budget warm, and the worker's core-split makes
+     * warm runs SLOWER (the original wash mechanism at a lower price point).
+     * Aggressive x2 stays excluded unconditionally: its incompatible lanes
+     * skip the main cache, so worker fills would be unreachable waste. */
     const int direct8Compatible = processingCanUseDirect8BitOutput(task->processing);
     if (!direct8Compatible
-        && !(task->scaleFactor >= 4
+        && !((task->scaleFactor >= 4
+              || (task->scaleFactor == 2
+                  && !mlvPlaybackAggressivePreviewMode()
+                  && mlv_processed8_prefetch_indirect_x2_enabled()))
              && mlv_processed8_prefetch_indirect_enabled()
              && mlv_processed8_prefetch_indirect_state_supported(task->processing)))
     {
