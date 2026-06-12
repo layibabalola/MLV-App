@@ -20285,6 +20285,33 @@ void MainWindow::drawFrameReady()
     }
     m_lastPresentedPlaybackFrame = static_cast<long long>( display_frame );
 
+    /* Round-4 item 3: dispatch the NEXT frame render BEFORE the present work
+     * below. The present span runs on this (GUI) thread, so the render
+     * thread used to sit starved for its whole duration (the measured
+     * ~12-15ms present_pacing band) because the next request was only
+     * created in the post-present tail. The frame slots, the request queue,
+     * the latest-by-serial acquire and the forward-only guard above already
+     * support one frame rendering while another presents; this only moves
+     * the existing inline advance ahead of the paint. The tail advance still
+     * runs and degrades to m_playbackFrameAdvancePending while the early
+     * render is in flight. */
+    if( ui->actionPlay->isChecked() && m_pRenderThread )
+    {
+        m_frameStillDrawing = !m_pRenderThread->isIdle();
+        if( !m_frameStillDrawing )
+        {
+            m_skipImmediateTimecodeLabel = true;
+            const double advance_start = mlv_stage_timing_now();
+            timerFrameEvent();
+            m_lastDrawFrameReadyAdvanceMs =
+                (mlv_stage_timing_now() - advance_start) * 1000.0;
+            mlv_stage_timing_note_elapsed("drawFrameReady.advance_early",
+                                          display_frame,
+                                          m_lastDrawFrameReadyAdvanceMs);
+            m_skipImmediateTimecodeLabel = false;
+        }
+    }
+
     const double display_start = mlv_stage_timing_now();
     if( interactiveTraceEnabled() )
     {
