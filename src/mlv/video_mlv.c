@@ -6191,7 +6191,8 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
                                              uint64_t frameIndex,
                                              uint8_t * outputFrame,
                                              int threads,
-                                             int scaleFactor)
+                                             int scaleFactor,
+                                             int playbackPreview)
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
@@ -6214,9 +6215,15 @@ static void getMlvProcessedFrame8_with_scale(mlvObject_t * video,
     g_mlv_last_processed8_cache_hit_scale_factor = 0;
     g_mlv_last_processed8_prefetch_hit = 0;
     /* Keep the playback-preview policy visible on the main render thread so
-     * the direct8 gate sees the same state as the prefetch worker. */
-    processingSetPlaybackPreviewMode(1);
-    processingSetPlaybackAggressivePreviewMode(mlvPlaybackAggressivePreviewMode());
+     * the direct8 gate sees the same state as the prefetch worker.
+     * Round-4 item 0b: ONLY for playback callers (getMlvProcessedFrame8Scaled).
+     * The unscaled getMlvProcessedFrame8 entry serves exports and single-frame
+     * grabs; forcing preview semantics there routed direct8-eligible receipts
+     * through the levels-skipping intrin kernel and non-eligible ones through
+     * the x1 half-res playback proxy - exports must never be proxied. */
+    processingSetPlaybackPreviewMode(playbackPreview ? 1 : 0);
+    processingSetPlaybackAggressivePreviewMode(
+        playbackPreview ? mlvPlaybackAggressivePreviewMode() : 0);
 
     /* Phase 4B: resolve effective scale (rejects scales that don't divide
      * the sensor evenly). */
@@ -6514,20 +6521,25 @@ cleanup:
 }
 
 /* Phase 4A: scale-1 entrypoint preserves the original public API. */
+/* Non-playback entry (exports, single-frame grabs): full quality, no preview
+ * proxies, non-preview direct8 contract. */
 void getMlvProcessedFrame8(mlvObject_t * video, uint64_t frameIndex, uint8_t * outputFrame, int threads)
 {
-    getMlvProcessedFrame8_with_scale(video, frameIndex, outputFrame, threads, 1);
+    getMlvProcessedFrame8_with_scale(video, frameIndex, outputFrame, threads, 1,
+                                     /*playbackPreview*/0);
 }
 
 /* Phase 4A: scale-aware variant. The pipeline still renders at full
- * resolution; scaleFactor only affects cache-key isolation. */
+ * resolution; scaleFactor only affects cache-key isolation. Playback entry:
+ * preview semantics (proxies, preview direct8 gate) apply. */
 void getMlvProcessedFrame8Scaled(mlvObject_t * video,
                                  uint64_t frameIndex,
                                  uint8_t * outputFrame,
                                  int threads,
                                  int scaleFactor)
 {
-    getMlvProcessedFrame8_with_scale(video, frameIndex, outputFrame, threads, scaleFactor);
+    getMlvProcessedFrame8_with_scale(video, frameIndex, outputFrame, threads, scaleFactor,
+                                     /*playbackPreview*/1);
 }
 
 int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
