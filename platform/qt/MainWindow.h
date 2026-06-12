@@ -862,6 +862,11 @@ private:
     // worker captures it at dispatch; the queued apply lambda re-checks before
     // touching any UI state, ensuring stale results from a previous clip are dropped.
     std::atomic<int> m_lookAssistAsyncGeneration{0};
+    // Round-4 debt block: count of detached look-assist workers still running.
+    // The worker reads m_pMlvObject (findMlvWhiteBalance renders from raw), so
+    // every freeMlvObject path must drainLookAssistWorkers() first or the
+    // worker reads freed memory (0xC0000005 on fast clip switching).
+    std::atomic<int> m_lookAssistWorkersInFlight{0};
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;
@@ -1280,6 +1285,7 @@ private:
     void initPlaybackQualityFromSettings( void );
     void initPlaybackPreviewModeFromSettings( void );
     void initPlaybackPreviewResolutionFromSettings( void );
+    void drainLookAssistWorkers( const char *reason );
     void initPlaybackScaleFactorFromSettings( void );
     void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackPreviewMode( int mode, bool persist, bool forceRefresh );

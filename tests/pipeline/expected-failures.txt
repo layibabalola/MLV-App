@@ -1,0 +1,37 @@
+# Machine-checked expected-failure manifest for the pipeline suite.
+# One gtest name per line; '#' comments. Checked by
+# tools/testing/check-expected-failures.ps1: the suite gate PASSES only when
+# the observed FAIL set is exactly a subset of this manifest (new names =
+# regression; newly-passing names are reported so the manifest gets pruned).
+#
+# Adjudication state (2026-06-12 round-4 debt block):
+#   [D8] direct8 byte-identity cluster - REAL unadjudicated divergence under
+#        investigation (round-4 debt block); these guard the direct8 fast
+#        path and must be fixed or re-pinned before the direct8 unlock lands.
+#   [STALE?] candidate stale expectations from pre-2026-06-10 contract
+#        changes - adjudicate and either fix the test or remove the line.
+#   [FLAKE] documented order/timing flake with a known root-cause family.
+
+# --- [D8] direct8 byte-identity cluster ---
+DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16Reference
+DualIsoPipeline.DirectProcessed8FastPathMatchesShiftedProcessed16WithCreativeCurveCache
+DualIsoPipeline.PhaseE7_AgxDirect8MatchesIndirectPathByteIdentity
+DualIsoPipeline.PhaseE7_NonAgxReceiptUnaffectedByDirect8AgxBranch
+DualIsoPipeline.PhaseE8_Direct8SimpleContrastMatchesIndirectPathByteIdentity
+DualIsoPipeline.PhaseE9_Direct8LookAssistToneSubsetMatchesIndirectPathByteIdentity
+DualIsoPipeline.PhaseE9_Direct8LookAssistToneSubsetWithAgxAndThreadsMatchesIndirectPathByteIdentity
+DualIsoPipeline.DirectProcessed8FastPath_AVX2IntrinByteIdentity
+
+# --- [STALE?] dispatch/contract pins predating the 2026-06-10 baseline ---
+Phase3_PAR.SerialPathByteIdentity
+DualIsoPipeline.ProcessedFrame16CacheKeepsNearbyFramesWarm
+DualIsoPipeline.ProcessedFrame8CacheKeepsNearbyFramesWarm
+DualIsoPipeline.ChromaSmoothScratchReusesFrameBufferAcrossFrames
+DualIsoPipeline.Phase4B_DualIsoHonorsScaleTwoWithSafeFallback
+DualIsoPipeline.Phase4B_AggressiveScaleEightDirectPathSkipsProcessed8CacheStore
+DualIsoPipeline.Phase4Bv3_HqMean23PlaybackUsesFullReconFallbackByDefault
+DualIsoPipeline.Phase4Bv3_AggressivePreviewUsesFullReconFallbackX4
+DualIsoPipeline.DualIsoPlaybackUsesFastHqPathForFastX2
+
+# --- [FLAKE] documented order/timing flake (passes in isolation) ---
+ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights

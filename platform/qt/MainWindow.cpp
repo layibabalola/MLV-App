@@ -1450,6 +1450,7 @@ MainWindow::~MainWindow()
 
     if( m_pMlvObject )
     {
+        drainLookAssistWorkers( "destructor" );
         freeMlvObject( m_pMlvObject );
         m_pMlvObject = nullptr;
         m_fileLoaded = false;
@@ -5457,6 +5458,10 @@ int MainWindow::openMlvForPreview(QString fileName)
     //Reset audio playback engine
     //m_pAudioPlayback->resetAudioEngine();
 
+    /* Round-4 debt block: the detached look-assist worker reads m_pMlvObject
+     * (findMlvWhiteBalance renders from raw); freeing under it is a UAF. */
+    drainLookAssistWorkers( "clip-switch" );
+
     /* Destroy it just for simplicity... and make a new one */
     freeMlvObject( m_pMlvObject );
     /* Set to NEW object with a NEW MLV clip! */
@@ -5632,6 +5637,10 @@ int MainWindow::openMlv( QString fileName )
 
     //Reset audio engine
     m_pAudioPlayback->resetAudioEngine();
+
+    /* Round-4 debt block: the detached look-assist worker reads m_pMlvObject
+     * (findMlvWhiteBalance renders from raw); freeing under it is a UAF. */
+    drainLookAssistWorkers( "clip-switch" );
 
     /* Destroy it just for simplicity... and make a new one */
     freeMlvObject( m_pMlvObject );
@@ -10285,6 +10294,31 @@ struct LookAssistAsyncResult
     QString colorCastWarning;
 };
 
+/* Round-4 debt block: invalidate and wait out any detached look-assist
+ * worker before a freeMlvObject. Bumping the generation FIRST makes the
+ * worker's pre-render early-out fire, so the wait is normally microseconds;
+ * the worst case (free arriving mid-findMlvWhiteBalance) blocks for the
+ * remainder of that one render - bounded, rare, and strictly better than
+ * the use-after-free it replaces. */
+void MainWindow::drainLookAssistWorkers( const char *reason )
+{
+    ++m_lookAssistAsyncGeneration;
+    if( m_lookAssistWorkersInFlight.load( std::memory_order_acquire ) == 0 )
+    {
+        return;
+    }
+    const double drain_start = mlv_stage_timing_now();
+    while( m_lookAssistWorkersInFlight.load( std::memory_order_acquire ) > 0 )
+    {
+        QThread::msleep( 1 );
+    }
+    logInteractionEvent(
+        QStringLiteral("look_assist.worker_drain"),
+        QStringLiteral("reason=%1 waited_ms=%2")
+            .arg( QString::fromLatin1( reason ) )
+            .arg( ( mlv_stage_timing_now() - drain_start ) * 1000.0, 0, 'f', 1 ) );
+}
+
 void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                            int analysisFrame )
 {
@@ -10528,6 +10562,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 .arg( lookAssistSceneName( scene ) )
                 .arg( bool01( floorLiftedNightThumbnail ) ) );
 
+        /* Round-4 debt block: every freeMlvObject path drains this counter
+         * before freeing, so the detached worker can never read a freed
+         * mlvObject (the in-flight UAF on fast clip switching). Incremented
+         * on the UI thread BEFORE the thread starts so the drain can never
+         * miss a worker that is about to begin. */
+        m_lookAssistWorkersInFlight.fetch_add( 1, std::memory_order_acq_rel );
+
         std::thread([this,
                      mlvObj,
                      thumbCopy,
@@ -10554,8 +10595,24 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                      baseTint,
                      chromaSmoothVal,
                      chromaSmoothAutoApplied,
-                     dispatchGeneration]() mutable
+                     dispatchGeneration,
+                     receipt]() mutable
         {
+            /* RAII: the drain in the freeMlvObject paths waits on this. */
+            struct WorkerScopeGuard
+            {
+                std::atomic<int> *counter;
+                ~WorkerScopeGuard() { counter->fetch_sub( 1, std::memory_order_acq_rel ); }
+            } worker_scope_guard{ &m_lookAssistWorkersInFlight };
+
+            /* Cheap early-out BEFORE the expensive render: a clip switch has
+             * already invalidated this work (the drain bumps the generation
+             * first, so this also makes the drain wait short). */
+            if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
+            {
+                return;
+            }
+
             // --- pure compute phase (no UI/Qt objects except QByteArray/QString values) ---
             LookAssistAsyncResult r;
             r.stats                = statsCopy;
@@ -10730,11 +10787,28 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             r.autoWhiteBalanceCandidateTint        = autoWbPatch.valid ? autoWhiteBalanceCandidateTint        : 0;
 
             // Marshal results back to the UI thread.
-            QMetaObject::invokeMethod( this, [this, r, dispatchGeneration]() mutable
+            QMetaObject::invokeMethod( this, [this, r, dispatchGeneration, receipt]() mutable
             {
                 // Re-check: clip must not have changed since dispatch.
                 if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
+                {
+                    /* Round-4 debt block: a dropped result used to leave the
+                     * de-dupe marker set from dispatch time, permanently
+                     * blocking re-analysis for that receipt (the ~1/36
+                     * "look assist never applied" race). Clear it and log so
+                     * the next settle/frame-ready trigger re-dispatches. */
+                    if( m_lookAssistAppliedReceipt == receipt )
+                    {
+                        m_lookAssistAppliedReceipt = nullptr;
+                    }
+                    logInteractionEvent(
+                        QStringLiteral("look_assist.apply.async_dropped"),
+                        QStringLiteral("generation=%1 current=%2 marker_cleared=%3")
+                            .arg( dispatchGeneration )
+                            .arg( m_lookAssistAsyncGeneration.load() )
+                            .arg( bool01( m_lookAssistAppliedReceipt == nullptr ) ) );
                     return;
+                }
                 if( !m_fileLoaded || !m_pMlvObject )
                     return;
 
@@ -18298,18 +18372,7 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_processing_core_creative_hue_vs_ms=%96 "
                "avg_processing_core_creative_vibrance_ms=%97 "
                "avg_processing_core_creative_saturation_ms=%98 "
-               "avg_processing_core_creative_toning_ms=%99 "
-               "avg_processing_core_creative_curve_ms=%100 "
-               "avg_processing_core_creative_gradation_ms=%101 "
-               "avg_processing_core_creative_agx_inverse_ms=%102 "
-               "avg_processed16_setup_ms=%103 avg_processed16_core_math_ms=%104 "
-               "avg_processed16_local_tone_ms=%105 "
-               "avg_processed16_threading_overhead_ms=%106 "
-               "avg_processed16_cache_store_ms=%107 "
-               "avg_processed8_setup_ms=%108 avg_processed8_core_math_ms=%109 "
-               "avg_processed8_local_tone_ms=%110 "
-               "avg_processed8_threading_overhead_ms=%111 "
-               "avg_processed8_cache_store_ms=%112" )
+               "avg_processing_core_creative_toning_ms=%99" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16SumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeRawUint16DecompressSumMs ), 0, 'f', 3 )
@@ -18413,7 +18476,29 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeHueVsSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeVibranceSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeSaturationSumMs ), 0, 'f', 3 )
-               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeToningSumMs ), 0, 'f', 3 )
+               .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeToningSumMs ), 0, 'f', 3 );
+
+    /* Round-4 debt block: QString::arg place markers only go up to %99, so
+     * the fields that used to sit at %100-%112 in the line above were
+     * silently emitted as "%10"+"0"-style garbage. They live on their own
+     * continuation line now. The smoke wrapper merges both lines into one
+     * cpuSummary object (it matches "cpu_summary " and "cpu_summary_ext"
+     * separately). */
+    qInfo().noquote()
+        << QStringLiteral(
+               "playback_smoke.cpu_summary_ext session=%1 "
+               "avg_processing_core_creative_curve_ms=%2 "
+               "avg_processing_core_creative_gradation_ms=%3 "
+               "avg_processing_core_creative_agx_inverse_ms=%4 "
+               "avg_processed16_setup_ms=%5 avg_processed16_core_math_ms=%6 "
+               "avg_processed16_local_tone_ms=%7 "
+               "avg_processed16_threading_overhead_ms=%8 "
+               "avg_processed16_cache_store_ms=%9 "
+               "avg_processed8_setup_ms=%10 avg_processed8_core_math_ms=%11 "
+               "avg_processed8_local_tone_ms=%12 "
+               "avg_processed8_threading_overhead_ms=%13 "
+               "avg_processed8_cache_store_ms=%14" )
+               .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeCurveSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeGradationSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokeProcessingCoreCreativeAgxInverseSumMs ), 0, 'f', 3 )
