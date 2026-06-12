@@ -4739,8 +4739,46 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfResPreviewDefaultsOnInPlaybackP
     const std::vector<uint16_t> got = fixture.renderFrame16Scaled(0, 1, 1);
     ASSERT_FALSE(got.empty());
     ASSERT_EQ(1, fixture.video()->playback_scale_factor_active);
-    ASSERT_EQ(6, mlv_phase4bv2_last_path_taken());
+    /* Round-3 item 2: half-res PROCESSING is default-on inside the proxy,
+     * so the default playback-preview path is now 7 (proxy + half
+     * processing); 6 remains the proxy-only path behind the kill switch. */
+    ASSERT_EQ(7, mlv_phase4bv2_last_path_taken());
     ASSERT_EQ(std::string("none"), std::string(mlv_phase4bv2_last_fallback_reason()));
+}
+
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfProcessingKillSwitchRestoresPath6)
+{
+    struct PreviewModeResetGuard {
+        ~PreviewModeResetGuard()
+        {
+            processingSetPlaybackPreviewMode(0);
+            processingSetPlaybackAggressivePreviewMode(0);
+            MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_HALFRES_X1_PROCESSING");
+        }
+    } preview_mode_reset_guard;
+
+    MLVAPP_TEST_SETENV("MLVAPP_DISABLE_HALFRES_X1_PROCESSING", "1");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 16) {
+        return;
+    }
+
+    const std::vector<uint16_t> got = fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_FALSE(got.empty());
+    ASSERT_EQ(6, mlv_phase4bv2_last_path_taken());
+    ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint16_t v) { return v != 0; }));
 }
 
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfResPreviewStaysOffOutsidePlayback)
@@ -4845,9 +4883,9 @@ TEST(DualIsoPipeline, PlaybackProxyLevelFullDisablesPreviewCoresMidClip)
         return;
     }
 
-    /* Auto: x1 takes the half-res proxy (path 6). */
+    /* Auto: x1 takes the half-res proxy with half processing (path 7). */
     (void)fixture.renderFrame16Scaled(0, 1, 1);
-    ASSERT_EQ(6, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(7, mlv_phase4bv2_last_path_taken());
 
     /* Flip to Full MID-CLIP and re-render the SAME frame: the proxy must
      * disengage (path 0) - a stale cache hit here means the signature does
