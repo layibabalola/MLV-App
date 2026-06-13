@@ -568,3 +568,16 @@
 - Updated the durable playback investigation note and new-session handoff to make the recent x8 FPS breakthrough explicit: the win came from moving x8 Bayer-domain reduction before LLRawProc/Dual ISO and debayer, not from a late output scale alone.
 - The next playback performance pass should start by implementing a stage/domain/resolution/pixel-budget model for x1/x2/x4/x8, then use that model to choose work. The standing question is now: for this preview mode, can each stage be skipped, approximated, cached, or run at preview resolution?
 - The handoff now treats NLE proxy/resolution ladders as a first-class architecture pattern and points the next session at decode-aware/tile-aware reduced preview, x2/x4 early-resolution consistency, fallback telemetry, and separate sharp-preview versus coarse-deep-preview modes.
+
+## 2026-06-13 - headless per-clip Look Assist DNG defaults
+
+- Headless `--batch` CDNG export now generates Look Assist defaults separately for each MLV it processes. The batch runner copies the effective receipt per file, applies it to the clip, then calls `ReceiptApplier::applyHeadlessLookAssist(...)` before DNG fingerprint/export.
+- The export path remains full-quality raw frame output. Look Assist affects DNG defaults/metadata only: raw black/white, `BaselineExposure`, `AsShotNeutral`, and related raw-fix/chroma-smooth state.
+- The feature honors receipt `lookAssistEnabled`; `MLVAPP_NO_LOOK_ASSIST=1` disables it for headless export. There is no separate headless CLI toggle yet.
+- Validation from the implementation pass:
+  - `console_tests --gtest_filter=ReceiptApplier.*`: `97 tests / 48 assertions / 0 skips / 0 failures`
+  - `DualIsoPipeline.HeadlessLookAssistGeneratesClipLocalDngDefaults`: `196 tests / 14 assertions / 0 skips / 0 failures`
+  - `DualIsoPipeline.HeadlessLookAssistRespectsDisabledReceipt`: `196 tests / 4 assertions / 0 skips / 0 failures`
+  - `DualIsoPipeline.DngExportOverridesWriteLookAssistDefaults`: `196 tests / 27 assertions / 0 skips / 0 failures`
+  - Release smoke on `tests/fixtures/clips/tiny_dual_iso.mlv` exported two DNGs and logged `LOOK_ASSIST applied ... exposure=178 temperature=5840 tint=6 ... rawBlack=2047 rawWhite=6000`.
+- Release binary proof from the pass: `platform\qt\build-release\release\MLVApp.exe`, `LastWriteTime=6/13/2026 10:15:22 AM`, `Length=9189376`, `SHA256=9222FA97EDF3A6739FC8808DD4E53704BFD7927F899B466E866311A51D6E4FFE`.
