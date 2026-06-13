@@ -229,6 +229,31 @@ static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
     return enabled;
 }
 
+/* Round-4 item 6: let the direct8 PLAYBACK lanes use the cheap preview
+ * shadows/highlights blur (quarter-res RBF) instead of the export-policy
+ * half/full-res RBF. The SH blur is a smooth low-frequency mask, so a
+ * quarter-res RBF upsampled to full dims is visually equivalent to the
+ * half-res one (the standard preview lanes already ship this), while cutting
+ * the ~21ms full-quality-x1 SH-prep ~4x. applyProcessingObject8 used
+ * force_export_policy=1 unconditionally as a round-4 item 2 band-aid; the
+ * corruption that motivated it was the TLS scaled-input self-alias (fixed
+ * separately, same item), NOT the blur resolution - the blur_image is full
+ * imageX*imageY in every branch, so the kernel reads identical dims. EXPORTS
+ * (preview mode OFF) keep the export policy and stay full quality. Kill
+ * switch restores the band-aid for A/B and safety. */
+static int processing_direct8_preview_quarterres_sh_enabled(void)
+{
+    static int initialized = 0;
+    static int enabled = 1;
+    if( !initialized )
+    {
+        enabled = processing_env_flag_enabled(
+            getenv("MLVAPP_DISABLE_DIRECT8_PREVIEW_QUARTERRES_SH") ) ? 0 : 1;
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
 {
     static MLV_PROCESSING_THREAD_LOCAL int cached_preview_mode_enabled = -1;
@@ -3741,10 +3766,15 @@ void applyProcessingObject8( processingObject_t * processing,
          * used to keep a full-res-only copy of the policy, which drifted
          * when 25795f27 moved the 16-bit side to half-res - the PhaseE9
          * direct8 parity break). Also a perf win: even-dimension frames now
-         * get the half-res RBF here too. force_export_policy=1: only the
-         * dimension-based halfres/fullres blur lanes are byte-identity-
-         * proven against this kernel (see the helper comment). */
-        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads, 1 );
+         * get the half-res RBF here too.
+         * Round-4 item 6: PLAYBACK direct8 (preview mode on) uses the cheap
+         * preview quarter-res blur lanes; EXPORTS (preview mode off) keep the
+         * dimension-based export policy and stay full quality. See
+         * processing_direct8_preview_quarterres_sh_enabled. */
+        const int sh_export_policy =
+            !( processingPlaybackPreviewModeEnabled()
+               && processing_direct8_preview_quarterres_sh_enabled() );
+        processing_compute_shadows_highlights_blur( processing, inputImage, imageX, imageY, threads, sh_export_policy );
     }
     g_processing_last_shadows_highlights_prep_ms = (omp_get_wtime() - shadows_highlights_start) * 1000.0;
 
