@@ -157,6 +157,56 @@ tearing (likely the same cold-path complex: look-assist settle + worker warm-up 
 all compete in the first seconds). Deserves its own session; not a regression of a measured gate
 (content/span/suite all clean warm), but user-visible on first play.
 
+## ROUND-4 RE-AUDIT (2026-06-13 — "maxed" framing CORRECTED; user challenge: "can x1 improve? are native scales full quality?")
+
+A 6-agent verified workflow + fresh measurement re-opened two claims the COMPLETE
+section below got wrong. Both corrections favor honesty over the prior rosy framing.
+
+**Q2 — the native-fps scales are NOT full quality (they are reduced-pixel previews).**
+The playback scale factor is a DOWNSAMPLE, confirmed in code (`out_w = full_w/scale`,
+video_mlv.c ~6410): x2 = 1/4 the pixels, x4 = 1/16, x8 = 1/64. "x4 native ~23 fps" means
+native fps for a 1/16-pixel render, not full quality. Even x1 "~16 Auto" is the half-res
+proxy (path 7). The ONLY genuinely full-quality playback path is x1 + Preview Resolution =
+Full + Sharp + HQ recon (path 0). Smoothness is ALWAYS bought with a resolution/processing
+reduction; no smooth lane is full quality. The COMPLETE section conflated "smooth preview
+across scales" with "throughput maxed" — that was an overclaim.
+
+**Q1 — full-quality x1 is NOT maxed; the "~8-9 fps, below-noise" dismissal was stale + mis-baselined.**
+The IMMUTABLE baseline (5.4 cold / 8.1 warm) was measured 2026-06-10, BEFORE R4-2 made
+direct8 eligible for the look-assist receipt. FRESH measurement on master 8BEAEE8A (proxy
+off, Sharp, default receipt): full-quality x1 = **11.0 fps (1327) / 10.8 fps (1446)**, with
+direct8 engaging (86/85 frames) — R4-1/R4-2/R4-3 lifted the full-quality lane too, it just
+was never re-measured. The "SIMD below noise" verdict (R4-5 row) was measured against the
+REDUCED ~40ms proxy lane, not the ~78ms full-quality path — unsound for full-quality x1.
+One genuine quality-preserving lever remains, full-quality-x1-only: the 78ms render is
+dominated by two SCALAR sub-stages — core_math ~22ms (the SH/contrast direct8 SHARED-C
+kernel; the hand-tuned AVX2 intrin kernel is neutral-receipt only) + the SH RBF blur ~21ms
+(recursive_bf_wrap, raw_processing.c:1268-1352, scalar). Hand-vectorizing those could
+realistically reach ~14-16 fps on that one lane. CATCHES: helps only the x1-Full lane (the
+proxy already covers smoothness), and carries the exact byte-parity regression risk that bit
+the 8-bit kernel for weeks (R4-0b/0c) — needs a full parity net. LJ92 decode stays
+un-vectorizable (serial Huffman); dual-ISO recon is already AVX2; the sampled-cache-hash
+lever is sub-1% with a stale-cache collision hazard (correctly a non-lever).
+
+**Q2 cleanliness — are the reduced lanes clean at their resolution? Yes, with one minor caveat.**
+The bayer-domain reduced lanes have NO vertical low-pass before decimation
+(`src_row_idx = (y_out>>2)*N + (y_out&3)` keeps 4-row ISO blocks, drops the rest;
+playback_downsample.c:683/755/815), structurally forced by the dual-ISO 4-row exposure
+pattern. Controlled cross-lane comparison (same frame, same display size, M16-1327 aquarium
+rock + near-horizontal railing edge — worst case): **x2/x4 clean-but-soft, no objectionable
+artifacts at any scale; x8 soft with a real but SUB-VISIBLE vertical-decimation aliasing**
+(faint edge jaggedness + chroma speckle visible only at 2.5x nearest-neighbor zoom on static
+high-contrast edges; gone at normal viewing size, masked further in motion). Characterized
+limitation, not a bug. The R4-5 "no visible artifacts" claim holds at normal viewing and is
+now backed by a controlled comparison + code-level cause rather than a one-clip spot check.
+Evidence: .claude-state/profiling/r4-reaudit/ (fresh x1-full vs Auto measurements, qual-cap
+crops) and the wf_b00d987a-3a8 verified workflow.
+
+**Net:** smooth preview playback IS effectively maxed across scales; FULL-QUALITY x1
+(~11 fps) still has one honest, narrow, parity-risky lever (vectorize core_math + SH blur ->
+~14-16 fps). Open levers/decisions: that x1-Full kernel vectorization; the x8 Y-low-pass
+cleanliness polish (sub-visible); R4-4 non-dual-ISO proxies (asset-blocked).
+
 ## ROUND-4 AUTONOMOUS AUDIT-EXECUTION (COMPLETE 2026-06-13 — stop condition met)
 
 **Mandate (user 2026-06-12): "execute all iteratively until done and no more performance
