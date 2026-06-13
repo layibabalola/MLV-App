@@ -4,6 +4,8 @@
 #include <QString>
 #include "BatchTypes.h"
 
+#include <cstdint>
+
 class ReceiptSettings;
 
 /* Orchestrates headless batch CDNG export.
@@ -17,6 +19,25 @@ public:
      * outputPath: root output directory
      * Returns process exit code (see CLAUDE.md exit code table). */
     static int run(const QString &inputPath, const QString &outputPath);
+
+    /* Pick the 0-based frame that headless Look Assist analyzes to generate the
+     * clip-wide DNG look defaults (BaselineExposure / AsShotNeutral / raw black
+     * and white levels).
+     *
+     * It MUST be the ORIGINAL receipt cut-in (cutIn - 1), never effectiveCutIn.
+     * The --resume flag advances effectiveCutIn past frames a previous run
+     * already exported, so anchoring analysis on effectiveCutIn would make a
+     * resumed run bake DIFFERENT look defaults into the remaining DNGs than the
+     * first run baked into the earlier frames of the same sequence. Look defaults
+     * are clip-wide, so the anchor must be stable across separate (and resumed)
+     * process invocations. effectiveCutIn is accepted only to document the value
+     * that must be ignored here; defined inline so it is unit-testable without
+     * linking the GUI-dependent BatchRunner.cpp. */
+    static uint32_t lookAssistAnalysisFrameIndex( uint32_t cutIn,
+                                                  uint32_t /*effectiveCutIn*/ )
+    {
+        return cutIn > 0 ? cutIn - 1 : 0;
+    }
 
 private:
     BatchRunner() = delete; /* Pure static */

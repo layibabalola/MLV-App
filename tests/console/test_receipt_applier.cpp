@@ -7,6 +7,7 @@
 #include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
 #include "../../src/batch/BatchLogger.h"
+#include "../../src/batch/BatchRunner.h"
 
 #include <QDir>
 #include <QFile>
@@ -291,4 +292,26 @@ TEST(ReceiptApplier, ApplyingReceiptInvalidatesCachedFrames)
     }
 
     destroy_runtime_objects(video.get());
+}
+
+/* Regression: headless Look Assist must analyze the ORIGINAL receipt cut-in
+ * frame, not effectiveCutIn. Under --resume effectiveCutIn is advanced past the
+ * frames a previous run already exported; anchoring the analysis on it would
+ * give the remaining DNGs different clip-wide look defaults than the first run.
+ * lookAssistAnalysisFrameIndex must therefore ignore effectiveCutIn. */
+TEST(BatchRunner, LookAssistAnalysisFrameAnchorsToOriginalCutInUnderResume)
+{
+    /* First run: nothing exported yet, effectiveCutIn == cutIn. */
+    ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(1, 1));
+    ASSERT_EQ(9u, BatchRunner::lookAssistAnalysisFrameIndex(10, 10));
+
+    /* Resumed run: effectiveCutIn advanced far past cutIn. The analysis anchor
+     * MUST stay at cutIn - 1 (this is exactly the bug the fix prevents: pre-fix
+     * these returned effectiveCutIn - 1 = 49 and 199). */
+    ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(1, 50));
+    ASSERT_EQ(9u, BatchRunner::lookAssistAnalysisFrameIndex(10, 200));
+
+    /* Degenerate cut-in (receipt cutIn == 0, normalized to frame 0). */
+    ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(0, 0));
+    ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(0, 25));
 }

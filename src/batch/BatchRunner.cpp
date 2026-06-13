@@ -386,11 +386,16 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * video_index scanning) but BEFORE the export call. */
     ReceiptApplier::applyToMlv( receipt, mlvObject, processingObject );
 
+    /* Analyze the ORIGINAL cut-in frame, NOT effectiveCutIn: --resume advances
+     * effectiveCutIn past already-exported frames, and Look Assist defaults are
+     * clip-wide, so a resumed run must analyze the same anchor as the first run
+     * or the remaining DNGs would get different BaselineExposure / AsShotNeutral
+     * / raw-level defaults. See BatchRunner::lookAssistAnalysisFrameIndex. */
     ReceiptApplier::applyHeadlessLookAssist(
         receipt,
         mlvObject,
         processingObject,
-        effectiveCutIn > 0 ? effectiveCutIn - 1 : 0 );
+        BatchRunner::lookAssistAnalysisFrameIndex( cutIn, effectiveCutIn ) );
 
     /* Print runtime FINGERPRINT — proves settings reached the pipeline */
     ReceiptApplier::printFingerprint( mlvObject, processingObject );
