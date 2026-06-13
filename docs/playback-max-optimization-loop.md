@@ -207,6 +207,20 @@ crops) and the wf_b00d987a-3a8 verified workflow.
 ~14-16 fps). Open levers/decisions: that x1-Full kernel vectorization; the x8 Y-low-pass
 cleanliness polish (sub-visible); R4-4 non-dual-ISO proxies (asset-blocked).
 
+**30s SUSTAINED RE-MEASURE (2026-06-13 — user flagged the 8s benchmark window as too short).**
+Correct: 8s is only ~90-180 frames (under-sampled median) and does not reach sustained
+thermal. Re-measured the headline standings at `-Seconds 30` on M16-1327/1446 (307-688
+presents/run, idle hardware). They HOLD within ~0.5 fps: full-quality x1 **10.4/11.1**, x1
+Auto **15.9/15.9**, x2 Sharp **21.3/22.7**, x4 **23.3/23.3**, x8 **23.3/23.3** (native
+23.976). Honest deltas vs the 8s numbers: the compute-heavy x1 lanes sag ~0.5 fps thermally
+over the longer window; x4/x8 unchanged at the ceiling; p99 frame times 77-91ms (x2/x4/x8) /
+139-144ms (x1 Full) — no catastrophic stall hiding in the long run, loop-wrap does not inject
+a big tail. NUANCE: the round-4 interleaved A/B *deltas* stay valid at 8s (back-to-back,
+thermal-symmetric); it is the ABSOLUTE standings that needed the longer window. STANDARD
+GOING FORWARD: `-Seconds 30` for any reported absolute number (the harness itself recommends
+it via `settledValidationRecommendedSeconds:30`); 8s only for quick relative A/B probes.
+Evidence: .claude-state/profiling/r4-30s/.
+
 ## ROUND-4 AUTONOMOUS AUDIT-EXECUTION (COMPLETE 2026-06-13 — stop condition met)
 
 **Mandate (user 2026-06-12): "execute all iteratively until done and no more performance
