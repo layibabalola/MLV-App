@@ -510,7 +510,14 @@ static void APPLY_8BIT_FAST_ROWS_NAME(processingObject_t * processing,
                 {
                     const float inv_y = 1.0f / Y;
                     const float result2_0 = Y - (Reinhard_for_colour((Y - result0) * inv_y) * Y);
-                    const float result2_1 = Y - (Reinhard_for_blue((Y - result1) * inv_y) * Y);
+                    /* Round-4 item 7c: the scalar tail must match the SIMD body
+                     * (line 378) and the shared kernel
+                     * (raw_processing_8bit_kernel.inc:477) - green uses the
+                     * neutral ReinhardTonemap_f, NOT Reinhard_for_blue. The
+                     * stray Reinhard_for_blue here diverged the trailing columns
+                     * of any non-multiple-of-8 width (caught by the
+                     * DirectProcessed8FastPath_AVX2IntrinOddWidthTail test). */
+                    const float result2_1 = Y - (ReinhardTonemap_f((Y - result1) * inv_y) * Y);
                     const float result2_2 = Y - (Reinhard_for_blue((Y - result2) * inv_y) * Y);
                     const float desaturate_factor =
                         (Y - MIN(MIN(result2_0, result2_1), result2_2)) / y_minus_min_channel;
