@@ -20295,6 +20295,15 @@ void MainWindow::drawFrameReady()
      * the existing inline advance ahead of the paint. The tail advance still
      * runs and degrades to m_playbackFrameAdvancePending while the early
      * render is in flight. */
+    /* Round-4 item 7b: reset the advance timing HERE, before the early advance
+     * runs, instead of in the shared reset block below. When the early advance
+     * fires it dispatches the next render and leaves the render thread busy, so
+     * the tail advance in finishPresentedFrame does not re-fire; the shared
+     * reset below previously zeroed this measurement before the smoke
+     * accounting (notePlaybackSmokePresentedFrame) read it as
+     * presentRenderSlotReleaseMs, which under-reported the early advance cost
+     * and inflated the residual present-pacing band. */
+    m_lastDrawFrameReadyAdvanceMs = 0.0;
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
         m_frameStillDrawing = !m_pRenderThread->isIdle();
@@ -20333,7 +20342,8 @@ void MainWindow::drawFrameReady()
             true );
     }
     m_lastDrawFrameReadyQueueMs = 0.0;
-    m_lastDrawFrameReadyAdvanceMs = 0.0;
+    /* m_lastDrawFrameReadyAdvanceMs is reset above, before the early advance,
+     * so its early measurement is not zeroed before the smoke accounting. */
     m_lastDrawFrameReadySceneMs = 0.0;
     m_lastDrawFrameReadyImageMs = 0.0;
     m_lastDrawFrameReadyPresentMs = 0.0;

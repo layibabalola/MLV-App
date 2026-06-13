@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "fix/r4item7-avx2-tail-green-and-advance-telemetry",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 10,
+  "createdAt": "2026-06-13T15:17:00+00:00",
+  "detectorHash": "2bf315554f0caf776b7cfa1f50f45e9c",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "e620733139823e75f2279347aa121cfeb0802f3f",
+  "schemaVersion": "1.0",
+  "targetHead": "aaad05d2c3a6082b82bc3030bced68b09f9888fb",
+  "workBlockId": "wb-1aaa01d8ac264f7e"
+}

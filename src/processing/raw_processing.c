@@ -2520,6 +2520,55 @@ int processingFastPathReinitDispatchForTesting(void)
     return g_apply_processing_object_8bit_fast_rows_use_avx2_intrin;
 }
 
+/* Test-only hook: invoke a specific direct8 fast-rows kernel variant directly,
+ * bypassing the runtime dispatch, so parity tests can drive an arbitrary image
+ * width (e.g. one that is NOT a multiple of 8) through a chosen variant's
+ * scalar tail. variant: 0 = plain-C scalar, 1 = AVX2 autovec, 2 = AVX2
+ * intrinsics. Returns 1 if the requested variant exists on this build and was
+ * run, 0 otherwise (the AVX2 variants only compile on x86 GCC; callers must
+ * still gate variants 1/2 on a host that advertises AVX2+FMA before running).
+ * blurImage may be NULL (the kernel ignores it). Not declared in the public
+ * header. */
+int processingApplyDirect8FastRowsVariantForTesting(processingObject_t * processing,
+                                                    int variant,
+                                                    int imageX,
+                                                    int rowStart,
+                                                    int rowEnd,
+                                                    uint16_t * inputImage,
+                                                    uint16_t * blurImage,
+                                                    uint8_t * outputImage);
+int processingApplyDirect8FastRowsVariantForTesting(processingObject_t * processing,
+                                                    int variant,
+                                                    int imageX,
+                                                    int rowStart,
+                                                    int rowEnd,
+                                                    uint16_t * inputImage,
+                                                    uint16_t * blurImage,
+                                                    uint8_t * outputImage)
+{
+    apply_processing_object_8bit_fast_rows_fn_t fn = NULL;
+    if( variant == 0 )
+    {
+        fn = apply_processing_object_8bit_fast_rows_scalar;
+    }
+#ifdef MLVAPP_AVX2_DISPATCH_AVAILABLE
+    else if( variant == 1 )
+    {
+        fn = apply_processing_object_8bit_fast_rows_avx2;
+    }
+    else if( variant == 2 )
+    {
+        fn = apply_processing_object_8bit_fast_rows_avx2_intrin;
+    }
+#endif
+    if( fn == NULL )
+    {
+        return 0;
+    }
+    fn( processing, imageX, rowStart, rowEnd, inputImage, blurImage, outputImage, NULL );
+    return 1;
+}
+
 static void apply_processing_object_8bit_fast_rows(processingObject_t * processing,
                                                    int imageX,
                                                    int rowStart,

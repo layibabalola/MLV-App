@@ -6720,6 +6720,38 @@ void getMlvProcessedFrame8Scaled(mlvObject_t * video,
                                      /*playbackPreview*/1);
 }
 
+/* PRECONDITION (playback-preview envelope): unlike getMlvProcessedFrame8Scaled
+ * / getMlvProcessedFrame8_with_scale -- which save, set and restore the FULL
+ * preview envelope themselves (preview mode, aggressive-preview mode AND the
+ * processing-global preview scale factor) -- this helper and its sibling
+ * getMlvProcessedFrame8ScaledFromReconnedRaw16 deliberately establish ONLY the
+ * aggressive-preview sub-flag and set video->playback_scale_factor_active
+ * directly. They INHERIT processingSetPlaybackPreviewMode(1) and
+ * processingSetPlaybackPreviewScaleFactor(...) from the caller's envelope.
+ *
+ * The only production caller is RenderFrameThread, which wraps the whole
+ * render body in PlaybackPreviewModeGuard (platform/qt/RenderFrameThread.cpp)
+ * before invoking these helpers; the guard is what sets the preview mode and
+ * preview scale factor for the call's duration. These helpers do not
+ * re-establish that envelope so the render hot path is not double-guarded.
+ *
+ * Subtlety: the guard sets the global preview scale factor to the RAW requested
+ * scale, whereas getMlvProcessedFrame8_with_scale sets it to the EFFECTIVE
+ * scale (mlv_effective_playback_scale_factor). They agree for the evenly
+ * dividing scales the UI offers, but on a down-normalized (misaligned) scale
+ * the inherited global stays at the raw value while
+ * video->playback_scale_factor_active holds the effective one, so a global
+ * reader (e.g. the quarter-res shadows/highlights RBF gate in raw_processing.c)
+ * sees the requested, not the effective, scale on this inherited path. Aligning
+ * them by self-establishing the envelope here (like with_scale) is a behavior
+ * change deferred to its own review.
+ *
+ * Consequence: calling this helper OUTSIDE an active playback-preview envelope
+ * (preview mode disabled, or a stale/foreign preview scale factor) gives
+ * incorrect direct8 gating and playback-proxy behavior. This is NOT a
+ * general-purpose 8-bit entry point -- use getMlvProcessedFrame8 (exports /
+ * single-frame grabs) or getMlvProcessedFrame8Scaled (which establishes the
+ * envelope itself) when calling from outside the render thread. */
 int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
                                          uint64_t frameIndex,
                                          const uint16_t * decodedRawFrame,
@@ -6820,6 +6852,11 @@ int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
     return 1;
 }
 
+/* Same playback-preview envelope precondition as
+ * getMlvProcessedFrame8ScaledFromRaw16 (see the contract note above it): must
+ * run inside the render thread's PlaybackPreviewModeGuard; manages only the
+ * aggressive-preview sub-flag and inherits preview mode / preview scale factor
+ * from that envelope. Not a general-purpose entry point. */
 int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                  uint64_t frameIndex,
                                                  const uint16_t * reconnedRawFrame,

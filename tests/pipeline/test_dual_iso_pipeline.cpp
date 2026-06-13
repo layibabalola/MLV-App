@@ -9,6 +9,7 @@
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
+#include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
 #include <algorithm>
 #include <chrono>
@@ -249,6 +250,76 @@ TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
+}
+
+TEST(DualIsoPipeline, HeadlessLookAssistGeneratesClipLocalDngDefaults)
+{
+    qunsetenv("MLVAPP_NO_LOOK_ASSIST");
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    ReceiptSettings &receipt = fixture.receipt();
+    receipt.setLookAssistEnabled(true);
+    receipt.setLookAssistBaselineValid(false);
+    receipt.setExposure(0);
+    receipt.setTemperature(-1);
+    receipt.setTint(0);
+
+    const bool applied = ReceiptApplier::applyHeadlessLookAssist(
+        &receipt,
+        fixture.video(),
+        fixture.processing(),
+        0);
+
+    ASSERT_TRUE(applied);
+    ASSERT_TRUE(receipt.lookAssistBaselineValid());
+    ASSERT_NE(-1, receipt.rawBlack());
+    ASSERT_NE(-1, receipt.rawWhite());
+    ASSERT_EQ(getMlvBlackLevel(fixture.video()) * 10, receipt.rawBlack());
+    ASSERT_EQ(getMlvWhiteLevel(fixture.video()), receipt.rawWhite());
+    ASSERT_TRUE(receipt.temperature() >= 2000);
+    ASSERT_TRUE(receipt.temperature() <= 10000);
+    ASSERT_TRUE(receipt.tint() >= -100);
+    ASSERT_TRUE(receipt.tint() <= 100);
+    ASSERT_NEAR(static_cast<double>(receipt.temperature()),
+                fixture.processing()->kelvin,
+                0.0001);
+    ASSERT_NEAR(receipt.tint() / 10.0,
+                fixture.processing()->wb_tint,
+                0.0001);
+
+    const QString summary = QStringLiteral("exp=%1;temp=%2;tint=%3;rawBlack=%4;rawWhite=%5;")
+        .arg(receipt.exposure())
+        .arg(receipt.temperature())
+        .arg(receipt.tint())
+        .arg(receipt.rawBlack())
+        .arg(receipt.rawWhite());
+    test_artifacts::record("batch.look_assist.clip_local_defaults",
+                           sha256_qstring(summary));
+}
+
+TEST(DualIsoPipeline, HeadlessLookAssistRespectsDisabledReceipt)
+{
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    ReceiptSettings &receipt = fixture.receipt();
+    receipt.setLookAssistEnabled(false);
+    receipt.setLookAssistBaselineValid(false);
+
+    const bool applied = ReceiptApplier::applyHeadlessLookAssist(
+        &receipt,
+        fixture.video(),
+        fixture.processing(),
+        0);
+
+    ASSERT_FALSE(applied);
+    ASSERT_FALSE(receipt.lookAssistBaselineValid());
 }
 
 static void configure_direct_processed8_supported_subset(MlvPipelineFixture & fixture)
@@ -1506,6 +1577,124 @@ TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinByteIdentity)
     unsetenv("MLVAPP_ENABLE_AVX2_INTRIN_DIRECT8");
 #endif
     processingFastPathReinitDispatchForTesting();
+}
+
+/* Test-only direct8 kernel-variant hook (raw_processing.c). variant: 0 =
+ * scalar, 1 = AVX2 autovec, 2 = AVX2 intrinsics. Returns 1 if the requested
+ * variant exists on this build and ran. */
+extern "C" int processingApplyDirect8FastRowsVariantForTesting(processingObject_t * processing,
+                                                               int variant,
+                                                               int imageX,
+                                                               int rowStart,
+                                                               int rowEnd,
+                                                               uint16_t * inputImage,
+                                                               uint16_t * blurImage,
+                                                               uint8_t * outputImage);
+
+/* Round-4 follow-up: the fixture-driven AVX2-intrinsics parity test above
+ * renders a frame whose width is a multiple of 8, so the intrinsics kernel's
+ * scalar tail (the `for( ; x < imageX; ++x )` block in
+ * raw_processing_8bit_kernel_avx2_intrin.inc) never runs. That tail's green
+ * highlight-rolloff used Reinhard_for_blue instead of the neutral
+ * ReinhardTonemap_f (the SIMD body was already corrected), so the trailing
+ * columns of any non-multiple-of-8 width diverged from the scalar reference.
+ * Drive a synthetic 13-wide buffer (cols 0-7 = SIMD body, cols 8-12 = scalar
+ * tail) through both the scalar and intrinsics variants directly and assert
+ * byte-identity, forcing that tail path under test. */
+TEST(DualIsoPipeline, DirectProcessed8FastPath_AVX2IntrinOddWidthTailByteIdentity)
+{
+#if defined(__GNUC__) && !defined(__clang__) && (defined(__x86_64__) || defined(__i386__))
+    __builtin_cpu_init();
+    const bool host_supports_avx2_fma =
+        __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+#else
+    const bool host_supports_avx2_fma = false;
+#endif
+
+    const char * kill_switch = std::getenv("MLVAPP_DISABLE_AVX2");
+    const bool kill_switch_set = kill_switch && kill_switch[0] != '\0'
+        && std::strcmp(kill_switch, "0") != 0;
+    if (!host_supports_avx2_fma || kill_switch_set) {
+        SKIP_TEST("host lacks AVX2+FMA or MLVAPP_DISABLE_AVX2 is set");
+        return;
+    }
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    /* Neutral direct8 subset: scalar and intrinsics must agree byte-for-byte
+     * everywhere except the (buggy) tail green tonemap, so any difference this
+     * test reports is the tail bug, not a creative-path divergence. */
+    configure_direct_processed8_supported_subset(fixture);
+
+    processingObject_t * processing = fixture.processing();
+    ASSERT_TRUE(processing != nullptr);
+
+    /* Width 13 -> SIMD body covers columns 0-7, the scalar tail covers the
+     * remaining 5 columns (8-12). Several rows of saturated, varied colours so
+     * the highlight-rolloff tonemap branch fires (Y > 0, min_channel < Y) and
+     * the green channel lands in the (0, 0.7) normalized band where
+     * Reinhard_for_blue and ReinhardTonemap_f diverge. */
+    const int imageX = 13;
+    const int rows = 4;
+    const std::size_t pixels = static_cast<std::size_t>(imageX) * static_cast<std::size_t>(rows);
+    std::vector<uint16_t> input(pixels * 3u);
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < imageX; ++x) {
+            const std::size_t idx = (static_cast<std::size_t>(y) * imageX + x) * 3u;
+            const uint16_t hi = static_cast<uint16_t>(6000 + ((x * 9 + y * 7) % 11) * 5000);
+            const uint16_t mid = static_cast<uint16_t>(hi * 2 / 3);
+            const uint16_t lo = static_cast<uint16_t>(800 + ((x + y) % 7) * 600);
+            switch ((x + y * 3) % 6) {
+                case 0:  input[idx+0]=hi;  input[idx+1]=mid; input[idx+2]=lo;  break;
+                case 1:  input[idx+0]=hi;  input[idx+1]=lo;  input[idx+2]=mid; break;
+                case 2:  input[idx+0]=mid; input[idx+1]=hi;  input[idx+2]=lo;  break;
+                case 3:  input[idx+0]=lo;  input[idx+1]=hi;  input[idx+2]=mid; break;
+                case 4:  input[idx+0]=mid; input[idx+1]=lo;  input[idx+2]=hi;  break;
+                default: input[idx+0]=lo;  input[idx+1]=mid; input[idx+2]=hi;  break;
+            }
+        }
+    }
+
+    std::vector<uint8_t> scalar_out(pixels * 3u, 0);
+    std::vector<uint8_t> intrin_out(pixels * 3u, 0);
+
+    const int scalar_ok = processingApplyDirect8FastRowsVariantForTesting(
+        processing, /*variant=scalar*/ 0, imageX, 0, rows,
+        input.data(), nullptr, scalar_out.data());
+    ASSERT_EQ(1, scalar_ok);
+
+    const int intrin_ok = processingApplyDirect8FastRowsVariantForTesting(
+        processing, /*variant=intrinsics*/ 2, imageX, 0, rows,
+        input.data(), nullptr, intrin_out.data());
+    ASSERT_EQ(1, intrin_ok);
+
+    std::uint64_t differing = 0;
+    int max_abs_diff = 0;
+    std::uint64_t first_diff_byte = 0;
+    bool have_first = false;
+    for (std::size_t i = 0; i < scalar_out.size(); ++i) {
+        int d = static_cast<int>(scalar_out[i]) - static_cast<int>(intrin_out[i]);
+        if (d < 0) d = -d;
+        if (d != 0) {
+            ++differing;
+            if (d > max_abs_diff) max_abs_diff = d;
+            if (!have_first) { first_diff_byte = i; have_first = true; }
+        }
+    }
+    const unsigned long long first_diff_col =
+        have_first ? static_cast<unsigned long long>((first_diff_byte / 3u) % static_cast<std::size_t>(imageX)) : 0ull;
+    std::printf("DirectProcessed8FastPath_AVX2IntrinOddWidthTail: %llu/%zu bytes differ, max|d|=%d, first byte@%llu (col=%llu)\n",
+                static_cast<unsigned long long>(differing),
+                scalar_out.size(),
+                max_abs_diff,
+                static_cast<unsigned long long>(first_diff_byte),
+                first_diff_col);
+    ASSERT_EQ(static_cast<std::uint64_t>(0), differing);
+    ASSERT_EQ(0, max_abs_diff);
 }
 
 TEST(DualIsoPipeline, DirectProcessed8FastPathAvx2PathActiveOnCapableHost)

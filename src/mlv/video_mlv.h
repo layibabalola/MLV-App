@@ -89,6 +89,12 @@ void getMlvProcessedFrame8Scaled(mlvObject_t * video,
                                  uint8_t * outputFrame,
                                  int threads,
                                  int scaleFactor);
+/* Render-thread-only playback helpers: both REQUIRE an active playback-preview
+ * envelope (RenderFrameThread's PlaybackPreviewModeGuard) -- they inherit the
+ * preview mode + preview scale factor and manage only the aggressive sub-flag,
+ * unlike getMlvProcessedFrame8Scaled which establishes the envelope itself.
+ * See the full contract note at their definitions in video_mlv.c. Not
+ * general-purpose; calling outside that envelope mis-gates the direct8 path. */
 int getMlvProcessedFrame8ScaledFromRaw16(mlvObject_t * video,
                                          uint64_t frameIndex,
                                          const uint16_t * decodedRawFrame,
