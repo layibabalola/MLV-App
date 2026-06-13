@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "fix/r4item8-batch-lookassist-resume-anchor",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-06-13T23:51:09+00:00",
+  "detectorHash": "e624e6826ba1712fddf445d40c191715",
+  "featureHead": "fe5897c53b1605e41e760546683948c6f6b55214",
+  "schemaVersion": "1.0",
+  "targetHead": "9e16d46890e993f9be2906d18655ee8d54ccdb57",
+  "workBlockId": "wb-c4ed473d9a224da2",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
