@@ -29,6 +29,14 @@ public:
     static void printFingerprint(mlvObject_t *mlvObject,
                                  processingObject_t *processingObject);
 
+    /* Batch/headless equivalent of Auto Look Assist.
+     * Generates fresh clip-local DNG defaults from the currently opened MLV
+     * instead of reusing a GUI receipt baseline captured from another clip. */
+    static bool applyHeadlessLookAssist(ReceiptSettings *receipt,
+                                        mlvObject_t *mlvObject,
+                                        processingObject_t *processingObject,
+                                        uint32_t analysisFrame);
+
 private:
     ReceiptApplier() = delete; /* Pure static — no instances */
 };

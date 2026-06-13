@@ -170,7 +170,11 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 
     for( const QString &mlvPath : mlvFiles )
     {
-        ProcessResult res = exportSingleFile( mlvPath, outputPath, &receipt );
+        /* ReceiptApplier mutates clip-local runtime decisions (Dual ISO state,
+         * raw levels, and headless Look Assist). Keep those derivations scoped
+         * to the MLV being exported so batch directories get one look per clip. */
+        ReceiptSettings clipReceipt = receipt;
+        ProcessResult res = exportSingleFile( mlvPath, outputPath, &clipReceipt );
 
         QString baseName = QFileInfo(mlvPath).completeBaseName();
         if( res.success )
@@ -381,6 +385,12 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * Must happen AFTER resume logic (which needs raw mlvObject state for
      * video_index scanning) but BEFORE the export call. */
     ReceiptApplier::applyToMlv( receipt, mlvObject, processingObject );
+
+    ReceiptApplier::applyHeadlessLookAssist(
+        receipt,
+        mlvObject,
+        processingObject,
+        effectiveCutIn > 0 ? effectiveCutIn - 1 : 0 );
 
     /* Print runtime FINGERPRINT — proves settings reached the pipeline */
     ReceiptApplier::printFingerprint( mlvObject, processingObject );

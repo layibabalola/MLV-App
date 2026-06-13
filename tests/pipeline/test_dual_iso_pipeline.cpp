@@ -9,6 +9,7 @@
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
+#include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
 #include <algorithm>
 #include <chrono>
@@ -249,6 +250,76 @@ TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
+}
+
+TEST(DualIsoPipeline, HeadlessLookAssistGeneratesClipLocalDngDefaults)
+{
+    qunsetenv("MLVAPP_NO_LOOK_ASSIST");
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    ReceiptSettings &receipt = fixture.receipt();
+    receipt.setLookAssistEnabled(true);
+    receipt.setLookAssistBaselineValid(false);
+    receipt.setExposure(0);
+    receipt.setTemperature(-1);
+    receipt.setTint(0);
+
+    const bool applied = ReceiptApplier::applyHeadlessLookAssist(
+        &receipt,
+        fixture.video(),
+        fixture.processing(),
+        0);
+
+    ASSERT_TRUE(applied);
+    ASSERT_TRUE(receipt.lookAssistBaselineValid());
+    ASSERT_NE(-1, receipt.rawBlack());
+    ASSERT_NE(-1, receipt.rawWhite());
+    ASSERT_EQ(getMlvBlackLevel(fixture.video()) * 10, receipt.rawBlack());
+    ASSERT_EQ(getMlvWhiteLevel(fixture.video()), receipt.rawWhite());
+    ASSERT_TRUE(receipt.temperature() >= 2000);
+    ASSERT_TRUE(receipt.temperature() <= 10000);
+    ASSERT_TRUE(receipt.tint() >= -100);
+    ASSERT_TRUE(receipt.tint() <= 100);
+    ASSERT_NEAR(static_cast<double>(receipt.temperature()),
+                fixture.processing()->kelvin,
+                0.0001);
+    ASSERT_NEAR(receipt.tint() / 10.0,
+                fixture.processing()->wb_tint,
+                0.0001);
+
+    const QString summary = QStringLiteral("exp=%1;temp=%2;tint=%3;rawBlack=%4;rawWhite=%5;")
+        .arg(receipt.exposure())
+        .arg(receipt.temperature())
+        .arg(receipt.tint())
+        .arg(receipt.rawBlack())
+        .arg(receipt.rawWhite());
+    test_artifacts::record("batch.look_assist.clip_local_defaults",
+                           sha256_qstring(summary));
+}
+
+TEST(DualIsoPipeline, HeadlessLookAssistRespectsDisabledReceipt)
+{
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    ReceiptSettings &receipt = fixture.receipt();
+    receipt.setLookAssistEnabled(false);
+    receipt.setLookAssistBaselineValid(false);
+
+    const bool applied = ReceiptApplier::applyHeadlessLookAssist(
+        &receipt,
+        fixture.video(),
+        fixture.processing(),
+        0);
+
+    ASSERT_FALSE(applied);
+    ASSERT_FALSE(receipt.lookAssistBaselineValid());
 }
 
 static void configure_direct_processed8_supported_subset(MlvPipelineFixture & fixture)

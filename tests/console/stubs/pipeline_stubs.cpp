@@ -139,6 +139,18 @@ void processingSetWhiteLevel(processingObject_t * processing, int mlvWhiteLevel,
     processingSetBlackAndWhiteLevel(processing, -1, mlvWhiteLevel, mlvBitDepth);
 }
 
+void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin, double WBTint)
+{
+    if (!processing) {
+        return;
+    }
+    processing->kelvin = WBKelvin;
+    processing->wb_tint = WBTint;
+    processing->wb_multipliers[0] = 1.0;
+    processing->wb_multipliers[1] = 1.0;
+    processing->wb_multipliers[2] = 1.0;
+}
+
 void getMlvRawFrameFloat(mlvObject_t *, uint64_t, float *) {}
 int getMlvRawFrameProcessedUint16(mlvObject_t *, uint64_t, uint16_t *, int * bit_shift)
 {
@@ -146,6 +158,37 @@ int getMlvRawFrameProcessedUint16(mlvObject_t *, uint64_t, uint16_t *, int * bit
         *bit_shift = 0;
     }
     return 0;
+}
+
+static void fill_stub_thumbnail(mlvObject_t * video, int downscale_factor, unsigned char * out_buffer)
+{
+    if (!out_buffer) {
+        return;
+    }
+    const int divisor = downscale_factor > 0 ? downscale_factor : 1;
+    const int width = video && video->RAWI.xRes > 0 ? video->RAWI.xRes / divisor : 1;
+    const int height = video && video->RAWI.yRes > 0 ? video->RAWI.yRes / divisor : 1;
+    std::memset(out_buffer, 128, static_cast<std::size_t>(width * height * 3));
+}
+
+void get_area_average_downscale_raw_thumnail(mlvObject_t * video, int, int downscale_factor, unsigned char * out_buffer)
+{
+    fill_stub_thumbnail(video, downscale_factor, out_buffer);
+}
+
+void get_area_average_downscale_thumnail(mlvObject_t * video, int, int downscale_factor, int, unsigned char * out_buffer)
+{
+    fill_stub_thumbnail(video, downscale_factor, out_buffer);
+}
+
+void findMlvWhiteBalance(mlvObject_t *, uint64_t, int, int, int * wbTemp, int * wbTint, int)
+{
+    if (wbTemp) {
+        *wbTemp = 6000;
+    }
+    if (wbTint) {
+        *wbTint = 0;
+    }
 }
 
 void wb_convert(wb_convert_info_t * wb_info, float *, int, int, int)
