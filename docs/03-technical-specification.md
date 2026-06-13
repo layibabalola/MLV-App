@@ -765,7 +765,9 @@ Sibling headers:
 - `src/batch/ReceiptLoader.h` — parse a `.marxml` into in-memory
   `ReceiptSettings`.
 - `src/batch/ReceiptApplier.h` — push `ReceiptSettings` onto
-  `mlvObject_t::processing` + `::llrawproc`.
+  `mlvObject_t::processing` + `::llrawproc`; also hosts the headless
+  `applyHeadlessLookAssist(...)` helper used by `--batch` to generate
+  clip-local DNG defaults before export.
 - `src/batch/BatchLogger.h` — stdout/log-file mirror (used by `--batch`).
 - `src/batch/BatchPrompts.h` — error-decision hooks.
 - `src/batch/BatchTypes.h` — `ProcessResult`, option enums shared with
@@ -807,6 +809,12 @@ public:
 
     int runHeadlessPlaybackProfile(const PlaybackProfileOptions &options);
 };
+
+// Headless batch CDNG export copies the effective receipt per MLV and runs
+// ReceiptApplier::applyHeadlessLookAssist(...) before exportCdngSequence(...).
+// The frame data remains full-quality raw output; Look Assist supplies DNG
+// defaults/metadata such as raw black/white, BaselineExposure, AsShotNeutral,
+// and matching raw-fix/chroma-smooth state.
 
 class RenderFrameThread : public QThread {
 public:

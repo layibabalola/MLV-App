@@ -649,6 +649,15 @@ MLVApp --batch --input <file-or-folder> --output <dir> [--receipt <file.marxml>]
 DNG output already matches the expected frame count. Exit codes: `0` success,
 `2` missing/invalid arguments, non-zero on runtime errors.
 
+When the effective receipt has `lookAssistEnabled`, batch export copies the
+receipt per input clip and runs headless Look Assist before writing the DNG
+sequence. This produces clip-local DNG defaults for raw black/white,
+`BaselineExposure`, `AsShotNeutral`, and related raw-fix/chroma-smooth state.
+The DNG frame data remains full-quality raw output; real-time playback scale
+reductions do not apply to this export path. Disable the headless auto look by
+turning off `lookAssistEnabled` in the receipt or setting
+`MLVAPP_NO_LOOK_ASSIST=1`.
+
 #### `--trim-mlv` — cut a clip
 
 Runs `src/batch/MlvTrim` to write a new `.mlv` containing a frame range from

@@ -1,5 +1,50 @@
 # Next-Session Handoff
 
+## 2026-06-13 headless per-clip Look Assist DNG export
+
+### Verified locally
+
+- Headless `--batch` CDNG export now generates Look Assist defaults per input MLV instead of reusing one batch receipt baseline across every clip.
+- The batch path copies `ReceiptSettings` per file in `src/batch/BatchRunner.cpp`, applies the receipt to the clip, then calls `ReceiptApplier::applyHeadlessLookAssist(...)` before DNG fingerprint/export.
+- `src/batch/ReceiptApplier.{h,cpp}` owns the headless Look Assist analysis. It computes raw black/white defaults, a scene-aware exposure default, neutral-patch white balance when possible, and the matching baseline/chroma-smooth state used by DNG export.
+- CDNG frame export remains full-quality raw output. The auto look is not a real-time preview scale and does not bake RGB pixels; it writes DNG defaults/metadata such as raw levels, `BaselineExposure`, `AsShotNeutral`, and related raw-fix/chroma-smooth state.
+- Controls are receipt/env based: the helper honors `lookAssistEnabled`, and `MLVAPP_NO_LOOK_ASSIST=1` disables it for headless export. There is no separate headless CLI flag for this feature.
+- Validation from the implementation pass:
+  - `console_tests --gtest_filter=ReceiptApplier.*`: `97 tests / 48 assertions / 0 skips / 0 failures`
+  - `pipeline_tests --gtest_filter=DualIsoPipeline.HeadlessLookAssistGeneratesClipLocalDngDefaults`: `196 tests / 14 assertions / 0 skips / 0 failures`
+  - `pipeline_tests --gtest_filter=DualIsoPipeline.HeadlessLookAssistRespectsDisabledReceipt`: `196 tests / 4 assertions / 0 skips / 0 failures`
+  - `pipeline_tests --gtest_filter=DualIsoPipeline.DngExportOverridesWriteLookAssistDefaults`: `196 tests / 27 assertions / 0 skips / 0 failures`
+  - Release smoke on `tests/fixtures/clips/tiny_dual_iso.mlv` exported two DNGs and logged `LOOK_ASSIST applied ... exposure=178 temperature=5840 tint=6 ... rawBlack=2047 rawWhite=6000`.
+- User-facing release executable after the pass:
+  - `platform\qt\build-release\release\MLVApp.exe`
+  - `LastWriteTime=6/13/2026 10:15:22 AM`
+  - `Length=9189376`
+  - `SHA256=9222FA97EDF3A6739FC8808DD4E53704BFD7927F899B466E866311A51D6E4FFE`
+
+### Cross-checked from prior analysis
+
+- This feature closes the headless parity gap raised during the DNG export discussion: each MLV in a headless batch needs its own auto look because Look Assist decisions are clip-dependent.
+- The related DNG export path already writes DNG metadata defaults through `exportCdngSequence(..., applyLookAssistDngDefaults, lookAssistExposure)`. The new work feeds that path with clip-local headless analysis rather than a stale GUI/default receipt.
+- The real-time playback scale ladder is a separate performance feature. Do not conflate x2/x4/x8 preview-resolution tradeoffs with headless CDNG export quality.
+
+### Needs review / follow-up
+
+- Review the copied/shared Look Assist math in `ReceiptApplier::applyHeadlessLookAssist(...)` against the GUI path for drift risk, especially raw-level clamping, neutral-patch AWB acceptance, and Dual ISO chroma-smooth defaults.
+- Consider adding a fixture-backed multi-clip batch test if the harness grows a cheap way to run the full `BatchRunner` export path with two distinct synthetic clips.
+- If a user-facing control is desired later, prefer a receipt/CLI-level explicit option over silently changing the GUI toggle semantics.
+
+### Claude review prompt
+
+Paste this into Claude for review:
+
+```text
+You are reviewing MLV-App's new headless per-clip Look Assist DNG export feature. Start by reading AGENTS.md, .claude/analysis/cross-agent-handoffs.md (the 2026-06-13 headless per-clip Look Assist section), .claude/ANALYSIS_LOG.md (2026-06-13 entry), docs/02-developer-guide.md (--batch section), docs/03-technical-specification.md (batch/export sections), and the implementation in src/batch/BatchRunner.cpp, src/batch/ReceiptApplier.{h,cpp}, src/dng/dng.{h,c}, tests/pipeline/test_dual_iso_pipeline.cpp, and tests/console/stubs/pipeline_stubs.cpp.
+
+Feature goal: headless MLVApp --batch CDNG export must generate clip-local Look Assist defaults for every MLV it processes, without cross-clip carryover. DNG frame data must remain full-quality raw output; Look Assist should only influence DNG defaults/metadata such as raw black/white, BaselineExposure, AsShotNeutral, and related raw-fix/chroma-smooth state. Confirm the implementation honors receipt lookAssistEnabled and MLVAPP_NO_LOOK_ASSIST=1.
+
+Please review for correctness, per-clip isolation, DNG metadata semantics, Dual ISO/raw-fix interactions, fallback behavior when stats/AWB are unavailable, drift versus the GUI Look Assist path, and missing tests. Findings first, ordered by severity, with file:line references. Separate conclusions into Verified locally, Cross-checked from prior analysis, and Needs runtime profiling. On Windows, use tools/testing/run-windows-test.ps1 for Qt-linked tests; do not run pipeline_tests.exe or console_tests.exe directly from a bare shell.
+```
+
 ## 2026-04-23 final predictor-1 keep
 
 ### Verified locally
