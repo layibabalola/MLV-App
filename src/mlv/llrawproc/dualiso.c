@@ -66,10 +66,14 @@ static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_hq_mean23_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_alias_map_taken_count = 0;
 static DUALISO_THREAD_LOCAL unsigned long long g_dualiso_fullres_blend_taken_count = 0;
 DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing = {0};
+static DUALISO_THREAD_LOCAL dualiso_gpu_recon_state_t g_dualiso_last_gpu_recon_state = {0};
+static DUALISO_THREAD_LOCAL int g_dualiso_gpu_recon_state_capture_enabled = 0;
 static int g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
 static int g_dualiso_mix_chroma_probe_stage_cache = 0;
 static int g_dualiso_mix_halfres_probe_mode_cache = INT_MIN;
 static int g_dualiso_final_blend_probe_mode_cache = INT_MIN;
+static inline float * build_fullres_curve_float(int black);
+static inline double * build_fullres_curve_float_as_double(int black);
 
 enum
 {
@@ -129,6 +133,7 @@ unsigned long long dualiso_debug_fullres_blend_taken_count(void)
 void dualiso_debug_reset_full20bit_timing(void)
 {
     memset(&g_dualiso_full20bit_timing, 0, sizeof(g_dualiso_full20bit_timing));
+    dualiso_debug_reset_last_gpu_recon_state();
     g_dualiso_full20bit_timing.interp_method = -1;
     g_dualiso_full20bit_timing.mix_chroma_probe_mode = -1;
     g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
@@ -169,6 +174,27 @@ void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing)
 {
     if (!timing) return;
     *timing = g_dualiso_full20bit_timing;
+}
+
+void dualiso_debug_reset_last_gpu_recon_state(void)
+{
+    memset(&g_dualiso_last_gpu_recon_state, 0, sizeof(g_dualiso_last_gpu_recon_state));
+}
+
+void dualiso_debug_set_gpu_recon_state_capture_enabled(int enabled)
+{
+    g_dualiso_gpu_recon_state_capture_enabled = enabled != 0;
+    if(!g_dualiso_gpu_recon_state_capture_enabled)
+    {
+        dualiso_debug_reset_last_gpu_recon_state();
+    }
+}
+
+int dualiso_debug_get_last_gpu_recon_state(dualiso_gpu_recon_state_t * state)
+{
+    if (!state) return 0;
+    *state = g_dualiso_last_gpu_recon_state;
+    return state->valid != 0;
 }
 
 static void dualiso_debug_set_full20bit_path(int interp_method, int use_alias_map, int use_fullres, int threads)
@@ -2717,7 +2743,7 @@ static inline double * build_fullres_curve(int black)
         double f = (c2+1) / 2;
         fullres_curve[i] = f;
     }
-    
+
     return fullres_curve;
 }
 
@@ -2743,6 +2769,26 @@ static inline float * build_fullres_curve_float(int black)
     }
 
     return fullres_curve_f;
+}
+
+static inline double * build_fullres_curve_float_as_double(int black)
+{
+    static double fullres_curve_fd[1<<20];
+    static int previous_black = -1;
+
+    if(previous_black == black) return fullres_curve_fd;
+
+    float * fullres_curve_f = build_fullres_curve_float(black);
+    if(!fullres_curve_f) return NULL;
+
+    #pragma omp parallel for
+    for(int i = 0; i < 1<<20; i++)
+    {
+        fullres_curve_fd[i] = (double)fullres_curve_f[i];
+    }
+
+    previous_black = black;
+    return fullres_curve_fd;
 }
 
 static inline int use_final_blend_float_fullres_curve(void)
@@ -4732,6 +4778,101 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
             raw_set_pixel_20to16_rand(x, y, raw_buffer_32[x + y*w]);
 }
 
+static const double * dualiso_select_gpu_mix_curve(const dualiso_full20bit_scratch_t * scratch,
+                                                   uint32_t black,
+                                                   uint32_t white,
+                                                   double corr_ev,
+                                                   double overlap)
+{
+    if(!scratch) return NULL;
+
+    for(int slot = 0; slot < DUALISO_MIX_CURVE_CACHE_SLOTS; ++slot)
+    {
+        if(scratch->mix_curve_valid[slot]
+        && scratch->mix_curve[slot]
+        && scratch->mix_curve_last_black[slot] == black
+        && scratch->mix_curve_last_white[slot] == white
+        && scratch->mix_curve_last_corr_ev[slot] == corr_ev
+        && scratch->mix_curve_last_overlap[slot] == overlap)
+        {
+            return scratch->mix_curve[slot];
+        }
+    }
+
+    return NULL;
+}
+
+static void dualiso_debug_publish_gpu_recon_state(int ret,
+                                                  int rggb,
+                                                  struct raw_info raw_info,
+                                                  uint32_t black,
+                                                  uint32_t white,
+                                                  uint32_t white_darkened,
+                                                  const int is_bright[4],
+                                                  double corr_ev,
+                                                  int black_delta_14,
+                                                  double dark_noise,
+                                                  int interp_method,
+                                                  int use_alias_map,
+                                                  int use_fullres,
+                                                  int chroma_smooth_method,
+                                                  int final_blend_fused_to_16bit,
+                                                  const dualiso_full20bit_scratch_t * scratch)
+{
+    if(!g_dualiso_gpu_recon_state_capture_enabled)
+    {
+        return;
+    }
+
+    dualiso_gpu_recon_state_t state;
+    memset(&state, 0, sizeof(state));
+
+    if(!ret || !rggb || !scratch || !is_bright)
+    {
+        g_dualiso_last_gpu_recon_state = state;
+        return;
+    }
+
+    if(interp_method != 1 || !use_alias_map || !use_fullres || chroma_smooth_method != 0)
+    {
+        g_dualiso_last_gpu_recon_state = state;
+        return;
+    }
+
+    const double overlap = g_dualiso_full20bit_timing.mix_curve_overlap;
+    const double * mix_curve = dualiso_select_gpu_mix_curve(scratch, black, white, corr_ev, overlap);
+    const double * fullres_curve = build_fullres_curve_float_as_double((int)black);
+
+    if(!scratch->ev_raw2ev || !scratch->ev2raw_0 || !mix_curve || !fullres_curve)
+    {
+        g_dualiso_last_gpu_recon_state = state;
+        return;
+    }
+
+    state.valid = 1;
+    state.width = raw_info.width;
+    state.height = raw_info.height;
+    state.black_level = (int)black;
+    state.white_level = (int)white;
+    state.white_darkened = (int)white_darkened;
+    state.black_delta = black_delta_14 * 64;
+    state.ev_correction = corr_ev;
+    state.dark_noise = dark_noise;
+    state.interp_method = interp_method;
+    state.use_alias_map = use_alias_map != 0;
+    state.use_fullres = use_fullres != 0;
+    state.chroma_smooth_method = chroma_smooth_method;
+    memcpy(state.is_bright, is_bright, sizeof(state.is_bright));
+    state.raw2ev = scratch->ev_raw2ev;
+    state.ev2raw = scratch->ev2raw_0;
+    state.mix_curve = mix_curve;
+    state.fullres_curve = fullres_curve;
+    state.randn05 = final_blend_fused_to_16bit ? randn05_cache : NULL;
+    state.apply_dither = final_blend_fused_to_16bit != 0;
+
+    g_dualiso_last_gpu_recon_state = state;
+}
+
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch)
 {
     const double full20_start = mlv_stage_timing_now();
@@ -4993,6 +5134,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     stage_start = mlv_stage_timing_now();
     int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, effective_chroma_smooth_method, scratch);
     g_dualiso_full20bit_timing.mix_ms += dualiso_debug_elapsed_ms(stage_start);
+    int final_blend_fused_to_16bit = 0;
     if (mix_ok)
     {
         /* let's check the ideal noise levels (on the halfres image, which in black areas is identical to the bright one) */
@@ -5006,7 +5148,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         double ideal_noise_std = noise_std[0];
 #endif
         stage_start = mlv_stage_timing_now();
-        int final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
+        final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
         g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
         if (!final_blend_fused_to_16bit)
         {
@@ -5023,6 +5165,23 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 #endif
         ret = 1;
     }
+
+    dualiso_debug_publish_gpu_recon_state(ret,
+                                          rggb,
+                                          raw_info,
+                                          (uint32_t)black,
+                                          (uint32_t)white,
+                                          (uint32_t)white_darkened,
+                                          is_bright,
+                                          corr_ev,
+                                          *black_delta,
+                                          dark_noise,
+                                          interp_method,
+                                          use_alias_map,
+                                          use_fullres,
+                                          effective_chroma_smooth_method,
+                                          final_blend_fused_to_16bit,
+                                          scratch);
     
     if (!rggb) /* back to GBRG */
     {
