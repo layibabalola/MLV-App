@@ -1,0 +1,11 @@
+# Host-built (regenerable via build-backend-dll.ps1 on Ultra-Magnus) - not tracked.
+*.dll
+*.lib
+*.exp
+*.obj
+*.o
+*.exe
+
+# Deploy copy of the canonical ABI header (tools/gpu/igpu_recon.h). Kept out of
+# git to avoid a divergent duplicate; the deploy step copies the canonical one.
+igpu_recon.h
