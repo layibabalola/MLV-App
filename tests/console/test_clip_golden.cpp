@@ -86,6 +86,30 @@ static bool write_look_assist_receipt_fixture(const QString & receipt_path)
     return file.flush();
 }
 
+static bool write_look_toggle_receipt_fixture(const QString & receipt_path, bool look_enabled)
+{
+    QFile file(receipt_path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
+    }
+
+    QTextStream out(&file);
+    out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    out << "<receipt version=\"4\" mlvapp=\"test\">\n";
+    out << "  <exposure>0</exposure>\n";
+    out << "  <rawFixesEnabled>1</rawFixesEnabled>\n";
+    out << "  <lookAssistEnabled>" << (look_enabled ? 1 : 0) << "</lookAssistEnabled>\n";
+    out << "  <lookAssistBaselineValid>1</lookAssistBaselineValid>\n";
+    out << "  <lookAssistBaselineExposure>10</lookAssistBaselineExposure>\n";
+    out << "  <lookAssistBaselineTemperature>5200</lookAssistBaselineTemperature>\n";
+    out << "  <lookAssistBaselineTint>-7</lookAssistBaselineTint>\n";
+    out << "  <lookAssistBaselineRawBlack>20490</lookAssistBaselineRawBlack>\n";
+    out << "  <lookAssistBaselineRawWhite>3021</lookAssistBaselineRawWhite>\n";
+    out << "</receipt>\n";
+
+    return file.flush();
+}
+
 static bool write_collapsed_cutout_receipt_fixture(const QString & receipt_path)
 {
     QFile file(receipt_path);
@@ -274,6 +298,44 @@ static std::map<std::string, std::string> collect_dng_hashes(const QString & dir
     return hashes;
 }
 
+static int run_batch_export(const QString & batch_exe,
+                            const QString & repo_root,
+                            const QString & input,
+                            const QString & receipt,
+                            const QString & output_dir,
+                            const QList<QPair<QString, QString>> & extra_environment,
+                            std::map<std::string, std::string> * output_hashes)
+{
+    QProcess process;
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("MLVAPP_FORCE_THREADS"), QStringLiteral("1"));
+    environment.insert(QStringLiteral("OMP_NUM_THREADS"), QStringLiteral("1"));
+    environment.insert(QStringLiteral("OMP_DYNAMIC"), QStringLiteral("FALSE"));
+    for (const auto & entry : extra_environment) {
+        environment.insert(entry.first, entry.second);
+    }
+
+    process.setProcessEnvironment(environment);
+    process.setWorkingDirectory(repo_root);
+    process.setProgram(batch_exe);
+    process.setArguments(QStringList()
+                         << QStringLiteral("--batch")
+                         << QStringLiteral("--input") << input
+                         << QStringLiteral("--output") << output_dir
+                         << QStringLiteral("--receipt") << receipt);
+    process.start();
+    if (!process.waitForStarted()) {
+        return -1;
+    }
+    if (!process.waitForFinished(-1)) {
+        return -2;
+    }
+    if (output_hashes) {
+        *output_hashes = collect_dng_hashes(output_dir);
+    }
+    return process.exitCode();
+}
+
 static void require_processing_timing_field(const QJsonObject & sample,
                                             const char * key,
                                             double * max_ms)
@@ -357,6 +419,56 @@ TEST(ClipGolden, TinyDualIsoBatchExportMatchesGolden)
         }
     }
     ASSERT_TRUE(expected_hashes == actual_hashes);
+}
+
+TEST(ClipGolden, BatchKillSwitchAndDisabledReceiptSuppressLookAssistDngDefaults)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString batch_exe = batch_executable_path();
+    if (batch_exe.isEmpty() || !QFileInfo::exists(batch_exe)) {
+        SKIP_TEST("Set MLVAPP_BATCH_EXE to a built MLVApp binary with batch support");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString enabled_receipt = temp_dir.filePath(QStringLiteral("look_enabled.marxml"));
+    const QString disabled_receipt = temp_dir.filePath(QStringLiteral("look_disabled.marxml"));
+    ASSERT_TRUE(write_look_toggle_receipt_fixture(enabled_receipt, true));
+    ASSERT_TRUE(write_look_toggle_receipt_fixture(disabled_receipt, false));
+
+    const QString look_on_dir = temp_dir.filePath(QStringLiteral("look_on"));
+    const QString env_off_dir = temp_dir.filePath(QStringLiteral("env_off"));
+    const QString disabled_dir = temp_dir.filePath(QStringLiteral("disabled"));
+    ASSERT_TRUE(QDir().mkpath(look_on_dir));
+    ASSERT_TRUE(QDir().mkpath(env_off_dir));
+    ASSERT_TRUE(QDir().mkpath(disabled_dir));
+
+    std::map<std::string, std::string> look_on_hashes;
+    std::map<std::string, std::string> env_off_hashes;
+    std::map<std::string, std::string> disabled_hashes;
+
+    ASSERT_EQ(0, run_batch_export(batch_exe, repo_root, fixture_path, enabled_receipt,
+                                  look_on_dir, {}, &look_on_hashes));
+    ASSERT_EQ(0, run_batch_export(batch_exe, repo_root, fixture_path, enabled_receipt,
+                                  env_off_dir,
+                                  {{QStringLiteral("MLVAPP_NO_LOOK_ASSIST"), QStringLiteral("1")}},
+                                  &env_off_hashes));
+    ASSERT_EQ(0, run_batch_export(batch_exe, repo_root, fixture_path, disabled_receipt,
+                                  disabled_dir, {}, &disabled_hashes));
+
+    ASSERT_TRUE(!look_on_hashes.empty());
+    ASSERT_TRUE(!env_off_hashes.empty());
+    ASSERT_TRUE(!disabled_hashes.empty());
+    ASSERT_TRUE(env_off_hashes == disabled_hashes);
+    ASSERT_TRUE(look_on_hashes != env_off_hashes);
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
