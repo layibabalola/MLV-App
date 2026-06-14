@@ -599,6 +599,8 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
 
     const QString dll_path = QString::fromLocal8Bit(dll_env);
     ASSERT_TRUE(QFile::exists(dll_path));
+    const QByteArray dll_path_bytes = dll_path.toLocal8Bit();
+    std::fprintf(stderr, "[gpu-export-parity] dll=%s\n", dll_path_bytes.constData());
 
     QTemporaryDir temp_dir;
     ASSERT_TRUE(temp_dir.isValid());
@@ -618,12 +620,38 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
 
         const QByteArray gpu_bytes =
             export_tiny_dng_for_gpu_export_gate(raw_state, true, dll_path, gpu_dng);
-        ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
-        ASSERT_EQ(0, llrpGpuExportBackendUnavailableForTesting());
-        ASSERT_EQ(1, llrpGpuExportLastRunAttemptedForTesting());
-        ASSERT_EQ(0, llrpGpuExportLastRunRcForTesting());
-        ASSERT_EQ(1, llrpGpuExportLastReplacedForTesting());
-        ASSERT_EQ(0, llrpGpuExportLastMismatchForTesting());
+        const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+        const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+        const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+        const int run_rc = llrpGpuExportLastRunRcForTesting();
+        const int replaced = llrpGpuExportLastReplacedForTesting();
+        const int mismatch = llrpGpuExportLastMismatchForTesting();
+        const std::string cpu_sha256 =
+            sha256_bytes(cpu_bytes.constData(), static_cast<std::size_t>(cpu_bytes.size()));
+        const std::string gpu_sha256 =
+            sha256_bytes(gpu_bytes.constData(), static_cast<std::size_t>(gpu_bytes.size()));
+        const QByteArray suffix_bytes = suffix.toLocal8Bit();
+        std::fprintf(stderr,
+                     "[gpu-export-parity] mode=%s backend_attempted=%d backend_unavailable=%d "
+                     "run_attempted=%d run_rc=%d replaced=%d mismatch=%d "
+                     "cpu_len=%lld gpu_len=%lld cpu_sha256=%s gpu_sha256=%s\n",
+                     suffix_bytes.constData(),
+                     backend_attempted,
+                     backend_unavailable,
+                     run_attempted,
+                     run_rc,
+                     replaced,
+                     mismatch,
+                     static_cast<long long>(cpu_bytes.size()),
+                     static_cast<long long>(gpu_bytes.size()),
+                     cpu_sha256.c_str(),
+                     gpu_sha256.c_str());
+        ASSERT_EQ(1, backend_attempted);
+        ASSERT_EQ(0, backend_unavailable);
+        ASSERT_EQ(1, run_attempted);
+        ASSERT_EQ(0, run_rc);
+        ASSERT_EQ(1, replaced);
+        ASSERT_EQ(0, mismatch);
 
         preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
         ASSERT_TRUE(cpu_bytes == gpu_bytes);
