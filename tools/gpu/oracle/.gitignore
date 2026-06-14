@@ -9,3 +9,9 @@ vectors/*.u32
 vectors/*.i32
 vectors/*.f64
 vectors/*.bin
+# per-case subdirs (vectors/<case>/...): base, res8k, clipped, iso1600
+vectors/**/*.u16
+vectors/**/*.u32
+vectors/**/*.i32
+vectors/**/*.f64
+vectors/**/*.bin

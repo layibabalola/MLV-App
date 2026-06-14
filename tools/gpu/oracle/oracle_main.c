@@ -83,8 +83,6 @@ demosaic(amazeinfo_t * inputdata)
  *  Constants (FIXED - do not change without regenerating the CUDA side):     */
 #define ORACLE_BLACK_14   2047    /* raw_info.black_level (14-bit)            */
 #define ORACLE_WHITE_14   15000   /* raw_info.white_level (14-bit)            */
-#define ORACLE_ISO1       100
-#define ORACLE_ISO2       800
 
 /* Bright-field pattern per (y & 3): {1,1,0,0}. Bright rows (is_bright==1)
  * simulate the LOW-iso-100 exposure that holds ~3 EV more highlight signal;
@@ -92,6 +90,41 @@ demosaic(amazeinfo_t * inputdata)
  * NB this matches iso_patterns[0] in dualiso.c:4762 so auto-detect resolves
  * to pattern index 0.                                                        */
 static const int ORACLE_IS_BRIGHT[4] = {1, 1, 0, 0};
+
+/* ---------------------------------------------------------------------------
+ * CASE SELECTOR
+ *
+ * Each case is a (name, W, H, iso1, iso2, pattern_variant) tuple. The CUDA
+ * probe regenerates in.u16 byte-identically from the same (W,H,iso pair,
+ * variant) + the same closed-form, so every case is fully reproducible on the
+ * device side and the scalars.txt sidecar carries everything the probe needs.
+ *
+ * pattern_variant:
+ *   0  = "smooth": diagonal gradient + mid-freq sinusoid (original base case).
+ *        Bright rows already touch WHITE near the corner, so the clip branch is
+ *        lightly exercised, but the bright field is mostly below white.
+ *   1  = "clipped": a boosted/offset field designed so a LARGE fraction of the
+ *        BRIGHT rows reach or exceed WHITE (saturates), forcing the recon's
+ *        fullres clip branch (f >= white_darkened -> MAX(f, dark)), the
+ *        overexposed map (bright >= white_darkened, dark >= white), and
+ *        final_blend's overexposed + dark-area cap paths to fire over a wide
+ *        region. Dark rows stay informative (1/8 exposure, clamped at white).
+ *------------------------------------------------------------------------- */
+typedef struct {
+    const char * name;
+    int W, H;
+    int iso1, iso2;
+    int variant;
+} oracle_case_t;
+
+static const oracle_case_t ORACLE_CASES[] = {
+    /* name        W      H      iso1  iso2   variant */
+    { "base",      1808,  2268,  100,  800,   0 },  /* the original parity case   */
+    { "res8k",     8192,  4320,  100,  800,   0 },  /* Case A: 8K, same pattern   */
+    { "clipped",   1808,  2268,  100,  800,   1 },  /* Case B: saturated highlights */
+    { "iso1600",   1808,  2268,  100,  1600,  0 },  /* Case C: corr_ev=4, iso 100/1600 */
+};
+#define ORACLE_NUM_CASES ((int)(sizeof(ORACLE_CASES)/sizeof(ORACLE_CASES[0])))
 
 /* Base scene "irradiance" field S(x,y) in [0, 1]: a smooth diagonal gradient
  * plus a mid-frequency sinusoidal texture, fully deterministic. Returns a
@@ -110,26 +143,52 @@ static double oracle_scene(int x, int y, int W, int H)
     return s;
 }
 
-/* Produce the 14-bit Bayer pixel for (x,y). Bright rows carry ~3 EV more
- * signal than dark rows so match_exposures (iso 100/800 -> log2(8)=3 EV)
- * yields corr_ev=3.0 and a real exposure match.
+/* Clipped variant scene S'(x,y): same diagonal gradient + texture, then boosted
+ * by gain 1.8 and DC offset 0.35 so a large contiguous region maps above 1.0
+ * (which the bright-row formula below clamps to WHITE). The pre-clamp value is
+ * returned UNclamped (can exceed 1.0); the caller clamps after the iso scale so
+ * BRIGHT rows saturate while DARK rows (1/ratio gain) stay well below white. */
+static double oracle_scene_clipped(int x, int y, int W, int H)
+{
+    double gx = (double)x / (double)(W - 1);
+    double gy = (double)y / (double)(H - 1);
+    double grad = 0.5 * (gx + gy);
+    double tex = 0.18 * sin((x * (2.0 * M_PI / 64.0)) + (y * (2.0 * M_PI / 48.0)));
+    double s = grad + tex;
+    if (s < 0.0) s = 0.0;
+    /* boost + offset, intentionally NOT clamped to 1.0 here */
+    double s2 = s * 1.8 + 0.35;
+    if (s2 < 0.0) s2 = 0.0;
+    return s2;   /* may exceed 1.0 -> bright rows clip to WHITE */
+}
+
+/* Produce the 14-bit Bayer pixel for (x,y) for a given case.
+ *
+ * The bright/dark exposure ratio is the ISO ratio (iso2/iso1), so
+ * match_exposures on the ISO-ratio path computes corr_ev = log2(iso2/iso1) and
+ * matches without aborting:
+ *   variant 0/iso 100/800  -> ratio 8  -> corr_ev 3
+ *   variant 0/iso 100/1600 -> ratio 16 -> corr_ev 4
  *
  *   signal_span = WHITE - BLACK
- *   dark rows : value = BLACK + S * (signal_span / 8)         (iso 800, /2^3)
- *   bright rows: value = BLACK + S * (signal_span)            (iso 100)
+ *   dark rows : value = BLACK + S * (signal_span / ratio)   (high iso, /ratio)
+ *   bright rows: value = BLACK + S * (signal_span)          (low iso)
  *
- * Both clamp to [BLACK, WHITE]. The 8x ratio between bright and dark is the
- * 3-EV exposure difference. */
-static uint16_t oracle_pixel(int x, int y, int W, int H)
+ * Both clamp to [BLACK, WHITE]. For variant 1 the bright-row S exceeds 1.0 over
+ * a wide region so bright values saturate at WHITE (clip-branch coverage). */
+static uint16_t oracle_pixel(int x, int y, const oracle_case_t * c)
 {
-    int span = ORACLE_WHITE_14 - ORACLE_BLACK_14;   /* 12953 */
-    double s = oracle_scene(x, y, W, H);
+    int span  = ORACLE_WHITE_14 - ORACLE_BLACK_14;   /* 12953 */
+    int ratio = c->iso2 / c->iso1;                   /* 8 or 16 */
+    double s = (c->variant == 1)
+                 ? oracle_scene_clipped(x, y, c->W, c->H)
+                 : oracle_scene(x, y, c->W, c->H);
     int is_bright = ORACLE_IS_BRIGHT[y & 3];
     double v;
     if (is_bright)
         v = (double)ORACLE_BLACK_14 + s * (double)span;
     else
-        v = (double)ORACLE_BLACK_14 + s * ((double)span / 8.0);
+        v = (double)ORACLE_BLACK_14 + s * ((double)span / (double)ratio);
     int iv = (int)floor(v + 0.5);
     if (iv < ORACLE_BLACK_14) iv = ORACLE_BLACK_14;   /* no sub-black for this synthetic */
     if (iv > ORACLE_WHITE_14) iv = ORACLE_WHITE_14;
@@ -160,12 +219,58 @@ int main(int argc, char ** argv)
     setenv("MLVAPP_DISABLE_AVX2", "1", 1);
 #endif
 
-    /* geometry: default 1808x2268, override via argv[1] argv[2]; argv[3]=outdir */
+    /* Argument forms (backward compatible):
+     *   oracle.exe                               -> base case, outdir "."
+     *   oracle.exe <W> <H> [outdir]              -> legacy: explicit geometry,
+     *                                               base-case iso/variant
+     *   oracle.exe --case <name> [outdir]        -> named case from ORACLE_CASES
+     *   oracle.exe --list                        -> print case table and exit
+     *
+     * The named-case form is the one the parity-breadth runner uses; it carries
+     * W/H + iso pair + pattern variant so each case is self-describing. */
     int W = 1808, H = 2268;
+    int sel_iso1 = 100, sel_iso2 = 800, sel_variant = 0;
+    const char * case_name = "base";
     const char * outdir = ".";
-    if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
-    if (argc >= 4) outdir = argv[3];
+
+    if (argc >= 2 && strcmp(argv[1], "--list") == 0) {
+        printf("oracle cases:\n");
+        for (int i = 0; i < ORACLE_NUM_CASES; i++) {
+            const oracle_case_t * c = &ORACLE_CASES[i];
+            printf("  %-10s %5dx%-5d  iso %d/%-5d  variant=%d\n",
+                   c->name, c->W, c->H, c->iso1, c->iso2, c->variant);
+        }
+        return 0;
+    }
+
+    if (argc >= 3 && strcmp(argv[1], "--case") == 0) {
+        const oracle_case_t * found = NULL;
+        for (int i = 0; i < ORACLE_NUM_CASES; i++) {
+            if (strcmp(argv[2], ORACLE_CASES[i].name) == 0) { found = &ORACLE_CASES[i]; break; }
+        }
+        if (!found) {
+            fprintf(stderr, "[oracle] unknown case '%s' (use --list)\n", argv[2]);
+            return 2;
+        }
+        W = found->W; H = found->H;
+        sel_iso1 = found->iso1; sel_iso2 = found->iso2; sel_variant = found->variant;
+        case_name = found->name;
+        if (argc >= 4) outdir = argv[3];
+    } else {
+        /* legacy positional form: <W> <H> [outdir] */
+        if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
+        if (argc >= 4) outdir = argv[3];
+    }
     if (W <= 16 || H <= 16) { fprintf(stderr, "[oracle] bad geometry %dx%d\n", W, H); return 2; }
+
+    /* the resolved case used by the synthetic generator + scalars sidecar */
+    oracle_case_t the_case;
+    the_case.name = case_name;
+    the_case.W = W; the_case.H = H;
+    the_case.iso1 = sel_iso1; the_case.iso2 = sel_iso2;
+    the_case.variant = sel_variant;
+    fprintf(stderr, "[oracle] case=%s  geometry=%dx%d  iso=%d/%d  variant=%d\n",
+            case_name, W, H, sel_iso1, sel_iso2, sel_variant);
 
     /* create output dir if missing (ignore "already exists") */
     if (ORACLE_MKDIR(outdir) != 0) {
@@ -185,7 +290,7 @@ int main(int argc, char ** argv)
     if (!img) { fprintf(stderr, "[oracle] OOM input\n"); return 4; }
     for (int y = 0; y < H; y++)
         for (int x = 0; x < W; x++)
-            img[(size_t)x + (size_t)y * W] = oracle_pixel(x, y, W, H);
+            img[(size_t)x + (size_t)y * W] = oracle_pixel(x, y, &the_case);
 
     /* keep a pristine copy of the input for the in.u16 dump (recon overwrites
      * img in place with the 16-bit output). */
@@ -236,7 +341,7 @@ int main(int argc, char ** argv)
     int    dark_frame           = 0;
 
     fprintf(stderr, "[oracle] running diso_get_full20bit (mean23 scalar)...\n");
-    int ok = diso_get_full20bit(ri, img, dark_frame, ORACLE_ISO1, ORACLE_ISO2,
+    int ok = diso_get_full20bit(ri, img, dark_frame, sel_iso1, sel_iso2,
                                 &diso_pattern, &diso_auto_correction,
                                 &diso_ev_correction, &diso_black_delta,
                                 interp_method, use_alias_map, use_fullres,
@@ -397,12 +502,14 @@ int main(int argc, char ** argv)
         FILE * f = fopen(path, "w");
         if (f) {
             fprintf(f, "# Dual ISO full-20-bit recon oracle - captured scalars\n");
+            fprintf(f, "case=%s\n", case_name);
+            fprintf(f, "pattern_variant=%d\n", sel_variant);
             fprintf(f, "width=%d\n", W);
             fprintf(f, "height=%d\n", H);
             fprintf(f, "black_level_14=%d\n", ORACLE_BLACK_14);
             fprintf(f, "white_level_14=%d\n", ORACLE_WHITE_14);
-            fprintf(f, "iso1=%d\n", ORACLE_ISO1);
-            fprintf(f, "iso2=%d\n", ORACLE_ISO2);
+            fprintf(f, "iso1=%d\n", sel_iso1);
+            fprintf(f, "iso2=%d\n", sel_iso2);
             fprintf(f, "cfa_pattern=0x02010100\n");
             fprintf(f, "interp_method=%d\n", interp_method);
             fprintf(f, "use_alias_map=%d\n", use_alias_map);
@@ -416,12 +523,15 @@ int main(int argc, char ** argv)
             fprintf(f, "corr_ev=%.17g\n", corr_ev);                    /* ABS(ev_correction) */
             fprintf(f, "black_delta=%d\n", black_delta_out);
             fprintf(f, "iso_pattern=%d\n", diso_pattern);
-            fprintf(f, "# --- 20-bit derived levels ---\n");
+            fprintf(f, "# --- 20-bit derived levels (probe reads these) ---\n");
             fprintf(f, "black20=%d\n", black20);
             fprintf(f, "white20=%d\n", white20);
             fprintf(f, "white_bright20=%d\n", white_bright20);
             fprintf(f, "white_darkened=%d\n", white_darkened);
-            fprintf(f, "dark_noise_20bit=512   # default-8 (14-bit) fallback *64 for active_area={0,0,W,H}\n");
+            fprintf(f, "factor=%.17g            # pow(2,-corr_ev), the match-exposures darken factor\n", wd_factor);
+            fprintf(f, "black_delta20=%d        # APPLY value (diso_black_delta=0 != -1 -> 0)\n", _black_delta_20);
+            fprintf(f, "dark_noise20=512        # default-8 (14-bit) fallback *64 for active_area={0,0,W,H}\n");
+            fprintf(f, "dark_noise_20bit=512   # legacy alias of dark_noise20\n");
             fclose(f);
             fprintf(stderr, "[oracle] wrote scalars.txt\n");
         } else {

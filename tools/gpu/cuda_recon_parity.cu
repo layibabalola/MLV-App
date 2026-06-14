@@ -24,6 +24,12 @@
  *
  * Build (on Ultra-Magnus): build-cuda.ps1 -Extra "--fmad=false"
  * Run: cuda_recon_parity.exe [vectors_dir]   (default G:\Temp\mlv-gpu-profile\oracle\vectors)
+ *
+ * Parameterized: W/H and ALL scalars (black20, white20, white_darkened,
+ * dark_noise20, black_delta20, factor, is_bright[4]) are read from the case's
+ * scalars.txt -- nothing about geometry or levels is hard-coded, so the same
+ * probe validates every oracle case (base / res8k / clipped / iso1600) just by
+ * pointing it at a different vectors dir.
  */
 
 #include <cstdio>
@@ -34,9 +40,7 @@
 #include <string>
 #include <cuda_runtime.h>
 
-/* ---- fixed geometry / scalars (from scalars.txt) ---------------------- */
-#define W 1808
-#define H 2268
+/* ---- fixed LUT geometry (case-independent) ---------------------------- */
 #define EV_RESOLUTION 65536
 #define RAW2EV_COUNT  (1u << 20)            /* 1048576 */
 #define EV2RAW_COUNT  (24u * EV_RESOLUTION) /* 1572864 */
@@ -44,28 +48,32 @@
 #define ALIAS_MAP_MAX 15000
 #define HOST_FULLRES_THR 0.8   /* fullres_thr (dualiso.c:1678); usable on device */
 
-__device__ __constant__ int   d_black;          /* 131008  */
-__device__ __constant__ int   d_white;          /* 960000  */
-__device__ __constant__ int   d_white_darkened; /* 174688  */
-__device__ __constant__ int   d_dark_noise;     /* 512     */
-__device__ __constant__ double d_factor;        /* 0.125   */
-__device__ __constant__ int   d_black_delta20;  /* 0       */
-__device__ __constant__ int   d_is_bright[4];   /* {1,1,0,0} */
+/* ---- per-case geometry + scalars (loaded from scalars.txt at runtime) ---- *
+ * W/H live in __constant__ so every kernel sees them with zero arg plumbing;
+ * each kernel aliases them to local `const int W=d_W, H=d_H;` so the kernel
+ * bodies stay verbatim against the scalar reference. */
+__device__ __constant__ int   d_W;
+__device__ __constant__ int   d_H;
+__device__ __constant__ int   d_black;          /* black20         */
+__device__ __constant__ int   d_white;          /* white20         */
+__device__ __constant__ int   d_white_darkened; /* match-exposures white_darkened */
+__device__ __constant__ int   d_dark_noise;     /* dark_noise20    */
+__device__ __constant__ double d_factor;        /* pow(2,-corr_ev) */
+__device__ __constant__ int   d_black_delta20;  /* apply value (0) */
+__device__ __constant__ int   d_is_bright[4];
 
-static const int   HOST_BLACK          = 131008;
-static const int   HOST_WHITE          = 960000;
-/* white_darkened = (MIN(white_level,white_bright) - black + bd)*factor + black
- * = (MIN(960000,480000) - 131008 + 0)*0.125 + 131008 = 174632.
- * NB the oracle's scalars.txt prints 174688 from a BUGGY sidecar recompute
- * (it used _black_delta=448 and white20 instead of the MIN(.,white_bright)=
- * 480000 that match_exposures actually uses, and the real apply forces
- * _black_delta=0 because diso_black_delta=0 != -1). The real recon used
- * 174632 - verified against the oracle's stage_bright dump. */
-static const int   HOST_WHITE_DARKENED = 174632;
-static const int   HOST_DARK_NOISE     = 512;
-static const double HOST_FACTOR        = 0.125;   /* pow(2,-3) */
-static const int   HOST_BLACK_DELTA20  = 0;
-static const int   HOST_IS_BRIGHT[4]   = {1, 1, 0, 0};
+/* host mirrors of the case scalars (populated by load_scalars) */
+static int    HOST_W = 0;
+static int    HOST_H = 0;
+static int    HOST_BLACK          = 0;
+static int    HOST_WHITE          = 0;
+static int    HOST_WHITE_DARKENED = 0;
+static int    HOST_DARK_NOISE     = 0;
+static double HOST_FACTOR         = 0.0;
+static int    HOST_BLACK_DELTA20  = 0;
+static int    HOST_IS_BRIGHT[4]   = {0, 0, 0, 0};
+static char   HOST_CASE_NAME[64]  = "?";
+static int    HOST_VARIANT        = 0;
 
 #define CK(call) do { cudaError_t _e=(call); if(_e!=cudaSuccess){ \
     fprintf(stderr,"CUDA error %s @ %s:%d: %s\n",#call,__FILE__,__LINE__, \
@@ -91,6 +99,7 @@ __device__ __host__ static inline int   iabs_(int a){ return a>0?a:-a; }
  *  guard leaves p untouched (still 0 from the promote).                   */
 __global__ void k_promote_match(const uint16_t* __restrict in, uint32_t* __restrict raw32)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -129,6 +138,7 @@ __global__ void k_mean23(const uint32_t* __restrict raw32,
                          uint32_t* __restrict dark, uint32_t* __restrict bright,
                          const int* __restrict raw2ev, const int* __restrict ev2raw)
 {
+    const int W = d_W, H = d_H;
     int y  = blockIdx.y*blockDim.y + threadIdx.y;        /* row */
     int xi = blockIdx.x*blockDim.x + threadIdx.x;        /* index over even x's */
     if (y<2 || y>=H-2) return;
@@ -178,6 +188,7 @@ __global__ void k_mean23(const uint32_t* __restrict raw32,
 __global__ void k_border_toprows(const uint32_t* __restrict raw32,
                                  uint32_t* __restrict dark, uint32_t* __restrict bright)
 {
+    const int W = d_W;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;   /* 0..2 */
     if (x>=W || y>=3) return;
@@ -190,6 +201,7 @@ __global__ void k_border_toprows(const uint32_t* __restrict raw32,
 __global__ void k_border_botrows(const uint32_t* __restrict raw32,
                                  uint32_t* __restrict dark, uint32_t* __restrict bright)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int yy = blockIdx.y*blockDim.y + threadIdx.y;  /* 0..3 -> y = H-4+yy */
     if (x>=W || yy>=4) return;
@@ -203,6 +215,7 @@ __global__ void k_border_botrows(const uint32_t* __restrict raw32,
 __global__ void k_border_cols(const uint32_t* __restrict raw32,
                               uint32_t* __restrict dark, uint32_t* __restrict bright)
 {
+    const int W = d_W, H = d_H;
     int y = blockIdx.x*blockDim.x + threadIdx.x;   /* 2..H-1 */
     if (y<2 || y>=H) return;
     int br = d_is_bright[y & 3];
@@ -223,6 +236,7 @@ __global__ void k_border_cols(const uint32_t* __restrict raw32,
 __global__ void k_fullres(uint32_t* __restrict fullres,
                           const uint32_t* __restrict dark, const uint32_t* __restrict bright)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -244,6 +258,7 @@ __global__ void k_mix_halfres(uint32_t* __restrict halfres,
                               const int* __restrict raw2ev, const int* __restrict ev2raw,
                               const double* __restrict mix_curve)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -268,6 +283,7 @@ __global__ void k_alias_init(uint16_t* __restrict alias_map,
                              const int* __restrict raw2ev,
                              const double* __restrict fullres_curve_d)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -302,6 +318,7 @@ __global__ void k_alias_rank(const uint16_t* __restrict alias_map,
                              const uint32_t* __restrict bright,
                              const double* __restrict fullres_curve_d)
 {
+    const int W = d_W, H = d_H;
     int x = 6 + blockIdx.x*blockDim.x + threadIdx.x;
     int y = 6 + blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W-6 || y>=H-6) return;
@@ -332,6 +349,7 @@ __global__ void k_alias_gauss(uint16_t* __restrict alias_map,
                               const uint32_t* __restrict bright,
                               const double* __restrict fullres_curve_d)
 {
+    const int W = d_W, H = d_H;
     int x = 6 + blockIdx.x*blockDim.x + threadIdx.x;
     int y = 6 + blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W-6 || y>=H-6) return;
@@ -355,6 +373,7 @@ __global__ void k_alias_gauss(uint16_t* __restrict alias_map,
 /* 2x2 grayscale-max clamp (no skip). y,x step 2 in [2,h-2)/[2,w-2). */
 __global__ void k_alias_gray(uint16_t* __restrict alias_map)
 {
+    const int W = d_W, H = d_H;
     int x = 2 + 2*(blockIdx.x*blockDim.x + threadIdx.x);
     int y = 2 + 2*(blockIdx.y*blockDim.y + threadIdx.y);
     if (x>=W-2 || y>=H-2) return;
@@ -375,6 +394,7 @@ __global__ void k_alias_gray(uint16_t* __restrict alias_map)
 __global__ void k_over_mark(uint16_t* __restrict over_aux,
                             const uint32_t* __restrict bright, const uint32_t* __restrict dark)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -386,6 +406,7 @@ __global__ void k_over_mark(uint16_t* __restrict over_aux,
 __global__ void k_over_bordercopy(uint16_t* __restrict overexposed,
                                   const uint16_t* __restrict over_aux)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -400,6 +421,7 @@ __global__ void k_over_bordercopy(uint16_t* __restrict overexposed,
 __global__ void k_over_blur(uint16_t* __restrict overexposed,
                             const uint16_t* __restrict over_aux)
 {
+    const int W = d_W, H = d_H;
     int x = 3 + blockIdx.x*blockDim.x + threadIdx.x;
     int y = 3 + blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W-3 || y>=H-3) return;
@@ -431,6 +453,7 @@ __global__ void k_final_blend(uint32_t* __restrict raw32,
                               const int* __restrict raw2ev, const int* __restrict ev2raw,
                               const double* __restrict fullres_curve_f /* float-cast curve */)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -473,6 +496,7 @@ __global__ void k_final_blend(uint32_t* __restrict raw32,
  *  STAGE 10: convert_20_to_16bit  ((int)(v/16.0 + 0.5) clamp; dither=0)   */
 __global__ void k_convert16(uint16_t* __restrict out, const uint32_t* __restrict raw32)
 {
+    const int W = d_W, H = d_H;
     int x = blockIdx.x*blockDim.x + threadIdx.x;
     int y = blockIdx.y*blockDim.y + threadIdx.y;
     if (x>=W || y>=H) return;
@@ -499,10 +523,78 @@ static void* load_blob(const std::string& path, size_t expect_bytes)
     return p;
 }
 
+/* ---- scalars.txt parser ------------------------------------------------ *
+ * Reads key=value pairs (ignoring "# ..." comments and trailing inline
+ * comments) and populates the HOST_* mirrors. Fails closed (exit 3) if any
+ * required key is missing so a stale/partial sidecar cannot silently produce a
+ * wrong-but-plausible parity verdict. */
+static int parse_kv_int(const char* line, const char* key, int* out)
+{
+    size_t kl = strlen(key);
+    if (strncmp(line, key, kl) != 0 || line[kl] != '=') return 0;
+    *out = atoi(line + kl + 1);
+    return 1;
+}
+static int parse_kv_double(const char* line, const char* key, double* out)
+{
+    size_t kl = strlen(key);
+    if (strncmp(line, key, kl) != 0 || line[kl] != '=') return 0;
+    *out = atof(line + kl + 1);
+    return 1;
+}
+static void load_scalars(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) { fprintf(stderr, "cannot open scalars %s\n", path.c_str()); exit(3); }
+    char line[512];
+    int got_w=0, got_h=0, got_black=0, got_white=0, got_wd=0, got_dn=0,
+        got_factor=0, got_bd=0, got_isb=0;
+    while (fgets(line, sizeof(line), f)) {
+        /* strip leading whitespace */
+        char* p = line; while (*p==' '||*p=='\t') p++;
+        if (*p=='#' || *p=='\n' || *p=='\0') continue;
+        int iv; double dv;
+        if (parse_kv_int(p, "width", &iv))            { HOST_W = iv; got_w=1; continue; }
+        if (parse_kv_int(p, "height", &iv))           { HOST_H = iv; got_h=1; continue; }
+        if (parse_kv_int(p, "black20", &iv))          { HOST_BLACK = iv; got_black=1; continue; }
+        if (parse_kv_int(p, "white20", &iv))          { HOST_WHITE = iv; got_white=1; continue; }
+        if (parse_kv_int(p, "white_darkened", &iv))   { HOST_WHITE_DARKENED = iv; got_wd=1; continue; }
+        if (parse_kv_int(p, "dark_noise20", &iv))     { HOST_DARK_NOISE = iv; got_dn=1; continue; }
+        if (parse_kv_double(p, "factor", &dv))        { HOST_FACTOR = dv; got_factor=1; continue; }
+        if (parse_kv_int(p, "black_delta20", &iv))    { HOST_BLACK_DELTA20 = iv; got_bd=1; continue; }
+        if (parse_kv_int(p, "pattern_variant", &iv))  { HOST_VARIANT = iv; continue; }
+        if (strncmp(p, "case=", 5) == 0) {
+            sscanf(p+5, "%63[^\n]", HOST_CASE_NAME); continue;
+        }
+        if (strncmp(p, "is_bright=", 10) == 0) {
+            int a,b,c,d;
+            if (sscanf(p+10, "%d,%d,%d,%d", &a,&b,&c,&d) == 4) {
+                HOST_IS_BRIGHT[0]=a; HOST_IS_BRIGHT[1]=b; HOST_IS_BRIGHT[2]=c; HOST_IS_BRIGHT[3]=d; got_isb=1;
+            }
+            continue;
+        }
+    }
+    fclose(f);
+    /* dark_noise20 is the canonical key; fall back to the legacy alias if the
+     * canonical one is absent (older sidecars). */
+    if (!got_dn) {
+        FILE* f2 = fopen(path.c_str(), "r");
+        if (f2) { while (fgets(line,sizeof(line),f2)) { char* p=line; while(*p==' '||*p=='\t')p++;
+            int iv; if (parse_kv_int(p,"dark_noise_20bit",&iv)){HOST_DARK_NOISE=iv;got_dn=1;break;} } fclose(f2); }
+    }
+    if (!(got_w&&got_h&&got_black&&got_white&&got_wd&&got_dn&&got_factor&&got_bd&&got_isb)) {
+        fprintf(stderr, "scalars.txt missing required key(s): "
+                "w=%d h=%d black20=%d white20=%d white_darkened=%d dark_noise=%d factor=%d black_delta20=%d is_bright=%d\n",
+                got_w,got_h,got_black,got_white,got_wd,got_dn,got_factor,got_bd,got_isb);
+        exit(3);
+    }
+}
+
 template<typename T>
 static void diff_stage(const char* name, const T* dev_host, const T* oracle, size_t n,
                        int* worst_count_out)
 {
+    const int W = HOST_W;
     long long maxabs=0; double sumabs=0; size_t nz=0; size_t first_x=0,first_y=0;
     long long firstd=0; int found=0;
     for (size_t i=0;i<n;i++){
@@ -525,14 +617,26 @@ int main(int argc, char** argv)
     if (argc>=2) vdir = argv[1];
     auto P=[&](const char* n){ return vdir + "\\" + n; };
 
+    /* ---- load ALL geometry + scalars from the case's scalars.txt ---- */
+    load_scalars(P("scalars.txt"));
+    const int    W = HOST_W;
+    const int    H = HOST_H;
     const size_t n = (size_t)W*H;
-    printf("[parity] vectors dir: %s   geometry %dx%d (%zu px)\n", vdir.c_str(), W, H, n);
+    printf("[parity] vectors dir: %s\n", vdir.c_str());
+    printf("[parity] case=%s variant=%d  geometry %dx%d (%zu px)\n",
+           HOST_CASE_NAME, HOST_VARIANT, W, H, n);
+    printf("[parity] scalars: black20=%d white20=%d white_darkened=%d dark_noise20=%d "
+           "factor=%.17g black_delta20=%d is_bright={%d,%d,%d,%d}\n",
+           HOST_BLACK, HOST_WHITE, HOST_WHITE_DARKENED, HOST_DARK_NOISE, HOST_FACTOR,
+           HOST_BLACK_DELTA20, HOST_IS_BRIGHT[0],HOST_IS_BRIGHT[1],HOST_IS_BRIGHT[2],HOST_IS_BRIGHT[3]);
 
     /* device props */
     cudaDeviceProp prop; CK(cudaGetDeviceProperties(&prop,0));
     printf("[parity] device: %s  sm_%d%d  --fmad should be false\n", prop.name, prop.major, prop.minor);
 
-    /* upload constants */
+    /* upload geometry + scalars */
+    CK(cudaMemcpyToSymbol(d_W, &HOST_W, sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_H, &HOST_H, sizeof(int)));
     CK(cudaMemcpyToSymbol(d_black, &HOST_BLACK, sizeof(int)));
     CK(cudaMemcpyToSymbol(d_white, &HOST_WHITE, sizeof(int)));
     CK(cudaMemcpyToSymbol(d_white_darkened, &HOST_WHITE_DARKENED, sizeof(int)));
