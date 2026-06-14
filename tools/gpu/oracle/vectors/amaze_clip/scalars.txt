@@ -1,0 +1,31 @@
+# Dual ISO full-20-bit recon oracle - captured scalars
+case=amaze_clip
+pattern_variant=1
+width=1808
+height=2268
+black_level_14=2047
+white_level_14=15000
+iso1=100
+iso2=800
+cfa_pattern=0x02010100
+interp_method=0
+amaze_row_width=1824
+use_alias_map=1
+use_fullres=1
+chroma_smooth_method=0
+threads=1
+is_bright=1,1,0,0
+# --- captured out-params (post-recon) ---
+ev_correction=-3
+corr_ev=3
+black_delta=0
+iso_pattern=-1
+# --- 20-bit derived levels (probe reads these) ---
+black20=131008
+white20=960000
+white_bright20=480000
+white_darkened=174632
+factor=0.125            # pow(2,-corr_ev), the match-exposures darken factor
+black_delta20=0        # APPLY value (diso_black_delta=0 != -1 -> 0)
+dark_noise20=512        # default-8 (14-bit) fallback *64 for active_area={0,0,W,H}
+dark_noise_20bit=512   # legacy alias of dark_noise20

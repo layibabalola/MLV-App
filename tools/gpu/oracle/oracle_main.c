@@ -30,9 +30,38 @@
  *        -DSTDOUT_SILENT, run with MLVAPP_DISABLE_AVX2=1).
  *
  * This file lives entirely under tools/gpu/oracle/ and does NOT modify any
- * src/ files. It #includes dualiso.c + hist.c directly into this TU and
- * provides a one-line demosaic() stub (the AMaZE branch is never taken for the
- * mean23 oracle).
+ * src/ files. It #includes dualiso.c + hist.c directly into this TU.
+ *
+ * AMaZE (interp_method=0, the PRODUCTION DEFAULT) support
+ * ------------------------------------------------------
+ * When built WITH the real demosaic (-DORACLE_REAL_DEMOSAIC, which the
+ * build script sets by default and which compiles src/debayer/amaze_demosaic.c
+ * into this TU), the "--case amaze*" cases run interp_method=0 SINGLE-THREAD
+ * (threads=1, so demosaic processes the whole image as one chunk -> fully
+ * deterministic, no pthread fan-out / chunk-boundary effects). In that mode the
+ * oracle additionally dumps the AMaZE-specific intermediate planes the CUDA
+ * edge-directed reconstruction port consumes / is validated against:
+ *
+ *   amaze_squeezed.i32          int32 LE [h]      squeezed[y] row remap
+ *   amaze_rawData.f32           f32   LE [h*wx]   pre-demosaic prescaled cfa
+ *   amaze_red.f32               f32   LE [h*wx]   demosaiced + clamped red plane
+ *   amaze_green.f32             f32   LE [h*wx]   demosaiced + green-undo plane
+ *   amaze_blue.f32              f32   LE [h*wx]   demosaiced + clamped blue plane
+ *   amaze_gray.u32              u32   LE [w*h]    grayscale = g/2+r/4+b/4 (trunc)
+ *   amaze_edge_direction.u8     u8    LE [w*h]    selected edge direction index
+ *   amaze_row_width.txt (in scalars: amaze_row_width=wx) -- wx = w+16
+ *
+ * The demosaiced red/green/blue planes are the validated handoff point between
+ * the generic RawTherapee AMaZE demosaic (an upstream component) and the
+ * dualiso-owned edge-directed reconstruction. The CUDA port reproduces every
+ * dualiso-owned AMaZE stage (gray, edge_direction, edge_interp -> dark/bright)
+ * starting from these planes; the demosaic itself is the one upstream stage that
+ * is NOT re-ported (its SSE2 float core is the source of the engine's own
+ * internal AVX2/scalar +/-1 LSB tolerance and is validated separately).
+ *
+ * The legacy mean23 cases keep working unchanged. When built WITHOUT
+ * -DORACLE_REAL_DEMOSAIC a one-line demosaic() stub satisfies the link symbol
+ * and the AMaZE cases are unavailable.
  */
 
 #include <stdio.h>
@@ -57,19 +86,52 @@
  * the include so the symbol resolves.                                       */
 #include "../../../src/debayer/debayer.h"
 
+#ifndef ORACLE_REAL_DEMOSAIC
+/* mean23-only build: the AMaZE branch is never entered, so a one-line stub
+ * satisfies the link-time demosaic() symbol reference. */
 void
 #ifdef __MINGW32__
 __attribute__ ((force_align_arg_pointer))
 #endif
 demosaic(amazeinfo_t * inputdata)
 {
-    /* Unused: the mean23 oracle (interp_method=1) never enters the AMaZE
-     * branch. Present only to satisfy the link-time symbol reference. */
     (void)inputdata;
 }
+#endif /* !ORACLE_REAL_DEMOSAIC */
 
 #include "../../../src/mlv/llrawproc/hist.c"
 #include "../../../src/mlv/llrawproc/dualiso.c"
+
+#ifdef ORACLE_REAL_DEMOSAIC
+/* Real AMaZE demosaic, compiled INTO this TU so interp_method=0 runs the
+ * engine's actual edge-directed reconstruction. amaze_demosaic.c #includes
+ * sleefsseavx.c (SSE helpers) and debayer.h; it has no other src deps for the
+ * single demosaic() entry. NOTE: amaze_demosaic.c redefines MIN/MAX/COERCE/SQR
+ * as its own (RawTherapee) macros, which collide with dualiso.c's. Undef the
+ * dualiso ones first so the demosaic TU sees its intended definitions. The
+ * demosaic() body is fully self-contained after that point.
+ *
+ * ORACLE_SCALAR_DEMOSAIC (diagnostic): undef __SSE2__ around the demosaic
+ * include so amaze_demosaic.c + sleefsseavx.c take their scalar `#else`
+ * branches. This builds a SECOND reference whose only difference from the
+ * default SSE2 oracle is the demosaic float path. Diffing the two oracles'
+ * out.u16 quantifies how much the demosaic's float-path choice perturbs the
+ * FINAL output -- i.e. the upper bound a GPU demosaic port (a third float path)
+ * would contribute to the end-to-end gap. The rest of the TU (dualiso.c) keeps
+ * SSE2 (it has no intrinsics; it is scalar C either way). */
+#undef MIN
+#undef MAX
+#undef COERCE
+#undef ABS
+#ifdef ORACLE_SCALAR_DEMOSAIC
+# pragma push_macro("__SSE2__")
+# undef __SSE2__
+#endif
+#include "../../../src/debayer/amaze_demosaic.c"
+#ifdef ORACLE_SCALAR_DEMOSAIC
+# pragma pop_macro("__SSE2__")
+#endif
+#endif /* ORACLE_REAL_DEMOSAIC */
 
 /* ====================================================================== *
  *  DETERMINISTIC SYNTHETIC DUAL-ISO BAYER GENERATOR
@@ -115,14 +177,19 @@ typedef struct {
     int W, H;
     int iso1, iso2;
     int variant;
+    int interp_method;   /* 1 = mean23 (default), 0 = AMaZE (production default) */
 } oracle_case_t;
 
 static const oracle_case_t ORACLE_CASES[] = {
-    /* name        W      H      iso1  iso2   variant */
-    { "base",      1808,  2268,  100,  800,   0 },  /* the original parity case   */
-    { "res8k",     8192,  4320,  100,  800,   0 },  /* Case A: 8K, same pattern   */
-    { "clipped",   1808,  2268,  100,  800,   1 },  /* Case B: saturated highlights */
-    { "iso1600",   1808,  2268,  100,  1600,  0 },  /* Case C: corr_ev=4, iso 100/1600 */
+    /* name         W      H      iso1  iso2   variant  interp */
+    { "base",       1808,  2268,  100,  800,   0,       1 },  /* original mean23 parity case   */
+    { "res8k",      8192,  4320,  100,  800,   0,       1 },  /* Case A: 8K, mean23            */
+    { "clipped",    1808,  2268,  100,  800,   1,       1 },  /* Case B: saturated, mean23     */
+    { "iso1600",    1808,  2268,  100,  1600,  0,       1 },  /* Case C: corr_ev=4, mean23     */
+    /* --- AMaZE (interp_method=0, the PRODUCTION DEFAULT) --- */
+    { "amaze",      1808,  2268,  100,  800,   0,       0 },  /* AMaZE base (smooth)           */
+    { "amaze_clip", 1808,  2268,  100,  800,   1,       0 },  /* AMaZE saturated highlights    */
+    { "amaze_iso1600",1808,2268,  100,  1600,  0,       0 },  /* AMaZE corr_ev=4               */
 };
 #define ORACLE_NUM_CASES ((int)(sizeof(ORACLE_CASES)/sizeof(ORACLE_CASES[0])))
 
@@ -230,6 +297,7 @@ int main(int argc, char ** argv)
      * W/H + iso pair + pattern variant so each case is self-describing. */
     int W = 1808, H = 2268;
     int sel_iso1 = 100, sel_iso2 = 800, sel_variant = 0;
+    int sel_interp = 1;                       /* 1 = mean23 (legacy default) */
     const char * case_name = "base";
     const char * outdir = ".";
 
@@ -237,8 +305,9 @@ int main(int argc, char ** argv)
         printf("oracle cases:\n");
         for (int i = 0; i < ORACLE_NUM_CASES; i++) {
             const oracle_case_t * c = &ORACLE_CASES[i];
-            printf("  %-10s %5dx%-5d  iso %d/%-5d  variant=%d\n",
-                   c->name, c->W, c->H, c->iso1, c->iso2, c->variant);
+            printf("  %-14s %5dx%-5d  iso %d/%-5d  variant=%d  interp=%s\n",
+                   c->name, c->W, c->H, c->iso1, c->iso2, c->variant,
+                   c->interp_method == 0 ? "AMaZE" : "mean23");
         }
         return 0;
     }
@@ -254,8 +323,16 @@ int main(int argc, char ** argv)
         }
         W = found->W; H = found->H;
         sel_iso1 = found->iso1; sel_iso2 = found->iso2; sel_variant = found->variant;
+        sel_interp = found->interp_method;
         case_name = found->name;
         if (argc >= 4) outdir = argv[3];
+#ifndef ORACLE_REAL_DEMOSAIC
+        if (sel_interp == 0) {
+            fprintf(stderr, "[oracle] case '%s' needs interp_method=0 (AMaZE) but this "
+                            "oracle was built WITHOUT -DORACLE_REAL_DEMOSAIC.\n", case_name);
+            return 2;
+        }
+#endif
     } else {
         /* legacy positional form: <W> <H> [outdir] */
         if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
@@ -269,8 +346,10 @@ int main(int argc, char ** argv)
     the_case.W = W; the_case.H = H;
     the_case.iso1 = sel_iso1; the_case.iso2 = sel_iso2;
     the_case.variant = sel_variant;
-    fprintf(stderr, "[oracle] case=%s  geometry=%dx%d  iso=%d/%d  variant=%d\n",
-            case_name, W, H, sel_iso1, sel_iso2, sel_variant);
+    the_case.interp_method = sel_interp;
+    fprintf(stderr, "[oracle] case=%s  geometry=%dx%d  iso=%d/%d  variant=%d  interp=%s\n",
+            case_name, W, H, sel_iso1, sel_iso2, sel_variant,
+            sel_interp == 0 ? "AMaZE" : "mean23");
 
     /* create output dir if missing (ignore "already exists") */
     if (ORACLE_MKDIR(outdir) != 0) {
@@ -333,14 +412,15 @@ int main(int argc, char ** argv)
     int    diso_auto_correction = -1;    /* ISO-ratio                                */
     double diso_ev_correction   = 1.0;   /* sentinel: use ISO-ratio (see above)      */
     int    diso_black_delta     = 0;
-    int    interp_method        = 1;     /* mean23 (scalar, integer-EV-LUT)          */
+    int    interp_method        = sel_interp; /* 0=AMaZE (production default), 1=mean23 */
     int    use_alias_map        = 1;     /* exercise the 3-pass alias map            */
     int    use_fullres          = 1;     /* fullres reconstruction on                */
     int    chroma_smooth_method = 0;     /* off                                       */
     int    threads              = 1;     /* single-thread for determinism            */
     int    dark_frame           = 0;
 
-    fprintf(stderr, "[oracle] running diso_get_full20bit (mean23 scalar)...\n");
+    fprintf(stderr, "[oracle] running diso_get_full20bit (%s scalar)...\n",
+            interp_method == 0 ? "AMaZE" : "mean23");
     int ok = diso_get_full20bit(ri, img, dark_frame, sel_iso1, sel_iso2,
                                 &diso_pattern, &diso_auto_correction,
                                 &diso_ev_correction, &diso_black_delta,
@@ -495,6 +575,41 @@ int main(int argc, char ** argv)
     if (sc.overexposed) all_ok &= dump_blob(outdir, "stage_overexposed.u16",    sc.overexposed, n * sizeof(uint16_t));
     if (sc.raw_buffer_32) all_ok &= dump_blob(outdir, "stage_final20.u32",      sc.raw_buffer_32, n * sizeof(uint32_t));
 
+    /* ---- AMaZE-SPECIFIC INTERMEDIATE DUMPS (interp_method==0 only) --------
+     * The edge-directed reconstruction the CUDA port reproduces is the chain
+     *   demosaiced red/green/blue planes (post green-undo + clamp)
+     *     -> gray = g/2 + r/4 + b/4 (float, truncated to u32)
+     *     -> edge_direction[x+y*w]  (integer EV-LUT edge search + diag penalty)
+     *     -> edge_interp -> dark/bright[x+y*w] (integer EV-LUT)
+     * We dump the planes the CUDA edge stages consume (red/green/blue float),
+     * plus gray + edge_direction + squeezed so each dualiso-owned AMaZE stage
+     * can be diffed independently against the CUDA kernels. dark/bright are
+     * already dumped above (stage_dark/stage_bright). The red/green/blue/rawData
+     * planes are stored as h rows of stride wx (=w+16); we dump the full flat
+     * h*wx storage so the CUDA side can index [squeezed[y]*wx + x] exactly.
+     * raw_buffer_32 (== stage_final20) is the final blend, NOT the post-interp
+     * raw promote, so AMaZE dark/bright after edge_interp are the parity-critical
+     * interpolation-stage outputs the task calls out (stage_dark / stage_bright).*/
+    if (interp_method == 0) {
+        size_t wx = (size_t)W + 16;
+        size_t plane = (size_t)H * wx;        /* row_count * row_width */
+        if (sc.amaze_squeezed)
+            all_ok &= dump_blob(outdir, "amaze_squeezed.i32",       sc.amaze_squeezed,       (size_t)H * sizeof(int));
+        if (sc.amaze_rawData_storage)
+            all_ok &= dump_blob(outdir, "amaze_rawData.f32",        sc.amaze_rawData_storage, plane * sizeof(float));
+        if (sc.amaze_red_storage)
+            all_ok &= dump_blob(outdir, "amaze_red.f32",            sc.amaze_red_storage,    plane * sizeof(float));
+        if (sc.amaze_green_storage)
+            all_ok &= dump_blob(outdir, "amaze_green.f32",          sc.amaze_green_storage,  plane * sizeof(float));
+        if (sc.amaze_blue_storage)
+            all_ok &= dump_blob(outdir, "amaze_blue.f32",           sc.amaze_blue_storage,   plane * sizeof(float));
+        if (sc.amaze_gray)
+            all_ok &= dump_blob(outdir, "amaze_gray.u32",           sc.amaze_gray,           n * sizeof(uint32_t));
+        if (sc.amaze_edge_direction)
+            all_ok &= dump_blob(outdir, "amaze_edge_direction.u8",  sc.amaze_edge_direction, n * sizeof(uint8_t));
+        fprintf(stderr, "[oracle] AMaZE plane dumps written (wx=%zu, plane=%zu cells)\n", wx, plane);
+    }
+
     /* ---- scalars sidecar ---------------------------------------------- */
     {
         char path[1024];
@@ -511,7 +626,8 @@ int main(int argc, char ** argv)
             fprintf(f, "iso1=%d\n", sel_iso1);
             fprintf(f, "iso2=%d\n", sel_iso2);
             fprintf(f, "cfa_pattern=0x02010100\n");
-            fprintf(f, "interp_method=%d\n", interp_method);
+            fprintf(f, "interp_method=%d\n", interp_method);   /* 0=AMaZE, 1=mean23 */
+            fprintf(f, "amaze_row_width=%d\n", W + 16);        /* wx = w+16 (AMaZE plane stride) */
             fprintf(f, "use_alias_map=%d\n", use_alias_map);
             fprintf(f, "use_fullres=%d\n", use_fullres);
             fprintf(f, "chroma_smooth_method=%d\n", chroma_smooth_method);

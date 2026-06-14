@@ -63,7 +63,19 @@ $inc = @(
 # -DSTDOUT_SILENT: drop the recon's printf chatter.
 # -static: bundle libgomp/libgcc/winpthread so oracle.exe is self-contained
 #          (avoids "libgomp-1.dll not found" at runtime; portable test-vector gen).
-$flags = @("-O2", "-fopenmp", "-DSTDOUT_SILENT", "-std=gnu11", "-Wall", "-static")
+# -DORACLE_REAL_DEMOSAIC: compile the REAL AMaZE demosaic (amaze_demosaic.c,
+#          which #includes sleefsseavx.c) into the TU so the AMaZE cases
+#          (interp_method=0, the production default) run the engine's actual
+#          edge-directed reconstruction. amaze_demosaic.c uses SSE2 intrinsics
+#          (the x86-64 default code path the real engine uses); -msse2 is implied
+#          on x86-64 but we set it explicitly so the parity reference matches the
+#          shipped build. -mfpmath=sse keeps float math off the x87 80-bit stack
+#          so the demosaic's float results are reproducible (and closer to GPU
+#          single-precision). The demosaic redefines MIN/MAX/COERCE; oracle_main.c
+#          #undefs the dualiso ones before including it.
+$flags = @("-O2", "-fopenmp", "-DSTDOUT_SILENT", "-DORACLE_REAL_DEMOSAIC",
+           "-msse2", "-mfpmath=sse", "-std=gnu11", "-Wall", "-Wno-unused",
+           "-Wno-unused-but-set-variable", "-static")
 
 $cmd = @($srcMain) + $inc + $flags + @("-o", $exe, "-lpthread", "-lm")
 
@@ -78,7 +90,7 @@ if ($NoRun) { return }
 $env:MLVAPP_DISABLE_AVX2 = "1"
 
 if ($AllCases) {
-    foreach ($c in @("base", "res8k", "clipped", "iso1600")) {
+    foreach ($c in @("base", "res8k", "clipped", "iso1600", "amaze", "amaze_clip", "amaze_iso1600")) {
         $cdir = Join-Path $vecRoot $c
         if (-not (Test-Path $cdir)) { New-Item -ItemType Directory -Force -Path $cdir | Out-Null }
         Write-Host "[build-oracle] running: oracle.exe --case $c `"$cdir`"  (MLVAPP_DISABLE_AVX2=1)" -ForegroundColor Cyan
