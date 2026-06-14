@@ -48,6 +48,19 @@ function Resolve-FirstExistingPath {
     throw "Could not find $Description. Tried: $($Candidates -join '; ')"
 }
 
+function Resolve-OptionalExistingPath {
+    param([string]$Path)
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
+        return (Resolve-Path -LiteralPath $Path).Path
+    }
+    return $Path
+}
+
+function Test-ExistingFile {
+    param([string]$Path)
+    return [bool]($Path -and (Test-Path -LiteralPath $Path -PathType Leaf))
+}
+
 function Get-ToolInfo {
     param([string]$Name, [string[]]$Args = @())
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -235,55 +248,67 @@ function Run-ProfileMatrix {
 
 $scriptRoot = Resolve-ScriptRoot
 if (-not $RepoRoot) {
-    $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..\..")).Path
+    $candidateRepoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptRoot "..\..")).Path
+    if ((Test-Path -LiteralPath (Join-Path $candidateRepoRoot ".git")) -or
+        (Test-Path -LiteralPath (Join-Path $candidateRepoRoot "platform\qt"))) {
+        $RepoRoot = $candidateRepoRoot
+    } else {
+        # Standalone inventory mode: if someone copied only this script to a
+        # laptop, write outputs beside the script rather than under C:\.
+        $RepoRoot = $scriptRoot
+    }
 } else {
     $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 }
 
-if (-not $Exe) {
-    $Exe = Join-Path $RepoRoot "platform\qt\build-release\release\MLVApp.exe"
-}
-$Exe = (Resolve-Path -LiteralPath $Exe).Path
-
-if (-not $Clip) {
-    $Clip = Resolve-FirstExistingPath -Description "default clip" -Candidates @(
-        "C:\temp\MLV\M16-1327.MLV",
-        (Join-Path $RepoRoot "tests\fixtures\clips\large_dual_iso.mlv")
-    )
-} else {
-    $Clip = (Resolve-Path -LiteralPath $Clip).Path
-}
-
-if (-not $Receipt) {
-    $Receipt = Resolve-FirstExistingPath -Description "default receipt" -Candidates @(
-        (Join-Path $RepoRoot "tests\fixtures\receipts\large_dual_iso_hq.marxml")
-    )
-} else {
-    $Receipt = (Resolve-Path -LiteralPath $Receipt).Path
-}
-
 if (-not $OutputRoot) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $OutputRoot = Join-Path $RepoRoot ".claude-state\profiling\local-gpu-capability-$stamp"
+    if (Test-Path -LiteralPath (Join-Path $RepoRoot ".git")) {
+        $OutputRoot = Join-Path $RepoRoot ".claude-state\profiling\local-gpu-capability-$stamp"
+    } else {
+        $OutputRoot = Join-Path $scriptRoot "local-gpu-capability-$stamp"
+    }
 }
 New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 $OutputRoot = (Resolve-Path -LiteralPath $OutputRoot).Path
 
+$exeCandidate = if ($Exe) { $Exe } else { Join-Path $RepoRoot "platform\qt\build-release\release\MLVApp.exe" }
+$clipCandidate = if ($Clip) { $Clip } else {
+    $candidateClip = Resolve-OptionalExistingPath -Path "C:\temp\MLV\M16-1327.MLV"
+    if (-not (Test-ExistingFile -Path $candidateClip)) {
+        $candidateClip = Resolve-OptionalExistingPath -Path (Join-Path $RepoRoot "tests\fixtures\clips\large_dual_iso.mlv")
+    }
+    $candidateClip
+}
+$receiptCandidate = if ($Receipt) { $Receipt } else {
+    Resolve-OptionalExistingPath -Path (Join-Path $RepoRoot "tests\fixtures\receipts\large_dual_iso_hq.marxml")
+}
+
+$Exe = Resolve-OptionalExistingPath -Path $exeCandidate
+$Clip = Resolve-OptionalExistingPath -Path $clipCandidate
+$Receipt = Resolve-OptionalExistingPath -Path $receiptCandidate
+$exeExists = Test-ExistingFile -Path $Exe
+$clipExists = Test-ExistingFile -Path $Clip
+$receiptExists = Test-ExistingFile -Path $Receipt
+
 $adapters = Get-AdapterInventory
 $tools = @(
-    (Get-ToolInfo -Name "nvidia-smi" -Args @("--query-gpu=name,driver_version,memory.total", "--format=csv,noheader")),
+    (Get-ToolInfo -Name "nvidia-smi" -Args @("--query-gpu=name,compute_cap,memory.total,driver_version", "--format=csv,noheader")),
     (Get-ToolInfo -Name "nvcc" -Args @("--version")),
     (Get-ToolInfo -Name "vulkaninfo" -Args @("--summary"))
 )
 
-$originalPref = Get-GpuPreferenceValue -Executable $Exe
+$originalPref = if ($exeExists) { Get-GpuPreferenceValue -Executable $Exe } else { $null }
 $inventory = [pscustomobject]@{
     host = $env:COMPUTERNAME
     captured = (Get-Date).ToString("o")
     repo_root = $RepoRoot
     exe = $Exe
+    exe_exists = $exeExists
     clip = $Clip
+    clip_exists = $clipExists
     receipt = $Receipt
+    receipt_exists = $receiptExists
     frames = $Frames
     scale_factor = $ScaleFactor
     session_name = $env:SESSIONNAME
@@ -302,9 +327,9 @@ Write-Host "=================== GPU INVENTORY ==================="
 $adapters | Format-Table name, adapter_compatibility, driver_version, adapter_ram_mb -AutoSize
 Write-Host "session        : $($inventory.session_name)"
 Write-Host "likely RDP     : $($inventory.likely_rdp)"
-Write-Host "exe            : $Exe"
-Write-Host "clip           : $Clip"
-Write-Host "receipt        : $Receipt"
+Write-Host "exe            : $Exe (exists=$exeExists)"
+Write-Host "clip           : $Clip (exists=$clipExists)"
+Write-Host "receipt        : $Receipt (exists=$receiptExists)"
 Write-Host "output         : $OutputRoot"
 Write-Host "inventory JSON : $inventoryPath"
 Write-Host "====================================================="
@@ -312,6 +337,10 @@ Write-Host "====================================================="
 if ($InventoryOnly) {
     Write-Host "InventoryOnly set; skipping profile runs."
     exit 0
+}
+
+if (-not $exeExists -or -not $clipExists -or -not $receiptExists) {
+    throw "Profile runs require existing -Exe, -Clip, and -Receipt paths. Use -InventoryOnly for zero-install hardware triage."
 }
 
 $allRows = @()
