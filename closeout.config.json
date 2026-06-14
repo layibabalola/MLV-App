@@ -12,7 +12,8 @@
   },
   "workBlockBootstrap": {
     "autoBranchFromProtectedTarget": true,
-    "branchPrefix": "codex/work-block"
+    "branchPrefix": "codex/work-block",
+    "requireIntegratedStartHeadForFinalize": true
   },
   "validation": {
     "timeoutMs": 120000,
@@ -416,6 +417,7 @@
     "requiredConfigKeys": [
       "git",
       "workBlockBootstrap",
+      "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
       "validation",
       "processResources",
       "powerShell",
@@ -476,6 +478,7 @@
     "requiredTests": [
       "test_start_work_block_auto_branches_from_clean_protected_target",
       "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
+      "test_finalize_blocks_work_block_started_from_unintegrated_base",
       "test_dirty_split_auto_remediates_owned_dirty_and_retains_foreign",
       "test_dirty_split_stale_tuple_is_rejected_before_mutation",
       "test_repo_sweep_foreign_dirty_integrated_branch_switches_and_prunes",
@@ -625,6 +628,7 @@
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -725,6 +729,7 @@
       {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
       {"path": "AGENTS.md", "contains": "protected-target-dirty-recovery"},
       {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
+      {"path": "AGENTS.md", "contains": "workBlockBootstrap.requireIntegratedStartHeadForFinalize"},
       {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "AGENTS.md", "contains": "PowerShell 7+"},
       {"path": "AGENTS.md", "contains": "repoStateLedger"},
@@ -739,6 +744,7 @@
       {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
       {"path": "CLAUDE.md", "contains": "protected-target-dirty-recovery"},
       {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
+      {"path": "CLAUDE.md", "contains": "workBlockBootstrap.requireIntegratedStartHeadForFinalize"},
       {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
       {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
       {"path": "CLAUDE.md", "contains": "repoStateLedger"},
@@ -746,6 +752,7 @@
       {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
       {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
       {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
+      {"path": "closeout.config.json", "contains": "requireIntegratedStartHeadForFinalize"},
       {"path": "closeout.config.json", "contains": "finalizeLoop"},
       {"path": "closeout.config.json", "contains": "hardClean"},
       {"path": "closeout.config.json", "contains": "runtimeServices"},

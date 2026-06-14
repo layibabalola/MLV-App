@@ -68,6 +68,7 @@
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\start-work-block.ps1 -RepoRoot . -Summary "<human commit subject>"`
   - Use a subject that describes the user-visible purpose of the change, for example `export: apply Auto Look Assist raw defaults to DNG metadata`. Broker-generated work-block/checkpoint/evidence details belong after that subject in the commit body.
 - If `start-work-block` begins on a clean protected target branch and `workBlockBootstrap.autoBranchFromProtectedTarget=true`, the broker creates an allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch, records `protectedBranchBootstrap` in the manifest, and continues there. Dirty protected targets must block before branch creation with the dirty paths listed.
+- Work blocks must start from clean `master`/target or an already approved and integrated base. With `workBlockBootstrap.requireIntegratedStartHeadForFinalize=true`, finalize must block before mutation when the manifest `startHead` is not already contained in the pinned target head; do not stack a new work block on an unapproved sibling branch.
 - Before any final response after non-trivial edits, always trigger closeout:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\closeout\work-block-complete.ps1 -RepoRoot . -Finalize`
 - To audit whole-repo branch/worktree/stash cleanup, run:

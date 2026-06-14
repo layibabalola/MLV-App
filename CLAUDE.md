@@ -99,6 +99,13 @@ allowed `workBlockBootstrap.branchPrefix/<workBlockId>` branch, records
 `protectedBranchBootstrap` in the manifest, and continues there. Dirty protected
 targets block before branch creation and must list the dirty paths.
 
+Work blocks must start from clean `master`/target or an already approved and
+integrated base. With
+`workBlockBootstrap.requireIntegratedStartHeadForFinalize=true`, finalize must
+block before mutation when the manifest `startHead` is not already contained in
+the pinned target head; do not stack a new work block on an unapproved sibling
+branch.
+
 Before declaring the work complete, always run:
 
 ```powershell

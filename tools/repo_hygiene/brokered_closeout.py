@@ -322,6 +322,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "workBlockBootstrap": {
         "autoBranchFromProtectedTarget": True,
         "branchPrefix": "codex/work-block",
+        "requireIntegratedStartHeadForFinalize": True,
     },
     "validation": {
         "timeoutMs": 120000,
@@ -737,6 +738,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requiredConfigKeys": [
             "git",
             "workBlockBootstrap",
+            "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
             "validation",
             "processResources",
             "powerShell",
@@ -798,6 +800,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
             "test_start_work_block_auto_branches_from_clean_protected_target",
             "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
+            "test_finalize_blocks_work_block_started_from_unintegrated_base",
             "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
             "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
             "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
@@ -941,6 +944,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_closeout_tooling_current"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1037,6 +1041,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "AGENTS.md", "contains": "protected-target-noop-closeout"},
             {"path": "AGENTS.md", "contains": "protected-target-dirty-recovery"},
             {"path": "AGENTS.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
+            {"path": "AGENTS.md", "contains": "workBlockBootstrap.requireIntegratedStartHeadForFinalize"},
             {"path": "AGENTS.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "AGENTS.md", "contains": "PowerShell 7+"},
             {"path": "AGENTS.md", "contains": "repoStateLedger"},
@@ -1052,6 +1057,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "protected-target-noop-closeout"},
             {"path": "CLAUDE.md", "contains": "protected-target-dirty-recovery"},
             {"path": "CLAUDE.md", "contains": "workBlockBootstrap.autoBranchFromProtectedTarget"},
+            {"path": "CLAUDE.md", "contains": "workBlockBootstrap.requireIntegratedStartHeadForFinalize"},
             {"path": "CLAUDE.md", "contains": "Evidence-preserving transaction prune"},
             {"path": "CLAUDE.md", "contains": "PowerShell 7+"},
             {"path": "CLAUDE.md", "contains": "repoStateLedger"},
@@ -1059,6 +1065,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "CLAUDE.md", "contains": "rollbackPolicy"},
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
+            {"path": "closeout.config.json", "contains": "requireIntegratedStartHeadForFinalize"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "closeout.config.json", "contains": "remediationFreeze"},
             {"path": "closeout.config.json", "contains": "hardClean"},
@@ -5681,6 +5688,39 @@ def write_finalize_retry_audit(repo_root: Path, config: Dict[str, Any], work_blo
     return row
 
 
+def validate_work_block_start_head_integrated(
+    repo_root: Path,
+    config: Dict[str, Any],
+    detection: Dict[str, Any],
+    manifest: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    bootstrap = config.get("workBlockBootstrap", {})
+    if not bool(bootstrap.get("requireIntegratedStartHeadForFinalize", True)):
+        return None
+    start_head = str(manifest.get("startHead") or "")
+    target_head = str(detection.get("targetHead") or "")
+    if start_head and target_head and is_ancestor(repo_root, start_head, target_head):
+        return None
+    target_branch = str(detection.get("targetBranch") or config.get("git", {}).get("targetBranch") or "master")
+    return {
+        "reason": "work_block_base_not_integrated",
+        "workBlockId": detection.get("workBlockId"),
+        "branch": detection.get("branch"),
+        "startHead": start_head,
+        "targetHead": target_head,
+        "targetBranch": target_branch,
+        "policy": "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
+        "recoveryCommand": (
+            "Switch to a clean approved target base, then start a fresh work block: "
+            "git switch %s; %s"
+            % (
+                target_branch,
+                closeout_script_command("start-work-block.ps1", ["-Summary", "<human commit subject>"], config),
+            )
+        ),
+    }
+
+
 def _finalize_work_block_once(
     repo_root_arg: Path,
     *,
@@ -5697,6 +5737,12 @@ def _finalize_work_block_once(
     update_manifest(repo_root, config, block_id, {"state": "finalizing", "completedAt": utc_now()})
     manifest = load_manifest(repo_root, config, block_id)
     commit_subject = work_block_commit_subject(manifest)
+    base_guard = validate_work_block_start_head_integrated(repo_root, config, detection, manifest)
+    if base_guard:
+        write_audit(repo_root, config, "work_block_base_not_integrated", base_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
+        return {"status": "blocked", **base_guard, "detection": detection}
     if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
         payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
         write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
@@ -10584,6 +10630,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
     required_config_keys = [
         "git",
         "workBlockBootstrap",
+        "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
         "validation",
         "processResources",
         "powerShell",
