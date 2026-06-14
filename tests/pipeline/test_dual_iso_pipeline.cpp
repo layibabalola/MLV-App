@@ -98,10 +98,22 @@ static void configure_gpu_export_supported_dual_iso(MlvPipelineFixture & fixture
     llrpSetChromaSmoothMode(fixture.video(), CS_OFF);
 }
 
-static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
-                                                      bool gpu_enabled,
-                                                      const QString & dll_path,
-                                                      const QString & dng_path)
+static void assert_gpu_export_fixture_ready(MlvPipelineFixture & fixture,
+                                            const QString & clip_relative_path,
+                                            const QString & receipt_relative_path)
+{
+    QString error_message;
+    ASSERT_TRUE(fixture.openClipFile(repo_file_path(clip_relative_path), &error_message));
+    ASSERT_TRUE(fixture.loadReceipt(receipt_relative_path, &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+}
+
+static QByteArray export_dng_for_gpu_export_gate(int raw_state,
+                                                 bool gpu_enabled,
+                                                 const QString & dll_path,
+                                                 const QString & dng_path,
+                                                 const QString & clip_relative_path,
+                                                 const QString & receipt_relative_path)
 {
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
@@ -112,7 +124,7 @@ static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
 
     MlvPipelineFixture fixture;
-    assert_fixture_ready(fixture);
+    assert_gpu_export_fixture_ready(fixture, clip_relative_path, receipt_relative_path);
     configure_gpu_export_supported_dual_iso(fixture);
     std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
     ASSERT_TRUE(!frame.empty());
@@ -134,6 +146,20 @@ static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
                               nullptr));
     freeDngObject(dng);
     return read_all_bytes(dng_path);
+}
+
+static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
+                                                      bool gpu_enabled,
+                                                      const QString & dll_path,
+                                                      const QString & dng_path)
+{
+    return export_dng_for_gpu_export_gate(
+        raw_state,
+        gpu_enabled,
+        dll_path,
+        dng_path,
+        QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv"),
+        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"));
 }
 
 static void assert_profiler_json_has_stage(const QJsonObject & stages,
@@ -611,75 +637,111 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
     QTemporaryDir temp_dir;
     ASSERT_TRUE(temp_dir.isValid());
 
+    struct ExportParityCase {
+        const char * name;
+        const char * clip_path;
+        const char * receipt_path;
+    };
+
+    const ExportParityCase cases[] = {
+        {
+            "tiny-hq",
+            "tests/fixtures/clips/tiny_dual_iso.mlv",
+            "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+        },
+        {
+            "large-hq",
+            "tests/fixtures/clips/large_dual_iso.mlv",
+            "tests/fixtures/receipts/large_dual_iso_hq.marxml",
+        },
+    };
     const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
-    for (int raw_state : raw_states) {
-        const QString suffix = raw_state == COMPRESSED_RAW
-            ? QStringLiteral("compressed")
-            : QStringLiteral("uncompressed");
-        const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
-        const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
+    for (const ExportParityCase & parity_case : cases) {
+        for (int raw_state : raw_states) {
+            const QString case_name = QString::fromLatin1(parity_case.name);
+            const QString raw_name = raw_state == COMPRESSED_RAW
+                ? QStringLiteral("compressed")
+                : QStringLiteral("uncompressed");
+            const QString suffix = case_name + QStringLiteral("-") + raw_name;
+            const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
+            const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
 
-        const QByteArray cpu_bytes =
-            export_tiny_dng_for_gpu_export_gate(raw_state, false, QString(), cpu_dng);
-        ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
-        ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+            const QByteArray cpu_bytes =
+                export_dng_for_gpu_export_gate(
+                    raw_state,
+                    false,
+                    QString(),
+                    cpu_dng,
+                    QString::fromLatin1(parity_case.clip_path),
+                    QString::fromLatin1(parity_case.receipt_path));
+            ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+            ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
 
-        const QByteArray gpu_bytes =
-            export_tiny_dng_for_gpu_export_gate(raw_state, true, dll_path, gpu_dng);
-        const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
-        const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
-        const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
-        const int run_rc = llrpGpuExportLastRunRcForTesting();
-        const int replaced = llrpGpuExportLastReplacedForTesting();
-        const int mismatch = llrpGpuExportLastMismatchForTesting();
-        const int apply_dither = llrpGpuExportLastApplyDitherForTesting();
-        const unsigned long long mismatch_count =
-            llrpGpuExportLastMismatchCountForTesting();
-        const unsigned long long mismatch_first_index =
-            llrpGpuExportLastMismatchFirstIndexForTesting();
-        const int mismatch_first_cpu =
-            llrpGpuExportLastMismatchFirstCpuForTesting();
-        const int mismatch_first_gpu =
-            llrpGpuExportLastMismatchFirstGpuForTesting();
-        const int mismatch_max_abs =
-            llrpGpuExportLastMismatchMaxAbsForTesting();
-        const std::string cpu_sha256 =
-            sha256_bytes(cpu_bytes.constData(), static_cast<std::size_t>(cpu_bytes.size()));
-        const std::string gpu_sha256 =
-            sha256_bytes(gpu_bytes.constData(), static_cast<std::size_t>(gpu_bytes.size()));
-        const QByteArray suffix_bytes = suffix.toLocal8Bit();
-        std::fprintf(stderr,
-                     "[gpu-export-parity] mode=%s backend_attempted=%d backend_unavailable=%d "
-                     "run_attempted=%d run_rc=%d replaced=%d mismatch=%d apply_dither=%d "
-                     "mismatch_count=%llu mismatch_first_index=%llu "
-                     "mismatch_first_cpu=%d mismatch_first_gpu=%d mismatch_max_abs=%d "
-                     "cpu_len=%lld gpu_len=%lld cpu_sha256=%s gpu_sha256=%s\n",
-                     suffix_bytes.constData(),
-                     backend_attempted,
-                     backend_unavailable,
-                     run_attempted,
-                     run_rc,
-                     replaced,
-                     mismatch,
-                     apply_dither,
-                     mismatch_count,
-                     mismatch_first_index,
-                     mismatch_first_cpu,
-                     mismatch_first_gpu,
-                     mismatch_max_abs,
-                     static_cast<long long>(cpu_bytes.size()),
-                     static_cast<long long>(gpu_bytes.size()),
-                     cpu_sha256.c_str(),
-                     gpu_sha256.c_str());
-        ASSERT_EQ(1, backend_attempted);
-        ASSERT_EQ(0, backend_unavailable);
-        ASSERT_EQ(1, run_attempted);
-        ASSERT_EQ(0, run_rc);
-        ASSERT_EQ(1, replaced);
-        ASSERT_EQ(0, mismatch);
+            const QByteArray gpu_bytes =
+                export_dng_for_gpu_export_gate(
+                    raw_state,
+                    true,
+                    dll_path,
+                    gpu_dng,
+                    QString::fromLatin1(parity_case.clip_path),
+                    QString::fromLatin1(parity_case.receipt_path));
+            const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+            const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+            const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+            const int run_rc = llrpGpuExportLastRunRcForTesting();
+            const int replaced = llrpGpuExportLastReplacedForTesting();
+            const int mismatch = llrpGpuExportLastMismatchForTesting();
+            const int apply_dither = llrpGpuExportLastApplyDitherForTesting();
+            const unsigned long long mismatch_count =
+                llrpGpuExportLastMismatchCountForTesting();
+            const unsigned long long mismatch_first_index =
+                llrpGpuExportLastMismatchFirstIndexForTesting();
+            const int mismatch_first_cpu =
+                llrpGpuExportLastMismatchFirstCpuForTesting();
+            const int mismatch_first_gpu =
+                llrpGpuExportLastMismatchFirstGpuForTesting();
+            const int mismatch_max_abs =
+                llrpGpuExportLastMismatchMaxAbsForTesting();
+            const std::string cpu_sha256 =
+                sha256_bytes(cpu_bytes.constData(), static_cast<std::size_t>(cpu_bytes.size()));
+            const std::string gpu_sha256 =
+                sha256_bytes(gpu_bytes.constData(), static_cast<std::size_t>(gpu_bytes.size()));
+            const QByteArray raw_name_bytes = raw_name.toLocal8Bit();
+            std::fprintf(stderr,
+                         "[gpu-export-parity] case=%s mode=%s backend_attempted=%d "
+                         "backend_unavailable=%d run_attempted=%d run_rc=%d "
+                         "replaced=%d mismatch=%d apply_dither=%d mismatch_count=%llu "
+                         "mismatch_first_index=%llu mismatch_first_cpu=%d "
+                         "mismatch_first_gpu=%d mismatch_max_abs=%d cpu_len=%lld "
+                         "gpu_len=%lld cpu_sha256=%s gpu_sha256=%s\n",
+                         parity_case.name,
+                         raw_name_bytes.constData(),
+                         backend_attempted,
+                         backend_unavailable,
+                         run_attempted,
+                         run_rc,
+                         replaced,
+                         mismatch,
+                         apply_dither,
+                         mismatch_count,
+                         mismatch_first_index,
+                         mismatch_first_cpu,
+                         mismatch_first_gpu,
+                         mismatch_max_abs,
+                         static_cast<long long>(cpu_bytes.size()),
+                         static_cast<long long>(gpu_bytes.size()),
+                         cpu_sha256.c_str(),
+                         gpu_sha256.c_str());
+            ASSERT_EQ(1, backend_attempted);
+            ASSERT_EQ(0, backend_unavailable);
+            ASSERT_EQ(1, run_attempted);
+            ASSERT_EQ(0, run_rc);
+            ASSERT_EQ(1, replaced);
+            ASSERT_EQ(0, mismatch);
 
-        preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
-        ASSERT_TRUE(cpu_bytes == gpu_bytes);
+            preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
+            ASSERT_TRUE(cpu_bytes == gpu_bytes);
+        }
     }
 
     qunsetenv("MLVAPP_GPU_EXPORT");
