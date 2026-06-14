@@ -682,12 +682,25 @@ int igpu_recon_run(igpu_recon_backend* b,
                    uint16_t* out_bayer16,
                    unsigned int gl_texture)
 {
-    (void)frame;       /* v1: match scalars fixed via set_clip; reserved */
     (void)gl_texture;
-    if (!b || !in_bayer14) return -1;
+    if (!b || !frame || !in_bayer14) return -1;
     if (!b->have_clip || !b->have_luts) {
         fprintf(stderr, "[igpu_recon_cuda] run() before set_clip/set_luts\n");
         return -1;
+    }
+    if (frame->interp_method != 1 ||
+        !frame->use_alias_map ||
+        !frame->use_fullres ||
+        frame->chroma_smooth_method != 0 ||
+        frame->apply_dither != 0) {
+        fprintf(stderr, "[igpu_recon_cuda] unsupported v1 frame controls "
+                        "(interp=%d alias=%d fullres=%d chroma=%d dither=%d)\n",
+                frame->interp_method,
+                frame->use_alias_map,
+                frame->use_fullres,
+                frame->chroma_smooth_method,
+                frame->apply_dither);
+        return 3;
     }
     if (out_kind == IGPU_OUT_GL_TEXTURE) {
         /* interop path not implemented in v1; return non-zero per spec. */
@@ -700,6 +713,29 @@ int igpu_recon_run(igpu_recon_backend* b,
     const int W = b->width, H = b->height;
     const size_t n = (size_t)W * (size_t)H;
     int* dd_ev2raw_origin = b->dd_ev2raw + EV2RAW_ORIGIN;
+
+    int black20 = b->black;
+    int white20 = b->white;
+    int white_darkened = frame->white_darkened;
+    int black_delta20 = frame->black_delta;
+    int dark_noise20 = (int)(frame->dark_noise + 0.5);
+    double corr_ev = fabs(frame->ev_correction);
+    double factor = pow(2.0, -corr_ev);
+
+    if (white_darkened <= 0 || dark_noise20 <= 0 || corr_ev < 0.5) {
+        fprintf(stderr, "[igpu_recon_cuda] invalid frame constants "
+                        "(white_darkened=%d dark_noise=%d corr_ev=%.4f)\n",
+                white_darkened, dark_noise20, corr_ev);
+        return 3;
+    }
+
+    CK(cudaMemcpyToSymbol(d_black,          &black20,        sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_white,          &white20,        sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_white_darkened, &white_darkened, sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_dark_noise,     &dark_noise20,   sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_factor,         &factor,         sizeof(double)));
+    CK(cudaMemcpyToSymbol(d_black_delta20,  &black_delta20,  sizeof(int)));
+    CK(cudaMemcpyToSymbol(d_is_bright,      b->is_bright,    sizeof(int)*4));
 
     dim3 bt(16,16);
     dim3 gt((W+15)/16,(H+15)/16);

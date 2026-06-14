@@ -268,11 +268,36 @@ typedef struct
     int valid;
 } dualiso_full20bit_timing_t;
 
+typedef struct
+{
+    int valid;
+    int width;
+    int height;
+    int black_level;
+    int white_level;
+    int white_darkened;
+    int black_delta;
+    double ev_correction;
+    double dark_noise;
+    int interp_method;
+    int use_alias_map;
+    int use_fullres;
+    int chroma_smooth_method;
+    int is_bright[4];
+    const int * raw2ev;
+    const int * ev2raw;
+    const double * mix_curve;
+    const double * fullres_curve;
+} dualiso_gpu_recon_state_t;
+
 extern DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing;
 
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch);
 void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
+int dualiso_debug_get_last_gpu_recon_state(dualiso_gpu_recon_state_t * state);
+void dualiso_debug_reset_last_gpu_recon_state(void);
+void dualiso_debug_set_gpu_recon_state_capture_enabled(int enabled);
 
 /* Test-only: counts how many times the HQ recon entered AMaZE (which == 0)
  * vs mean23 (which == 1) since the last reset. Used by pipeline tests to
