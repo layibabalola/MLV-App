@@ -403,7 +403,7 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     luts.ev2raw = state.ev2raw;
     luts.mix_curve = state.mix_curve;
     luts.fullres_curve = state.fullres_curve;
-    luts.randn05 = NULL;
+    luts.randn05 = state.randn05;
 
     memset(&frame, 0, sizeof(frame));
     frame.ev_correction = state.ev_correction;
@@ -414,7 +414,7 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     frame.use_alias_map = state.use_alias_map;
     frame.use_fullres = state.use_fullres;
     frame.chroma_smooth_method = state.chroma_smooth_method;
-    frame.apply_dither = 0;
+    frame.apply_dither = state.apply_dither;
 
     gpu_output = (uint16_t *)malloc(raw_image_size);
     if(!gpu_output) return 0;

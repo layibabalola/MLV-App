@@ -453,6 +453,69 @@ __global__ void k_convert16(uint16_t* __restrict out, const uint32_t* __restrict
     out[i] = (uint16_t)icoerce(o, 0, 0xFFFF);
 }
 
+/* STAGE 9+10: AVX2-compatible final_blend fused directly to 16-bit.
+ * Mirrors final_blend_row_avx2(... fuse_to_16bit=1): float raw2ev values,
+ * explicit fused multiply-adds, and per-row dither cursor `(y*7 + x) & 1023`.
+ */
+__global__ void k_final_blend16_avx2(uint16_t* __restrict out,
+                                     const uint32_t* __restrict bright,
+                                     const uint32_t* __restrict halfres_smooth,
+                                     const uint32_t* __restrict fullres,
+                                     const uint32_t* __restrict fullres_smooth,
+                                     const uint32_t* __restrict dark,
+                                     const uint16_t* __restrict overexposed,
+                                     const uint16_t* __restrict alias_map,
+                                     const int* __restrict raw2ev,
+                                     const int* __restrict ev2raw,
+                                     const double* __restrict fullres_curve_f,
+                                     const float* __restrict randn05,
+                                     int W, int H)
+{
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y*blockDim.y + threadIdx.y;
+    if (x>=W || y>=H) return;
+    size_t i=(size_t)x+(size_t)y*W;
+
+    int b   = (int)bright[i];
+    int hr  = (int)halfres_smooth[i];
+    int fr  = (int)fullres[i];
+    int frs = (int)fullres_smooth[i];
+    int d   = (int)dark[i];
+
+    float hrev  = (float)raw2ev[hr];
+    float frev  = (float)raw2ev[fr];
+    float frsev = (float)raw2ev[frs];
+    float f = (float)fullres_curve_f[b & 0xFFFFF];
+
+    int co = (int)alias_map[i];
+    float c_amap = (float)co * (1.0f / (float)ALIAS_MAP_MAX);
+    c_amap = fminf(fmaxf(c_amap, 0.0f), 1.0f);
+
+    float ovf = (float)overexposed[i] * (1.0f / 200.0f);
+    ovf = fminf(fmaxf(ovf, 0.0f), 1.0f);
+
+    float c = fmaxf(c_amap, ovf);
+    float noisy_or_over = fmaxf(ovf, 1.0f - f);
+    f = fmaxf(f, c);
+
+    float fev = fmaf(noisy_or_over, frsev - frev, frev);
+
+    int sig = (d + b) >> 1;
+    float cap = (float)(sig - d_black) * (1.0f / (4.0f * (float)d_dark_noise));
+    f = fmaxf(0.0f, fminf(f, cap));
+
+    float outf = fmaf(f, fev - hrev, hrev);
+    int output = __float2int_rz(outf);
+    output = icoerce(output, -10*EV_RESOLUTION, 14*EV_RESOLUTION - 1);
+
+    int raw20 = ev2raw[output];
+    float dither = randn05[(y * 7 + x) & 1023];
+    float rounded = fmaf((float)raw20, 1.0f / 16.0f, dither);
+    rounded += 0.5f;
+    int v = __float2int_rz(rounded);
+    out[i] = (uint16_t)icoerce(v, 0, 0xFFFF);
+}
+
 /* ===================================================================== *
  *  BACKEND HANDLE + ABI                                                  *
  * ===================================================================== */
@@ -475,6 +538,7 @@ struct igpu_recon_backend {
     /* device LUTs (uploaded once on set_luts) */
     int      *dd_raw2ev, *dd_ev2raw;     /* ev2raw is BASE; origin = +EV2RAW_ORIGIN */
     double   *dd_mix, *dd_frc_f, *dd_frc_d;
+    float    *df_randn05;
 
     /* timing */
     igpu_recon_timing_t last_timing;
@@ -506,8 +570,10 @@ static void free_lut_buffers(igpu_recon_backend* b) {
     if (b->dd_mix)    cudaFree(b->dd_mix);
     if (b->dd_frc_f)  cudaFree(b->dd_frc_f);
     if (b->dd_frc_d)  cudaFree(b->dd_frc_d);
+    if (b->df_randn05) cudaFree(b->df_randn05);
     b->dd_raw2ev=b->dd_ev2raw=NULL;
     b->dd_mix=b->dd_frc_f=b->dd_frc_d=NULL;
+    b->df_randn05=NULL;
 }
 
 extern "C" {
@@ -668,7 +734,10 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts)
         CK(cudaMemcpy(b->dd_frc_f, luts->fullres_curve, (size_t)RAW2EV_COUNT*sizeof(double), cudaMemcpyHostToDevice));
         CK(cudaMemcpy(b->dd_frc_d, luts->fullres_curve, (size_t)RAW2EV_COUNT*sizeof(double), cudaMemcpyHostToDevice));
     }
-    /* randn05 (dither cache) ignored in v1: dither is off. */
+    if (luts->randn05) {
+        if (!b->df_randn05) CK(cudaMalloc(&b->df_randn05, (size_t)1024*sizeof(float)));
+        CK(cudaMemcpy(b->df_randn05, luts->randn05, (size_t)1024*sizeof(float), cudaMemcpyHostToDevice));
+    }
 
     b->have_luts = 1;
     return 0;
@@ -692,7 +761,7 @@ int igpu_recon_run(igpu_recon_backend* b,
         !frame->use_alias_map ||
         !frame->use_fullres ||
         frame->chroma_smooth_method != 0 ||
-        frame->apply_dither != 0) {
+        (frame->apply_dither != 0 && frame->apply_dither != 1)) {
         fprintf(stderr, "[igpu_recon_cuda] unsupported v1 frame controls "
                         "(interp=%d alias=%d fullres=%d chroma=%d dither=%d)\n",
                 frame->interp_method,
@@ -700,6 +769,10 @@ int igpu_recon_run(igpu_recon_backend* b,
                 frame->use_fullres,
                 frame->chroma_smooth_method,
                 frame->apply_dither);
+        return 3;
+    }
+    if (frame->apply_dither && !b->df_randn05) {
+        fprintf(stderr, "[igpu_recon_cuda] dither requested without randn05 LUT\n");
         return 3;
     }
     if (out_kind == IGPU_OUT_GL_TEXTURE) {
@@ -790,13 +863,20 @@ int igpu_recon_run(igpu_recon_backend* b,
     k_over_bordercopy<<<gt,bt>>>(b->d_over,b->d_overaux,W,H);
     { dim3 g((W-6+15)/16,(H-6+15)/16); k_over_blur<<<g,bt>>>(b->d_over,b->d_overaux,W,H); }
 
-    /* STAGE 9: final blend */
-    k_final_blend<<<gt,bt>>>(b->d_raw32,b->d_bright,b->d_halfres,b->d_fullres,b->d_fullres,
-                             b->d_dark,b->d_over,b->d_alias,
-                             b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,W,H);
+    if (frame->apply_dither) {
+        /* STAGE 9+10: default AVX2 export shape, fused to 16-bit with row dither. */
+        k_final_blend16_avx2<<<gt,bt>>>(b->d_out,b->d_bright,b->d_halfres,b->d_fullres,b->d_fullres,
+                                        b->d_dark,b->d_over,b->d_alias,
+                                        b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,b->df_randn05,W,H);
+    } else {
+        /* STAGE 9: scalar export shape, final blend to raw32. */
+        k_final_blend<<<gt,bt>>>(b->d_raw32,b->d_bright,b->d_halfres,b->d_fullres,b->d_fullres,
+                                 b->d_dark,b->d_over,b->d_alias,
+                                 b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,W,H);
 
-    /* STAGE 10: convert 20->16 */
-    k_convert16<<<gt,bt>>>(b->d_out,b->d_raw32,W,H);
+        /* STAGE 10: convert 20->16 without AVX2 row dither. */
+        k_convert16<<<gt,bt>>>(b->d_out,b->d_raw32,W,H);
+    }
 
     CK(cudaGetLastError());
     CK(cudaEventRecord(b->ev_after_kernel, 0));

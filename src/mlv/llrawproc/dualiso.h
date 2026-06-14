@@ -288,6 +288,8 @@ typedef struct
     const int * ev2raw;
     const double * mix_curve;
     const double * fullres_curve;
+    const float * randn05;
+    int apply_dither;
 } dualiso_gpu_recon_state_t;
 
 extern DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing;

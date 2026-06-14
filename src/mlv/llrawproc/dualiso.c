@@ -4816,6 +4816,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
                                                   int use_alias_map,
                                                   int use_fullres,
                                                   int chroma_smooth_method,
+                                                  int final_blend_fused_to_16bit,
                                                   const dualiso_full20bit_scratch_t * scratch)
 {
     if(!g_dualiso_gpu_recon_state_capture_enabled)
@@ -4866,6 +4867,8 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
     state.ev2raw = scratch->ev2raw_0;
     state.mix_curve = mix_curve;
     state.fullres_curve = fullres_curve;
+    state.randn05 = final_blend_fused_to_16bit ? randn05_cache : NULL;
+    state.apply_dither = final_blend_fused_to_16bit != 0;
 
     g_dualiso_last_gpu_recon_state = state;
 }
@@ -5131,6 +5134,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     stage_start = mlv_stage_timing_now();
     int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, effective_chroma_smooth_method, scratch);
     g_dualiso_full20bit_timing.mix_ms += dualiso_debug_elapsed_ms(stage_start);
+    int final_blend_fused_to_16bit = 0;
     if (mix_ok)
     {
         /* let's check the ideal noise levels (on the halfres image, which in black areas is identical to the bright one) */
@@ -5144,7 +5148,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         double ideal_noise_std = noise_std[0];
 #endif
         stage_start = mlv_stage_timing_now();
-        int final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
+        final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
         g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
         if (!final_blend_fused_to_16bit)
         {
@@ -5176,6 +5180,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                           use_alias_map,
                                           use_fullres,
                                           effective_chroma_smooth_method,
+                                          final_blend_fused_to_16bit,
                                           scratch);
     
     if (!rggb) /* back to GBRG */
