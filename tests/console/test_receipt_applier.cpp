@@ -8,6 +8,7 @@
 #include "../../src/batch/ReceiptLoader.h"
 #include "../../src/batch/BatchLogger.h"
 #include "../../src/batch/BatchRunner.h"
+#include "../../platform/qt/DualIsoPatternMapping.h"
 
 #include <QDir>
 #include <QFile>
@@ -168,6 +169,64 @@ TEST(ReceiptApplier, PreviewDualIsoModeSurvivesWhenAutoCorrectionIsDisabled)
     destroy_runtime_objects(video.get());
 }
 
+TEST(ReceiptApplier, AutoCorrectedDualIsoPatternMapsUiIndexToCorePattern)
+{
+    for( int uiIndex = 0; uiIndex <= 3; ++uiIndex )
+    {
+        ReceiptSettings receipt;
+        receipt.setRawFixesEnabled(true);
+        receipt.setFocusPixels(1);
+        receipt.setBadPixels(0);
+        receipt.setDualIsoForced(DISO_FORCED);
+        receipt.setDualIso(2);
+        receipt.setDualIsoAutoCorrected(1);
+        receipt.setDualIsoPattern(uiIndex);
+        receipt.setDualIsoEvCorrection(0);
+        receipt.setDualIsoBlackDelta(0);
+        receipt.setDarkFrameEnabled(0);
+        receipt.setRawBlack(-1);
+        receipt.setRawWhite(-1);
+
+        auto video = std::make_unique<mlvObject_t>();
+        auto llrawproc = std::make_unique<llrawprocObject_t>();
+        auto processing = std::make_unique<processingObject_t>();
+        seed_runtime_objects(video.get(), llrawproc.get(), processing.get());
+        llrawproc->diso_validity = DISO_INVALID;
+        llrawproc->diso1 = 100;
+        llrawproc->diso2 = 1600;
+
+        ReceiptApplier::applyToMlv(&receipt, video.get(), processing.get());
+
+        ASSERT_EQ(dualIsoCorePatternFromUiIndex(uiIndex), llrawproc->diso_pattern);
+
+        destroy_runtime_objects(video.get());
+    }
+}
+
+TEST(ReceiptApplier, DisabledLookAssistClearsStaleBaselineValid)
+{
+    ReceiptSettings receipt;
+    receipt.setLookAssistEnabled(false);
+    receipt.setLookAssistBaselineValid(true);
+
+    auto video = std::make_unique<mlvObject_t>();
+    auto llrawproc = std::make_unique<llrawprocObject_t>();
+    auto processing = std::make_unique<processingObject_t>();
+    seed_runtime_objects(video.get(), llrawproc.get(), processing.get());
+
+    QTemporaryDir temporary_dir;
+    const QString log_path = temporary_dir.filePath(QStringLiteral("look-assist.log"));
+    BatchLogger::init(log_path);
+    const bool applied =
+        ReceiptApplier::applyHeadlessLookAssist(&receipt, video.get(), processing.get(), 0);
+    BatchLogger::shutdown();
+
+    ASSERT_FALSE(applied);
+    ASSERT_FALSE(receipt.lookAssistBaselineValid());
+
+    destroy_runtime_objects(video.get());
+}
+
 TEST(ReceiptApplier, ValidDualIsoClipIgnoresCopiedCorrectionState)
 {
     ReceiptSettings receipt;
@@ -314,4 +373,27 @@ TEST(BatchRunner, LookAssistAnalysisFrameAnchorsToOriginalCutInUnderResume)
     /* Degenerate cut-in (receipt cutIn == 0, normalized to frame 0). */
     ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(0, 0));
     ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(0, 25));
+}
+
+TEST(BatchRunner, PerClipReceiptCopyDoesNotMutateSharedBaseReceipt)
+{
+    ReceiptSettings base;
+    base.setExposure(0);
+    base.setTemperature(6000);
+    base.setRawBlack(-1);
+    base.setRawWhite(-1);
+    base.setLookAssistBaselineValid(false);
+
+    ReceiptSettings clipReceipt = base;
+    clipReceipt.setExposure(178);
+    clipReceipt.setTemperature(5840);
+    clipReceipt.setRawBlack(20470);
+    clipReceipt.setRawWhite(6000);
+    clipReceipt.setLookAssistBaselineValid(true);
+
+    ASSERT_EQ(0, base.exposure());
+    ASSERT_EQ(6000, base.temperature());
+    ASSERT_EQ(-1, base.rawBlack());
+    ASSERT_EQ(-1, base.rawWhite());
+    ASSERT_FALSE(base.lookAssistBaselineValid());
 }
