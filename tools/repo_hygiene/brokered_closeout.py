@@ -8975,26 +8975,29 @@ def pending_agent_remediation_queue_packets(repo_root: Path, config: Dict[str, A
             except Exception as exc:
                 packet = {"status": "unreadable", "error": str(exc), "schemaVersion": BROKER_SCHEMA_VERSION}
             status = str(packet.get("status", "queued"))
-            if status in {"consumed", "retired", "superseded"} and agent_queue_retirement_proof_valid(repo_root, config, packet):
-                continue
             packet["queuePath"] = str(path)
+            if status in {"consumed", "retired", "superseded"}:
+                if agent_queue_retirement_proof_valid(repo_root, config, packet):
+                    continue
+                if reap_stale_retired_agent_queue_packet(repo_root, config, packet):
+                    continue
             packets.append(packet)
     return packets
 
 
-def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> bool:
+def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any], *, policy_hash: Optional[str] = None) -> bool:
     proof = packet.get("retirementProof")
     if not isinstance(proof, dict):
         return False
     exact_tuple = packet.get("exactTuple")
     if not isinstance(exact_tuple, dict):
         return False
-    packet_policy_hash = packet.get("policyHash")
+    required_policy_hash = config.get("policyHash") if policy_hash is None else policy_hash
     required_equal = {
         "candidateId": packet.get("candidateId"),
         "actionId": packet.get("actionId"),
         "evidenceHash": packet.get("evidenceHash"),
-        "policyHash": packet_policy_hash,
+        "policyHash": required_policy_hash,
     }
     for key, expected in required_equal.items():
         if proof.get(key) != expected:
@@ -9039,7 +9042,7 @@ def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], 
             return False
         if item.get("evidenceHash") != packet.get("evidenceHash"):
             return False
-        if item.get("policyHash") != packet_policy_hash:
+        if item.get("policyHash") != required_policy_hash:
             return False
         if item.get("pinnedRefs") != packet.get("pinnedRefs"):
             return False
@@ -9047,6 +9050,74 @@ def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], 
             return False
     if proof.get("retiredPacketStatus") not in {"consumed", "retired", "superseded"}:
         return False
+    return True
+
+
+def stale_retired_agent_queue_reap_evidence(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(packet.get("status", "queued"))
+    historical_policy_hash = packet.get("policyHash")
+    current_policy_hash = config.get("policyHash")
+    reasons: List[Dict[str, Any]] = []
+    pinned_validations: List[Dict[str, Any]] = []
+    if status not in {"consumed", "retired", "superseded"}:
+        reasons.append({"kind": "packet_not_retired", "status": status})
+    if not agent_queue_retirement_proof_valid(repo_root, config, packet, policy_hash=historical_policy_hash):
+        reasons.append({"kind": "historical_retirement_proof_invalid"})
+    for row in pinned_ref_expected_actual(repo_root, "pinnedRefs", packet.get("pinnedRefs")):
+        validation = dict(row)
+        if row["expected"] == row["actual"]:
+            validation["status"] = "current"
+        elif row["label"] == "pinnedRefs.target" and row["actual"] and is_ancestor(repo_root, str(row["expected"]), str(row["actual"])):
+            validation["status"] = "target_descends_from_retired_tuple"
+        elif row["label"] in {"pinnedRefs.branch", "pinnedRefs.worktree"} and row["actual"] is None:
+            validation["status"] = "retired_ref_absent"
+        else:
+            validation["status"] = "blocked"
+            reasons.append({"kind": "pinned_ref_not_reapable", **row})
+        pinned_validations.append(validation)
+    evidence_payload = {
+        "candidateId": packet.get("candidateId"),
+        "actionId": packet.get("actionId"),
+        "originalEvidenceHash": packet.get("evidenceHash"),
+        "historicalPolicyHash": historical_policy_hash,
+        "currentPolicyHash": current_policy_hash,
+        "historicalExactTuple": packet.get("exactTuple"),
+        "historicalPinnedRefs": packet.get("pinnedRefs"),
+        "pinnedRefValidation": pinned_validations,
+        "retiredPacketStatus": status,
+        "retirementProofHash": stable_hash(packet.get("retirementProof")),
+    }
+    reap_evidence_hash = stable_hash(evidence_payload)
+    reap_exact_tuple = {
+        "candidateId": packet.get("candidateId"),
+        "actionId": "reap_stale_retired_agent_queue_packet",
+        "evidenceHash": reap_evidence_hash,
+        "policyHash": current_policy_hash,
+        "pinnedRefs": {"historical": packet.get("pinnedRefs"), "validation": pinned_validations},
+    }
+    return {
+        "schemaVersion": BROKER_SCHEMA_VERSION,
+        "status": "success" if not reasons else "blocked",
+        "reapReason": "stale_retired_agent_queue_packet",
+        "candidateId": packet.get("candidateId"),
+        "workBlockId": packet.get("workBlockId"),
+        "queuePath": packet.get("queuePath"),
+        "originalActionId": packet.get("actionId"),
+        "currentPolicyHash": current_policy_hash,
+        "historicalPolicyHash": historical_policy_hash,
+        "historicalExactTuple": packet.get("exactTuple"),
+        "reapExactTuple": reap_exact_tuple,
+        "reapEvidenceHash": reap_evidence_hash,
+        "pinnedRefValidation": pinned_validations,
+        "blockers": reasons,
+    }
+
+
+def reap_stale_retired_agent_queue_packet(repo_root: Path, config: Dict[str, Any], packet: Dict[str, Any]) -> bool:
+    evidence = stale_retired_agent_queue_reap_evidence(repo_root, config, packet)
+    if evidence["status"] != "success":
+        return False
+    write_audit(repo_root, config, "agent_remediation_stale_retired_packet_reap", evidence, work_block_id=packet.get("workBlockId"), outcome="success")
     return True
 
 

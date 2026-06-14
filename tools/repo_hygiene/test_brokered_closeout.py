@@ -5023,6 +5023,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         stale_reasons = {reason["kind"] for packet in result["stalePackets"] for reason in packet["staleReasons"]}
         self.assertIn("dirty_state_changed", stale_reasons)
         self.assertIn("agent_remediation_queue_stale", self.audit_types(repo))
+        self.assertNotIn("agent_remediation_stale_retired_packet_reap", self.audit_types(repo))
 
     def test_agent_queue_dirty_hash_detects_same_status_byte_change(self) -> None:
         repo = self.init_repo()
@@ -5369,7 +5370,39 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
     def test_repo_closed_postcondition_accepts_retired_queue_after_policy_drift(self) -> None:
         repo = self.init_repo()
-        path = self.write_agent_queue_packet(repo, candidate_id="candidate:retired-policy-drift")
+        config = load_closeout_config(repo)
+        retired_target_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        split_branch = "closeout/split/wb-retired-policy-drift"
+        git(repo, "checkout", "-b", split_branch)
+        split_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "checkout", "master")
+        pinned_refs = {
+            "target": {"branch": "master", "head": retired_target_head, "mode": "local", "ref": "refs/heads/master"},
+            "branch": {"branch": split_branch, "head": split_head},
+            "worktree": {"branch": split_branch, "branchRef": f"refs/heads/{split_branch}", "head": split_head, "path": str(repo / ".claude-state" / "closeout" / "dirty-splits" / "worktrees" / "retired-policy-drift")},
+        }
+        shards = [
+            {
+                "shardId": "manual-01",
+                "candidateId": "candidate:retired-policy-drift",
+                "workBlockId": None,
+                "actionId": "resolve_conflicts_with_agent",
+                "evidenceHash": "manual-evidence",
+                "policyHash": config["policyHash"],
+                "pinnedRefs": pinned_refs,
+                "allowedReadScope": ["conflict.txt"],
+                "allowedWriteScope": ["conflict.txt"],
+                "resultPath": ".claude-state/closeout/agent-remediation/results/manual/retired-policy-drift.json",
+                "expectedOutputSchema": {"requiredFields": ["status", "changedPaths"]},
+                "validationRequirements": [],
+            }
+        ]
+        path = self.write_agent_queue_packet(
+            repo,
+            candidate_id="candidate:retired-policy-drift",
+            shards=shards,
+            updates={"pinnedRefs": pinned_refs, "exactTuple": {"pinnedRefs": pinned_refs}},
+        )
         spawn = agent_remediation_queue_consumer_plan(repo)["spawnPlan"][0]
         result_path = repo / spawn["resultPath"]
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5413,14 +5446,17 @@ class BrokeredCloseoutTests(unittest.TestCase):
         }
         path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
 
+        git(repo, "branch", "-D", split_branch)
         self.write_config(repo, {"policyHash": "new-policy-after-retirement"})
-        git(repo, "add", "closeout.config.json")
+        (repo / "README.md").write_text("hello\nadvance target after retirement\n", encoding="utf-8")
+        git(repo, "add", "closeout.config.json", "README.md")
         git(repo, "commit", "-m", "change closeout policy")
 
         result = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
 
         self.assertEqual(result["status"], "success", result)
         self.assertEqual(result["agentRemediationState"]["packetCount"], 0)
+        self.assertIn("agent_remediation_stale_retired_packet_reap", self.audit_types(repo))
 
     def test_repo_closed_postcondition_rejects_wrong_result_tuple(self) -> None:
         repo = self.init_repo()
