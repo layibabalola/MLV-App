@@ -20,7 +20,11 @@
 #include <thread>
 #include <string>
 #include <vector>
+#include <QByteArray>
+#include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QString>
 #include <QTemporaryDir>
 
@@ -30,6 +34,110 @@ static void assert_fixture_ready(MlvPipelineFixture & fixture)
     ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
     ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
+}
+
+static QByteArray read_all_bytes(const QString & path)
+{
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    return file.readAll();
+}
+
+static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
+                                                    bool profiler_enabled,
+                                                    const QString & dng_path,
+                                                    const QString & profile_path)
+{
+    if (profiler_enabled) {
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    } else {
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("0"));
+    }
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("pipeline-test"));
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                              dng,
+                              0,
+                              dng_path_bytes.data(),
+                              nullptr));
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
+static void assert_profiler_json_has_stage(const QJsonObject & stages,
+                                           const QString & stage_name)
+{
+    ASSERT_TRUE(stages.contains(stage_name));
+    const QJsonObject stage = stages.value(stage_name).toObject();
+    ASSERT_TRUE(stage.value(QStringLiteral("samples")).toInt() >= 1);
+}
+
+static void assert_profiler_json_valid_for_raw_state(const QString & profile_path,
+                                                     int raw_state)
+{
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("schema")).toString()
+                == QStringLiteral("mlvapp.export_stage_profile.v1"));
+    ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 1);
+    ASSERT_FALSE(root.value(QStringLiteral("queue_idle_supported")).toBool(true));
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("disk_write_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("frame_total_ms"));
+    if (raw_state == COMPRESSED_RAW) {
+        assert_profiler_json_has_stage(stages, QStringLiteral("dng_compress_ms"));
+    } else {
+        assert_profiler_json_has_stage(stages, QStringLiteral("dng_pack_ms"));
+    }
+}
+
+static void preserve_profiler_gate_artifacts(const QString & suffix,
+                                             const QString & off_dng,
+                                             const QString & on_dng,
+                                             const QString & off_profile,
+                                             const QString & on_profile)
+{
+    const QByteArray preserve_dir_env =
+        qgetenv("MLVAPP_EXPORT_STAGE_PROFILER_TEST_PRESERVE_DIR");
+    if (preserve_dir_env.isEmpty()) return;
+
+    QDir dir(QString::fromLocal8Bit(preserve_dir_env));
+    ASSERT_TRUE(dir.mkpath(QStringLiteral(".")));
+
+    const QString preserved_off_dng = dir.filePath(suffix + QStringLiteral("-off.dng"));
+    const QString preserved_on_dng = dir.filePath(suffix + QStringLiteral("-on.dng"));
+    const QString preserved_off_profile = dir.filePath(suffix + QStringLiteral("-off.json"));
+    const QString preserved_on_profile = dir.filePath(suffix + QStringLiteral("-on.json"));
+
+    QFile::remove(preserved_off_dng);
+    QFile::remove(preserved_on_dng);
+    QFile::remove(preserved_off_profile);
+    QFile::remove(preserved_on_profile);
+
+    ASSERT_TRUE(QFile::copy(off_dng, preserved_off_dng));
+    ASSERT_TRUE(QFile::copy(on_dng, preserved_on_dng));
+    if (QFile::exists(off_profile)) {
+        ASSERT_TRUE(QFile::copy(off_profile, preserved_off_profile));
+    }
+    if (QFile::exists(on_profile)) {
+        ASSERT_TRUE(QFile::copy(on_profile, preserved_on_profile));
+    }
 }
 
 static bool has_processed_8bit_cache_slot(const mlvObject_t * video, uint64_t frameIndex, int threads)
@@ -141,6 +249,13 @@ static int32_t dng_i32(const QByteArray &data, int offset)
     return static_cast<int32_t>(dng_u32(data, offset));
 }
 
+static bool dng_find_ifd_entry(const QByteArray &data,
+                               uint32_t ifd_offset,
+                               uint16_t tag,
+                               uint16_t *type,
+                               uint32_t *count,
+                               uint32_t *value);
+
 static bool dng_find_ifd0_entry(const QByteArray &data,
                                 uint16_t tag,
                                 uint16_t *type,
@@ -148,7 +263,16 @@ static bool dng_find_ifd0_entry(const QByteArray &data,
                                 uint32_t *value)
 {
     if (data.size() < 10) return false;
-    const uint32_t ifd_offset = dng_u32(data, 4);
+    return dng_find_ifd_entry(data, dng_u32(data, 4), tag, type, count, value);
+}
+
+static bool dng_find_ifd_entry(const QByteArray &data,
+                               uint32_t ifd_offset,
+                               uint16_t tag,
+                               uint16_t *type,
+                               uint32_t *count,
+                               uint32_t *value)
+{
     if (ifd_offset + 2 > static_cast<uint32_t>(data.size())) return false;
     const uint16_t entries = dng_u16(data, static_cast<int>(ifd_offset));
     const int first_entry = static_cast<int>(ifd_offset) + 2;
@@ -162,6 +286,35 @@ static bool dng_find_ifd0_entry(const QByteArray &data,
         return true;
     }
     return false;
+}
+
+struct DngRational
+{
+    uint32_t numerator;
+    uint32_t denominator;
+};
+
+static DngRational dng_read_exif_rational_tag(const QByteArray &data, uint16_t tag)
+{
+    uint16_t type = 0;
+    uint32_t count = 0;
+    uint32_t value = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(data, 34665, &type, &count, &value));
+    ASSERT_EQ(4, type);
+    ASSERT_EQ(1u, count);
+
+    uint16_t exif_type = 0;
+    uint32_t exif_count = 0;
+    uint32_t exif_value = 0;
+    ASSERT_TRUE(dng_find_ifd_entry(data, value, tag, &exif_type, &exif_count, &exif_value));
+    ASSERT_EQ(5, exif_type);
+    ASSERT_EQ(1u, exif_count);
+    ASSERT_TRUE(exif_value + 8 <= static_cast<uint32_t>(data.size()));
+
+    return DngRational{
+        dng_u32(data, static_cast<int>(exif_value)),
+        dng_u32(data, static_cast<int>(exif_value + 4))
+    };
 }
 
 static double dng_read_rational_value(const QByteArray &data, uint32_t offset, bool signed_value)
@@ -250,6 +403,91 @@ TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
+}
+
+TEST(DualIsoPipeline, DngFocalPlaneResolutionIsStableAcrossSameProcessExports)
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QByteArray preserve_dir_env =
+        qgetenv("MLVAPP_FOCAL_STABILITY_TEST_PRESERVE_DIR");
+    QDir preserve_dir;
+    const bool preserve = !preserve_dir_env.isEmpty();
+    if (preserve) {
+        preserve_dir = QDir(QString::fromLocal8Bit(preserve_dir_env));
+        ASSERT_TRUE(preserve_dir.mkpath(QStringLiteral(".")));
+    }
+
+    const DngRational expected{5760000u, 4383u};
+    for (int export_index = 0; export_index < 3; ++export_index) {
+        const QString dng_path = temp_dir.filePath(
+            QStringLiteral("same-process-%1.dng").arg(export_index + 1));
+        QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  dng,
+                                  0,
+                                  dng_path_bytes.data(),
+                                  nullptr));
+
+        const QByteArray data = read_all_bytes(dng_path);
+        const DngRational focal_x = dng_read_exif_rational_tag(data, 41486);
+        ASSERT_EQ(expected.numerator, focal_x.numerator);
+        ASSERT_EQ(expected.denominator, focal_x.denominator);
+
+        if (preserve) {
+            ASSERT_TRUE(QFile::copy(dng_path,
+                                    preserve_dir.filePath(
+                                        QStringLiteral("same-process-%1.dng")
+                                            .arg(export_index + 1))));
+        }
+    }
+
+    freeDngObject(dng);
+}
+
+TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressedDng)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString off_profile = temp_dir.filePath(suffix + QStringLiteral("-off.json"));
+        const QString on_profile = temp_dir.filePath(suffix + QStringLiteral("-on.json"));
+        const QString off_dng = temp_dir.filePath(suffix + QStringLiteral("-off.dng"));
+        const QString on_dng = temp_dir.filePath(suffix + QStringLiteral("-on.dng"));
+
+        const QByteArray off_bytes =
+            export_tiny_dng_for_profiler_gate(raw_state, false, off_dng, off_profile);
+        ASSERT_FALSE(QFile::exists(off_profile));
+
+        const QByteArray on_bytes =
+            export_tiny_dng_for_profiler_gate(raw_state, true, on_dng, on_profile);
+        preserve_profiler_gate_artifacts(suffix, off_dng, on_dng, off_profile, on_profile);
+        ASSERT_TRUE(off_bytes == on_bytes);
+        ASSERT_TRUE(QFile::exists(on_profile));
+        assert_profiler_json_valid_for_raw_state(on_profile, raw_state);
+    }
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
 }
 
 TEST(DualIsoPipeline, HeadlessLookAssistGeneratesClipLocalDngDefaults)

@@ -47,7 +47,7 @@ CPU       universal fallback (permanent floor)
 ## 3. Lane A — GPU CDNG export (first; lowest risk, on-mission)
 
 CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's NLE), so only the **recon** stage needs the GPU — exactly the proven, ABI-wrapped, 0-LSB stage. Offline + readback-tolerant + file-diff-verifiable ⇒ the safest first production integration.
-- **E0** export-stage profiler: decode / Dual-ISO recon / DNG pack / DNG compress / disk write / queue idle.
+- **E0** export-stage profiler: decode / Dual-ISO recon / DNG pack / DNG compress / disk write / queue idle. Also includes an intentional CPU-export focal-plane resolution stability guard for same-process multi-frame DNG exports: frame 1 remains legacy byte-identical, while affected frames 2+ stop compounding the EXIF focal-plane denominator.
 - **E1** GPU CDNG recon: CPU decode/unpack → CUDA recon (`IGPU_OUT_CPU16`) → read back Bayer16 → existing DNG writer unchanged. Behind `MLVAPP_GPU_EXPORT` / setting.
 - **E2** export parity gate: CPU vs GPU exported DNGs match image payload + metadata (Look Assist defaults, resume, Dual-ISO pattern mapping, compressed + uncompressed). CPU fallback always.
 - **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU).
