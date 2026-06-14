@@ -50,7 +50,17 @@
   },
   "tracked_ignored_allowlist": [
     "osx_installer/BuildInstaller.sh",
-    "platform/mlv_blender/build.sh"
+    "platform/mlv_blender/build.sh",
+    "tools/gpu/backend/build-backend-dll.ps1",
+    "tools/gpu/build-cuda.ps1",
+    "tools/gpu/glinterop/glinterop-build-run.ps1",
+    "tools/gpu/oracle/build-oracle.ps1",
+    "tools/gpu/pipeline-probe-build-run.ps1",
+    "tools/gpu/recon-amaze-parity-build-run.ps1",
+    "tools/gpu/recon-opt-build-run.ps1",
+    "tools/gpu/recon-parity-build-run.ps1",
+    "tools/gpu/recon-probe-build-run.ps1",
+    "tools/gpu/smoke-build-run.ps1"
   ],
   "required_ignore_samples": {
     "must_be_ignored": [
