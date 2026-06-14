@@ -4,6 +4,7 @@
 #include "ReceiptSafety.h"
 
 #include "../../platform/qt/ReceiptSettings.h"
+#include "../../platform/qt/DualIsoPatternMapping.h"
 
 #include <QByteArray>
 #include <QFileInfo>
@@ -909,11 +910,12 @@ void ReceiptApplier::applyToMlv(ReceiptSettings *receipt,
     }
     else
     {
-        /* Auto-corrected: apply receipt values directly to struct members
-         * (matches on_DualIsoPatternComboBox_currentIndexChanged,
+        /* Auto-corrected: apply receipt values through the same UI-to-core
+         * mapping used by on_DualIsoPatternComboBox_currentIndexChanged,
          *  on_horizontalSliderDualIsoEvCorrection_valueChanged,
          *  on_horizontalSliderDualIsoBlackDelta_valueChanged) */
-        mlvObject->llrawproc->diso_pattern = receipt->dualIsoPattern();
+        mlvObject->llrawproc->diso_pattern =
+            dualIsoCorePatternFromUiIndex( receipt->dualIsoPattern() );
 
         /* EV correction: receipt stores the slider int value.
          * Slider value 1 is special (triggers auto-correct toggle),
@@ -1084,6 +1086,8 @@ bool ReceiptApplier::applyHeadlessLookAssist(ReceiptSettings *receipt,
         qEnvironmentVariableIntValue( "MLVAPP_NO_LOOK_ASSIST" ) != 0;
     if( s_noLookAssist || !receipt || !mlvObject || !processingObject || !receipt->lookAssistEnabled() )
     {
+        if( receipt )
+            receipt->setLookAssistBaselineValid( false );
         BatchLogger::out( QStringLiteral(
             "[BATCH] LOOK_ASSIST skip env_disabled=%1 receipt=%2 mlv=%3 enabled=%4\n" )
             .arg( s_noLookAssist ? QStringLiteral("true") : QStringLiteral("false") )

@@ -391,7 +391,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
      * clip-wide, so a resumed run must analyze the same anchor as the first run
      * or the remaining DNGs would get different BaselineExposure / AsShotNeutral
      * / raw-level defaults. See BatchRunner::lookAssistAnalysisFrameIndex. */
-    ReceiptApplier::applyHeadlessLookAssist(
+    const bool lookAssistApplied = ReceiptApplier::applyHeadlessLookAssist(
         receipt,
         mlvObject,
         processingObject,
@@ -414,7 +414,7 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
         true,                 /* export audio if present */
         receipt->rawFixesEnabled(), /* from receipt */
         nullptr,
-        receipt->lookAssistEnabled() && receipt->lookAssistBaselineValid(),
+        lookAssistApplied,
         receipt->exposure()
     );
 
