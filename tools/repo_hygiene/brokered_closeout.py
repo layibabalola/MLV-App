@@ -8989,11 +8989,12 @@ def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], 
     exact_tuple = packet.get("exactTuple")
     if not isinstance(exact_tuple, dict):
         return False
+    packet_policy_hash = packet.get("policyHash")
     required_equal = {
         "candidateId": packet.get("candidateId"),
         "actionId": packet.get("actionId"),
         "evidenceHash": packet.get("evidenceHash"),
-        "policyHash": config.get("policyHash"),
+        "policyHash": packet_policy_hash,
     }
     for key, expected in required_equal.items():
         if proof.get(key) != expected:
@@ -9038,7 +9039,7 @@ def agent_queue_retirement_proof_valid(repo_root: Path, config: Dict[str, Any], 
             return False
         if item.get("evidenceHash") != packet.get("evidenceHash"):
             return False
-        if item.get("policyHash") != config.get("policyHash"):
+        if item.get("policyHash") != packet_policy_hash:
             return False
         if item.get("pinnedRefs") != packet.get("pinnedRefs"):
             return False
