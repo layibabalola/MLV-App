@@ -186,6 +186,12 @@ static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_attempted = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_replaced = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_apply_dither = 0;
+static MLV_THREAD_LOCAL unsigned long long g_llrawproc_gpu_export_last_mismatch_count = 0;
+static MLV_THREAD_LOCAL unsigned long long g_llrawproc_gpu_export_last_mismatch_first_index = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch_first_cpu = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch_first_gpu = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch_max_abs = 0;
 
 static void llrawproc_gpu_export_reset_last_run_state(void)
 {
@@ -193,6 +199,12 @@ static void llrawproc_gpu_export_reset_last_run_state(void)
     g_llrawproc_gpu_export_last_run_rc = 0;
     g_llrawproc_gpu_export_last_replaced = 0;
     g_llrawproc_gpu_export_last_mismatch = 0;
+    g_llrawproc_gpu_export_last_apply_dither = 0;
+    g_llrawproc_gpu_export_last_mismatch_count = 0;
+    g_llrawproc_gpu_export_last_mismatch_first_index = 0;
+    g_llrawproc_gpu_export_last_mismatch_first_cpu = 0;
+    g_llrawproc_gpu_export_last_mismatch_first_gpu = 0;
+    g_llrawproc_gpu_export_last_mismatch_max_abs = 0;
 }
 
 int llrpResetGpuExportRunForTesting(void);
@@ -224,6 +236,42 @@ int llrpGpuExportLastMismatchForTesting(void);
 int llrpGpuExportLastMismatchForTesting(void)
 {
     return g_llrawproc_gpu_export_last_mismatch;
+}
+
+int llrpGpuExportLastApplyDitherForTesting(void);
+int llrpGpuExportLastApplyDitherForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_apply_dither;
+}
+
+unsigned long long llrpGpuExportLastMismatchCountForTesting(void);
+unsigned long long llrpGpuExportLastMismatchCountForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_mismatch_count;
+}
+
+unsigned long long llrpGpuExportLastMismatchFirstIndexForTesting(void);
+unsigned long long llrpGpuExportLastMismatchFirstIndexForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_mismatch_first_index;
+}
+
+int llrpGpuExportLastMismatchFirstCpuForTesting(void);
+int llrpGpuExportLastMismatchFirstCpuForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_mismatch_first_cpu;
+}
+
+int llrpGpuExportLastMismatchFirstGpuForTesting(void);
+int llrpGpuExportLastMismatchFirstGpuForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_mismatch_first_gpu;
+}
+
+int llrpGpuExportLastMismatchMaxAbsForTesting(void);
+int llrpGpuExportLastMismatchMaxAbsForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_mismatch_max_abs;
 }
 
 #if defined(_WIN32)
@@ -415,6 +463,7 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     frame.use_fullres = state.use_fullres;
     frame.chroma_smooth_method = state.chroma_smooth_method;
     frame.apply_dither = state.apply_dither;
+    g_llrawproc_gpu_export_last_apply_dither = frame.apply_dither;
 
     gpu_output = (uint16_t *)malloc(raw_image_size);
     if(!gpu_output) return 0;
@@ -433,6 +482,29 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     }
     if(rc == 0)
     {
+        unsigned long long mismatch_count = 0;
+        for(size_t i = 0; i < pixel_count; ++i)
+        {
+            int cpu = (int)cpu_output[i];
+            int gpu = (int)gpu_output[i];
+            int diff = cpu - gpu;
+            if(diff)
+            {
+                int abs_diff = diff < 0 ? -diff : diff;
+                if(mismatch_count == 0)
+                {
+                    g_llrawproc_gpu_export_last_mismatch_first_index = (unsigned long long)i;
+                    g_llrawproc_gpu_export_last_mismatch_first_cpu = cpu;
+                    g_llrawproc_gpu_export_last_mismatch_first_gpu = gpu;
+                }
+                if(abs_diff > g_llrawproc_gpu_export_last_mismatch_max_abs)
+                {
+                    g_llrawproc_gpu_export_last_mismatch_max_abs = abs_diff;
+                }
+                ++mismatch_count;
+            }
+        }
+        g_llrawproc_gpu_export_last_mismatch_count = mismatch_count;
         g_llrawproc_gpu_export_last_mismatch = 1;
     }
 

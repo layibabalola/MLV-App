@@ -244,6 +244,32 @@ __global__ void k_mix_halfres(uint32_t* __restrict halfres,
     halfres[i] = ev2raw[mixed];
 }
 
+__global__ void k_mix_halfres_avx2(uint32_t* __restrict halfres,
+                                   const uint32_t* __restrict bright,
+                                   const uint32_t* __restrict dark,
+                                   const int* __restrict raw2ev,
+                                   const int* __restrict ev2raw,
+                                   const double* __restrict mix_curve,
+                                   int W, int H)
+{
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y*blockDim.y + threadIdx.y;
+    if (x>=W || y>=H) return;
+    size_t i=(size_t)x+(size_t)y*W;
+
+    int b = (int)bright[i];
+    int d = (int)dark[i];
+    float bev = (float)raw2ev[b];
+    float dev = (float)raw2ev[d];
+    float k = (float)mix_curve[b & 0xFFFFF];
+    k = fminf(fmaxf(k, 0.0f), 1.0f);
+
+    float mixed_f = fmaf(k, dev - bev, bev);
+    int mixed = __float2int_rz(mixed_f);
+    mixed = icoerce(mixed, -10*EV_RESOLUTION, 14*EV_RESOLUTION - 1);
+    halfres[i] = ev2raw[mixed];
+}
+
 /* STAGE 7: build_alias_map */
 __global__ void k_alias_init(uint16_t* __restrict alias_map,
                              const uint32_t* __restrict fullres_smooth,
@@ -847,8 +873,13 @@ int igpu_recon_run(igpu_recon_backend* b,
     k_fullres<<<gt,bt>>>(b->d_fullres,b->d_dark,b->d_bright,W,H);
 
     /* STAGE 6: mix halfres */
-    k_mix_halfres<<<gt,bt>>>(b->d_halfres,b->d_bright,b->d_dark,
-                             b->dd_raw2ev,dd_ev2raw_origin,b->dd_mix,W,H);
+    if (frame->apply_dither) {
+        k_mix_halfres_avx2<<<gt,bt>>>(b->d_halfres,b->d_bright,b->d_dark,
+                                      b->dd_raw2ev,dd_ev2raw_origin,b->dd_mix,W,H);
+    } else {
+        k_mix_halfres<<<gt,bt>>>(b->d_halfres,b->d_bright,b->d_dark,
+                                 b->dd_raw2ev,dd_ev2raw_origin,b->dd_mix,W,H);
+    }
 
     /* STAGE 7: alias map (fullres_smooth==fullres, halfres_smooth==halfres) */
     k_alias_init<<<gt,bt>>>(b->d_alias,b->d_fullres,b->d_halfres,b->d_bright,
