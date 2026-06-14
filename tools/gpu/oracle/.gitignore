@@ -1,0 +1,11 @@
+# Build output + large regenerable test vectors (regenerate via build-oracle.ps1)
+*.exe
+*.lib
+*.exp
+*.obj
+*.o
+vectors/*.u16
+vectors/*.u32
+vectors/*.i32
+vectors/*.f64
+vectors/*.bin
