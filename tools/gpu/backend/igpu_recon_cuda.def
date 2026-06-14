@@ -1,0 +1,15 @@
+; igpu_recon_cuda.def - module-definition file exporting the igpu_recon C ABI
+; from igpu_recon_cuda.dll. The functions are extern "C" (cdecl, unmangled), so
+; they are exported by their plain names. Passing this to the linker (/DEF)
+; exports the entry points and produces the import .lib without putting any
+; export attribute in the shared igpu_recon.h contract header.
+LIBRARY igpu_recon_cuda
+EXPORTS
+    igpu_recon_create
+    igpu_recon_destroy
+    igpu_recon_abi_version
+    igpu_recon_describe
+    igpu_recon_set_clip
+    igpu_recon_set_luts
+    igpu_recon_run
+    igpu_recon_last_timing

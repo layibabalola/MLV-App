@@ -19,9 +19,11 @@ The policy config also carries a root registry for sensitive and special roots:
 `tests/`, vendored or external library roots, and ignored build outputs. The
 verifier fails if the core hygiene roots disappear from that registry.
 
-The verifier also checks tracked files that match `.gitignore`. Existing legacy
-exceptions are narrow and explicit: `osx_installer/BuildInstaller.sh` and
-`platform/mlv_blender/build.sh`. New tracked ignored files must either be
+The verifier also checks tracked files that match `.gitignore`. Existing
+exceptions are narrow and explicit: legacy build scripts
+`osx_installer/BuildInstaller.sh` and `platform/mlv_blender/build.sh`, plus the
+tracked GPU lane PowerShell wrappers under `tools/gpu/` whose filenames match
+the broad root `*build*` ignore rule. New tracked ignored files must either be
 removed from tracking or deliberately added to the allowlist with review.
 
 The verifier also uses positive and negative ignore samples. Runtime locations

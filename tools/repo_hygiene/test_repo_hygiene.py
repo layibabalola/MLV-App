@@ -198,6 +198,7 @@ class RepoHygieneTests(unittest.TestCase):
         for required in [".claude", ".claude-state", ".claude/worktrees", "tools/repo_hygiene", "tools/repo-hygiene"]:
             self.assertIn(required, registry)
         self.assertIn("osx_installer/BuildInstaller.sh", load_config(ROOT)["tracked_ignored_allowlist"])
+        self.assertIn("tools/gpu/build-cuda.ps1", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:

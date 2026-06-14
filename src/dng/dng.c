@@ -26,6 +26,11 @@
 #include <string.h>
 #include <math.h>
 #include <pthread.h>
+#include <time.h>
+
+#if defined(_WIN32) || defined(__WIN32)
+#include <windows.h>
+#endif
 
 #include "dng.h"
 #include "dng_tag_codes.h"
@@ -82,6 +87,414 @@ static void apply_llrawproc_locked(mlvObject_t * mlv_data,
                                    uint64_t image_size_unpacked)
 {
     applyLLRawProcObject(mlv_data, image_buf_unpacked, image_size_unpacked);
+}
+
+typedef enum
+{
+    EXPORT_PROFILE_RAW_READ,
+    EXPORT_PROFILE_RAW_DECODE,
+    EXPORT_PROFILE_RAW_UNPACK,
+    EXPORT_PROFILE_LLRAWPROC,
+    EXPORT_PROFILE_DNG_HEADER,
+    EXPORT_PROFILE_DNG_PACK,
+    EXPORT_PROFILE_DNG_COMPRESS,
+    EXPORT_PROFILE_DISK_WRITE,
+    EXPORT_PROFILE_FRAME_TOTAL,
+    EXPORT_PROFILE_STAGE_COUNT
+} exportProfileStage_t;
+
+#define EXPORT_PROFILE_PATH_MAX 1024
+#define EXPORT_PROFILE_BUILD_ID_MAX 128
+
+typedef struct
+{
+    int active;
+    uint32_t frame_index;
+    int raw_input_state;
+    int raw_output_state;
+    int success;
+    char clip_path[EXPORT_PROFILE_PATH_MAX];
+    double stages_ms[EXPORT_PROFILE_STAGE_COUNT];
+    uint32_t stage_mask;
+} exportProfileFrame_t;
+
+static exportProfileFrame_t * g_export_profile_frames = NULL;
+static size_t g_export_profile_frame_count = 0;
+static size_t g_export_profile_frame_capacity = 0;
+static char g_export_profile_path[EXPORT_PROFILE_PATH_MAX] = "";
+static char g_export_profile_build_id[EXPORT_PROFILE_BUILD_ID_MAX] = "";
+static int g_export_profile_atexit_registered = 0;
+static int g_export_profile_write_in_progress = 0;
+
+static int export_profile_env_truthy(const char * value)
+{
+    if(value == NULL || value[0] == '\0') return 0;
+    if(strcmp(value, "0") == 0) return 0;
+    if(strcmp(value, "false") == 0 || strcmp(value, "FALSE") == 0) return 0;
+    if(strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0) return 0;
+    if(strcmp(value, "no") == 0 || strcmp(value, "NO") == 0) return 0;
+    return 1;
+}
+
+static const char * export_profile_raw_state_name(int state)
+{
+    switch(state)
+    {
+        case UNCOMPRESSED_RAW:  return "uncompressed_raw";
+        case COMPRESSED_RAW:    return "compressed_raw";
+        case UNCOMPRESSED_ORIG: return "uncompressed_original";
+        case COMPRESSED_ORIG:   return "compressed_original";
+        default:                return "unknown";
+    }
+}
+
+static const char * export_profile_stage_name(exportProfileStage_t stage)
+{
+    switch(stage)
+    {
+        case EXPORT_PROFILE_RAW_READ:     return "raw_read_ms";
+        case EXPORT_PROFILE_RAW_DECODE:   return "raw_decode_ms";
+        case EXPORT_PROFILE_RAW_UNPACK:   return "raw_unpack_ms";
+        case EXPORT_PROFILE_LLRAWPROC:    return "llrawproc_ms";
+        case EXPORT_PROFILE_DNG_HEADER:   return "dng_header_ms";
+        case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
+        case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
+        case EXPORT_PROFILE_DISK_WRITE:   return "disk_write_ms";
+        case EXPORT_PROFILE_FRAME_TOTAL:  return "frame_total_ms";
+        default:                          return "unknown_ms";
+    }
+}
+
+static void export_profile_copy_string(char * dst, size_t dst_size, const char * src)
+{
+    if(dst_size == 0) return;
+    if(src == NULL) src = "";
+    strncpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
+
+static double export_profile_now_ms(void)
+{
+#if defined(_WIN32) || defined(__WIN32)
+    static LARGE_INTEGER freq = { 0 };
+    LARGE_INTEGER now;
+    if(freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return ((double)now.QuadPart * 1000.0) / (double)freq.QuadPart;
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#else
+    return ((double)clock() * 1000.0) / (double)CLOCKS_PER_SEC;
+#endif
+}
+
+static void export_profile_write_json(void);
+
+static void export_profile_reset_frames(void)
+{
+    free(g_export_profile_frames);
+    g_export_profile_frames = NULL;
+    g_export_profile_frame_count = 0;
+    g_export_profile_frame_capacity = 0;
+}
+
+static int export_profile_configure_from_env(void)
+{
+    const char * enabled = getenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    const char * output_path = getenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    const char * build_id = getenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+
+    if(!export_profile_env_truthy(enabled) || output_path == NULL || output_path[0] == '\0')
+    {
+        return 0;
+    }
+
+    if(g_export_profile_path[0] != '\0' && strcmp(g_export_profile_path, output_path) != 0)
+    {
+        export_profile_write_json();
+        export_profile_reset_frames();
+    }
+
+    export_profile_copy_string(g_export_profile_path, sizeof(g_export_profile_path), output_path);
+    if(build_id != NULL && build_id[0] != '\0')
+    {
+        export_profile_copy_string(g_export_profile_build_id, sizeof(g_export_profile_build_id), build_id);
+    }
+    else
+    {
+        export_profile_copy_string(g_export_profile_build_id,
+                                   sizeof(g_export_profile_build_id),
+                                   __DATE__ " " __TIME__);
+    }
+
+    if(!g_export_profile_atexit_registered)
+    {
+        atexit(export_profile_write_json);
+        g_export_profile_atexit_registered = 1;
+    }
+
+    return 1;
+}
+
+static void export_profile_frame_begin(exportProfileFrame_t * frame,
+                                       mlvObject_t * mlv_data,
+                                       dngObject_t * dng_data,
+                                       uint32_t frame_index)
+{
+    if(frame == NULL) return;
+    memset(frame, 0, sizeof(*frame));
+    if(!export_profile_configure_from_env()) return;
+
+    frame->active = 1;
+    frame->frame_index = frame_index;
+    frame->raw_input_state = dng_data ? dng_data->raw_input_state : -1;
+    frame->raw_output_state = dng_data ? dng_data->raw_output_state : -1;
+    frame->success = 0;
+    export_profile_copy_string(frame->clip_path,
+                               sizeof(frame->clip_path),
+                               mlv_data ? mlv_data->path : "");
+}
+
+static double export_profile_stage_begin(exportProfileFrame_t * frame)
+{
+    return (frame != NULL && frame->active) ? export_profile_now_ms() : 0.0;
+}
+
+static void export_profile_stage_end(exportProfileFrame_t * frame,
+                                     exportProfileStage_t stage,
+                                     double start_ms)
+{
+    if(frame == NULL || !frame->active || stage < 0 || stage >= EXPORT_PROFILE_STAGE_COUNT)
+    {
+        return;
+    }
+    frame->stages_ms[stage] += export_profile_now_ms() - start_ms;
+    frame->stage_mask |= (1u << stage);
+}
+
+static void export_profile_frame_finish(exportProfileFrame_t * frame, int success)
+{
+    exportProfileFrame_t * next = NULL;
+    if(frame == NULL || !frame->active) return;
+
+    frame->success = success ? 1 : 0;
+    if(g_export_profile_frame_count == g_export_profile_frame_capacity)
+    {
+        size_t new_capacity = g_export_profile_frame_capacity ? g_export_profile_frame_capacity * 2 : 64;
+        exportProfileFrame_t * grown = (exportProfileFrame_t*)realloc(g_export_profile_frames,
+            new_capacity * sizeof(exportProfileFrame_t));
+        if(grown == NULL) return;
+        g_export_profile_frames = grown;
+        g_export_profile_frame_capacity = new_capacity;
+    }
+
+    next = &g_export_profile_frames[g_export_profile_frame_count++];
+    *next = *frame;
+}
+
+static int export_profile_double_compare(const void * lhs, const void * rhs)
+{
+    const double a = *(const double*)lhs;
+    const double b = *(const double*)rhs;
+    return (a > b) - (a < b);
+}
+
+static int export_profile_stage_value(const exportProfileFrame_t * frame,
+                                      const char * stage_name,
+                                      double * value)
+{
+    if(frame == NULL || value == NULL) return 0;
+
+    if(strcmp(stage_name, "raw_read_decode_unpack_ms") == 0)
+    {
+        const uint32_t raw_mask =
+            (1u << EXPORT_PROFILE_RAW_READ) |
+            (1u << EXPORT_PROFILE_RAW_DECODE) |
+            (1u << EXPORT_PROFILE_RAW_UNPACK);
+        if((frame->stage_mask & raw_mask) == 0) return 0;
+        *value = frame->stages_ms[EXPORT_PROFILE_RAW_READ] +
+                 frame->stages_ms[EXPORT_PROFILE_RAW_DECODE] +
+                 frame->stages_ms[EXPORT_PROFILE_RAW_UNPACK];
+        return 1;
+    }
+
+    for(int stage = 0; stage < EXPORT_PROFILE_STAGE_COUNT; stage++)
+    {
+        if(strcmp(stage_name, export_profile_stage_name((exportProfileStage_t)stage)) == 0)
+        {
+            if((frame->stage_mask & (1u << stage)) == 0) return 0;
+            *value = frame->stages_ms[stage];
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static void export_profile_write_json_string(FILE * file, const char * value)
+{
+    fputc('"', file);
+    if(value)
+    {
+        for(const unsigned char * p = (const unsigned char*)value; *p; p++)
+        {
+            switch(*p)
+            {
+                case '\\': fputs("\\\\", file); break;
+                case '"':  fputs("\\\"", file); break;
+                case '\b': fputs("\\b", file); break;
+                case '\f': fputs("\\f", file); break;
+                case '\n': fputs("\\n", file); break;
+                case '\r': fputs("\\r", file); break;
+                case '\t': fputs("\\t", file); break;
+                default:
+                    if(*p < 0x20) fprintf(file, "\\u%04x", *p);
+                    else fputc(*p, file);
+                    break;
+            }
+        }
+    }
+    fputc('"', file);
+}
+
+static void export_profile_write_stage_stats(FILE * file,
+                                             const char * name,
+                                             int comma)
+{
+    double * values = NULL;
+    size_t count = 0;
+    double sum = 0.0;
+
+    values = (double*)malloc(g_export_profile_frame_count * sizeof(double));
+    if(values == NULL)
+    {
+        if(comma) fputs(",\n", file);
+        fprintf(file, "    ");
+        export_profile_write_json_string(file, name);
+        fputs(": {\"samples\":0,\"avg_ms\":0,\"p50_ms\":0,\"p95_ms\":0}", file);
+        return;
+    }
+
+    for(size_t i = 0; i < g_export_profile_frame_count; i++)
+    {
+        double value = 0.0;
+        if(export_profile_stage_value(&g_export_profile_frames[i], name, &value))
+        {
+            values[count++] = value;
+            sum += value;
+        }
+    }
+
+    qsort(values, count, sizeof(double), export_profile_double_compare);
+
+    const double avg = count ? sum / (double)count : 0.0;
+    const double p50 = count ? values[(size_t)((count - 1) * 0.50)] : 0.0;
+    const double p95 = count ? values[(size_t)((count - 1) * 0.95)] : 0.0;
+
+    if(comma) fputs(",\n", file);
+    fprintf(file, "    ");
+    export_profile_write_json_string(file, name);
+    fprintf(file,
+            ": {\"samples\":%u,\"avg_ms\":%.6f,\"p50_ms\":%.6f,\"p95_ms\":%.6f}",
+            (unsigned)count,
+            avg,
+            p50,
+            p95);
+    free(values);
+}
+
+static void export_profile_write_json(void)
+{
+    FILE * file = NULL;
+    time_t now;
+    struct tm * utc;
+    char generated[64] = "";
+
+    if(g_export_profile_write_in_progress) return;
+    if(g_export_profile_path[0] == '\0' || g_export_profile_frame_count == 0) return;
+
+    g_export_profile_write_in_progress = 1;
+    file = fopen(g_export_profile_path, "wb");
+    if(file == NULL)
+    {
+        g_export_profile_write_in_progress = 0;
+        return;
+    }
+
+    now = time(NULL);
+    utc = gmtime(&now);
+    if(utc)
+    {
+        strftime(generated, sizeof(generated), "%Y-%m-%dT%H:%M:%SZ", utc);
+    }
+
+    fputs("{\n", file);
+    fputs("  \"schema\":\"mlvapp.export_stage_profile.v1\",\n", file);
+    fputs("  \"enabled_by\":\"MLVAPP_EXPORT_STAGE_PROFILER\",\n", file);
+    fputs("  \"profile_file_env\":\"MLVAPP_EXPORT_STAGE_PROFILE_FILE\",\n", file);
+    fputs("  \"build_id\":", file);
+    export_profile_write_json_string(file, g_export_profile_build_id);
+    fputs(",\n", file);
+    fputs("  \"generated_utc\":", file);
+    export_profile_write_json_string(file, generated);
+    fputs(",\n", file);
+    fprintf(file, "  \"frame_count\":%u,\n", (unsigned)g_export_profile_frame_count);
+    fputs("  \"queue_idle_supported\":false,\n", file);
+    fputs("  \"stages\":{\n", file);
+    export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
+    export_profile_write_stage_stats(file, "raw_read_ms", 1);
+    export_profile_write_stage_stats(file, "raw_decode_ms", 1);
+    export_profile_write_stage_stats(file, "raw_unpack_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_ms", 1);
+    export_profile_write_stage_stats(file, "dng_header_ms", 1);
+    export_profile_write_stage_stats(file, "dng_pack_ms", 1);
+    export_profile_write_stage_stats(file, "dng_compress_ms", 1);
+    export_profile_write_stage_stats(file, "disk_write_ms", 1);
+    export_profile_write_stage_stats(file, "frame_total_ms", 1);
+    fputs(",\n    \"queue_idle_ms\":{\"supported\":false,\"samples\":0,\"avg_ms\":0,\"p50_ms\":0,\"p95_ms\":0}\n", file);
+    fputs("  },\n", file);
+    fputs("  \"frames\":[\n", file);
+    for(size_t i = 0; i < g_export_profile_frame_count; i++)
+    {
+        const exportProfileFrame_t * frame = &g_export_profile_frames[i];
+        if(i) fputs(",\n", file);
+        fputs("    {", file);
+        fputs("\"clip\":", file);
+        export_profile_write_json_string(file, frame->clip_path);
+        fprintf(file,
+                ",\"frame_index\":%u,\"raw_input_state\":",
+                frame->frame_index);
+        export_profile_write_json_string(file, export_profile_raw_state_name(frame->raw_input_state));
+        fputs(",\"raw_output_state\":", file);
+        export_profile_write_json_string(file, export_profile_raw_state_name(frame->raw_output_state));
+        fprintf(file, ",\"success\":%s", frame->success ? "true" : "false");
+
+        for(int stage = 0; stage < EXPORT_PROFILE_STAGE_COUNT; stage++)
+        {
+            if((frame->stage_mask & (1u << stage)) == 0) continue;
+            fprintf(file, ",");
+            export_profile_write_json_string(file, export_profile_stage_name((exportProfileStage_t)stage));
+            fprintf(file, ":%.6f", frame->stages_ms[stage]);
+        }
+
+        {
+            double raw_total = 0.0;
+            if(export_profile_stage_value(frame, "raw_read_decode_unpack_ms", &raw_total))
+            {
+                fputs(",", file);
+                export_profile_write_json_string(file, "raw_read_decode_unpack_ms");
+                fprintf(file, ":%.6f", raw_total);
+            }
+        }
+
+        fputs("}", file);
+    }
+    fputs("\n  ]\n", file);
+    fputs("}\n", file);
+    fclose(file);
+    g_export_profile_write_in_progress = 0;
 }
 
 //MLV WB modes
@@ -607,9 +1020,10 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             }
         }
 
-        /* Focal resolution stuff */
-        int32_t * focal_resolution_x = camid->focal_resolution_x;
-        int32_t * focal_resolution_y = camid->focal_resolution_y;
+        /* Focal resolution stuff. Work on local copies; the sampling/aspect
+           adjustments below must not mutate the shared camera database. */
+        int32_t focal_resolution_x[2] = { camid->focal_resolution_x[0], camid->focal_resolution_x[1] };
+        int32_t focal_resolution_y[2] = { camid->focal_resolution_y[0], camid->focal_resolution_y[1] };
 
         /* Picture aspect ratio */
         int manual_ar = 0;
@@ -963,21 +1377,28 @@ static void dng_reverse_byte_order(uint16_t * input_buffer, size_t buf_size)
 }
 
 /* build whole DNG frame (header + image), process image if needed and put to the dng struct ready to save */
-static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, const char *prop_filename)
+static int dng_get_frame(mlvObject_t * mlv_data,
+                         dngObject_t * dng_data,
+                         uint32_t frame_index,
+                         const char *prop_filename,
+                         exportProfileFrame_t * profile_frame)
 {
     int ret = 0;
+    double profile_stage_start = 0.0;
 
     FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
 
     if (isMcrawLoaded(mlv_data))
     {
         /* Move to start of frame in file and read the RAW data */
+        profile_stage_start = export_profile_stage_begin(profile_frame);
         file_set_pos(fd, mlv_data->video_index[frame_index].block_offset, SEEK_SET);
 
         mr_item_t item = {};
 
         if (fread(&item, sizeof(mr_item_t), 1, fd) != 1)
         {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
             printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
@@ -992,18 +1413,22 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
 
         if (fread(dng_data->image_buf2, stored_size, 1, fd) != 1)
         {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
             printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
             return -1;
         }
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 
+        profile_stage_start = export_profile_stage_begin(profile_frame);
         int64_t ret = mr_decode_video_frame((uint8_t*)dng_data->image_buf_unpacked,
                                             (uint8_t*)dng_data->image_buf2,
                                             stored_size,
                                             mlv_data->RAWI.xRes,
                                             mlv_data->RAWI.yRes,
                                             mlv_data->compression_type);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE, profile_stage_start);
 
         if (ret <= 0)
         {
@@ -1014,30 +1439,37 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
         }
 
         /* apply low level raw processing to the unpacked_frame */
+        profile_stage_start = export_profile_stage_begin(profile_frame);
         apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
 
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
+            profile_stage_start = export_profile_stage_begin(profile_frame);
             ret = dng_compress_image(dng_data->image_buf,
                                      dng_data->image_buf_unpacked,
                                      &dng_data->image_size,
                                      mlv_data->RAWI.xRes,
                                      mlv_data->RAWI.yRes,
                                      mlv_data->RAWI.raw_info.bits_per_pixel);
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
         }
         else   // uncompressed and fast pass
         {
+            profile_stage_start = export_profile_stage_begin(profile_frame);
             dng_pack_image_bits(dng_data->image_buf,
                                 dng_data->image_buf_unpacked,
                                 mlv_data->RAWI.xRes,
                                 mlv_data->RAWI.yRes,
                                 mlv_data->RAWI.raw_info.bits_per_pixel,
                                 1);
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
         }
     }
     else
     {
         /* Move to start of frame in file and read the RAW data */
+        profile_stage_start = export_profile_stage_begin(profile_frame);
         file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset, SEEK_SET);
 
         if (dng_data->raw_input_state == COMPRESSED_RAW) /* If lossless, decompress or pass trough */
@@ -1045,9 +1477,14 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_LOSLESS, frame_index);
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
+            }
+            else
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
             }
 
             if(dng_data->raw_output_state == COMPRESSED_ORIG)
@@ -1056,27 +1493,34 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
             }
             else
             {
+                profile_stage_start = export_profile_stage_begin(profile_frame);
                 ret = dng_decompress_image(dng_data->image_buf_unpacked,
                                            dng_data->image_buf,
                                            dng_data->image_size,
                                            mlv_data->RAWI.xRes,
                                            mlv_data->RAWI.yRes,
                                            mlv_data->RAWI.raw_info.bits_per_pixel);
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE, profile_stage_start);
 
                 /* apply low level raw processing to the unpacked_frame */
+                profile_stage_start = export_profile_stage_begin(profile_frame);
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
+                    profile_stage_start = export_profile_stage_begin(profile_frame);
                     ret = dng_compress_image(dng_data->image_buf,
                                              dng_data->image_buf_unpacked,
                                              &dng_data->image_size,
                                              mlv_data->RAWI.xRes,
                                              mlv_data->RAWI.yRes,
                                              (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel);
+                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
                 }
                 else
                 {
+                    profile_stage_start = export_profile_stage_begin(profile_frame);
                     if(!llrpHQDualIso(mlv_data))
                     {
                         dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_PACKED, frame_index);
@@ -1092,6 +1536,7 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
                         dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, frame_index);
                         memcpy(dng_data->image_buf, dng_data->image_buf_unpacked, dng_data->image_size);
                     }
+                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
                 }
             }
         }
@@ -1100,37 +1545,51 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_PACKED, frame_index);
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
             }
+            else
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+            }
 
             if(dng_data->raw_output_state == UNCOMPRESSED_ORIG)
             {
+                profile_stage_start = export_profile_stage_begin(profile_frame);
                 dng_reverse_byte_order(dng_data->image_buf, dng_data->image_size);
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
             }
             else
             {
+                profile_stage_start = export_profile_stage_begin(profile_frame);
                 dng_unpack_image_bits(dng_data->image_buf_unpacked,
                                       dng_data->image_buf,
                                       mlv_data->RAWI.xRes,
                                       mlv_data->RAWI.yRes,
                                       mlv_data->RAWI.raw_info.bits_per_pixel);
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_UNPACK, profile_stage_start);
 
                 /* apply low level raw processing to the unpacked_frame */
+                profile_stage_start = export_profile_stage_begin(profile_frame);
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
+                    profile_stage_start = export_profile_stage_begin(profile_frame);
                     ret = dng_compress_image(dng_data->image_buf,
                                              dng_data->image_buf_unpacked,
                                              &dng_data->image_size,
                                              mlv_data->RAWI.xRes,
                                              mlv_data->RAWI.yRes,
                                              (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel);
+                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
                 }
                 else
                 {
+                    profile_stage_start = export_profile_stage_begin(profile_frame);
                     if(!llrpHQDualIso(mlv_data))
                     {
                         dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_PACKED, frame_index);
@@ -1146,12 +1605,15 @@ static int dng_get_frame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_
                         dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, frame_index);
                         memcpy(dng_data->image_buf, dng_data->image_buf_unpacked, dng_data->image_size);
                     }
+                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
                 }
             }
         }
     }
 
+    profile_stage_start = export_profile_stage_begin(profile_frame);
     dng_fill_header(mlv_data, dng_data, frame_index, prop_filename);
+    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_HEADER, profile_stage_start);
     return ret;
 }
 
@@ -1193,23 +1655,39 @@ void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * 
 /* save DNG file */
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *prop_filename)
 {
+    exportProfileFrame_t profile_frame;
+    double profile_frame_start = 0.0;
+    double profile_stage_start = 0.0;
+
+    export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
+    profile_frame_start = export_profile_stage_begin(&profile_frame);
+
     FILE* dngf = fopen(dng_filename, "wb");
     if (!dngf)
     {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
         return 1;
     }
 
     /* get filled dng_data struct */
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename) != 0)
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
     {
         fclose(dngf);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
         return 1;
     }
+
+    profile_stage_start = export_profile_stage_begin(&profile_frame);
 
     /* write DNG header */
     if (fwrite(dng_data->header_buf, dng_data->header_size, 1, dngf) != 1)
     {
         fclose(dngf);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
         return 1;
     }
     
@@ -1217,10 +1695,16 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     if (fwrite(dng_data->image_buf, dng_data->image_size, 1, dngf) != 1)
     {
         fclose(dngf);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
         return 1;
     }
 
     fclose(dngf);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+    export_profile_frame_finish(&profile_frame, 1);
 #ifndef STDOUT_SILENT
     if (!frame_index)
     {
@@ -1248,6 +1732,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
 /* free all buffers used for DNG creation */
 void freeDngObject(dngObject_t * dng_data)
 {
+    export_profile_write_json();
     if(dng_data->header_buf) free(dng_data->header_buf);
     if(dng_data->image_buf) free(dng_data->image_buf);
     if(dng_data->image_buf2) free(dng_data->image_buf2);

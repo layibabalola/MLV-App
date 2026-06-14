@@ -1,0 +1,23 @@
+# Build output + large regenerable test vectors (regenerate via build-oracle.ps1)
+*.exe
+*.lib
+*.exp
+*.obj
+*.o
+vectors/*.u16
+vectors/*.u32
+vectors/*.u8
+vectors/*.i32
+vectors/*.f32
+vectors/*.f64
+vectors/*.bin
+# per-case subdirs (vectors/<case>/...): base, res8k, clipped, iso1600,
+#   amaze, amaze_clip, amaze_iso1600 (AMaZE adds .f32 demosaiced planes + .u8
+#   edge_direction dumps)
+vectors/**/*.u16
+vectors/**/*.u32
+vectors/**/*.u8
+vectors/**/*.i32
+vectors/**/*.f32
+vectors/**/*.f64
+vectors/**/*.bin
