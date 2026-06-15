@@ -111,7 +111,7 @@ QByteArray gpuBilinearDebayerFragmentShaderSource(void)
         "float sampleRaw(vec2 logicalPixel)\n"
         "{\n"
         "    vec2 clamped = clamp(logicalPixel, vec2(0.0), textureSize - vec2(1.0));\n"
-        "    vec2 uv = vec2(clamped.x + 0.5, textureSize.y - clamped.y - 0.5) / textureSize;\n"
+        "    vec2 uv = vec2(clamped.x + 0.5, clamped.y + 0.5) / textureSize;\n"
         "    return texture2D(rawTexture, uv).r;\n"
         "}\n"
         "vec3 debayerBilinear(vec2 outputPixel)\n"
@@ -374,9 +374,8 @@ bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
     rawTexture->release();
     program.release();
     fbo.release();
-    context.doneCurrent();
-
     delete rawTexture;
+    context.doneCurrent();
 
     if ( reason ) reason->clear();
     return true;

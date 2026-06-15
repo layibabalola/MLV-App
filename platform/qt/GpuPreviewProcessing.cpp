@@ -465,7 +465,7 @@ QByteArray gpuPreviewProcessingDisplayFragmentShaderSource(void)
         "            float gamutMin = min(min(gamutReference.r, gamutReference.g), gamutReference.b);\n"
         "            float desaturateFactor = 1.0;\n"
         "            float denom = Y - minChannel;\n"
-        "            if (Y > 0.0 && abs(denom) > 0.000001)\n"
+        "            if (Y > 0.0 && abs(denom) > 0.00000001)\n"
         "            {\n"
         "                desaturateFactor = (Y - gamutMin) / denom;\n"
         "            }\n"
@@ -569,7 +569,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "            float gamutMin = min(min(gamutReference.r, gamutReference.g), gamutReference.b);\n"
         "            float desaturateFactor = 1.0;\n"
         "            float denom = Y - minChannel;\n"
-        "            if (Y > 0.0 && abs(denom) > 0.000001)\n"
+        "            if (Y > 0.0 && abs(denom) > 0.00000001)\n"
         "            {\n"
         "                desaturateFactor = (Y - gamutMin) / denom;\n"
         "            }\n"
@@ -582,7 +582,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "}\n"
         "void main()\n"
         "{\n"
-        "    vec4 sampledColor = texture2D(frameTexture, vTexCoord);\n"
+        "    vec2 sourceCoord = vec2(vTexCoord.x, 1.0 - vTexCoord.y);\n"
+        "    vec4 sampledColor = texture2D(frameTexture, sourceCoord);\n"
         "    gl_FragColor = vec4(applyPreviewProcessing(sampledColor.rgb), sampledColor.a);\n"
         "}\n");
 }
@@ -945,7 +946,6 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gammaTexture->release();
     program.release();
     fbo.release();
-    context.doneCurrent();
 
     delete frameTexture;
     delete levelsTexture;
@@ -953,6 +953,7 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete matrixGTexture;
     delete matrixBTexture;
     delete gammaTexture;
+    context.doneCurrent();
 
     if ( reason ) reason->clear();
     return true;
