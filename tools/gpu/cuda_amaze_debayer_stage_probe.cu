@@ -15,6 +15,7 @@
  *   - Nyquist texture detection flags
  *   - Nyquist-region area interpolation hvwt refinement
  *   - green-plane assembly at red/blue sites
+ *   - Nyquist-region green-plane refinement
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -199,6 +200,17 @@ __host__ __device__ float gauss_grad(int index)
         case 3: return 0.03687419286733595f;
         case 4: return 0.03099732204057846f;
         default: return 0.018413194161458882f;
+    }
+}
+
+__host__ __device__ float gquinc(int index)
+{
+    switch (index)
+    {
+        case 0: return 0.169917f;
+        case 1: return 0.108947f;
+        case 2: return 0.069855f;
+        default: return 0.0287182f;
     }
 }
 
@@ -749,6 +761,52 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             {
                 out->dgrb2h[idx >> 1] = 0.0f;
                 out->dgrb2v[idx >> 1] = 0.0f;
+            }
+        }
+    }
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            if (out->nyquist[idx >> 1])
+            {
+                const float gvarh =
+                    epssq +
+                    (gquinc(0) * out->dgrb2h[idx >> 1] +
+                     gquinc(1) * (out->dgrb2h[(idx - m1) >> 1] +
+                                  out->dgrb2h[(idx + p1) >> 1] +
+                                  out->dgrb2h[(idx - p1) >> 1] +
+                                  out->dgrb2h[(idx + m1) >> 1]) +
+                     gquinc(2) * (out->dgrb2h[(idx - v2) >> 1] +
+                                  out->dgrb2h[(idx - 2) >> 1] +
+                                  out->dgrb2h[(idx + 2) >> 1] +
+                                  out->dgrb2h[(idx + v2) >> 1]) +
+                     gquinc(3) * (out->dgrb2h[(idx - m2) >> 1] +
+                                  out->dgrb2h[(idx + p2) >> 1] +
+                                  out->dgrb2h[(idx - p2) >> 1] +
+                                  out->dgrb2h[(idx + m2) >> 1]));
+                const float gvarv =
+                    epssq +
+                    (gquinc(0) * out->dgrb2v[idx >> 1] +
+                     gquinc(1) * (out->dgrb2v[(idx - m1) >> 1] +
+                                  out->dgrb2v[(idx + p1) >> 1] +
+                                  out->dgrb2v[(idx - p1) >> 1] +
+                                  out->dgrb2v[(idx + m1) >> 1]) +
+                     gquinc(2) * (out->dgrb2v[(idx - v2) >> 1] +
+                                  out->dgrb2v[(idx - 2) >> 1] +
+                                  out->dgrb2v[(idx + 2) >> 1] +
+                                  out->dgrb2v[(idx + v2) >> 1]) +
+                     gquinc(3) * (out->dgrb2v[(idx - m2) >> 1] +
+                                  out->dgrb2v[(idx + p2) >> 1] +
+                                  out->dgrb2v[(idx - p2) >> 1] +
+                                  out->dgrb2v[(idx + m2) >> 1]));
+
+                out->dgrb0[idx >> 1] =
+                    (out->hcd[idx] * gvarv + out->vcd[idx] * gvarh) / (gvarv + gvarh);
+                out->rgbgreen[idx] = out->cfa[idx] + out->dgrb0[idx >> 1];
             }
         }
     }
@@ -1313,6 +1371,56 @@ __global__ void k_green_plane_assembly_scalar(const float * cfa,
     }
 }
 
+__global__ void k_nyquist_green_refinement(const float * cfa,
+                                           const float * vcd,
+                                           const float * hcd,
+                                           const unsigned char * nyquist,
+                                           const float * dgrb2h,
+                                           const float * dgrb2v,
+                                           float * dgrb0,
+                                           float * rgbgreen,
+                                           int rr1,
+                                           int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 8 || rr >= rr1 - 8) return;
+
+    const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 8 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v2 = 2 * kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+    const int p2 = -2 * kTileSize + 2;
+    const int m2 = 2 * kTileSize + 2;
+    const float epssq = kEps * kEps;
+    const int idx = rr * kTileSize + cc;
+    if (!nyquist[idx >> 1]) return;
+
+    const float gvarh =
+        epssq +
+        (gquinc(0) * dgrb2h[idx >> 1] +
+         gquinc(1) * (dgrb2h[(idx - m1) >> 1] + dgrb2h[(idx + p1) >> 1] +
+                      dgrb2h[(idx - p1) >> 1] + dgrb2h[(idx + m1) >> 1]) +
+         gquinc(2) * (dgrb2h[(idx - v2) >> 1] + dgrb2h[(idx - 2) >> 1] +
+                      dgrb2h[(idx + 2) >> 1] + dgrb2h[(idx + v2) >> 1]) +
+         gquinc(3) * (dgrb2h[(idx - m2) >> 1] + dgrb2h[(idx + p2) >> 1] +
+                      dgrb2h[(idx - p2) >> 1] + dgrb2h[(idx + m2) >> 1]));
+    const float gvarv =
+        epssq +
+        (gquinc(0) * dgrb2v[idx >> 1] +
+         gquinc(1) * (dgrb2v[(idx - m1) >> 1] + dgrb2v[(idx + p1) >> 1] +
+                      dgrb2v[(idx - p1) >> 1] + dgrb2v[(idx + m1) >> 1]) +
+         gquinc(2) * (dgrb2v[(idx - v2) >> 1] + dgrb2v[(idx - 2) >> 1] +
+                      dgrb2v[(idx + 2) >> 1] + dgrb2v[(idx + v2) >> 1]) +
+         gquinc(3) * (dgrb2v[(idx - m2) >> 1] + dgrb2v[(idx + p2) >> 1] +
+                      dgrb2v[(idx - p2) >> 1] + dgrb2v[(idx + m2) >> 1]));
+
+    dgrb0[idx >> 1] = (hcd[idx] * gvarv + vcd[idx] * gvarh) / (gvarv + gvarh);
+    rgbgreen[idx] = cfa[idx] + dgrb0[idx >> 1];
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1618,6 +1726,17 @@ bool run_case(const CaseSpec & spec)
                                             rr1,
                                             cc1);
     CK(cudaGetLastError());
+    k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
+                                                d.vcd,
+                                                d.hcd,
+                                                d.nyquist,
+                                                d.dgrb2h,
+                                                d.dgrb2v,
+                                                d.dgrb0,
+                                                d.rgbgreen,
+                                                rr1,
+                                                cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -1685,6 +1804,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green stages)\n";
     return ok ? 0 : 1;
 }
