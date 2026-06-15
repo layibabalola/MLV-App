@@ -1,0 +1,9 @@
+; igpu_amaze_debayer_cuda.def - exports for the CUDA AMaZE debayer C ABI.
+LIBRARY igpu_amaze_debayer_cuda
+EXPORTS
+    igpu_amaze_debayer_create
+    igpu_amaze_debayer_destroy
+    igpu_amaze_debayer_abi_version
+    igpu_amaze_debayer_describe
+    igpu_amaze_debayer_run
+    igpu_amaze_debayer_last_timing
