@@ -11,6 +11,7 @@
  *   - diagonal precursor weights used by later R/B interpolation
  *   - first green-direction interpolation color-difference planes
  *   - scalar-order variance selection and saturation-bound refinement
+ *   - adaptive horizontal/vertical green interpolation weights (hvwt)
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -73,6 +74,7 @@ struct StageBuffers
     std::vector<float> dgintv;
     std::vector<float> dginth;
     std::vector<float> cddiffsq;
+    std::vector<float> hvwt;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -91,6 +93,7 @@ struct StageBuffers
         , dgintv(kTileSamples, 0.0f)
         , dginth(kTileSamples, 0.0f)
         , cddiffsq(kTileSamples, 0.0f)
+        , hvwt(kHalfTileSamples, 0.0f)
     {
     }
 };
@@ -114,6 +117,7 @@ struct DeviceBuffers
     float * dgintv = nullptr;
     float * dginth = nullptr;
     float * cddiffsq = nullptr;
+    float * hvwt = nullptr;
 };
 
 struct CompareStats
@@ -464,6 +468,78 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             }
         }
     }
+
+    const int v3 = 3 * kTileSize;
+    const float epssq = kEps * kEps;
+    for (int rr = 6; rr < rr1 - 6; ++rr)
+    {
+        for (int cc = 6 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 6;
+             cc += 2, idx += 2)
+        {
+            const float uave =
+                out->vcd[idx] + out->vcd[idx - v1] + out->vcd[idx - v2] + out->vcd[idx - v3];
+            const float dave =
+                out->vcd[idx] + out->vcd[idx + v1] + out->vcd[idx + v2] + out->vcd[idx + v3];
+            const float lave =
+                out->hcd[idx] + out->hcd[idx - 1] + out->hcd[idx - 2] + out->hcd[idx - 3];
+            const float rave =
+                out->hcd[idx] + out->hcd[idx + 1] + out->hcd[idx + 2] + out->hcd[idx + 3];
+
+            const float dgrbvvaru =
+                sqr_f(out->vcd[idx] - uave) +
+                sqr_f(out->vcd[idx - v1] - uave) +
+                sqr_f(out->vcd[idx - v2] - uave) +
+                sqr_f(out->vcd[idx - v3] - uave);
+            const float dgrbvvard =
+                sqr_f(out->vcd[idx] - dave) +
+                sqr_f(out->vcd[idx + v1] - dave) +
+                sqr_f(out->vcd[idx + v2] - dave) +
+                sqr_f(out->vcd[idx + v3] - dave);
+            const float dgrbhvarl =
+                sqr_f(out->hcd[idx] - lave) +
+                sqr_f(out->hcd[idx - 1] - lave) +
+                sqr_f(out->hcd[idx - 2] - lave) +
+                sqr_f(out->hcd[idx - 3] - lave);
+            const float dgrbhvarr =
+                sqr_f(out->hcd[idx] - rave) +
+                sqr_f(out->hcd[idx + 1] - rave) +
+                sqr_f(out->hcd[idx + 2] - rave) +
+                sqr_f(out->hcd[idx + 3] - rave);
+
+            const float hwt = out->dirwts1[idx - 1] /
+                              (out->dirwts1[idx - 1] + out->dirwts1[idx + 1]);
+            const float vwt = out->dirwts0[idx - v1] /
+                              (out->dirwts0[idx + v1] + out->dirwts0[idx - v1]);
+
+            const float vcdvar = epssq + vwt * dgrbvvard + (1.0f - vwt) * dgrbvvaru;
+            const float hcdvar = epssq + hwt * dgrbhvarr + (1.0f - hwt) * dgrbhvarl;
+
+            const float dgrbvvaru1 =
+                out->dgintv[idx] + out->dgintv[idx - v1] + out->dgintv[idx - v2];
+            const float dgrbvvard1 =
+                out->dgintv[idx] + out->dgintv[idx + v1] + out->dgintv[idx + v2];
+            const float dgrbhvarl1 =
+                out->dginth[idx] + out->dginth[idx - 1] + out->dginth[idx - 2];
+            const float dgrbhvarr1 =
+                out->dginth[idx] + out->dginth[idx + 1] + out->dginth[idx + 2];
+
+            const float vcdvar1 = epssq + vwt * dgrbvvard1 + (1.0f - vwt) * dgrbvvaru1;
+            const float hcdvar1 = epssq + hwt * dgrbhvarr1 + (1.0f - hwt) * dgrbhvarl1;
+
+            const float varwt = hcdvar / (vcdvar + hcdvar);
+            const float diffwt = hcdvar1 / (vcdvar1 + hcdvar1);
+            if ((0.5f - varwt) * (0.5f - diffwt) > 0.0f &&
+                std::fabs(0.5f - diffwt) < std::fabs(0.5f - varwt))
+            {
+                out->hvwt[idx >> 1] = varwt;
+            }
+            else
+            {
+                out->hvwt[idx >> 1] = diffwt;
+            }
+        }
+    }
 }
 
 __global__ void k_tile_load(const uint16_t * raw,
@@ -764,6 +840,82 @@ __global__ void k_variance_selection_scalar(float * cfa,
     }
 }
 
+__global__ void k_hvwt_adaptive_weights(const float * dirwts0,
+                                        const float * dirwts1,
+                                        const float * vcd,
+                                        const float * hcd,
+                                        const float * dgintv,
+                                        const float * dginth,
+                                        float * hvwt,
+                                        int rr1,
+                                        int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 6 || rr >= rr1 - 6) return;
+
+    const int ccStart = 6 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 6 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const int v2 = 2 * kTileSize;
+    const int v3 = 3 * kTileSize;
+    const float epssq = kEps * kEps;
+    const int idx = rr * kTileSize + cc;
+
+    const float uave = vcd[idx] + vcd[idx - v1] + vcd[idx - v2] + vcd[idx - v3];
+    const float dave = vcd[idx] + vcd[idx + v1] + vcd[idx + v2] + vcd[idx + v3];
+    const float lave = hcd[idx] + hcd[idx - 1] + hcd[idx - 2] + hcd[idx - 3];
+    const float rave = hcd[idx] + hcd[idx + 1] + hcd[idx + 2] + hcd[idx + 3];
+
+    const float dgrbvvaru =
+        sqr_f(vcd[idx] - uave) +
+        sqr_f(vcd[idx - v1] - uave) +
+        sqr_f(vcd[idx - v2] - uave) +
+        sqr_f(vcd[idx - v3] - uave);
+    const float dgrbvvard =
+        sqr_f(vcd[idx] - dave) +
+        sqr_f(vcd[idx + v1] - dave) +
+        sqr_f(vcd[idx + v2] - dave) +
+        sqr_f(vcd[idx + v3] - dave);
+    const float dgrbhvarl =
+        sqr_f(hcd[idx] - lave) +
+        sqr_f(hcd[idx - 1] - lave) +
+        sqr_f(hcd[idx - 2] - lave) +
+        sqr_f(hcd[idx - 3] - lave);
+    const float dgrbhvarr =
+        sqr_f(hcd[idx] - rave) +
+        sqr_f(hcd[idx + 1] - rave) +
+        sqr_f(hcd[idx + 2] - rave) +
+        sqr_f(hcd[idx + 3] - rave);
+
+    const float hwt = dirwts1[idx - 1] / (dirwts1[idx - 1] + dirwts1[idx + 1]);
+    const float vwt = dirwts0[idx - v1] / (dirwts0[idx + v1] + dirwts0[idx - v1]);
+
+    const float vcdvar = epssq + vwt * dgrbvvard + (1.0f - vwt) * dgrbvvaru;
+    const float hcdvar = epssq + hwt * dgrbhvarr + (1.0f - hwt) * dgrbhvarl;
+
+    const float dgrbvvaru1 = dgintv[idx] + dgintv[idx - v1] + dgintv[idx - v2];
+    const float dgrbvvard1 = dgintv[idx] + dgintv[idx + v1] + dgintv[idx + v2];
+    const float dgrbhvarl1 = dginth[idx] + dginth[idx - 1] + dginth[idx - 2];
+    const float dgrbhvarr1 = dginth[idx] + dginth[idx + 1] + dginth[idx + 2];
+
+    const float vcdvar1 = epssq + vwt * dgrbvvard1 + (1.0f - vwt) * dgrbvvaru1;
+    const float hcdvar1 = epssq + hwt * dgrbhvarr1 + (1.0f - hwt) * dgrbhvarl1;
+
+    const float varwt = hcdvar / (vcdvar + hcdvar);
+    const float diffwt = hcdvar1 / (vcdvar1 + hcdvar1);
+    if ((0.5f - varwt) * (0.5f - diffwt) > 0.0f &&
+        fabsf(0.5f - diffwt) < fabsf(0.5f - varwt))
+    {
+        hvwt[idx >> 1] = varwt;
+    }
+    else
+    {
+        hvwt[idx >> 1] = diffwt;
+    }
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -797,6 +949,7 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->dgintv, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dginth, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->cddiffsq, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->hvwt, kHalfTileSamples * sizeof(float)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -818,6 +971,7 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->dgintv);
     cudaFree(d->dginth);
     cudaFree(d->cddiffsq);
+    cudaFree(d->hvwt);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -838,6 +992,7 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.dgintv, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dginth, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.cddiffsq, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.hvwt, 0, kHalfTileSamples * sizeof(float)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -858,6 +1013,7 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->dgintv.data(), d.dgintv, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dginth.data(), d.dginth, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->cddiffsq.data(), d.cddiffsq, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->hvwt.data(), d.hvwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -969,13 +1125,23 @@ bool run_case(const CaseSpec & spec)
                                            cc1);
     CK(cudaGetLastError());
     k_variance_selection_scalar<<<1, 1>>>(d.cfa,
-                                          d.vcd,
-                                          d.hcd,
-                                          d.vcdalt,
-                                          d.hcdalt,
-                                          d.cddiffsq,
-                                          rr1,
-                                          cc1);
+                                           d.vcd,
+                                           d.hcd,
+                                           d.vcdalt,
+                                           d.hcdalt,
+                                           d.cddiffsq,
+                                           rr1,
+                                           cc1);
+    CK(cudaGetLastError());
+    k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
+                                             d.dirwts1,
+                                             d.vcd,
+                                             d.hcd,
+                                             d.dgintv,
+                                             d.dginth,
+                                             d.hvwt,
+                                             rr1,
+                                             cc1);
     CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
@@ -1004,6 +1170,7 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "dgintv", cpu.dgintv, gpu.dgintv) && ok;
     ok = report_compare(spec.name, "dginth", cpu.dginth, gpu.dginth) && ok;
     ok = report_compare(spec.name, "cddiffsq", cpu.cddiffsq, gpu.cddiffsq) && ok;
+    ok = report_compare(spec.name, "hvwt", cpu.hvwt, gpu.hvwt) && ok;
     return ok;
 }
 }
@@ -1039,6 +1206,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt stages)\n";
     return ok ? 0 : 1;
 }
