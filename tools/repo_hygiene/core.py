@@ -233,6 +233,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "osx_installer/BuildInstaller.sh",
         "platform/mlv_blender/build.sh",
         "tools/gpu/backend/build-backend-dll.ps1",
+        "tools/gpu/amaze-debayer-stage-build-run.ps1",
         "tools/gpu/build-cuda.ps1",
         "tools/gpu/glinterop/glinterop-build-run.ps1",
         "tools/gpu/oracle/build-oracle.ps1",
