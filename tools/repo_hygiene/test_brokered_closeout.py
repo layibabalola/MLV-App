@@ -484,6 +484,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
             approved=True,
         )
 
+    def write_gpu_lane_coordination(self, repo: Path, text: str) -> Path:
+        path = repo / ".claude-state" / "coordination" / "gpu-lane-impl-review-sync.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
     def audit_types(self, repo: Path) -> list[str]:
         audit_log = repo / ".claude-state" / "closeout" / "audits" / "audits.jsonl"
         if not audit_log.exists():
@@ -613,6 +619,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(config["workBlockBootstrap"]["autoBranchFromProtectedTarget"])
         self.assertEqual(config["workBlockBootstrap"]["branchPrefix"], "codex/work-block")
         self.assertTrue(config["workBlockBootstrap"]["requireIntegratedStartHeadForFinalize"])
+        self.assertTrue(config["contentReviewGate"]["requireClaudeApprovalForFinalize"])
+        self.assertEqual(config["contentReviewGate"]["coordinationFile"], ".claude-state/coordination/gpu-lane-impl-review-sync.md")
         self.assertFalse(config["stashPolicy"]["allowForeignDirtyStash"])
         self.assertIn("pinnedRefs", config["reviewQuorum"]["tupleFields"])
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
@@ -622,6 +630,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("dirtySplit", contract["requiredConfigKeys"])
         self.assertIn("workBlockBootstrap", contract["requiredConfigKeys"])
         self.assertIn("workBlockBootstrap.requireIntegratedStartHeadForFinalize", contract["requiredConfigKeys"])
+        self.assertIn("contentReviewGate", contract["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.requireClaudeApprovalForFinalize", contract["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.coordinationFile", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("powerShell", contract["requiredConfigKeys"])
         self.assertIn("powerShell.preferredExecutable", contract["requiredConfigKeys"])
@@ -2028,6 +2039,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
         baseline = config["toolingBaseline"]
         self.assertIn("workBlockBootstrap", baseline["requiredConfigKeys"])
         self.assertIn("workBlockBootstrap.requireIntegratedStartHeadForFinalize", baseline["requiredConfigKeys"])
+        self.assertIn("contentReviewGate", baseline["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.requireClaudeApprovalForFinalize", baseline["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.coordinationFile", baseline["requiredConfigKeys"])
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
         self.assertIn("agentRemediation", baseline["requiredConfigKeys"])
@@ -2044,6 +2058,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_start_work_block_auto_branches_from_clean_protected_target", baseline["requiredTests"])
         self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
         self.assertIn("test_finalize_blocks_work_block_started_from_unintegrated_base", baseline["requiredTests"])
+        self.assertIn("test_finalize_blocks_review_gated_chunk_without_claude_approval", baseline["requiredTests"])
+        self.assertIn("test_finalize_rejects_claude_approval_for_different_range", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_caps_oversized_child_output", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_normalizes_known_failure_text_with_zero_exit", baseline["requiredTests"])
         self.assertIn("test_bounded_runner_trusts_finalize_semantic_success_over_validation_text", baseline["requiredTests"])
@@ -2086,6 +2102,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def apply_windows_process_tree_affinity"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def process_tree_cpu_sample"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def validate_work_block_start_head_integrated"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def validate_content_review_approval_for_finalize"), required_symbols)
         self.assertIn(("AGENTS.md", "Closeout actors must be bounded at the process boundary"), required_symbols)
         self.assertIn(("AGENTS.md", "Hard-clean final responses are blocked unless the repo-closed postcondition passes"), required_symbols)
         self.assertIn(("AGENTS.md", "closeoutCleanTruth"), required_symbols)
@@ -2103,6 +2120,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(("CLAUDE.md", "workBlockBootstrap.requireIntegratedStartHeadForFinalize"), required_symbols)
         self.assertIn(("closeout.config.json", "workBlockBootstrap"), required_symbols)
         self.assertIn(("closeout.config.json", "requireIntegratedStartHeadForFinalize"), required_symbols)
+        self.assertIn(("closeout.config.json", "contentReviewGate"), required_symbols)
         self.assertIn(("closeout.config.json", "unifiedTruthReport"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def run_bounded_closeout_process"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def bounded_closeout_cli_main"), required_symbols)
@@ -3788,6 +3806,97 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), target_head)
         self.assertNotEqual(git(repo, "cat-file", "-e", "master:e2.txt", check=False).returncode, 0)
         self.assertNotEqual(git(repo, "cat-file", "-e", "master:tool.txt", check=False).returncode, 0)
+
+    def test_finalize_blocks_review_gated_chunk_without_claude_approval(self) -> None:
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-review-gated")
+        detection = detect_work_block(repo, work_block_id="wb-review-gated")
+        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n"
+            "Gate: ready for Claude review.\n",
+        )
+
+        result = finalize_work_block(repo, work_block_id="wb-review-gated")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "content_approval_missing")
+        self.assertEqual(result["range"], range_token)
+        self.assertIn("content_approval_missing", self.audit_types(repo))
+        self.assertNotEqual(git(repo, "cat-file", "-e", "master:work.txt", check=False).returncode, 0)
+
+    def test_finalize_rejects_claude_approval_for_different_range(self) -> None:
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-review-wrong-range")
+        detection = detect_work_block(repo, work_block_id="wb-review-wrong-range")
+        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        wrong_range = "%s..%s" % (detection["targetHead"][:8], "00000000")
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n"
+            "Gate: ready for Claude review.\n\n"
+            "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{wrong_range}`\n"
+            "Verdict: APPROVE\n",
+        )
+
+        result = finalize_work_block(repo, work_block_id="wb-review-wrong-range")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "content_approval_missing")
+        self.assertIn("content_approval_missing", self.audit_types(repo))
+        self.assertNotEqual(git(repo, "cat-file", "-e", "master:work.txt", check=False).returncode, 0)
+
+    def test_finalize_accepts_latest_claude_approval_for_handed_off_range(self) -> None:
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-review-approved")
+        detection = detect_work_block(repo, work_block_id="wb-review-approved")
+        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n"
+            "Gate: ready for Claude review.\n\n"
+            "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\n"
+            "Verdict: APPROVE\n\n"
+            "### [2026-01-01T00:02:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\n"
+            "Verdict: IDLE\n",
+        )
+
+        result = finalize_work_block(repo, work_block_id="wb-review-approved")
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(git(repo, "show", "master:work.txt").stdout, "feature work\n")
+
+    def test_finalize_blocks_when_latest_claude_review_requests_changes(self) -> None:
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-review-changes")
+        detection = detect_work_block(repo, work_block_id="wb-review-changes")
+        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n"
+            "Gate: ready for Claude review.\n\n"
+            "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\n"
+            "Verdict: APPROVE\n\n"
+            "### [2026-01-01T00:02:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\n"
+            "Verdict: CHANGES_REQUESTED\n",
+        )
+
+        result = finalize_work_block(repo, work_block_id="wb-review-changes")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "content_approval_blocked")
+        self.assertIn("content_approval_blocked", self.audit_types(repo))
+        self.assertNotEqual(git(repo, "cat-file", "-e", "master:work.txt", check=False).returncode, 0)
 
     def test_stale_review_tuple_blocks_when_target_moves(self) -> None:
         repo = self.init_repo(config_updates={"autoQuorum": {"allowStaleReviewRenewal": False}})
