@@ -16,6 +16,7 @@
  *   - Nyquist-region area interpolation hvwt refinement
  *   - green-plane assembly at red/blue sites
  *   - Nyquist-region green-plane refinement
+ *   - diagonal red/blue interpolation candidates and pmwt
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -84,6 +85,9 @@ struct StageBuffers
     std::vector<float> dgrb0;
     std::vector<float> dgrb2h;
     std::vector<float> dgrb2v;
+    std::vector<float> rbm;
+    std::vector<float> rbp;
+    std::vector<float> pmwt;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -107,6 +111,9 @@ struct StageBuffers
         , dgrb0(kHalfTileSamples, 0.0f)
         , dgrb2h(kHalfTileSamples, 0.0f)
         , dgrb2v(kHalfTileSamples, 0.0f)
+        , rbm(kHalfTileSamples, 0.0f)
+        , rbp(kHalfTileSamples, 0.0f)
+        , pmwt(kHalfTileSamples, 0.0f)
     {
     }
 };
@@ -135,6 +142,9 @@ struct DeviceBuffers
     float * dgrb0 = nullptr;
     float * dgrb2h = nullptr;
     float * dgrb2v = nullptr;
+    float * rbm = nullptr;
+    float * rbp = nullptr;
+    float * pmwt = nullptr;
 };
 
 struct CompareStats
@@ -214,6 +224,11 @@ __host__ __device__ float gquinc(int index)
     }
 }
 
+__host__ __device__ float gauss_seven(int index)
+{
+    return index == 0 ? 0.13719494435797422f : 0.05640252782101291f;
+}
+
 __host__ __device__ float min_f(float a, float b)
 {
     return a < b ? a : b;
@@ -245,6 +260,21 @@ __host__ __device__ float xdiv2f_probe(float value)
     if ((bits.u & 0x7fffffffu) != 0)
     {
         bits.u -= 1u << 23;
+    }
+    return bits.f;
+}
+
+__host__ __device__ float xmul2f_probe(float value)
+{
+    union Bits
+    {
+        float f;
+        uint32_t u;
+    };
+    Bits bits = {value};
+    if ((bits.u & 0x7fffffffu) != 0)
+    {
+        bits.u += 1u << 23;
     }
     return bits.f;
 }
@@ -807,6 +837,123 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
                 out->dgrb0[idx >> 1] =
                     (out->hcd[idx] * gvarv + out->vcd[idx] * gvarh) / (gvarv + gvarh);
                 out->rgbgreen[idx] = out->cfa[idx] + out->dgrb0[idx >> 1];
+            }
+        }
+    }
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            const int halfIdx = idx >> 1;
+            const float crse = xmul2f_probe(out->cfa[idx + m1]) /
+                               (kEps + out->cfa[idx] + out->cfa[idx + m2]);
+            const float crnw = xmul2f_probe(out->cfa[idx - m1]) /
+                               (kEps + out->cfa[idx] + out->cfa[idx - m2]);
+            const float crne = xmul2f_probe(out->cfa[idx + p1]) /
+                               (kEps + out->cfa[idx] + out->cfa[idx + p2]);
+            const float crsw = xmul2f_probe(out->cfa[idx - p1]) /
+                               (kEps + out->cfa[idx] + out->cfa[idx - p2]);
+
+            const float rbse =
+                (std::fabs(1.0f - crse) < kAdaptiveRatioThreshold)
+                    ? out->cfa[idx] * crse
+                    : out->cfa[idx + m1] + xdiv2f_probe(out->cfa[idx] - out->cfa[idx + m2]);
+            const float rbnw =
+                (std::fabs(1.0f - crnw) < kAdaptiveRatioThreshold)
+                    ? out->cfa[idx] * crnw
+                    : out->cfa[idx - m1] + xdiv2f_probe(out->cfa[idx] - out->cfa[idx - m2]);
+            const float rbne =
+                (std::fabs(1.0f - crne) < kAdaptiveRatioThreshold)
+                    ? out->cfa[idx] * crne
+                    : out->cfa[idx + p1] + xdiv2f_probe(out->cfa[idx] - out->cfa[idx + p2]);
+            const float rbsw =
+                (std::fabs(1.0f - crsw) < kAdaptiveRatioThreshold)
+                    ? out->cfa[idx] * crsw
+                    : out->cfa[idx - p1] + xdiv2f_probe(out->cfa[idx] - out->cfa[idx - p2]);
+
+            const float wtse = kEps + out->delm[halfIdx] + out->delm[(idx + m1) >> 1] +
+                               out->delm[(idx + m2) >> 1];
+            const float wtnw = kEps + out->delm[halfIdx] + out->delm[(idx - m1) >> 1] +
+                               out->delm[(idx - m2) >> 1];
+            const float wtne = kEps + out->delp[halfIdx] + out->delp[(idx + p1) >> 1] +
+                               out->delp[(idx + p2) >> 1];
+            const float wtsw = kEps + out->delp[halfIdx] + out->delp[(idx - p1) >> 1] +
+                               out->delp[(idx - p2) >> 1];
+
+            out->rbm[halfIdx] = (wtse * rbnw + wtnw * rbse) / (wtse + wtnw);
+            out->rbp[halfIdx] = (wtne * rbsw + wtsw * rbne) / (wtne + wtsw);
+
+            const float rbvarm =
+                epssq +
+                (gauss_seven(0) * (out->dgrbsq1m[(idx - v1) >> 1] +
+                                   out->dgrbsq1m[(idx - 1) >> 1] +
+                                   out->dgrbsq1m[(idx + 1) >> 1] +
+                                   out->dgrbsq1m[(idx + v1) >> 1]) +
+                 gauss_seven(1) * (out->dgrbsq1m[(idx - v2 - 1) >> 1] +
+                                   out->dgrbsq1m[(idx - v2 + 1) >> 1] +
+                                   out->dgrbsq1m[(idx - 2 - v1) >> 1] +
+                                   out->dgrbsq1m[(idx + 2 - v1) >> 1] +
+                                   out->dgrbsq1m[(idx - 2 + v1) >> 1] +
+                                   out->dgrbsq1m[(idx + 2 + v1) >> 1] +
+                                   out->dgrbsq1m[(idx + v2 - 1) >> 1] +
+                                   out->dgrbsq1m[(idx + v2 + 1) >> 1]));
+            const float rbvarp =
+                epssq +
+                (gauss_seven(0) * (out->dgrbsq1p[(idx - v1) >> 1] +
+                                   out->dgrbsq1p[(idx - 1) >> 1] +
+                                   out->dgrbsq1p[(idx + 1) >> 1] +
+                                   out->dgrbsq1p[(idx + v1) >> 1]) +
+                 gauss_seven(1) * (out->dgrbsq1p[(idx - v2 - 1) >> 1] +
+                                   out->dgrbsq1p[(idx - v2 + 1) >> 1] +
+                                   out->dgrbsq1p[(idx - 2 - v1) >> 1] +
+                                   out->dgrbsq1p[(idx + 2 - v1) >> 1] +
+                                   out->dgrbsq1p[(idx - 2 + v1) >> 1] +
+                                   out->dgrbsq1p[(idx + 2 + v1) >> 1] +
+                                   out->dgrbsq1p[(idx + v2 - 1) >> 1] +
+                                   out->dgrbsq1p[(idx + v2 + 1) >> 1]));
+            out->pmwt[halfIdx] = rbvarm / (rbvarp + rbvarm);
+
+            if (out->rbp[halfIdx] < out->cfa[idx])
+            {
+                const float bounded = ulim_f(out->rbp[halfIdx], out->cfa[idx - p1], out->cfa[idx + p1]);
+                if (xmul2f_probe(out->rbp[halfIdx]) < out->cfa[idx])
+                {
+                    out->rbp[halfIdx] = bounded;
+                }
+                else
+                {
+                    const float pwt =
+                        xmul2f_probe(out->cfa[idx] - out->rbp[halfIdx]) /
+                        (kEps + out->rbp[halfIdx] + out->cfa[idx]);
+                    out->rbp[halfIdx] = pwt * out->rbp[halfIdx] + (1.0f - pwt) * bounded;
+                }
+            }
+            if (out->rbm[halfIdx] < out->cfa[idx])
+            {
+                const float bounded = ulim_f(out->rbm[halfIdx], out->cfa[idx - m1], out->cfa[idx + m1]);
+                if (xmul2f_probe(out->rbm[halfIdx]) < out->cfa[idx])
+                {
+                    out->rbm[halfIdx] = bounded;
+                }
+                else
+                {
+                    const float mwt =
+                        xmul2f_probe(out->cfa[idx] - out->rbm[halfIdx]) /
+                        (kEps + out->rbm[halfIdx] + out->cfa[idx]);
+                    out->rbm[halfIdx] = mwt * out->rbm[halfIdx] + (1.0f - mwt) * bounded;
+                }
+            }
+
+            if (out->rbp[halfIdx] > kClipPoint)
+            {
+                out->rbp[halfIdx] = ulim_f(out->rbp[halfIdx], out->cfa[idx - p1], out->cfa[idx + p1]);
+            }
+            if (out->rbm[halfIdx] > kClipPoint)
+            {
+                out->rbm[halfIdx] = ulim_f(out->rbm[halfIdx], out->cfa[idx - m1], out->cfa[idx + m1]);
             }
         }
     }
@@ -1421,6 +1568,129 @@ __global__ void k_nyquist_green_refinement(const float * cfa,
     rgbgreen[idx] = cfa[idx] + dgrb0[idx >> 1];
 }
 
+__global__ void k_diagonal_rb_interpolation(const float * cfa,
+                                            const float * delp,
+                                            const float * delm,
+                                            const float * dgrbsq1p,
+                                            const float * dgrbsq1m,
+                                            float * rbm,
+                                            float * rbp,
+                                            float * pmwt,
+                                            int rr1,
+                                            int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 8 || rr >= rr1 - 8) return;
+
+    const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 8 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const int v2 = 2 * kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+    const int p2 = -2 * kTileSize + 2;
+    const int m2 = 2 * kTileSize + 2;
+    const float epssq = kEps * kEps;
+    const int idx = rr * kTileSize + cc;
+    const int halfIdx = idx >> 1;
+
+    const float crse = xmul2f_probe(cfa[idx + m1]) / (kEps + cfa[idx] + cfa[idx + m2]);
+    const float crnw = xmul2f_probe(cfa[idx - m1]) / (kEps + cfa[idx] + cfa[idx - m2]);
+    const float crne = xmul2f_probe(cfa[idx + p1]) / (kEps + cfa[idx] + cfa[idx + p2]);
+    const float crsw = xmul2f_probe(cfa[idx - p1]) / (kEps + cfa[idx] + cfa[idx - p2]);
+
+    const float rbse =
+        (fabsf(1.0f - crse) < kAdaptiveRatioThreshold)
+            ? cfa[idx] * crse
+            : cfa[idx + m1] + xdiv2f_probe(cfa[idx] - cfa[idx + m2]);
+    const float rbnw =
+        (fabsf(1.0f - crnw) < kAdaptiveRatioThreshold)
+            ? cfa[idx] * crnw
+            : cfa[idx - m1] + xdiv2f_probe(cfa[idx] - cfa[idx - m2]);
+    const float rbne =
+        (fabsf(1.0f - crne) < kAdaptiveRatioThreshold)
+            ? cfa[idx] * crne
+            : cfa[idx + p1] + xdiv2f_probe(cfa[idx] - cfa[idx + p2]);
+    const float rbsw =
+        (fabsf(1.0f - crsw) < kAdaptiveRatioThreshold)
+            ? cfa[idx] * crsw
+            : cfa[idx - p1] + xdiv2f_probe(cfa[idx] - cfa[idx - p2]);
+
+    const float wtse = kEps + delm[halfIdx] + delm[(idx + m1) >> 1] + delm[(idx + m2) >> 1];
+    const float wtnw = kEps + delm[halfIdx] + delm[(idx - m1) >> 1] + delm[(idx - m2) >> 1];
+    const float wtne = kEps + delp[halfIdx] + delp[(idx + p1) >> 1] + delp[(idx + p2) >> 1];
+    const float wtsw = kEps + delp[halfIdx] + delp[(idx - p1) >> 1] + delp[(idx - p2) >> 1];
+
+    rbm[halfIdx] = (wtse * rbnw + wtnw * rbse) / (wtse + wtnw);
+    rbp[halfIdx] = (wtne * rbsw + wtsw * rbne) / (wtne + wtsw);
+
+    const float rbvarm =
+        epssq +
+        (gauss_seven(0) * (dgrbsq1m[(idx - v1) >> 1] + dgrbsq1m[(idx - 1) >> 1] +
+                           dgrbsq1m[(idx + 1) >> 1] + dgrbsq1m[(idx + v1) >> 1]) +
+         gauss_seven(1) * (dgrbsq1m[(idx - v2 - 1) >> 1] +
+                           dgrbsq1m[(idx - v2 + 1) >> 1] +
+                           dgrbsq1m[(idx - 2 - v1) >> 1] +
+                           dgrbsq1m[(idx + 2 - v1) >> 1] +
+                           dgrbsq1m[(idx - 2 + v1) >> 1] +
+                           dgrbsq1m[(idx + 2 + v1) >> 1] +
+                           dgrbsq1m[(idx + v2 - 1) >> 1] +
+                           dgrbsq1m[(idx + v2 + 1) >> 1]));
+    const float rbvarp =
+        epssq +
+        (gauss_seven(0) * (dgrbsq1p[(idx - v1) >> 1] + dgrbsq1p[(idx - 1) >> 1] +
+                           dgrbsq1p[(idx + 1) >> 1] + dgrbsq1p[(idx + v1) >> 1]) +
+         gauss_seven(1) * (dgrbsq1p[(idx - v2 - 1) >> 1] +
+                           dgrbsq1p[(idx - v2 + 1) >> 1] +
+                           dgrbsq1p[(idx - 2 - v1) >> 1] +
+                           dgrbsq1p[(idx + 2 - v1) >> 1] +
+                           dgrbsq1p[(idx - 2 + v1) >> 1] +
+                           dgrbsq1p[(idx + 2 + v1) >> 1] +
+                           dgrbsq1p[(idx + v2 - 1) >> 1] +
+                           dgrbsq1p[(idx + v2 + 1) >> 1]));
+    pmwt[halfIdx] = rbvarm / (rbvarp + rbvarm);
+
+    if (rbp[halfIdx] < cfa[idx])
+    {
+        const float bounded = ulim_f(rbp[halfIdx], cfa[idx - p1], cfa[idx + p1]);
+        if (xmul2f_probe(rbp[halfIdx]) < cfa[idx])
+        {
+            rbp[halfIdx] = bounded;
+        }
+        else
+        {
+            const float pwt = xmul2f_probe(cfa[idx] - rbp[halfIdx]) /
+                              (kEps + rbp[halfIdx] + cfa[idx]);
+            rbp[halfIdx] = pwt * rbp[halfIdx] + (1.0f - pwt) * bounded;
+        }
+    }
+    if (rbm[halfIdx] < cfa[idx])
+    {
+        const float bounded = ulim_f(rbm[halfIdx], cfa[idx - m1], cfa[idx + m1]);
+        if (xmul2f_probe(rbm[halfIdx]) < cfa[idx])
+        {
+            rbm[halfIdx] = bounded;
+        }
+        else
+        {
+            const float mwt = xmul2f_probe(cfa[idx] - rbm[halfIdx]) /
+                              (kEps + rbm[halfIdx] + cfa[idx]);
+            rbm[halfIdx] = mwt * rbm[halfIdx] + (1.0f - mwt) * bounded;
+        }
+    }
+
+    if (rbp[halfIdx] > kClipPoint)
+    {
+        rbp[halfIdx] = ulim_f(rbp[halfIdx], cfa[idx - p1], cfa[idx + p1]);
+    }
+    if (rbm[halfIdx] > kClipPoint)
+    {
+        rbm[halfIdx] = ulim_f(rbm[halfIdx], cfa[idx - m1], cfa[idx + m1]);
+    }
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1459,6 +1729,9 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->dgrb0, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dgrb2h, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dgrb2v, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->rbm, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->rbp, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->pmwt, kHalfTileSamples * sizeof(float)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -1485,6 +1758,9 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->dgrb0);
     cudaFree(d->dgrb2h);
     cudaFree(d->dgrb2v);
+    cudaFree(d->rbm);
+    cudaFree(d->rbp);
+    cudaFree(d->pmwt);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -1510,6 +1786,9 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.dgrb0, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.dgrb2h, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.dgrb2v, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.rbm, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.rbp, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.pmwt, 0, kHalfTileSamples * sizeof(float)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -1535,6 +1814,9 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->dgrb0.data(), d.dgrb0, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgrb2h.data(), d.dgrb2h, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgrb2v.data(), d.dgrb2v, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->rbm.data(), d.rbm, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->rbp.data(), d.rbp, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->pmwt.data(), d.pmwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -1737,6 +2019,17 @@ bool run_case(const CaseSpec & spec)
                                                 rr1,
                                                 cc1);
     CK(cudaGetLastError());
+    k_diagonal_rb_interpolation<<<grid, block>>>(d.cfa,
+                                                 d.delp,
+                                                 d.delm,
+                                                 d.dgrbsq1p,
+                                                 d.dgrbsq1m,
+                                                 d.rbm,
+                                                 d.rbp,
+                                                 d.pmwt,
+                                                 rr1,
+                                                 cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -1769,6 +2062,9 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "dgrb0", cpu.dgrb0, gpu.dgrb0) && ok;
     ok = report_compare(spec.name, "dgrb2h", cpu.dgrb2h, gpu.dgrb2h) && ok;
     ok = report_compare(spec.name, "dgrb2v", cpu.dgrb2v, gpu.dgrb2v) && ok;
+    ok = report_compare(spec.name, "rbm", cpu.rbm, gpu.rbm) && ok;
+    ok = report_compare(spec.name, "rbp", cpu.rbp, gpu.rbp) && ok;
+    ok = report_compare(spec.name, "pmwt", cpu.pmwt, gpu.pmwt) && ok;
     return ok;
 }
 }
@@ -1804,6 +2100,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb stages)\n";
     return ok ? 0 : 1;
 }
