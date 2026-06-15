@@ -554,6 +554,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileProducesJson)
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_available")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_reason")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_renderer")));
+    ASSERT_TRUE(metadata.value(QStringLiteral("gpu_amaze_debayer_backend_request")).toString()
+                == QStringLiteral("auto"));
+    ASSERT_TRUE(!metadata.value(QStringLiteral("gpu_amaze_debayer_environment_requested")).toBool());
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_available")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_reason")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_renderer")));
     ASSERT_EQ(1, metadata.value(QStringLiteral("dual_iso_mode_selected")).toInt());
     ASSERT_EQ(2, metadata.value(QStringLiteral("dual_iso_mode_effective")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("dual_iso_preview_runtime_active")).toBool());
@@ -1790,6 +1796,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerCpuBackendP
         const QJsonObject sample = value.toObject();
         ASSERT_TRUE(sample.contains(QStringLiteral("gpu_bilinear_debayer_active")));
         ASSERT_TRUE(!sample.value(QStringLiteral("gpu_bilinear_debayer_active")).toBool());
+        ASSERT_TRUE(sample.contains(QStringLiteral("gpu_amaze_debayer_active")));
+        ASSERT_TRUE(!sample.value(QStringLiteral("gpu_amaze_debayer_active")).toBool());
     }
 }
 
@@ -1851,6 +1859,12 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerGpuBackendP
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_available")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_reason")));
     ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_bilinear_debayer_probe_renderer")));
+    ASSERT_TRUE(metadata.value(QStringLiteral("gpu_amaze_debayer_backend_request")).toString()
+                == QStringLiteral("auto"));
+    ASSERT_TRUE(!metadata.value(QStringLiteral("gpu_amaze_debayer_environment_requested")).toBool());
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_available")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_reason")));
+    ASSERT_TRUE(metadata.contains(QStringLiteral("gpu_amaze_debayer_probe_renderer")));
     ASSERT_TRUE(metadata.value(QStringLiteral("qt_opengl_environment")).toString()
                 == QStringLiteral("desktop"));
     ASSERT_TRUE(metadata.value(QStringLiteral("qt_qpa_platform_environment")).toString()
@@ -1861,6 +1875,8 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerGpuBackendP
     for (const QJsonValue & value : frames) {
         const QJsonObject sample = value.toObject();
         ASSERT_TRUE(sample.contains(QStringLiteral("gpu_bilinear_debayer_active")));
+        ASSERT_TRUE(sample.contains(QStringLiteral("gpu_amaze_debayer_active")));
+        ASSERT_TRUE(!sample.value(QStringLiteral("gpu_amaze_debayer_active")).toBool());
         if (sample.contains(QStringLiteral("gpu_bilinear_debayer_fallback_reason"))) {
             ASSERT_TRUE(sample.contains(QStringLiteral("gpu_bilinear_debayer_renderer")));
         }
@@ -2667,6 +2683,85 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRejectsInvalidGpuBilinearDeba
     const QString stderr_output = QString::fromLocal8Bit(process.readAllStandardError());
     ASSERT_TRUE(stderr_output.contains(
         QStringLiteral("--gpu-bilinear-debayer must be one of auto, cpu, gpu")));
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRejectsInvalidGpuAmazeDebayerBackend)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-invalid-amaze-debayer.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--gpu-amaze-debayer") << QStringLiteral("bogus"));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(2, process.exitCode());
+
+    const QString stderr_output = QString::fromLocal8Bit(process.readAllStandardError());
+    ASSERT_TRUE(stderr_output.contains(
+        QStringLiteral("--gpu-amaze-debayer must be one of auto, cpu, gpu")));
+}
+
+TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRejectsGpuAmazeWithCpuPreviewProcessing)
+{
+    const QString fixture_path = clip_fixture_path();
+    if (!QFileInfo::exists(fixture_path)) {
+        SKIP_TEST("Missing fixture clip tests/fixtures/clips/tiny_dual_iso.mlv");
+    }
+
+    const QString app_exe = app_executable_path();
+    if (app_exe.isEmpty() || !QFileInfo::exists(app_exe)) {
+        SKIP_TEST("Set MLVAPP_PROFILE_EXE or MLVAPP_BATCH_EXE to a built MLVApp binary");
+    }
+
+    const QString repo_root = find_repo_root();
+    ASSERT_TRUE(!repo_root.isEmpty());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString output_json = temp_dir.filePath(QStringLiteral("playback-profile-amaze-cpu-processing.json"));
+
+    QProcess process;
+    configure_playback_profile_process(
+        &process,
+        app_exe,
+        repo_root,
+        QStringList()
+            << QStringLiteral("--profile-playback")
+            << QStringLiteral("--input") << fixture_path
+            << QStringLiteral("--output") << output_json
+            << QStringLiteral("--gpu-preview-processing") << QStringLiteral("cpu")
+            << QStringLiteral("--gpu-amaze-debayer") << QStringLiteral("gpu"));
+    process.start();
+    ASSERT_TRUE(process.waitForStarted());
+    ASSERT_TRUE(process.waitForFinished(-1));
+    ASSERT_EQ(2, process.exitCode());
+
+    const QString stderr_output = QString::fromLocal8Bit(process.readAllStandardError());
+    ASSERT_TRUE(stderr_output.contains(
+        QStringLiteral("--gpu-amaze-debayer gpu requires --gpu-preview-processing gpu or auto")));
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileRejectsInvalidPlaybackDebayer)

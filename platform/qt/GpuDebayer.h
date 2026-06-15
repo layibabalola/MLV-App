@@ -21,6 +21,8 @@ struct GpuAmazeDebayerBackendAvailability
 
 const char * gpuBilinearDebayerEnvironmentVariableName(void);
 bool gpuBilinearDebayerRequestedByEnvironment(void);
+const char * gpuAmazeDebayerEnvironmentVariableName(void);
+bool gpuAmazeDebayerRequestedByEnvironment(void);
 GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbeBackend(void);
 bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
                                          uint16_t * outputRgb16,

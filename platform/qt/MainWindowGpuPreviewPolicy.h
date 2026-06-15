@@ -25,6 +25,13 @@ enum class GpuBilinearDebayerBackendRequest
     Gpu
 };
 
+enum class GpuAmazeDebayerBackendRequest
+{
+    Auto = 0,
+    Cpu,
+    Gpu
+};
+
 struct MainWindowGpuPreviewPolicyState
 {
     bool gpuViewportInstalled = false;
@@ -36,6 +43,10 @@ struct MainWindowGpuPreviewPolicyState
         GpuBilinearDebayerBackendRequest::Auto;
     bool gpuBilinearDebayerEnvironmentRequested = false;
     bool gpuBilinearDebayerCompatible = false;
+    GpuAmazeDebayerBackendRequest gpuAmazeDebayerBackendRequest =
+        GpuAmazeDebayerBackendRequest::Auto;
+    bool gpuAmazeDebayerEnvironmentRequested = false;
+    bool gpuAmazeDebayerCompatible = false;
     bool histogramEnabled = false;
     bool waveformEnabled = false;
     bool paradeEnabled = false;
@@ -43,6 +54,7 @@ struct MainWindowGpuPreviewPolicyState
     bool renderThreadUsing16BitPreview = false;
     bool renderThreadUsingGpuProcessingPreview = false;
     bool renderThreadUsingGpuBilinearDebayer = false;
+    bool renderThreadUsingGpuAmazeDebayer = false;
     int playbackScaleFactorActive = 1;
     bool betterResizerEnabled = false;
     bool zebrasEnabled = false;
@@ -129,6 +141,36 @@ inline bool mainWindowUsesGpuBilinearDebayer(
     return mainWindowUsesGpuPreviewProcessing(state)
         && mainWindowAllowsGpuBilinearDebayer(state)
         && state.renderThreadUsingGpuBilinearDebayer;
+}
+
+inline bool mainWindowAllowsGpuAmazeDebayer(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    bool gpuAmazeDebayerRequested = false;
+    switch (state.gpuAmazeDebayerBackendRequest)
+    {
+    case GpuAmazeDebayerBackendRequest::Auto:
+        gpuAmazeDebayerRequested = state.gpuAmazeDebayerEnvironmentRequested;
+        break;
+    case GpuAmazeDebayerBackendRequest::Cpu:
+        gpuAmazeDebayerRequested = false;
+        break;
+    case GpuAmazeDebayerBackendRequest::Gpu:
+        gpuAmazeDebayerRequested = true;
+        break;
+    }
+
+    return mainWindowAllowsGpuPreviewProcessing(state)
+        && gpuAmazeDebayerRequested
+        && state.gpuAmazeDebayerCompatible;
+}
+
+inline bool mainWindowUsesGpuAmazeDebayer(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    return mainWindowUsesGpuPreviewProcessing(state)
+        && mainWindowAllowsGpuAmazeDebayer(state)
+        && state.renderThreadUsingGpuAmazeDebayer;
 }
 
 inline bool mainWindowUsesGpuImagePresentation(

@@ -279,8 +279,11 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
 - `--gpu-preview-processing <auto|cpu|gpu>` exercises the production
   preview-policy seam without depending only on the environment variable.
 - `--gpu-bilinear-debayer <auto|cpu|gpu>` is the production-adjacent control
-  for the existing experimental bilinear GPU debayer path only; AMaZE
-  remains intentionally unsupported.
+  for the existing experimental bilinear GPU debayer path.
+- `--gpu-amaze-debayer <auto|cpu|gpu>` is the explicit Full Quality AMaZE GPU
+  selector. It remains off by default; `gpu` implies the preview-processing GPU
+  seam and falls back to CPU AMaZE with telemetry if the CUDA DLL path is
+  unavailable or unsupported.
 - `--playback-processing <auto|receipt|subset>` controls playback-processing
   mode. Current local semantics:
   - `auto` defaults to the receipt path.
@@ -339,6 +342,8 @@ Per-stage resolution telemetry uses the prefix
 - `gpu_preview_processing_environment_requested`
 - `gpu_bilinear_debayer_backend_request`
 - `gpu_bilinear_debayer_environment_requested`
+- `gpu_amaze_debayer_backend_request`
+- `gpu_amaze_debayer_environment_requested`
 - `dual_iso_mode_selected`
 - `dual_iso_mode_effective`
 - `dual_iso_preview_runtime_active`
@@ -351,6 +356,12 @@ Per-stage resolution telemetry uses the prefix
 - `gpu_bilinear_debayer_probe_reason`
 - `gpu_bilinear_debayer_probe_renderer`
 
+### One-time GPU AMaZE debayer probe
+
+- `gpu_amaze_debayer_probe_available`
+- `gpu_amaze_debayer_probe_reason`
+- `gpu_amaze_debayer_probe_renderer`
+
 ### Per-frame GPU activation
 
 - `gpu16_preview_active`
@@ -358,6 +369,9 @@ Per-stage resolution telemetry uses the prefix
 - `gpu_bilinear_debayer_active`
 - optional `gpu_bilinear_debayer_renderer`
 - optional `gpu_bilinear_debayer_fallback_reason`
+- `gpu_amaze_debayer_active`
+- optional `gpu_amaze_debayer_renderer`
+- optional `gpu_amaze_debayer_fallback_reason`
 
 ### Per-frame outer CPU stages
 

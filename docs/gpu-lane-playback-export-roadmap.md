@@ -122,7 +122,7 @@ Minimal   — Basic / None (Fastest, last-resort cadence rescue)
 | Stage | Engineering done | GUI may honestly offer |
 |---|---|---|
 | 1 | P2 / E1 (recon + bilinear, 0-LSB) | `GPU` engine; Full-Quality-AMaZE routes to **CPU**; GPU bilinear only under a labeled *Performance* mode |
-| 2 | P-pre passes (AMaZE debayer + processing parity) | `GPU · Full Quality · AMaZE` becomes a true selectable path |
+| 2 | P-pre passes (AMaZE debayer + processing parity) | `GPU · Full Quality · AMaZE` becomes a true explicit path, with CPU AMaZE fallback reported instead of silent bilinear substitution |
 
 P-pre is therefore both the engineering gate and the GUI-claim gate — it's what prevents a "Full Quality" toggle that silently isn't.
 
@@ -143,8 +143,8 @@ North star: *"I can trust what I'm seeing and exporting,"* while the app quietly
 
 ## Execution order (recommended)
 1. **Lane A E0–E2** (GPU CDNG export, byte-exact) — lowest-risk first production use; serves the batch-export mission.
-2. **P-pre** quality completion (AMaZE debayer + processing parity) — unlocks honest "GPU Full Quality" everywhere.
-3. **Lane B P1–P4** (CUDA playback) — the user-facing realtime win.
+2. **P-pre** quality completion (AMaZE debayer + processing parity) — unlocks honest "GPU Full Quality" routing.
+3. **Lane B P1–P4** (CUDA playback) — first explicit AMaZE playback routing, then the no-readback/user-facing realtime wins.
 4. **Lane A E3–E4** (export pipeline + rendered/NVENC) and **Lane C** (Vulkan/Metal) as parallel/later tracks.
 
 Supervised items (touch shipping `src/` or protected branch): all `src/` wiring in §3-4, and merging the work-block branch. The backend, parity harness, and this plan are ready.

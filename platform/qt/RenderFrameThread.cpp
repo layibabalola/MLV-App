@@ -28,6 +28,10 @@
 #include <atomic>
 #include <cmath>
 
+extern "C" {
+#include "../../src/debayer/wb_conversion.h"
+}
+
 namespace {
 
 bool phase3StageCsvSinkEnsureOpen()
@@ -102,13 +106,16 @@ RenderFrameThread::RenderFrameThread()
     m_pMlvObject = nullptr;
     m_activeOutputMode = OutputProcessed8;
     m_activeUseGpuBilinearDebayer = false;
+    m_activeUseGpuAmazeDebayer = false;
     m_activeFrameNumber = 0;
     m_activeFrameRequestSerial = 0;
     m_activePresentationContext = ReadyFrame::PresentationContext();
     m_activePresentationPreparationOptions = PresentationPreparationOptions();
     m_activeQueuedPlaybackDropCount = 0;
     m_loggedGpuBilinearSuccess = false;
+    m_loggedGpuAmazeSuccess = false;
     m_lastFrameUsedGpuBilinearDebayer = false;
+    m_lastFrameUsedGpuAmazeDebayer = false;
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
@@ -162,6 +169,7 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_imageWidth = imageWidth;
     m_imageHeight = imageHeight;
     m_activeUseGpuBilinearDebayer = false;
+    m_activeUseGpuAmazeDebayer = false;
     m_activeFrameNumber = 0;
     m_activeFrameRequestSerial = 0;
     m_activeOutputMode = OutputProcessed8;
@@ -173,6 +181,9 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_lastFrameUsedGpuBilinearDebayer = false;
     m_lastGpuBilinearFallbackReason.clear();
     m_lastGpuBilinearRendererDescription.clear();
+    m_lastFrameUsedGpuAmazeDebayer = false;
+    m_lastGpuAmazeFallbackReason.clear();
+    m_lastGpuAmazeRendererDescription.clear();
     m_lastDualIsoPreviewHistogramMs = 0.0;
     m_lastDualIsoPreviewRegressionMs = 0.0;
     m_lastDualIsoPreviewRowscaleMs = 0.0;
@@ -182,6 +193,7 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_lastRenderThreadTotalMs = 0.0;
     m_lastFrameReadyEmitStageTime = 0.0;
     m_gpuBilinearDebayerRawFrame.clear();
+    m_gpuAmazeDebayerRawFrame.clear();
     const size_t pixelCount =
         static_cast<size_t>(qMax(0, imageWidth)) * static_cast<size_t>(qMax(0, imageHeight));
     const size_t rgbPixelCount = pixelCount * 3u;
@@ -198,6 +210,7 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
 void RenderFrameThread::renderFrame(uint32_t frameNumber,
                                     OutputMode outputMode,
                                     bool useGpuBilinearDebayer,
+                                    bool useGpuAmazeDebayer,
                                     uint64_t requestSerial,
                                     const ReadyFrame::PresentationContext &presentationContext,
                                     const PresentationPreparationOptions &presentationPreparation)
@@ -207,6 +220,7 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
     request.frameNumber = frameNumber;
     request.outputMode = outputMode;
     request.useGpuBilinearDebayer = useGpuBilinearDebayer;
+    request.useGpuAmazeDebayer = useGpuAmazeDebayer;
     request.requestSerial = requestSerial;
     request.requestStageTime = mlv_stage_timing_now();
     request.phase3Mode = phase3Mode();
@@ -320,6 +334,9 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->usedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
         frame->gpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
         frame->gpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
+        frame->usedGpuAmazeDebayer = slot.usedGpuAmazeDebayer;
+        frame->gpuAmazeFallbackReason = slot.gpuAmazeFallbackReason;
+        frame->gpuAmazeRendererDescription = slot.gpuAmazeRendererDescription;
         frame->dualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
         frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
@@ -377,6 +394,21 @@ QString RenderFrameThread::lastGpuBilinearFallbackReason() const
 QString RenderFrameThread::lastGpuBilinearRendererDescription() const
 {
     return m_lastGpuBilinearRendererDescription;
+}
+
+bool RenderFrameThread::lastFrameUsedGpuAmazeDebayer() const
+{
+    return m_lastFrameUsedGpuAmazeDebayer;
+}
+
+QString RenderFrameThread::lastGpuAmazeFallbackReason() const
+{
+    return m_lastGpuAmazeFallbackReason;
+}
+
+QString RenderFrameThread::lastGpuAmazeRendererDescription() const
+{
+    return m_lastGpuAmazeRendererDescription;
 }
 
 double RenderFrameThread::lastDualIsoPreviewHistogramMilliseconds() const
@@ -759,6 +791,7 @@ void RenderFrameThread::setupActiveRequestLocked( const RenderRequest &request, 
     m_activeFrameNumber = request.frameNumber;
     m_activeOutputMode = request.outputMode;
     m_activeUseGpuBilinearDebayer = request.useGpuBilinearDebayer;
+    m_activeUseGpuAmazeDebayer = request.useGpuAmazeDebayer;
     m_activeFrameRequestSerial = request.requestSerial;
     m_activeFrameRequestStageTime = request.requestStageTime;
     m_activePresentationContext = request.presentationContext;
@@ -1207,6 +1240,7 @@ void RenderFrameThread::runSerial(void)
         m_activeFrameNumber = request.frameNumber;
         m_activeOutputMode = request.outputMode;
         m_activeUseGpuBilinearDebayer = request.useGpuBilinearDebayer;
+        m_activeUseGpuAmazeDebayer = request.useGpuAmazeDebayer;
         m_activeFrameRequestSerial = request.requestSerial;
         m_activeFrameRequestStageTime = request.requestStageTime;
         m_activePresentationContext = request.presentationContext;
@@ -1465,6 +1499,9 @@ void RenderFrameThread::copySlotTelemetryLocked( const FrameSlot &slot )
     m_lastFrameUsedGpuBilinearDebayer = slot.usedGpuBilinearDebayer;
     m_lastGpuBilinearFallbackReason = slot.gpuBilinearFallbackReason;
     m_lastGpuBilinearRendererDescription = slot.gpuBilinearRendererDescription;
+    m_lastFrameUsedGpuAmazeDebayer = slot.usedGpuAmazeDebayer;
+    m_lastGpuAmazeFallbackReason = slot.gpuAmazeFallbackReason;
+    m_lastGpuAmazeRendererDescription = slot.gpuAmazeRendererDescription;
     m_lastDualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
     m_lastDualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
     m_lastDualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
@@ -1494,6 +1531,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const uint32_t frameNumber = slot.frameNumber;
     const OutputMode outputMode = slot.outputMode;
     const bool useGpuBilinearDebayer = m_activeUseGpuBilinearDebayer;
+    const bool useGpuAmazeDebayer = m_activeUseGpuAmazeDebayer;
     const int playbackScaleFactor = m_activePresentationContext.playbackScaleFactor;
     const bool playbackPreviewFastPathActive =
         outputMode == OutputProcessed8
@@ -1533,6 +1571,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
     if ( !useGpuBilinearDebayer )
     {
         slot.gpuBilinearFallbackReason.clear();
+    }
+    if ( !useGpuAmazeDebayer )
+    {
+        slot.gpuAmazeFallbackReason.clear();
     }
 
     /* Read the requested scale factor. The MLV core can still reject invalid
@@ -1608,8 +1650,85 @@ void RenderFrameThread::drawFrame( int slotIndex,
     else if ( outputMode == OutputDebayered16 && !slot.rawImage16.empty() )
     {
         bool usedGpuBilinearDebayer = false;
+        bool usedGpuAmazeDebayer = false;
         bool renderedDebayeredFrame = false;
-        if ( useGpuBilinearDebayer && m_pMlvObject )
+        if ( useGpuAmazeDebayer && m_pMlvObject )
+        {
+            const int width = getMlvWidth( m_pMlvObject );
+            const int height = getMlvHeight( m_pMlvObject );
+            const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+            m_gpuAmazeDebayerRawFrame.resize( pixelCount );
+            getMlvRawFrameFloat( m_pMlvObject,
+                                 frameNumber,
+                                 m_gpuAmazeDebayerRawFrame.data() );
+
+            QString gpuReason;
+            QString rendererDescription;
+            if ( m_pMlvObject->ca_red <= -0.1 || m_pMlvObject->ca_red >= 0.1
+              || m_pMlvObject->ca_blue <= -0.1 || m_pMlvObject->ca_blue >= 0.1 )
+            {
+                gpuReason = QStringLiteral(
+                    "GPU AMaZE debayer does not support CA correction yet; falling back to CPU AMaZE");
+            }
+            else
+            {
+                wb_convert_info_t wbInfo;
+                wb_convert( &wbInfo,
+                            m_gpuAmazeDebayerRawFrame.data(),
+                            width,
+                            height,
+                            getMlvBlackLevel( m_pMlvObject ) );
+                usedGpuAmazeDebayer =
+                    gpuAmazeDebayerApplyGpuOffscreen( m_gpuAmazeDebayerRawFrame.data(),
+                                                      slot.rawImage16.data(),
+                                                      width,
+                                                      height,
+                                                      &gpuReason,
+                                                      &rendererDescription );
+                if ( usedGpuAmazeDebayer )
+                {
+                    wb_undo( &wbInfo,
+                             slot.rawImage16.data(),
+                             width,
+                             height,
+                             getMlvBlackLevel( m_pMlvObject ) );
+                }
+            }
+
+            if ( usedGpuAmazeDebayer )
+            {
+                renderedDebayeredFrame = true;
+                slot.usedGpuAmazeDebayer = true;
+                slot.gpuAmazeFallbackReason.clear();
+                slot.gpuAmazeRendererDescription = rendererDescription;
+                if ( !m_loggedGpuAmazeSuccess )
+                {
+                    qInfo() << "GPU AMaZE debayer enabled for the debayered-16 preview path"
+                            << "(renderer:"
+                            << (rendererDescription.isEmpty() ? QStringLiteral("unknown") : rendererDescription)
+                            << ").";
+                    m_loggedGpuAmazeSuccess = true;
+                }
+            }
+            else
+            {
+                slot.usedGpuAmazeDebayer = false;
+                slot.gpuAmazeRendererDescription = rendererDescription;
+                const QString previousFallbackReason = m_lastGpuAmazeFallbackReason;
+                if ( !gpuReason.isEmpty()
+                  && gpuReason != previousFallbackReason )
+                {
+                    qWarning().nospace()
+                        << "GPU AMaZE debayer fell back to CPU: "
+                        << gpuReason
+                        << " (renderer="
+                        << (rendererDescription.isEmpty() ? QStringLiteral("unknown") : rendererDescription)
+                        << ").";
+                }
+                slot.gpuAmazeFallbackReason = gpuReason;
+            }
+        }
+        else if ( useGpuBilinearDebayer && m_pMlvObject )
         {
             const int width = getMlvWidth( m_pMlvObject );
             const int height = getMlvHeight( m_pMlvObject );
@@ -1671,6 +1790,24 @@ void RenderFrameThread::drawFrame( int slotIndex,
         if ( !renderedDebayeredFrame )
         {
             getMlvRawFrameDebayered( m_pMlvObject, frameNumber, slot.rawImage16.data() );
+        }
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_bilinear_debayer_active"),
+            usedGpuBilinearDebayer );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_debayer_active"),
+            usedGpuAmazeDebayer );
+        if ( !slot.gpuAmazeFallbackReason.isEmpty() )
+        {
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_fallback_reason"),
+                slot.gpuAmazeFallbackReason );
+        }
+        if ( !slot.gpuAmazeRendererDescription.isEmpty() )
+        {
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_renderer"),
+                slot.gpuAmazeRendererDescription );
         }
         mlv_stage_timing_note("render_thread_draw16_debayered", frameNumber, render_start);
     }
