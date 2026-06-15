@@ -13,6 +13,7 @@
  *   - scalar-order variance selection and saturation-bound refinement
  *   - adaptive horizontal/vertical green interpolation weights (hvwt)
  *   - Nyquist texture detection flags
+ *   - Nyquist-region area interpolation hvwt refinement
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -643,6 +644,50 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             if (nyquisttemp < 4) out->nyquist[idx >> 1] = 0;
         }
     }
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            if (out->nyquist[idx >> 1])
+            {
+                float sumh = 0.0f;
+                float sumv = 0.0f;
+                float sumsqh = 0.0f;
+                float sumsqv = 0.0f;
+                float areawt = 0.0f;
+                for (int i = -6; i < 7; i += 2)
+                {
+                    for (int j = -6; j < 7; j += 2)
+                    {
+                        const int idx1 = (rr + i) * kTileSize + cc + j;
+                        if (out->nyquist[idx1 >> 1])
+                        {
+                            sumh +=
+                                out->cfa[idx1] -
+                                xdiv2f_probe(out->cfa[idx1 - 1] + out->cfa[idx1 + 1]);
+                            sumv +=
+                                out->cfa[idx1] -
+                                xdiv2f_probe(out->cfa[idx1 - v1] + out->cfa[idx1 + v1]);
+                            sumsqh +=
+                                xdiv2f_probe(sqr_f(out->cfa[idx1] - out->cfa[idx1 - 1]) +
+                                             sqr_f(out->cfa[idx1] - out->cfa[idx1 + 1]));
+                            sumsqv +=
+                                xdiv2f_probe(sqr_f(out->cfa[idx1] - out->cfa[idx1 - v1]) +
+                                             sqr_f(out->cfa[idx1] - out->cfa[idx1 + v1]));
+                            areawt += 1.0f;
+                        }
+                    }
+                }
+
+                const float hcdvar = epssq + fabsf(areawt * sumsqh - sumh * sumh);
+                const float vcdvar = epssq + fabsf(areawt * sumsqv - sumv * sumv);
+                out->hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
+            }
+        }
+    }
 }
 
 __global__ void k_tile_load(const uint16_t * raw,
@@ -1104,6 +1149,54 @@ __global__ void k_nyquist_refine_scalar(unsigned char * nyquist, int rr1, int cc
     }
 }
 
+__global__ void k_nyquist_area_interpolation(const float * cfa,
+                                             const unsigned char * nyquist,
+                                             float * hvwt,
+                                             int rr1,
+                                             int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 8 || rr >= rr1 - 8) return;
+
+    const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 8 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const float epssq = kEps * kEps;
+    const int idx = rr * kTileSize + cc;
+    if (!nyquist[idx >> 1]) return;
+
+    float sumh = 0.0f;
+    float sumv = 0.0f;
+    float sumsqh = 0.0f;
+    float sumsqv = 0.0f;
+    float areawt = 0.0f;
+    for (int i = -6; i < 7; i += 2)
+    {
+        for (int j = -6; j < 7; j += 2)
+        {
+            const int idx1 = (rr + i) * kTileSize + cc + j;
+            if (nyquist[idx1 >> 1])
+            {
+                sumh += cfa[idx1] - xdiv2f_probe(cfa[idx1 - 1] + cfa[idx1 + 1]);
+                sumv += cfa[idx1] - xdiv2f_probe(cfa[idx1 - v1] + cfa[idx1 + v1]);
+                sumsqh +=
+                    xdiv2f_probe(sqr_f(cfa[idx1] - cfa[idx1 - 1]) +
+                                 sqr_f(cfa[idx1] - cfa[idx1 + 1]));
+                sumsqv +=
+                    xdiv2f_probe(sqr_f(cfa[idx1] - cfa[idx1 - v1]) +
+                                 sqr_f(cfa[idx1] - cfa[idx1 + v1]));
+                areawt += 1.0f;
+            }
+        }
+    }
+
+    const float hcdvar = epssq + fabsf(areawt * sumsqh - sumh * sumh);
+    const float vcdvar = epssq + fabsf(areawt * sumsqv - sumv * sumv);
+    hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1379,6 +1472,12 @@ bool run_case(const CaseSpec & spec)
     CK(cudaGetLastError());
     k_nyquist_refine_scalar<<<1, 1>>>(d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
+    k_nyquist_area_interpolation<<<grid, block>>>(d.cfa,
+                                                  d.nyquist,
+                                                  d.hvwt,
+                                                  rr1,
+                                                  cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -1443,6 +1542,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area stages)\n";
     return ok ? 0 : 1;
 }
