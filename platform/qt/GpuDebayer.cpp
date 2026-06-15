@@ -239,6 +239,13 @@ bool makeDebayerContextCurrent(QOffscreenSurface * surface,
 
     return true;
 }
+
+QString gpuAmazeDebayerUnavailableReason(void)
+{
+    return QStringLiteral(
+        "not yet implemented: GPU AMaZE debayer backend is unavailable; "
+        "do not route AMaZE to bilinear or CPU fallback under the GPU backend");
+}
 }
 
 const char * gpuBilinearDebayerEnvironmentVariableName(void)
@@ -379,4 +386,25 @@ bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
 
     if ( reason ) reason->clear();
     return true;
+}
+
+GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeBackend(void)
+{
+    GpuAmazeDebayerBackendAvailability availability;
+    availability.available = false;
+    availability.reason = gpuAmazeDebayerUnavailableReason();
+    availability.rendererDescription.clear();
+    return availability;
+}
+
+bool gpuAmazeDebayerApplyGpuOffscreen(const float *,
+                                      uint16_t *,
+                                      int,
+                                      int,
+                                      QString * reason,
+                                      QString * rendererDescription)
+{
+    if ( reason ) *reason = gpuAmazeDebayerUnavailableReason();
+    if ( rendererDescription ) rendererDescription->clear();
+    return false;
 }

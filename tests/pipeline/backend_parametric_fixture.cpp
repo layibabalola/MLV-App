@@ -95,11 +95,13 @@ BackendParametricFixture::BackendAvailability BackendParametricFixture::probeDeb
     case Backend::Cpu:
         return {true, QString(), QString()};
     case Backend::Gpu:
-        if (mode != DebayerMode::Bilinear)
+        if (mode == DebayerMode::Amaze)
         {
-            return {false,
-                    QStringLiteral("not yet implemented: GPU debayer backend currently supports bilinear only"),
-                    QString()};
+            const GpuAmazeDebayerBackendAvailability availability =
+                gpuAmazeDebayerProbeBackend();
+            return {availability.available,
+                    availability.reason,
+                    availability.rendererDescription};
         }
         {
             const GpuBilinearDebayerBackendAvailability availability =
@@ -209,14 +211,34 @@ std::vector<uint16_t> BackendParametricFixture::renderDebayeredFrame(
         return renderDebayeredFrame16(frame_index);
     }
     case Backend::Gpu:
-        if (mode != DebayerMode::Bilinear)
+        if (mode == DebayerMode::Amaze)
         {
-            if (error_message)
+            const std::vector<float> raw = renderRawFrameFloat(frame_index);
+            if (raw.empty())
             {
-                *error_message = QStringLiteral(
-                    "not yet implemented: GPU debayer backend currently supports bilinear only");
+                if (error_message)
+                {
+                    *error_message = QStringLiteral(
+                        "Raw frame is empty; check clip open / receipt apply.");
+                }
+                return std::vector<uint16_t>();
             }
-            return std::vector<uint16_t>();
+
+            std::vector<uint16_t> output(
+                static_cast<std::size_t>(width()) *
+                static_cast<std::size_t>(height()) * 3u,
+                0);
+            QString renderer_description;
+            if (!gpuAmazeDebayerApplyGpuOffscreen(raw.data(),
+                                                   output.data(),
+                                                   width(),
+                                                   height(),
+                                                   error_message,
+                                                   &renderer_description))
+            {
+                return std::vector<uint16_t>();
+            }
+            return output;
         }
 
         {
