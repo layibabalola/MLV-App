@@ -374,9 +374,8 @@ bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
     rawTexture->release();
     program.release();
     fbo.release();
-    context.doneCurrent();
-
     delete rawTexture;
+    context.doneCurrent();
 
     if ( reason ) reason->clear();
     return true;

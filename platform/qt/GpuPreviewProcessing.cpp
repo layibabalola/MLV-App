@@ -945,7 +945,6 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gammaTexture->release();
     program.release();
     fbo.release();
-    context.doneCurrent();
 
     delete frameTexture;
     delete levelsTexture;
@@ -953,6 +952,7 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete matrixGTexture;
     delete matrixBTexture;
     delete gammaTexture;
+    context.doneCurrent();
 
     if ( reason ) reason->clear();
     return true;
