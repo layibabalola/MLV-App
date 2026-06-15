@@ -191,6 +191,36 @@ def work_block_commit_subject(manifest: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def commit_changed_paths(repo_root: Path, commit_hash: str) -> List[str]:
+    result = run_git(repo_root, ["diff-tree", "--no-commit-id", "--name-only", "-r", commit_hash])
+    if result.returncode != 0:
+        return []
+    return sorted({normalize_rel(line) for line in result.stdout.splitlines() if normalize_rel(line)})
+
+
+def closeout_evidence_paths_only(paths: Sequence[str]) -> bool:
+    normalized = [normalize_rel(path) for path in paths if normalize_rel(str(path))]
+    return bool(normalized) and all(path.startswith(".closeout-evidence/") for path in normalized)
+
+
+def delivered_work_commit_subject(repo_root: Path, detection: Dict[str, Any], manifest: Optional[Dict[str, Any]]) -> str:
+    target_head = str(detection.get("targetHead") or "")
+    feature_head = str(detection.get("featureHead") or "")
+    if target_head and feature_head:
+        result = run_git(repo_root, ["log", "--format=%H%x1f%s", f"{target_head}..{feature_head}"])
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "\x1f" not in line:
+                    continue
+                commit_hash, subject = line.split("\x1f", 1)
+                if closeout_evidence_paths_only(commit_changed_paths(repo_root, commit_hash)):
+                    continue
+                clean_subject = normalize_commit_subject(subject)
+                if clean_subject:
+                    return clean_subject
+    return work_block_commit_subject(manifest)
+
+
 def evidence_repair_commit_message(
     config: Dict[str, Any],
     *,
@@ -3755,7 +3785,7 @@ def repair_missing_evidence(repo_root_arg: Path, config: Dict[str, Any], detecti
         reason=reason,
         work_block_id=work_block_id,
         paths=paths,
-        work_summary=work_block_commit_subject(manifest),
+        work_summary=delivered_work_commit_subject(repo_root, detection, manifest),
     )
     commit = run_git(repo_root, ["commit", "-m", commit_message])
     if commit.returncode != 0:
@@ -5956,7 +5986,7 @@ def _finalize_work_block_once(
     block_id = detection["workBlockId"]
     update_manifest(repo_root, config, block_id, {"state": "finalizing", "completedAt": utc_now()})
     manifest = load_manifest(repo_root, config, block_id)
-    commit_subject = work_block_commit_subject(manifest)
+    commit_subject = delivered_work_commit_subject(repo_root, detection, manifest)
     base_guard = validate_work_block_start_head_integrated(repo_root, config, detection, manifest)
     if base_guard:
         write_audit(repo_root, config, "work_block_base_not_integrated", base_guard, work_block_id=block_id, outcome="blocked")
