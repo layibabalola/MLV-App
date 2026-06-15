@@ -12,6 +12,7 @@
  *   - first green-direction interpolation color-difference planes
  *   - scalar-order variance selection and saturation-bound refinement
  *   - adaptive horizontal/vertical green interpolation weights (hvwt)
+ *   - Nyquist texture detection flags
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -45,6 +46,7 @@ constexpr float kEps = 1.0e-5f;
 constexpr float kAdaptiveRatioThreshold = 0.75f;
 constexpr float kClipPoint = 1.0f;
 constexpr float kClipPoint8 = 0.8f;
+constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
 
 struct CaseSpec
@@ -75,6 +77,7 @@ struct StageBuffers
     std::vector<float> dginth;
     std::vector<float> cddiffsq;
     std::vector<float> hvwt;
+    std::vector<unsigned char> nyquist;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -94,6 +97,7 @@ struct StageBuffers
         , dginth(kTileSamples, 0.0f)
         , cddiffsq(kTileSamples, 0.0f)
         , hvwt(kHalfTileSamples, 0.0f)
+        , nyquist(kHalfTileSamples, 0)
     {
     }
 };
@@ -118,6 +122,7 @@ struct DeviceBuffers
     float * dginth = nullptr;
     float * cddiffsq = nullptr;
     float * hvwt = nullptr;
+    unsigned char * nyquist = nullptr;
 };
 
 struct CompareStats
@@ -125,6 +130,14 @@ struct CompareStats
     std::size_t mismatches = 0;
     std::size_t bitMismatches = 0;
     float maxAbs = 0.0f;
+    std::size_t maxIndex = 0;
+};
+
+struct ByteCompareStats
+{
+    std::size_t mismatches = 0;
+    std::size_t bitMismatches = 0;
+    int maxAbs = 0;
     std::size_t maxIndex = 0;
 };
 
@@ -152,6 +165,30 @@ __host__ __device__ int fc_rggb(int row, int col)
 __host__ __device__ float sqr_f(float value)
 {
     return value * value;
+}
+
+__host__ __device__ float gauss_odd(int index)
+{
+    switch (index)
+    {
+        case 0: return 0.14659727707323927f;
+        case 1: return 0.103592713382435f;
+        case 2: return 0.0732036125103057f;
+        default: return 0.0365543548389495f;
+    }
+}
+
+__host__ __device__ float gauss_grad(int index)
+{
+    switch (index)
+    {
+        case 0: return 0.07384411893421103f;
+        case 1: return 0.06207511968171489f;
+        case 2: return 0.0521818194747806f;
+        case 3: return 0.03687419286733595f;
+        case 4: return 0.03099732204057846f;
+        default: return 0.018413194161458882f;
+    }
 }
 
 __host__ __device__ float min_f(float a, float b)
@@ -222,6 +259,8 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
     const int v2 = 2 * kTileSize;
     const int p1 = -kTileSize + 1;
     const int m1 = kTileSize + 1;
+    const int p2 = -2 * kTileSize + 2;
+    const int m2 = 2 * kTileSize + 2;
 
     for (int rr = 0; rr < rr1; ++rr)
     {
@@ -538,6 +577,70 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             {
                 out->hvwt[idx >> 1] = diffwt;
             }
+        }
+    }
+
+    for (int rr = 6; rr < rr1 - 6; ++rr)
+    {
+        for (int cc = 6 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 6;
+             cc += 2, idx += 2)
+        {
+            float nyqtest =
+                gauss_odd(0) * out->cddiffsq[idx] +
+                gauss_odd(1) * (out->cddiffsq[idx - m1] + out->cddiffsq[idx + p1] +
+                                out->cddiffsq[idx - p1] + out->cddiffsq[idx + m1]) +
+                gauss_odd(2) * (out->cddiffsq[idx - v2] + out->cddiffsq[idx - 2] +
+                                out->cddiffsq[idx + 2] + out->cddiffsq[idx + v2]) +
+                gauss_odd(3) * (out->cddiffsq[idx - m2] + out->cddiffsq[idx + p2] +
+                                out->cddiffsq[idx - p2] + out->cddiffsq[idx + m2]);
+
+            nyqtest -=
+                kNyquistThreshold *
+                (gauss_grad(0) * out->delhvsqsum[idx] +
+                 gauss_grad(1) * (out->delhvsqsum[idx - v1] + out->delhvsqsum[idx + 1] +
+                                  out->delhvsqsum[idx - 1] + out->delhvsqsum[idx + v1]) +
+                 gauss_grad(2) * (out->delhvsqsum[idx - m1] + out->delhvsqsum[idx + p1] +
+                                  out->delhvsqsum[idx - p1] + out->delhvsqsum[idx + m1]) +
+                 gauss_grad(3) * (out->delhvsqsum[idx - v2] + out->delhvsqsum[idx - 2] +
+                                  out->delhvsqsum[idx + 2] + out->delhvsqsum[idx + v2]) +
+                 gauss_grad(4) * (out->delhvsqsum[idx - 2 * kTileSize - 1] +
+                                  out->delhvsqsum[idx - 2 * kTileSize + 1] +
+                                  out->delhvsqsum[idx - kTileSize - 2] +
+                                  out->delhvsqsum[idx - kTileSize + 2] +
+                                  out->delhvsqsum[idx + kTileSize - 2] +
+                                  out->delhvsqsum[idx + kTileSize + 2] +
+                                  out->delhvsqsum[idx + 2 * kTileSize - 1] +
+                                  out->delhvsqsum[idx + 2 * kTileSize + 1]) +
+                 gauss_grad(5) * (out->delhvsqsum[idx - m2] + out->delhvsqsum[idx + p2] +
+                                  out->delhvsqsum[idx - p2] + out->delhvsqsum[idx + m2]));
+
+            if (nyqtest > 0.0f)
+            {
+                out->nyquist[idx >> 1] = 1;
+            }
+        }
+    }
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            const unsigned int nyquisttemp =
+                out->nyquist[(idx - v2) >> 1] +
+                out->nyquist[(idx - m1) >> 1] +
+                out->nyquist[(idx + p1) >> 1] +
+                out->nyquist[(idx - 2) >> 1] +
+                out->nyquist[idx >> 1] +
+                out->nyquist[(idx + 2) >> 1] +
+                out->nyquist[(idx - p1) >> 1] +
+                out->nyquist[(idx + m1) >> 1] +
+                out->nyquist[(idx + v2) >> 1];
+
+            if (nyquisttemp > 4) out->nyquist[idx >> 1] = 1;
+            if (nyquisttemp < 4) out->nyquist[idx >> 1] = 0;
         }
     }
 }
@@ -916,6 +1019,91 @@ __global__ void k_hvwt_adaptive_weights(const float * dirwts0,
     }
 }
 
+__global__ void k_nyquist_test(const float * cddiffsq,
+                               const float * delhvsqsum,
+                               unsigned char * nyquist,
+                               int rr1,
+                               int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 6 || rr >= rr1 - 6) return;
+
+    const int ccStart = 6 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 6 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const int v2 = 2 * kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+    const int p2 = -2 * kTileSize + 2;
+    const int m2 = 2 * kTileSize + 2;
+    const int idx = rr * kTileSize + cc;
+
+    float nyqtest =
+        gauss_odd(0) * cddiffsq[idx] +
+        gauss_odd(1) * (cddiffsq[idx - m1] + cddiffsq[idx + p1] +
+                        cddiffsq[idx - p1] + cddiffsq[idx + m1]) +
+        gauss_odd(2) * (cddiffsq[idx - v2] + cddiffsq[idx - 2] +
+                        cddiffsq[idx + 2] + cddiffsq[idx + v2]) +
+        gauss_odd(3) * (cddiffsq[idx - m2] + cddiffsq[idx + p2] +
+                        cddiffsq[idx - p2] + cddiffsq[idx + m2]);
+
+    nyqtest -=
+        kNyquistThreshold *
+        (gauss_grad(0) * delhvsqsum[idx] +
+         gauss_grad(1) * (delhvsqsum[idx - v1] + delhvsqsum[idx + 1] +
+                          delhvsqsum[idx - 1] + delhvsqsum[idx + v1]) +
+         gauss_grad(2) * (delhvsqsum[idx - m1] + delhvsqsum[idx + p1] +
+                          delhvsqsum[idx - p1] + delhvsqsum[idx + m1]) +
+         gauss_grad(3) * (delhvsqsum[idx - v2] + delhvsqsum[idx - 2] +
+                          delhvsqsum[idx + 2] + delhvsqsum[idx + v2]) +
+         gauss_grad(4) * (delhvsqsum[idx - 2 * kTileSize - 1] +
+                          delhvsqsum[idx - 2 * kTileSize + 1] +
+                          delhvsqsum[idx - kTileSize - 2] +
+                          delhvsqsum[idx - kTileSize + 2] +
+                          delhvsqsum[idx + kTileSize - 2] +
+                          delhvsqsum[idx + kTileSize + 2] +
+                          delhvsqsum[idx + 2 * kTileSize - 1] +
+                          delhvsqsum[idx + 2 * kTileSize + 1]) +
+         gauss_grad(5) * (delhvsqsum[idx - m2] + delhvsqsum[idx + p2] +
+                          delhvsqsum[idx - p2] + delhvsqsum[idx + m2]));
+
+    if (nyqtest > 0.0f)
+    {
+        nyquist[idx >> 1] = 1;
+    }
+}
+
+__global__ void k_nyquist_refine_scalar(unsigned char * nyquist, int rr1, int cc1)
+{
+    const int v2 = 2 * kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            const unsigned int nyquisttemp =
+                nyquist[(idx - v2) >> 1] +
+                nyquist[(idx - m1) >> 1] +
+                nyquist[(idx + p1) >> 1] +
+                nyquist[(idx - 2) >> 1] +
+                nyquist[idx >> 1] +
+                nyquist[(idx + 2) >> 1] +
+                nyquist[(idx - p1) >> 1] +
+                nyquist[(idx + m1) >> 1] +
+                nyquist[(idx + v2) >> 1];
+
+            if (nyquisttemp > 4) nyquist[idx >> 1] = 1;
+            if (nyquisttemp < 4) nyquist[idx >> 1] = 0;
+        }
+    }
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -950,6 +1138,7 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->dginth, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->cddiffsq, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->hvwt, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->nyquist, kHalfTileSamples * sizeof(unsigned char)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -972,6 +1161,7 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->dginth);
     cudaFree(d->cddiffsq);
     cudaFree(d->hvwt);
+    cudaFree(d->nyquist);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -993,6 +1183,7 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.dginth, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.cddiffsq, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.hvwt, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.nyquist, 0, kHalfTileSamples * sizeof(unsigned char)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -1014,6 +1205,7 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->dginth.data(), d.dginth, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->cddiffsq.data(), d.cddiffsq, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->hvwt.data(), d.hvwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->nyquist.data(), d.nyquist, kHalfTileSamples * sizeof(unsigned char), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -1047,6 +1239,27 @@ CompareStats compare_array(const std::vector<float> & cpu,
     return stats;
 }
 
+ByteCompareStats compare_array(const std::vector<unsigned char> & cpu,
+                               const std::vector<unsigned char> & gpu)
+{
+    ByteCompareStats stats;
+    for (std::size_t i = 0; i < cpu.size(); ++i)
+    {
+        const int diff = std::abs(static_cast<int>(cpu[i]) - static_cast<int>(gpu[i]));
+        if (diff > stats.maxAbs)
+        {
+            stats.maxAbs = diff;
+            stats.maxIndex = i;
+        }
+        if (diff != 0)
+        {
+            ++stats.mismatches;
+            ++stats.bitMismatches;
+        }
+    }
+    return stats;
+}
+
 bool report_compare(const char * caseName,
                     const char * arrayName,
                     const std::vector<float> & cpu,
@@ -1056,6 +1269,21 @@ bool report_compare(const char * caseName,
     std::cout << "  " << caseName << "." << arrayName
               << ": max_abs=" << std::setprecision(9) << stats.maxAbs
               << " mismatches_gt_" << kTolerance << "=" << stats.mismatches
+              << " bit_mismatches=" << stats.bitMismatches
+              << " max_index=" << stats.maxIndex
+              << "\n";
+    return stats.mismatches == 0;
+}
+
+bool report_compare(const char * caseName,
+                    const char * arrayName,
+                    const std::vector<unsigned char> & cpu,
+                    const std::vector<unsigned char> & gpu)
+{
+    const ByteCompareStats stats = compare_array(cpu, gpu);
+    std::cout << "  " << caseName << "." << arrayName
+              << ": max_abs=" << stats.maxAbs
+              << " mismatches=" << stats.mismatches
               << " bit_mismatches=" << stats.bitMismatches
               << " max_index=" << stats.maxIndex
               << "\n";
@@ -1143,6 +1371,14 @@ bool run_case(const CaseSpec & spec)
                                              rr1,
                                              cc1);
     CK(cudaGetLastError());
+    k_nyquist_test<<<grid, block>>>(d.cddiffsq,
+                                    d.delhvsqsum,
+                                    d.nyquist,
+                                    rr1,
+                                    cc1);
+    CK(cudaGetLastError());
+    k_nyquist_refine_scalar<<<1, 1>>>(d.nyquist, rr1, cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -1171,6 +1407,7 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "dginth", cpu.dginth, gpu.dginth) && ok;
     ok = report_compare(spec.name, "cddiffsq", cpu.cddiffsq, gpu.cddiffsq) && ok;
     ok = report_compare(spec.name, "hvwt", cpu.hvwt, gpu.hvwt) && ok;
+    ok = report_compare(spec.name, "nyquist", cpu.nyquist, gpu.nyquist) && ok;
     return ok;
 }
 }
@@ -1206,6 +1443,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist stages)\n";
     return ok ? 0 : 1;
 }
