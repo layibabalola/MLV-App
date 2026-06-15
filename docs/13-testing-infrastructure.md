@@ -96,6 +96,13 @@ suite. The `perf_tests` workflow specifically is documented separately in
   unset, and on Windows it suppresses native crash dialogs before
   constructing `QApplication`; this keeps direct local launches from
   surfacing modal fail-fast popups in this workspace.
+- Known issue (2026-06-15): local Windows `gui_tests.exe -functions` can hang
+  before QtTest prints the function list. The hang reproduces on both the
+  current GPU AMaZE playback branch and clean baseline `ae895390`, so it is
+  tracked as pre-existing test-infra debt rather than a runtime regression.
+  Fix direction: make the wrapper launch deterministic for the offscreen Qt
+  platform/plugin tree and ensure timed-out GUI test children are killed before
+  retrying deployment.
 - `gui_tests` covers the current GPU presenter seam only:
   environment-gated install, CPU fallback visibility when the presenter is
   absent, fallback hide/show when a texture-backed presentation is active,
