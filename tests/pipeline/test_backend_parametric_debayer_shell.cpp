@@ -216,6 +216,48 @@ std::string format_compare_detail(const char * label,
     return stream.str();
 }
 
+std::string format_processing_settings_fingerprint(
+    const char * label,
+    const char * debayer_name,
+    const processingObject_t * processing,
+    const GpuPreviewProcessingConfig & config)
+{
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(6);
+    const int dual_iso_value = processing && processing->dual_iso
+        ? *processing->dual_iso
+        : -1;
+    stream << "label=" << label
+           << ";debayer=" << debayer_name
+           << ";config_signature=" << config.signature
+           << ";enabled=" << (config.enabled ? 1 : 0)
+           << ";source_exposure_stops=" << config.sourceExposureStops
+           << ";processing_exposure_stops=" << (processing ? processing->exposure_stops : 0.0)
+           << ";kelvin=" << (processing ? processing->kelvin : 0.0)
+           << ";wb_tint=" << (processing ? processing->wb_tint : 0.0)
+           << ";wb_multipliers="
+           << (processing ? processing->wb_multipliers[0] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[1] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[2] : 0.0)
+           << ";dual_iso=" << dual_iso_value
+           << ";exr_mode=" << (processing ? processing->exr_mode : 0)
+           << ";use_camera_matrix=" << (config.useCameraMatrix ? 1 : 0)
+           << ";processing_use_cam_matrix="
+           << (processing ? static_cast<int>(processing->use_cam_matrix) : 0)
+           << ";colour_gamut="
+           << (processing ? static_cast<int>(processing->colour_gamut) : 0)
+           << ";apply_gamut_compression="
+           << (config.applyGamutCompression ? 1 : 0)
+           << ";levels_lut_bytes=" << config.levelsLut.size()
+           << ";matrix_lut_bytes="
+           << config.matrixLutR.size() << ","
+           << config.matrixLutG.size() << ","
+           << config.matrixLutB.size()
+           << ";gamma_lut_bytes=" << config.gammaLut.size();
+    return stream.str();
+}
+
 std::string format_worst_debayer_samples(const std::vector<uint16_t> & cpu_debayer,
                                          const std::vector<uint16_t> & gpu_debayer,
                                          int width,
@@ -811,6 +853,15 @@ TEST(BackendParametricDebayerShell, PPreX1AmazeDebayerProcessingFrameDiffMatches
     assert_debayer_fixture_ready(fixture);
     const GpuPreviewProcessingConfig config =
         build_p_pre_supported_processing_config(fixture);
+    const std::string settings_fingerprint =
+        format_processing_settings_fingerprint(
+            "p_pre_x1_amaze",
+            BackendParametricFixture::debayerModeName(
+                BackendParametricFixture::DebayerMode::Amaze),
+            fixture.processing(),
+            config);
+    std::printf("PPreX1ProcessingSettings: %s\n",
+                settings_fingerprint.c_str());
 
     const BackendParametricFixture::BackendAvailability availability =
         BackendParametricFixture::probeDebayerBackend(
@@ -830,74 +881,6 @@ TEST(BackendParametricDebayerShell, PPreX1AmazeDebayerProcessingFrameDiffMatches
         SKIP_TEST(processing_availability.reason.toStdString());
     }
 
-    QString error_message;
-    const std::vector<uint16_t> cpu_debayer_frame = fixture.renderDebayeredFrame(
-        BackendParametricFixture::Backend::Cpu,
-        BackendParametricFixture::DebayerMode::Amaze,
-        0,
-        &error_message);
-    ASSERT_TRUE(error_message.isEmpty());
-    ASSERT_TRUE(!cpu_debayer_frame.empty());
-
-    const std::vector<uint16_t> cpu_frame =
-        apply_p_pre_processing_frame(
-            fixture,
-            BackendParametricFixture::Backend::Cpu,
-            config,
-            cpu_debayer_frame);
-    ASSERT_TRUE(!cpu_frame.empty());
-
-    error_message.clear();
-    const std::vector<uint16_t> gpu_debayer_frame = fixture.renderDebayeredFrame(
-        BackendParametricFixture::Backend::Gpu,
-        BackendParametricFixture::DebayerMode::Amaze,
-        0,
-        &error_message);
-    ASSERT_TRUE(error_message.isEmpty());
-    ASSERT_TRUE(!gpu_debayer_frame.empty());
-    ASSERT_EQ(cpu_debayer_frame.size(), gpu_debayer_frame.size());
-
-    const std::vector<uint16_t> expected_from_gpu_debayer =
-        apply_p_pre_processing_frame(
-            fixture,
-            BackendParametricFixture::Backend::Cpu,
-            config,
-            gpu_debayer_frame);
-    ASSERT_TRUE(!expected_from_gpu_debayer.empty());
-
-    error_message.clear();
-    const std::vector<uint16_t> gpu_frame =
-        apply_p_pre_processing_frame(
-            fixture,
-            BackendParametricFixture::Backend::Gpu,
-            config,
-            gpu_debayer_frame,
-            &error_message);
-    ASSERT_TRUE(error_message.isEmpty());
-    ASSERT_TRUE(!gpu_frame.empty());
-    ASSERT_EQ(cpu_frame.size(), gpu_frame.size());
-
-    const std::string cpu_hash = sha256_bytes(cpu_frame.data(),
-                                              cpu_frame.size() * sizeof(uint16_t));
-    const std::string gpu_hash = sha256_bytes(gpu_frame.data(),
-                                              gpu_frame.size() * sizeof(uint16_t));
-    test_artifacts::record(
-        format_x1_pipeline_artifact_key(
-            BackendParametricFixture::debayerModeName(
-                BackendParametricFixture::DebayerMode::Amaze),
-            BackendParametricFixture::backendName(
-                BackendParametricFixture::Backend::Cpu),
-            0),
-        cpu_hash);
-    test_artifacts::record(
-        format_x1_pipeline_artifact_key(
-            BackendParametricFixture::debayerModeName(
-                BackendParametricFixture::DebayerMode::Amaze),
-            BackendParametricFixture::backendName(
-                BackendParametricFixture::Backend::Gpu),
-            0),
-        gpu_hash);
-
     const uint16_t debayer_per_pixel_tolerance = 2;
     /* Same measured AMaZE SSE-vs-scalar debayer envelope as the standalone
      * GPU-vs-CPU test; the isolated GPU processing comparison below stays much
@@ -907,89 +890,170 @@ TEST(BackendParametricDebayerShell, PPreX1AmazeDebayerProcessingFrameDiffMatches
     const uint16_t processing_per_pixel_tolerance = 1;
     const uint16_t processing_max_abs_slack = 8;
     const double processing_mismatch_fraction_slack = 0.001;
-    const std::size_t total_samples = cpu_frame.size();
+    const uint64_t frame_indices[] = {0, 1};
+    std::string failure_detail;
 
-    const frame_compare_result_t debayer_result = compare_frames_u16(
-        cpu_debayer_frame.data(), gpu_debayer_frame.data(),
-        fixture.width(), fixture.height(), 3,
-        debayer_per_pixel_tolerance);
-    const frame_tolerance_verdict_t debayer_verdict = evaluate_frame_tolerance(
-        debayer_result, cpu_debayer_frame.size(),
-        debayer_max_abs_slack,
-        debayer_mismatch_fraction_slack);
+    for (uint64_t frame_index : frame_indices)
+    {
+        QString error_message;
+        const std::vector<uint16_t> cpu_debayer_frame = fixture.renderDebayeredFrame(
+            BackendParametricFixture::Backend::Cpu,
+            BackendParametricFixture::DebayerMode::Amaze,
+            frame_index,
+            &error_message);
+        ASSERT_TRUE(error_message.isEmpty());
+        ASSERT_TRUE(!cpu_debayer_frame.empty());
 
-    const frame_compare_result_t expected_amplification = compare_frames_u16(
-        cpu_frame.data(), expected_from_gpu_debayer.data(),
-        fixture.width(), fixture.height(), 3,
-        processing_per_pixel_tolerance);
-    const frame_compare_result_t isolated_processing = compare_frames_u16(
-        expected_from_gpu_debayer.data(), gpu_frame.data(),
-        fixture.width(), fixture.height(), 3,
-        processing_per_pixel_tolerance);
-    const frame_tolerance_verdict_t processing_verdict = evaluate_frame_tolerance(
-        isolated_processing, total_samples,
-        processing_max_abs_slack,
-        processing_mismatch_fraction_slack);
+        const std::vector<uint16_t> cpu_frame =
+            apply_p_pre_processing_frame(
+                fixture,
+                BackendParametricFixture::Backend::Cpu,
+                config,
+                cpu_debayer_frame);
+        ASSERT_TRUE(!cpu_frame.empty());
 
-    const frame_compare_result_t end_to_end = compare_frames_u16(
-        cpu_frame.data(), gpu_frame.data(),
-        fixture.width(), fixture.height(), 3,
-        processing_per_pixel_tolerance);
-    const uint16_t derived_max_abs_threshold =
-        expected_amplification.max_abs_diff >
-            static_cast<uint16_t>(65535u - processing_max_abs_slack)
-            ? static_cast<uint16_t>(65535u)
-            : static_cast<uint16_t>(expected_amplification.max_abs_diff +
-                                    processing_max_abs_slack);
-    const double derived_mismatch_fraction_threshold = std::min(
-        1.0,
-        mismatch_fraction(expected_amplification, total_samples) +
+        error_message.clear();
+        const std::vector<uint16_t> gpu_debayer_frame = fixture.renderDebayeredFrame(
+            BackendParametricFixture::Backend::Gpu,
+            BackendParametricFixture::DebayerMode::Amaze,
+            frame_index,
+            &error_message);
+        ASSERT_TRUE(error_message.isEmpty());
+        ASSERT_TRUE(!gpu_debayer_frame.empty());
+        ASSERT_EQ(cpu_debayer_frame.size(), gpu_debayer_frame.size());
+
+        const std::vector<uint16_t> expected_from_gpu_debayer =
+            apply_p_pre_processing_frame(
+                fixture,
+                BackendParametricFixture::Backend::Cpu,
+                config,
+                gpu_debayer_frame);
+        ASSERT_TRUE(!expected_from_gpu_debayer.empty());
+
+        error_message.clear();
+        const std::vector<uint16_t> gpu_frame =
+            apply_p_pre_processing_frame(
+                fixture,
+                BackendParametricFixture::Backend::Gpu,
+                config,
+                gpu_debayer_frame,
+                &error_message);
+        ASSERT_TRUE(error_message.isEmpty());
+        ASSERT_TRUE(!gpu_frame.empty());
+        ASSERT_EQ(cpu_frame.size(), gpu_frame.size());
+
+        const std::string cpu_hash = sha256_bytes(cpu_frame.data(),
+                                                  cpu_frame.size() * sizeof(uint16_t));
+        const std::string gpu_hash = sha256_bytes(gpu_frame.data(),
+                                                  gpu_frame.size() * sizeof(uint16_t));
+        test_artifacts::record(
+            format_x1_pipeline_artifact_key(
+                BackendParametricFixture::debayerModeName(
+                    BackendParametricFixture::DebayerMode::Amaze),
+                BackendParametricFixture::backendName(
+                    BackendParametricFixture::Backend::Cpu),
+                frame_index),
+            cpu_hash);
+        test_artifacts::record(
+            format_x1_pipeline_artifact_key(
+                BackendParametricFixture::debayerModeName(
+                    BackendParametricFixture::DebayerMode::Amaze),
+                BackendParametricFixture::backendName(
+                    BackendParametricFixture::Backend::Gpu),
+                frame_index),
+            gpu_hash);
+
+        const std::size_t total_samples = cpu_frame.size();
+        const frame_compare_result_t debayer_result = compare_frames_u16(
+            cpu_debayer_frame.data(), gpu_debayer_frame.data(),
+            fixture.width(), fixture.height(), 3,
+            debayer_per_pixel_tolerance);
+        const frame_tolerance_verdict_t debayer_verdict = evaluate_frame_tolerance(
+            debayer_result, cpu_debayer_frame.size(),
+            debayer_max_abs_slack,
+            debayer_mismatch_fraction_slack);
+
+        const frame_compare_result_t expected_amplification = compare_frames_u16(
+            cpu_frame.data(), expected_from_gpu_debayer.data(),
+            fixture.width(), fixture.height(), 3,
+            processing_per_pixel_tolerance);
+        const frame_compare_result_t isolated_processing = compare_frames_u16(
+            expected_from_gpu_debayer.data(), gpu_frame.data(),
+            fixture.width(), fixture.height(), 3,
+            processing_per_pixel_tolerance);
+        const frame_tolerance_verdict_t processing_verdict = evaluate_frame_tolerance(
+            isolated_processing, total_samples,
+            processing_max_abs_slack,
             processing_mismatch_fraction_slack);
-    const frame_tolerance_verdict_t end_to_end_verdict = evaluate_frame_tolerance(
-        end_to_end, total_samples,
-        derived_max_abs_threshold,
-        derived_mismatch_fraction_threshold);
 
-    const std::string diagnostic =
-        format_compare_detail("debayer", debayer_result, cpu_debayer_frame.size())
-        + ";"
-        + format_compare_detail("expected_amplification", expected_amplification, total_samples)
-        + ";"
-        + format_compare_detail("isolated_processing", isolated_processing, total_samples)
-        + ";"
-        + format_compare_detail("end_to_end", end_to_end, total_samples)
-        + ";derived_max_abs_threshold=" + std::to_string(derived_max_abs_threshold)
-        + ";derived_mismatch_fraction_threshold=" +
-            std::to_string(derived_mismatch_fraction_threshold)
-        + ";worst_samples="
-        + format_worst_x1_samples(cpu_frame,
-                                  gpu_frame,
-                                  expected_from_gpu_debayer,
-                                  cpu_debayer_frame,
-                                  gpu_debayer_frame,
-                                  fixture.width(),
-                                  fixture.height(),
-                                  16);
-    std::printf("PPreX1AmazeDerivedTolerance: %s\n", diagnostic.c_str());
+        const frame_compare_result_t end_to_end = compare_frames_u16(
+            cpu_frame.data(), gpu_frame.data(),
+            fixture.width(), fixture.height(), 3,
+            processing_per_pixel_tolerance);
+        const uint16_t derived_max_abs_threshold =
+            expected_amplification.max_abs_diff >
+                static_cast<uint16_t>(65535u - processing_max_abs_slack)
+                ? static_cast<uint16_t>(65535u)
+                : static_cast<uint16_t>(expected_amplification.max_abs_diff +
+                                        processing_max_abs_slack);
+        const double derived_mismatch_fraction_threshold = std::min(
+            1.0,
+            mismatch_fraction(expected_amplification, total_samples) +
+                processing_mismatch_fraction_slack);
+        const frame_tolerance_verdict_t end_to_end_verdict = evaluate_frame_tolerance(
+            end_to_end, total_samples,
+            derived_max_abs_threshold,
+            derived_mismatch_fraction_threshold);
 
-    if (!debayer_verdict.passed)
-    {
-        ::minitest::fail(__FILE__, __LINE__,
-                         "PPreX1Amaze debayer parity",
-                         debayer_verdict.detail + ";" + diagnostic);
+        const std::string diagnostic =
+            std::string("frame=") + std::to_string(frame_index)
+            + ";"
+            + format_compare_detail("debayer", debayer_result, cpu_debayer_frame.size())
+            + ";"
+            + format_compare_detail("expected_amplification", expected_amplification, total_samples)
+            + ";"
+            + format_compare_detail("isolated_processing", isolated_processing, total_samples)
+            + ";"
+            + format_compare_detail("end_to_end", end_to_end, total_samples)
+            + ";derived_max_abs_threshold=" + std::to_string(derived_max_abs_threshold)
+            + ";derived_mismatch_fraction_threshold=" +
+                std::to_string(derived_mismatch_fraction_threshold)
+            + ";worst_samples="
+            + format_worst_x1_samples(cpu_frame,
+                                      gpu_frame,
+                                      expected_from_gpu_debayer,
+                                      cpu_debayer_frame,
+                                      gpu_debayer_frame,
+                                      fixture.width(),
+                                      fixture.height(),
+                                      16);
+        std::printf("PPreX1AmazeDerivedTolerance: %s\n", diagnostic.c_str());
+
+        if (!debayer_verdict.passed)
+        {
+            if (!failure_detail.empty()) failure_detail += " | ";
+            failure_detail += "debayer parity;" + debayer_verdict.detail + ";" + diagnostic;
+        }
+
+        if (!processing_verdict.passed)
+        {
+            if (!failure_detail.empty()) failure_detail += " | ";
+            failure_detail += "isolated GPU processing parity;" +
+                processing_verdict.detail + ";" + diagnostic;
+        }
+
+        if (!end_to_end_verdict.passed)
+        {
+            if (!failure_detail.empty()) failure_detail += " | ";
+            failure_detail += "derived debayer-amplification envelope;" +
+                end_to_end_verdict.detail + ";" + diagnostic;
+        }
     }
 
-    if (!processing_verdict.passed)
+    if (!failure_detail.empty())
     {
         ::minitest::fail(__FILE__, __LINE__,
-                         "PPreX1Amaze isolated GPU processing parity",
-                         processing_verdict.detail + ";" + diagnostic);
-    }
-
-    if (!end_to_end_verdict.passed)
-    {
-        ::minitest::fail(__FILE__, __LINE__,
-                         "PPreX1Amaze derived debayer-amplification envelope",
-                         end_to_end_verdict.detail + ";" + diagnostic);
+                         "PPreX1AmazeDebayerProcessingFrameDiffMatchesCpuReferenceOrSkips",
+                         failure_detail);
     }
 }

@@ -1,7 +1,9 @@
 # GPU Lane — Playback & Export Roadmap + UX (plan of record)
 
-Status: 2026-06-14. The CUDA recon lane is proven on an RTX 4090 (validated bit-exact
-+ measured). This doc is the agreed plan of record before any MLVApp `src/` wiring.
+Status: 2026-06-15. The CUDA recon lane is proven on an RTX 4090 (validated bit-exact
++ measured), and the first production CUDA AMaZE debayer seam has landed behind
+a DLL gate with no GUI claim. This doc remains the plan of record for the
+remaining playback/export rollout.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
@@ -10,6 +12,7 @@ glinterop / optimization / full-pipeline results, integration-blueprint) and
 Code: `tools/gpu/` (probes, parity, oracle, `igpu_recon.h`, `igpu_recon_cuda.dll`).
 
 Proven so far: recon 0-LSB (mean23 + AMaZE dual-ISO logic), bilinear debayer 0-LSB,
+CUDA AMaZE debayer parity through the DLL-gated/non-default production seam,
 zero-readback CUDA->GL present (~0.1 ms), deployable ABI-validated `igpu_recon_cuda.dll`,
 full pipeline ~1 ms/frame @ 4.1 MP (~988 fps) / ~9 ms @ 8K, parity across 8K/clipped/ISO.
 
@@ -55,7 +58,9 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 
 ## 4. Lane B — CUDA playback
 
-- **P-pre (quality completion):** GPU **AMaZE debayer** parity + GPU **processing** parity + clean x1 CPU-vs-GPU frame diff. Required before the GUI may claim "GPU Full Quality AMaZE" (see §8).
+- **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
+  DLL gate) + GPU **processing** parity + clean x1 CPU-vs-GPU frame diff. Required
+  before the GUI may claim "GPU Full Quality AMaZE" (see §8).
 - **P1** loader/fallback: load `igpu_recon_cuda.dll` if present + capable, else CPU. No hard dependency.
 - **P2** GPU recon + CPU readback: CUDA recon → Bayer16 readback → existing CPU debayer/process/present. Integration bridge, not final UX.
 - **P3** no-readback playback: CPU decode/prefetch → CUDA recon/debayer/process → CUDA→GL texture present (no `QImage`, no `glReadPixels`); `GpuDisplayViewport` gains a texture-in path.
@@ -102,8 +107,13 @@ Minimal   — Basic / None (Fastest, last-resort cadence rescue)
 ## 8. Validation gates
 
 - **Recon:** 0 LSB vs CPU oracle (mean23 + AMaZE dual-ISO logic) — done. AMaZE dual-ISO's shared float demosaic core is ±1-2 LSB = the engine's own SSE2-vs-scalar variance (policy: keep that subpath on CPU for "legacy-exact," or require explicit tolerance opt-in).
-- **Debayer:** bilinear 0 LSB — done; **AMaZE debayer parity = P-pre** (not yet).
-- **Processing:** **parity = P-pre** (currently representative timing only).
+- **Debayer:** bilinear 0 LSB — done; **AMaZE debayer parity** landed as a
+  DLL-gated/non-default production seam and remains non-GUI until the rest of
+  P-pre is reviewed.
+- **Processing:** **parity = P-pre**. The current gate covers the supported
+  preview-processing subset (levels / matrix / camera matrix / gamut compression
+  / gamma LUT path) through CPU-vs-GPU frame diffs; broader unsupported features
+  still fail closed instead of silently using GPU.
 - **Export:** per-frame DNG image-payload + metadata diff, compressed + uncompressed.
 - **Playback truth:** validate by *pixels* (PrintWindow / frame diff), never FPS alone — cadence can read perfect over a frozen frame.
 
