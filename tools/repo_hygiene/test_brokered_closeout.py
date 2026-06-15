@@ -25,6 +25,7 @@ from .brokered_closeout import (
     closeout_clean_truth_from_postcondition,
     closeout_merge_commit_message,
     closeout_script_command,
+    delivered_work_commit_subject,
     dirty_split_commit_message,
     enter_remediation_freeze,
     evidence_repair_commit_message,
@@ -42,11 +43,13 @@ from .brokered_closeout import (
     finalize_work_block,
     guard_closeout_hook,
     load_closeout_config,
+    load_manifest,
     file_content_hash,
     plan_dirty_split_candidates,
     apply_dirty_split_candidate,
     preserve_owned_dirty_split,
     record_review_approval,
+    repair_missing_evidence,
     repair_target_push_failure,
     repair_eligibility,
     remediate_retained_candidates,
@@ -3254,6 +3257,40 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "export: apply Auto Look Assist raw defaults\n\n"
             "Closeout: repair closeout.json, metrics.json, and session.json before final push.\n"
             "Work block: wb-demo.",
+        )
+
+    def test_evidence_repair_uses_delivered_subject_not_aspirational_work_block(self) -> None:
+        repo = self.init_repo(config_updates={"evidenceRepair": {"enabled": True}})
+        start_work_block(
+            repo,
+            work_block_id="wb-delivered-subject",
+            actor="local-test",
+            summary="P-pre: implement GPU AMaZE debayer parity",
+        )
+        (repo / "tools").mkdir()
+        (repo / "tools" / "stage-probe.txt").write_text("stage probe only\n", encoding="utf-8")
+        git(repo, "add", "tools/stage-probe.txt")
+        git(repo, "commit", "-m", "P-pre: add CUDA AMaZE debayer stage probe")
+
+        config = load_closeout_config(repo)
+        detection = detect_work_block(repo, work_block_id="wb-delivered-subject")
+        manifest = load_manifest(repo, config, "wb-delivered-subject")
+
+        self.assertEqual(
+            delivered_work_commit_subject(repo, detection, manifest),
+            "P-pre: add CUDA AMaZE debayer stage probe",
+        )
+
+        result = repair_missing_evidence(repo, config, detection, reason="final_push")
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(git(repo, "log", "-1", "--format=%s").stdout.strip(), "P-pre: add CUDA AMaZE debayer stage probe")
+        self.assertIn("Closeout: repair", git(repo, "log", "-1", "--format=%B").stdout)
+
+        post_evidence_detection = detect_work_block(repo, work_block_id="wb-delivered-subject")
+        self.assertEqual(
+            delivered_work_commit_subject(repo, post_evidence_detection, manifest),
+            "P-pre: add CUDA AMaZE debayer stage probe",
         )
 
     def test_checkpoint_commit_message_falls_back_to_generated_detail(self) -> None:
