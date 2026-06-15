@@ -582,7 +582,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "}\n"
         "void main()\n"
         "{\n"
-        "    vec4 sampledColor = texture2D(frameTexture, vTexCoord);\n"
+        "    vec2 sourceCoord = vec2(vTexCoord.x, 1.0 - vTexCoord.y);\n"
+        "    vec4 sampledColor = texture2D(frameTexture, sourceCoord);\n"
         "    gl_FragColor = vec4(applyPreviewProcessing(sampledColor.rgb), sampledColor.a);\n"
         "}\n");
 }
