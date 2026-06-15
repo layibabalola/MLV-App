@@ -324,6 +324,17 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "branchPrefix": "codex/work-block",
         "requireIntegratedStartHeadForFinalize": True,
     },
+    "contentReviewGate": {
+        "requireClaudeApprovalForFinalize": False,
+        "coordinationFile": ".claude-state/coordination/gpu-lane-impl-review-sync.md",
+        "handoffActor": "CODEX",
+        "handoffKind": "HANDOFF",
+        "reviewActor": "CLAUDE",
+        "reviewKind": "REVIEW",
+        "approveTokens": ["APPROVE"],
+        "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
+        "requireHandoff": True,
+    },
     "validation": {
         "timeoutMs": 120000,
         "maxOutputBytes": 524288,
@@ -739,6 +750,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "git",
             "workBlockBootstrap",
             "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
+            "contentReviewGate",
+            "contentReviewGate.requireClaudeApprovalForFinalize",
+            "contentReviewGate.coordinationFile",
             "validation",
             "processResources",
             "powerShell",
@@ -801,6 +815,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_start_work_block_auto_branches_from_clean_protected_target",
             "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
             "test_finalize_blocks_work_block_started_from_unintegrated_base",
+            "test_finalize_blocks_review_gated_chunk_without_claude_approval",
+            "test_finalize_rejects_claude_approval_for_different_range",
             "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
             "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
             "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
@@ -945,6 +961,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_missing_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_content_review_approval_for_finalize"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1066,6 +1083,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "closeout.config.json", "contains": "closeoutAddendumPersistence"},
             {"path": "closeout.config.json", "contains": "workBlockBootstrap"},
             {"path": "closeout.config.json", "contains": "requireIntegratedStartHeadForFinalize"},
+            {"path": "closeout.config.json", "contains": "contentReviewGate"},
             {"path": "closeout.config.json", "contains": "finalizeLoop"},
             {"path": "closeout.config.json", "contains": "remediationFreeze"},
             {"path": "closeout.config.json", "contains": "hardClean"},
@@ -5721,6 +5739,208 @@ def validate_work_block_start_head_integrated(
     }
 
 
+def content_review_range_tokens(start_head: str, feature_head: str) -> List[str]:
+    starts = {start_head, start_head[:12], start_head[:8]}
+    features = {feature_head, feature_head[:12], feature_head[:8]}
+    tokens = sorted(
+        {
+            f"{start}..{feature}"
+            for start in starts
+            for feature in features
+            if start and feature
+        },
+        key=lambda value: (len(value), value),
+    )
+    return tokens
+
+
+def coordination_entries(text: str) -> List[Dict[str, Any]]:
+    headings = list(re.finditer(r"(?m)^### \[[^\]]+\][^\n]*$", text))
+    entries: List[Dict[str, Any]] = []
+    for index, match in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        body = text[match.start() : end]
+        entries.append({"offset": match.start(), "heading": match.group(0), "body": body})
+    return entries
+
+
+def coordination_entry_verdict(entry_body: str) -> str:
+    match = re.search(r"(?im)^\s*Verdict:\s*(.+?)\s*$", entry_body)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def coordination_entry_matches(entry: Dict[str, Any], *, actor: str, kind: str, range_tokens: Sequence[str]) -> bool:
+    heading = str(entry.get("heading") or "").upper()
+    body = str(entry.get("body") or "")
+    return actor.upper() in heading and kind.upper() in heading and any(token in body for token in range_tokens)
+
+
+def content_review_gate_block(
+    config: Dict[str, Any],
+    detection: Dict[str, Any],
+    *,
+    reason: str,
+    coordination_file: str,
+    range_tokens: Sequence[str],
+    detail: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    gate = config.get("contentReviewGate", {})
+    target_branch = str(detection.get("targetBranch") or config.get("git", {}).get("targetBranch") or "master")
+    primary_range = range_tokens[0] if range_tokens else ""
+    payload = {
+        "reason": reason,
+        "workBlockId": detection.get("workBlockId"),
+        "branch": detection.get("branch"),
+        "targetBranch": target_branch,
+        "targetHead": detection.get("targetHead"),
+        "featureHead": detection.get("featureHead"),
+        "range": primary_range,
+        "rangeTokens": list(range_tokens),
+        "coordinationFile": coordination_file,
+        "policy": "contentReviewGate.requireClaudeApprovalForFinalize",
+        "recoveryCommand": (
+            "Append a CODEX HANDOFF for range %s to %s, wait for a CLAUDE REVIEW with Verdict: APPROVE "
+            "for the same range, then rerun %s"
+            % (
+                primary_range or "<target>..<feature>",
+                coordination_file,
+                closeout_script_command("work-block-complete.ps1", ["-Finalize"], config),
+            )
+        ),
+    }
+    if detail:
+        payload["detail"] = detail
+    if gate:
+        payload["gate"] = {
+            "handoffActor": gate.get("handoffActor"),
+            "handoffKind": gate.get("handoffKind"),
+            "reviewActor": gate.get("reviewActor"),
+            "reviewKind": gate.get("reviewKind"),
+            "requireHandoff": gate.get("requireHandoff"),
+        }
+    return payload
+
+
+def validate_content_review_approval_for_finalize(
+    repo_root: Path,
+    config: Dict[str, Any],
+    detection: Dict[str, Any],
+    manifest: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    gate = config.get("contentReviewGate", {})
+    if not isinstance(gate, dict) or not bool(gate.get("requireClaudeApprovalForFinalize", False)):
+        return None
+    coordination_file = str(gate.get("coordinationFile") or ".claude-state/coordination/gpu-lane-impl-review-sync.md")
+    start_head = str(manifest.get("startHead") or detection.get("targetHead") or "")
+    feature_head = str(detection.get("featureHead") or "")
+    range_tokens = content_review_range_tokens(start_head, feature_head)
+    if not range_tokens:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_range_unknown",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+        )
+    coordination_path = (repo_root / coordination_file).resolve()
+    try:
+        coordination_path.relative_to(repo_root.resolve())
+    except ValueError:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_coordination_path_escape",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"resolvedPath": str(coordination_path)},
+        )
+    if not coordination_path.exists():
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_file_missing",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+        )
+    text = coordination_path.read_text(encoding="utf-8")
+    entries = coordination_entries(text)
+    handoff_actor = str(gate.get("handoffActor") or "CODEX")
+    handoff_kind = str(gate.get("handoffKind") or "HANDOFF")
+    review_actor = str(gate.get("reviewActor") or "CLAUDE")
+    review_kind = str(gate.get("reviewKind") or "REVIEW")
+    require_handoff = bool(gate.get("requireHandoff", True))
+    handoffs = [
+        entry
+        for entry in entries
+        if coordination_entry_matches(entry, actor=handoff_actor, kind=handoff_kind, range_tokens=range_tokens)
+    ]
+    if require_handoff and not handoffs:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_missing_handoff",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+        )
+    handoff_offset = int(handoffs[-1]["offset"]) if handoffs else -1
+    reviews = [
+        entry
+        for entry in entries
+        if int(entry["offset"]) > handoff_offset
+        and coordination_entry_matches(entry, actor=review_actor, kind=review_kind, range_tokens=range_tokens)
+    ]
+    if not reviews:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_missing",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"handoffOffset": handoff_offset},
+        )
+    blocking_tokens = [str(token).upper() for token in gate.get("blockingTokens", ["CHANGES_REQUESTED", "BLOCKER"])]
+    approve_tokens = [str(token).upper() for token in gate.get("approveTokens", ["APPROVE"])]
+    decisive_reviews = []
+    for entry in reviews:
+        verdict = coordination_entry_verdict(str(entry.get("body") or ""))
+        verdict_upper = verdict.upper()
+        if any(token in verdict_upper for token in blocking_tokens) or any(token in verdict_upper for token in approve_tokens):
+            decisive_reviews.append({"entry": entry, "verdict": verdict})
+    if not decisive_reviews:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_not_approved",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"latestReviewHeading": reviews[-1].get("heading"), "verdict": coordination_entry_verdict(str(reviews[-1].get("body") or ""))},
+        )
+    latest = decisive_reviews[-1]["entry"]
+    verdict = str(decisive_reviews[-1]["verdict"])
+    verdict_upper = verdict.upper()
+    if any(token in verdict_upper for token in blocking_tokens):
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_blocked",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"latestReviewHeading": latest.get("heading"), "verdict": verdict},
+        )
+    if any(token in verdict_upper for token in approve_tokens):
+        return None
+    return content_review_gate_block(
+        config,
+        detection,
+        reason="content_approval_not_approved",
+        coordination_file=coordination_file,
+        range_tokens=range_tokens,
+        detail={"latestReviewHeading": latest.get("heading"), "verdict": verdict},
+    )
+
+
 def _finalize_work_block_once(
     repo_root_arg: Path,
     *,
@@ -5743,6 +5963,13 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
         return {"status": "blocked", **base_guard, "detection": detection}
+    content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
+    if content_guard:
+        reason = str(content_guard["reason"])
+        write_audit(repo_root, config, reason, content_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **content_guard, "detection": detection}
     if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
         payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
         write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
@@ -10703,6 +10930,9 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
         "git",
         "workBlockBootstrap",
         "workBlockBootstrap.requireIntegratedStartHeadForFinalize",
+        "contentReviewGate",
+        "contentReviewGate.requireClaudeApprovalForFinalize",
+        "contentReviewGate.coordinationFile",
         "validation",
         "processResources",
         "powerShell",
