@@ -14,6 +14,7 @@
  *   - adaptive horizontal/vertical green interpolation weights (hvwt)
  *   - Nyquist texture detection flags
  *   - Nyquist-region area interpolation hvwt refinement
+ *   - green-plane assembly at red/blue sites
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -79,6 +80,9 @@ struct StageBuffers
     std::vector<float> cddiffsq;
     std::vector<float> hvwt;
     std::vector<unsigned char> nyquist;
+    std::vector<float> dgrb0;
+    std::vector<float> dgrb2h;
+    std::vector<float> dgrb2v;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -99,6 +103,9 @@ struct StageBuffers
         , cddiffsq(kTileSamples, 0.0f)
         , hvwt(kHalfTileSamples, 0.0f)
         , nyquist(kHalfTileSamples, 0)
+        , dgrb0(kHalfTileSamples, 0.0f)
+        , dgrb2h(kHalfTileSamples, 0.0f)
+        , dgrb2v(kHalfTileSamples, 0.0f)
     {
     }
 };
@@ -124,6 +131,9 @@ struct DeviceBuffers
     float * cddiffsq = nullptr;
     float * hvwt = nullptr;
     unsigned char * nyquist = nullptr;
+    float * dgrb0 = nullptr;
+    float * dgrb2h = nullptr;
+    float * dgrb2v = nullptr;
 };
 
 struct CompareStats
@@ -223,6 +233,21 @@ __host__ __device__ float xdiv2f_probe(float value)
     if ((bits.u & 0x7fffffffu) != 0)
     {
         bits.u -= 1u << 23;
+    }
+    return bits.f;
+}
+
+__host__ __device__ float xdivf_probe(float value, int exponentDelta)
+{
+    union Bits
+    {
+        float f;
+        uint32_t u;
+    };
+    Bits bits = {value};
+    if ((bits.u & 0x7fffffffu) != 0)
+    {
+        bits.u -= static_cast<uint32_t>(exponentDelta) << 23;
     }
     return bits.f;
 }
@@ -685,6 +710,45 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
                 const float hcdvar = epssq + fabsf(areawt * sumsqh - sumh * sumh);
                 const float vcdvar = epssq + fabsf(areawt * sumsqv - sumv * sumv);
                 out->hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
+            }
+        }
+    }
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            const float hvwtalt =
+                xdivf_probe(out->hvwt[(idx - m1) >> 1] +
+                            out->hvwt[(idx + p1) >> 1] +
+                            out->hvwt[(idx - p1) >> 1] +
+                            out->hvwt[(idx + m1) >> 1],
+                            2);
+            if (fabsf(0.5f - out->hvwt[idx >> 1]) < fabsf(0.5f - hvwtalt))
+            {
+                out->hvwt[idx >> 1] = hvwtalt;
+            }
+
+            out->dgrb0[idx >> 1] =
+                out->hcd[idx] * (1.0f - out->hvwt[idx >> 1]) +
+                out->vcd[idx] * out->hvwt[idx >> 1];
+            out->rgbgreen[idx] = out->cfa[idx] + out->dgrb0[idx >> 1];
+
+            if (out->nyquist[idx >> 1])
+            {
+                out->dgrb2h[idx >> 1] =
+                    sqr_f(out->rgbgreen[idx] -
+                          xdiv2f_probe(out->rgbgreen[idx - 1] + out->rgbgreen[idx + 1]));
+                out->dgrb2v[idx >> 1] =
+                    sqr_f(out->rgbgreen[idx] -
+                          xdiv2f_probe(out->rgbgreen[idx - v1] + out->rgbgreen[idx + v1]));
+            }
+            else
+            {
+                out->dgrb2h[idx >> 1] = 0.0f;
+                out->dgrb2v[idx >> 1] = 0.0f;
             }
         }
     }
@@ -1197,6 +1261,58 @@ __global__ void k_nyquist_area_interpolation(const float * cfa,
     hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
 }
 
+__global__ void k_green_plane_assembly_scalar(const float * cfa,
+                                              const float * vcd,
+                                              const float * hcd,
+                                              const unsigned char * nyquist,
+                                              float * hvwt,
+                                              float * dgrb0,
+                                              float * rgbgreen,
+                                              float * dgrb2h,
+                                              float * dgrb2v,
+                                              int rr1,
+                                              int cc1)
+{
+    const int v1 = kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+
+    for (int rr = 8; rr < rr1 - 8; ++rr)
+    {
+        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 8;
+             cc += 2, idx += 2)
+        {
+            const float hvwtalt =
+                xdivf_probe(hvwt[(idx - m1) >> 1] +
+                            hvwt[(idx + p1) >> 1] +
+                            hvwt[(idx - p1) >> 1] +
+                            hvwt[(idx + m1) >> 1],
+                            2);
+            if (fabsf(0.5f - hvwt[idx >> 1]) < fabsf(0.5f - hvwtalt))
+            {
+                hvwt[idx >> 1] = hvwtalt;
+            }
+
+            dgrb0[idx >> 1] = hcd[idx] * (1.0f - hvwt[idx >> 1]) + vcd[idx] * hvwt[idx >> 1];
+            rgbgreen[idx] = cfa[idx] + dgrb0[idx >> 1];
+
+            if (nyquist[idx >> 1])
+            {
+                dgrb2h[idx >> 1] =
+                    sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - 1] + rgbgreen[idx + 1]));
+                dgrb2v[idx >> 1] =
+                    sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - v1] + rgbgreen[idx + v1]));
+            }
+            else
+            {
+                dgrb2h[idx >> 1] = 0.0f;
+                dgrb2v[idx >> 1] = 0.0f;
+            }
+        }
+    }
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1232,6 +1348,9 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->cddiffsq, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->hvwt, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->nyquist, kHalfTileSamples * sizeof(unsigned char)));
+    CK(cudaMalloc(&d->dgrb0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->dgrb2h, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->dgrb2v, kHalfTileSamples * sizeof(float)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -1255,6 +1374,9 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->cddiffsq);
     cudaFree(d->hvwt);
     cudaFree(d->nyquist);
+    cudaFree(d->dgrb0);
+    cudaFree(d->dgrb2h);
+    cudaFree(d->dgrb2v);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -1277,6 +1399,9 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.cddiffsq, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.hvwt, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.nyquist, 0, kHalfTileSamples * sizeof(unsigned char)));
+    CK(cudaMemset(d.dgrb0, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.dgrb2h, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.dgrb2v, 0, kHalfTileSamples * sizeof(float)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -1299,6 +1424,9 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->cddiffsq.data(), d.cddiffsq, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->hvwt.data(), d.hvwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->nyquist.data(), d.nyquist, kHalfTileSamples * sizeof(unsigned char), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->dgrb0.data(), d.dgrb0, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->dgrb2h.data(), d.dgrb2h, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->dgrb2v.data(), d.dgrb2v, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -1478,6 +1606,18 @@ bool run_case(const CaseSpec & spec)
                                                   rr1,
                                                   cc1);
     CK(cudaGetLastError());
+    k_green_plane_assembly_scalar<<<1, 1>>>(d.cfa,
+                                            d.vcd,
+                                            d.hcd,
+                                            d.nyquist,
+                                            d.hvwt,
+                                            d.dgrb0,
+                                            d.rgbgreen,
+                                            d.dgrb2h,
+                                            d.dgrb2v,
+                                            rr1,
+                                            cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -1507,6 +1647,9 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "cddiffsq", cpu.cddiffsq, gpu.cddiffsq) && ok;
     ok = report_compare(spec.name, "hvwt", cpu.hvwt, gpu.hvwt) && ok;
     ok = report_compare(spec.name, "nyquist", cpu.nyquist, gpu.nyquist) && ok;
+    ok = report_compare(spec.name, "dgrb0", cpu.dgrb0, gpu.dgrb0) && ok;
+    ok = report_compare(spec.name, "dgrb2h", cpu.dgrb2h, gpu.dgrb2h) && ok;
+    ok = report_compare(spec.name, "dgrb2v", cpu.dgrb2v, gpu.dgrb2v) && ok;
     return ok;
 }
 }
@@ -1542,6 +1685,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green stages)\n";
     return ok ? 0 : 1;
 }
