@@ -3,6 +3,10 @@
 #include "../../platform/qt/GpuDebayer.h"
 #include "../../src/mlv/macros.h"
 
+extern "C" {
+#include "../../src/debayer/wb_conversion.h"
+}
+
 #include <cstddef>
 
 namespace
@@ -224,12 +228,31 @@ std::vector<uint16_t> BackendParametricFixture::renderDebayeredFrame(
                 return std::vector<uint16_t>();
             }
 
+            if (video()->ca_red <= -0.1 || video()->ca_red >= 0.1
+             || video()->ca_blue <= -0.1 || video()->ca_blue >= 0.1)
+            {
+                if (error_message)
+                {
+                    *error_message = QStringLiteral(
+                        "GPU AMaZE debayer fixture does not support CA correction yet");
+                }
+                return std::vector<uint16_t>();
+            }
+
+            std::vector<float> prepared_raw = raw;
+            wb_convert_info_t wb_info;
+            wb_convert(&wb_info,
+                       prepared_raw.data(),
+                       width(),
+                       height(),
+                       getMlvBlackLevel(video()));
+
             std::vector<uint16_t> output(
                 static_cast<std::size_t>(width()) *
                 static_cast<std::size_t>(height()) * 3u,
                 0);
             QString renderer_description;
-            if (!gpuAmazeDebayerApplyGpuOffscreen(raw.data(),
+            if (!gpuAmazeDebayerApplyGpuOffscreen(prepared_raw.data(),
                                                    output.data(),
                                                    width(),
                                                    height(),
@@ -238,6 +261,11 @@ std::vector<uint16_t> BackendParametricFixture::renderDebayeredFrame(
             {
                 return std::vector<uint16_t>();
             }
+            wb_undo(&wb_info,
+                    output.data(),
+                    width(),
+                    height(),
+                    getMlvBlackLevel(video()));
             return output;
         }
 

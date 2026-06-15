@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -2336,9 +2337,24 @@ __global__ void k_final_output_planes(const float * rgbgreen,
     green[idx] = 65535.0f * rgbgreen[idx];
 }
 
+#ifdef CUDA_AMAZE_DEBAYER_STAGE_PROBE_LIBRARY
+struct CudaStageProbeError : public std::runtime_error
+{
+    explicit CudaStageProbeError(const std::string & message)
+        : std::runtime_error(message)
+    {
+    }
+};
+#endif
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
+#ifdef CUDA_AMAZE_DEBAYER_STAGE_PROBE_LIBRARY
+    throw CudaStageProbeError(
+        std::string("CUDA error ") + call + " @ " + file + ":" +
+        std::to_string(line) + ": " + cudaGetErrorString(rc));
+#else
     std::fprintf(stderr,
                  "CUDA error %s @ %s:%d: %s\n",
                  call,
@@ -2346,6 +2362,7 @@ void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
                  line,
                  cudaGetErrorString(rc));
     std::exit(10);
+#endif
 }
 
 #define CK(call) check_cuda((call), #call, __FILE__, __LINE__)
@@ -2784,6 +2801,7 @@ bool run_case(const CaseSpec & spec)
 }
 }
 
+#ifndef CUDA_AMAZE_DEBAYER_STAGE_PROBE_NO_MAIN
 int main()
 {
     int deviceCount = 0;
@@ -2819,3 +2837,4 @@ int main()
               << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction/chrominance/final-output stages)\n";
     return ok ? 0 : 1;
 }
+#endif

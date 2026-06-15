@@ -3,7 +3,11 @@
 #include "GpuPreviewProcessing.h"
 
 #include <QByteArray>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QGuiApplication>
+#include <QLibrary>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
@@ -13,6 +17,8 @@
 #include <QOpenGLTexture>
 #include <QSurfaceFormat>
 #include <QVector2D>
+
+#include "../../tools/gpu/igpu_amaze_debayer.h"
 
 #include <cstring>
 
@@ -243,8 +249,132 @@ bool makeDebayerContextCurrent(QOffscreenSurface * surface,
 QString gpuAmazeDebayerUnavailableReason(void)
 {
     return QStringLiteral(
-        "not yet implemented: GPU AMaZE debayer backend is unavailable; "
+        "GPU AMaZE debayer backend DLL is unavailable; set "
+        "MLVAPP_GPU_AMAZE_DEBAYER_DLL or deploy igpu_amaze_debayer_cuda.dll; "
         "do not route AMaZE to bilinear or CPU fallback under the GPU backend");
+}
+
+const char * gpuAmazeDebayerDllEnvironmentVariableName(void)
+{
+    return "MLVAPP_GPU_AMAZE_DEBAYER_DLL";
+}
+
+QString gpuAmazeDebayerDllPath(void)
+{
+    const QByteArray configured = qgetenv(gpuAmazeDebayerDllEnvironmentVariableName()).trimmed();
+    if ( !configured.isEmpty() )
+    {
+        return QString::fromLocal8Bit(configured);
+    }
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    if ( !appDir.isEmpty() )
+    {
+        const QString deployed =
+            QDir(appDir).filePath(QStringLiteral("igpu_amaze_debayer_cuda.dll"));
+        if ( QFileInfo::exists(deployed) )
+        {
+            return deployed;
+        }
+    }
+
+    return QStringLiteral("igpu_amaze_debayer_cuda.dll");
+}
+
+typedef igpu_amaze_debayer_backend * (*GpuAmazeCreateFn)(const char *);
+typedef void (*GpuAmazeDestroyFn)(igpu_amaze_debayer_backend *);
+typedef int (*GpuAmazeAbiVersionFn)(igpu_amaze_debayer_backend *);
+typedef const char * (*GpuAmazeDescribeFn)(igpu_amaze_debayer_backend *);
+typedef int (*GpuAmazeRunFn)(igpu_amaze_debayer_backend *,
+                             const float *,
+                             uint16_t *,
+                             int,
+                             int);
+typedef int (*GpuAmazeLastTimingFn)(igpu_amaze_debayer_backend *,
+                                    igpu_amaze_debayer_timing_t *);
+
+struct GpuAmazeDebayerRuntime
+{
+    QLibrary library;
+    GpuAmazeCreateFn create = nullptr;
+    GpuAmazeDestroyFn destroy = nullptr;
+    GpuAmazeAbiVersionFn abiVersion = nullptr;
+    GpuAmazeDescribeFn describe = nullptr;
+    GpuAmazeRunFn run = nullptr;
+    GpuAmazeLastTimingFn lastTiming = nullptr;
+};
+
+template <typename FunctionPointer>
+bool resolveAmazeDebayerSymbol(QLibrary * library,
+                               const char * symbol,
+                               FunctionPointer * out,
+                               QString * reason)
+{
+    *out = reinterpret_cast<FunctionPointer>(library->resolve(symbol));
+    if ( *out ) return true;
+    if ( reason )
+    {
+        *reason = QStringLiteral("GPU AMaZE debayer backend missing ABI symbol %1")
+            .arg(QString::fromLatin1(symbol));
+    }
+    return false;
+}
+
+bool loadAmazeDebayerRuntime(GpuAmazeDebayerRuntime * runtime,
+                             QString * reason)
+{
+    if ( !runtime )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU AMaZE debayer runtime loader received null storage");
+        return false;
+    }
+
+    const QString dllPath = gpuAmazeDebayerDllPath();
+    runtime->library.setFileName(dllPath);
+    if ( !runtime->library.load() )
+    {
+        if ( reason )
+        {
+            *reason = QStringLiteral("GPU AMaZE debayer backend DLL load failed (%1): %2")
+                .arg(dllPath, runtime->library.errorString());
+        }
+        return false;
+    }
+
+    return resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_create",
+                                     &runtime->create,
+                                     reason)
+        && resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_destroy",
+                                     &runtime->destroy,
+                                     reason)
+        && resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_abi_version",
+                                     &runtime->abiVersion,
+                                     reason)
+        && resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_describe",
+                                     &runtime->describe,
+                                     reason)
+        && resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_run",
+                                     &runtime->run,
+                                     reason)
+        && resolveAmazeDebayerSymbol(&runtime->library,
+                                     "igpu_amaze_debayer_last_timing",
+                                     &runtime->lastTiming,
+                                     reason);
+}
+
+QString describeAmazeBackend(GpuAmazeDebayerRuntime * runtime,
+                             igpu_amaze_debayer_backend * backend)
+{
+    if ( !runtime || !runtime->describe || !backend ) return QStringLiteral("unknown");
+    const char * description = runtime->describe(backend);
+    return description && *description
+        ? QString::fromUtf8(description)
+        : QStringLiteral("unknown");
 }
 }
 
@@ -391,20 +521,100 @@ bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
 GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeBackend(void)
 {
     GpuAmazeDebayerBackendAvailability availability;
-    availability.available = false;
-    availability.reason = gpuAmazeDebayerUnavailableReason();
-    availability.rendererDescription.clear();
+
+    GpuAmazeDebayerRuntime runtime;
+    if ( !loadAmazeDebayerRuntime(&runtime, &availability.reason) )
+    {
+        if ( availability.reason.isEmpty() )
+        {
+            availability.reason = gpuAmazeDebayerUnavailableReason();
+        }
+        return availability;
+    }
+
+    igpu_amaze_debayer_backend * backend = runtime.create("cuda");
+    if ( !backend )
+    {
+        availability.reason = QStringLiteral("GPU AMaZE debayer backend create('cuda') failed");
+        return availability;
+    }
+
+    const int abiVersion = runtime.abiVersion(backend);
+    if ( abiVersion != IGPU_AMAZE_DEBAYER_ABI_VERSION )
+    {
+        availability.reason =
+            QStringLiteral("GPU AMaZE debayer backend ABI mismatch: got %1 expected %2")
+                .arg(abiVersion)
+                .arg(IGPU_AMAZE_DEBAYER_ABI_VERSION);
+        runtime.destroy(backend);
+        return availability;
+    }
+
+    availability.rendererDescription = describeAmazeBackend(&runtime, backend);
+    runtime.destroy(backend);
+    availability.available = true;
+    availability.reason.clear();
     return availability;
 }
 
-bool gpuAmazeDebayerApplyGpuOffscreen(const float *,
-                                      uint16_t *,
-                                      int,
-                                      int,
+bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
+                                      uint16_t * outputRgb16,
+                                      int width,
+                                      int height,
                                       QString * reason,
                                       QString * rendererDescription)
 {
-    if ( reason ) *reason = gpuAmazeDebayerUnavailableReason();
-    if ( rendererDescription ) rendererDescription->clear();
-    return false;
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        if ( rendererDescription ) rendererDescription->clear();
+        return false;
+    };
+
+    if ( !inputRawFrame || !outputRgb16 || width <= 32 || height <= 32 )
+    {
+        return fail(QStringLiteral("GPU AMaZE debayer input/output buffers are invalid"));
+    }
+
+    GpuAmazeDebayerRuntime runtime;
+    QString loadReason;
+    if ( !loadAmazeDebayerRuntime(&runtime, &loadReason) )
+    {
+        return fail(loadReason.isEmpty() ? gpuAmazeDebayerUnavailableReason() : loadReason);
+    }
+
+    igpu_amaze_debayer_backend * backend = runtime.create("cuda");
+    if ( !backend )
+    {
+        return fail(QStringLiteral("GPU AMaZE debayer backend create('cuda') failed"));
+    }
+
+    const int abiVersion = runtime.abiVersion(backend);
+    if ( abiVersion != IGPU_AMAZE_DEBAYER_ABI_VERSION )
+    {
+        const QString mismatch =
+            QStringLiteral("GPU AMaZE debayer backend ABI mismatch: got %1 expected %2")
+                .arg(abiVersion)
+                .arg(IGPU_AMAZE_DEBAYER_ABI_VERSION);
+        runtime.destroy(backend);
+        return fail(mismatch);
+    }
+
+    const int rc = runtime.run(backend, inputRawFrame, outputRgb16, width, height);
+    if ( rc != 0 )
+    {
+        const QString backendDescription = describeAmazeBackend(&runtime, backend);
+        runtime.destroy(backend);
+        return fail(QStringLiteral("GPU AMaZE debayer backend run failed rc=%1 renderer=%2")
+            .arg(rc)
+            .arg(backendDescription));
+    }
+
+    if ( rendererDescription )
+    {
+        *rendererDescription = describeAmazeBackend(&runtime, backend);
+    }
+    runtime.destroy(backend);
+    if ( reason ) reason->clear();
+    return true;
 }
