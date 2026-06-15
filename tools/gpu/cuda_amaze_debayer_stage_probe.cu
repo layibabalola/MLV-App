@@ -19,6 +19,7 @@
  *   - diagonal red/blue interpolation candidates, pmwt refinement, and rbint
  *   - diagonal green correction at red/blue sites
  *   - G-R/G-B coset split and fancy chrominance interpolation
+ *   - final red/green/blue output-plane assembly
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -68,6 +69,9 @@ struct StageBuffers
 {
     std::vector<float> cfa;
     std::vector<float> rgbgreen;
+    std::vector<float> red;
+    std::vector<float> green;
+    std::vector<float> blue;
     std::vector<float> dirwts0;
     std::vector<float> dirwts1;
     std::vector<float> delhvsqsum;
@@ -97,6 +101,9 @@ struct StageBuffers
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
         , rgbgreen(kTileSamples, 0.0f)
+        , red(kTileSamples, 0.0f)
+        , green(kTileSamples, 0.0f)
+        , blue(kTileSamples, 0.0f)
         , dirwts0(kTileSamples, 0.0f)
         , dirwts1(kTileSamples, 0.0f)
         , delhvsqsum(kTileSamples, 0.0f)
@@ -131,6 +138,9 @@ struct DeviceBuffers
     uint16_t * raw = nullptr;
     float * cfa = nullptr;
     float * rgbgreen = nullptr;
+    float * red = nullptr;
+    float * green = nullptr;
+    float * blue = nullptr;
     float * dirwts0 = nullptr;
     float * dirwts1 = nullptr;
     float * delhvsqsum = nullptr;
@@ -1185,6 +1195,116 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
                 (wtnw + wtne + wtsw + wtse);
         }
     }
+
+    for (int rr = 16; rr < rr1 - 16; ++rr)
+    {
+        if ((fc_rggb(rr, 2) & 1) == 1)
+        {
+            int cc = 16;
+            int idx = rr * kTileSize + cc;
+            for (; cc < cc1 - 16 - (cc1 & 1); cc += 2, ++idx)
+            {
+                float temp =
+                    1.0f /
+                    (out->hvwt[(idx - v1) >> 1] +
+                     (1.0f - out->hvwt[(idx + 1) >> 1]) +
+                     (1.0f - out->hvwt[(idx - 1) >> 1]) +
+                     out->hvwt[(idx + v1) >> 1]);
+                out->red[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb0[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb0[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb0[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb0[(idx + v1) >> 1]) *
+                         temp);
+                out->blue[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb1[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb1[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb1[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb1[(idx + v1) >> 1]) *
+                         temp);
+
+                ++idx;
+                out->red[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb0[idx >> 1]);
+                out->blue[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb1[idx >> 1]);
+            }
+            if (cc1 & 1)
+            {
+                float temp =
+                    1.0f /
+                    (out->hvwt[(idx - v1) >> 1] +
+                     (1.0f - out->hvwt[(idx + 1) >> 1]) +
+                     (1.0f - out->hvwt[(idx - 1) >> 1]) +
+                     out->hvwt[(idx + v1) >> 1]);
+                out->red[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb0[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb0[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb0[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb0[(idx + v1) >> 1]) *
+                         temp);
+                out->blue[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb1[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb1[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb1[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb1[(idx + v1) >> 1]) *
+                         temp);
+            }
+        }
+        else
+        {
+            int cc = 16;
+            int idx = rr * kTileSize + cc;
+            for (; cc < cc1 - 16 - (cc1 & 1); cc += 2, ++idx)
+            {
+                out->red[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb0[idx >> 1]);
+                out->blue[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb1[idx >> 1]);
+
+                ++idx;
+                float temp =
+                    1.0f /
+                    (out->hvwt[(idx - v1) >> 1] +
+                     (1.0f - out->hvwt[(idx + 1) >> 1]) +
+                     (1.0f - out->hvwt[(idx - 1) >> 1]) +
+                     out->hvwt[(idx + v1) >> 1]);
+                out->red[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb0[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb0[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb0[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb0[(idx + v1) >> 1]) *
+                         temp);
+                out->blue[idx] =
+                    65535.0f *
+                    (out->rgbgreen[idx] -
+                     (out->hvwt[(idx - v1) >> 1] * out->dgrb1[(idx - v1) >> 1] +
+                      (1.0f - out->hvwt[(idx + 1) >> 1]) * out->dgrb1[(idx + 1) >> 1] +
+                      (1.0f - out->hvwt[(idx - 1) >> 1]) * out->dgrb1[(idx - 1) >> 1] +
+                      out->hvwt[(idx + v1) >> 1] * out->dgrb1[(idx + v1) >> 1]) *
+                         temp);
+            }
+            if (cc1 & 1)
+            {
+                out->red[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb0[idx >> 1]);
+                out->blue[idx] = 65535.0f * (out->rgbgreen[idx] - out->dgrb1[idx >> 1]);
+            }
+        }
+    }
+
+    for (int rr = 16; rr < rr1 - 16; ++rr)
+    {
+        for (int cc = 16, idx = rr * kTileSize + cc; cc < cc1 - 16; ++cc, ++idx)
+        {
+            out->green[idx] = 65535.0f * out->rgbgreen[idx];
+        }
+    }
 }
 
 __global__ void k_tile_load(const uint16_t * raw,
@@ -2167,6 +2287,55 @@ __global__ void k_fancy_chrominance_interpolation(float * dgrb0,
         (wtnw + wtne + wtsw + wtse);
 }
 
+__global__ void k_final_output_planes(const float * rgbgreen,
+                                      const float * hvwt,
+                                      const float * dgrb0,
+                                      const float * dgrb1,
+                                      float * red,
+                                      float * green,
+                                      float * blue,
+                                      int rr1,
+                                      int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 16 || rr >= rr1 - 16 || cc < 16 || cc >= cc1 - 16) return;
+
+    const int idx = rr * kTileSize + cc;
+    if ((fc_rggb(rr, cc) & 1) != 0)
+    {
+        const float temp =
+            1.0f /
+            (hvwt[(idx - kTileSize) >> 1] +
+             (1.0f - hvwt[(idx + 1) >> 1]) +
+             (1.0f - hvwt[(idx - 1) >> 1]) +
+             hvwt[(idx + kTileSize) >> 1]);
+        red[idx] =
+            65535.0f *
+            (rgbgreen[idx] -
+             (hvwt[(idx - kTileSize) >> 1] * dgrb0[(idx - kTileSize) >> 1] +
+              (1.0f - hvwt[(idx + 1) >> 1]) * dgrb0[(idx + 1) >> 1] +
+              (1.0f - hvwt[(idx - 1) >> 1]) * dgrb0[(idx - 1) >> 1] +
+              hvwt[(idx + kTileSize) >> 1] * dgrb0[(idx + kTileSize) >> 1]) *
+                 temp);
+        blue[idx] =
+            65535.0f *
+            (rgbgreen[idx] -
+             (hvwt[(idx - kTileSize) >> 1] * dgrb1[(idx - kTileSize) >> 1] +
+              (1.0f - hvwt[(idx + 1) >> 1]) * dgrb1[(idx + 1) >> 1] +
+              (1.0f - hvwt[(idx - 1) >> 1]) * dgrb1[(idx - 1) >> 1] +
+              hvwt[(idx + kTileSize) >> 1] * dgrb1[(idx + kTileSize) >> 1]) *
+                 temp);
+    }
+    else
+    {
+        red[idx] = 65535.0f * (rgbgreen[idx] - dgrb0[idx >> 1]);
+        blue[idx] = 65535.0f * (rgbgreen[idx] - dgrb1[idx >> 1]);
+    }
+
+    green[idx] = 65535.0f * rgbgreen[idx];
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -2186,6 +2355,9 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->raw, rawCount * sizeof(uint16_t)));
     CK(cudaMalloc(&d->cfa, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->rgbgreen, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->red, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->green, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->blue, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dirwts0, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dirwts1, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->delhvsqsum, kTileSamples * sizeof(float)));
@@ -2218,6 +2390,9 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->raw);
     cudaFree(d->cfa);
     cudaFree(d->rgbgreen);
+    cudaFree(d->red);
+    cudaFree(d->green);
+    cudaFree(d->blue);
     cudaFree(d->dirwts0);
     cudaFree(d->dirwts1);
     cudaFree(d->delhvsqsum);
@@ -2249,6 +2424,9 @@ void clear_device_stages(const DeviceBuffers & d)
 {
     CK(cudaMemset(d.cfa, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.rgbgreen, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.red, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.green, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.blue, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dirwts0, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dirwts1, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.delhvsqsum, 0, kTileSamples * sizeof(float)));
@@ -2280,6 +2458,9 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
 {
     CK(cudaMemcpy(out->cfa.data(), d.cfa, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->rgbgreen.data(), d.rgbgreen, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->red.data(), d.red, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->green.data(), d.green, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->blue.data(), d.blue, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dirwts0.data(), d.dirwts0, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dirwts1.data(), d.dirwts1, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->delhvsqsum.data(), d.delhvsqsum, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
@@ -2548,6 +2729,16 @@ bool run_case(const CaseSpec & spec)
                                                        rr1,
                                                        cc1);
     CK(cudaGetLastError());
+    k_final_output_planes<<<grid, block>>>(d.rgbgreen,
+                                           d.hvwt,
+                                           d.dgrb0,
+                                           d.dgrb1,
+                                           d.red,
+                                           d.green,
+                                           d.blue,
+                                           rr1,
+                                           cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -2561,6 +2752,9 @@ bool run_case(const CaseSpec & spec)
     bool ok = true;
     ok = report_compare(spec.name, "cfa", cpu.cfa, gpu.cfa) && ok;
     ok = report_compare(spec.name, "rgbgreen", cpu.rgbgreen, gpu.rgbgreen) && ok;
+    ok = report_compare(spec.name, "red", cpu.red, gpu.red) && ok;
+    ok = report_compare(spec.name, "green", cpu.green, gpu.green) && ok;
+    ok = report_compare(spec.name, "blue", cpu.blue, gpu.blue) && ok;
     ok = report_compare(spec.name, "dirwts0", cpu.dirwts0, gpu.dirwts0) && ok;
     ok = report_compare(spec.name, "dirwts1", cpu.dirwts1, gpu.dirwts1) && ok;
     ok = report_compare(spec.name, "delhvsqsum", cpu.delhvsqsum, gpu.delhvsqsum) && ok;
@@ -2611,6 +2805,7 @@ int main()
         {"top_left_halo", 1808, 2268, -16, -16},
         {"interior_full_tile", 1808, 2268, 112, 112},
         {"bottom_right_halo", 1808, 2268, 2160, 1680},
+        {"odd_right_halo", 1809, 2268, 2160, 1680},
     };
 
     bool ok = true;
@@ -2621,6 +2816,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction/chrominance stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction/chrominance/final-output stages)\n";
     return ok ? 0 : 1;
 }
