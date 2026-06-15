@@ -22,15 +22,12 @@
  *   - Preview-processing subset:
  *     CPU reference + real offscreen GPU execution or runtime skip.
  *   - Debayer shell:
- *     CPU bilinear/AMaZE execution + real bilinear GPU execution or runtime
- *     skip. AMaZE has its own explicit unavailable GPU capability surface
- *     until a second backend lands.
+ *     CPU bilinear/AMaZE execution plus real GPU bilinear and DLL-gated GPU
+ *     AMaZE execution, or a concrete runtime skip when either backend is not
+ *     available.
  *
- * Later slices will:
- *   - Replace the debayer GPU probe with a real backend check plus parity
- *     execution.
- *   - Extend the same pattern to later stages (for example Dual ISO full20bit)
- *     once the debayer backend is real.
+ * Later slices will extend the same pattern to later stages, broader
+ * processing coverage, and no-readback playback/export paths.
  */
 
 class BackendParametricFixture : public MlvPipelineFixture
@@ -98,10 +95,9 @@ public:
      * explicit debayer-mode override, so the returned frame is a real debayered
      * RGB16 output rather than a synthetic oracle.
      *
-     * Bilinear GPU debayer now uses the same offscreen executor as the
-     * experimental production preview path, while AMaZE intentionally remains
-     * unavailable through a distinct GPU AMaZE probe/apply hook so the next backend
-     * flip is explicit in review and cannot silently substitute bilinear or CPU.
+     * Bilinear GPU debayer uses the same offscreen executor as the experimental
+     * production preview path. AMaZE goes through a distinct DLL-gated probe/apply
+     * hook so review can prove it does not silently substitute bilinear or CPU.
      */
     std::vector<uint16_t> renderDebayeredFrame(Backend backend,
                                                DebayerMode mode,
