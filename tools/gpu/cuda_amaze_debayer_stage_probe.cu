@@ -10,6 +10,7 @@
  *   - horizontal/vertical gradient weights
  *   - diagonal precursor weights used by later R/B interpolation
  *   - first green-direction interpolation color-difference planes
+ *   - scalar-order variance selection and saturation-bound refinement
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -41,6 +42,7 @@ constexpr int kTileSamples = kTileSize * kTileSize;
 constexpr int kHalfTileSamples = kTileSize * kTileHalf;
 constexpr float kEps = 1.0e-5f;
 constexpr float kAdaptiveRatioThreshold = 0.75f;
+constexpr float kClipPoint = 1.0f;
 constexpr float kClipPoint8 = 0.8f;
 constexpr float kTolerance = 1.0e-6f;
 
@@ -70,6 +72,7 @@ struct StageBuffers
     std::vector<float> hcdalt;
     std::vector<float> dgintv;
     std::vector<float> dginth;
+    std::vector<float> cddiffsq;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -87,6 +90,7 @@ struct StageBuffers
         , hcdalt(kTileSamples, 0.0f)
         , dgintv(kTileSamples, 0.0f)
         , dginth(kTileSamples, 0.0f)
+        , cddiffsq(kTileSamples, 0.0f)
     {
     }
 };
@@ -109,6 +113,7 @@ struct DeviceBuffers
     float * hcdalt = nullptr;
     float * dgintv = nullptr;
     float * dginth = nullptr;
+    float * cddiffsq = nullptr;
 };
 
 struct CompareStats
@@ -143,6 +148,26 @@ __host__ __device__ int fc_rggb(int row, int col)
 __host__ __device__ float sqr_f(float value)
 {
     return value * value;
+}
+
+__host__ __device__ float min_f(float a, float b)
+{
+    return a < b ? a : b;
+}
+
+__host__ __device__ float max_f(float a, float b)
+{
+    return a > b ? a : b;
+}
+
+__host__ __device__ float coerce_f(float x, float lo, float hi)
+{
+    return max_f(min_f(x, hi), lo);
+}
+
+__host__ __device__ float ulim_f(float a, float b, float c)
+{
+    return (b < c) ? coerce_f(a, b, c) : coerce_f(a, c, b);
 }
 
 __host__ __device__ float xdiv2f_probe(float value)
@@ -328,6 +353,117 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             out->dginth[idx] = std::min(sqr_f(glha - grha), sqr_f(glar - grar));
         }
     }
+
+    for (int rr = 4; rr < rr1 - 4; ++rr)
+    {
+        for (int cc = 4; cc < cc1 - 4; ++cc)
+        {
+            const int idx = rr * kTileSize + cc;
+            const float hcdvar =
+                3.0f * (sqr_f(out->hcd[idx - 2]) +
+                        sqr_f(out->hcd[idx]) +
+                        sqr_f(out->hcd[idx + 2])) -
+                sqr_f(out->hcd[idx - 2] + out->hcd[idx] + out->hcd[idx + 2]);
+            const float hcdaltvar =
+                3.0f * (sqr_f(out->hcdalt[idx - 2]) +
+                        sqr_f(out->hcdalt[idx]) +
+                        sqr_f(out->hcdalt[idx + 2])) -
+                sqr_f(out->hcdalt[idx - 2] + out->hcdalt[idx] + out->hcdalt[idx + 2]);
+            const float vcdvar =
+                3.0f * (sqr_f(out->vcd[idx - v2]) +
+                        sqr_f(out->vcd[idx]) +
+                        sqr_f(out->vcd[idx + v2])) -
+                sqr_f(out->vcd[idx - v2] + out->vcd[idx] + out->vcd[idx + v2]);
+            const float vcdaltvar =
+                3.0f * (sqr_f(out->vcdalt[idx - v2]) +
+                        sqr_f(out->vcdalt[idx]) +
+                        sqr_f(out->vcdalt[idx + v2])) -
+                sqr_f(out->vcdalt[idx - v2] + out->vcdalt[idx] + out->vcdalt[idx + v2]);
+
+            if (hcdaltvar < hcdvar) out->hcd[idx] = out->hcdalt[idx];
+            if (vcdaltvar < vcdvar) out->vcd[idx] = out->vcdalt[idx];
+
+            if ((fc_rggb(rr, cc) & 1) != 0)
+            {
+                const float ginth = -out->hcd[idx] + out->cfa[idx];
+                const float gintv = -out->vcd[idx] + out->cfa[idx];
+                if (out->hcd[idx] > 0.0f)
+                {
+                    const float bounded = -ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]) + out->cfa[idx];
+                    if (3.0f * out->hcd[idx] > (ginth + out->cfa[idx]))
+                    {
+                        out->hcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float hwt = 1.0f - 3.0f * out->hcd[idx] / (kEps + ginth + out->cfa[idx]);
+                        out->hcd[idx] = hwt * out->hcd[idx] + (1.0f - hwt) * bounded;
+                    }
+                }
+                if (out->vcd[idx] > 0.0f)
+                {
+                    const float bounded = -ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]) + out->cfa[idx];
+                    if (3.0f * out->vcd[idx] > (gintv + out->cfa[idx]))
+                    {
+                        out->vcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float vwt = 1.0f - 3.0f * out->vcd[idx] / (kEps + gintv + out->cfa[idx]);
+                        out->vcd[idx] = vwt * out->vcd[idx] + (1.0f - vwt) * bounded;
+                    }
+                }
+                if (ginth > kClipPoint)
+                {
+                    out->hcd[idx] = -ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]) + out->cfa[idx];
+                }
+                if (gintv > kClipPoint)
+                {
+                    out->vcd[idx] = -ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]) + out->cfa[idx];
+                }
+            }
+            else
+            {
+                const float ginth = out->hcd[idx] + out->cfa[idx];
+                const float gintv = out->vcd[idx] + out->cfa[idx];
+                if (out->hcd[idx] < 0.0f)
+                {
+                    const float bounded = ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]) - out->cfa[idx];
+                    if (3.0f * out->hcd[idx] < -(ginth + out->cfa[idx]))
+                    {
+                        out->hcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float hwt = 1.0f + 3.0f * out->hcd[idx] / (kEps + ginth + out->cfa[idx]);
+                        out->hcd[idx] = hwt * out->hcd[idx] + (1.0f - hwt) * bounded;
+                    }
+                }
+                if (out->vcd[idx] < 0.0f)
+                {
+                    const float bounded = ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]) - out->cfa[idx];
+                    if (3.0f * out->vcd[idx] < -(gintv + out->cfa[idx]))
+                    {
+                        out->vcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float vwt = 1.0f + 3.0f * out->vcd[idx] / (kEps + gintv + out->cfa[idx]);
+                        out->vcd[idx] = vwt * out->vcd[idx] + (1.0f - vwt) * bounded;
+                    }
+                }
+                if (ginth > kClipPoint)
+                {
+                    out->hcd[idx] = ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]) - out->cfa[idx];
+                }
+                if (gintv > kClipPoint)
+                {
+                    out->vcd[idx] = ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]) - out->cfa[idx];
+                }
+                out->cddiffsq[idx] = sqr_f(out->vcd[idx] - out->hcd[idx]);
+            }
+        }
+    }
 }
 
 __global__ void k_tile_load(const uint16_t * raw,
@@ -503,6 +639,131 @@ __global__ void k_green_interpolation(const float * cfa,
     dginth[idx] = fminf(sqr_f(glha - grha), sqr_f(glar - grar));
 }
 
+__global__ void k_variance_selection_scalar(float * cfa,
+                                            float * vcd,
+                                            float * hcd,
+                                            const float * vcdalt,
+                                            const float * hcdalt,
+                                            float * cddiffsq,
+                                            int rr1,
+                                            int cc1)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0 || threadIdx.y != 0) return;
+
+    const int v1 = kTileSize;
+    const int v2 = 2 * kTileSize;
+    for (int rr = 4; rr < rr1 - 4; ++rr)
+    {
+        for (int cc = 4; cc < cc1 - 4; ++cc)
+        {
+            const int idx = rr * kTileSize + cc;
+            const float hcdvar =
+                3.0f * (sqr_f(hcd[idx - 2]) +
+                        sqr_f(hcd[idx]) +
+                        sqr_f(hcd[idx + 2])) -
+                sqr_f(hcd[idx - 2] + hcd[idx] + hcd[idx + 2]);
+            const float hcdaltvar =
+                3.0f * (sqr_f(hcdalt[idx - 2]) +
+                        sqr_f(hcdalt[idx]) +
+                        sqr_f(hcdalt[idx + 2])) -
+                sqr_f(hcdalt[idx - 2] + hcdalt[idx] + hcdalt[idx + 2]);
+            const float vcdvar =
+                3.0f * (sqr_f(vcd[idx - v2]) +
+                        sqr_f(vcd[idx]) +
+                        sqr_f(vcd[idx + v2])) -
+                sqr_f(vcd[idx - v2] + vcd[idx] + vcd[idx + v2]);
+            const float vcdaltvar =
+                3.0f * (sqr_f(vcdalt[idx - v2]) +
+                        sqr_f(vcdalt[idx]) +
+                        sqr_f(vcdalt[idx + v2])) -
+                sqr_f(vcdalt[idx - v2] + vcdalt[idx] + vcdalt[idx + v2]);
+
+            if (hcdaltvar < hcdvar) hcd[idx] = hcdalt[idx];
+            if (vcdaltvar < vcdvar) vcd[idx] = vcdalt[idx];
+
+            if ((fc_rggb(rr, cc) & 1) != 0)
+            {
+                const float ginth = -hcd[idx] + cfa[idx];
+                const float gintv = -vcd[idx] + cfa[idx];
+                if (hcd[idx] > 0.0f)
+                {
+                    const float bounded = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+                    if (3.0f * hcd[idx] > (ginth + cfa[idx]))
+                    {
+                        hcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float hwt = 1.0f - 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
+                        hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
+                    }
+                }
+                if (vcd[idx] > 0.0f)
+                {
+                    const float bounded = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+                    if (3.0f * vcd[idx] > (gintv + cfa[idx]))
+                    {
+                        vcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float vwt = 1.0f - 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
+                        vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
+                    }
+                }
+                if (ginth > kClipPoint)
+                {
+                    hcd[idx] = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+                }
+                if (gintv > kClipPoint)
+                {
+                    vcd[idx] = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+                }
+            }
+            else
+            {
+                const float ginth = hcd[idx] + cfa[idx];
+                const float gintv = vcd[idx] + cfa[idx];
+                if (hcd[idx] < 0.0f)
+                {
+                    const float bounded = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+                    if (3.0f * hcd[idx] < -(ginth + cfa[idx]))
+                    {
+                        hcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float hwt = 1.0f + 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
+                        hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
+                    }
+                }
+                if (vcd[idx] < 0.0f)
+                {
+                    const float bounded = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+                    if (3.0f * vcd[idx] < -(gintv + cfa[idx]))
+                    {
+                        vcd[idx] = bounded;
+                    }
+                    else
+                    {
+                        const float vwt = 1.0f + 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
+                        vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
+                    }
+                }
+                if (ginth > kClipPoint)
+                {
+                    hcd[idx] = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+                }
+                if (gintv > kClipPoint)
+                {
+                    vcd[idx] = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+                }
+                cddiffsq[idx] = sqr_f(vcd[idx] - hcd[idx]);
+            }
+        }
+    }
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -535,6 +796,7 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->hcdalt, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dgintv, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dginth, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->cddiffsq, kTileSamples * sizeof(float)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -555,6 +817,7 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->hcdalt);
     cudaFree(d->dgintv);
     cudaFree(d->dginth);
+    cudaFree(d->cddiffsq);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -574,6 +837,7 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.hcdalt, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dgintv, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dginth, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.cddiffsq, 0, kTileSamples * sizeof(float)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -593,6 +857,7 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->hcdalt.data(), d.hcdalt, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgintv.data(), d.dgintv, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dginth.data(), d.dginth, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->cddiffsq.data(), d.cddiffsq, kTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -703,6 +968,15 @@ bool run_case(const CaseSpec & spec)
                                            rr1,
                                            cc1);
     CK(cudaGetLastError());
+    k_variance_selection_scalar<<<1, 1>>>(d.cfa,
+                                          d.vcd,
+                                          d.hcd,
+                                          d.vcdalt,
+                                          d.hcdalt,
+                                          d.cddiffsq,
+                                          rr1,
+                                          cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -729,6 +1003,7 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "hcdalt", cpu.hcdalt, gpu.hcdalt) && ok;
     ok = report_compare(spec.name, "dgintv", cpu.dgintv, gpu.dgintv) && ok;
     ok = report_compare(spec.name, "dginth", cpu.dginth, gpu.dginth) && ok;
+    ok = report_compare(spec.name, "cddiffsq", cpu.cddiffsq, gpu.cddiffsq) && ok;
     return ok;
 }
 }
@@ -764,6 +1039,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection stages)\n";
     return ok ? 0 : 1;
 }
