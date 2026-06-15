@@ -66,7 +66,8 @@ void assert_amaze_gpu_tripwire_reason(const QString & reason)
 {
     ASSERT_TRUE(!reason.isEmpty());
     ASSERT_TRUE(reason.contains(QStringLiteral("not yet implemented")));
-    ASSERT_TRUE(reason.contains(QStringLiteral("bilinear only")));
+    ASSERT_TRUE(reason.contains(QStringLiteral("GPU AMaZE debayer backend")));
+    ASSERT_TRUE(reason.contains(QStringLiteral("do not route AMaZE to bilinear")));
 }
 
 std::vector<uint16_t> render_debayer_frame(BackendParametricFixture::Backend backend,
@@ -412,6 +413,22 @@ TEST(BackendParametricDebayerShell, GpuRenderDebayerAmazeSkipsUntilBackendLands)
     ::minitest::fail(__FILE__, __LINE__,
                      "BackendParametricFixture::probeDebayerBackend(Backend::Gpu, DebayerMode::Amaze)",
                      "GPU AMaZE debayer backend is now available; update the slice-3a tripwire test.");
+}
+
+TEST(BackendParametricDebayerShell, GpuRenderDebayerAmazeRejectsFallbackUntilBackendLands)
+{
+    BackendParametricFixture fixture;
+    assert_debayer_fixture_ready(fixture);
+
+    QString error_message;
+    const std::vector<uint16_t> gpu_frame = fixture.renderDebayeredFrame(
+        BackendParametricFixture::Backend::Gpu,
+        BackendParametricFixture::DebayerMode::Amaze,
+        0,
+        &error_message);
+
+    ASSERT_TRUE(gpu_frame.empty());
+    assert_amaze_gpu_tripwire_reason(error_message);
 }
 
 TEST(BackendParametricDebayerShell, PPreX1BilinearProcessingMatchesCpuReferenceOnGpuDebayerInputOrSkips)

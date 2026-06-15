@@ -23,8 +23,8 @@
  *     CPU reference + real offscreen GPU execution or runtime skip.
  *   - Debayer shell:
  *     CPU bilinear/AMaZE execution + real bilinear GPU execution or runtime
- *     skip. AMaZE remains an explicit skip-only tripwire until a second
- *     backend lands.
+ *     skip. AMaZE has its own explicit unavailable GPU capability surface
+ *     until a second backend lands.
  *
  * Later slices will:
  *   - Replace the debayer GPU probe with a real backend check plus parity
@@ -100,7 +100,8 @@ public:
      *
      * Bilinear GPU debayer now uses the same offscreen executor as the
      * experimental production preview path, while AMaZE intentionally remains
-     * unavailable so the next backend flip is explicit in review.
+     * unavailable through a distinct GPU AMaZE probe/apply hook so the next backend
+     * flip is explicit in review and cannot silently substitute bilinear or CPU.
      */
     std::vector<uint16_t> renderDebayeredFrame(Backend backend,
                                                DebayerMode mode,
