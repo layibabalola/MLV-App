@@ -27,6 +27,8 @@
 #include <QString>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -108,6 +110,48 @@ void configure_exr_mode(processingObject_t * processing)
     processing->exr_mode = 1;
 }
 
+std::string format_processing_settings_fingerprint(
+    const char * variant_name,
+    const char * input_name,
+    const processingObject_t * processing,
+    const GpuPreviewProcessingConfig & config)
+{
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(6);
+    const int dual_iso_value = processing && processing->dual_iso
+        ? *processing->dual_iso
+        : -1;
+    stream << "variant=" << variant_name
+           << ";input=" << input_name
+           << ";config_signature=" << config.signature
+           << ";enabled=" << (config.enabled ? 1 : 0)
+           << ";source_exposure_stops=" << config.sourceExposureStops
+           << ";processing_exposure_stops=" << (processing ? processing->exposure_stops : 0.0)
+           << ";kelvin=" << (processing ? processing->kelvin : 0.0)
+           << ";wb_tint=" << (processing ? processing->wb_tint : 0.0)
+           << ";wb_multipliers="
+           << (processing ? processing->wb_multipliers[0] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[1] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[2] : 0.0)
+           << ";dual_iso=" << dual_iso_value
+           << ";exr_mode=" << (processing ? processing->exr_mode : 0)
+           << ";use_camera_matrix=" << (config.useCameraMatrix ? 1 : 0)
+           << ";processing_use_cam_matrix="
+           << (processing ? static_cast<int>(processing->use_cam_matrix) : 0)
+           << ";colour_gamut="
+           << (processing ? static_cast<int>(processing->colour_gamut) : 0)
+           << ";apply_gamut_compression="
+           << (config.applyGamutCompression ? 1 : 0)
+           << ";levels_lut_bytes=" << config.levelsLut.size()
+           << ";matrix_lut_bytes="
+           << config.matrixLutR.size() << ","
+           << config.matrixLutG.size() << ","
+           << config.matrixLutB.size()
+           << ";gamma_lut_bytes=" << config.gammaLut.size();
+    return stream.str();
+}
+
 std::string format_artifact_key(const char * backend_name, uint64_t frame_index)
 {
     std::string key = "tiny_dual_iso.preview_processing.";
@@ -172,6 +216,13 @@ void assert_processing_parity_case(const char * variant_name,
 {
     BackendParametricFixture fixture;
     const GpuPreviewProcessingConfig config = build_supported_config(fixture, mutate);
+    const std::string settings_fingerprint =
+        format_processing_settings_fingerprint(variant_name,
+                                               "preview_rgb16",
+                                               fixture.processing(),
+                                               config);
+    std::printf("PreviewProcessingSettings: %s\n",
+                settings_fingerprint.c_str());
 
     const BackendParametricFixture::BackendAvailability availability =
         BackendParametricFixture::probeBackend(BackendParametricFixture::Backend::Gpu);

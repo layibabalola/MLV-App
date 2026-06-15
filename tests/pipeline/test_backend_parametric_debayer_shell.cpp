@@ -216,6 +216,48 @@ std::string format_compare_detail(const char * label,
     return stream.str();
 }
 
+std::string format_processing_settings_fingerprint(
+    const char * label,
+    const char * debayer_name,
+    const processingObject_t * processing,
+    const GpuPreviewProcessingConfig & config)
+{
+    std::ostringstream stream;
+    stream.setf(std::ios::fixed);
+    stream.precision(6);
+    const int dual_iso_value = processing && processing->dual_iso
+        ? *processing->dual_iso
+        : -1;
+    stream << "label=" << label
+           << ";debayer=" << debayer_name
+           << ";config_signature=" << config.signature
+           << ";enabled=" << (config.enabled ? 1 : 0)
+           << ";source_exposure_stops=" << config.sourceExposureStops
+           << ";processing_exposure_stops=" << (processing ? processing->exposure_stops : 0.0)
+           << ";kelvin=" << (processing ? processing->kelvin : 0.0)
+           << ";wb_tint=" << (processing ? processing->wb_tint : 0.0)
+           << ";wb_multipliers="
+           << (processing ? processing->wb_multipliers[0] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[1] : 0.0) << ","
+           << (processing ? processing->wb_multipliers[2] : 0.0)
+           << ";dual_iso=" << dual_iso_value
+           << ";exr_mode=" << (processing ? processing->exr_mode : 0)
+           << ";use_camera_matrix=" << (config.useCameraMatrix ? 1 : 0)
+           << ";processing_use_cam_matrix="
+           << (processing ? static_cast<int>(processing->use_cam_matrix) : 0)
+           << ";colour_gamut="
+           << (processing ? static_cast<int>(processing->colour_gamut) : 0)
+           << ";apply_gamut_compression="
+           << (config.applyGamutCompression ? 1 : 0)
+           << ";levels_lut_bytes=" << config.levelsLut.size()
+           << ";matrix_lut_bytes="
+           << config.matrixLutR.size() << ","
+           << config.matrixLutG.size() << ","
+           << config.matrixLutB.size()
+           << ";gamma_lut_bytes=" << config.gammaLut.size();
+    return stream.str();
+}
+
 std::string format_worst_debayer_samples(const std::vector<uint16_t> & cpu_debayer,
                                          const std::vector<uint16_t> & gpu_debayer,
                                          int width,
@@ -811,6 +853,15 @@ TEST(BackendParametricDebayerShell, PPreX1AmazeDebayerProcessingFrameDiffMatches
     assert_debayer_fixture_ready(fixture);
     const GpuPreviewProcessingConfig config =
         build_p_pre_supported_processing_config(fixture);
+    const std::string settings_fingerprint =
+        format_processing_settings_fingerprint(
+            "p_pre_x1_amaze",
+            BackendParametricFixture::debayerModeName(
+                BackendParametricFixture::DebayerMode::Amaze),
+            fixture.processing(),
+            config);
+    std::printf("PPreX1ProcessingSettings: %s\n",
+                settings_fingerprint.c_str());
 
     const BackendParametricFixture::BackendAvailability availability =
         BackendParametricFixture::probeDebayerBackend(
