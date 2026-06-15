@@ -16,7 +16,8 @@
  *   - Nyquist-region area interpolation hvwt refinement
  *   - green-plane assembly at red/blue sites
  *   - Nyquist-region green-plane refinement
- *   - diagonal red/blue interpolation candidates and pmwt
+ *   - diagonal red/blue interpolation candidates, pmwt refinement, and rbint
+ *   - diagonal green correction at red/blue sites
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -88,6 +89,8 @@ struct StageBuffers
     std::vector<float> rbm;
     std::vector<float> rbp;
     std::vector<float> pmwt;
+    std::vector<float> pmwtalt;
+    std::vector<float> rbint;
 
     StageBuffers()
         : cfa(kTileSamples, 0.0f)
@@ -114,6 +117,8 @@ struct StageBuffers
         , rbm(kHalfTileSamples, 0.0f)
         , rbp(kHalfTileSamples, 0.0f)
         , pmwt(kHalfTileSamples, 0.0f)
+        , pmwtalt(kHalfTileSamples, 0.0f)
+        , rbint(kHalfTileSamples, 0.0f)
     {
     }
 };
@@ -145,6 +150,8 @@ struct DeviceBuffers
     float * rbm = nullptr;
     float * rbp = nullptr;
     float * pmwt = nullptr;
+    float * pmwtalt = nullptr;
+    float * rbint = nullptr;
 };
 
 struct CompareStats
@@ -292,6 +299,12 @@ __host__ __device__ float xdivf_probe(float value, int exponentDelta)
         bits.u -= static_cast<uint32_t>(exponentDelta) << 23;
     }
     return bits.f;
+}
+
+__host__ __device__ float double_twice_div_probe(float value, float denominator)
+{
+    return static_cast<float>((static_cast<double>(value) * 2.0) /
+                              static_cast<double>(denominator));
 }
 
 std::vector<uint16_t> make_raw_pattern(int width, int height, uint32_t seed)
@@ -955,6 +968,121 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
             {
                 out->rbm[halfIdx] = ulim_f(out->rbm[halfIdx], out->cfa[idx - m1], out->cfa[idx + m1]);
             }
+        }
+    }
+
+    for (int rr = 10; rr < rr1 - 10; ++rr)
+    {
+        for (int cc = 10 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 10;
+             cc += 2, idx += 2)
+        {
+            const int halfIdx = idx >> 1;
+            out->pmwtalt[halfIdx] =
+                xdivf_probe(out->pmwt[(idx - m1) >> 1] +
+                                out->pmwt[(idx + p1) >> 1] +
+                                out->pmwt[(idx - p1) >> 1] +
+                                out->pmwt[(idx + m1) >> 1],
+                            2);
+            if (std::fabs(0.5f - out->pmwt[halfIdx]) < std::fabs(0.5f - out->pmwtalt[halfIdx]))
+            {
+                out->pmwt[halfIdx] = out->pmwtalt[halfIdx];
+            }
+
+            out->rbint[halfIdx] =
+                xdiv2f_probe(out->cfa[idx] +
+                             out->rbm[halfIdx] * (1.0f - out->pmwt[halfIdx]) +
+                             out->rbp[halfIdx] * out->pmwt[halfIdx]);
+        }
+    }
+
+    for (int rr = 12; rr < rr1 - 12; ++rr)
+    {
+        for (int cc = 12 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 12;
+             cc += 2, idx += 2)
+        {
+            const int halfIdx = idx >> 1;
+            if (std::fabs(0.5f - out->pmwt[halfIdx]) < std::fabs(0.5f - out->hvwt[halfIdx]))
+            {
+                continue;
+            }
+
+            const float cruDenom = kEps + out->rbint[halfIdx] + out->rbint[halfIdx - v1];
+            const float crdDenom = kEps + out->rbint[halfIdx] + out->rbint[halfIdx + v1];
+            const float crlDenom = kEps + out->rbint[halfIdx] + out->rbint[halfIdx - 1];
+            const float crrDenom = kEps + out->rbint[halfIdx] + out->rbint[halfIdx + 1];
+            const float cru = double_twice_div_probe(out->cfa[idx - v1], cruDenom);
+            const float crd = double_twice_div_probe(out->cfa[idx + v1], crdDenom);
+            const float crl = double_twice_div_probe(out->cfa[idx - 1], crlDenom);
+            const float crr = double_twice_div_probe(out->cfa[idx + 1], crrDenom);
+
+            const float gu =
+                (std::fabs(1.0f - cru) < kAdaptiveRatioThreshold)
+                    ? out->rbint[halfIdx] * cru
+                    : out->cfa[idx - v1] + xdiv2f_probe(out->rbint[halfIdx] - out->rbint[halfIdx - v1]);
+            const float gd =
+                (std::fabs(1.0f - crd) < kAdaptiveRatioThreshold)
+                    ? out->rbint[halfIdx] * crd
+                    : out->cfa[idx + v1] + xdiv2f_probe(out->rbint[halfIdx] - out->rbint[halfIdx + v1]);
+            const float gl =
+                (std::fabs(1.0f - crl) < kAdaptiveRatioThreshold)
+                    ? out->rbint[halfIdx] * crl
+                    : out->cfa[idx - 1] + xdiv2f_probe(out->rbint[halfIdx] - out->rbint[halfIdx - 1]);
+            const float gr =
+                (std::fabs(1.0f - crr) < kAdaptiveRatioThreshold)
+                    ? out->rbint[halfIdx] * crr
+                    : out->cfa[idx + 1] + xdiv2f_probe(out->rbint[halfIdx] - out->rbint[halfIdx + 1]);
+
+            float gintv =
+                (out->dirwts0[idx - v1] * gd + out->dirwts0[idx + v1] * gu) /
+                (out->dirwts0[idx + v1] + out->dirwts0[idx - v1]);
+            float ginth =
+                (out->dirwts1[idx - 1] * gr + out->dirwts1[idx + 1] * gl) /
+                (out->dirwts1[idx - 1] + out->dirwts1[idx + 1]);
+
+            if (gintv < out->rbint[halfIdx])
+            {
+                if (2.0f * gintv < out->rbint[halfIdx])
+                {
+                    gintv = ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]);
+                }
+                else
+                {
+                    const float diff = out->rbint[halfIdx] - gintv;
+                    const float denom = kEps + gintv + out->rbint[halfIdx];
+                    const float vwt = double_twice_div_probe(diff, denom);
+                    gintv = vwt * gintv +
+                            (1.0f - vwt) * ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]);
+                }
+            }
+            if (ginth < out->rbint[halfIdx])
+            {
+                if (2.0f * ginth < out->rbint[halfIdx])
+                {
+                    ginth = ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]);
+                }
+                else
+                {
+                    const float diff = out->rbint[halfIdx] - ginth;
+                    const float denom = kEps + ginth + out->rbint[halfIdx];
+                    const float hwt = double_twice_div_probe(diff, denom);
+                    ginth = hwt * ginth +
+                            (1.0f - hwt) * ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]);
+                }
+            }
+
+            if (ginth > kClipPoint)
+            {
+                ginth = ulim_f(ginth, out->cfa[idx - 1], out->cfa[idx + 1]);
+            }
+            if (gintv > kClipPoint)
+            {
+                gintv = ulim_f(gintv, out->cfa[idx - v1], out->cfa[idx + v1]);
+            }
+
+            out->rgbgreen[idx] = ginth * (1.0f - out->hvwt[halfIdx]) + gintv * out->hvwt[halfIdx];
+            out->dgrb0[halfIdx] = out->rgbgreen[idx] - out->cfa[idx];
         }
     }
 }
@@ -1691,6 +1819,143 @@ __global__ void k_diagonal_rb_interpolation(const float * cfa,
     }
 }
 
+__global__ void k_pmwt_refinement_and_rbint_scalar(const float * cfa,
+                                                   const float * rbm,
+                                                   const float * rbp,
+                                                   float * pmwt,
+                                                   float * pmwtalt,
+                                                   float * rbint,
+                                                   int rr1,
+                                                   int cc1)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0 || threadIdx.y != 0) return;
+
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+    for (int rr = 10; rr < rr1 - 10; ++rr)
+    {
+        for (int cc = 10 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 10;
+             cc += 2, idx += 2)
+        {
+            const int halfIdx = idx >> 1;
+            pmwtalt[halfIdx] =
+                xdivf_probe(pmwt[(idx - m1) >> 1] +
+                                pmwt[(idx + p1) >> 1] +
+                                pmwt[(idx - p1) >> 1] +
+                                pmwt[(idx + m1) >> 1],
+                            2);
+            if (fabsf(0.5f - pmwt[halfIdx]) < fabsf(0.5f - pmwtalt[halfIdx]))
+            {
+                pmwt[halfIdx] = pmwtalt[halfIdx];
+            }
+
+            rbint[halfIdx] =
+                xdiv2f_probe(cfa[idx] +
+                             rbm[halfIdx] * (1.0f - pmwt[halfIdx]) +
+                             rbp[halfIdx] * pmwt[halfIdx]);
+        }
+    }
+}
+
+__global__ void k_diagonal_green_correction(const float * cfa,
+                                            const float * dirwts0,
+                                            const float * dirwts1,
+                                            const float * hvwt,
+                                            const float * pmwt,
+                                            const float * rbint,
+                                            float * dgrb0,
+                                            float * rgbgreen,
+                                            int rr1,
+                                            int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 12 || rr >= rr1 - 12) return;
+
+    const int ccStart = 12 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 12 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const int idx = rr * kTileSize + cc;
+    const int halfIdx = idx >> 1;
+    if (fabsf(0.5f - pmwt[halfIdx]) < fabsf(0.5f - hvwt[halfIdx])) return;
+
+    const float cruDenom = kEps + rbint[halfIdx] + rbint[halfIdx - v1];
+    const float crdDenom = kEps + rbint[halfIdx] + rbint[halfIdx + v1];
+    const float crlDenom = kEps + rbint[halfIdx] + rbint[halfIdx - 1];
+    const float crrDenom = kEps + rbint[halfIdx] + rbint[halfIdx + 1];
+    const float cru = double_twice_div_probe(cfa[idx - v1], cruDenom);
+    const float crd = double_twice_div_probe(cfa[idx + v1], crdDenom);
+    const float crl = double_twice_div_probe(cfa[idx - 1], crlDenom);
+    const float crr = double_twice_div_probe(cfa[idx + 1], crrDenom);
+
+    const float gu =
+        (fabsf(1.0f - cru) < kAdaptiveRatioThreshold)
+            ? rbint[halfIdx] * cru
+            : cfa[idx - v1] + xdiv2f_probe(rbint[halfIdx] - rbint[halfIdx - v1]);
+    const float gd =
+        (fabsf(1.0f - crd) < kAdaptiveRatioThreshold)
+            ? rbint[halfIdx] * crd
+            : cfa[idx + v1] + xdiv2f_probe(rbint[halfIdx] - rbint[halfIdx + v1]);
+    const float gl =
+        (fabsf(1.0f - crl) < kAdaptiveRatioThreshold)
+            ? rbint[halfIdx] * crl
+            : cfa[idx - 1] + xdiv2f_probe(rbint[halfIdx] - rbint[halfIdx - 1]);
+    const float gr =
+        (fabsf(1.0f - crr) < kAdaptiveRatioThreshold)
+            ? rbint[halfIdx] * crr
+            : cfa[idx + 1] + xdiv2f_probe(rbint[halfIdx] - rbint[halfIdx + 1]);
+
+    float gintv =
+        (dirwts0[idx - v1] * gd + dirwts0[idx + v1] * gu) /
+        (dirwts0[idx + v1] + dirwts0[idx - v1]);
+    float ginth =
+        (dirwts1[idx - 1] * gr + dirwts1[idx + 1] * gl) /
+        (dirwts1[idx - 1] + dirwts1[idx + 1]);
+
+    if (gintv < rbint[halfIdx])
+    {
+        if (2.0f * gintv < rbint[halfIdx])
+        {
+            gintv = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]);
+        }
+        else
+        {
+            const float diff = rbint[halfIdx] - gintv;
+            const float denom = kEps + gintv + rbint[halfIdx];
+            const float vwt = double_twice_div_probe(diff, denom);
+            gintv = vwt * gintv + (1.0f - vwt) * ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]);
+        }
+    }
+    if (ginth < rbint[halfIdx])
+    {
+        if (2.0f * ginth < rbint[halfIdx])
+        {
+            ginth = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]);
+        }
+        else
+        {
+            const float diff = rbint[halfIdx] - ginth;
+            const float denom = kEps + ginth + rbint[halfIdx];
+            const float hwt = double_twice_div_probe(diff, denom);
+            ginth = hwt * ginth + (1.0f - hwt) * ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]);
+        }
+    }
+
+    if (ginth > kClipPoint)
+    {
+        ginth = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]);
+    }
+    if (gintv > kClipPoint)
+    {
+        gintv = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]);
+    }
+
+    rgbgreen[idx] = ginth * (1.0f - hvwt[halfIdx]) + gintv * hvwt[halfIdx];
+    dgrb0[halfIdx] = rgbgreen[idx] - cfa[idx];
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1732,6 +1997,8 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->rbm, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->rbp, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->pmwt, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->pmwtalt, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->rbint, kHalfTileSamples * sizeof(float)));
 }
 
 void free_device(DeviceBuffers * d)
@@ -1761,6 +2028,8 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->rbm);
     cudaFree(d->rbp);
     cudaFree(d->pmwt);
+    cudaFree(d->pmwtalt);
+    cudaFree(d->rbint);
 }
 
 void clear_device_stages(const DeviceBuffers & d)
@@ -1789,6 +2058,8 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.rbm, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.rbp, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.pmwt, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.pmwtalt, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.rbint, 0, kHalfTileSamples * sizeof(float)));
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
@@ -1817,6 +2088,8 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->rbm.data(), d.rbm, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->rbp.data(), d.rbp, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->pmwt.data(), d.pmwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->pmwtalt.data(), d.pmwtalt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->rbint.data(), d.rbint, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
 }
 
 uint32_t float_bits(float value)
@@ -2030,6 +2303,26 @@ bool run_case(const CaseSpec & spec)
                                                  rr1,
                                                  cc1);
     CK(cudaGetLastError());
+    k_pmwt_refinement_and_rbint_scalar<<<1, 1>>>(d.cfa,
+                                                 d.rbm,
+                                                 d.rbp,
+                                                 d.pmwt,
+                                                 d.pmwtalt,
+                                                 d.rbint,
+                                                 rr1,
+                                                 cc1);
+    CK(cudaGetLastError());
+    k_diagonal_green_correction<<<grid, block>>>(d.cfa,
+                                                 d.dirwts0,
+                                                 d.dirwts1,
+                                                 d.hvwt,
+                                                 d.pmwt,
+                                                 d.rbint,
+                                                 d.dgrb0,
+                                                 d.rgbgreen,
+                                                 rr1,
+                                                 cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -2065,6 +2358,8 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "rbm", cpu.rbm, gpu.rbm) && ok;
     ok = report_compare(spec.name, "rbp", cpu.rbp, gpu.rbp) && ok;
     ok = report_compare(spec.name, "pmwt", cpu.pmwt, gpu.pmwt) && ok;
+    ok = report_compare(spec.name, "pmwtalt", cpu.pmwtalt, gpu.pmwtalt) && ok;
+    ok = report_compare(spec.name, "rbint", cpu.rbint, gpu.rbint) && ok;
     return ok;
 }
 }
@@ -2100,6 +2395,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction stages)\n";
     return ok ? 0 : 1;
 }
