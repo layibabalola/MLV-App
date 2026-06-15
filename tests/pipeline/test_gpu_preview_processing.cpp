@@ -9,6 +9,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <functional>
+#include <string>
 #include <vector>
 
 static void assert_gpu_preview_fixture_ready(MlvPipelineFixture & fixture)
@@ -64,6 +66,40 @@ static GpuPreviewProcessingConfig assert_gpu_preview_subset_supported(MlvPipelin
     ASSERT_EQ(static_cast<int>(65536u * sizeof(uint16_t)), config.levelsLut.size());
     ASSERT_EQ(static_cast<int>(65536u * sizeof(uint16_t)), config.gammaLut.size());
     return config;
+}
+
+static void assert_gpu_preview_rejects_processing_feature(
+    const char * label,
+    const QString & expected_reason,
+    const std::function<void(processingObject_t *)> & enable_unsupported_feature)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingObject_t * processing = fixture.processing();
+    ASSERT_TRUE(processing != nullptr);
+    enable_unsupported_feature(processing);
+
+    QString reason;
+    if (gpuPreviewProcessingIsSupported(processing, &reason))
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         std::string("gpuPreviewProcessingIsSupported rejects ") + label);
+    }
+    ASSERT_EQ(expected_reason.toStdString(), reason.toStdString());
+
+    const GpuPreviewProcessingConfig rejected_config =
+        gpuPreviewProcessingBuildConfig(processing, &reason);
+    if (rejected_config.enabled)
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         std::string("gpuPreviewProcessingBuildConfig disables ") + label);
+    }
+    ASSERT_EQ(expected_reason.toStdString(), reason.toStdString());
+
+    test_artifacts::record(std::string("gpu_preview_subset.unsupported.") + label,
+                           reason.toStdString());
 }
 
 static std::vector<uint16_t> render_gpu_preview_subset_cpu_reference(MlvPipelineFixture & fixture,
@@ -148,4 +184,76 @@ TEST(GpuPreviewProcessing, ExposureStopsChangesSubsetConfigAndStableOutput)
                            exposed_hash);
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0",
                            std::to_string(exposed_config.signature));
+}
+
+TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
+{
+    assert_gpu_preview_rejects_processing_feature(
+        "highlight_reconstruction",
+        QStringLiteral("highlight reconstruction enabled"),
+        [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "creative_adjustments",
+        QStringLiteral("creative adjustments enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); });
+    assert_gpu_preview_rejects_processing_feature(
+        "gradient",
+        QStringLiteral("gradient enabled"),
+        [](processingObject_t * processing) { processing->gradient_enable = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "lut",
+        QStringLiteral("LUT enabled"),
+        [](processingObject_t * processing) { processing->lut_on = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "filter",
+        QStringLiteral("filter enabled"),
+        [](processingObject_t * processing) { processing->filter_on = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "agx",
+        QStringLiteral("AgX enabled"),
+        [](processingObject_t * processing) { processing->AgX = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "median_denoiser",
+        QStringLiteral("median denoiser enabled"),
+        [](processingObject_t * processing) { processing->denoiserStrength = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "rbf_denoiser",
+        QStringLiteral("RBF denoiser enabled"),
+        [](processingObject_t * processing) { processing->rbfDenoiserLuma = 25; });
+    assert_gpu_preview_rejects_processing_feature(
+        "grain",
+        QStringLiteral("grain enabled"),
+        [](processingObject_t * processing) { processing->grainStrength = 25; });
+    assert_gpu_preview_rejects_processing_feature(
+        "ca_correction",
+        QStringLiteral("CA correction enabled"),
+        [](processingObject_t * processing) { processing->ca_desaturate = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "sharpening",
+        QStringLiteral("sharpening enabled"),
+        [](processingObject_t * processing) { processing->sharpen = 0.25; });
+    assert_gpu_preview_rejects_processing_feature(
+        "chroma_separation",
+        QStringLiteral("chroma separation enabled"),
+        [](processingObject_t * processing) { processing->cs_zone.use_cs = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "chroma_blur",
+        QStringLiteral("chroma blur enabled"),
+        [](processingObject_t * processing) { processing->cs_zone.chroma_blur_radius = 3; });
+    assert_gpu_preview_rejects_processing_feature(
+        "clarity",
+        QStringLiteral("clarity enabled"),
+        [](processingObject_t * processing) { processing->clarity = 0.25; });
+    assert_gpu_preview_rejects_processing_feature(
+        "shadows_highlights",
+        QStringLiteral("shadows/highlights enabled"),
+        [](processingObject_t * processing) { processing->shadows_highlights.shadows = 0.25; });
+    assert_gpu_preview_rejects_processing_feature(
+        "vignette",
+        QStringLiteral("vignette enabled"),
+        [](processingObject_t * processing) { processing->vignette_strength = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "unsupported_gamut",
+        QStringLiteral("unsupported gamut"),
+        [](processingObject_t * processing) { processingSetGamut(processing, GAMUT_Rec2020); });
 }
