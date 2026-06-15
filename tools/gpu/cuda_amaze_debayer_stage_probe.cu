@@ -18,6 +18,7 @@
  *   - Nyquist-region green-plane refinement
  *   - diagonal red/blue interpolation candidates, pmwt refinement, and rbint
  *   - diagonal green correction at red/blue sites
+ *   - G-R/G-B coset split and fancy chrominance interpolation
  *
  * The purpose is to land a small, reviewable, real-device AMaZE slice before
  * the full demosaic port. Full P-pre remains blocked until the final GPU AMaZE
@@ -84,6 +85,7 @@ struct StageBuffers
     std::vector<float> hvwt;
     std::vector<unsigned char> nyquist;
     std::vector<float> dgrb0;
+    std::vector<float> dgrb1;
     std::vector<float> dgrb2h;
     std::vector<float> dgrb2v;
     std::vector<float> rbm;
@@ -112,6 +114,7 @@ struct StageBuffers
         , hvwt(kHalfTileSamples, 0.0f)
         , nyquist(kHalfTileSamples, 0)
         , dgrb0(kHalfTileSamples, 0.0f)
+        , dgrb1(kHalfTileSamples, 0.0f)
         , dgrb2h(kHalfTileSamples, 0.0f)
         , dgrb2v(kHalfTileSamples, 0.0f)
         , rbm(kHalfTileSamples, 0.0f)
@@ -145,6 +148,7 @@ struct DeviceBuffers
     float * hvwt = nullptr;
     unsigned char * nyquist = nullptr;
     float * dgrb0 = nullptr;
+    float * dgrb1 = nullptr;
     float * dgrb2h = nullptr;
     float * dgrb2v = nullptr;
     float * rbm = nullptr;
@@ -342,6 +346,36 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
     const int m1 = kTileSize + 1;
     const int p2 = -2 * kTileSize + 2;
     const int m2 = 2 * kTileSize + 2;
+    const int p3 = -3 * kTileSize + 3;
+    const int m3 = 3 * kTileSize + 3;
+    int ex = 0;
+    int ey = 0;
+    if (fc_rggb(0, 0) == 1)
+    {
+        if (fc_rggb(0, 1) == 0)
+        {
+            ey = 0;
+            ex = 1;
+        }
+        else
+        {
+            ey = 1;
+            ex = 0;
+        }
+    }
+    else
+    {
+        if (fc_rggb(0, 0) == 0)
+        {
+            ey = 0;
+            ex = 0;
+        }
+        else
+        {
+            ey = 1;
+            ex = 1;
+        }
+    }
 
     for (int rr = 0; rr < rr1; ++rr)
     {
@@ -1083,6 +1117,72 @@ void cpu_stage_probe(const std::vector<uint16_t> & raw,
 
             out->rgbgreen[idx] = ginth * (1.0f - out->hvwt[halfIdx]) + gintv * out->hvwt[halfIdx];
             out->dgrb0[halfIdx] = out->rgbgreen[idx] - out->cfa[idx];
+        }
+    }
+
+    for (int rr = 13 - ey; rr < rr1 - 12; rr += 2)
+    {
+        for (int cc = 13 - ex, halfIdx = (rr * kTileSize + cc) >> 1;
+             cc < cc1 - 12;
+             cc += 2, ++halfIdx)
+        {
+            out->dgrb1[halfIdx] = out->dgrb0[halfIdx];
+            out->dgrb0[halfIdx] = 0.0f;
+        }
+    }
+
+    for (int rr = 14; rr < rr1 - 14; ++rr)
+    {
+        for (int cc = 14 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+             cc < cc1 - 14;
+             cc += 2, idx += 2)
+        {
+            const int channel = 1 - fc_rggb(rr, cc) / 2;
+            std::vector<float> & dgrb = (channel == 0) ? out->dgrb0 : out->dgrb1;
+
+            const float wtnw =
+                1.0f /
+                (kEps +
+                 std::fabs(dgrb[(idx - m1) >> 1] - dgrb[(idx + m1) >> 1]) +
+                 std::fabs(dgrb[(idx - m1) >> 1] - dgrb[(idx - m3) >> 1]) +
+                 std::fabs(dgrb[(idx + m1) >> 1] - dgrb[(idx - m3) >> 1]));
+            const float wtne =
+                1.0f /
+                (kEps +
+                 std::fabs(dgrb[(idx + p1) >> 1] - dgrb[(idx - p1) >> 1]) +
+                 std::fabs(dgrb[(idx + p1) >> 1] - dgrb[(idx + p3) >> 1]) +
+                 std::fabs(dgrb[(idx - p1) >> 1] - dgrb[(idx + p3) >> 1]));
+            const float wtsw =
+                1.0f /
+                (kEps +
+                 std::fabs(dgrb[(idx - p1) >> 1] - dgrb[(idx + p1) >> 1]) +
+                 std::fabs(dgrb[(idx - p1) >> 1] - dgrb[(idx + m3) >> 1]) +
+                 std::fabs(dgrb[(idx + p1) >> 1] - dgrb[(idx - p3) >> 1]));
+            const float wtse =
+                1.0f /
+                (kEps +
+                 std::fabs(dgrb[(idx + m1) >> 1] - dgrb[(idx - m1) >> 1]) +
+                 std::fabs(dgrb[(idx + m1) >> 1] - dgrb[(idx - p3) >> 1]) +
+                 std::fabs(dgrb[(idx - m1) >> 1] - dgrb[(idx + m3) >> 1]));
+
+            dgrb[idx >> 1] =
+                (wtnw * (1.325f * dgrb[(idx - m1) >> 1] -
+                         0.175f * dgrb[(idx - m3) >> 1] -
+                         0.075f * dgrb[(idx - m1 - 2) >> 1] -
+                         0.075f * dgrb[(idx - m1 - v2) >> 1]) +
+                 wtne * (1.325f * dgrb[(idx + p1) >> 1] -
+                         0.175f * dgrb[(idx + p3) >> 1] -
+                         0.075f * dgrb[(idx + p1 + 2) >> 1] -
+                         0.075f * dgrb[(idx + p1 + v2) >> 1]) +
+                 wtsw * (1.325f * dgrb[(idx - p1) >> 1] -
+                         0.175f * dgrb[(idx - p3) >> 1] -
+                         0.075f * dgrb[(idx - p1 - 2) >> 1] -
+                         0.075f * dgrb[(idx - p1 - v2) >> 1]) +
+                 wtse * (1.325f * dgrb[(idx + m1) >> 1] -
+                         0.175f * dgrb[(idx + m3) >> 1] -
+                         0.075f * dgrb[(idx + m1 + 2) >> 1] -
+                         0.075f * dgrb[(idx + m1 + v2) >> 1])) /
+                (wtnw + wtne + wtsw + wtse);
         }
     }
 }
@@ -1956,6 +2056,117 @@ __global__ void k_diagonal_green_correction(const float * cfa,
     dgrb0[halfIdx] = rgbgreen[idx] - cfa[idx];
 }
 
+__global__ void k_chrominance_coset_split(float * dgrb0,
+                                          float * dgrb1,
+                                          int rr1,
+                                          int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+
+    int ex = 0;
+    int ey = 0;
+    if (fc_rggb(0, 0) == 1)
+    {
+        if (fc_rggb(0, 1) == 0)
+        {
+            ey = 0;
+            ex = 1;
+        }
+        else
+        {
+            ey = 1;
+            ex = 0;
+        }
+    }
+    else
+    {
+        if (fc_rggb(0, 0) == 0)
+        {
+            ey = 0;
+            ex = 0;
+        }
+        else
+        {
+            ey = 1;
+            ex = 1;
+        }
+    }
+
+    if (rr < 13 - ey || rr >= rr1 - 12 || ((rr - (13 - ey)) & 1) != 0) return;
+    if (cc < 13 - ex || cc >= cc1 - 12 || ((cc - (13 - ex)) & 1) != 0) return;
+
+    const int halfIdx = (rr * kTileSize + cc) >> 1;
+    dgrb1[halfIdx] = dgrb0[halfIdx];
+    dgrb0[halfIdx] = 0.0f;
+}
+
+__global__ void k_fancy_chrominance_interpolation(float * dgrb0,
+                                                  float * dgrb1,
+                                                  int rr1,
+                                                  int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 14 || rr >= rr1 - 14) return;
+
+    const int ccStart = 14 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 14 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v2 = 2 * kTileSize;
+    const int p1 = -kTileSize + 1;
+    const int m1 = kTileSize + 1;
+    const int p3 = -3 * kTileSize + 3;
+    const int m3 = 3 * kTileSize + 3;
+    const int idx = rr * kTileSize + cc;
+    const int channel = 1 - fc_rggb(rr, cc) / 2;
+    float * dgrb = (channel == 0) ? dgrb0 : dgrb1;
+
+    const float wtnw =
+        1.0f /
+        (kEps +
+         fabsf(dgrb[(idx - m1) >> 1] - dgrb[(idx + m1) >> 1]) +
+         fabsf(dgrb[(idx - m1) >> 1] - dgrb[(idx - m3) >> 1]) +
+         fabsf(dgrb[(idx + m1) >> 1] - dgrb[(idx - m3) >> 1]));
+    const float wtne =
+        1.0f /
+        (kEps +
+         fabsf(dgrb[(idx + p1) >> 1] - dgrb[(idx - p1) >> 1]) +
+         fabsf(dgrb[(idx + p1) >> 1] - dgrb[(idx + p3) >> 1]) +
+         fabsf(dgrb[(idx - p1) >> 1] - dgrb[(idx + p3) >> 1]));
+    const float wtsw =
+        1.0f /
+        (kEps +
+         fabsf(dgrb[(idx - p1) >> 1] - dgrb[(idx + p1) >> 1]) +
+         fabsf(dgrb[(idx - p1) >> 1] - dgrb[(idx + m3) >> 1]) +
+         fabsf(dgrb[(idx + p1) >> 1] - dgrb[(idx - p3) >> 1]));
+    const float wtse =
+        1.0f /
+        (kEps +
+         fabsf(dgrb[(idx + m1) >> 1] - dgrb[(idx - m1) >> 1]) +
+         fabsf(dgrb[(idx + m1) >> 1] - dgrb[(idx - p3) >> 1]) +
+         fabsf(dgrb[(idx - m1) >> 1] - dgrb[(idx + m3) >> 1]));
+
+    dgrb[idx >> 1] =
+        (wtnw * (1.325f * dgrb[(idx - m1) >> 1] -
+                 0.175f * dgrb[(idx - m3) >> 1] -
+                 0.075f * dgrb[(idx - m1 - 2) >> 1] -
+                 0.075f * dgrb[(idx - m1 - v2) >> 1]) +
+         wtne * (1.325f * dgrb[(idx + p1) >> 1] -
+                 0.175f * dgrb[(idx + p3) >> 1] -
+                 0.075f * dgrb[(idx + p1 + 2) >> 1] -
+                 0.075f * dgrb[(idx + p1 + v2) >> 1]) +
+         wtsw * (1.325f * dgrb[(idx - p1) >> 1] -
+                 0.175f * dgrb[(idx - p3) >> 1] -
+                 0.075f * dgrb[(idx - p1 - 2) >> 1] -
+                 0.075f * dgrb[(idx - p1 - v2) >> 1]) +
+         wtse * (1.325f * dgrb[(idx + m1) >> 1] -
+                 0.175f * dgrb[(idx + m3) >> 1] -
+                 0.075f * dgrb[(idx + m1 + 2) >> 1] -
+                 0.075f * dgrb[(idx + m1 + v2) >> 1])) /
+        (wtnw + wtne + wtsw + wtse);
+}
+
 void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 {
     if (rc == cudaSuccess) return;
@@ -1992,6 +2203,7 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->hvwt, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->nyquist, kHalfTileSamples * sizeof(unsigned char)));
     CK(cudaMalloc(&d->dgrb0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->dgrb1, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dgrb2h, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dgrb2v, kHalfTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->rbm, kHalfTileSamples * sizeof(float)));
@@ -2023,6 +2235,7 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->hvwt);
     cudaFree(d->nyquist);
     cudaFree(d->dgrb0);
+    cudaFree(d->dgrb1);
     cudaFree(d->dgrb2h);
     cudaFree(d->dgrb2v);
     cudaFree(d->rbm);
@@ -2053,6 +2266,7 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.hvwt, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.nyquist, 0, kHalfTileSamples * sizeof(unsigned char)));
     CK(cudaMemset(d.dgrb0, 0, kHalfTileSamples * sizeof(float)));
+    CK(cudaMemset(d.dgrb1, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.dgrb2h, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.dgrb2v, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.rbm, 0, kHalfTileSamples * sizeof(float)));
@@ -2083,6 +2297,7 @@ void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)
     CK(cudaMemcpy(out->hvwt.data(), d.hvwt, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->nyquist.data(), d.nyquist, kHalfTileSamples * sizeof(unsigned char), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgrb0.data(), d.dgrb0, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(out->dgrb1.data(), d.dgrb1, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgrb2h.data(), d.dgrb2h, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->dgrb2v.data(), d.dgrb2v, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
     CK(cudaMemcpy(out->rbm.data(), d.rbm, kHalfTileSamples * sizeof(float), cudaMemcpyDeviceToHost));
@@ -2323,6 +2538,16 @@ bool run_case(const CaseSpec & spec)
                                                  rr1,
                                                  cc1);
     CK(cudaGetLastError());
+    k_chrominance_coset_split<<<grid, block>>>(d.dgrb0,
+                                               d.dgrb1,
+                                               rr1,
+                                               cc1);
+    CK(cudaGetLastError());
+    k_fancy_chrominance_interpolation<<<grid, block>>>(d.dgrb0,
+                                                       d.dgrb1,
+                                                       rr1,
+                                                       cc1);
+    CK(cudaGetLastError());
     CK(cudaDeviceSynchronize());
 
     copy_device_to_host(d, &gpu);
@@ -2353,6 +2578,7 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "hvwt", cpu.hvwt, gpu.hvwt) && ok;
     ok = report_compare(spec.name, "nyquist", cpu.nyquist, gpu.nyquist) && ok;
     ok = report_compare(spec.name, "dgrb0", cpu.dgrb0, gpu.dgrb0) && ok;
+    ok = report_compare(spec.name, "dgrb1", cpu.dgrb1, gpu.dgrb1) && ok;
     ok = report_compare(spec.name, "dgrb2h", cpu.dgrb2h, gpu.dgrb2h) && ok;
     ok = report_compare(spec.name, "dgrb2v", cpu.dgrb2v, gpu.dgrb2v) && ok;
     ok = report_compare(spec.name, "rbm", cpu.rbm, gpu.rbm) && ok;
@@ -2395,6 +2621,6 @@ int main()
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
               << (ok ? "PASS" : "FAIL")
-              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction stages)\n";
+              << " (generic AMaZE tile/gradient/green-interpolation/variance-selection/hvwt/nyquist/area/green/nyquist-green/diagonal-rb/pmwtalt-rbint/diagonal-green-correction/chrominance stages)\n";
     return ok ? 0 : 1;
 }
