@@ -492,6 +492,7 @@ private slots:
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
+    void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -759,6 +760,44 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeG
     QVERIFY(mainWindowUsesGpuBilinearDebayer(state));
     QVERIFY(!mainWindowAllowsGpuAmazeDebayer(state));
     QVERIFY(!mainWindowUsesGpuAmazeDebayer(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.gpuPreviewProcessingBackendRequest = GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Gpu;
+    state.gpuAmazeDebayerCompatible = true;
+    state.renderThreadUsingGpuAmazeDebayer = true;
+
+    QVERIFY(mainWindowUsesGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.gpuAmazeTexturePresentationEnvironmentRequested = true;
+    QVERIFY(mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.renderThreadUsingGpuAmazeTexturePresentation = true;
+    QVERIFY(mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.gpuViewportInstalled = false;
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.gpuViewportInstalled = true;
+    state.gpuAmazeDebayerCompatible = false;
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+
+    state.gpuAmazeDebayerCompatible = true;
+    state.renderThreadUsingGpuAmazeDebayer = false;
+    QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()

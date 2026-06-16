@@ -216,6 +216,7 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_samplingModeDirty(false)
     , m_processingTexturesDirty(false)
     , m_pendingTextureIs16Bit(false)
+    , m_pendingTextureFromGpuAmaze(false)
     , m_textureIs16Bit(false)
     , m_view(qobject_cast<QGraphicsView *>(parent))
     , m_fallbackItem(nullptr)
@@ -326,6 +327,40 @@ bool GpuDisplayViewport::presentRgb16(QGraphicsView *view,
     viewport->setFallbackItem(fallbackItem);
     viewport->setPresentedRgb16(imageData, width, height, options);
     return true;
+}
+
+bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
+                                                   QGraphicsPixmapItem *fallbackItem,
+                                                   const float *rawFrame,
+                                                   int width,
+                                                   int height,
+                                                   int blackLevel,
+                                                   const double wbMultipliers[3],
+                                                   const PresentationOptions &options,
+                                                   QString *reason,
+                                                   QString *rendererDescription,
+                                                   GpuAmazeDebayerBackendTiming *timing)
+{
+    GpuDisplayViewport *viewport = from(view);
+    if ( !viewport || !rawFrame || width <= 0 || height <= 0 )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU AMaZE texture-present viewport or input is invalid");
+        if ( fallbackItem ) fallbackItem->setVisible(true);
+        return false;
+    }
+
+    viewport->setFallbackItem(fallbackItem);
+    const bool ok = viewport->setPresentedAmazePostWbTexture(rawFrame,
+                                                            width,
+                                                            height,
+                                                            blackLevel,
+                                                            wbMultipliers,
+                                                            options,
+                                                            reason,
+                                                            rendererDescription,
+                                                            timing);
+    if ( !ok && fallbackItem ) fallbackItem->setVisible(true);
+    return ok;
 }
 
 void GpuDisplayViewport::clearPresentedImage(QGraphicsView *view,
@@ -573,6 +608,7 @@ void GpuDisplayViewport::setPresentedImage(const QImage &image, const Presentati
         ? image.copy()
         : image.convertToFormat(QImage::Format_RGBA8888);
     m_pendingTextureBytes.clear();
+    m_pendingTextureFromGpuAmaze = false;
     m_pendingTextureWidth = m_pendingImage.width();
     m_pendingTextureHeight = m_pendingImage.height();
     m_pendingTextureIs16Bit = false;
@@ -606,6 +642,7 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
     suppressUniformTopMagentaBandRgb16(rgba, width, height);
 
     m_pendingImage = QImage();
+    m_pendingTextureFromGpuAmaze = false;
     m_pendingTextureWidth = width;
     m_pendingTextureHeight = height;
     m_pendingTextureIs16Bit = true;
@@ -618,6 +655,97 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
     update();
 }
 
+bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
+                                                        int width,
+                                                        int height,
+                                                        int blackLevel,
+                                                        const double wbMultipliers[3],
+                                                        const PresentationOptions &options,
+                                                        QString *reason,
+                                                        QString *rendererDescription,
+                                                        GpuAmazeDebayerBackendTiming *timing)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        m_pendingTextureFromGpuAmaze = false;
+        m_texturePresentationActive = false;
+        return false;
+    };
+
+    if ( !rawFrame || width <= 0 || height <= 0 )
+    {
+        return fail(QStringLiteral("GPU AMaZE texture-present input is invalid"));
+    }
+
+    QOpenGLContext *glContext = context();
+    if ( !glContext )
+    {
+        return fail(QStringLiteral("GPU AMaZE texture-present requires an initialized viewport OpenGL context"));
+    }
+
+    const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
+    const bool madeCurrent = needsCurrent ? (makeCurrent(), true) : false;
+
+    ensureProgram();
+    if ( !m_program )
+    {
+        if ( madeCurrent ) doneCurrent();
+        return fail(QStringLiteral("GPU AMaZE texture-present shader setup failed"));
+    }
+
+    m_presentationOptions = options;
+    m_processingTexturesDirty = true;
+    updateProcessingTexturesIfNeeded();
+
+    if ( !m_texture
+      || m_texture->width() != width
+      || m_texture->height() != height
+      || !m_textureIs16Bit )
+    {
+        destroyTexture();
+        m_texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+        m_texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
+        m_texture->setSize(width, height);
+        m_texture->setMipLevels(1);
+        m_texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
+        m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+        m_textureIs16Bit = true;
+    }
+    applySamplingMode();
+
+    const bool ok = gpuAmazeDebayerRenderPostWbGlTexture(rawFrame,
+                                                        m_texture->textureId(),
+                                                        width,
+                                                        height,
+                                                        blackLevel,
+                                                        wbMultipliers,
+                                                        reason,
+                                                        rendererDescription,
+                                                        timing);
+    if ( !ok )
+    {
+        destroyTexture();
+        m_pendingTextureFromGpuAmaze = false;
+        if ( madeCurrent ) doneCurrent();
+        return false;
+    }
+
+    m_pendingImage = QImage();
+    m_pendingTextureBytes.clear();
+    m_pendingTextureWidth = width;
+    m_pendingTextureHeight = height;
+    m_pendingTextureIs16Bit = true;
+    m_pendingTextureFromGpuAmaze = true;
+    m_textureDirty = false;
+    m_samplingModeDirty = false;
+    m_texturePresentationActive = false;
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
+    if ( madeCurrent ) doneCurrent();
+    update();
+    return true;
+}
+
 void GpuDisplayViewport::clearPresentedImage()
 {
     m_pendingImage = QImage();
@@ -625,6 +753,7 @@ void GpuDisplayViewport::clearPresentedImage()
     m_pendingTextureWidth = 0;
     m_pendingTextureHeight = 0;
     m_pendingTextureIs16Bit = false;
+    m_pendingTextureFromGpuAmaze = false;
     m_textureDirty = false;
     m_samplingModeDirty = false;
     m_processingTexturesDirty = false;
@@ -678,7 +807,11 @@ void GpuDisplayViewport::updateTextureIfNeeded()
     }
 
     applySamplingMode();
-    if ( m_pendingTextureIs16Bit )
+    if ( m_pendingTextureFromGpuAmaze )
+    {
+        /* The CUDA backend already wrote the viewport-owned GL_RGBA16 texture. */
+    }
+    else if ( m_pendingTextureIs16Bit )
     {
         m_texture->setData(QOpenGLTexture::RGBA,
                            QOpenGLTexture::UInt16,
@@ -855,6 +988,10 @@ int GpuDisplayViewport::pendingHeight() const
 
 bool GpuDisplayViewport::hasPendingFrame() const
 {
+    if ( m_pendingTextureFromGpuAmaze )
+    {
+        return m_pendingTextureWidth > 0 && m_pendingTextureHeight > 0 && m_texture != nullptr;
+    }
     return m_pendingTextureIs16Bit
         ? (!m_pendingTextureBytes.isEmpty() && m_pendingTextureWidth > 0 && m_pendingTextureHeight > 0)
         : !m_pendingImage.isNull();

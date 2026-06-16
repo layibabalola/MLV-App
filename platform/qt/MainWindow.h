@@ -621,6 +621,8 @@ private:
         int devicePixelRatioMilli = 0;
         const uint16_t *sourceImage16 = nullptr;
         size_t sourceImage16Size = 0;
+        const float *gpuAmazeTextureRawFrame = nullptr;
+        size_t gpuAmazeTextureRawFrameSize = 0;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;
         bool cpuPreviewProcessingActive = false;
@@ -634,6 +636,7 @@ private:
         GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
         std::vector<uint8_t> ownedSourceImage;
         std::vector<uint16_t> ownedSourceImage16;
+        std::vector<float> ownedGpuAmazeTextureRawFrame;
         std::vector<uint8_t> ownedPlaybackScaledImage8;
 
         void rebindOwnedImagePointers()
@@ -651,6 +654,13 @@ private:
                 sourceImage16 = ownedSourceImage16.data();
                 sourceImage16Size = ownedSourceImage16.size() * sizeof( uint16_t );
                 readyFrame.rawImage16 = sourceImage16;
+            }
+            if( !ownedGpuAmazeTextureRawFrame.empty() )
+            {
+                gpuAmazeTextureRawFrame = ownedGpuAmazeTextureRawFrame.data();
+                gpuAmazeTextureRawFrameSize = ownedGpuAmazeTextureRawFrame.size();
+                readyFrame.gpuAmazeTextureRawFrame = gpuAmazeTextureRawFrame;
+                readyFrame.gpuAmazeTextureRawFrameSize = gpuAmazeTextureRawFrameSize;
             }
             if( !ownedPlaybackScaledImage8.empty() )
             {

@@ -958,8 +958,10 @@ landed on this branch — see [04-external-auditor-guide.md §13.5](04-external-
 
 Bilinear and AMaZE have explicit experimental GPU playback/profile paths
 (`MLVAPP_EXPERIMENTAL_GPU_DEBAYER=1` and
-`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1`). Other debayer algorithms remain
-CPU-only.
+`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1`). AMaZE also has a separate,
+non-default no-readback texture-present experiment
+(`MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1`) nested under the GPU
+preview-processing + GPU AMaZE path. Other debayer algorithms remain CPU-only.
 
 #### (6) `applyProcessingObject[8]` — 9 stages
 
@@ -1173,6 +1175,25 @@ see `docs/12-gpu-viewport-architecture.md`.
   validation fails, the backend run fails, or an unsupported case such as CA
   correction is active.
 
+### 9.5 `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1`
+
+- Explicit AMaZE CUDA-to-GL texture presentation request for the GPU
+  preview-processing + GPU AMaZE playback path.
+- The GUI viewport owns the `GL_RGBA16` texture and invokes the post-WB AMaZE
+  backend primitive while its OpenGL context is current.
+- This path is non-default and fails closed: if the AMaZE backend preflight
+  fails, playback uses the existing CPU AMaZE path; if the texture write fails
+  after preflight, the app attempts the existing CPU-readback RGB16
+  presentation fallback.
+- Per-frame telemetry:
+  - `gpu_amaze_texture_present_requested`
+  - `gpu_amaze_texture_present_preflight_available`
+  - `gpu_amaze_texture_present_preflight_renderer`
+  - `gpu_amaze_texture_present_candidate`
+  - `gpu_amaze_texture_present_active`
+  - `gpu_amaze_texture_present_fallback_reason`
+  - `gpu_amaze_texture_present_cpu_readback_fallback_active`
+
 ---
 
 ## 10. CLI surface
@@ -1224,6 +1245,7 @@ Legend: **compile** = read at qmake/compile time;
 | `MLVAPP_EXPERIMENTAL_GPU_PROCESSING` | unset | runtime | `1` enables shader-side preview processing. |
 | `MLVAPP_EXPERIMENTAL_GPU_DEBAYER` | unset | runtime | `1` enables bilinear GPU debayer. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` | unset | runtime | `1` enables explicit AMaZE CUDA debayer routing when the GPU preview-processing path is active. |
+| `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT` | unset | runtime | `1` requests the non-default AMaZE CUDA-to-GL texture-present path nested under GPU preview processing and GPU AMaZE; CPU-readback fallback remains available. |
 | `MLVAPP_GPU_AMAZE_DEBAYER_DLL` | unset | runtime | Optional path to `igpu_amaze_debayer_cuda.dll`; otherwise app-dir/search-path lookup is used. |
 | `MLVAPP_STAGE_TIMING` | unset | runtime | Non-empty and not `"0"` → emit per-stage lines via `mlv_stage_timing_note` (`StageTiming.h:44`). |
 | `MLVAPP_STAGE_TIMING_FILE` | unset | runtime | Path to redirect stage-timing lines to a file. Default is stderr. |

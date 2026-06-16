@@ -2545,6 +2545,17 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         QStringLiteral("draw_frame_ready_prescaled_image_active"),
         preScaledPlaybackImageAvailable );
 
+    if( task.readyFrame.gpuAmazeTexturePresentCandidate )
+    {
+        result.preparedWidth = sourceWidth;
+        result.preparedHeight = sourceHeight;
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_prep_passthrough"),
+            true );
+        result.imageBuildMs = (mlv_stage_timing_now() - image_start) * 1000.0;
+        return result;
+    }
+
     QImage displayImage;
     bool displayImageOwnsData = false;
     std::vector<uint8_t> displayImageBacking;
@@ -3027,8 +3038,143 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             ? task.sourceImage
             : task.readyFrame.rawImage8;
     bool framePresentedByViewport = false;
+    const size_t expectedAmazeTextureRawFloats =
+        static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+    const bool gpuAmazeTexturePresentRequested =
+        task.requestContext.gpuAmazeTexturePresentRequested;
+    const bool gpuAmazeTexturePresentCandidate =
+        gpuAmazeTexturePresentRequested
+        && readyFrame.gpuAmazeTexturePresentCandidate
+        && task.gpuAmazeTextureRawFrame
+        && task.gpuAmazeTextureRawFrameSize >= expectedAmazeTextureRawFloats
+        && readyFrame.gpuAmazeTextureWidth == sourceWidth
+        && readyFrame.gpuAmazeTextureHeight == sourceHeight;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_amaze_texture_present_requested"),
+        gpuAmazeTexturePresentRequested );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_amaze_texture_present_candidate"),
+        gpuAmazeTexturePresentCandidate );
+    if( gpuAmazeTexturePresentCandidate )
+    {
+        QString textureReason;
+        QString textureRenderer;
+        GpuAmazeDebayerBackendTiming textureTiming;
+        framePresentedByViewport =
+            GpuDisplayViewport::presentAmazePostWbTexture(
+                ui->graphicsView,
+                m_pGraphicsItem,
+                task.gpuAmazeTextureRawFrame,
+                sourceWidth,
+                sourceHeight,
+                readyFrame.gpuAmazeTextureBlackLevel,
+                readyFrame.gpuAmazeTextureWbMultipliers.data(),
+                task.gpuPresentationOptions,
+                &textureReason,
+                &textureRenderer,
+                &textureTiming );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_active"),
+            framePresentedByViewport );
+        if( framePresentedByViewport )
+        {
+            readyFrame.usedGpuAmazeDebayer = true;
+            readyFrame.gpuAmazeFallbackReason.clear();
+            readyFrame.gpuAmazeRendererDescription = textureRenderer;
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_renderer"),
+                textureRenderer.isEmpty() ? QStringLiteral("unknown") : textureRenderer );
+            if( textureTiming.available )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_upload_ms"),
+                    textureTiming.uploadMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_kernel_ms"),
+                    textureTiming.kernelMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_handoff_ms"),
+                    textureTiming.downloadMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_total_ms"),
+                    textureTiming.totalMs );
+            }
+        }
+        else
+        {
+            std::vector<uint16_t> fallbackRgb16( expectedAmazeTextureRawFloats * 3u );
+            QString fallbackReason;
+            QString fallbackRenderer;
+            GpuAmazeDebayerBackendTiming fallbackTiming;
+            const bool fallbackOk =
+                gpuAmazeDebayerApplyGpuOffscreenPostWb(
+                    task.gpuAmazeTextureRawFrame,
+                    fallbackRgb16.data(),
+                    sourceWidth,
+                    sourceHeight,
+                    readyFrame.gpuAmazeTextureBlackLevel,
+                    readyFrame.gpuAmazeTextureWbMultipliers.data(),
+                    &fallbackReason,
+                    &fallbackRenderer,
+                    &fallbackTiming );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_fallback_reason"),
+                textureReason.isEmpty()
+                    ? QStringLiteral("GPU AMaZE texture-present failed")
+                    : textureReason );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_cpu_readback_fallback_active"),
+                fallbackOk );
+            if( fallbackOk )
+            {
+                framePresentedByViewport =
+                    GpuDisplayViewport::presentRgb16( ui->graphicsView,
+                                                      m_pGraphicsItem,
+                                                      fallbackRgb16.data(),
+                                                      sourceWidth,
+                                                      sourceHeight,
+                                                      task.gpuPresentationOptions );
+                readyFrame.usedGpuAmazeDebayer = framePresentedByViewport;
+                readyFrame.gpuAmazeFallbackReason =
+                    textureReason.isEmpty()
+                        ? QStringLiteral("GPU AMaZE texture-present failed; used CPU-readback fallback")
+                        : textureReason;
+                readyFrame.gpuAmazeRendererDescription = fallbackRenderer;
+                if( fallbackTiming.available )
+                {
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_upload_ms"),
+                        fallbackTiming.uploadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_kernel_ms"),
+                        fallbackTiming.kernelMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_download_ms"),
+                        fallbackTiming.downloadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_total_ms"),
+                        fallbackTiming.totalMs );
+                }
+            }
+            else
+            {
+                readyFrame.usedGpuAmazeDebayer = false;
+                readyFrame.gpuAmazeRendererDescription = fallbackRenderer;
+                readyFrame.gpuAmazeFallbackReason =
+                    fallbackReason.isEmpty()
+                        ? QStringLiteral("GPU AMaZE texture-present and CPU-readback fallback failed")
+                        : fallbackReason;
+            }
+        }
+    }
+    else
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_active"),
+            false );
+    }
     uint8_t underOver = result.underOver;
-    if( gpu16PreviewActive )
+    if( !framePresentedByViewport && gpu16PreviewActive )
     {
         framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
                                                                     m_pGraphicsItem,
@@ -3388,6 +3534,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.gpuAmazeDebayerBackendRequest = m_gpuAmazeDebayerBackendRequest;
     renderPolicy.gpuAmazeDebayerEnvironmentRequested =
         gpuAmazeDebayerRequestedByEnvironment();
+    renderPolicy.gpuAmazeTexturePresentationEnvironmentRequested =
+        gpuAmazeTexturePresentRequestedByEnvironment();
     renderPolicy.gpuAmazeDebayerCompatible =
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
@@ -3412,6 +3560,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.renderThreadUsingGpuProcessingPreview = m_renderThreadUsingGpuPreviewProcessing;
     renderPolicy.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
     renderPolicy.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
+    renderPolicy.renderThreadUsingGpuAmazeTexturePresentation =
+        mainWindowAllowsGpuAmazeTexturePresentation( renderPolicy );
     m_lastQueuedGpuPreviewPolicy = renderPolicy;
     m_lastQueuedGpuPresentationOptions =
         mainWindowBuildGpuPresentationOptions( renderPolicy );
@@ -3467,6 +3617,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
     requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
     requestContext.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
+    requestContext.gpuAmazeTexturePresentRequested =
+        mainWindowUsesGpuAmazeTexturePresentation( renderPolicy );
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
         playbackProcessingSelected;
@@ -4853,6 +5005,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                              options.gpuAmazeDebayerBackend ) ) );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_environment_requested"),
                      gpuAmazeDebayerRequestedByEnvironment() );
+    metadata.insert( QStringLiteral("gpu_amaze_texture_present_environment_requested"),
+                     gpuAmazeTexturePresentRequestedByEnvironment() );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_available"),
                     gpuAmazeDebayerProbe.available );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_reason"),
@@ -20652,6 +20806,8 @@ void MainWindow::drawFrameReady()
         ( display_start > 0.0 && task.enqueueTime >= display_start )
             ? ( task.enqueueTime - display_start ) * 1000.0
             : 0.0;
+    task.gpuAmazeTextureRawFrame = readyFrame.gpuAmazeTextureRawFrame;
+    task.gpuAmazeTextureRawFrameSize = readyFrame.gpuAmazeTextureRawFrameSize;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
@@ -20664,6 +20820,14 @@ void MainWindow::drawFrameReady()
         const size_t sourceImage16Words = sourceImage16Bytes / sizeof( uint16_t );
         task.ownedSourceImage16.assign( readyFrame.rawImage16,
                                         readyFrame.rawImage16 + sourceImage16Words );
+    }
+    if( readyFrame.gpuAmazeTexturePresentCandidate
+     && readyFrame.gpuAmazeTextureRawFrame
+     && readyFrame.gpuAmazeTextureRawFrameSize > 0 )
+    {
+        task.ownedGpuAmazeTextureRawFrame.assign(
+            readyFrame.gpuAmazeTextureRawFrame,
+            readyFrame.gpuAmazeTextureRawFrame + readyFrame.gpuAmazeTextureRawFrameSize );
     }
     const size_t playbackScaledImageBytes =
         (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
@@ -20683,6 +20847,9 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_rgb16_bytes"),
         static_cast<qint64>( task.ownedSourceImage16.size() * sizeof( uint16_t ) ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_amaze_texture_raw_bytes"),
+        static_cast<qint64>( task.ownedGpuAmazeTextureRawFrame.size() * sizeof( float ) ) );
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
         static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );

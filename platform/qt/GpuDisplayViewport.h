@@ -8,6 +8,7 @@
 #ifndef GPUDISPLAYVIEWPORT_H
 #define GPUDISPLAYVIEWPORT_H
 
+#include "GpuDebayer.h"
 #include "ZebraThresholds.h"
 #include "GpuPreviewProcessing.h"
 #include <QImage>
@@ -69,6 +70,17 @@ public:
                              int width,
                              int height,
                              const PresentationOptions &options = PresentationOptions());
+    static bool presentAmazePostWbTexture(QGraphicsView *view,
+                                          QGraphicsPixmapItem *fallbackItem,
+                                          const float *rawFrame,
+                                          int width,
+                                          int height,
+                                          int blackLevel,
+                                          const double wbMultipliers[3],
+                                          const PresentationOptions &options,
+                                          QString *reason = nullptr,
+                                          QString *rendererDescription = nullptr,
+                                          GpuAmazeDebayerBackendTiming *timing = nullptr);
     static void clearPresentedImage(QGraphicsView *view,
                                     QGraphicsPixmapItem *fallbackItem = nullptr);
 
@@ -85,6 +97,15 @@ private:
     void setFallbackItem(QGraphicsPixmapItem *item);
     void setPresentedImage(const QImage &image, const PresentationOptions &options);
     void setPresentedRgb16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
+    bool setPresentedAmazePostWbTexture(const float *rawFrame,
+                                        int width,
+                                        int height,
+                                        int blackLevel,
+                                        const double wbMultipliers[3],
+                                        const PresentationOptions &options,
+                                        QString *reason,
+                                        QString *rendererDescription,
+                                        GpuAmazeDebayerBackendTiming *timing);
     void clearPresentedImage(void);
     void updateTextureIfNeeded(void);
     void updateProcessingTexturesIfNeeded(void);
@@ -104,6 +125,7 @@ private:
     bool m_samplingModeDirty;
     bool m_processingTexturesDirty;
     bool m_pendingTextureIs16Bit;
+    bool m_pendingTextureFromGpuAmaze;
     bool m_textureIs16Bit;
     QGraphicsView *m_view;
     QGraphicsPixmapItem *m_fallbackItem;

@@ -88,6 +88,7 @@ static bool shouldPreferDesktopOpenGl(int argc,
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")) return true;
 #else
     Q_UNUSED(argc)
     Q_UNUSED(argv)

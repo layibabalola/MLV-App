@@ -290,6 +290,15 @@ typedef int (*GpuAmazeRunFn)(igpu_amaze_debayer_backend *,
                              uint16_t *,
                              int,
                              int);
+typedef int (*GpuAmazeRunPostWbGlTextureFn)(igpu_amaze_debayer_backend *,
+                                            const float *,
+                                            unsigned int,
+                                            int,
+                                            int,
+                                            int,
+                                            double,
+                                            double,
+                                            double);
 typedef int (*GpuAmazeLastTimingFn)(igpu_amaze_debayer_backend *,
                                     igpu_amaze_debayer_timing_t *);
 
@@ -301,6 +310,7 @@ struct GpuAmazeDebayerRuntime
     GpuAmazeAbiVersionFn abiVersion = nullptr;
     GpuAmazeDescribeFn describe = nullptr;
     GpuAmazeRunFn run = nullptr;
+    GpuAmazeRunPostWbGlTextureFn runPostWbGlTexture = nullptr;
     GpuAmazeLastTimingFn lastTiming = nullptr;
 };
 
@@ -376,6 +386,65 @@ QString describeAmazeBackend(GpuAmazeDebayerRuntime * runtime,
         ? QString::fromUtf8(description)
         : QStringLiteral("unknown");
 }
+
+bool validWbMultipliers(const double wbMultipliers[3])
+{
+    return wbMultipliers
+        && wbMultipliers[0] > 0.0
+        && wbMultipliers[1] > 0.0
+        && wbMultipliers[2] > 0.0;
+}
+
+uint16_t clampPostWbChannel(double value)
+{
+    if ( value <= 0.0 ) return 0;
+    if ( value >= 65535.0 ) return 65535;
+    return static_cast<uint16_t>(value);
+}
+
+void applyPostWbUndoToRgb16(uint16_t * rgb16,
+                            int width,
+                            int height,
+                            int blackLevel,
+                            const double wbMultipliers[3])
+{
+    if ( blackLevel < 1000 ) blackLevel = -1000;
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    for ( size_t i = 0; i < pixelCount; ++i )
+    {
+        uint16_t * pixel = rgb16 + i * 3u;
+        pixel[0] = clampPostWbChannel(
+            static_cast<double>(pixel[0]) / wbMultipliers[0] + static_cast<double>(blackLevel));
+        pixel[1] = clampPostWbChannel(
+            static_cast<double>(pixel[1]) / wbMultipliers[1] + static_cast<double>(blackLevel));
+        pixel[2] = clampPostWbChannel(
+            static_cast<double>(pixel[2]) / wbMultipliers[2] + static_cast<double>(blackLevel));
+    }
+}
+
+void copyAmazeTiming(GpuAmazeDebayerRuntime * runtime,
+                     igpu_amaze_debayer_backend * backend,
+                     GpuAmazeDebayerBackendTiming * timing)
+{
+    if ( !timing ) return;
+
+    igpu_amaze_debayer_timing_t backendTiming;
+    if ( runtime
+      && runtime->lastTiming
+      && backend
+      && runtime->lastTiming(backend, &backendTiming) == 0 )
+    {
+        timing->available = true;
+        timing->uploadMs = backendTiming.upload_ms;
+        timing->kernelMs = backendTiming.kernel_ms;
+        timing->downloadMs = backendTiming.download_ms;
+        timing->totalMs = backendTiming.total_ms;
+    }
+    else
+    {
+        *timing = GpuAmazeDebayerBackendTiming();
+    }
+}
 }
 
 const char * gpuBilinearDebayerEnvironmentVariableName(void)
@@ -396,6 +465,16 @@ const char * gpuAmazeDebayerEnvironmentVariableName(void)
 bool gpuAmazeDebayerRequestedByEnvironment(void)
 {
     return envFlagEnabled(qgetenv(gpuAmazeDebayerEnvironmentVariableName()));
+}
+
+const char * gpuAmazeTexturePresentEnvironmentVariableName(void)
+{
+    return "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT";
+}
+
+bool gpuAmazeTexturePresentRequestedByEnvironment(void)
+{
+    return envFlagEnabled(qgetenv(gpuAmazeTexturePresentEnvironmentVariableName()));
 }
 
 GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbeBackend(void)
@@ -628,22 +707,123 @@ bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
     }
     if ( timing )
     {
-        igpu_amaze_debayer_timing_t backendTiming;
-        if ( runtime.lastTiming
-          && runtime.lastTiming(backend, &backendTiming) == 0 )
-        {
-            timing->available = true;
-            timing->uploadMs = backendTiming.upload_ms;
-            timing->kernelMs = backendTiming.kernel_ms;
-            timing->downloadMs = backendTiming.download_ms;
-            timing->totalMs = backendTiming.total_ms;
-        }
-        else
-        {
-            *timing = GpuAmazeDebayerBackendTiming();
-        }
+        copyAmazeTiming(&runtime, backend, timing);
     }
     runtime.destroy(backend);
     if ( reason ) reason->clear();
+    return true;
+}
+
+bool gpuAmazeDebayerRenderPostWbGlTexture(const float * inputRawFrame,
+                                          unsigned int glTexture,
+                                          int width,
+                                          int height,
+                                          int blackLevel,
+                                          const double wbMultipliers[3],
+                                          QString * reason,
+                                          QString * rendererDescription,
+                                          GpuAmazeDebayerBackendTiming * timing)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        if ( rendererDescription ) rendererDescription->clear();
+        if ( timing ) *timing = GpuAmazeDebayerBackendTiming();
+        return false;
+    };
+
+    if ( !inputRawFrame || glTexture == 0 || width <= 32 || height <= 32 )
+    {
+        return fail(QStringLiteral("GPU AMaZE texture-present input or GL texture is invalid"));
+    }
+    if ( !validWbMultipliers(wbMultipliers) )
+    {
+        return fail(QStringLiteral("GPU AMaZE texture-present WB multipliers are invalid"));
+    }
+
+    GpuAmazeDebayerRuntime runtime;
+    QString loadReason;
+    if ( !loadAmazeDebayerRuntime(&runtime, &loadReason) )
+    {
+        return fail(loadReason.isEmpty() ? gpuAmazeDebayerUnavailableReason() : loadReason);
+    }
+    if ( !resolveAmazeDebayerSymbol(&runtime.library,
+                                    "igpu_amaze_debayer_run_post_wb_gl_texture",
+                                    &runtime.runPostWbGlTexture,
+                                    reason) )
+    {
+        return fail(reason ? *reason : QStringLiteral("GPU AMaZE post-WB GL texture symbol is unavailable"));
+    }
+
+    igpu_amaze_debayer_backend * backend = runtime.create("cuda");
+    if ( !backend )
+    {
+        return fail(QStringLiteral("GPU AMaZE debayer backend create('cuda') failed"));
+    }
+
+    const int abiVersion = runtime.abiVersion(backend);
+    if ( abiVersion != IGPU_AMAZE_DEBAYER_ABI_VERSION )
+    {
+        const QString mismatch =
+            QStringLiteral("GPU AMaZE debayer backend ABI mismatch: got %1 expected %2")
+                .arg(abiVersion)
+                .arg(IGPU_AMAZE_DEBAYER_ABI_VERSION);
+        runtime.destroy(backend);
+        return fail(mismatch);
+    }
+
+    const int rc = runtime.runPostWbGlTexture(backend,
+                                             inputRawFrame,
+                                             glTexture,
+                                             width,
+                                             height,
+                                             blackLevel,
+                                             wbMultipliers[0],
+                                             wbMultipliers[1],
+                                             wbMultipliers[2]);
+    const QString backendDescription = describeAmazeBackend(&runtime, backend);
+    if ( rc != 0 )
+    {
+        runtime.destroy(backend);
+        return fail(QStringLiteral("GPU AMaZE post-WB GL texture run failed rc=%1 renderer=%2")
+            .arg(rc)
+            .arg(backendDescription));
+    }
+
+    if ( rendererDescription ) *rendererDescription = backendDescription;
+    copyAmazeTiming(&runtime, backend, timing);
+    runtime.destroy(backend);
+    if ( reason ) reason->clear();
+    return true;
+}
+
+bool gpuAmazeDebayerApplyGpuOffscreenPostWb(const float * inputRawFrame,
+                                           uint16_t * outputRgb16,
+                                           int width,
+                                           int height,
+                                           int blackLevel,
+                                           const double wbMultipliers[3],
+                                           QString * reason,
+                                           QString * rendererDescription,
+                                           GpuAmazeDebayerBackendTiming * timing)
+{
+    if ( !validWbMultipliers(wbMultipliers) )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU AMaZE post-WB fallback WB multipliers are invalid");
+        if ( rendererDescription ) rendererDescription->clear();
+        if ( timing ) *timing = GpuAmazeDebayerBackendTiming();
+        return false;
+    }
+
+    const bool ok = gpuAmazeDebayerApplyGpuOffscreen(inputRawFrame,
+                                                    outputRgb16,
+                                                    width,
+                                                    height,
+                                                    reason,
+                                                    rendererDescription,
+                                                    timing);
+    if ( !ok ) return false;
+
+    applyPostWbUndoToRgb16(outputRgb16, width, height, blackLevel, wbMultipliers);
     return true;
 }
