@@ -572,12 +572,14 @@ bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
                                       int width,
                                       int height,
                                       QString * reason,
-                                      QString * rendererDescription)
+                                      QString * rendererDescription,
+                                      GpuAmazeDebayerBackendTiming * timing)
 {
     auto fail = [&](const QString & why) -> bool
     {
         if ( reason ) *reason = why;
         if ( rendererDescription ) rendererDescription->clear();
+        if ( timing ) *timing = GpuAmazeDebayerBackendTiming();
         return false;
     };
 
@@ -623,6 +625,23 @@ bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
     if ( rendererDescription )
     {
         *rendererDescription = describeAmazeBackend(&runtime, backend);
+    }
+    if ( timing )
+    {
+        igpu_amaze_debayer_timing_t backendTiming;
+        if ( runtime.lastTiming
+          && runtime.lastTiming(backend, &backendTiming) == 0 )
+        {
+            timing->available = true;
+            timing->uploadMs = backendTiming.upload_ms;
+            timing->kernelMs = backendTiming.kernel_ms;
+            timing->downloadMs = backendTiming.download_ms;
+            timing->totalMs = backendTiming.total_ms;
+        }
+        else
+        {
+            *timing = GpuAmazeDebayerBackendTiming();
+        }
     }
     runtime.destroy(backend);
     if ( reason ) reason->clear();

@@ -19,6 +19,15 @@ struct GpuAmazeDebayerBackendAvailability
     QString rendererDescription;
 };
 
+struct GpuAmazeDebayerBackendTiming
+{
+    bool available = false;
+    double uploadMs = 0.0;
+    double kernelMs = 0.0;
+    double downloadMs = 0.0;
+    double totalMs = 0.0;
+};
+
 const char * gpuBilinearDebayerEnvironmentVariableName(void);
 bool gpuBilinearDebayerRequestedByEnvironment(void);
 const char * gpuAmazeDebayerEnvironmentVariableName(void);
@@ -36,6 +45,7 @@ bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
                                       int width,
                                       int height,
                                       QString * reason = nullptr,
-                                      QString * rendererDescription = nullptr);
+                                      QString * rendererDescription = nullptr,
+                                      GpuAmazeDebayerBackendTiming * timing = nullptr);
 
 #endif // GPUDEBAYER_H
