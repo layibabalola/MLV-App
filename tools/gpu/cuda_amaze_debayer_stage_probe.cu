@@ -56,6 +56,7 @@ constexpr float kClipPoint = 1.0f;
 constexpr float kClipPoint8 = 0.8f;
 constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
+constexpr int kVarianceWavefrontThreads = 128;
 
 struct CaseSpec
 {
@@ -1481,126 +1482,176 @@ __global__ void k_green_interpolation(const float * cfa,
     dginth[idx] = fminf(sqr_f(glha - grha), sqr_f(glar - grar));
 }
 
-__global__ void k_variance_selection_scalar(float * cfa,
-                                            float * vcd,
-                                            float * hcd,
-                                            const float * vcdalt,
-                                            const float * hcdalt,
-                                            float * cddiffsq,
-                                            int rr1,
-                                            int cc1)
+__device__ void variance_selection_update_pixel(const float * cfa,
+                                                float * vcd,
+                                                float * hcd,
+                                                const float * vcdalt,
+                                                const float * hcdalt,
+                                                float * cddiffsq,
+                                                int rr,
+                                                int cc)
 {
-    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0 || threadIdx.y != 0) return;
-
     const int v1 = kTileSize;
     const int v2 = 2 * kTileSize;
-    for (int rr = 4; rr < rr1 - 4; ++rr)
+    const int idx = rr * kTileSize + cc;
+    const float hcdvar =
+        3.0f * (sqr_f(hcd[idx - 2]) +
+                sqr_f(hcd[idx]) +
+                sqr_f(hcd[idx + 2])) -
+        sqr_f(hcd[idx - 2] + hcd[idx] + hcd[idx + 2]);
+    const float hcdaltvar =
+        3.0f * (sqr_f(hcdalt[idx - 2]) +
+                sqr_f(hcdalt[idx]) +
+                sqr_f(hcdalt[idx + 2])) -
+        sqr_f(hcdalt[idx - 2] + hcdalt[idx] + hcdalt[idx + 2]);
+    const float vcdvar =
+        3.0f * (sqr_f(vcd[idx - v2]) +
+                sqr_f(vcd[idx]) +
+                sqr_f(vcd[idx + v2])) -
+        sqr_f(vcd[idx - v2] + vcd[idx] + vcd[idx + v2]);
+    const float vcdaltvar =
+        3.0f * (sqr_f(vcdalt[idx - v2]) +
+                sqr_f(vcdalt[idx]) +
+                sqr_f(vcdalt[idx + v2])) -
+        sqr_f(vcdalt[idx - v2] + vcdalt[idx] + vcdalt[idx + v2]);
+
+    if (hcdaltvar < hcdvar) hcd[idx] = hcdalt[idx];
+    if (vcdaltvar < vcdvar) vcd[idx] = vcdalt[idx];
+
+    if ((fc_rggb(rr, cc) & 1) != 0)
     {
-        for (int cc = 4; cc < cc1 - 4; ++cc)
+        const float ginth = -hcd[idx] + cfa[idx];
+        const float gintv = -vcd[idx] + cfa[idx];
+        if (hcd[idx] > 0.0f)
         {
-            const int idx = rr * kTileSize + cc;
-            const float hcdvar =
-                3.0f * (sqr_f(hcd[idx - 2]) +
-                        sqr_f(hcd[idx]) +
-                        sqr_f(hcd[idx + 2])) -
-                sqr_f(hcd[idx - 2] + hcd[idx] + hcd[idx + 2]);
-            const float hcdaltvar =
-                3.0f * (sqr_f(hcdalt[idx - 2]) +
-                        sqr_f(hcdalt[idx]) +
-                        sqr_f(hcdalt[idx + 2])) -
-                sqr_f(hcdalt[idx - 2] + hcdalt[idx] + hcdalt[idx + 2]);
-            const float vcdvar =
-                3.0f * (sqr_f(vcd[idx - v2]) +
-                        sqr_f(vcd[idx]) +
-                        sqr_f(vcd[idx + v2])) -
-                sqr_f(vcd[idx - v2] + vcd[idx] + vcd[idx + v2]);
-            const float vcdaltvar =
-                3.0f * (sqr_f(vcdalt[idx - v2]) +
-                        sqr_f(vcdalt[idx]) +
-                        sqr_f(vcdalt[idx + v2])) -
-                sqr_f(vcdalt[idx - v2] + vcdalt[idx] + vcdalt[idx + v2]);
-
-            if (hcdaltvar < hcdvar) hcd[idx] = hcdalt[idx];
-            if (vcdaltvar < vcdvar) vcd[idx] = vcdalt[idx];
-
-            if ((fc_rggb(rr, cc) & 1) != 0)
+            const float bounded = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+            if (3.0f * hcd[idx] > (ginth + cfa[idx]))
             {
-                const float ginth = -hcd[idx] + cfa[idx];
-                const float gintv = -vcd[idx] + cfa[idx];
-                if (hcd[idx] > 0.0f)
-                {
-                    const float bounded = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
-                    if (3.0f * hcd[idx] > (ginth + cfa[idx]))
-                    {
-                        hcd[idx] = bounded;
-                    }
-                    else
-                    {
-                        const float hwt = 1.0f - 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
-                        hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
-                    }
-                }
-                if (vcd[idx] > 0.0f)
-                {
-                    const float bounded = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
-                    if (3.0f * vcd[idx] > (gintv + cfa[idx]))
-                    {
-                        vcd[idx] = bounded;
-                    }
-                    else
-                    {
-                        const float vwt = 1.0f - 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
-                        vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
-                    }
-                }
-                if (ginth > kClipPoint)
-                {
-                    hcd[idx] = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
-                }
-                if (gintv > kClipPoint)
-                {
-                    vcd[idx] = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
-                }
+                hcd[idx] = bounded;
             }
             else
             {
-                const float ginth = hcd[idx] + cfa[idx];
-                const float gintv = vcd[idx] + cfa[idx];
-                if (hcd[idx] < 0.0f)
+                const float hwt = 1.0f - 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
+                hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
+            }
+        }
+        if (vcd[idx] > 0.0f)
+        {
+            const float bounded = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+            if (3.0f * vcd[idx] > (gintv + cfa[idx]))
+            {
+                vcd[idx] = bounded;
+            }
+            else
+            {
+                const float vwt = 1.0f - 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
+                vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
+            }
+        }
+        if (ginth > kClipPoint)
+        {
+            hcd[idx] = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+        }
+        if (gintv > kClipPoint)
+        {
+            vcd[idx] = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+        }
+    }
+    else
+    {
+        const float ginth = hcd[idx] + cfa[idx];
+        const float gintv = vcd[idx] + cfa[idx];
+        if (hcd[idx] < 0.0f)
+        {
+            const float bounded = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+            if (3.0f * hcd[idx] < -(ginth + cfa[idx]))
+            {
+                hcd[idx] = bounded;
+            }
+            else
+            {
+                const float hwt = 1.0f + 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
+                hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
+            }
+        }
+        if (vcd[idx] < 0.0f)
+        {
+            const float bounded = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+            if (3.0f * vcd[idx] < -(gintv + cfa[idx]))
+            {
+                vcd[idx] = bounded;
+            }
+            else
+            {
+                const float vwt = 1.0f + 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
+                vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
+            }
+        }
+        if (ginth > kClipPoint)
+        {
+            hcd[idx] = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+        }
+        if (gintv > kClipPoint)
+        {
+            vcd[idx] = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+        }
+        cddiffsq[idx] = sqr_f(vcd[idx] - hcd[idx]);
+    }
+}
+
+// Preserve the serial pass's same-parity left/up dependencies while exposing
+// each anti-diagonal inside a tile to parallel threads.
+__global__ void k_variance_selection_wavefront(float * cfa,
+                                               float * vcd,
+                                               float * hcd,
+                                               const float * vcdalt,
+                                               const float * hcdalt,
+                                               float * cddiffsq,
+                                               int rr1,
+                                               int cc1)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0) return;
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    const int threadCount = blockDim.x * blockDim.y;
+
+    for (int rrParity = 0; rrParity < 2; ++rrParity)
+    {
+        int rrStart = 4;
+        if ((rrStart & 1) != rrParity) ++rrStart;
+        if (rrStart >= rr1 - 4) continue;
+        const int rrCount = ((rr1 - 5 - rrStart) / 2) + 1;
+
+        for (int ccParity = 0; ccParity < 2; ++ccParity)
+        {
+            int ccStart = 4;
+            if ((ccStart & 1) != ccParity) ++ccStart;
+            if (ccStart >= cc1 - 4) continue;
+            const int ccCount = ((cc1 - 5 - ccStart) / 2) + 1;
+            const int maxDiag = rrCount + ccCount - 2;
+
+            for (int diag = 0; diag <= maxDiag; ++diag)
+            {
+                const int prMinCandidate = diag - (ccCount - 1);
+                const int prMin = prMinCandidate > 0 ? prMinCandidate : 0;
+                const int prMax = diag < rrCount ? diag : rrCount - 1;
+                const int diagCount = prMax - prMin + 1;
+                for (int i = tid; i < diagCount; i += threadCount)
                 {
-                    const float bounded = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
-                    if (3.0f * hcd[idx] < -(ginth + cfa[idx]))
-                    {
-                        hcd[idx] = bounded;
-                    }
-                    else
-                    {
-                        const float hwt = 1.0f + 3.0f * hcd[idx] / (kEps + ginth + cfa[idx]);
-                        hcd[idx] = hwt * hcd[idx] + (1.0f - hwt) * bounded;
-                    }
+                    const int pr = prMin + i;
+                    const int pc = diag - pr;
+                    const int rr = rrStart + 2 * pr;
+                    const int cc = ccStart + 2 * pc;
+                    variance_selection_update_pixel(cfa,
+                                                    vcd,
+                                                    hcd,
+                                                    vcdalt,
+                                                    hcdalt,
+                                                    cddiffsq,
+                                                    rr,
+                                                    cc);
                 }
-                if (vcd[idx] < 0.0f)
-                {
-                    const float bounded = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
-                    if (3.0f * vcd[idx] < -(gintv + cfa[idx]))
-                    {
-                        vcd[idx] = bounded;
-                    }
-                    else
-                    {
-                        const float vwt = 1.0f + 3.0f * vcd[idx] / (kEps + gintv + cfa[idx]);
-                        vcd[idx] = vwt * vcd[idx] + (1.0f - vwt) * bounded;
-                    }
-                }
-                if (ginth > kClipPoint)
-                {
-                    hcd[idx] = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
-                }
-                if (gintv > kClipPoint)
-                {
-                    vcd[idx] = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
-                }
-                cddiffsq[idx] = sqr_f(vcd[idx] - hcd[idx]);
+                __syncthreads();
             }
         }
     }
@@ -2649,14 +2700,14 @@ bool run_case(const CaseSpec & spec)
                                            rr1,
                                            cc1);
     CK(cudaGetLastError());
-    k_variance_selection_scalar<<<1, 1>>>(d.cfa,
-                                           d.vcd,
-                                           d.hcd,
-                                           d.vcdalt,
-                                           d.hcdalt,
-                                           d.cddiffsq,
-                                           rr1,
-                                           cc1);
+    k_variance_selection_wavefront<<<1, kVarianceWavefrontThreads>>>(d.cfa,
+                                                                     d.vcd,
+                                                                     d.hcd,
+                                                                     d.vcdalt,
+                                                                     d.hcdalt,
+                                                                     d.cddiffsq,
+                                                                     rr1,
+                                                                     cc1);
     CK(cudaGetLastError());
     k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
                                              d.dirwts1,

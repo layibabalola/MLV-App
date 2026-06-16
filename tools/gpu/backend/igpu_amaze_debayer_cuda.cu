@@ -133,7 +133,14 @@ void run_tile(const float * dRaw,
                                            rr1,
                                            cc1);
     CK(cudaGetLastError());
-    k_variance_selection_scalar<<<1, 1>>>(d.cfa, d.vcd, d.hcd, d.vcdalt, d.hcdalt, d.cddiffsq, rr1, cc1);
+    k_variance_selection_wavefront<<<1, kVarianceWavefrontThreads>>>(d.cfa,
+                                                                     d.vcd,
+                                                                     d.hcd,
+                                                                     d.vcdalt,
+                                                                     d.hcdalt,
+                                                                     d.cddiffsq,
+                                                                     rr1,
+                                                                     cc1);
     CK(cudaGetLastError());
     k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
                                              d.dirwts1,
