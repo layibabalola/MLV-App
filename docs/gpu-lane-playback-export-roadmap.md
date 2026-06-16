@@ -5,6 +5,17 @@ Status: 2026-06-15. The CUDA recon lane is proven on an RTX 4090 (validated bit-
 a DLL gate with no GUI claim. This doc remains the plan of record for the
 remaining playback/export rollout.
 
+Update 2026-06-16: P-pre **processing parity** is being extended from the
+supported levels / matrix / camera-matrix WB / gamut / gamma subset to the
+`allow_creative_adjustments` family, staged as curve-first parity slices
+(see §8.1). Slice 1 (the creative contrast-curve LUT) is designed and next to
+implement; each slice is bit-aligned CPU-vs-GPU and validated by an RTX 4090
+frame diff before the `gpuPreviewProcessingIsSupported` gate relaxes. Note also
+that Lane A **E1** is currently realized as an off-by-default *shadow validator*
+(`MLVAPP_GPU_EXPORT`): `llrawproc` runs the CUDA recon into a scratch buffer and
+copies it over the CPU output only when byte-identical, so the CPU path stays
+authoritative until the E2 parity gate promotes it.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -125,6 +136,35 @@ Minimal   — Basic / None (Fastest, last-resort cadence rescue)
 | 2 | P-pre passes (AMaZE debayer + processing parity) | `GPU · Full Quality · AMaZE` becomes a true explicit path, with CPU AMaZE fallback reported instead of silent bilinear substitution |
 
 P-pre is therefore both the engineering gate and the GUI-claim gate — it's what prevents a "Full Quality" toggle that silently isn't.
+
+### 8.1 Processing-parity slices (extending P-pre to `allow_creative_adjustments`)
+
+The GPU preview-processing shader today reproduces only the levels / matrix /
+camera-matrix WB / gamut / gamma subset and fails closed on
+`allow_creative_adjustments` (the creative grade). Extending it to full parity —
+so a normally-graded clip can use the GPU path instead of falling back to CPU —
+is staged as curve-first slices, because at the default image profile the
+creative **contrast curve** (`pre_calc_curve_r`, built from the non-zero base
+contrast params) is the only creative-family stage that is both active and
+non-identity; gradation and toning execute but are identity, and
+shadows/highlights and clarity are inert by default.
+
+- **Slice 1 (next):** creative contrast-curve LUT + identity-safe gradation/toning
+  — a 1D 16-bit LUT lookup, no spatial pass; enables default-graded clips on the
+  GPU path. `gpuPreviewProcessingIsSupported` accepts `allow_creative_adjustments`
+  only when the active creative state is a subset of the ported stages.
+- **Slice 2:** gradation + toning (non-identity cases).
+- **Slice 3:** hue-vs / luma-vs curves, vibrance, saturation.
+- **Slice 4:** shadows/highlights + clarity — the spatial blur-mask stages
+  (harder; needs the RBF blur pre-pass on the GPU).
+- **Slice 5+:** remaining stages — 1D/3D LUT, creative filter, AgX, median/RBF
+  denoise, grain, CA correction, sharpen, vignette, non-Rec709 gamut.
+
+Each slice keeps the CPU reference (`applyPreviewProcessingPixel`) and the GPU
+subset shader bit-aligned, adds unit parity tests, and is validated by a
+CPU-vs-GPU frame diff on the RTX 4090 before the support gate relaxes for that
+stage. P-pre — and the honest GUI "GPU · Full Quality · AMaZE" claim per §8
+stage 2 — completes when every creative stage reaches parity.
 
 ## 9. UI truth / status language
 
