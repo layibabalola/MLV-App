@@ -158,17 +158,17 @@ void run_tile(const float * dRaw,
     CK(cudaGetLastError());
     k_nyquist_area_interpolation<<<grid, block>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
     CK(cudaGetLastError());
-    k_green_plane_assembly_scalar<<<1, 1>>>(d.cfa,
-                                            d.vcd,
-                                            d.hcd,
-                                            d.nyquist,
-                                            d.hvwt,
-                                            d.dgrb0,
-                                            d.rgbgreen,
-                                            d.dgrb2h,
-                                            d.dgrb2v,
-                                            rr1,
-                                            cc1);
+    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(d.cfa,
+                                                                   d.vcd,
+                                                                   d.hcd,
+                                                                   d.nyquist,
+                                                                   d.hvwt,
+                                                                   d.dgrb0,
+                                                                   d.rgbgreen,
+                                                                   d.dgrb2h,
+                                                                   d.dgrb2v,
+                                                                   rr1,
+                                                                   cc1);
     CK(cudaGetLastError());
     k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
                                                 d.vcd,
