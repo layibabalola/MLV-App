@@ -192,10 +192,29 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "highlight_reconstruction",
         QStringLiteral("highlight reconstruction enabled"),
         [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
+    /* allow_creative_adjustments is no longer unconditionally rejected: the GPU
+     * subset shader now ports the contrast + gradation curves. It is rejected
+     * only when an UNPORTED creative stage is non-neutral. */
     assert_gpu_preview_rejects_processing_feature(
-        "creative_adjustments",
-        QStringLiteral("creative adjustments enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); });
+        "creative_hue_vs",
+        QStringLiteral("creative hue-vs/luma-vs curve enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->hue_vs_luma_used = 1; });
+    assert_gpu_preview_rejects_processing_feature(
+        "creative_vibrance",
+        QStringLiteral("creative vibrance enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->vibrance = 1.5; });
+    assert_gpu_preview_rejects_processing_feature(
+        "creative_saturation",
+        QStringLiteral("creative saturation enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->saturation = 1.5; });
+    assert_gpu_preview_rejects_processing_feature(
+        "creative_toning",
+        QStringLiteral("creative toning enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->toning_dry = 0.5f; });
+    assert_gpu_preview_rejects_processing_feature(
+        "creative_in_loop_contrast",
+        QStringLiteral("creative in-loop contrast factor enabled"),
+        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->contrast = 0.5; });
     assert_gpu_preview_rejects_processing_feature(
         "gradient",
         QStringLiteral("gradient enabled"),
@@ -256,4 +275,41 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "unsupported_gamut",
         QStringLiteral("unsupported gamut"),
         [](processingObject_t * processing) { processingSetGamut(processing, GAMUT_Rec2020); });
+}
+
+TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+
+    /* Baseline: the supported subset with creative adjustments OFF. */
+    const GpuPreviewProcessingConfig base_config = assert_gpu_preview_subset_supported(fixture);
+    ASSERT_TRUE(!base_config.applyCreativeCurves);
+    const std::string base_hash = render_subset_hash(fixture, base_config, 0);
+
+    /* Turn the creative flag ON with every UNPORTED creative stage left neutral
+     * (vibrance/saturation/toning/hue-vs at their defaults). The gate must now
+     * accept it, because the contrast + gradation curves are ported to the GPU
+     * subset shader. */
+    processingAllowCreativeAdjustments(fixture.processing());
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig creative_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(creative_config.enabled);
+    ASSERT_TRUE(creative_config.applyCreativeCurves);
+    ASSERT_EQ(static_cast<int>(65536u * sizeof(uint16_t)), creative_config.contrastCurveLut.size());
+    ASSERT_EQ(static_cast<int>(65536u * sizeof(uint16_t)), creative_config.gradationLutY.size());
+    ASSERT_NE(base_config.signature, creative_config.signature);
+
+    /* The default creative contrast curve (pre_calc_curve_r) is non-identity, so
+     * the ported CPU-reference output must differ from the creative-off baseline,
+     * proving the curve chain is actually applied. */
+    const std::string creative_hash = render_subset_hash(fixture, creative_config, 0);
+    ASSERT_TRUE(base_hash != creative_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.frame0", creative_hash);
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.signature.frame0",
+                           std::to_string(creative_config.signature));
 }

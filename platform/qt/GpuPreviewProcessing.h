@@ -20,6 +20,12 @@ struct GpuPreviewProcessingConfig
     QByteArray matrixLutG;
     QByteArray matrixLutB;
     QByteArray gammaLut;
+    bool applyCreativeCurves = false;
+    QByteArray contrastCurveLut;
+    QByteArray gradationLutY;
+    QByteArray gradationLutR;
+    QByteArray gradationLutG;
+    QByteArray gradationLutB;
     uint64_t signature = 0;
 };
 

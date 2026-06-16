@@ -178,7 +178,21 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     for (int channel = 0; channel < 3; ++channel)
     {
         const float gammaInput = clamp01(matrixApplied[channel]);
-        outputPixel[channel] = sampleLut(config.gammaLut, gammaInput);
+        uint16_t value = sampleLut(config.gammaLut, gammaInput);
+        if ( config.applyCreativeCurves )
+        {
+            /* Post-gamma creative curves, mirroring raw_processing.c:3696-3738:
+             * contrast curve (pre_calc_curve_r) on all channels, then gradation
+             * gcurve_y on all channels, then per-channel gcurve_r/g/b. */
+            value = sampleLut(config.contrastCurveLut, value / 65535.0f);
+            value = sampleLut(config.gradationLutY, value / 65535.0f);
+            const QByteArray & perChannelGradation =
+                (channel == 0) ? config.gradationLutR
+              : (channel == 1) ? config.gradationLutG
+                               : config.gradationLutB;
+            value = sampleLut(perChannelGradation, value / 65535.0f);
+        }
+        outputPixel[channel] = value;
     }
 }
 
@@ -519,7 +533,13 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform sampler2D matrixLutG;\n"
         "uniform sampler2D matrixLutB;\n"
         "uniform sampler2D gammaLut;\n"
+        "uniform sampler2D contrastCurveLut;\n"
+        "uniform sampler2D gradationLutY;\n"
+        "uniform sampler2D gradationLutR;\n"
+        "uniform sampler2D gradationLutG;\n"
+        "uniform sampler2D gradationLutB;\n"
         "uniform float previewProcessingEnabled;\n"
+        "uniform float previewApplyCreativeCurves;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -578,7 +598,14 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        matrixApplied = wbApplied;\n"
         "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
-        "    return vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyCreativeCurves > 0.5)\n"
+        "    {\n"
+        "        result = vec3(sampleU16Lut(contrastCurveLut, result.r), sampleU16Lut(contrastCurveLut, result.g), sampleU16Lut(contrastCurveLut, result.b));\n"
+        "        result = vec3(sampleU16Lut(gradationLutY, result.r), sampleU16Lut(gradationLutY, result.g), sampleU16Lut(gradationLutY, result.b));\n"
+        "        result = vec3(sampleU16Lut(gradationLutR, result.r), sampleU16Lut(gradationLutG, result.g), sampleU16Lut(gradationLutB, result.b));\n"
+        "    }\n"
+        "    return result;\n"
         "}\n"
         "void main()\n"
         "{\n"
@@ -635,7 +662,41 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
 
     if ( !processing ) return reject(QStringLiteral("processing object missing"));
     if ( processing->highlight_reconstruction ) return reject(QStringLiteral("highlight reconstruction enabled"));
-    if ( processing->allow_creative_adjustments ) return reject(QStringLiteral("creative adjustments enabled"));
+    if ( processing->allow_creative_adjustments )
+    {
+        /* The GPU subset shader ports the post-gamma creative contrast curve
+         * (pre_calc_curve_r) and gradation curves (gcurve_*). Accept the creative
+         * flag ONLY when every OTHER creative stage the shader does NOT implement
+         * is neutral, mirroring raw_processing.c processing_has_neutral_creative_
+         * adjustments (2029-2053) plus the unported in-loop simple-contrast factor.
+         * Otherwise keep the CPU path. */
+        if ( processing->hue_vs_luma_used
+          || processing->hue_vs_saturation_used
+          || processing->hue_vs_hue_used
+          || processing->luma_vs_saturation_used )
+        {
+            return reject(QStringLiteral("creative hue-vs/luma-vs curve enabled"));
+        }
+        if ( processing->vibrance > 1.01 || processing->vibrance < 0.99 )
+        {
+            return reject(QStringLiteral("creative vibrance enabled"));
+        }
+        if ( processing->saturation > 1.01 || processing->saturation < 0.99 )
+        {
+            return reject(QStringLiteral("creative saturation enabled"));
+        }
+        if ( processing->toning_dry < 0.998f
+          || std::fabs(processing->toning_wet[0]) > 0.0005f
+          || std::fabs(processing->toning_wet[1]) > 0.0005f
+          || std::fabs(processing->toning_wet[2]) > 0.0005f )
+        {
+            return reject(QStringLiteral("creative toning enabled"));
+        }
+        if ( std::fabs(processing->contrast) >= 0.01 )
+        {
+            return reject(QStringLiteral("creative in-loop contrast factor enabled"));
+        }
+    }
     if ( processing->gradient_enable ) return reject(QStringLiteral("gradient enabled"));
     if ( processing->lut_on ) return reject(QStringLiteral("LUT enabled"));
     if ( processing->filter_on ) return reject(QStringLiteral("filter enabled"));
@@ -705,6 +766,31 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
         reinterpret_cast<const char *>(processing->pre_calc_gamma),
         static_cast<int>(65536u * sizeof(uint16_t)));
 
+    /* Slice 1: post-gamma creative curves (contrast + gradation) ported to the
+     * GPU subset shader. gpuPreviewProcessingIsSupported only accepts
+     * allow_creative_adjustments when the not-yet-ported creative stages are
+     * neutral, so these prebuilt uint16[65536] LUTs are safe to apply verbatim.
+     * Order matches raw_processing.c:3696-3738. */
+    config.applyCreativeCurves = processing->allow_creative_adjustments != 0;
+    if ( config.applyCreativeCurves )
+    {
+        config.contrastCurveLut = QByteArray(
+            reinterpret_cast<const char *>(processing->pre_calc_curve_r),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradationLutY = QByteArray(
+            reinterpret_cast<const char *>(processing->gcurve_y),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradationLutR = QByteArray(
+            reinterpret_cast<const char *>(processing->gcurve_r),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradationLutG = QByteArray(
+            reinterpret_cast<const char *>(processing->gcurve_g),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradationLutB = QByteArray(
+            reinterpret_cast<const char *>(processing->gcurve_b),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+    }
+
     uint64_t hash = 1469598103934665603ull;
     hash = fnv1a64_append(hash, &config.useCameraMatrix, sizeof(config.useCameraMatrix));
     hash = fnv1a64_append(hash, &config.applyGamutCompression, sizeof(config.applyGamutCompression));
@@ -716,6 +802,12 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.matrixLutG.constData(), static_cast<size_t>(config.matrixLutG.size()));
     hash = fnv1a64_append(hash, config.matrixLutB.constData(), static_cast<size_t>(config.matrixLutB.size()));
     hash = fnv1a64_append(hash, config.gammaLut.constData(), static_cast<size_t>(config.gammaLut.size()));
+    hash = fnv1a64_append(hash, &config.applyCreativeCurves, sizeof(config.applyCreativeCurves));
+    hash = fnv1a64_append(hash, config.contrastCurveLut.constData(), static_cast<size_t>(config.contrastCurveLut.size()));
+    hash = fnv1a64_append(hash, config.gradationLutY.constData(), static_cast<size_t>(config.gradationLutY.size()));
+    hash = fnv1a64_append(hash, config.gradationLutR.constData(), static_cast<size_t>(config.gradationLutR.size()));
+    hash = fnv1a64_append(hash, config.gradationLutG.constData(), static_cast<size_t>(config.gradationLutG.size()));
+    hash = fnv1a64_append(hash, config.gradationLutB.constData(), static_cast<size_t>(config.gradationLutB.size()));
     config.signature = hash;
     return config;
 }
@@ -848,6 +940,16 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     const QByteArray matrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.matrixLutG);
     const QByteArray matrixBBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.matrixLutB);
     const QByteArray gammaBytes = gpuPreviewProcessingPackLookupTextureRgba16(config.gammaLut);
+    const QByteArray contrastBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyCreativeCurves ? config.contrastCurveLut : config.gammaLut);
+    const QByteArray gradationYBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyCreativeCurves ? config.gradationLutY : config.gammaLut);
+    const QByteArray gradationRBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyCreativeCurves ? config.gradationLutR : config.gammaLut);
+    const QByteArray gradationGBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyCreativeCurves ? config.gradationLutG : config.gammaLut);
+    const QByteArray gradationBBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyCreativeCurves ? config.gradationLutB : config.gammaLut);
 
     QOpenGLTexture * frameTexture = createFrameTexture(width, height);
     QOpenGLTexture * levelsTexture = createLookupTexture();
@@ -855,6 +957,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * matrixGTexture = createLookupTexture();
     QOpenGLTexture * matrixBTexture = createLookupTexture();
     QOpenGLTexture * gammaTexture = createLookupTexture();
+    QOpenGLTexture * contrastCurveTexture = createLookupTexture();
+    QOpenGLTexture * gradationYTexture = createLookupTexture();
+    QOpenGLTexture * gradationRTexture = createLookupTexture();
+    QOpenGLTexture * gradationGTexture = createLookupTexture();
+    QOpenGLTexture * gradationBTexture = createLookupTexture();
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -874,6 +981,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gammaTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
                           gammaBytes.constData());
+    contrastCurveTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, contrastBytes.constData());
+    gradationYTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationYBytes.constData());
+    gradationRTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationRBytes.constData());
+    gradationGTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationGBytes.constData());
+    gradationBTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationBBytes.constData());
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -889,6 +1001,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("matrixLutG", 3);
     program.setUniformValue("matrixLutB", 4);
     program.setUniformValue("gammaLut", 5);
+    program.setUniformValue("contrastCurveLut", 6);
+    program.setUniformValue("gradationLutY", 7);
+    program.setUniformValue("gradationLutR", 8);
+    program.setUniformValue("gradationLutG", 9);
+    program.setUniformValue("gradationLutB", 10);
+    program.setUniformValue("previewApplyCreativeCurves", config.applyCreativeCurves ? 1.0f : 0.0f);
     program.setUniformValue("previewProcessingEnabled", config.enabled ? 1.0f : 0.0f);
     program.setUniformValue("previewUseCameraMatrix", config.useCameraMatrix ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyGamutCompression", config.applyGamutCompression ? 1.0f : 0.0f);
@@ -915,6 +1033,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     matrixGTexture->bind(3);
     matrixBTexture->bind(4);
     gammaTexture->bind(5);
+    contrastCurveTexture->bind(6);
+    gradationYTexture->bind(7);
+    gradationRTexture->bind(8);
+    gradationGTexture->bind(9);
+    gradationBTexture->bind(10);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -944,6 +1067,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     matrixGTexture->release();
     matrixBTexture->release();
     gammaTexture->release();
+    contrastCurveTexture->release();
+    gradationYTexture->release();
+    gradationRTexture->release();
+    gradationGTexture->release();
+    gradationBTexture->release();
     program.release();
     fbo.release();
 
@@ -953,6 +1081,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete matrixGTexture;
     delete matrixBTexture;
     delete gammaTexture;
+    delete contrastCurveTexture;
+    delete gradationYTexture;
+    delete gradationRTexture;
+    delete gradationGTexture;
+    delete gradationBTexture;
     context.doneCurrent();
 
     if ( reason ) reason->clear();
