@@ -173,20 +173,29 @@ toning → contrast curve → gradation):
     `luma_vs_saturation` curve is set; clamping is the correct, deterministic
     behaviour and the production CPU path should adopt the same clamp (tracked
     separately — out of GPU-lane scope).
-- **Slice 6 (REMAINING — gate still rejects):** in-loop **simple-contrast factor**
-  (`processing->contrast`, a per-pixel luma-dependent exposure multiply via
-  `contrast_curve[cval]`, `raw_processing.c:2954`). This is in the exposure/linear
-  domain, not the post-gamma creative LUT section, so it needs its own port.
-  Until then `gpuPreviewProcessingIsSupported` rejects `|contrast| >= 0.01`.
-- **Later slices:** shadows/highlights + clarity (spatial RBF blur-mask pre-pass),
-  then 1D/3D LUT, creative filter, AgX, median/RBF denoise, grain, CA correction,
-  sharpen, vignette, non-Rec709 gamut.
+- **Slice 6 (DONE):** in-loop **simple-contrast factor** (`processing->contrast`,
+  a per-pixel luma-dependent exposure multiply via `contrast_curve[cval]`,
+  `raw_processing.c:2941-2954`). `cval` is the integer luma `(4R+11G+B)>>4` of the
+  matrix-applied (pre camera-WB) pixel; the value is multiplied by
+  `contrast_curve[cval]`. Because the factor is luma-dependent it cannot be folded
+  into the per-channel matrix/gamma LUTs, so it is applied in-shader after the
+  matrix sample and before the camera matrix/gamma (the scalar commutes with the
+  linear WB). `contrast_curve` (`double[65536]`) is narrowed to `float` and carried
+  as an R32F texture (unit 15).
+- **Later slices (non-creative features, gated independently of the creative flag):**
+  shadows/highlights + clarity (spatial RBF blur-mask pre-pass), then 1D/3D LUT,
+  creative filter, AgX, median/RBF denoise, grain, CA correction, sharpen,
+  vignette, non-Rec709 gamut.
 
-After slices 1-5, `gpuPreviewProcessingIsSupported` accepts
-`allow_creative_adjustments` for any default-graded clip whose only creative
-controls are the ported stages — which covers the default image profile and the
-common grade (hue-vs/vibrance/saturation/toning/curves), failing closed only on
-the unported in-loop contrast factor and the spatial/LUT stages above.
+**After slices 1-6 the creative-adjustments family is fully ported.**
+`gpuPreviewProcessingIsSupported` no longer rejects `allow_creative_adjustments`
+on its own — it accepts any grade (default or hand-graded: in-loop contrast +
+hue-vs/luma-vs + vibrance + saturation + toning + contrast curve + gradation) and
+fails closed only on the non-creative features listed above, which are gated
+independently of the creative flag. The P-pre creative-parity goal (a normally
+graded clip uses the GPU path instead of the CPU fallback) is met for the
+creative-grade family, pending the RTX 4090 GL frame-diff that validates the
+shader against this CPU reference.
 
 Each slice keeps the CPU reference (`applyPreviewProcessingPixel`) and the GPU
 subset shader bit-aligned, adds unit parity tests (the CPU reference is the local

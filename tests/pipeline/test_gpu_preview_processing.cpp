@@ -192,15 +192,12 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "highlight_reconstruction",
         QStringLiteral("highlight reconstruction enabled"),
         [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
-    /* allow_creative_adjustments is no longer unconditionally rejected: the GPU
-     * subset shader now ports the hue-vs/luma-vs curves, vibrance, saturation,
-     * toning, the contrast curve and the gradation curves. It is rejected only
-     * when the one UNPORTED creative stage -- the in-loop contrast factor -- is
-     * non-neutral. */
-    assert_gpu_preview_rejects_processing_feature(
-        "creative_in_loop_contrast",
-        QStringLiteral("creative in-loop contrast factor enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->contrast = 0.5; });
+    /* allow_creative_adjustments is no longer rejected on its own: the GPU subset
+     * shader now ports every creative-family stage -- the in-loop simple-contrast
+     * factor, hue-vs/luma-vs curves, vibrance, saturation, toning, the contrast
+     * curve and the gradation curves. Clips are still failed closed on the
+     * non-creative features below, which are gated independently of the creative
+     * flag. */
     assert_gpu_preview_rejects_processing_feature(
         "gradient",
         QStringLiteral("gradient enabled"),
@@ -428,4 +425,38 @@ TEST(GpuPreviewProcessing, NonNeutralHueVsIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != huevs_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.hue_vs.frame0", huevs_hash);
+}
+
+TEST(GpuPreviewProcessing, NonNeutralInLoopContrastIsSupportedAndChangesOutput)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingAllowCreativeAdjustments(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig neutral_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(neutral_config.enabled);
+    ASSERT_TRUE(!neutral_config.applyInLoopContrast);
+    const std::string neutral_hash = render_subset_hash(fixture, neutral_config, 0);
+
+    /* The in-loop simple-contrast factor is now ported (per-pixel luma-dependent
+     * exposure multiply by contrast_curve[cval]), so the gate must accept a
+     * non-zero contrast (previously the last creative reject) and the output must
+     * change. processingSetSimpleContrast sets contrast = value*0.65 and rebuilds
+     * the curve. */
+    processingSetSimpleContrast(fixture.processing(), 1.0);
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig contrast_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(contrast_config.enabled);
+    ASSERT_TRUE(contrast_config.applyInLoopContrast);
+    ASSERT_NE(neutral_config.signature, contrast_config.signature);
+
+    const std::string contrast_hash = render_subset_hash(fixture, contrast_config, 0);
+    ASSERT_TRUE(neutral_hash != contrast_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.in_loop_contrast.frame0", contrast_hash);
 }

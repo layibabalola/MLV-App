@@ -28,6 +28,9 @@ struct GpuPreviewProcessingConfig
     bool applySaturation = false;
     float saturation = 1.0f;
     bool applyHueVs = false;
+    bool applyInLoopContrast = false;
+    float sourceContrast = 0.0f;
+    QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;
     QByteArray gradationLutY;
     QByteArray gradationLutR;
