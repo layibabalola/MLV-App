@@ -179,6 +179,12 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     {
         const float gammaInput = clamp01(matrixApplied[channel]);
         uint16_t value = sampleLut(config.gammaLut, gammaInput);
+        if ( config.applyToning )
+        {
+            /* Per-channel scalar gain, before the contrast curve, matching
+             * raw_processing.c:3685 (truncate to uint16, no clamp). */
+            value = static_cast<uint16_t>(static_cast<float>(value) * config.toningGain[channel]);
+        }
         if ( config.applyCreativeCurves )
         {
             /* Post-gamma creative curves, mirroring raw_processing.c:3696-3738:
@@ -540,6 +546,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform sampler2D gradationLutB;\n"
         "uniform float previewProcessingEnabled;\n"
         "uniform float previewApplyCreativeCurves;\n"
+        "uniform float previewApplyToning;\n"
+        "uniform vec3 previewToningGain;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -599,6 +607,10 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyToning > 0.5)\n"
+        "    {\n"
+        "        result = clamp(trunc(result * 65535.0 * previewToningGain), 0.0, 65535.0) / 65535.0;\n"
+        "    }\n"
         "    if (previewApplyCreativeCurves > 0.5)\n"
         "    {\n"
         "        result = vec3(sampleU16Lut(contrastCurveLut, result.r), sampleU16Lut(contrastCurveLut, result.g), sampleU16Lut(contrastCurveLut, result.b));\n"
@@ -685,13 +697,6 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
         {
             return reject(QStringLiteral("creative saturation enabled"));
         }
-        if ( processing->toning_dry < 0.998f
-          || std::fabs(processing->toning_wet[0]) > 0.0005f
-          || std::fabs(processing->toning_wet[1]) > 0.0005f
-          || std::fabs(processing->toning_wet[2]) > 0.0005f )
-        {
-            return reject(QStringLiteral("creative toning enabled"));
-        }
         if ( std::fabs(processing->contrast) >= 0.01 )
         {
             return reject(QStringLiteral("creative in-loop contrast factor enabled"));
@@ -772,6 +777,14 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
      * neutral, so these prebuilt uint16[65536] LUTs are safe to apply verbatim.
      * Order matches raw_processing.c:3696-3738. */
     config.applyCreativeCurves = processing->allow_creative_adjustments != 0;
+    config.applyToning = processing->allow_creative_adjustments != 0
+                      && (processing->toning_dry < 0.998f
+                          || std::fabs(processing->toning_wet[0]) > 0.0005f
+                          || std::fabs(processing->toning_wet[1]) > 0.0005f
+                          || std::fabs(processing->toning_wet[2]) > 0.0005f);
+    config.toningGain[0] = static_cast<float>(processing->toning_dry + processing->toning_wet[0]);
+    config.toningGain[1] = static_cast<float>(processing->toning_dry + processing->toning_wet[1]);
+    config.toningGain[2] = static_cast<float>(processing->toning_dry + processing->toning_wet[2]);
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -803,6 +816,8 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.matrixLutB.constData(), static_cast<size_t>(config.matrixLutB.size()));
     hash = fnv1a64_append(hash, config.gammaLut.constData(), static_cast<size_t>(config.gammaLut.size()));
     hash = fnv1a64_append(hash, &config.applyCreativeCurves, sizeof(config.applyCreativeCurves));
+    hash = fnv1a64_append(hash, &config.applyToning, sizeof(config.applyToning));
+    hash = fnv1a64_append(hash, config.toningGain, sizeof(config.toningGain));
     hash = fnv1a64_append(hash, config.contrastCurveLut.constData(), static_cast<size_t>(config.contrastCurveLut.size()));
     hash = fnv1a64_append(hash, config.gradationLutY.constData(), static_cast<size_t>(config.gradationLutY.size()));
     hash = fnv1a64_append(hash, config.gradationLutR.constData(), static_cast<size_t>(config.gradationLutR.size()));
@@ -1007,6 +1022,9 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("gradationLutG", 9);
     program.setUniformValue("gradationLutB", 10);
     program.setUniformValue("previewApplyCreativeCurves", config.applyCreativeCurves ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyToning", config.applyToning ? 1.0f : 0.0f);
+    program.setUniformValue("previewToningGain",
+                            QVector3D(config.toningGain[0], config.toningGain[1], config.toningGain[2]));
     program.setUniformValue("previewProcessingEnabled", config.enabled ? 1.0f : 0.0f);
     program.setUniformValue("previewUseCameraMatrix", config.useCameraMatrix ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyGamutCompression", config.applyGamutCompression ? 1.0f : 0.0f);

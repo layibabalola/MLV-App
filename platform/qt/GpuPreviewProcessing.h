@@ -21,6 +21,8 @@ struct GpuPreviewProcessingConfig
     QByteArray matrixLutB;
     QByteArray gammaLut;
     bool applyCreativeCurves = false;
+    bool applyToning = false;
+    float toningGain[3] = { 1.0f, 1.0f, 1.0f };
     QByteArray contrastCurveLut;
     QByteArray gradationLutY;
     QByteArray gradationLutR;

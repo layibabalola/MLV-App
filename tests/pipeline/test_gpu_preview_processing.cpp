@@ -208,10 +208,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("creative saturation enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->saturation = 1.5; });
     assert_gpu_preview_rejects_processing_feature(
-        "creative_toning",
-        QStringLiteral("creative toning enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->toning_dry = 0.5f; });
-    assert_gpu_preview_rejects_processing_feature(
         "creative_in_loop_contrast",
         QStringLiteral("creative in-loop contrast factor enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->contrast = 0.5; });
@@ -312,4 +308,36 @@ TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.frame0", creative_hash);
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.signature.frame0",
                            std::to_string(creative_config.signature));
+}
+
+TEST(GpuPreviewProcessing, NonNeutralToningIsSupportedAndChangesOutput)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    /* Creative on, every stage neutral: toning must be inert. */
+    processingAllowCreativeAdjustments(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig neutral_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(neutral_config.enabled);
+    ASSERT_TRUE(!neutral_config.applyToning);
+    const std::string neutral_hash = render_subset_hash(fixture, neutral_config, 0);
+
+    /* Non-neutral toning is now ported to the GPU subset, so the gate must accept
+     * it (not force CPU) and the per-channel gain must change the output. */
+    processingSetToning(fixture.processing(), 255, 192, 0, 40);
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig toned_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(toned_config.enabled);
+    ASSERT_TRUE(toned_config.applyToning);
+    ASSERT_NE(neutral_config.signature, toned_config.signature);
+
+    const std::string toned_hash = render_subset_hash(fixture, toned_config, 0);
+    ASSERT_TRUE(neutral_hash != toned_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.toning.frame0", toned_hash);
 }
