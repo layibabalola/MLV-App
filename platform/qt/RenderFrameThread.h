@@ -79,6 +79,7 @@ public:
             bool renderThreadUsingGpuPreviewProcessing = false;
             bool renderThreadUsingGpuBilinearDebayer = false;
             bool renderThreadUsingGpuAmazeDebayer = false;
+            bool gpuAmazeTexturePresentRequested = false;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
         };
@@ -102,6 +103,13 @@ public:
         bool usedGpuAmazeDebayer = false;
         QString gpuAmazeFallbackReason;
         QString gpuAmazeRendererDescription;
+        bool gpuAmazeTexturePresentCandidate = false;
+        const float *gpuAmazeTextureRawFrame = nullptr;
+        size_t gpuAmazeTextureRawFrameSize = 0;
+        int gpuAmazeTextureWidth = 0;
+        int gpuAmazeTextureHeight = 0;
+        int gpuAmazeTextureBlackLevel = 0;
+        std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -214,6 +222,12 @@ private:
         bool usedGpuAmazeDebayer = false;
         QString gpuAmazeFallbackReason;
         QString gpuAmazeRendererDescription;
+        bool gpuAmazeTexturePresentCandidate = false;
+        std::vector<float> gpuAmazeTextureRawFrame;
+        int gpuAmazeTextureWidth = 0;
+        int gpuAmazeTextureHeight = 0;
+        int gpuAmazeTextureBlackLevel = 0;
+        std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -251,6 +265,12 @@ private:
             usedGpuAmazeDebayer = false;
             gpuAmazeFallbackReason.clear();
             gpuAmazeRendererDescription.clear();
+            gpuAmazeTexturePresentCandidate = false;
+            gpuAmazeTextureRawFrame.clear();
+            gpuAmazeTextureWidth = 0;
+            gpuAmazeTextureHeight = 0;
+            gpuAmazeTextureBlackLevel = 0;
+            gpuAmazeTextureWbMultipliers = {{1.0, 1.0, 1.0}};
             dualIsoPreviewHistogramMs = 0.0;
             dualIsoPreviewRegressionMs = 0.0;
             dualIsoPreviewRowscaleMs = 0.0;

@@ -8,6 +8,7 @@ TARGET = gui_tests
 
 SOURCES += \
     $$REPO_ROOT/platform/qt/ColorToolButton.cpp \
+    $$REPO_ROOT/platform/qt/GpuDebayer.cpp \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.cpp \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.cpp \
     $$REPO_ROOT/platform/qt/Histogram.cpp \
@@ -21,6 +22,7 @@ SOURCES += \
 
 HEADERS += \
     $$REPO_ROOT/platform/qt/ColorToolButton.h \
+    $$REPO_ROOT/platform/qt/GpuDebayer.h \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/platform/qt/DualIsoPatternMapping.h \
     $$REPO_ROOT/platform/qt/GpuDisplayViewport.h \

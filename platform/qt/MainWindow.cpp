@@ -2545,6 +2545,17 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         QStringLiteral("draw_frame_ready_prescaled_image_active"),
         preScaledPlaybackImageAvailable );
 
+    if( task.readyFrame.gpuAmazeTexturePresentCandidate )
+    {
+        result.preparedWidth = sourceWidth;
+        result.preparedHeight = sourceHeight;
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_prep_passthrough"),
+            true );
+        result.imageBuildMs = (mlv_stage_timing_now() - image_start) * 1000.0;
+        return result;
+    }
+
     QImage displayImage;
     bool displayImageOwnsData = false;
     std::vector<uint8_t> displayImageBacking;
@@ -3027,8 +3038,143 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             ? task.sourceImage
             : task.readyFrame.rawImage8;
     bool framePresentedByViewport = false;
+    const size_t expectedAmazeTextureRawFloats =
+        static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+    const bool gpuAmazeTexturePresentRequested =
+        task.requestContext.gpuAmazeTexturePresentRequested;
+    const bool gpuAmazeTexturePresentCandidate =
+        gpuAmazeTexturePresentRequested
+        && readyFrame.gpuAmazeTexturePresentCandidate
+        && task.gpuAmazeTextureRawFrame
+        && task.gpuAmazeTextureRawFrameSize >= expectedAmazeTextureRawFloats
+        && readyFrame.gpuAmazeTextureWidth == sourceWidth
+        && readyFrame.gpuAmazeTextureHeight == sourceHeight;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_amaze_texture_present_requested"),
+        gpuAmazeTexturePresentRequested );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_amaze_texture_present_candidate"),
+        gpuAmazeTexturePresentCandidate );
+    if( gpuAmazeTexturePresentCandidate )
+    {
+        QString textureReason;
+        QString textureRenderer;
+        GpuAmazeDebayerBackendTiming textureTiming;
+        framePresentedByViewport =
+            GpuDisplayViewport::presentAmazePostWbTexture(
+                ui->graphicsView,
+                m_pGraphicsItem,
+                task.gpuAmazeTextureRawFrame,
+                sourceWidth,
+                sourceHeight,
+                readyFrame.gpuAmazeTextureBlackLevel,
+                readyFrame.gpuAmazeTextureWbMultipliers.data(),
+                task.gpuPresentationOptions,
+                &textureReason,
+                &textureRenderer,
+                &textureTiming );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_active"),
+            framePresentedByViewport );
+        if( framePresentedByViewport )
+        {
+            readyFrame.usedGpuAmazeDebayer = true;
+            readyFrame.gpuAmazeFallbackReason.clear();
+            readyFrame.gpuAmazeRendererDescription = textureRenderer;
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_renderer"),
+                textureRenderer.isEmpty() ? QStringLiteral("unknown") : textureRenderer );
+            if( textureTiming.available )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_upload_ms"),
+                    textureTiming.uploadMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_kernel_ms"),
+                    textureTiming.kernelMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_handoff_ms"),
+                    textureTiming.downloadMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_amaze_texture_present_total_ms"),
+                    textureTiming.totalMs );
+            }
+        }
+        else
+        {
+            std::vector<uint16_t> fallbackRgb16( expectedAmazeTextureRawFloats * 3u );
+            QString fallbackReason;
+            QString fallbackRenderer;
+            GpuAmazeDebayerBackendTiming fallbackTiming;
+            const bool fallbackOk =
+                gpuAmazeDebayerApplyGpuOffscreenPostWb(
+                    task.gpuAmazeTextureRawFrame,
+                    fallbackRgb16.data(),
+                    sourceWidth,
+                    sourceHeight,
+                    readyFrame.gpuAmazeTextureBlackLevel,
+                    readyFrame.gpuAmazeTextureWbMultipliers.data(),
+                    &fallbackReason,
+                    &fallbackRenderer,
+                    &fallbackTiming );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_fallback_reason"),
+                textureReason.isEmpty()
+                    ? QStringLiteral("GPU AMaZE texture-present failed")
+                    : textureReason );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_texture_present_cpu_readback_fallback_active"),
+                fallbackOk );
+            if( fallbackOk )
+            {
+                framePresentedByViewport =
+                    GpuDisplayViewport::presentRgb16( ui->graphicsView,
+                                                      m_pGraphicsItem,
+                                                      fallbackRgb16.data(),
+                                                      sourceWidth,
+                                                      sourceHeight,
+                                                      task.gpuPresentationOptions );
+                readyFrame.usedGpuAmazeDebayer = framePresentedByViewport;
+                readyFrame.gpuAmazeFallbackReason =
+                    textureReason.isEmpty()
+                        ? QStringLiteral("GPU AMaZE texture-present failed; used CPU-readback fallback")
+                        : textureReason;
+                readyFrame.gpuAmazeRendererDescription = fallbackRenderer;
+                if( fallbackTiming.available )
+                {
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_upload_ms"),
+                        fallbackTiming.uploadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_kernel_ms"),
+                        fallbackTiming.kernelMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_download_ms"),
+                        fallbackTiming.downloadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_debayer_total_ms"),
+                        fallbackTiming.totalMs );
+                }
+            }
+            else
+            {
+                readyFrame.usedGpuAmazeDebayer = false;
+                readyFrame.gpuAmazeRendererDescription = fallbackRenderer;
+                readyFrame.gpuAmazeFallbackReason =
+                    fallbackReason.isEmpty()
+                        ? QStringLiteral("GPU AMaZE texture-present and CPU-readback fallback failed")
+                        : fallbackReason;
+            }
+        }
+    }
+    else
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_texture_present_active"),
+            false );
+    }
     uint8_t underOver = result.underOver;
-    if( gpu16PreviewActive )
+    if( !framePresentedByViewport && gpu16PreviewActive )
     {
         framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
                                                                     m_pGraphicsItem,
@@ -3388,6 +3534,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.gpuAmazeDebayerBackendRequest = m_gpuAmazeDebayerBackendRequest;
     renderPolicy.gpuAmazeDebayerEnvironmentRequested =
         gpuAmazeDebayerRequestedByEnvironment();
+    renderPolicy.gpuAmazeTexturePresentationEnvironmentRequested =
+        gpuAmazeTexturePresentRequestedByEnvironment();
     renderPolicy.gpuAmazeDebayerCompatible =
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
@@ -3412,6 +3560,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.renderThreadUsingGpuProcessingPreview = m_renderThreadUsingGpuPreviewProcessing;
     renderPolicy.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
     renderPolicy.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
+    renderPolicy.renderThreadUsingGpuAmazeTexturePresentation =
+        mainWindowAllowsGpuAmazeTexturePresentation( renderPolicy );
     m_lastQueuedGpuPreviewPolicy = renderPolicy;
     m_lastQueuedGpuPresentationOptions =
         mainWindowBuildGpuPresentationOptions( renderPolicy );
@@ -3467,6 +3617,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
     requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
     requestContext.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
+    requestContext.gpuAmazeTexturePresentRequested =
+        mainWindowUsesGpuAmazeTexturePresentation( renderPolicy );
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
         playbackProcessingSelected;
@@ -4853,6 +5005,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                              options.gpuAmazeDebayerBackend ) ) );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_environment_requested"),
                      gpuAmazeDebayerRequestedByEnvironment() );
+    metadata.insert( QStringLiteral("gpu_amaze_texture_present_environment_requested"),
+                     gpuAmazeTexturePresentRequestedByEnvironment() );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_available"),
                     gpuAmazeDebayerProbe.available );
     metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_reason"),
@@ -5070,6 +5224,10 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         return 3;
     }
 
+    m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
+    m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
+    m_gpuAmazeDebayerBackendRequest = options.gpuAmazeDebayerBackend;
+
     show();
     qApp->processEvents( QEventLoop::AllEvents );
 
@@ -5127,8 +5285,42 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
      * the receipt-only fallback. Opt the smoke into the playback policy so
      * the fast-processing subset can participate while we benchmark. */
     m_headlessPlaybackProfileUsePlaybackPolicy = true;
-    ui->actionUseFastProcessingForPlayback->setChecked( true );
+    if( options.forcePlaybackDebayer )
+    {
+        setPlaybackProfileDebayerRequest( options.playbackDebayer );
+    }
+    setPlaybackProfileProcessingRequest( options.playbackProcessing );
+    selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
+
+    logInteractionEvent(
+        QStringLiteral("gui_smoke.playback_policy"),
+        QStringLiteral(
+            "playback_debayer_forced=%1 playback_debayer_request=%2 "
+            "playback_debayer_effective=%3 playback_processing_request=%4 "
+            "playback_processing_selected=%5 gpu_preview_processing_request=%6 "
+            "gpu_bilinear_debayer_request=%7 gpu_amaze_debayer_request=%8 "
+            "gpu_amaze_texture_present_environment=%9 playback_policy_active=%10" )
+            .arg( bool01( options.forcePlaybackDebayer ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_debayer_request_name(
+                          options.playbackDebayer ) ) )
+            .arg( playbackDebayerLabel() )
+            .arg( QString::fromLatin1(
+                      playback_profile_processing_request_name(
+                          options.playbackProcessing ) ) )
+            .arg( selectedPlaybackProcessingLabel() )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_preview_backend_name(
+                          options.gpuPreviewProcessingBackend ) ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_bilinear_debayer_backend_name(
+                          options.gpuBilinearDebayerBackend ) ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_amaze_debayer_backend_name(
+                          options.gpuAmazeDebayerBackend ) ) )
+            .arg( bool01( gpuAmazeTexturePresentRequestedByEnvironment() ) )
+            .arg( bool01( m_headlessPlaybackProfileUsePlaybackPolicy ) ) );
 
     const int totalFrames = getMlvFrames( m_pMlvObject );
     if( totalFrames < 2 )
@@ -5193,6 +5385,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                   ? m_lastLookAssistScene
                   : QStringLiteral("none") ) );
 
+    QString gpuPreviewProcessingRejectReason;
+    const bool gpuPreviewProcessingCompatible =
+        gpuPreviewProcessingIsSupported( m_pProcessingObject,
+                                         &gpuPreviewProcessingRejectReason );
+
     logInteractionEvent(
         QStringLiteral("gui_smoke.visual_state"),
         QStringLiteral(
@@ -5203,7 +5400,25 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             "h_stretch_index=%17 v_stretch_index=%18 dual_iso_mode=%19 "
             "dual_iso_interp=%20 dual_iso_alias_map=%21 dual_iso_fullres=%22 "
             "drop_frame=%23 audio=%24 scopes=%25 zebras=%26 scale_request=%27 "
-            "quality_mode=%28 receipt_supplied=%29" )
+            "quality_mode=%28 receipt_supplied=%29 "
+            "gpu_amaze_texture_present_requested=%30 "
+            "gpu_amaze_texture_present_candidate=%31 "
+            "gpu_amaze_texture_present_active=%32 "
+            "gpu_amaze_texture_present_renderer=%33 "
+            "gpu_amaze_texture_present_fallback_reason=%34 "
+            "gpu_amaze_texture_present_cpu_readback_fallback_active=%35 "
+            "gpu_viewport_installed=%36 "
+            "gpu_preview_processing_env_requested=%37 "
+            "gpu_preview_processing_compatible=%38 "
+            "render_thread_using_gpu_preview_processing=%39 "
+            "render_thread_using_gpu_amaze_debayer=%40 "
+            "gpu_amaze_debayer_environment_requested=%41 "
+            "gpu_amaze_debayer_compatible=%42 "
+            "gpu_amaze_texture_present_environment_requested=%43 "
+            "does_mlv_always_use_amaze=%44 "
+            "gpu16_preview_active=%45 "
+            "playback_processing_reason=%46 "
+            "gpu_preview_processing_reject_reason=%47" )
             .arg( bool01( ACTIVE_RECEIPT && ACTIVE_RECEIPT->lookAssistEnabled()
                           && ui->checkBoxLookAssistEnable->isChecked() ) )
             .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
@@ -5235,7 +5450,33 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             .arg( bool01( ui->actionShowZebras->isChecked() ) )
             .arg( effectivePlaybackScaleFactorForRequest() )
             .arg( m_playbackQualityMode )
-            .arg( bool01( !options.receiptPath.isEmpty() ) ) );
+            .arg( bool01( !options.receiptPath.isEmpty() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_requested") ).toBool() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_candidate") ).toBool() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_active") ).toBool() ) )
+            .arg( m_lastPresentedStageTimingTelemetry.value(
+                      QStringLiteral("gpu_amaze_texture_present_renderer") ).toString() )
+            .arg( m_lastPresentedStageTimingTelemetry.value(
+                      QStringLiteral("gpu_amaze_texture_present_fallback_reason") ).toString() )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral(
+                                  "gpu_amaze_texture_present_cpu_readback_fallback_active" ) )
+                          .toBool() ) )
+            .arg( bool01( GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) )
+            .arg( bool01( gpuPreviewProcessingRequestedByEnvironment() ) )
+            .arg( bool01( gpuPreviewProcessingCompatible ) )
+            .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
+            .arg( bool01( m_renderThreadUsingGpuAmazeDebayer ) )
+            .arg( bool01( gpuAmazeDebayerRequestedByEnvironment() ) )
+            .arg( bool01( m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0 && !ui->actionCaching->isChecked() ) )
+            .arg( bool01( gpuAmazeTexturePresentRequestedByEnvironment() ) )
+            .arg( m_pMlvObject ? doesMlvAlwaysUseAmaze( m_pMlvObject ) : -1 )
+            .arg( bool01( m_renderThreadUsing16BitPreview ) )
+            .arg( m_lastQueuedPlaybackProcessingReason )
+            .arg( gpuPreviewProcessingRejectReason ) );
 
     const int settleMs = qMax( 0, options.settleMs );
     const int settleCpuStableMs = qMax( 0, options.settleCpuStableMs );
@@ -20652,6 +20893,8 @@ void MainWindow::drawFrameReady()
         ( display_start > 0.0 && task.enqueueTime >= display_start )
             ? ( task.enqueueTime - display_start ) * 1000.0
             : 0.0;
+    task.gpuAmazeTextureRawFrame = readyFrame.gpuAmazeTextureRawFrame;
+    task.gpuAmazeTextureRawFrameSize = readyFrame.gpuAmazeTextureRawFrameSize;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
@@ -20664,6 +20907,14 @@ void MainWindow::drawFrameReady()
         const size_t sourceImage16Words = sourceImage16Bytes / sizeof( uint16_t );
         task.ownedSourceImage16.assign( readyFrame.rawImage16,
                                         readyFrame.rawImage16 + sourceImage16Words );
+    }
+    if( readyFrame.gpuAmazeTexturePresentCandidate
+     && readyFrame.gpuAmazeTextureRawFrame
+     && readyFrame.gpuAmazeTextureRawFrameSize > 0 )
+    {
+        task.ownedGpuAmazeTextureRawFrame.assign(
+            readyFrame.gpuAmazeTextureRawFrame,
+            readyFrame.gpuAmazeTextureRawFrame + readyFrame.gpuAmazeTextureRawFrameSize );
     }
     const size_t playbackScaledImageBytes =
         (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
@@ -20683,6 +20934,9 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_rgb16_bytes"),
         static_cast<qint64>( task.ownedSourceImage16.size() * sizeof( uint16_t ) ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_amaze_texture_raw_bytes"),
+        static_cast<qint64>( task.ownedGpuAmazeTextureRawFrame.size() * sizeof( float ) ) );
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
         static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );

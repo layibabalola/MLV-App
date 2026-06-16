@@ -32,6 +32,8 @@ const char * gpuBilinearDebayerEnvironmentVariableName(void);
 bool gpuBilinearDebayerRequestedByEnvironment(void);
 const char * gpuAmazeDebayerEnvironmentVariableName(void);
 bool gpuAmazeDebayerRequestedByEnvironment(void);
+const char * gpuAmazeTexturePresentEnvironmentVariableName(void);
+bool gpuAmazeTexturePresentRequestedByEnvironment(void);
 GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbeBackend(void);
 bool gpuBilinearDebayerApplyGpuOffscreen(const float * inputRawFrame,
                                          uint16_t * outputRgb16,
@@ -47,5 +49,23 @@ bool gpuAmazeDebayerApplyGpuOffscreen(const float * inputRawFrame,
                                       QString * reason = nullptr,
                                       QString * rendererDescription = nullptr,
                                       GpuAmazeDebayerBackendTiming * timing = nullptr);
+bool gpuAmazeDebayerRenderPostWbGlTexture(const float * inputRawFrame,
+                                          unsigned int glTexture,
+                                          int width,
+                                          int height,
+                                          int blackLevel,
+                                          const double wbMultipliers[3],
+                                          QString * reason = nullptr,
+                                          QString * rendererDescription = nullptr,
+                                          GpuAmazeDebayerBackendTiming * timing = nullptr);
+bool gpuAmazeDebayerApplyGpuOffscreenPostWb(const float * inputRawFrame,
+                                           uint16_t * outputRgb16,
+                                           int width,
+                                           int height,
+                                           int blackLevel,
+                                           const double wbMultipliers[3],
+                                           QString * reason = nullptr,
+                                           QString * rendererDescription = nullptr,
+                                           GpuAmazeDebayerBackendTiming * timing = nullptr);
 
 #endif // GPUDEBAYER_H

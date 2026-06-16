@@ -33,6 +33,18 @@ param(
     [string[]]$ExtraEnvironment = @(),
     [string]$Receipt = "",
     [string]$Scope = "",
+    [ValidateSet("", "auto", "receipt", "none", "simple", "bilinear", "lmmse", "igv", "amaze", "ahd", "rcd", "dcb", "amaze-cached")]
+    [string]$PlaybackDebayer = "",
+    [ValidateSet("", "auto", "receipt", "subset")]
+    [string]$PlaybackProcessing = "",
+    [ValidateSet("", "auto", "cpu", "gpu")]
+    [string]$GpuPreviewProcessing = "",
+    [ValidateSet("", "auto", "cpu", "gpu")]
+    [string]$GpuBilinearDebayer = "",
+    [ValidateSet("", "auto", "cpu", "gpu")]
+    [string]$GpuAmazeDebayer = "",
+    [switch]$GpuAmazeTexturePresent,
+    [string]$StageLog = "",
     [ValidateSet("", "on", "off")]
     [string]$Zebras = "",
     [bool]$RequireLookAssist = $true,
@@ -758,6 +770,32 @@ if (-not [string]::IsNullOrWhiteSpace($Receipt)) {
 if (-not [string]::IsNullOrWhiteSpace($Scope)) {
     $arguments += @("--scope", $Scope)
 }
+if (-not [string]::IsNullOrWhiteSpace($PlaybackDebayer)) {
+    $arguments += "--playback-debayer=$PlaybackDebayer"
+}
+if (-not [string]::IsNullOrWhiteSpace($PlaybackProcessing)) {
+    $arguments += "--playback-processing=$PlaybackProcessing"
+}
+if (-not [string]::IsNullOrWhiteSpace($GpuPreviewProcessing)) {
+    $arguments += "--gpu-preview-processing=$GpuPreviewProcessing"
+}
+if (-not [string]::IsNullOrWhiteSpace($GpuBilinearDebayer)) {
+    $arguments += "--gpu-bilinear-debayer=$GpuBilinearDebayer"
+}
+if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
+    $arguments += "--gpu-amaze-debayer=$GpuAmazeDebayer"
+}
+if ($GpuAmazeTexturePresent) {
+    $arguments += "--gpu-amaze-texture-present"
+}
+if (-not [string]::IsNullOrWhiteSpace($StageLog)) {
+    $stageLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StageLog)
+    $stageLogDir = [IO.Path]::GetDirectoryName($stageLogPath)
+    if (-not [string]::IsNullOrWhiteSpace($stageLogDir)) {
+        New-Item -ItemType Directory -Force -Path $stageLogDir | Out-Null
+    }
+    $arguments += "--stage-log=$stageLogPath"
+}
 if ($CaptureScreenshot) {
     $arguments += @("--screenshot-output", $screenshotPath)
     if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
@@ -1060,6 +1098,9 @@ $lookAssistAsyncApplyLine = $recentLines |
 $visualStateLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.visual_state*" } |
     Select-Object -Last 1
+$playbackPolicyLine = $recentLines |
+    Where-Object { $_ -like "*gui_smoke.playback_policy*" } |
+    Select-Object -Last 1
 $cpuSettleLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.cpu_settle*" } |
     Select-Object -Last 1
@@ -1095,6 +1136,7 @@ $lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject
 $lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
 $lookAssistAsyncApply = if ($lookAssistAsyncApplyLine) { Convert-PlaybackLogLineToObject $lookAssistAsyncApplyLine } else { $null }
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
+$playbackPolicy = if ($playbackPolicyLine) { Convert-PlaybackLogLineToObject $playbackPolicyLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
@@ -1267,6 +1309,7 @@ $result = [pscustomobject]@{
         qualityModeStart = $qualityModeStart
         qualityModeLast = $qualityModeLast
         visualState = $visualState
+        playbackPolicy = $playbackPolicy
         aspectEvidence = $screenshotAspectEvidence
         colorArtifactScan = $colorArtifactScan
         lookAssist = [pscustomobject]@{
@@ -1355,6 +1398,7 @@ $result = [pscustomobject]@{
         lookAssistSettle = $lookAssistSettle
         lookAssistApply = $lookAssistApply
         visualState = $visualState
+        playbackPolicy = $playbackPolicy
         cpuSettle = $cpuSettle
         screenshot = $screenshotCapture
         windowScreenshot = $windowScreenshotCapture
@@ -1373,6 +1417,7 @@ $result = [pscustomobject]@{
             lookAssistSettle = $lookAssistSettleLine
             lookAssistApply = $lookAssistApplyLine
             visualState = $visualStateLine
+            playbackPolicy = $playbackPolicyLine
             cpuSettle = $cpuSettleLine
             screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
             windowScreenshot = if ($windowScreenshotCapture) { $windowScreenshotCapture.outputPath } else { $null }

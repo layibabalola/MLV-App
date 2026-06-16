@@ -477,10 +477,52 @@ All GPU paths are **environment-gated and off by default**:
 - `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1` — explicit GPU AMaZE debayer
   routing (`GpuDebayer` + `igpu_amaze_debayer_cuda.dll`); in auto/env mode it
   is used with `MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1`.
+- `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1` — explicit AMaZE
+  CUDA-to-GL texture presentation request nested under GPU preview processing
+  and GPU AMaZE. It remains non-default, requires an AMaZE backend preflight
+  before becoming a present candidate, and must preserve CPU fallback paths.
 
 The production default is the CPU path in every case. A reviewer looking at
 the shipped binary behaviour should confirm these env vars are unset when
 evaluating "typical use".
+
+For the AMaZE texture-present path, reviewers should use the GUI smoke wrapper
+selector flags instead of relying on persisted GUI state. A proof run should
+force AMaZE, subset playback processing, GPU preview processing, and GPU AMaZE
+selection, then compare a CPU-readback run against a texture-present run on the
+same RTX 4090 machine:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . `
+  -Input C:\temp\MLV\M16-1327.MLV `
+  -Output .claude-state\profiling\gpu-amaze-present-proof\texture-present.json `
+  -CaptureScreenshot -FrameTelemetry -PlaybackDebayer amaze `
+  -PlaybackProcessing subset -GpuPreviewProcessing gpu -GpuAmazeDebayer gpu `
+  -GpuAmazeTexturePresent `
+  -StageLog .claude-state\profiling\gpu-amaze-present-proof\texture-present-stage.log `
+  -ExtraEnvironment @(
+    'MLVAPP_GPU_AMAZE_DEBAYER_DLL=C:\path\to\igpu_amaze_debayer_cuda.dll'
+  )
+```
+
+The resulting JSON includes `visualQuality.playbackPolicy`, which records the
+forced debayer/processing/GPU selector state. A passing selector smoke does not
+by itself prove the no-readback path; approval still requires user-interactive
+RTX 4090 screenshot/pixel evidence that the texture-present run and the
+CPU-readback run are identical or that any differences are justified. The
+`gui_smoke.visual_state` line now also surfaces
+`gpu_amaze_texture_present_requested`, `gpu_amaze_texture_present_candidate`,
+`gpu_amaze_texture_present_active`, `gpu_amaze_texture_present_renderer`, and
+`gpu_amaze_texture_present_fallback_reason`, plus the upstream gate flags
+`gpu_viewport_installed`, `gpu_preview_processing_env_requested`,
+`gpu_preview_processing_compatible`, `render_thread_using_gpu_preview_processing`,
+`render_thread_using_gpu_amaze_debayer`,
+`gpu_amaze_debayer_environment_requested`, `gpu_amaze_debayer_compatible`,
+`gpu_amaze_texture_present_environment_requested`, `does_mlv_always_use_amaze`,
+`gpu16_preview_active`, `playback_output_mode`, and
+`playback_processing_reason` so an auditor can see which gate blocked the
+no-readback path or whether it fell back before the pixel comparison.
 
 ## 8. Reproducing a build from scratch
 
@@ -803,10 +845,11 @@ exec'd as a child, not linked.
 ### 13.4 Experimental paths off by default
 
 `MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`,
-`MLVAPP_EXPERIMENTAL_GPU_DEBAYER`, and
-`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` all default OFF. The production
-surface an auditor evaluates for "default behaviour" is the CPU path. Confirm
-these env vars are unset in the runtime environment you audit.
+`MLVAPP_EXPERIMENTAL_GPU_DEBAYER`,
+`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER`, and
+`MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT` all default OFF. The
+production surface an auditor evaluates for "default behaviour" is the CPU
+path. Confirm these env vars are unset in the runtime environment you audit.
 
 ### 13.5 Mutable state during playback (and the broader WIP surface)
 
@@ -949,7 +992,7 @@ the command an auditor uses to confirm them.
 | Release policy (macOS ARM) | [.github/workflows/macOS-Arm64.yml](../.github/workflows/macOS-Arm64.yml) | read |
 | Release policy (Linux AppImage) | [.github/workflows/Linux.yml](../.github/workflows/Linux.yml) | read |
 | CLI flag inventory | [platform/qt/main.cpp:26-62](../platform/qt/main.cpp) | `grep -nE "\"--" platform/qt/main.cpp` |
-| Experimental GPU env vars | `grep -rn "MLVAPP_EXPERIMENTAL_" platform/qt/` is the **primary** evidence. Hits include `platform/qt/GpuDisplayViewport.cpp`, `GpuPreviewProcessing.cpp`, `GpuDebayer.cpp`. Cross-referenced from [docs/00-overview.md](00-overview.md) "Status at a glance". | run the grep; expect 4 env vars (`MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`, `MLVAPP_EXPERIMENTAL_GPU_DEBAYER`, `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER`) |
+| Experimental GPU env vars | `grep -rn "MLVAPP_EXPERIMENTAL_" platform/qt/` is the **primary** evidence. Hits include `platform/qt/GpuDisplayViewport.cpp`, `GpuPreviewProcessing.cpp`, `GpuDebayer.cpp`, and `platform/qt/main.cpp`. Cross-referenced from [docs/00-overview.md](00-overview.md) "Status at a glance". | run the grep; expect 5 env vars (`MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`, `MLVAPP_EXPERIMENTAL_GPU_DEBAYER`, `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER`, `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT`) |
 | Prefetch disable env var | [src/mlv/video_mlv.c](../src/mlv/video_mlv.c) | `grep -n "MLVAPP_DISABLE_RAW_UINT16_PREFETCH" src/mlv/video_mlv.c` |
 
 ## 16. Citation freshness — how to spot-check this guide

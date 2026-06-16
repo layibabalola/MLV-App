@@ -25,6 +25,7 @@
 #include <QDateTime>
 #include <QMutexLocker>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 
@@ -71,6 +72,27 @@ qint64 stagePixelCount( int width, int height )
 {
     if( width <= 0 || height <= 0 ) return 0;
     return static_cast<qint64>( width ) * static_cast<qint64>( height );
+}
+
+std::array<double, 3> normalizedWbMultipliers6500()
+{
+    std::array<double, 3> wb{{1.0, 1.0, 1.0}};
+    get_kelvin_multipliers_rgb(6500, wb.data());
+    const double maxWb = std::max(wb[0], std::max(wb[1], wb[2]));
+    if( maxWb > 0.0
+     && std::isfinite(wb[0])
+     && std::isfinite(wb[1])
+     && std::isfinite(wb[2]) )
+    {
+        wb[0] /= maxWb;
+        wb[1] /= maxWb;
+        wb[2] /= maxWb;
+    }
+    else
+    {
+        wb = {{1.0, 1.0, 1.0}};
+    }
+    return wb;
 }
 
 void insertStageResolutionTelemetry( QJsonObject &telemetry,
@@ -337,6 +359,14 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->usedGpuAmazeDebayer = slot.usedGpuAmazeDebayer;
         frame->gpuAmazeFallbackReason = slot.gpuAmazeFallbackReason;
         frame->gpuAmazeRendererDescription = slot.gpuAmazeRendererDescription;
+        frame->gpuAmazeTexturePresentCandidate = slot.gpuAmazeTexturePresentCandidate;
+        frame->gpuAmazeTextureRawFrame =
+            slot.gpuAmazeTextureRawFrame.empty() ? nullptr : slot.gpuAmazeTextureRawFrame.data();
+        frame->gpuAmazeTextureRawFrameSize = slot.gpuAmazeTextureRawFrame.size();
+        frame->gpuAmazeTextureWidth = slot.gpuAmazeTextureWidth;
+        frame->gpuAmazeTextureHeight = slot.gpuAmazeTextureHeight;
+        frame->gpuAmazeTextureBlackLevel = slot.gpuAmazeTextureBlackLevel;
+        frame->gpuAmazeTextureWbMultipliers = slot.gpuAmazeTextureWbMultipliers;
         frame->dualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
         frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
@@ -1653,6 +1683,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         bool usedGpuAmazeDebayer = false;
         bool renderedDebayeredFrame = false;
         GpuAmazeDebayerBackendTiming gpuAmazeTiming;
+        const bool useGpuAmazeTexturePresent =
+            m_activePresentationContext.gpuAmazeTexturePresentRequested;
         if ( useGpuAmazeDebayer && m_pMlvObject )
         {
             const int width = getMlvWidth( m_pMlvObject );
@@ -1679,21 +1711,65 @@ void RenderFrameThread::drawFrame( int slotIndex,
                             width,
                             height,
                             getMlvBlackLevel( m_pMlvObject ) );
-                usedGpuAmazeDebayer =
-                    gpuAmazeDebayerApplyGpuOffscreen( m_gpuAmazeDebayerRawFrame.data(),
-                                                      slot.rawImage16.data(),
-                                                      width,
-                                                      height,
-                                                      &gpuReason,
-                                                      &rendererDescription,
-                                                      &gpuAmazeTiming );
-                if ( usedGpuAmazeDebayer )
+                if ( useGpuAmazeTexturePresent )
                 {
-                    wb_undo( &wbInfo,
-                             slot.rawImage16.data(),
-                             width,
-                             height,
-                             getMlvBlackLevel( m_pMlvObject ) );
+                    const GpuAmazeDebayerBackendAvailability availability =
+                        gpuAmazeDebayerProbeBackend();
+                    slot.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_amaze_texture_present_preflight_available"),
+                        availability.available );
+                    if ( !availability.rendererDescription.isEmpty() )
+                    {
+                        slot.stageTimingTelemetry.insert(
+                            QStringLiteral("gpu_amaze_texture_present_preflight_renderer"),
+                            availability.rendererDescription );
+                    }
+                    if ( availability.available )
+                    {
+                        slot.gpuAmazeTextureRawFrame = m_gpuAmazeDebayerRawFrame;
+                        slot.gpuAmazeTexturePresentCandidate = true;
+                        slot.gpuAmazeTextureWidth = width;
+                        slot.gpuAmazeTextureHeight = height;
+                        slot.gpuAmazeTextureBlackLevel = getMlvBlackLevel( m_pMlvObject );
+                        slot.gpuAmazeTextureWbMultipliers = normalizedWbMultipliers6500();
+                        rendererDescription =
+                            QStringLiteral("pending CUDA AMaZE post-WB GL texture present");
+                        usedGpuAmazeDebayer = true;
+                        slot.stageTimingTelemetry.insert(
+                            QStringLiteral("gpu_amaze_texture_present_candidate"),
+                            true );
+                    }
+                    else
+                    {
+                        gpuReason =
+                            availability.reason.isEmpty()
+                                ? QStringLiteral("GPU AMaZE texture-present backend preflight failed")
+                                : QStringLiteral("GPU AMaZE texture-present backend unavailable before GL handoff: %1")
+                                      .arg(availability.reason);
+                        rendererDescription = availability.rendererDescription;
+                        slot.stageTimingTelemetry.insert(
+                            QStringLiteral("gpu_amaze_texture_present_candidate"),
+                            false );
+                    }
+                }
+                else
+                {
+                    usedGpuAmazeDebayer =
+                        gpuAmazeDebayerApplyGpuOffscreen( m_gpuAmazeDebayerRawFrame.data(),
+                                                          slot.rawImage16.data(),
+                                                          width,
+                                                          height,
+                                                          &gpuReason,
+                                                          &rendererDescription,
+                                                          &gpuAmazeTiming );
+                    if ( usedGpuAmazeDebayer )
+                    {
+                        wb_undo( &wbInfo,
+                                 slot.rawImage16.data(),
+                                 width,
+                                 height,
+                                 getMlvBlackLevel( m_pMlvObject ) );
+                    }
                 }
             }
 
