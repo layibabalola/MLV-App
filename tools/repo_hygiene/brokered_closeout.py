@@ -5801,10 +5801,17 @@ def coordination_entry_verdict(entry_body: str) -> str:
     return ""
 
 
-def coordination_entry_matches(entry: Dict[str, Any], *, actor: str, kind: str, range_tokens: Sequence[str]) -> bool:
+def coordination_entry_range(entry_body: str) -> str:
+    match = re.search(r"(?im)^\s*Range:\s*`?([^`\r\n]+?)`?\s*$", entry_body)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def coordination_entry_matches(entry: Dict[str, Any], *, actor: str, kind: str, range_token: str) -> bool:
     heading = str(entry.get("heading") or "").upper()
     body = str(entry.get("body") or "")
-    return actor.upper() in heading and kind.upper() in heading and any(token in body for token in range_tokens)
+    return actor.upper() in heading and kind.upper() in heading and coordination_entry_range(body) == range_token
 
 
 def content_review_gate_block(
@@ -5818,7 +5825,7 @@ def content_review_gate_block(
 ) -> Dict[str, Any]:
     gate = config.get("contentReviewGate", {})
     target_branch = str(detection.get("targetBranch") or config.get("git", {}).get("targetBranch") or "master")
-    primary_range = range_tokens[0] if range_tokens else ""
+    primary_range = range_tokens[-1] if range_tokens else ""
     payload = {
         "reason": reason,
         "workBlockId": detection.get("workBlockId"),
@@ -5866,6 +5873,7 @@ def validate_content_review_approval_for_finalize(
     start_head = str(manifest.get("startHead") or detection.get("targetHead") or "")
     feature_head = str(detection.get("featureHead") or "")
     range_tokens = content_review_range_tokens(start_head, feature_head)
+    canonical_range = range_tokens[-1] if range_tokens else ""
     if not range_tokens:
         return content_review_gate_block(
             config,
@@ -5904,7 +5912,7 @@ def validate_content_review_approval_for_finalize(
     handoffs = [
         entry
         for entry in entries
-        if coordination_entry_matches(entry, actor=handoff_actor, kind=handoff_kind, range_tokens=range_tokens)
+        if coordination_entry_matches(entry, actor=handoff_actor, kind=handoff_kind, range_token=canonical_range)
     ]
     if require_handoff and not handoffs:
         return content_review_gate_block(
@@ -5919,7 +5927,7 @@ def validate_content_review_approval_for_finalize(
         entry
         for entry in entries
         if int(entry["offset"]) > handoff_offset
-        and coordination_entry_matches(entry, actor=review_actor, kind=review_kind, range_tokens=range_tokens)
+        and coordination_entry_matches(entry, actor=review_actor, kind=review_kind, range_token=canonical_range)
     ]
     if not reviews:
         return content_review_gate_block(
@@ -5936,7 +5944,7 @@ def validate_content_review_approval_for_finalize(
     for entry in reviews:
         verdict = coordination_entry_verdict(str(entry.get("body") or ""))
         verdict_upper = verdict.upper()
-        if any(token in verdict_upper for token in blocking_tokens) or any(token in verdict_upper for token in approve_tokens):
+        if verdict_upper in blocking_tokens or verdict_upper in approve_tokens:
             decisive_reviews.append({"entry": entry, "verdict": verdict})
     if not decisive_reviews:
         return content_review_gate_block(
@@ -5950,7 +5958,7 @@ def validate_content_review_approval_for_finalize(
     latest = decisive_reviews[-1]["entry"]
     verdict = str(decisive_reviews[-1]["verdict"])
     verdict_upper = verdict.upper()
-    if any(token in verdict_upper for token in blocking_tokens):
+    if verdict_upper in blocking_tokens:
         return content_review_gate_block(
             config,
             detection,
@@ -5959,7 +5967,7 @@ def validate_content_review_approval_for_finalize(
             range_tokens=range_tokens,
             detail={"latestReviewHeading": latest.get("heading"), "verdict": verdict},
         )
-    if any(token in verdict_upper for token in approve_tokens):
+    if verdict_upper in approve_tokens:
         return None
     return content_review_gate_block(
         config,

@@ -3848,7 +3848,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
         self.make_feature(repo, "wb-review-gated")
         detection = detect_work_block(repo, work_block_id="wb-review-gated")
-        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
         self.write_gpu_lane_coordination(
             repo,
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
@@ -3868,8 +3868,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
         self.make_feature(repo, "wb-review-wrong-range")
         detection = detect_work_block(repo, work_block_id="wb-review-wrong-range")
-        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
-        wrong_range = "%s..%s" % (detection["targetHead"][:8], "00000000")
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
+        wrong_range = "%s..%s" % (detection["targetHead"], "0" * 40)
         self.write_gpu_lane_coordination(
             repo,
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
@@ -3887,11 +3887,33 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("content_approval_missing", self.audit_types(repo))
         self.assertNotEqual(git(repo, "cat-file", "-e", "master:work.txt", check=False).returncode, 0)
 
+    def test_finalize_blocks_when_latest_claude_review_is_hold(self) -> None:
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-review-hold")
+        detection = detect_work_block(repo, work_block_id="wb-review-hold")
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n"
+            "Gate: ready for Claude review.\n\n"
+            "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\n"
+            "Verdict: HOLD\n",
+        )
+
+        result = finalize_work_block(repo, work_block_id="wb-review-hold")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "content_approval_not_approved")
+        self.assertIn("content_approval_not_approved", self.audit_types(repo))
+        self.assertNotEqual(git(repo, "cat-file", "-e", "master:work.txt", check=False).returncode, 0)
+
     def test_finalize_accepts_latest_claude_approval_for_handed_off_range(self) -> None:
         repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
         self.make_feature(repo, "wb-review-approved")
         detection = detect_work_block(repo, work_block_id="wb-review-approved")
-        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
         self.write_gpu_lane_coordination(
             repo,
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
@@ -3914,7 +3936,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
         self.make_feature(repo, "wb-review-changes")
         detection = detect_work_block(repo, work_block_id="wb-review-changes")
-        range_token = "%s..%s" % (detection["targetHead"][:8], detection["featureHead"][:8])
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
         self.write_gpu_lane_coordination(
             repo,
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
