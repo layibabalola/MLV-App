@@ -200,10 +200,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("creative hue-vs/luma-vs curve enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->hue_vs_luma_used = 1; });
     assert_gpu_preview_rejects_processing_feature(
-        "creative_vibrance",
-        QStringLiteral("creative vibrance enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->vibrance = 1.5; });
-    assert_gpu_preview_rejects_processing_feature(
         "creative_in_loop_contrast",
         QStringLiteral("creative in-loop contrast factor enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->contrast = 0.5; });
@@ -368,4 +364,36 @@ TEST(GpuPreviewProcessing, NonNeutralSaturationIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != sat_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.saturation.frame0", sat_hash);
+}
+
+TEST(GpuPreviewProcessing, NonNeutralVibranceIsSupportedAndChangesOutput)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingAllowCreativeAdjustments(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig neutral_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(neutral_config.enabled);
+    ASSERT_TRUE(!neutral_config.applyVibrance);
+    const std::string neutral_hash = render_subset_hash(fixture, neutral_config, 0);
+
+    /* Positive vibrance is now ported (saturation-weighted blend), so the gate
+     * accepts it and the output must change. */
+    processingSetVibrance(fixture.processing(), 1.5);
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig vib_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(vib_config.enabled);
+    ASSERT_TRUE(vib_config.applyVibrance);
+    ASSERT_NEAR(1.5, vib_config.vibrance, 0.0001);
+    ASSERT_NE(neutral_config.signature, vib_config.signature);
+
+    const std::string vib_hash = render_subset_hash(fixture, vib_config, 0);
+    ASSERT_TRUE(neutral_hash != vib_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.vibrance.frame0", vib_hash);
 }

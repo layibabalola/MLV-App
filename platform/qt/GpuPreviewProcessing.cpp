@@ -182,6 +182,48 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         gammaOut[channel] = sampleLut(config.gammaLut, gammaInput);
     }
 
+    if ( config.applyVibrance )
+    {
+        /* Vibrance, before saturation, matching raw_processing.c:3587-3644.
+         * pix0 = trunc((pix-Y1)*vibrance) + Y1 (pre_calc_vibrance LUT reduced);
+         * positive vibrance blends toward the original by the pixel's own
+         * saturation, negative vibrance is just pix0. Float32 mirrors the shader. */
+        const int32_t Y1 = ((static_cast<int32_t>(gammaOut[0]) << 2)
+                          + (static_cast<int32_t>(gammaOut[1]) * 11)
+                          + static_cast<int32_t>(gammaOut[2])) >> 4;
+        int32_t pix0[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            pix0[channel] = static_cast<int32_t>(std::trunc(
+                (static_cast<float>(gammaOut[channel]) - static_cast<float>(Y1)) * config.vibrance)) + Y1;
+        }
+        if ( config.vibrance > 1.0f )
+        {
+            const int biggest = std::max(std::max(int(gammaOut[0]), int(gammaOut[1])), int(gammaOut[2]));
+            const int smallest = std::min(std::min(int(gammaOut[0]), int(gammaOut[1])), int(gammaOut[2]));
+            float sat = (biggest > 0)
+                ? (static_cast<float>(biggest) - static_cast<float>(smallest)) / static_cast<float>(biggest)
+                : 0.0f;
+            sat = 2.0f * sat / (sat * sat + 1.0f);
+            if ( sat > 1.0f ) sat = 1.0f;
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const float blended = static_cast<float>(gammaOut[channel]) * sat
+                                    + static_cast<float>(pix0[channel]) * (1.0f - sat);
+                const int32_t b = static_cast<int32_t>(blended);
+                gammaOut[channel] = static_cast<uint16_t>(b < 0 ? 0 : (b > 65535 ? 65535 : b));
+            }
+        }
+        else
+        {
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                gammaOut[channel] = static_cast<uint16_t>(
+                    pix0[channel] < 0 ? 0 : (pix0[channel] > 65535 ? 65535 : pix0[channel]));
+            }
+        }
+    }
+
     if ( config.applySaturation )
     {
         /* Cross-channel saturation, before toning, matching raw_processing.c
@@ -574,6 +616,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewApplyCreativeCurves;\n"
         "uniform float previewApplyToning;\n"
         "uniform vec3 previewToningGain;\n"
+        "uniform float previewApplyVibrance;\n"
+        "uniform float previewVibrance;\n"
         "uniform float previewApplySaturation;\n"
         "uniform float previewSaturation;\n"
         "uniform float previewUseCameraMatrix;\n"
@@ -635,6 +679,25 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyVibrance > 0.5)\n"
+        "    {\n"
+        "        vec3 vv = result * 65535.0;\n"
+        "        float vibY = floor((vv.r * 4.0 + vv.g * 11.0 + vv.b) / 16.0);\n"
+        "        vec3 vpix0 = trunc((vv - vec3(vibY)) * previewVibrance) + vec3(vibY);\n"
+        "        if (previewVibrance > 1.0)\n"
+        "        {\n"
+        "            float vbig = max(max(vv.r, vv.g), vv.b);\n"
+        "            float vsmall = min(min(vv.r, vv.g), vv.b);\n"
+        "            float vs = (vbig > 0.0) ? (vbig - vsmall) / vbig : 0.0;\n"
+        "            vs = 2.0 * vs / (vs * vs + 1.0);\n"
+        "            vs = min(vs, 1.0);\n"
+        "            result = clamp(vv * vs + vpix0 * (1.0 - vs), 0.0, 65535.0) / 65535.0;\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            result = clamp(vpix0, 0.0, 65535.0) / 65535.0;\n"
+        "        }\n"
+        "    }\n"
         "    if (previewApplySaturation > 0.5)\n"
         "    {\n"
         "        vec3 sv = result * 65535.0;\n"
@@ -722,10 +785,6 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
           || processing->luma_vs_saturation_used )
         {
             return reject(QStringLiteral("creative hue-vs/luma-vs curve enabled"));
-        }
-        if ( processing->vibrance > 1.01 || processing->vibrance < 0.99 )
-        {
-            return reject(QStringLiteral("creative vibrance enabled"));
         }
         if ( std::fabs(processing->contrast) >= 0.01 )
         {
@@ -815,6 +874,9 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     config.toningGain[0] = static_cast<float>(processing->toning_dry + processing->toning_wet[0]);
     config.toningGain[1] = static_cast<float>(processing->toning_dry + processing->toning_wet[1]);
     config.toningGain[2] = static_cast<float>(processing->toning_dry + processing->toning_wet[2]);
+    config.applyVibrance = processing->allow_creative_adjustments != 0
+                        && (processing->vibrance > 1.01 || processing->vibrance < 0.99);
+    config.vibrance = static_cast<float>(processing->vibrance);
     config.applySaturation = processing->allow_creative_adjustments != 0
                           && (processing->saturation > 1.01 || processing->saturation < 0.99);
     config.saturation = static_cast<float>(processing->saturation);
@@ -851,6 +913,8 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyCreativeCurves, sizeof(config.applyCreativeCurves));
     hash = fnv1a64_append(hash, &config.applyToning, sizeof(config.applyToning));
     hash = fnv1a64_append(hash, config.toningGain, sizeof(config.toningGain));
+    hash = fnv1a64_append(hash, &config.applyVibrance, sizeof(config.applyVibrance));
+    hash = fnv1a64_append(hash, &config.vibrance, sizeof(config.vibrance));
     hash = fnv1a64_append(hash, &config.applySaturation, sizeof(config.applySaturation));
     hash = fnv1a64_append(hash, &config.saturation, sizeof(config.saturation));
     hash = fnv1a64_append(hash, config.contrastCurveLut.constData(), static_cast<size_t>(config.contrastCurveLut.size()));
@@ -1060,6 +1124,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("previewApplyToning", config.applyToning ? 1.0f : 0.0f);
     program.setUniformValue("previewToningGain",
                             QVector3D(config.toningGain[0], config.toningGain[1], config.toningGain[2]));
+    program.setUniformValue("previewApplyVibrance", config.applyVibrance ? 1.0f : 0.0f);
+    program.setUniformValue("previewVibrance", config.vibrance);
     program.setUniformValue("previewApplySaturation", config.applySaturation ? 1.0f : 0.0f);
     program.setUniformValue("previewSaturation", config.saturation);
     program.setUniformValue("previewProcessingEnabled", config.enabled ? 1.0f : 0.0f);
