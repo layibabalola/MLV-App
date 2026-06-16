@@ -15,6 +15,21 @@
 #include <chrono>
 #include <cstring>
 #include <sstream>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include <GL/gl.h>
+#include <cuda_gl_interop.h>
+
+#ifndef GL_TEXTURE_2D
+#define GL_TEXTURE_2D 0x0DE1
+#endif
 
 struct igpu_amaze_debayer_backend
 {
@@ -86,6 +101,20 @@ __global__ void k_store_tile_rgb16(const float * red,
     outRgb16[outIndex + 0] = truncate_amaze_float_to_u16(red[tileIndex]);
     outRgb16[outIndex + 1] = truncate_amaze_float_to_u16(green[tileIndex]);
     outRgb16[outIndex + 2] = truncate_amaze_float_to_u16(blue[tileIndex]);
+}
+
+__global__ void k_pack_rgb16_to_rgba16(const uint16_t * rgb,
+                                       uint16_t * rgba,
+                                       std::size_t pixelCount)
+{
+    const std::size_t pixel =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (pixel >= pixelCount) return;
+
+    rgba[pixel * 4u + 0u] = rgb[pixel * 3u + 0u];
+    rgba[pixel * 4u + 1u] = rgb[pixel * 3u + 1u];
+    rgba[pixel * 4u + 2u] = rgb[pixel * 3u + 2u];
+    rgba[pixel * 4u + 3u] = 65535u;
 }
 
 void run_tile(const float * dRaw,
@@ -238,6 +267,117 @@ void run_tile(const float * dRaw,
                                         cc1);
     CK(cudaGetLastError());
 }
+
+void run_frame_to_device_rgb16(const float * dRaw,
+                               uint16_t * dRgb16,
+                               DeviceBuffers & d,
+                               int width,
+                               int height)
+{
+    for (int top = -16; top < height; top += kTileSize - 32)
+    {
+        for (int left = -16; left < width; left += kTileSize - 32)
+        {
+            run_tile(dRaw, dRgb16, d, width, height, top, left);
+        }
+    }
+}
+
+int copy_rgb16_to_gl_rgba16_texture(const uint16_t * dRgb16,
+                                    int width,
+                                    int height,
+                                    unsigned int glTexture)
+{
+    if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t rgbaBytes = pixelCount * 4u * sizeof(uint16_t);
+    uint16_t * dRgba16 = nullptr;
+    cudaGraphicsResource * resource = nullptr;
+
+    try
+    {
+        CK(cudaMalloc(&dRgba16, rgbaBytes));
+        const int threads = 256;
+        const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
+        k_pack_rgb16_to_rgba16<<<blocks, threads>>>(dRgb16, dRgba16, pixelCount);
+        CK(cudaGetLastError());
+
+        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                     glTexture,
+                                                     GL_TEXTURE_2D,
+                                                     cudaGraphicsRegisterFlagsWriteDiscard);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            cudaFree(dRgba16);
+            return 2;
+        }
+
+        rc = cudaGraphicsMapResources(1, &resource, 0);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            cudaGraphicsUnregisterResource(resource);
+            cudaFree(dRgba16);
+            return 2;
+        }
+
+        cudaArray_t mappedArray = nullptr;
+        rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
+        if (rc == cudaSuccess)
+        {
+            const std::size_t rowBytes = static_cast<std::size_t>(width) * 4u * sizeof(uint16_t);
+            rc = cudaMemcpy2DToArray(mappedArray,
+                                     0,
+                                     0,
+                                     dRgba16,
+                                     rowBytes,
+                                     rowBytes,
+                                     static_cast<std::size_t>(height),
+                                     cudaMemcpyDeviceToDevice);
+        }
+
+        const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
+        const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+        cudaFree(dRgba16);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] device-to-GL texture copy failed: %s\n",
+                         cudaGetErrorString(rc));
+            return 2;
+        }
+        if (unmapRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 texture) failed: %s\n",
+                         cudaGetErrorString(unmapRc));
+            return 2;
+        }
+        if (unregisterRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(GL_RGBA16 texture) failed: %s\n",
+                         cudaGetErrorString(unregisterRc));
+            return 2;
+        }
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        if (resource) cudaGraphicsUnregisterResource(resource);
+        cudaFree(dRgba16);
+        return -2;
+    }
+
+    return 0;
+}
 } // namespace
 
 extern "C" igpu_amaze_debayer_backend * igpu_amaze_debayer_create(const char * backend_name)
@@ -314,13 +454,7 @@ extern "C" int igpu_amaze_debayer_run(igpu_amaze_debayer_backend * backend,
         backend->lastTiming.upload_ms = now_ms() - uploadStart;
 
         const double kernelStart = now_ms();
-        for (int top = -16; top < height; top += kTileSize - 32)
-        {
-            for (int left = -16; left < width; left += kTileSize - 32)
-            {
-                run_tile(dRaw, dRgb16, d, width, height, top, left);
-            }
-        }
+        run_frame_to_device_rgb16(dRaw, dRgb16, d, width, height);
         CK(cudaDeviceSynchronize());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
@@ -334,6 +468,66 @@ extern "C" int igpu_amaze_debayer_run(igpu_amaze_debayer_backend * backend,
         cudaFree(dRaw);
         cudaFree(dRgb16);
         return 0;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        free_device(&d);
+        cudaFree(dRaw);
+        cudaFree(dRgb16);
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return -2;
+    }
+}
+
+extern "C" int igpu_amaze_debayer_run_gl_texture(igpu_amaze_debayer_backend * backend,
+                                                 const float * in_raw_float,
+                                                 unsigned int gl_texture,
+                                                 int width,
+                                                 int height)
+{
+    if (!backend || !in_raw_float || gl_texture == 0 || width <= 32 || height <= 32)
+    {
+        return -1;
+    }
+
+    float * dRaw = nullptr;
+    uint16_t * dRgb16 = nullptr;
+    DeviceBuffers d;
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t rawBytes = pixelCount * sizeof(float);
+    const std::size_t rgbBytes = pixelCount * 3u * sizeof(uint16_t);
+    std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
+
+    const double totalStart = now_ms();
+    try
+    {
+        CK(cudaMalloc(&dRaw, rawBytes));
+        CK(cudaMalloc(&dRgb16, rgbBytes));
+        allocate_device(&d, 1);
+        CK(cudaMemset(dRgb16, 0, rgbBytes));
+
+        const double uploadStart = now_ms();
+        CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.upload_ms = now_ms() - uploadStart;
+
+        const double kernelStart = now_ms();
+        run_frame_to_device_rgb16(dRaw, dRgb16, d, width, height);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.kernel_ms = now_ms() - kernelStart;
+
+        const double handoffStart = now_ms();
+        const int rc = copy_rgb16_to_gl_rgba16_texture(dRgb16, width, height, gl_texture);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.download_ms = now_ms() - handoffStart;
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+
+        free_device(&d);
+        cudaFree(dRaw);
+        cudaFree(dRgb16);
+        return rc;
     }
     catch (const CudaStageProbeError & error)
     {
