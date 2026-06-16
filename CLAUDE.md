@@ -156,6 +156,30 @@ Declared review surfaces that cannot run must write a durable
 candidate/action ids, evidence hash, policy hash, pinned refs, blocker, and
 recovery command. Missing or insufficient quorum remains
 `insufficient_review_quorum`/`review_quorum_missing`, not mutation authority.
+When `contentReviewGate.requireClaudeApprovalForFinalize=true`, the broker
+blocks `work-block-complete.ps1 -Finalize` until the coordination file named by
+`contentReviewGate.coordinationFile` (currently
+`.claude-state/coordination/gpu-lane-impl-review-sync.md`) records a handoff
+entry from `handoffActor` (`handoffKind`) followed by a LATER review entry from
+`reviewActor` (`reviewKind`). For the current GPU-lane role swap the actors are
+flipped from the original direction to `handoffActor=CLAUDE` and
+`reviewActor=CODEX`. Claude is now the implementer, so finalize requires that
+YOU first append a `CLAUDE — HANDOFF` entry and then wait for Codex to append a
+matching `CODEX — REVIEW` entry that approves it — your own handoff does not
+release the gate. Headings are matched case-insensitively by actor+kind
+substring. Both the handoff and the review entry must carry a dedicated
+`Range:` line whose value EXACTLY equals the canonical full-40-char
+`startHead..featureHead` range token; the short 8/12-char range forms no longer
+match. The review entry must also carry a bare `Verdict:` line whose token
+EXACTLY equals an approve token (`APPROVE`) or a blocking token
+(`CHANGES_REQUESTED`/`BLOCKER`) — a `Verdict: APPROVE -- <range>` suffix no
+longer counts as approval, and a non-decisive verdict such as `HOLD` or `IDLE`
+leaves finalize blocked as `content_approval_not_approved`. A blocked finalize
+result surfaces `expectedEntryFormat` (the canonical range and the exact
+`Range:`/`Verdict:` lines required) and a `recoveryCommand` derived from the
+configured actors. The config key `requireClaudeApprovalForFinalize` keeps its
+legacy name for compatibility; despite the name, the approval it now requires
+comes from whoever `reviewActor` names — Codex.
 Response/final hooks remain read-only for managed session worktrees: they must
 not checkout, create worktrees, pull, reset, stash, or clean. The pre-response
 hook may create or refresh the lightweight broker manifest for the current
