@@ -5385,6 +5385,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                   ? m_lastLookAssistScene
                   : QStringLiteral("none") ) );
 
+    QString gpuPreviewProcessingRejectReason;
+    const bool gpuPreviewProcessingCompatible =
+        gpuPreviewProcessingIsSupported( m_pProcessingObject,
+                                         &gpuPreviewProcessingRejectReason );
+
     logInteractionEvent(
         QStringLiteral("gui_smoke.visual_state"),
         QStringLiteral(
@@ -5395,7 +5400,25 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             "h_stretch_index=%17 v_stretch_index=%18 dual_iso_mode=%19 "
             "dual_iso_interp=%20 dual_iso_alias_map=%21 dual_iso_fullres=%22 "
             "drop_frame=%23 audio=%24 scopes=%25 zebras=%26 scale_request=%27 "
-            "quality_mode=%28 receipt_supplied=%29" )
+            "quality_mode=%28 receipt_supplied=%29 "
+            "gpu_amaze_texture_present_requested=%30 "
+            "gpu_amaze_texture_present_candidate=%31 "
+            "gpu_amaze_texture_present_active=%32 "
+            "gpu_amaze_texture_present_renderer=%33 "
+            "gpu_amaze_texture_present_fallback_reason=%34 "
+            "gpu_amaze_texture_present_cpu_readback_fallback_active=%35 "
+            "gpu_viewport_installed=%36 "
+            "gpu_preview_processing_env_requested=%37 "
+            "gpu_preview_processing_compatible=%38 "
+            "render_thread_using_gpu_preview_processing=%39 "
+            "render_thread_using_gpu_amaze_debayer=%40 "
+            "gpu_amaze_debayer_environment_requested=%41 "
+            "gpu_amaze_debayer_compatible=%42 "
+            "gpu_amaze_texture_present_environment_requested=%43 "
+            "does_mlv_always_use_amaze=%44 "
+            "gpu16_preview_active=%45 "
+            "playback_processing_reason=%46 "
+            "gpu_preview_processing_reject_reason=%47" )
             .arg( bool01( ACTIVE_RECEIPT && ACTIVE_RECEIPT->lookAssistEnabled()
                           && ui->checkBoxLookAssistEnable->isChecked() ) )
             .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
@@ -5427,7 +5450,33 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             .arg( bool01( ui->actionShowZebras->isChecked() ) )
             .arg( effectivePlaybackScaleFactorForRequest() )
             .arg( m_playbackQualityMode )
-            .arg( bool01( !options.receiptPath.isEmpty() ) ) );
+            .arg( bool01( !options.receiptPath.isEmpty() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_requested") ).toBool() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_candidate") ).toBool() ) )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral("gpu_amaze_texture_present_active") ).toBool() ) )
+            .arg( m_lastPresentedStageTimingTelemetry.value(
+                      QStringLiteral("gpu_amaze_texture_present_renderer") ).toString() )
+            .arg( m_lastPresentedStageTimingTelemetry.value(
+                      QStringLiteral("gpu_amaze_texture_present_fallback_reason") ).toString() )
+            .arg( bool01( m_lastPresentedStageTimingTelemetry.value(
+                              QStringLiteral(
+                                  "gpu_amaze_texture_present_cpu_readback_fallback_active" ) )
+                          .toBool() ) )
+            .arg( bool01( GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) )
+            .arg( bool01( gpuPreviewProcessingRequestedByEnvironment() ) )
+            .arg( bool01( gpuPreviewProcessingCompatible ) )
+            .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
+            .arg( bool01( m_renderThreadUsingGpuAmazeDebayer ) )
+            .arg( bool01( gpuAmazeDebayerRequestedByEnvironment() ) )
+            .arg( bool01( m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0 && !ui->actionCaching->isChecked() ) )
+            .arg( bool01( gpuAmazeTexturePresentRequestedByEnvironment() ) )
+            .arg( m_pMlvObject ? doesMlvAlwaysUseAmaze( m_pMlvObject ) : -1 )
+            .arg( bool01( m_renderThreadUsing16BitPreview ) )
+            .arg( m_lastQueuedPlaybackProcessingReason )
+            .arg( gpuPreviewProcessingRejectReason ) );
 
     const int settleMs = qMax( 0, options.settleMs );
     const int settleCpuStableMs = qMax( 0, options.settleCpuStableMs );

@@ -510,7 +510,19 @@ The resulting JSON includes `visualQuality.playbackPolicy`, which records the
 forced debayer/processing/GPU selector state. A passing selector smoke does not
 by itself prove the no-readback path; approval still requires user-interactive
 RTX 4090 screenshot/pixel evidence that the texture-present run and the
-CPU-readback run are identical or that any differences are justified.
+CPU-readback run are identical or that any differences are justified. The
+`gui_smoke.visual_state` line now also surfaces
+`gpu_amaze_texture_present_requested`, `gpu_amaze_texture_present_candidate`,
+`gpu_amaze_texture_present_active`, `gpu_amaze_texture_present_renderer`, and
+`gpu_amaze_texture_present_fallback_reason`, plus the upstream gate flags
+`gpu_viewport_installed`, `gpu_preview_processing_env_requested`,
+`gpu_preview_processing_compatible`, `render_thread_using_gpu_preview_processing`,
+`render_thread_using_gpu_amaze_debayer`,
+`gpu_amaze_debayer_environment_requested`, `gpu_amaze_debayer_compatible`,
+`gpu_amaze_texture_present_environment_requested`, `does_mlv_always_use_amaze`,
+`gpu16_preview_active`, `playback_output_mode`, and
+`playback_processing_reason` so an auditor can see which gate blocked the
+no-readback path or whether it fell back before the pixel comparison.
 
 ## 8. Reproducing a build from scratch
 
