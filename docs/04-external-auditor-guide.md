@@ -499,10 +499,10 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -Output .claude-state\profiling\gpu-amaze-present-proof\texture-present.json `
   -CaptureScreenshot -FrameTelemetry -PlaybackDebayer amaze `
   -PlaybackProcessing subset -GpuPreviewProcessing gpu -GpuAmazeDebayer gpu `
+  -GpuAmazeTexturePresent `
   -StageLog .claude-state\profiling\gpu-amaze-present-proof\texture-present-stage.log `
   -ExtraEnvironment @(
-    'MLVAPP_GPU_AMAZE_DEBAYER_DLL=C:\path\to\igpu_amaze_debayer_cuda.dll',
-    'MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1'
+    'MLVAPP_GPU_AMAZE_DEBAYER_DLL=C:\path\to\igpu_amaze_debayer_cuda.dll'
   )
 ```
 

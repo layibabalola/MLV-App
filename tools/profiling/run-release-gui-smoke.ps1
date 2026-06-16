@@ -43,6 +43,7 @@ param(
     [string]$GpuBilinearDebayer = "",
     [ValidateSet("", "auto", "cpu", "gpu")]
     [string]$GpuAmazeDebayer = "",
+    [switch]$GpuAmazeTexturePresent,
     [string]$StageLog = "",
     [ValidateSet("", "on", "off")]
     [string]$Zebras = "",
@@ -783,6 +784,9 @@ if (-not [string]::IsNullOrWhiteSpace($GpuBilinearDebayer)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
     $arguments += "--gpu-amaze-debayer=$GpuAmazeDebayer"
+}
+if ($GpuAmazeTexturePresent) {
+    $arguments += "--gpu-amaze-texture-present"
 }
 if (-not [string]::IsNullOrWhiteSpace($StageLog)) {
     $stageLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StageLog)

@@ -61,14 +61,25 @@ static bool hasGuiPlaybackSmokeFlag(int argc, char *argv[])
     return false;
 }
 
+static bool argvOptionMatches(const char *arg, const char *option)
+{
+    if (!arg || !option) return false;
+    if (std::strcmp(arg, option) == 0) return true;
+
+    const size_t optionLength = std::strlen(option);
+    return std::strncmp(arg, option, optionLength) == 0
+        && arg[optionLength] == '=';
+}
+
 static bool hasGpuRelatedFlag(int argc, char *argv[])
 {
     for (int i = 1; i < argc; ++i)
     {
-        if (std::strcmp(argv[i], "--gpu-viewport") == 0) return true;
-        if (std::strcmp(argv[i], "--gpu-preview-processing") == 0) return true;
-        if (std::strcmp(argv[i], "--gpu-bilinear-debayer") == 0) return true;
-        if (std::strcmp(argv[i], "--gpu-amaze-debayer") == 0) return true;
+        if (argvOptionMatches(argv[i], "--gpu-viewport")) return true;
+        if (argvOptionMatches(argv[i], "--gpu-preview-processing")) return true;
+        if (argvOptionMatches(argv[i], "--gpu-bilinear-debayer")) return true;
+        if (argvOptionMatches(argv[i], "--gpu-amaze-debayer")) return true;
+        if (argvOptionMatches(argv[i], "--gpu-amaze-texture-present")) return true;
     }
     return false;
 }
@@ -898,6 +909,11 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("auto"));
     parser.addOption(gpuAmazeDebayerOpt);
 
+    const QCommandLineOption gpuAmazeTexturePresentOpt(
+        QStringLiteral("gpu-amaze-texture-present"),
+        QStringLiteral("Request experimental AMaZE CUDA-to-GL texture presentation during the smoke. Requires the GPU AMaZE selector chain to become active."));
+    parser.addOption(gpuAmazeTexturePresentOpt);
+
     const QCommandLineOption zebrasOpt(
         QStringLiteral("zebras"),
         QStringLiteral("Force zebra overlay on during the smoke."));
@@ -1057,6 +1073,10 @@ static int runGuiPlaybackSmoke(QApplication &app)
         || gpuAmazeDebayerBackend == GpuAmazeDebayerBackendRequest::Gpu)
     {
         qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
+    }
+    if (parser.isSet(gpuAmazeTexturePresentOpt))
+    {
+        qputenv("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT", QByteArrayLiteral("1"));
     }
 
     const QString stageLogPath = parser.value(stageLogOpt).isEmpty()
