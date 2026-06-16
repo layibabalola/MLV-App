@@ -204,10 +204,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("creative vibrance enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->vibrance = 1.5; });
     assert_gpu_preview_rejects_processing_feature(
-        "creative_saturation",
-        QStringLiteral("creative saturation enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->saturation = 1.5; });
-    assert_gpu_preview_rejects_processing_feature(
         "creative_in_loop_contrast",
         QStringLiteral("creative in-loop contrast factor enabled"),
         [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->contrast = 0.5; });
@@ -340,4 +336,36 @@ TEST(GpuPreviewProcessing, NonNeutralToningIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != toned_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.toning.frame0", toned_hash);
+}
+
+TEST(GpuPreviewProcessing, NonNeutralSaturationIsSupportedAndChangesOutput)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingAllowCreativeAdjustments(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig neutral_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(neutral_config.enabled);
+    ASSERT_TRUE(!neutral_config.applySaturation);
+    const std::string neutral_hash = render_subset_hash(fixture, neutral_config, 0);
+
+    /* Saturation is now ported (direct Y1 + (pix-Y1)*sat), so the gate accepts it
+     * and the chroma scale must change the output. */
+    processingSetSaturation(fixture.processing(), 1.5);
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig sat_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(sat_config.enabled);
+    ASSERT_TRUE(sat_config.applySaturation);
+    ASSERT_NEAR(1.5, sat_config.saturation, 0.0001);
+    ASSERT_NE(neutral_config.signature, sat_config.signature);
+
+    const std::string sat_hash = render_subset_hash(fixture, sat_config, 0);
+    ASSERT_TRUE(neutral_hash != sat_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.saturation.frame0", sat_hash);
 }
