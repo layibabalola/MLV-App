@@ -149,22 +149,51 @@ contrast params) is the only creative-family stage that is both active and
 non-identity; gradation and toning execute but are identity, and
 shadows/highlights and clarity are inert by default.
 
-- **Slice 1 (next):** creative contrast-curve LUT + identity-safe gradation/toning
-  — a 1D 16-bit LUT lookup, no spatial pass; enables default-graded clips on the
-  GPU path. `gpuPreviewProcessingIsSupported` accepts `allow_creative_adjustments`
-  only when the active creative state is a subset of the ported stages.
-- **Slice 2:** gradation + toning (non-identity cases).
-- **Slice 3:** hue-vs / luma-vs curves, vibrance, saturation.
-- **Slice 4:** shadows/highlights + clarity — the spatial blur-mask stages
-  (harder; needs the RBF blur pre-pass on the GPU).
-- **Slice 5+:** remaining stages — 1D/3D LUT, creative filter, AgX, median/RBF
-  denoise, grain, CA correction, sharpen, vignette, non-Rec709 gamut.
+The post-gamma creative pipeline is ported as bit-aligned slices, in the exact
+order `raw_processing.c` applies them (gamma → hue-vs → vibrance → saturation →
+toning → contrast curve → gradation):
+
+- **Slice 1 (DONE, `d77a26c6`):** creative contrast-curve LUT (`pre_calc_curve_r`)
+  + gradation curves (`gcurve_*`) — 1D 16-bit LUT lookups, no spatial pass.
+- **Slice 2 (DONE, `7c59d699`):** toning (per-channel `toning_dry + toning_wet`).
+- **Slice 3 (DONE, `2e04516b`):** saturation (`Y1 + trunc((pix-Y1)*sat)`).
+- **Slice 4 (DONE, `6ee4b4f3`):** vibrance (saturation-weighted blend).
+- **Slice 5 (DONE):** hue-vs / luma-vs curves — RGB→HSV, four signed-`float[36000]`
+  curve adjustments indexed by hue (`H*100`) and luma (`V*36000`), HSV→RGB. The
+  curves are carried as **R32F** textures (units 11-14) so the GPU, the CPU
+  reference and the production `float` curves stay bit-aligned (the uint16 LUT
+  path would quantize the [-1,1] curve to ~3e-5 and break parity).
+  - **Parity caveat (OOB clamp):** `hue_vs_luma` can push `V` to ≥ 1.0, after
+    which `(uint16)(V*36000)` indexes `luma_vs_saturation[]` (exactly 36000
+    entries) out of bounds — `V == 1.0` alone already yields index 36000. That
+    read is undefined on the production CPU path, so both the GPU shader and the
+    CPU reference **clamp the luma index to 35999** (the last valid sample)
+    instead of reproducing undefined behaviour. This diverges from production
+    only for boosted highlights (`V ≥ 1.0`) when a non-neutral
+    `luma_vs_saturation` curve is set; clamping is the correct, deterministic
+    behaviour and the production CPU path should adopt the same clamp (tracked
+    separately — out of GPU-lane scope).
+- **Slice 6 (REMAINING — gate still rejects):** in-loop **simple-contrast factor**
+  (`processing->contrast`, a per-pixel luma-dependent exposure multiply via
+  `contrast_curve[cval]`, `raw_processing.c:2954`). This is in the exposure/linear
+  domain, not the post-gamma creative LUT section, so it needs its own port.
+  Until then `gpuPreviewProcessingIsSupported` rejects `|contrast| >= 0.01`.
+- **Later slices:** shadows/highlights + clarity (spatial RBF blur-mask pre-pass),
+  then 1D/3D LUT, creative filter, AgX, median/RBF denoise, grain, CA correction,
+  sharpen, vignette, non-Rec709 gamut.
+
+After slices 1-5, `gpuPreviewProcessingIsSupported` accepts
+`allow_creative_adjustments` for any default-graded clip whose only creative
+controls are the ported stages — which covers the default image profile and the
+common grade (hue-vs/vibrance/saturation/toning/curves), failing closed only on
+the unported in-loop contrast factor and the spatial/LUT stages above.
 
 Each slice keeps the CPU reference (`applyPreviewProcessingPixel`) and the GPU
-subset shader bit-aligned, adds unit parity tests, and is validated by a
-CPU-vs-GPU frame diff on the RTX 4090 before the support gate relaxes for that
-stage. P-pre — and the honest GUI "GPU · Full Quality · AMaZE" claim per §8
-stage 2 — completes when every creative stage reaches parity.
+subset shader bit-aligned, adds unit parity tests (the CPU reference is the local
+bit-exact oracle), and is validated by a CPU-vs-GPU frame diff on the RTX 4090
+before the support gate relaxes for that stage. P-pre — and the honest GUI
+"GPU · Full Quality · AMaZE" claim per §8 stage 2 — completes when every creative
+stage reaches parity.
 
 ## 9. UI truth / status language
 

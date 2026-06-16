@@ -193,12 +193,10 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("highlight reconstruction enabled"),
         [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
     /* allow_creative_adjustments is no longer unconditionally rejected: the GPU
-     * subset shader now ports the contrast + gradation curves. It is rejected
-     * only when an UNPORTED creative stage is non-neutral. */
-    assert_gpu_preview_rejects_processing_feature(
-        "creative_hue_vs",
-        QStringLiteral("creative hue-vs/luma-vs curve enabled"),
-        [](processingObject_t * processing) { processingAllowCreativeAdjustments(processing); processing->hue_vs_luma_used = 1; });
+     * subset shader now ports the hue-vs/luma-vs curves, vibrance, saturation,
+     * toning, the contrast curve and the gradation curves. It is rejected only
+     * when the one UNPORTED creative stage -- the in-loop contrast factor -- is
+     * non-neutral. */
     assert_gpu_preview_rejects_processing_feature(
         "creative_in_loop_contrast",
         QStringLiteral("creative in-loop contrast factor enabled"),
@@ -396,4 +394,38 @@ TEST(GpuPreviewProcessing, NonNeutralVibranceIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != vib_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.vibrance.frame0", vib_hash);
+}
+
+TEST(GpuPreviewProcessing, NonNeutralHueVsIsSupportedAndChangesOutput)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingAllowCreativeAdjustments(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig neutral_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(neutral_config.enabled);
+    ASSERT_TRUE(!neutral_config.applyHueVs);
+    const std::string neutral_hash = render_subset_hash(fixture, neutral_config, 0);
+
+    /* hue-vs / luma-vs curves are now ported (RGB->HSV, four curve adjustments,
+     * HSV->RGB). A constant +0.5 hue_vs_hue curve rotates every chroma pixel's
+     * hue by 60*0.5 = 30 degrees, so the gate must accept it (not force the CPU
+     * path) and the output must change. */
+    for (int i = 0; i < 36000; ++i) fixture.processing()->hue_vs_hue[i] = 0.5f;
+    fixture.processing()->hue_vs_hue_used = 1;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig huevs_config =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(huevs_config.enabled);
+    ASSERT_TRUE(huevs_config.applyHueVs);
+    ASSERT_NE(neutral_config.signature, huevs_config.signature);
+
+    const std::string huevs_hash = render_subset_hash(fixture, huevs_config, 0);
+    ASSERT_TRUE(neutral_hash != huevs_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.hue_vs.frame0", huevs_hash);
 }

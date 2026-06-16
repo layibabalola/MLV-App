@@ -16,6 +16,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstring>
 #include <omp.h>
@@ -110,6 +111,86 @@ float sampleNormalizedLut(const QByteArray & lutBytes, float normalized)
     return reinterpret_cast<const uint16_t *>(lutBytes.constData())[index] / 65535.0f;
 }
 
+/* Hue-vs / luma-vs creative curves are float[36000] in [-1,1]. The CPU
+ * reference reads them directly; the GPU uploads each as an R32F texture and
+ * samples by the same integer index, so both stay bit-aligned. The luma index
+ * is clamped to [0,35999]: hue_vs_luma can boost V (hsv[2]) to >= 1.0, and the
+ * production path then indexes luma_vs_saturation[] out of bounds (the array is
+ * exactly 36000 entries, and V == 1.0 already yields index 36000). That read is
+ * undefined on the CPU, so both this reference and the shader clamp to the last
+ * valid sample instead of matching undefined behaviour. */
+constexpr int kHueVsCurveSamples = 36000;
+
+float sampleHueVsCurve(const QByteArray & curveBytes, int index)
+{
+    if ( curveBytes.size() < static_cast<int>(kHueVsCurveSamples * sizeof(float)) )
+    {
+        return 0.0f;
+    }
+    const int clamped = std::max(0, std::min(kHueVsCurveSamples - 1, index));
+    return reinterpret_cast<const float *>(curveBytes.constData())[clamped];
+}
+
+/* Float32 mirror of fromRGBtoHSV (processing.c:282-308): hsv[0]=H in [0,360),
+ * hsv[1]=S, hsv[2]=V. Kept byte-identical (same >= tie ordering) so the CPU
+ * reference and the GLSL port agree. */
+void previewFromRGBtoHSV(const float rgb[3], float hsv[3])
+{
+    hsv[0] = 0.0f;
+    hsv[2] = std::max(rgb[0], std::max(rgb[1], rgb[2]));
+    const float delta = hsv[2] - std::min(rgb[0], std::min(rgb[1], rgb[2]));
+    if ( delta < FLT_MIN )
+    {
+        hsv[1] = 0.0f;
+    }
+    else
+    {
+        hsv[1] = delta / hsv[2];
+        if ( rgb[0] >= hsv[2] )
+        {
+            hsv[0] = (rgb[1] - rgb[2]) / delta;
+            if ( hsv[0] < 0.0f ) hsv[0] += 6.0f;
+        }
+        else if ( rgb[1] >= hsv[2] )
+        {
+            hsv[0] = 2.0f + (rgb[2] - rgb[0]) / delta;
+        }
+        else
+        {
+            hsv[0] = 4.0f + (rgb[0] - rgb[1]) / delta;
+        }
+    }
+    hsv[0] *= 60.0f;
+}
+
+/* Float32 mirror of fromHSVtoRGB (processing.c:310-363). */
+void previewFromHSVtoRGB(const float hsv[3], float rgb[3])
+{
+    if ( hsv[1] < FLT_MIN )
+    {
+        rgb[0] = rgb[1] = rgb[2] = hsv[2];
+        return;
+    }
+    const float h = hsv[0] / 60.0f;
+    const int i = static_cast<int>(h);
+    const float f = h - static_cast<float>(i);
+    const float p = hsv[2] * (1.0f - hsv[1]);
+    if ( i & 1 )
+    {
+        const float q = hsv[2] * (1.0f - (hsv[1] * f));
+        if ( i == 1 ) { rgb[0] = q; rgb[1] = hsv[2]; rgb[2] = p; }
+        else if ( i == 3 ) { rgb[0] = p; rgb[1] = q; rgb[2] = hsv[2]; }
+        else { rgb[0] = hsv[2]; rgb[1] = p; rgb[2] = q; }
+    }
+    else
+    {
+        const float t = hsv[2] * (1.0f - (hsv[1] * (1.0f - f)));
+        if ( i == 0 ) { rgb[0] = hsv[2]; rgb[1] = t; rgb[2] = p; }
+        else if ( i == 2 ) { rgb[0] = p; rgb[1] = hsv[2]; rgb[2] = t; }
+        else { rgb[0] = t; rgb[1] = p; rgb[2] = hsv[2]; }
+    }
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
                                  uint16_t * outputPixel)
@@ -180,6 +261,54 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     {
         const float gammaInput = clamp01(matrixApplied[channel]);
         gammaOut[channel] = sampleLut(config.gammaLut, gammaInput);
+    }
+
+    if ( config.applyHueVs )
+    {
+        /* Hue-vs / luma-vs creative curves, the FIRST creative stage, matching
+         * raw_processing.c:3523-3578: RGB->HSV, four signed-curve adjustments
+         * indexed by hue (H*100) and luma (V*36000), HSV->RGB, then rounded back
+         * to uint16. Float32 mirrors the shader (+/-1 LSB vs the CPU double
+         * pipeline, within engine tolerance). The luma curve index is clamped
+         * (see sampleHueVsCurve) rather than matching the production OOB read. */
+        float rgb[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            rgb[channel] = static_cast<float>(gammaOut[channel]) / 65535.0f;
+        }
+        float hsl[3];
+        previewFromRGBtoHSV(rgb, hsl);
+
+        float sat = 0.0f;
+        if ( !(gammaOut[0] == 0 && gammaOut[1] == 0 && gammaOut[2] == 0) )
+        {
+            const uint16_t biggest = std::max(std::max(gammaOut[0], gammaOut[1]), gammaOut[2]);
+            const uint16_t smallest = std::min(std::min(gammaOut[0], gammaOut[1]), gammaOut[2]);
+            sat = (static_cast<float>(biggest) - static_cast<float>(smallest))
+                / static_cast<float>(biggest);
+        }
+        sat = 2.0f * sat / (sat * sat + 1.0f);
+        if ( sat > 1.0f ) sat = 1.0f;
+
+        const int hueIndex = static_cast<int>(hsl[0] * 100.0f);
+        hsl[2] *= 1.0f + (sampleHueVsCurve(config.hueVsLumaCurve, hueIndex) * sat * 2.0f);
+        if ( hsl[2] < 0.0f ) hsl[2] = 0.0f;
+        hsl[1] *= 1.0f + (sampleHueVsCurve(config.hueVsSaturationCurve, hueIndex) * 2.0f);
+        if ( hsl[1] < 0.0f ) hsl[1] = 0.0f;
+        hsl[0] += 60.0f * sampleHueVsCurve(config.hueVsHueCurve, hueIndex);
+        if ( hsl[0] < 0.0f ) hsl[0] += 360.0f;
+        else if ( hsl[0] >= 360.0f ) hsl[0] -= 360.0f;
+        const int lumaIndex = static_cast<int>(hsl[2] * 36000.0f);
+        hsl[1] *= 1.0f + (sampleHueVsCurve(config.lumaVsSaturationCurve, lumaIndex) * 2.0f);
+        if ( hsl[1] < 0.0f ) hsl[1] = 0.0f;
+
+        previewFromHSVtoRGB(hsl, rgb);
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const int rounded = static_cast<int>(rgb[channel] * 65535.0f + 0.5f);
+            gammaOut[channel] = static_cast<uint16_t>(
+                rounded < 0 ? 0 : (rounded > 65535 ? 65535 : rounded));
+        }
     }
 
     if ( config.applyVibrance )
@@ -297,6 +426,38 @@ QOpenGLTexture * createLookupTexture()
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
     texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
     return texture;
+}
+
+/* hue-vs / luma-vs curves are signed float[36000] in [-1,1]; an R32F texture
+ * holds them exactly (the uint16 LUT path would quantize to ~3e-5 and break
+ * bit-alignment with the CPU reference and the production float curves).
+ * 256 * 141 = 36096 >= 36000 entries, sampled by integer index. */
+constexpr int kHueVsCurveTextureWidth = 256;
+constexpr int kHueVsCurveTextureHeight = 141;
+
+QOpenGLTexture * createCurveTexture()
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::R32F);
+    texture->setSize(kHueVsCurveTextureWidth, kHueVsCurveTextureHeight);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+QByteArray packCurveTextureR32F(const QByteArray & curveBytes)
+{
+    QByteArray packed(kHueVsCurveTextureWidth * kHueVsCurveTextureHeight
+                      * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    std::memset(packed.data(), 0, static_cast<size_t>(packed.size()));
+    const int wanted = static_cast<int>(kHueVsCurveSamples * sizeof(float));
+    if ( curveBytes.size() >= wanted )
+    {
+        std::memcpy(packed.data(), curveBytes.constData(), static_cast<size_t>(wanted));
+    }
+    return packed;
 }
 
 QOpenGLTexture * createFrameTexture(int width, int height)
@@ -612,6 +773,10 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform sampler2D gradationLutR;\n"
         "uniform sampler2D gradationLutG;\n"
         "uniform sampler2D gradationLutB;\n"
+        "uniform sampler2D hueVsHueCurve;\n"
+        "uniform sampler2D hueVsSaturationCurve;\n"
+        "uniform sampler2D hueVsLumaCurve;\n"
+        "uniform sampler2D lumaVsSaturationCurve;\n"
         "uniform float previewProcessingEnabled;\n"
         "uniform float previewApplyCreativeCurves;\n"
         "uniform float previewApplyToning;\n"
@@ -620,6 +785,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewVibrance;\n"
         "uniform float previewApplySaturation;\n"
         "uniform float previewSaturation;\n"
+        "uniform float previewApplyHueVs;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -635,6 +801,62 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    float y = floor(index / 256.0);\n"
         "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
         "    return texture2D(lut, uv).r;\n"
+        "}\n"
+        "float sampleHueVsCurve(sampler2D curve, float idx)\n"
+        "{\n"
+        "    float i = clamp(idx, 0.0, 35999.0);\n"
+        "    float x = mod(i, 256.0);\n"
+        "    float y = floor(i / 256.0);\n"
+        "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 141.0);\n"
+        "    return texture2D(curve, uv).r;\n"
+        "}\n"
+        "vec3 previewFromRGBtoHSV(vec3 rgb)\n"
+        "{\n"
+        "    float V = max(rgb.r, max(rgb.g, rgb.b));\n"
+        "    float delta = V - min(rgb.r, min(rgb.g, rgb.b));\n"
+        "    float H = 0.0;\n"
+        "    float S = 0.0;\n"
+        "    if (delta >= 1.17549435e-38)\n"
+        "    {\n"
+        "        S = delta / V;\n"
+        "        if (rgb.r >= V)\n"
+        "        {\n"
+        "            H = (rgb.g - rgb.b) / delta;\n"
+        "            if (H < 0.0) H += 6.0;\n"
+        "        }\n"
+        "        else if (rgb.g >= V)\n"
+        "        {\n"
+        "            H = 2.0 + (rgb.b - rgb.r) / delta;\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            H = 4.0 + (rgb.r - rgb.g) / delta;\n"
+        "        }\n"
+        "    }\n"
+        "    return vec3(H * 60.0, S, V);\n"
+        "}\n"
+        "vec3 previewFromHSVtoRGB(vec3 hsv)\n"
+        "{\n"
+        "    if (hsv.g < 1.17549435e-38)\n"
+        "    {\n"
+        "        return vec3(hsv.b);\n"
+        "    }\n"
+        "    float h = hsv.x / 60.0;\n"
+        "    float fi = floor(h);\n"
+        "    int i = int(fi);\n"
+        "    float f = h - fi;\n"
+        "    float p = hsv.z * (1.0 - hsv.y);\n"
+        "    if (mod(fi, 2.0) >= 0.5)\n"
+        "    {\n"
+        "        float q = hsv.z * (1.0 - (hsv.y * f));\n"
+        "        if (i == 1) return vec3(q, hsv.z, p);\n"
+        "        else if (i == 3) return vec3(p, q, hsv.z);\n"
+        "        return vec3(hsv.z, p, q);\n"
+        "    }\n"
+        "    float t = hsv.z * (1.0 - (hsv.y * (1.0 - f)));\n"
+        "    if (i == 0) return vec3(hsv.z, t, p);\n"
+        "    else if (i == 2) return vec3(p, hsv.z, t);\n"
+        "    return vec3(t, p, hsv.z);\n"
         "}\n"
         "float reinhardTonemap(float x)\n"
         "{\n"
@@ -679,6 +901,33 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyHueVs > 0.5)\n"
+        "    {\n"
+        "        vec3 hv = result * 65535.0;\n"
+        "        vec3 hsl = previewFromRGBtoHSV(result);\n"
+        "        float hsat = 0.0;\n"
+        "        if (!(hv.r < 0.5 && hv.g < 0.5 && hv.b < 0.5))\n"
+        "        {\n"
+        "            float hbig = max(max(hv.r, hv.g), hv.b);\n"
+        "            float hsmall = min(min(hv.r, hv.g), hv.b);\n"
+        "            hsat = (hbig > 0.0) ? (hbig - hsmall) / hbig : 0.0;\n"
+        "        }\n"
+        "        hsat = 2.0 * hsat / (hsat * hsat + 1.0);\n"
+        "        hsat = min(hsat, 1.0);\n"
+        "        float hueIndex = floor(hsl.x * 100.0);\n"
+        "        hsl.z *= 1.0 + (sampleHueVsCurve(hueVsLumaCurve, hueIndex) * hsat * 2.0);\n"
+        "        hsl.z = max(hsl.z, 0.0);\n"
+        "        hsl.y *= 1.0 + (sampleHueVsCurve(hueVsSaturationCurve, hueIndex) * 2.0);\n"
+        "        hsl.y = max(hsl.y, 0.0);\n"
+        "        hsl.x += 60.0 * sampleHueVsCurve(hueVsHueCurve, hueIndex);\n"
+        "        if (hsl.x < 0.0) hsl.x += 360.0;\n"
+        "        else if (hsl.x >= 360.0) hsl.x -= 360.0;\n"
+        "        float lumaIndex = floor(hsl.z * 36000.0);\n"
+        "        hsl.y *= 1.0 + (sampleHueVsCurve(lumaVsSaturationCurve, lumaIndex) * 2.0);\n"
+        "        hsl.y = max(hsl.y, 0.0);\n"
+        "        vec3 hrgb = previewFromHSVtoRGB(hsl);\n"
+        "        result = clamp(floor(hrgb * 65535.0 + 0.5), 0.0, 65535.0) / 65535.0;\n"
+        "    }\n"
         "    if (previewApplyVibrance > 0.5)\n"
         "    {\n"
         "        vec3 vv = result * 65535.0;\n"
@@ -773,19 +1022,11 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     if ( processing->highlight_reconstruction ) return reject(QStringLiteral("highlight reconstruction enabled"));
     if ( processing->allow_creative_adjustments )
     {
-        /* The GPU subset shader ports the post-gamma creative contrast curve
-         * (pre_calc_curve_r) and gradation curves (gcurve_*). Accept the creative
-         * flag ONLY when every OTHER creative stage the shader does NOT implement
-         * is neutral, mirroring raw_processing.c processing_has_neutral_creative_
-         * adjustments (2029-2053) plus the unported in-loop simple-contrast factor.
-         * Otherwise keep the CPU path. */
-        if ( processing->hue_vs_luma_used
-          || processing->hue_vs_saturation_used
-          || processing->hue_vs_hue_used
-          || processing->luma_vs_saturation_used )
-        {
-            return reject(QStringLiteral("creative hue-vs/luma-vs curve enabled"));
-        }
+        /* The GPU subset shader ports the post-gamma creative stages: hue-vs /
+         * luma-vs curves, vibrance, saturation, toning, the contrast curve
+         * (pre_calc_curve_r) and the gradation curves (gcurve_*). Accept the
+         * creative flag ONLY when the remaining unported stage -- the in-loop
+         * simple-contrast factor -- is neutral; otherwise keep the CPU path. */
         if ( std::fabs(processing->contrast) >= 0.01 )
         {
             return reject(QStringLiteral("creative in-loop contrast factor enabled"));
@@ -880,6 +1121,26 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     config.applySaturation = processing->allow_creative_adjustments != 0
                           && (processing->saturation > 1.01 || processing->saturation < 0.99);
     config.saturation = static_cast<float>(processing->saturation);
+    config.applyHueVs = processing->allow_creative_adjustments != 0
+                     && (processing->hue_vs_hue_used
+                      || processing->hue_vs_saturation_used
+                      || processing->hue_vs_luma_used
+                      || processing->luma_vs_saturation_used);
+    if ( config.applyHueVs )
+    {
+        /* hue-vs / luma-vs curves are float[36000] in [-1,1]; copied verbatim so
+         * the CPU reference and the R32F GPU textures share the exact values
+         * (raw_processing.c:3523-3578). */
+        const int curveBytes = static_cast<int>(36000u * sizeof(float));
+        config.hueVsHueCurve = QByteArray(
+            reinterpret_cast<const char *>(processing->hue_vs_hue), curveBytes);
+        config.hueVsSaturationCurve = QByteArray(
+            reinterpret_cast<const char *>(processing->hue_vs_saturation), curveBytes);
+        config.hueVsLumaCurve = QByteArray(
+            reinterpret_cast<const char *>(processing->hue_vs_luma), curveBytes);
+        config.lumaVsSaturationCurve = QByteArray(
+            reinterpret_cast<const char *>(processing->luma_vs_saturation), curveBytes);
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -917,6 +1178,11 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.vibrance, sizeof(config.vibrance));
     hash = fnv1a64_append(hash, &config.applySaturation, sizeof(config.applySaturation));
     hash = fnv1a64_append(hash, &config.saturation, sizeof(config.saturation));
+    hash = fnv1a64_append(hash, &config.applyHueVs, sizeof(config.applyHueVs));
+    hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
+    hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
+    hash = fnv1a64_append(hash, config.hueVsLumaCurve.constData(), static_cast<size_t>(config.hueVsLumaCurve.size()));
+    hash = fnv1a64_append(hash, config.lumaVsSaturationCurve.constData(), static_cast<size_t>(config.lumaVsSaturationCurve.size()));
     hash = fnv1a64_append(hash, config.contrastCurveLut.constData(), static_cast<size_t>(config.contrastCurveLut.size()));
     hash = fnv1a64_append(hash, config.gradationLutY.constData(), static_cast<size_t>(config.gradationLutY.size()));
     hash = fnv1a64_append(hash, config.gradationLutR.constData(), static_cast<size_t>(config.gradationLutR.size()));
@@ -1064,6 +1330,14 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         config.applyCreativeCurves ? config.gradationLutG : config.gammaLut);
     const QByteArray gradationBBytes = gpuPreviewProcessingPackLookupTextureRgba16(
         config.applyCreativeCurves ? config.gradationLutB : config.gammaLut);
+    const QByteArray hueVsHueBytes = packCurveTextureR32F(
+        config.applyHueVs ? config.hueVsHueCurve : QByteArray());
+    const QByteArray hueVsSaturationBytes = packCurveTextureR32F(
+        config.applyHueVs ? config.hueVsSaturationCurve : QByteArray());
+    const QByteArray hueVsLumaBytes = packCurveTextureR32F(
+        config.applyHueVs ? config.hueVsLumaCurve : QByteArray());
+    const QByteArray lumaVsSaturationBytes = packCurveTextureR32F(
+        config.applyHueVs ? config.lumaVsSaturationCurve : QByteArray());
 
     QOpenGLTexture * frameTexture = createFrameTexture(width, height);
     QOpenGLTexture * levelsTexture = createLookupTexture();
@@ -1076,6 +1350,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * gradationRTexture = createLookupTexture();
     QOpenGLTexture * gradationGTexture = createLookupTexture();
     QOpenGLTexture * gradationBTexture = createLookupTexture();
+    QOpenGLTexture * hueVsHueTexture = createCurveTexture();
+    QOpenGLTexture * hueVsSaturationTexture = createCurveTexture();
+    QOpenGLTexture * hueVsLumaTexture = createCurveTexture();
+    QOpenGLTexture * lumaVsSaturationTexture = createCurveTexture();
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -1100,6 +1378,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradationRTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationRBytes.constData());
     gradationGTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationGBytes.constData());
     gradationBTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradationBBytes.constData());
+    hueVsHueTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsHueBytes.constData());
+    hueVsSaturationTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsSaturationBytes.constData());
+    hueVsLumaTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsLumaBytes.constData());
+    lumaVsSaturationTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, lumaVsSaturationBytes.constData());
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -1120,6 +1402,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("gradationLutR", 8);
     program.setUniformValue("gradationLutG", 9);
     program.setUniformValue("gradationLutB", 10);
+    program.setUniformValue("hueVsHueCurve", 11);
+    program.setUniformValue("hueVsSaturationCurve", 12);
+    program.setUniformValue("hueVsLumaCurve", 13);
+    program.setUniformValue("lumaVsSaturationCurve", 14);
+    program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyCreativeCurves", config.applyCreativeCurves ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyToning", config.applyToning ? 1.0f : 0.0f);
     program.setUniformValue("previewToningGain",
@@ -1159,6 +1446,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradationRTexture->bind(8);
     gradationGTexture->bind(9);
     gradationBTexture->bind(10);
+    hueVsHueTexture->bind(11);
+    hueVsSaturationTexture->bind(12);
+    hueVsLumaTexture->bind(13);
+    lumaVsSaturationTexture->bind(14);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -1193,6 +1484,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradationRTexture->release();
     gradationGTexture->release();
     gradationBTexture->release();
+    hueVsHueTexture->release();
+    hueVsSaturationTexture->release();
+    hueVsLumaTexture->release();
+    lumaVsSaturationTexture->release();
     program.release();
     fbo.release();
 
@@ -1207,6 +1502,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete gradationRTexture;
     delete gradationGTexture;
     delete gradationBTexture;
+    delete hueVsHueTexture;
+    delete hueVsSaturationTexture;
+    delete hueVsLumaTexture;
+    delete lumaVsSaturationTexture;
     context.doneCurrent();
 
     if ( reason ) reason->clear();

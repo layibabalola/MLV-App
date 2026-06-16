@@ -27,11 +27,16 @@ struct GpuPreviewProcessingConfig
     float vibrance = 1.0f;
     bool applySaturation = false;
     float saturation = 1.0f;
+    bool applyHueVs = false;
     QByteArray contrastCurveLut;
     QByteArray gradationLutY;
     QByteArray gradationLutR;
     QByteArray gradationLutG;
     QByteArray gradationLutB;
+    QByteArray hueVsHueCurve;
+    QByteArray hueVsSaturationCurve;
+    QByteArray hueVsLumaCurve;
+    QByteArray lumaVsSaturationCurve;
     uint64_t signature = 0;
 };
 
