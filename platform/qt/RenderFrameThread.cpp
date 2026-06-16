@@ -1652,6 +1652,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         bool usedGpuBilinearDebayer = false;
         bool usedGpuAmazeDebayer = false;
         bool renderedDebayeredFrame = false;
+        GpuAmazeDebayerBackendTiming gpuAmazeTiming;
         if ( useGpuAmazeDebayer && m_pMlvObject )
         {
             const int width = getMlvWidth( m_pMlvObject );
@@ -1684,7 +1685,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                                       width,
                                                       height,
                                                       &gpuReason,
-                                                      &rendererDescription );
+                                                      &rendererDescription,
+                                                      &gpuAmazeTiming );
                 if ( usedGpuAmazeDebayer )
                 {
                     wb_undo( &wbInfo,
@@ -1808,6 +1810,21 @@ void RenderFrameThread::drawFrame( int slotIndex,
             slot.stageTimingTelemetry.insert(
                 QStringLiteral("gpu_amaze_debayer_renderer"),
                 slot.gpuAmazeRendererDescription );
+        }
+        if ( usedGpuAmazeDebayer && gpuAmazeTiming.available )
+        {
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_upload_ms"),
+                gpuAmazeTiming.uploadMs );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_kernel_ms"),
+                gpuAmazeTiming.kernelMs );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_download_ms"),
+                gpuAmazeTiming.downloadMs );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_amaze_debayer_total_ms"),
+                gpuAmazeTiming.totalMs );
         }
         mlv_stage_timing_note("render_thread_draw16_debayered", frameNumber, render_start);
     }

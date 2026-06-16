@@ -353,6 +353,32 @@ static void require_processing_timing_field(const QJsonObject & sample,
     }
 }
 
+static void require_no_gpu_amaze_backend_timing_fields(const QJsonObject & sample)
+{
+    ASSERT_TRUE(!sample.contains(QStringLiteral("gpu_amaze_debayer_upload_ms")));
+    ASSERT_TRUE(!sample.contains(QStringLiteral("gpu_amaze_debayer_kernel_ms")));
+    ASSERT_TRUE(!sample.contains(QStringLiteral("gpu_amaze_debayer_download_ms")));
+    ASSERT_TRUE(!sample.contains(QStringLiteral("gpu_amaze_debayer_total_ms")));
+}
+
+static void require_gpu_amaze_backend_timing_fields(const QJsonObject & sample)
+{
+    require_processing_timing_field(sample, "gpu_amaze_debayer_upload_ms", nullptr);
+    require_processing_timing_field(sample, "gpu_amaze_debayer_kernel_ms", nullptr);
+    require_processing_timing_field(sample, "gpu_amaze_debayer_download_ms", nullptr);
+    require_processing_timing_field(sample, "gpu_amaze_debayer_total_ms", nullptr);
+}
+
+TEST(ClipGolden, GpuAmazeBackendTimingTelemetryRequiresNumericShape)
+{
+    QJsonObject sample;
+    sample.insert(QStringLiteral("gpu_amaze_debayer_upload_ms"), 1.0);
+    sample.insert(QStringLiteral("gpu_amaze_debayer_kernel_ms"), 2.0);
+    sample.insert(QStringLiteral("gpu_amaze_debayer_download_ms"), 3.0);
+    sample.insert(QStringLiteral("gpu_amaze_debayer_total_ms"), 6.0);
+    require_gpu_amaze_backend_timing_fields(sample);
+}
+
 TEST(ClipGolden, TinyDualIsoBatchExportMatchesGolden)
 {
     const QString fixture_path = clip_fixture_path();
@@ -1798,6 +1824,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerCpuBackendP
         ASSERT_TRUE(!sample.value(QStringLiteral("gpu_bilinear_debayer_active")).toBool());
         ASSERT_TRUE(sample.contains(QStringLiteral("gpu_amaze_debayer_active")));
         ASSERT_TRUE(!sample.value(QStringLiteral("gpu_amaze_debayer_active")).toBool());
+        require_no_gpu_amaze_backend_timing_fields(sample);
     }
 }
 
@@ -1877,6 +1904,7 @@ TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfileGpuBilinearDebayerGpuBackendP
         ASSERT_TRUE(sample.contains(QStringLiteral("gpu_bilinear_debayer_active")));
         ASSERT_TRUE(sample.contains(QStringLiteral("gpu_amaze_debayer_active")));
         ASSERT_TRUE(!sample.value(QStringLiteral("gpu_amaze_debayer_active")).toBool());
+        require_no_gpu_amaze_backend_timing_fields(sample);
         if (sample.contains(QStringLiteral("gpu_bilinear_debayer_fallback_reason"))) {
             ASSERT_TRUE(sample.contains(QStringLiteral("gpu_bilinear_debayer_renderer")));
         }

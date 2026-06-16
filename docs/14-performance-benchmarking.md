@@ -372,6 +372,16 @@ Per-stage resolution telemetry uses the prefix
 - `gpu_amaze_debayer_active`
 - optional `gpu_amaze_debayer_renderer`
 - optional `gpu_amaze_debayer_fallback_reason`
+- optional `gpu_amaze_debayer_upload_ms`
+- optional `gpu_amaze_debayer_kernel_ms`
+- optional `gpu_amaze_debayer_download_ms`
+- optional `gpu_amaze_debayer_total_ms`
+
+The `gpu_amaze_debayer_*_ms` fields are emitted only when the explicit CUDA
+AMaZE backend actually renders the frame. They come from the DLL's backend
+timing API and split the current CPU-visible path into host-to-device upload,
+kernel work, device-to-host download, and backend total time; fallback frames do
+not synthesize these fields.
 
 ### Per-frame outer CPU stages
 
