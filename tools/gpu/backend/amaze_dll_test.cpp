@@ -44,6 +44,15 @@ typedef int (*pfn_run_gl_texture)(igpu_amaze_debayer_backend *,
                                   unsigned int,
                                   int,
                                   int);
+typedef int (*pfn_run_post_wb_gl_texture)(igpu_amaze_debayer_backend *,
+                                          const float *,
+                                          unsigned int,
+                                          int,
+                                          int,
+                                          int,
+                                          double,
+                                          double,
+                                          double);
 typedef int (*pfn_last_timing)(igpu_amaze_debayer_backend *,
                                igpu_amaze_debayer_timing_t *);
 
@@ -173,7 +182,8 @@ static uint64_t fnv1a64(const void * data, size_t bytes)
     return hash;
 }
 
-static long long compare_gl_rgba_to_rgb(const uint16_t * rgb,
+static long long compare_gl_rgba_to_rgb(const char * label,
+                                        const uint16_t * rgb,
                                         const uint16_t * rgba,
                                         size_t pixelCount)
 {
@@ -193,11 +203,103 @@ static long long compare_gl_rgba_to_rgb(const uint16_t * rgb,
         if (rgba[i * 4u + 3u] != 65535u) ++alphaBad;
     }
 
-    std::printf("\n[amaze_dll_test] GL_RGBA16 texture vs host RGB16:\n");
+    std::printf("\n[amaze_dll_test] %s:\n", label);
     std::printf("  max abs diff = %lld LSB\n", maxAbs);
     std::printf("  rgb mismatches = %zu / %zu samples\n", mismatches, pixelCount * 3u);
     std::printf("  alpha mismatches = %zu / %zu pixels\n", alphaBad, pixelCount);
     return maxAbs + (long long)mismatches + (long long)alphaBad;
+}
+
+static bool create_rgba16_texture(GLuint * tex,
+                                  int width,
+                                  int height,
+                                  const char * label)
+{
+    if (!tex) return false;
+    *tex = 0;
+
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D,
+                 0,
+                 GL_RGBA16,
+                 width,
+                 height,
+                 0,
+                 GL_RGBA,
+                 GL_UNSIGNED_SHORT,
+                 NULL);
+    const GLenum glError = glGetError();
+    if (glError != GL_NO_ERROR)
+    {
+        std::fprintf(stderr,
+                     "[amaze_dll_test] glTexImage2D(GL_RGBA16 %s) failed GL error 0x%04x\n",
+                     label ? label : "texture",
+                     glError);
+        if (*tex) glDeleteTextures(1, tex);
+        *tex = 0;
+        return false;
+    }
+
+    return true;
+}
+
+static bool read_rgba16_texture(GLuint tex,
+                                std::vector<uint16_t> * rgba,
+                                const char * label)
+{
+    if (!rgba) return false;
+
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glFinish();
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_SHORT, rgba->data());
+    const GLenum glError = glGetError();
+    if (glError != GL_NO_ERROR)
+    {
+        std::fprintf(stderr,
+                     "[amaze_dll_test] glGetTexImage(GL_RGBA16 %s) failed GL error 0x%04x\n",
+                     label ? label : "texture",
+                     glError);
+        return false;
+    }
+
+    return true;
+}
+
+static uint16_t clamp_double_to_u16_ref(double value)
+{
+    if (value <= 0.0) return 0u;
+    if (value >= 65535.0) return 65535u;
+    return (uint16_t)value;
+}
+
+static std::vector<uint16_t> apply_wb_undo_reference(const uint16_t * rgb,
+                                                     size_t pixelCount,
+                                                     int blackLevel,
+                                                     double wbR,
+                                                     double wbG,
+                                                     double wbB)
+{
+    if (blackLevel < 1000) blackLevel = -1000;
+
+    std::vector<uint16_t> out(pixelCount * 3u, 0u);
+    for (size_t i = 0; i < pixelCount; ++i)
+    {
+        out[i * 3u + 0u] =
+            clamp_double_to_u16_ref(((double)rgb[i * 3u + 0u] / wbR)
+                                    + (double)blackLevel);
+        out[i * 3u + 1u] =
+            clamp_double_to_u16_ref(((double)rgb[i * 3u + 1u] / wbG)
+                                    + (double)blackLevel);
+        out[i * 3u + 2u] =
+            clamp_double_to_u16_ref(((double)rgb[i * 3u + 2u] / wbB)
+                                    + (double)blackLevel);
+    }
+    return out;
 }
 
 #define RESOLVE(var, type, name) \
@@ -255,6 +357,7 @@ int main(int argc, char ** argv)
     pfn_describe f_describe;
     pfn_run f_run;
     pfn_run_gl_texture f_run_gl_texture = NULL;
+    pfn_run_post_wb_gl_texture f_run_post_wb_gl_texture = NULL;
     pfn_last_timing f_timing;
     RESOLVE(f_create, pfn_create, "igpu_amaze_debayer_create");
     RESOLVE(f_destroy, pfn_destroy, "igpu_amaze_debayer_destroy");
@@ -267,6 +370,9 @@ int main(int argc, char ** argv)
         RESOLVE(f_run_gl_texture,
                 pfn_run_gl_texture,
                 "igpu_amaze_debayer_run_gl_texture");
+        RESOLVE(f_run_post_wb_gl_texture,
+                pfn_run_post_wb_gl_texture,
+                "igpu_amaze_debayer_run_post_wb_gl_texture");
     }
     std::printf("[amaze_dll_test] resolved ABI symbols\n");
 
@@ -306,6 +412,7 @@ int main(int argc, char ** argv)
     }
 
     long long glDiff = 0;
+    long long postWbGlDiff = 0;
     if (runGlTexture)
     {
         HiddenGlContext gl;
@@ -315,28 +422,8 @@ int main(int argc, char ** argv)
         }
 
         GLuint tex = 0;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D,
-                     0,
-                     GL_RGBA16,
-                     width,
-                     height,
-                     0,
-                     GL_RGBA,
-                     GL_UNSIGNED_SHORT,
-                     NULL);
-        GLenum glError = glGetError();
-        if (glError != GL_NO_ERROR)
+        if (!create_rgba16_texture(&tex, width, height, "pre-WB"))
         {
-            std::fprintf(stderr,
-                         "[amaze_dll_test] glTexImage2D(GL_RGBA16) failed GL error 0x%04x\n",
-                         glError);
-            glDeleteTextures(1, &tex);
             destroy_hidden_gl_context(&gl);
             return 5;
         }
@@ -361,35 +448,107 @@ int main(int argc, char ** argv)
         }
 
         std::vector<uint16_t> rgba(pixelCount * 4u, 0u);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glFinish();
-        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_SHORT, rgba.data());
-        glError = glGetError();
-        if (glError != GL_NO_ERROR)
+        if (!read_rgba16_texture(tex, &rgba, "pre-WB"))
         {
-            std::fprintf(stderr,
-                         "[amaze_dll_test] glGetTexImage(GL_RGBA16) failed GL error 0x%04x\n",
-                         glError);
             glDeleteTextures(1, &tex);
             destroy_hidden_gl_context(&gl);
             return 5;
         }
 
-        glDiff = compare_gl_rgba_to_rgb(hostRgb.data(), rgba.data(), pixelCount);
+        glDiff = compare_gl_rgba_to_rgb("pre-WB GL_RGBA16 texture vs host RGB16",
+                                        hostRgb.data(),
+                                        rgba.data(),
+                                        pixelCount);
         const uint64_t rgbaHash =
             fnv1a64(rgba.data(), rgba.size() * sizeof(uint16_t));
         std::printf("[amaze_dll_test] GL RGBA16 FNV1A64 = %016llx\n",
                     (unsigned long long)rgbaHash);
         glDeleteTextures(1, &tex);
+
+        const int postBlackLevel = 2048;
+        const double postWbR = 0.75;
+        const double postWbG = 1.0;
+        const double postWbB = 0.50;
+        const std::vector<uint16_t> hostPostRgb =
+            apply_wb_undo_reference(hostRgb.data(),
+                                    pixelCount,
+                                    postBlackLevel,
+                                    postWbR,
+                                    postWbG,
+                                    postWbB);
+        const uint64_t hostPostHash =
+            fnv1a64(hostPostRgb.data(), hostPostRgb.size() * sizeof(uint16_t));
+        std::printf("[amaze_dll_test] post-WB CPU reference black=%d wb=(%.6f, %.6f, %.6f)\n",
+                    postBlackLevel,
+                    postWbR,
+                    postWbG,
+                    postWbB);
+        std::printf("[amaze_dll_test] post-WB CPU RGB16 FNV1A64 = %016llx\n",
+                    (unsigned long long)hostPostHash);
+
+        GLuint postTex = 0;
+        if (!create_rgba16_texture(&postTex, width, height, "post-WB"))
+        {
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+
+        rc = f_run_post_wb_gl_texture(backend,
+                                      raw.data(),
+                                      (unsigned int)postTex,
+                                      width,
+                                      height,
+                                      postBlackLevel,
+                                      postWbR,
+                                      postWbG,
+                                      postWbB);
+        if (rc != 0)
+        {
+            std::fprintf(stderr,
+                         "[amaze_dll_test] run(post-WB GL_TEXTURE) returned %d\n",
+                         rc);
+            glDeleteTextures(1, &postTex);
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+        std::printf("[amaze_dll_test] run(post-WB GL_TEXTURE) OK\n");
+
+        if (f_timing(backend, &timing) == 0)
+        {
+            std::printf("[amaze_dll_test] post-WB GL timing ms: upload=%.3f kernel=%.3f interop=%.3f total=%.3f\n",
+                        timing.upload_ms,
+                        timing.kernel_ms,
+                        timing.download_ms,
+                        timing.total_ms);
+        }
+
+        std::vector<uint16_t> postRgba(pixelCount * 4u, 0u);
+        if (!read_rgba16_texture(postTex, &postRgba, "post-WB"))
+        {
+            glDeleteTextures(1, &postTex);
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+
+        postWbGlDiff =
+            compare_gl_rgba_to_rgb("post-WB GL_RGBA16 texture vs CPU post-WB reference",
+                                   hostPostRgb.data(),
+                                   postRgba.data(),
+                                   pixelCount);
+        const uint64_t postRgbaHash =
+            fnv1a64(postRgba.data(), postRgba.size() * sizeof(uint16_t));
+        std::printf("[amaze_dll_test] post-WB GL RGBA16 FNV1A64 = %016llx\n",
+                    (unsigned long long)postRgbaHash);
+        glDeleteTextures(1, &postTex);
         destroy_hidden_gl_context(&gl);
     }
 
     f_destroy(backend);
     FreeLibrary(dll);
 
-    const bool pass = !runGlTexture || glDiff == 0;
+    const bool pass = !runGlTexture || (glDiff == 0 && postWbGlDiff == 0);
     std::printf("\n[amaze_dll_test] RESULT: %s%s\n",
                 pass ? "PASS" : "FAIL",
-                runGlTexture ? " (host RGB16 == GL_RGBA16 RGB, alpha=65535)" : "");
+                runGlTexture ? " (pre-WB and post-WB GL_RGBA16 RGB bit-exact, alpha=65535)" : "");
     return pass ? 0 : 1;
 }

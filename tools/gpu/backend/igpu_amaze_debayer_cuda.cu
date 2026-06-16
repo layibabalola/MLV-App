@@ -117,6 +117,39 @@ __global__ void k_pack_rgb16_to_rgba16(const uint16_t * rgb,
     rgba[pixel * 4u + 3u] = 65535u;
 }
 
+__device__ __forceinline__ uint16_t clamp_double_to_u16(double value)
+{
+    if (value <= 0.0) return 0u;
+    if (value >= 65535.0) return 65535u;
+    return static_cast<uint16_t>(value);
+}
+
+__global__ void k_pack_rgb16_to_rgba16_post_wb_undo(const uint16_t * rgb,
+                                                    uint16_t * rgba,
+                                                    std::size_t pixelCount,
+                                                    int blackLevel,
+                                                    double wbMultiplierR,
+                                                    double wbMultiplierG,
+                                                    double wbMultiplierB)
+{
+    const std::size_t pixel =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (pixel >= pixelCount) return;
+
+    const std::size_t rgbIndex = pixel * 3u;
+    const std::size_t rgbaIndex = pixel * 4u;
+    rgba[rgbaIndex + 0u] =
+        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 0u]) / wbMultiplierR)
+                            + static_cast<double>(blackLevel));
+    rgba[rgbaIndex + 1u] =
+        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 1u]) / wbMultiplierG)
+                            + static_cast<double>(blackLevel));
+    rgba[rgbaIndex + 2u] =
+        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 2u]) / wbMultiplierB)
+                            + static_cast<double>(blackLevel));
+    rgba[rgbaIndex + 3u] = 65535u;
+}
+
 void run_tile(const float * dRaw,
               uint16_t * dRgb16,
               DeviceBuffers & d,
@@ -405,6 +438,114 @@ extern "C" igpu_amaze_debayer_backend * igpu_amaze_debayer_create(const char * b
     }
 }
 
+int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
+                                                 int width,
+                                                 int height,
+                                                 unsigned int glTexture,
+                                                 int blackLevel,
+                                                 double wbMultiplierR,
+                                                 double wbMultiplierG,
+                                                 double wbMultiplierB)
+{
+    if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
+    if (wbMultiplierR <= 0.0 || wbMultiplierG <= 0.0 || wbMultiplierB <= 0.0) return -1;
+
+    if (blackLevel < 1000) blackLevel = -1000;
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t rgbaBytes = pixelCount * 4u * sizeof(uint16_t);
+    uint16_t * dRgba16 = nullptr;
+    cudaGraphicsResource * resource = nullptr;
+
+    try
+    {
+        CK(cudaMalloc(&dRgba16, rgbaBytes));
+        const int threads = 256;
+        const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
+        k_pack_rgb16_to_rgba16_post_wb_undo<<<blocks, threads>>>(dRgb16,
+                                                                 dRgba16,
+                                                                 pixelCount,
+                                                                 blackLevel,
+                                                                 wbMultiplierR,
+                                                                 wbMultiplierG,
+                                                                 wbMultiplierB);
+        CK(cudaGetLastError());
+
+        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                     glTexture,
+                                                     GL_TEXTURE_2D,
+                                                     cudaGraphicsRegisterFlagsWriteDiscard);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 post-WB texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            cudaFree(dRgba16);
+            return 2;
+        }
+
+        rc = cudaGraphicsMapResources(1, &resource, 0);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 post-WB texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            cudaGraphicsUnregisterResource(resource);
+            cudaFree(dRgba16);
+            return 2;
+        }
+
+        cudaArray_t mappedArray = nullptr;
+        rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
+        if (rc == cudaSuccess)
+        {
+            const std::size_t rowBytes = static_cast<std::size_t>(width) * 4u * sizeof(uint16_t);
+            rc = cudaMemcpy2DToArray(mappedArray,
+                                     0,
+                                     0,
+                                     dRgba16,
+                                     rowBytes,
+                                     rowBytes,
+                                     static_cast<std::size_t>(height),
+                                     cudaMemcpyDeviceToDevice);
+        }
+
+        const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
+        const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+        cudaFree(dRgba16);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] post-WB device-to-GL texture copy failed: %s\n",
+                         cudaGetErrorString(rc));
+            return 2;
+        }
+        if (unmapRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 post-WB texture) failed: %s\n",
+                         cudaGetErrorString(unmapRc));
+            return 2;
+        }
+        if (unregisterRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(GL_RGBA16 post-WB texture) failed: %s\n",
+                         cudaGetErrorString(unregisterRc));
+            return 2;
+        }
+        return 0;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        if (resource) cudaGraphicsUnregisterResource(resource);
+        cudaFree(dRgba16);
+        return 2;
+    }
+}
+
 extern "C" void igpu_amaze_debayer_destroy(igpu_amaze_debayer_backend * backend)
 {
     delete backend;
@@ -540,8 +681,81 @@ extern "C" int igpu_amaze_debayer_run_gl_texture(igpu_amaze_debayer_backend * ba
     }
 }
 
+extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_backend * backend,
+                                                         const float * in_raw_float,
+                                                         unsigned int gl_texture,
+                                                         int width,
+                                                         int height,
+                                                         int black_level,
+                                                         double wb_multiplier_r,
+                                                         double wb_multiplier_g,
+                                                         double wb_multiplier_b)
+{
+    if (!backend || !in_raw_float || gl_texture == 0 || width <= 32 || height <= 32
+        || wb_multiplier_r <= 0.0 || wb_multiplier_g <= 0.0 || wb_multiplier_b <= 0.0)
+    {
+        return -1;
+    }
+
+    float * dRaw = nullptr;
+    uint16_t * dRgb16 = nullptr;
+    DeviceBuffers d;
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t rawBytes = pixelCount * sizeof(float);
+    const std::size_t rgbBytes = pixelCount * 3u * sizeof(uint16_t);
+    std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
+
+    const double totalStart = now_ms();
+    try
+    {
+        CK(cudaMalloc(&dRaw, rawBytes));
+        CK(cudaMalloc(&dRgb16, rgbBytes));
+        allocate_device(&d, 1);
+        CK(cudaMemset(dRgb16, 0, rgbBytes));
+
+        const double uploadStart = now_ms();
+        CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.upload_ms = now_ms() - uploadStart;
+
+        const double kernelStart = now_ms();
+        run_frame_to_device_rgb16(dRaw, dRgb16, d, width, height);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.kernel_ms = now_ms() - kernelStart;
+
+        const double handoffStart = now_ms();
+        const int rc =
+            copy_rgb16_to_gl_rgba16_texture_post_wb_undo(dRgb16,
+                                                         width,
+                                                         height,
+                                                         gl_texture,
+                                                         black_level,
+                                                         wb_multiplier_r,
+                                                         wb_multiplier_g,
+                                                         wb_multiplier_b);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.download_ms = now_ms() - handoffStart;
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+
+        free_device(&d);
+        cudaFree(dRaw);
+        cudaFree(dRgb16);
+        return rc;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        free_device(&d);
+        cudaFree(dRaw);
+        cudaFree(dRgb16);
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return -2;
+    }
+}
+
 extern "C" int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,
-                                              igpu_amaze_debayer_timing_t * timing)
+                                               igpu_amaze_debayer_timing_t * timing)
 {
     if (!backend || !timing) return -1;
     *timing = backend->lastTiming;
