@@ -59,6 +59,7 @@ constexpr float kTolerance = 1.0e-6f;
 constexpr int kVarianceWavefrontThreads = 128;
 constexpr int kNyquistPrefixThreads = 128;
 constexpr int kGreenPlaneThreads = 128;
+constexpr int kPmwtRowThreads = 128;
 
 struct CaseSpec
 {
@@ -2176,24 +2177,25 @@ __global__ void k_diagonal_rb_interpolation(const float * cfa,
     }
 }
 
-__global__ void k_pmwt_refinement_and_rbint_scalar(const float * cfa,
-                                                   const float * rbm,
-                                                   const float * rbp,
-                                                   float * pmwt,
-                                                   float * pmwtalt,
-                                                   float * rbint,
-                                                   int rr1,
-                                                   int cc1)
+__global__ void k_pmwt_refinement_and_rbint_row_parallel(const float * cfa,
+                                                         const float * rbm,
+                                                         const float * rbp,
+                                                         float * pmwt,
+                                                         float * pmwtalt,
+                                                         float * rbint,
+                                                         int rr1,
+                                                         int cc1)
 {
-    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0 || threadIdx.y != 0) return;
+    if (blockIdx.x != 0) return;
 
     const int p1 = -kTileSize + 1;
     const int m1 = kTileSize + 1;
     for (int rr = 10; rr < rr1 - 10; ++rr)
     {
-        for (int cc = 10 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+        const int ccStart = 10 + (fc_rggb(rr, 2) & 1);
+        for (int cc = ccStart + 2 * threadIdx.x, idx = rr * kTileSize + cc;
              cc < cc1 - 10;
-             cc += 2, idx += 2)
+             cc += 2 * blockDim.x, idx += 2 * blockDim.x)
         {
             const int halfIdx = idx >> 1;
             pmwtalt[halfIdx] =
@@ -2212,6 +2214,7 @@ __global__ void k_pmwt_refinement_and_rbint_scalar(const float * cfa,
                              rbm[halfIdx] * (1.0f - pmwt[halfIdx]) +
                              rbp[halfIdx] * pmwt[halfIdx]);
         }
+        __syncthreads();
     }
 }
 
@@ -2852,14 +2855,14 @@ bool run_case(const CaseSpec & spec)
                                                  rr1,
                                                  cc1);
     CK(cudaGetLastError());
-    k_pmwt_refinement_and_rbint_scalar<<<1, 1>>>(d.cfa,
-                                                 d.rbm,
-                                                 d.rbp,
-                                                 d.pmwt,
-                                                 d.pmwtalt,
-                                                 d.rbint,
-                                                 rr1,
-                                                 cc1);
+    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(d.cfa,
+                                                                     d.rbm,
+                                                                     d.rbp,
+                                                                     d.pmwt,
+                                                                     d.pmwtalt,
+                                                                     d.rbint,
+                                                                     rr1,
+                                                                     cc1);
     CK(cudaGetLastError());
     k_diagonal_green_correction<<<grid, block>>>(d.cfa,
                                                  d.dirwts0,

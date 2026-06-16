@@ -192,14 +192,14 @@ void run_tile(const float * dRaw,
                                                  rr1,
                                                  cc1);
     CK(cudaGetLastError());
-    k_pmwt_refinement_and_rbint_scalar<<<1, 1>>>(d.cfa,
-                                                 d.rbm,
-                                                 d.rbp,
-                                                 d.pmwt,
-                                                 d.pmwtalt,
-                                                 d.rbint,
-                                                 rr1,
-                                                 cc1);
+    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(d.cfa,
+                                                                     d.rbm,
+                                                                     d.rbp,
+                                                                     d.pmwt,
+                                                                     d.pmwtalt,
+                                                                     d.rbint,
+                                                                     rr1,
+                                                                     cc1);
     CK(cudaGetLastError());
     k_diagonal_green_correction<<<grid, block>>>(d.cfa,
                                                  d.dirwts0,
