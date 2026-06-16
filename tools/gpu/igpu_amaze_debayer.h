@@ -8,9 +8,10 @@
  *   Input  : float[width*height] RGGB raw frame after the same WB/CA prep the
  *            CPU AMaZE core receives.
  *   Output : uint16_t[width*height*3] interleaved RGB, before WB undo, or a
- *            GL_TEXTURE_2D with GL_RGBA16 storage for the zero-readback
- *            playback handoff. The GL texture form carries the same RGB16
- *            values in RGB with alpha set to 65535.
+ *            GL_TEXTURE_2D with GL_RGBA16 storage for lower-stack parity
+ *            checks. The production playback GL handoff must use the explicit
+ *            post-WB-undo texture symbol so displayed pixels match the current
+ *            CPU-readback path.
  */
 #ifndef IGPU_AMAZE_DEBAYER_H
 #define IGPU_AMAZE_DEBAYER_H
@@ -48,6 +49,16 @@ int igpu_amaze_debayer_run_gl_texture(igpu_amaze_debayer_backend * backend,
                                       unsigned int gl_texture,
                                       int width,
                                       int height);
+
+int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_backend * backend,
+                                              const float * in_raw_float,
+                                              unsigned int gl_texture,
+                                              int width,
+                                              int height,
+                                              int black_level,
+                                              double wb_multiplier_r,
+                                              double wb_multiplier_g,
+                                              double wb_multiplier_b);
 
 int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,
                                    igpu_amaze_debayer_timing_t * timing);

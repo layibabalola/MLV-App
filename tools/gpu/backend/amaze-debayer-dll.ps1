@@ -73,6 +73,7 @@ $required = @(
     'igpu_amaze_debayer_describe',
     'igpu_amaze_debayer_run',
     'igpu_amaze_debayer_run_gl_texture',
+    'igpu_amaze_debayer_run_post_wb_gl_texture',
     'igpu_amaze_debayer_last_timing'
 )
 $missing = @()
