@@ -57,6 +57,7 @@ constexpr float kClipPoint8 = 0.8f;
 constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
 constexpr int kVarianceWavefrontThreads = 128;
+constexpr int kNyquistPrefixThreads = 128;
 
 struct CaseSpec
 {
@@ -1789,32 +1790,112 @@ __global__ void k_nyquist_test(const float * cddiffsq,
     }
 }
 
-__global__ void k_nyquist_refine_scalar(unsigned char * nyquist, int rr1, int cc1)
+__device__ unsigned char nyquist_refine_result(unsigned int nyquisttemp,
+                                               unsigned char current)
 {
+    if (nyquisttemp > 4) return 1;
+    if (nyquisttemp < 4) return 0;
+    return current ? 1 : 0;
+}
+
+__device__ unsigned char nyquist_refine_apply_map(unsigned char map,
+                                                  unsigned int input)
+{
+    return static_cast<unsigned char>((map >> (input & 1u)) & 1u);
+}
+
+__device__ unsigned char nyquist_refine_compose_maps(unsigned char before,
+                                                     unsigned char after)
+{
+    const unsigned char out0 =
+        nyquist_refine_apply_map(after, nyquist_refine_apply_map(before, 0));
+    const unsigned char out1 =
+        nyquist_refine_apply_map(after, nyquist_refine_apply_map(before, 1));
+    return static_cast<unsigned char>(out0 | (out1 << 1));
+}
+
+__device__ unsigned char nyquist_refine_build_map(unsigned int sumNoLeft,
+                                                  unsigned char current)
+{
+    const unsigned char out0 = nyquist_refine_result(sumNoLeft, current);
+    const unsigned char out1 = nyquist_refine_result(sumNoLeft + 1u, current);
+    return static_cast<unsigned char>(out0 | (out1 << 1));
+}
+
+__global__ void k_nyquist_refine_row_prefix(unsigned char * nyquist, int rr1, int cc1)
+{
+    if (blockIdx.x != 0 || blockIdx.y != 0) return;
+
     const int v2 = 2 * kTileSize;
     const int p1 = -kTileSize + 1;
     const int m1 = kTileSize + 1;
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
 
+    __shared__ unsigned char maps[kTileHalf];
+    __shared__ unsigned char rowBoundaryLeft;
+
+    // Preserve the scalar row-major pass: rows are finalized in order, while
+    // each row is scanned as a Boolean recurrence over the same-row left bit.
     for (int rr = 8; rr < rr1 - 8; ++rr)
     {
-        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
-             cc < cc1 - 8;
-             cc += 2, idx += 2)
-        {
-            const unsigned int nyquisttemp =
-                nyquist[(idx - v2) >> 1] +
-                nyquist[(idx - m1) >> 1] +
-                nyquist[(idx + p1) >> 1] +
-                nyquist[(idx - 2) >> 1] +
-                nyquist[idx >> 1] +
-                nyquist[(idx + 2) >> 1] +
-                nyquist[(idx - p1) >> 1] +
-                nyquist[(idx + m1) >> 1] +
-                nyquist[(idx + v2) >> 1];
+        const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+        if (ccStart >= cc1 - 8) continue;
+        const int count = ((cc1 - 9 - ccStart) / 2) + 1;
 
-            if (nyquisttemp > 4) nyquist[idx >> 1] = 1;
-            if (nyquisttemp < 4) nyquist[idx >> 1] = 0;
+        if (tid == 0)
+        {
+            const int idxStart = rr * kTileSize + ccStart;
+            rowBoundaryLeft = nyquist[(idxStart - 2) >> 1];
         }
+
+        if (tid < kTileHalf)
+        {
+            if (tid < count)
+            {
+                const int cc = ccStart + 2 * tid;
+                const int idx = rr * kTileSize + cc;
+                const unsigned int sumNoLeft =
+                    nyquist[(idx - v2) >> 1] +
+                    nyquist[(idx - m1) >> 1] +
+                    nyquist[(idx + p1) >> 1] +
+                    nyquist[idx >> 1] +
+                    nyquist[(idx + 2) >> 1] +
+                    nyquist[(idx - p1) >> 1] +
+                    nyquist[(idx + m1) >> 1] +
+                    nyquist[(idx + v2) >> 1];
+                maps[tid] = nyquist_refine_build_map(sumNoLeft, nyquist[idx >> 1]);
+            }
+            else
+            {
+                maps[tid] = 2;
+            }
+        }
+        __syncthreads();
+
+        for (int offset = 1; offset < kTileHalf; offset <<= 1)
+        {
+            unsigned char combined = 2;
+            if (tid < kTileHalf)
+            {
+                const unsigned char mine = maps[tid];
+                const unsigned char before = (tid >= offset) ? maps[tid - offset] : 2;
+                combined = nyquist_refine_compose_maps(before, mine);
+            }
+            __syncthreads();
+            if (tid < kTileHalf && tid >= offset)
+            {
+                maps[tid] = combined;
+            }
+            __syncthreads();
+        }
+
+        if (tid < count)
+        {
+            const int cc = ccStart + 2 * tid;
+            const int idx = rr * kTileSize + cc;
+            nyquist[idx >> 1] = nyquist_refine_apply_map(maps[tid], rowBoundaryLeft);
+        }
+        __syncthreads();
     }
 }
 
@@ -2725,7 +2806,7 @@ bool run_case(const CaseSpec & spec)
                                     rr1,
                                     cc1);
     CK(cudaGetLastError());
-    k_nyquist_refine_scalar<<<1, 1>>>(d.nyquist, rr1, cc1);
+    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads>>>(d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
     k_nyquist_area_interpolation<<<grid, block>>>(d.cfa,
                                                   d.nyquist,
