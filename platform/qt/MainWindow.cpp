@@ -5224,6 +5224,10 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         return 3;
     }
 
+    m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
+    m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
+    m_gpuAmazeDebayerBackendRequest = options.gpuAmazeDebayerBackend;
+
     show();
     qApp->processEvents( QEventLoop::AllEvents );
 
@@ -5281,8 +5285,42 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
      * the receipt-only fallback. Opt the smoke into the playback policy so
      * the fast-processing subset can participate while we benchmark. */
     m_headlessPlaybackProfileUsePlaybackPolicy = true;
-    ui->actionUseFastProcessingForPlayback->setChecked( true );
+    if( options.forcePlaybackDebayer )
+    {
+        setPlaybackProfileDebayerRequest( options.playbackDebayer );
+    }
+    setPlaybackProfileProcessingRequest( options.playbackProcessing );
+    selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
+
+    logInteractionEvent(
+        QStringLiteral("gui_smoke.playback_policy"),
+        QStringLiteral(
+            "playback_debayer_forced=%1 playback_debayer_request=%2 "
+            "playback_debayer_effective=%3 playback_processing_request=%4 "
+            "playback_processing_selected=%5 gpu_preview_processing_request=%6 "
+            "gpu_bilinear_debayer_request=%7 gpu_amaze_debayer_request=%8 "
+            "gpu_amaze_texture_present_environment=%9 playback_policy_active=%10" )
+            .arg( bool01( options.forcePlaybackDebayer ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_debayer_request_name(
+                          options.playbackDebayer ) ) )
+            .arg( playbackDebayerLabel() )
+            .arg( QString::fromLatin1(
+                      playback_profile_processing_request_name(
+                          options.playbackProcessing ) ) )
+            .arg( selectedPlaybackProcessingLabel() )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_preview_backend_name(
+                          options.gpuPreviewProcessingBackend ) ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_bilinear_debayer_backend_name(
+                          options.gpuBilinearDebayerBackend ) ) )
+            .arg( QString::fromLatin1(
+                      playback_profile_gpu_amaze_debayer_backend_name(
+                          options.gpuAmazeDebayerBackend ) ) )
+            .arg( bool01( gpuAmazeTexturePresentRequestedByEnvironment() ) )
+            .arg( bool01( m_headlessPlaybackProfileUsePlaybackPolicy ) ) );
 
     const int totalFrames = getMlvFrames( m_pMlvObject );
     if( totalFrames < 2 )

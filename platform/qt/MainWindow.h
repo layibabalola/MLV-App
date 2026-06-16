@@ -144,7 +144,18 @@ public:
         QString screenshotOutputPath;
         QString windowScreenshotOutputPath;
         PlaybackProfileScope scope = PlaybackProfileScope::None;
+        PlaybackProfileDebayerRequest playbackDebayer =
+            PlaybackProfileDebayerRequest::Auto;
+        PlaybackProfileProcessingRequest playbackProcessing =
+            PlaybackProfileProcessingRequest::Subset;
+        GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackend =
+            GpuPreviewProcessingBackendRequest::Auto;
+        GpuBilinearDebayerBackendRequest gpuBilinearDebayerBackend =
+            GpuBilinearDebayerBackendRequest::Auto;
+        GpuAmazeDebayerBackendRequest gpuAmazeDebayerBackend =
+            GpuAmazeDebayerBackendRequest::Auto;
         bool forceScope = false;
+        bool forcePlaybackDebayer = false;
         bool zebras = false;
         bool forceZebras = false;
     };

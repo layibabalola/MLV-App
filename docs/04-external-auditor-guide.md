@@ -486,6 +486,32 @@ The production default is the CPU path in every case. A reviewer looking at
 the shipped binary behaviour should confirm these env vars are unset when
 evaluating "typical use".
 
+For the AMaZE texture-present path, reviewers should use the GUI smoke wrapper
+selector flags instead of relying on persisted GUI state. A proof run should
+force AMaZE, subset playback processing, GPU preview processing, and GPU AMaZE
+selection, then compare a CPU-readback run against a texture-present run on the
+same RTX 4090 machine:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\run-release-gui-smoke.ps1 -RepoRoot . `
+  -Input C:\temp\MLV\M16-1327.MLV `
+  -Output .claude-state\profiling\gpu-amaze-present-proof\texture-present.json `
+  -CaptureScreenshot -FrameTelemetry -PlaybackDebayer amaze `
+  -PlaybackProcessing subset -GpuPreviewProcessing gpu -GpuAmazeDebayer gpu `
+  -StageLog .claude-state\profiling\gpu-amaze-present-proof\texture-present-stage.log `
+  -ExtraEnvironment @(
+    'MLVAPP_GPU_AMAZE_DEBAYER_DLL=C:\path\to\igpu_amaze_debayer_cuda.dll',
+    'MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1'
+  )
+```
+
+The resulting JSON includes `visualQuality.playbackPolicy`, which records the
+forced debayer/processing/GPU selector state. A passing selector smoke does not
+by itself prove the no-readback path; approval still requires user-interactive
+RTX 4090 screenshot/pixel evidence that the texture-present run and the
+CPU-readback run are identical or that any differences are justified.
+
 ## 8. Reproducing a build from scratch
 
 For full detail see [docs/02-developer-guide.md](02-developer-guide.md) and

@@ -858,6 +858,46 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("mode"));
     parser.addOption(scopeOpt);
 
+    const QCommandLineOption playbackDebayerOpt(
+        QStringLiteral("playback-debayer"),
+        QStringLiteral("Force playback debayer during the smoke: auto, receipt, none, simple, bilinear, lmmse, igv, amaze, ahd, rcd, dcb, amaze-cached. If omitted, the user's persisted GUI state is used."),
+        QStringLiteral("mode"),
+        QStringLiteral("auto"));
+    parser.addOption(playbackDebayerOpt);
+
+    const QCommandLineOption playbackProcessingOpt(
+        QStringLiteral("playback-processing"),
+        QStringLiteral("Force playback processing during the smoke: receipt or subset. Defaults to subset to match the existing GUI smoke lane."),
+        QStringLiteral("mode"),
+        QStringLiteral("subset"));
+    parser.addOption(playbackProcessingOpt);
+
+    const QCommandLineOption gpuViewportOpt(
+        QStringLiteral("gpu-viewport"),
+        QStringLiteral("Enable the experimental OpenGL viewport path during the smoke."));
+    parser.addOption(gpuViewportOpt);
+
+    const QCommandLineOption gpuPreviewProcessingOpt(
+        QStringLiteral("gpu-preview-processing"),
+        QStringLiteral("Preview-processing backend selection for the 16-bit GPU viewport path: auto, cpu, gpu. Selecting gpu implies --gpu-viewport."),
+        QStringLiteral("backend"),
+        QStringLiteral("auto"));
+    parser.addOption(gpuPreviewProcessingOpt);
+
+    const QCommandLineOption gpuBilinearDebayerOpt(
+        QStringLiteral("gpu-bilinear-debayer"),
+        QStringLiteral("Experimental bilinear debayer backend selection for the GPU preview-processing path: auto, cpu, gpu. Selecting gpu implies --gpu-viewport."),
+        QStringLiteral("backend"),
+        QStringLiteral("auto"));
+    parser.addOption(gpuBilinearDebayerOpt);
+
+    const QCommandLineOption gpuAmazeDebayerOpt(
+        QStringLiteral("gpu-amaze-debayer"),
+        QStringLiteral("Experimental AMaZE debayer backend selection for the GPU preview-processing path: auto, cpu, gpu. Selecting gpu implies --gpu-viewport and --gpu-preview-processing gpu."),
+        QStringLiteral("backend"),
+        QStringLiteral("auto"));
+    parser.addOption(gpuAmazeDebayerOpt);
+
     const QCommandLineOption zebrasOpt(
         QStringLiteral("zebras"),
         QStringLiteral("Force zebra overlay on during the smoke."));
@@ -867,6 +907,12 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("no-zebras"),
         QStringLiteral("Force zebra overlay off during the smoke."));
     parser.addOption(noZebrasOpt);
+
+    const QCommandLineOption stageLogOpt(
+        QStringLiteral("stage-log"),
+        QStringLiteral("Optional stage timing log path. Also enables MLVAPP_STAGE_TIMING."),
+        QStringLiteral("file"));
+    parser.addOption(stageLogOpt);
 
     parser.process(app);
 
@@ -941,6 +987,87 @@ static int runGuiPlaybackSmoke(QApplication &app)
         return 2;
     }
 
+    bool playbackDebayerOk = false;
+    const MainWindow::PlaybackProfileDebayerRequest playbackDebayer =
+        parsePlaybackProfileDebayerRequest(
+            parser.value(playbackDebayerOpt),
+            &playbackDebayerOk);
+    if (!playbackDebayerOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --playback-debayer must be one of auto, receipt, none, simple, bilinear, lmmse, igv, amaze, ahd, rcd, dcb, amaze-cached.\n";
+        return 2;
+    }
+
+    bool playbackProcessingOk = false;
+    const MainWindow::PlaybackProfileProcessingRequest playbackProcessing =
+        parsePlaybackProfileProcessingRequest(
+            parser.value(playbackProcessingOpt),
+            &playbackProcessingOk);
+    if (!playbackProcessingOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --playback-processing must be one of auto, receipt, subset.\n";
+        return 2;
+    }
+
+    bool gpuPreviewProcessingOk = false;
+    GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackend =
+        parsePlaybackProfileGpuPreviewProcessingBackend(
+            parser.value(gpuPreviewProcessingOpt),
+            &gpuPreviewProcessingOk);
+    if (!gpuPreviewProcessingOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --gpu-preview-processing must be one of auto, cpu, gpu.\n";
+        return 2;
+    }
+
+    bool gpuBilinearDebayerOk = false;
+    const GpuBilinearDebayerBackendRequest gpuBilinearDebayerBackend =
+        parsePlaybackProfileGpuBilinearDebayerBackend(
+            parser.value(gpuBilinearDebayerOpt),
+            &gpuBilinearDebayerOk);
+    if (!gpuBilinearDebayerOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --gpu-bilinear-debayer must be one of auto, cpu, gpu.\n";
+        return 2;
+    }
+
+    bool gpuAmazeDebayerOk = false;
+    const GpuAmazeDebayerBackendRequest gpuAmazeDebayerBackend =
+        parsePlaybackProfileGpuAmazeDebayerBackend(
+            parser.value(gpuAmazeDebayerOpt),
+            &gpuAmazeDebayerOk);
+    if (!gpuAmazeDebayerOk)
+    {
+        err << "[GUI-SMOKE] ERROR: --gpu-amaze-debayer must be one of auto, cpu, gpu.\n";
+        return 2;
+    }
+    if (gpuAmazeDebayerBackend == GpuAmazeDebayerBackendRequest::Gpu)
+    {
+        if (gpuPreviewProcessingBackend == GpuPreviewProcessingBackendRequest::Cpu)
+        {
+            err << "[GUI-SMOKE] ERROR: --gpu-amaze-debayer gpu requires --gpu-preview-processing gpu or auto.\n";
+            return 2;
+        }
+        gpuPreviewProcessingBackend = GpuPreviewProcessingBackendRequest::Gpu;
+    }
+
+    if (parser.isSet(gpuViewportOpt)
+        || gpuPreviewProcessingBackend == GpuPreviewProcessingBackendRequest::Gpu
+        || gpuBilinearDebayerBackend == GpuBilinearDebayerBackendRequest::Gpu
+        || gpuAmazeDebayerBackend == GpuAmazeDebayerBackendRequest::Gpu)
+    {
+        qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
+    }
+
+    const QString stageLogPath = parser.value(stageLogOpt).isEmpty()
+        ? QString()
+        : QFileInfo(parser.value(stageLogOpt)).absoluteFilePath();
+    if (parser.isSet(stageLogOpt))
+    {
+        qputenv("MLVAPP_STAGE_TIMING", QByteArrayLiteral("1"));
+        qputenv("MLVAPP_STAGE_TIMING_FILE", QDir::toNativeSeparators(stageLogPath).toLocal8Bit());
+    }
+
     if (parser.isSet(zebrasOpt) && parser.isSet(noZebrasOpt))
     {
         err << "[GUI-SMOKE] ERROR: use only one of --zebras or --no-zebras.\n";
@@ -965,7 +1092,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         ? QString()
         : QFileInfo(parser.value(windowScreenshotOutputOpt)).absoluteFilePath();
     options.scope = scope;
+    options.playbackDebayer = playbackDebayer;
+    options.playbackProcessing = playbackProcessing;
+    options.gpuPreviewProcessingBackend = gpuPreviewProcessingBackend;
+    options.gpuBilinearDebayerBackend = gpuBilinearDebayerBackend;
+    options.gpuAmazeDebayerBackend = gpuAmazeDebayerBackend;
     options.forceScope = parser.isSet(scopeOpt);
+    options.forcePlaybackDebayer = parser.isSet(playbackDebayerOpt);
     options.zebras = parser.isSet(zebrasOpt);
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
 
