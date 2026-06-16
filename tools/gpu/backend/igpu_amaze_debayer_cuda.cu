@@ -154,7 +154,7 @@ void run_tile(const float * dRaw,
     CK(cudaGetLastError());
     k_nyquist_test<<<grid, block>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
-    k_nyquist_refine_scalar<<<1, 1>>>(d.nyquist, rr1, cc1);
+    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads>>>(d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
     k_nyquist_area_interpolation<<<grid, block>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
     CK(cudaGetLastError());
