@@ -58,6 +58,7 @@ constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
 constexpr int kVarianceWavefrontThreads = 128;
 constexpr int kNyquistPrefixThreads = 128;
+constexpr int kGreenPlaneThreads = 128;
 
 struct CaseSpec
 {
@@ -1947,27 +1948,29 @@ __global__ void k_nyquist_area_interpolation(const float * cfa,
     hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
 }
 
-__global__ void k_green_plane_assembly_scalar(const float * cfa,
-                                              const float * vcd,
-                                              const float * hcd,
-                                              const unsigned char * nyquist,
-                                              float * hvwt,
-                                              float * dgrb0,
-                                              float * rgbgreen,
-                                              float * dgrb2h,
-                                              float * dgrb2v,
-                                              int rr1,
-                                              int cc1)
+__global__ void k_green_plane_assembly_row_parallel(const float * cfa,
+                                                    const float * vcd,
+                                                    const float * hcd,
+                                                    const unsigned char * nyquist,
+                                                    float * hvwt,
+                                                    float * dgrb0,
+                                                    float * rgbgreen,
+                                                    float * dgrb2h,
+                                                    float * dgrb2v,
+                                                    int rr1,
+                                                    int cc1)
 {
+    const int tid = threadIdx.x;
     const int v1 = kTileSize;
     const int p1 = -kTileSize + 1;
     const int m1 = kTileSize + 1;
 
     for (int rr = 8; rr < rr1 - 8; ++rr)
     {
-        for (int cc = 8 + (fc_rggb(rr, 2) & 1), idx = rr * kTileSize + cc;
+        const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+        for (int cc = ccStart + 2 * tid, idx = rr * kTileSize + cc;
              cc < cc1 - 8;
-             cc += 2, idx += 2)
+             cc += 2 * blockDim.x, idx += 2 * blockDim.x)
         {
             const float hvwtalt =
                 xdivf_probe(hvwt[(idx - m1) >> 1] +
@@ -1996,6 +1999,7 @@ __global__ void k_green_plane_assembly_scalar(const float * cfa,
                 dgrb2v[idx >> 1] = 0.0f;
             }
         }
+        __syncthreads();
     }
 }
 
@@ -2814,17 +2818,17 @@ bool run_case(const CaseSpec & spec)
                                                   rr1,
                                                   cc1);
     CK(cudaGetLastError());
-    k_green_plane_assembly_scalar<<<1, 1>>>(d.cfa,
-                                            d.vcd,
-                                            d.hcd,
-                                            d.nyquist,
-                                            d.hvwt,
-                                            d.dgrb0,
-                                            d.rgbgreen,
-                                            d.dgrb2h,
-                                            d.dgrb2v,
-                                            rr1,
-                                            cc1);
+    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(d.cfa,
+                                                                   d.vcd,
+                                                                   d.hcd,
+                                                                   d.nyquist,
+                                                                   d.hvwt,
+                                                                   d.dgrb0,
+                                                                   d.rgbgreen,
+                                                                   d.dgrb2h,
+                                                                   d.dgrb2v,
+                                                                   rr1,
+                                                                   cc1);
     CK(cudaGetLastError());
     k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
                                                 d.vcd,
