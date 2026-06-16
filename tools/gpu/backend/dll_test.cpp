@@ -11,11 +11,15 @@
  *   2. Load the oracle in.u16 + the 4 LUTs from the vectors dir.
  *   3. create("cuda") / set_clip / set_luts / run(in.u16, CPU16).
  *   4. Compare run() output to oracle out.u16 -> expect max abs diff 0 LSB.
- *   5. Print last_timing (upload / kernel / download / total).
+ *   5. Print last_timing (upload / kernel / download-or-interop / total).
+ *   6. Optional --gl-texture mode reruns through IGPU_OUT_GL_TEXTURE into a
+ *      hidden-WGL GL_R16 texture, then reads that texture back only for harness
+ *      parity comparison. The backend call itself performs no D2H copy.
  *
  * Build (MSVC cl, on the host):
- *   cl /EHsc /O2 dll_test.cpp /Fe:dll_test.exe
- *   (no CUDA link; only Win32 LoadLibrary. See build-backend-dll.ps1.)
+ *   cl /EHsc /O2 dll_test.cpp /Fe:dll_test.exe opengl32.lib user32.lib gdi32.lib
+ *   (no CUDA link; only Win32 LoadLibrary plus optional WGL test context. See
+ *   build-backend-dll.ps1.)
  *
  * Run:
  *   dll_test.exe [vectors_dir] [dll_path]
@@ -29,8 +33,24 @@
 #include <cstdint>
 #include <string>
 #include <windows.h>
+#include <GL/gl.h>
 
 #include "igpu_recon.h"
+
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+#ifndef GL_RED
+#define GL_RED 0x1903
+#endif
+#ifndef GL_R16
+#define GL_R16 0x822A
+#endif
 
 /* fixed oracle geometry / LUT sizes (README.txt) */
 #define W 1808
@@ -64,6 +84,129 @@ static void* load_blob(const std::string& path, size_t expect_bytes)
     return p;
 }
 
+struct HiddenGlContext
+{
+    HWND hwnd;
+    HDC hdc;
+    HGLRC hglrc;
+};
+
+static bool create_hidden_gl_context(HiddenGlContext* gl)
+{
+    if (!gl) return false;
+    memset(gl, 0, sizeof(*gl));
+
+    WNDCLASSA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.style = CS_OWNDC;
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "MLVAppReconDllTestHiddenGl";
+    RegisterClassA(&wc);
+
+    gl->hwnd = CreateWindowA(wc.lpszClassName,
+                             "MLVApp recon dll GL texture test",
+                             WS_OVERLAPPEDWINDOW,
+                             0,
+                             0,
+                             64,
+                             64,
+                             NULL,
+                             NULL,
+                             wc.hInstance,
+                             NULL);
+    if (!gl->hwnd) {
+        fprintf(stderr, "[dll_test] CreateWindowA for hidden GL context failed (err=%lu)\n",
+                (unsigned long)GetLastError());
+        return false;
+    }
+
+    gl->hdc = GetDC(gl->hwnd);
+    if (!gl->hdc) {
+        fprintf(stderr, "[dll_test] GetDC for hidden GL context failed\n");
+        DestroyWindow(gl->hwnd);
+        memset(gl, 0, sizeof(*gl));
+        return false;
+    }
+
+    PIXELFORMATDESCRIPTOR pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+
+    const int pixel_format = ChoosePixelFormat(gl->hdc, &pfd);
+    if (pixel_format == 0 || !SetPixelFormat(gl->hdc, pixel_format, &pfd)) {
+        fprintf(stderr, "[dll_test] ChoosePixelFormat/SetPixelFormat failed (err=%lu)\n",
+                (unsigned long)GetLastError());
+        ReleaseDC(gl->hwnd, gl->hdc);
+        DestroyWindow(gl->hwnd);
+        memset(gl, 0, sizeof(*gl));
+        return false;
+    }
+
+    gl->hglrc = wglCreateContext(gl->hdc);
+    if (!gl->hglrc || !wglMakeCurrent(gl->hdc, gl->hglrc)) {
+        fprintf(stderr, "[dll_test] wglCreateContext/wglMakeCurrent failed (err=%lu)\n",
+                (unsigned long)GetLastError());
+        if (gl->hglrc) wglDeleteContext(gl->hglrc);
+        ReleaseDC(gl->hwnd, gl->hdc);
+        DestroyWindow(gl->hwnd);
+        memset(gl, 0, sizeof(*gl));
+        return false;
+    }
+
+    printf("[dll_test] hidden GL context OK renderer=\"%s\"\n",
+           (const char*)glGetString(GL_RENDERER));
+    return true;
+}
+
+static void destroy_hidden_gl_context(HiddenGlContext* gl)
+{
+    if (!gl) return;
+    wglMakeCurrent(NULL, NULL);
+    if (gl->hglrc) wglDeleteContext(gl->hglrc);
+    if (gl->hwnd && gl->hdc) ReleaseDC(gl->hwnd, gl->hdc);
+    if (gl->hwnd) DestroyWindow(gl->hwnd);
+    memset(gl, 0, sizeof(*gl));
+}
+
+static long long compare_to_oracle(const char* label,
+                                   const uint16_t* result,
+                                   const uint16_t* h_out,
+                                   size_t n)
+{
+    long long maxabs = 0;
+    double sumabs = 0;
+    size_t le0 = 0, le1 = 0, le2 = 0;
+    size_t fx = 0, fy = 0;
+    long long fd = 0;
+    int found = 0;
+    for (size_t i = 0; i < n; i++) {
+        long long d = (long long)result[i] - (long long)h_out[i];
+        long long a = d < 0 ? -d : d;
+        if (a > maxabs) maxabs = a;
+        sumabs += (double)a;
+        if (a <= 0) le0++;
+        if (a <= 1) le1++;
+        if (a <= 2) le2++;
+        if (a > 0 && !found) { found = 1; fx = i % W; fy = i / W; fd = d; }
+    }
+
+    printf("\n[dll_test] PARITY THROUGH THE ABI vs oracle out.u16 (%s):\n", label);
+    printf("  max abs diff   = %lld LSB\n", maxabs);
+    printf("  mean abs diff  = %.6f LSB\n", sumabs / (double)n);
+    printf("  within 0 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le0 / n, le0, n);
+    printf("  within 1 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le1 / n, le1, n);
+    printf("  within 2 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le2 / n, le2, n);
+    if (found) printf("  first mismatch @(%zu,%zu) dll-oracle=%lld\n", fx, fy, fd);
+    return maxabs;
+}
+
 #define RESOLVE(var, type, name) \
     var = (type)GetProcAddress(dll, name); \
     if (!var) { fprintf(stderr, "GetProcAddress failed for %s\n", name); return 4; }
@@ -72,13 +215,29 @@ int main(int argc, char** argv)
 {
     std::string vdir = "G:\\Temp\\mlv-gpu-profile\\oracle\\vectors";
     std::string dllpath = "igpu_recon_cuda.dll";
-    if (argc >= 2) vdir = argv[1];
-    if (argc >= 3) dllpath = argv[2];
+    bool run_gl_texture = false;
+    int positional = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--gl-texture") == 0) {
+            run_gl_texture = true;
+        } else if (positional == 0) {
+            vdir = argv[i];
+            positional++;
+        } else if (positional == 1) {
+            dllpath = argv[i];
+            positional++;
+        } else {
+            fprintf(stderr,
+                    "usage: dll_test.exe [--gl-texture] [vectors_dir] [dll_path]\n");
+            return 2;
+        }
+    }
     auto P = [&](const char* n) { return vdir + "\\" + n; };
     const size_t n = (size_t)W * H;
 
     printf("[dll_test] vectors dir : %s\n", vdir.c_str());
     printf("[dll_test] dll path    : %s\n", dllpath.c_str());
+    printf("[dll_test] gl texture  : %s\n", run_gl_texture ? "enabled" : "disabled");
 
     /* ---- 1. runtime-load the DLL + resolve the ABI ---- */
     HMODULE dll = LoadLibraryA(dllpath.c_str());
@@ -163,25 +322,7 @@ int main(int argc, char** argv)
     printf("[dll_test] run OK\n");
 
     /* ---- 4. compare to oracle out.u16 ---- */
-    long long maxabs = 0; double sumabs = 0; size_t le0 = 0, le1 = 0, le2 = 0;
-    size_t fx = 0, fy = 0; long long fd = 0; int found = 0;
-    for (size_t i = 0; i < n; i++) {
-        long long d = (long long)result[i] - (long long)h_out[i];
-        long long a = d < 0 ? -d : d;
-        if (a > maxabs) maxabs = a;
-        sumabs += (double)a;
-        if (a <= 0) le0++;
-        if (a <= 1) le1++;
-        if (a <= 2) le2++;
-        if (a > 0 && !found) { found = 1; fx = i % W; fy = i / W; fd = d; }
-    }
-    printf("\n[dll_test] PARITY THROUGH THE ABI vs oracle out.u16:\n");
-    printf("  max abs diff   = %lld LSB\n", maxabs);
-    printf("  mean abs diff  = %.6f LSB\n", sumabs / (double)n);
-    printf("  within 0 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le0 / n, le0, n);
-    printf("  within 1 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le1 / n, le1, n);
-    printf("  within 2 LSB   = %.4f%% (%zu/%zu)\n", 100.0 * le2 / n, le2, n);
-    if (found) printf("  first mismatch @(%zu,%zu) dll-oracle=%lld\n", fx, fy, fd);
+    long long maxabs = compare_to_oracle("CPU16", result, h_out, n);
 
     /* ---- 5. timing ---- */
     igpu_recon_timing_t t;
@@ -193,10 +334,80 @@ int main(int argc, char** argv)
         printf("  total    = %.3f\n", t.total_ms);
     }
 
+    long long gl_maxabs = 0;
+    if (run_gl_texture) {
+        HiddenGlContext gl;
+        if (!create_hidden_gl_context(&gl)) {
+            fprintf(stderr, "[dll_test] GL texture mode cannot create a hardware context\n");
+            return 5;
+        }
+
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D,
+                     0,
+                     GL_R16,
+                     W,
+                     H,
+                     0,
+                     GL_RED,
+                     GL_UNSIGNED_SHORT,
+                     NULL);
+        GLenum gerr = glGetError();
+        if (gerr != GL_NO_ERROR) {
+            fprintf(stderr, "[dll_test] glTexImage2D(GL_R16) failed GL error 0x%04x\n", gerr);
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+
+        int gl_rc = f_run(b, &frame, h_in, IGPU_OUT_GL_TEXTURE, NULL, (unsigned int)tex);
+        if (gl_rc != 0) {
+            fprintf(stderr, "[dll_test] run(GL_TEXTURE) returned %d\n", gl_rc);
+            glDeleteTextures(1, &tex);
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+        printf("[dll_test] run(GL_TEXTURE) OK\n");
+
+        if (f_timing(b, &t) == 0) {
+            printf("\n[dll_test] last_timing GL_TEXTURE (ms):\n");
+            printf("  upload   = %.3f\n", t.upload_ms);
+            printf("  kernel   = %.3f\n", t.kernel_ms);
+            printf("  interop  = %.3f\n", t.download_ms);
+            printf("  total    = %.3f\n", t.total_ms);
+        }
+
+        uint16_t* gl_result = (uint16_t*)malloc(n * sizeof(uint16_t));
+        memset(gl_result, 0, n * sizeof(uint16_t));
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glFinish();
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RED, GL_UNSIGNED_SHORT, gl_result);
+        gerr = glGetError();
+        if (gerr != GL_NO_ERROR) {
+            fprintf(stderr, "[dll_test] glGetTexImage(GL_R16) failed GL error 0x%04x\n", gerr);
+            free(gl_result);
+            glDeleteTextures(1, &tex);
+            destroy_hidden_gl_context(&gl);
+            return 5;
+        }
+
+        gl_maxabs = compare_to_oracle("GL_TEXTURE/R16 readback for test", gl_result, h_out, n);
+        free(gl_result);
+        glDeleteTextures(1, &tex);
+        destroy_hidden_gl_context(&gl);
+    }
+
     f_destroy(b);
     FreeLibrary(dll);
 
-    printf("\n[dll_test] RESULT: %s (0 LSB target, through the ABI)\n",
-           (maxabs == 0) ? "PASS" : (maxabs <= 2 ? "CLOSE" : "FAIL"));
-    return (maxabs == 0) ? 0 : 1;
+    const bool pass = (maxabs == 0) && (!run_gl_texture || gl_maxabs == 0);
+    printf("\n[dll_test] RESULT: %s (0 LSB target, through the ABI%s)\n",
+           pass ? "PASS" : "FAIL",
+           run_gl_texture ? " + GL_TEXTURE" : "");
+    return pass ? 0 : 1;
 }
