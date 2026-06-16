@@ -936,6 +936,21 @@ should confirm the tarball excludes both directories. Neither directory is
 referenced from the build (`platform/qt/MLVApp.pro`) and neither appears in
 any release workflow.
 
+For a reviewer assessing change-control governance (not product code):
+`.claude-state/coordination/` holds the **content-review-gate** ledger that the
+repo's brokered closeout uses to gate work-block *finalize* (the merge of a
+work block onto the target branch). When
+`contentReviewGate.requireClaudeApprovalForFinalize` is enabled in
+[`closeout.config.json`](../closeout.config.json), the broker
+([`tools/repo_hygiene/brokered_closeout.py`](../tools/repo_hygiene/brokered_closeout.py),
+`validate_content_review_approval_for_finalize`) refuses to finalize unless the
+ledger records a handoff entry from one agent and a later approving review entry
+from a *different* agent, each pinned to the exact full-length
+`startHead..featureHead` commit range and carrying an exact `Verdict:` token.
+This is a development-workflow integrity control between the paired agents; like
+the rest of these directories it ships in **no** release artifact and is not
+referenced by the build.
+
 ### 13.8 Default-on decode-ahead prefetch
 
 As of commit `00091b62`, the raw-uint16 decode-ahead prefetch worker is
