@@ -10,7 +10,8 @@
 param(
     [string]$Dir      = $PSScriptRoot,
     [string]$Vectors  = 'G:\Temp\mlv-gpu-profile\oracle\vectors',
-    [string]$Arch     = 'sm_89'
+    [string]$Arch     = 'sm_89',
+    [switch]$RunGlTexture
 )
 $ErrorActionPreference = 'Stop'
 if (-not $Dir) { $Dir = 'G:\Temp\mlv-gpu-profile\backend' }
@@ -45,7 +46,7 @@ $cmdFile = Join-Path $env:TEMP 'build_backend_dll.cmd'
     "`"$nvcc`" -arch=$Arch -O3 --fmad=false -shared -allow-unsupported-compiler -Xcompiler `"/MD`" -Xlinker `"/DEF:$def`" -I `"$Dir`" `"$src`" -o `"$dll`"",
     'if errorlevel 1 exit /b 11',
     'echo === building dll_test.exe (cl, LoadLibrary harness, no CUDA link) ===',
-    "cl /nologo /EHsc /O2 /I `"$Dir`" `"$testsrc`" /Fe:`"$testexe`" /Fo:`"$Dir\dll_test.obj`"",
+    "cl /nologo /EHsc /O2 /I `"$Dir`" `"$testsrc`" /Fe:`"$testexe`" /Fo:`"$Dir\dll_test.obj`" opengl32.lib user32.lib gdi32.lib",
     'if errorlevel 1 exit /b 12',
     'exit /b 0'
 ) | Set-Content -Encoding ASCII $cmdFile
@@ -65,7 +66,11 @@ Get-ChildItem $Dir -Include igpu_recon_cuda.dll,igpu_recon_cuda.lib,igpu_recon_c
 $env:PATH = "$cudaBin;$Dir;$env:PATH"
 Write-Host '--- running dll_test (LoadLibrary + GetProcAddress + run + compare) ---'
 Push-Location $Dir
-& $testexe $Vectors $dll
+if ($RunGlTexture) {
+    & $testexe --gl-texture $Vectors $dll
+} else {
+    & $testexe $Vectors $dll
+}
 $prc = $LASTEXITCODE
 Pop-Location
 Write-Host "dll_test exit=$prc"

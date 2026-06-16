@@ -18,8 +18,10 @@
  * DATA CONTRACT (matches diso_get_full20bit, src/mlv/llrawproc/dualiso.c:4735)
  *   Input  : uint16_t[w*h] single-channel RGGB Bayer, 14-bit values in 16-bit
  *            storage (caller already ran make_14bit).
- *   Output : uint16_t[w*h] RGGB Bayer, 16-bit (0..65535) - OR a GL texture for
- *            the zero-readback playback path.
+ *   Output : uint16_t[w*h] RGGB Bayer, 16-bit (0..65535) - OR a GL R16 texture
+ *            for the zero-readback playback path. The GL texture form carries
+ *            the same single-channel Bayer16 values and is intended as a
+ *            device-resident handoff to later debayer/present stages.
  *   The backend works internally in the 20-bit domain (raw<<6) and converts back.
  */
 #ifndef IGPU_RECON_H
@@ -73,8 +75,8 @@ typedef struct {
 
 /* Where the reconstructed frame is delivered. */
 typedef enum {
-    IGPU_OUT_CPU16      = 0, /* fill out_bayer16 (uint16[w*h]) - parity/export   */
-    IGPU_OUT_GL_TEXTURE = 1  /* write into a CUDA-GL-interop texture - no readback*/
+    IGPU_OUT_CPU16      = 0, /* fill out_bayer16 (uint16[w*h]) - parity/export    */
+    IGPU_OUT_GL_TEXTURE = 1  /* write into a CUDA-GL-interop GL_R16 texture        */
 } igpu_recon_out_kind;
 
 /* Per-run timings (ms) for profiling against the 41.7 ms / 24 fps budget. */
@@ -105,7 +107,9 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts);
 /* Reconstruct one frame.
  *   in_bayer14  : const uint16_t[w*h], 14-bit RGGB (required).
  *   out_kind    : CPU16 -> out_bayer16 must be uint16_t[w*h]; GL_TEXTURE ->
- *                 gl_texture is a valid GL texture id registered for interop.
+ *                 gl_texture is a valid GL_TEXTURE_2D with GL_R16 storage in a
+ *                 current CUDA-compatible OpenGL context. The backend registers
+ *                 it for interop during the call and writes Bayer16 device-side.
  * Returns 0 on success, non-zero on error. */
 int igpu_recon_run(igpu_recon_backend* b,
                    const igpu_recon_frame_t* frame,

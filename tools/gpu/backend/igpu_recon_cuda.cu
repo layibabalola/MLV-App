@@ -30,7 +30,18 @@
 #include <cstdint>
 #include <cmath>
 #include <string>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include <GL/gl.h>
 #include <cuda_runtime.h>
+#include <cuda_gl_interop.h>
 
 #include "igpu_recon.h"
 
@@ -572,6 +583,69 @@ struct igpu_recon_backend {
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
 
+static int copy_bayer16_to_gl_r16_texture(igpu_recon_backend* b, unsigned int gl_texture)
+{
+    if (!b || gl_texture == 0) return -1;
+
+    cudaGraphicsResource* resource = NULL;
+    cudaError_t e = cudaGraphicsGLRegisterImage(&resource,
+                                                gl_texture,
+                                                GL_TEXTURE_2D,
+                                                cudaGraphicsRegisterFlagsWriteDiscard);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsGLRegisterImage(GL_R16 texture) failed: %s\n",
+                cudaGetErrorString(e));
+        return 2;
+    }
+
+    e = cudaGraphicsMapResources(1, &resource, 0);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsMapResources(GL_R16 texture) failed: %s\n",
+                cudaGetErrorString(e));
+        cudaGraphicsUnregisterResource(resource);
+        return 2;
+    }
+
+    cudaArray_t mapped_array = NULL;
+    e = cudaGraphicsSubResourceGetMappedArray(&mapped_array, resource, 0, 0);
+    if (e == cudaSuccess) {
+        const size_t row_bytes = (size_t)b->width * sizeof(uint16_t);
+        e = cudaMemcpy2DToArray(mapped_array,
+                                0,
+                                0,
+                                b->d_out,
+                                row_bytes,
+                                row_bytes,
+                                (size_t)b->height,
+                                cudaMemcpyDeviceToDevice);
+    }
+
+    const cudaError_t unmap_error = cudaGraphicsUnmapResources(1, &resource, 0);
+    const cudaError_t unregister_error = cudaGraphicsUnregisterResource(resource);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] device-to-GL texture copy failed: %s\n",
+                cudaGetErrorString(e));
+        return 2;
+    }
+    if (unmap_error != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsUnmapResources(GL_R16 texture) failed: %s\n",
+                cudaGetErrorString(unmap_error));
+        return 2;
+    }
+    if (unregister_error != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsUnregisterResource(GL_R16 texture) failed: %s\n",
+                cudaGetErrorString(unregister_error));
+        return 2;
+    }
+
+    return 0;
+}
+
 static void free_clip_buffers(igpu_recon_backend* b) {
     if (!b) return;
     if (b->d_in)       cudaFree(b->d_in);
@@ -801,11 +875,12 @@ int igpu_recon_run(igpu_recon_backend* b,
         fprintf(stderr, "[igpu_recon_cuda] dither requested without randn05 LUT\n");
         return 3;
     }
-    if (out_kind == IGPU_OUT_GL_TEXTURE) {
-        /* interop path not implemented in v1; return non-zero per spec. */
-        return 2;
+    const int output_to_gl_texture = (out_kind == IGPU_OUT_GL_TEXTURE);
+    if (output_to_gl_texture) {
+        if (gl_texture == 0) return -1;
+    } else if (out_kind != IGPU_OUT_CPU16 || !out_bayer16) {
+        return -1;
     }
-    if (out_kind != IGPU_OUT_CPU16 || !out_bayer16) return -1;
 
     CK(cudaSetDevice(b->device));
 
@@ -912,8 +987,13 @@ int igpu_recon_run(igpu_recon_backend* b,
     CK(cudaGetLastError());
     CK(cudaEventRecord(b->ev_after_kernel, 0));
 
-    /* ---- timed: D2H download ---- */
-    CK(cudaMemcpy(out_bayer16, b->d_out, n*sizeof(uint16_t), cudaMemcpyDeviceToHost));
+    /* ---- timed: D2H download or CUDA->GL interop handoff ---- */
+    if (output_to_gl_texture) {
+        const int rc = copy_bayer16_to_gl_r16_texture(b, gl_texture);
+        if (rc != 0) return rc;
+    } else {
+        CK(cudaMemcpy(out_bayer16, b->d_out, n*sizeof(uint16_t), cudaMemcpyDeviceToHost));
+    }
     CK(cudaEventRecord(b->ev_after_dl, 0));
     CK(cudaEventSynchronize(b->ev_after_dl));
 
