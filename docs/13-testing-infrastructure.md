@@ -96,6 +96,13 @@ suite. The `perf_tests` workflow specifically is documented separately in
   unset, and on Windows it suppresses native crash dialogs before
   constructing `QApplication`; this keeps direct local launches from
   surfacing modal fail-fast popups in this workspace.
+- Known issue (2026-06-15): local Windows `gui_tests.exe -functions` can hang
+  before QtTest prints the function list. The hang reproduces on both the
+  current GPU AMaZE playback branch and clean baseline `ae895390`, so it is
+  tracked as pre-existing test-infra debt rather than a runtime regression.
+  Fix direction: make the wrapper launch deterministic for the offscreen Qt
+  platform/plugin tree and ensure timed-out GUI test children are killed before
+  retrying deployment.
 - `gui_tests` covers the current GPU presenter seam only:
   environment-gated install, CPU fallback visibility when the presenter is
   absent, fallback hide/show when a texture-backed presentation is active,
@@ -241,8 +248,9 @@ passed with `42 tests / 485 assertions / 3 skips / 0 failures`.
     within tolerance.
   - If the host is unsupported / software-only, the test skips with a
     known runtime reason.
-- AMaZE GPU debayer still intentionally skips; it remains the explicit next
-  backend flip rather than silently turning green.
+- AMaZE GPU debayer is now covered by the same backend fixture and, on hosts
+  with the CUDA AMaZE DLL, compares CPU vs GPU within the documented P-pre
+  tolerance envelope. Unsupported hosts still skip with a known runtime reason.
 - The latest current-tree focused verification run of the converged debayer
   shell via `tests/build-gpu-debayer/release/pipeline_tests.exe --check-golden`
   passed with `43 tests / 491 assertions / 4 skips / 0 failures`.
@@ -288,7 +296,11 @@ Playback-profile mode now supports:
   the production preview-policy seam can be exercised without depending
   only on the environment variable.
 - `--gpu-bilinear-debayer <auto|cpu|gpu>` for the existing experimental
-  bilinear GPU debayer path only; AMaZE remains intentionally unsupported.
+  bilinear GPU debayer path.
+- `--gpu-amaze-debayer <auto|cpu|gpu>` for the explicit Full Quality AMaZE GPU
+  path. It is opt-in; `gpu` implies the GPU preview-processing seam and falls
+  back to CPU AMaZE with telemetry when the CUDA backend is unavailable or an
+  unsupported case such as CA correction is active.
 
 `--profile-playback` JSON now reports the selector and the real per-frame
 seam.
@@ -318,11 +330,29 @@ Playback-profile output also records a one-time probe:
 - `gpu_bilinear_debayer_probe_reason`
 - `gpu_bilinear_debayer_probe_renderer`
 
+For the AMaZE debayer, "requested" vs "active" means:
+
+- Requested:
+  - `metadata.gpu_amaze_debayer_backend_request`
+  - `metadata.gpu_amaze_debayer_environment_requested`
+- Active:
+  - per-frame `gpu_amaze_debayer_active`
+  - plus optional `gpu_amaze_debayer_renderer` and
+    `gpu_amaze_debayer_fallback_reason`
+
+Playback-profile output also records a one-time AMaZE probe:
+
+- `gpu_amaze_debayer_probe_available`
+- `gpu_amaze_debayer_probe_reason`
+- `gpu_amaze_debayer_probe_renderer`
+
 Expected behavior on `llvmpipe` or another software renderer:
 
 - The probe reports unavailable.
 - The debayer path falls back to CPU.
 - `gpu_bilinear_debayer_active` stays `false`.
+- `gpu_amaze_debayer_active` stays `false` unless the CUDA AMaZE backend is
+  available and the explicit AMaZE GPU selector is active.
 
 ### Console-test contracts for the selectors
 

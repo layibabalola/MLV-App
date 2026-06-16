@@ -1077,6 +1077,21 @@ static const char * playback_profile_gpu_bilinear_debayer_backend_name(
     }
 }
 
+static const char * playback_profile_gpu_amaze_debayer_backend_name(
+    GpuAmazeDebayerBackendRequest backend)
+{
+    switch (backend)
+    {
+    case GpuAmazeDebayerBackendRequest::Cpu:
+        return "cpu";
+    case GpuAmazeDebayerBackendRequest::Gpu:
+        return "gpu";
+    case GpuAmazeDebayerBackendRequest::Auto:
+    default:
+        return "auto";
+    }
+}
+
 static const char * playback_profile_debayer_request_name(
     MainWindow::PlaybackProfileDebayerRequest request)
 {
@@ -1307,6 +1322,7 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_renderThreadUsing16BitPreview = false;
     m_renderThreadUsingGpuPreviewProcessing = false;
     m_renderThreadUsingGpuBilinearDebayer = false;
+    m_renderThreadUsingGpuAmazeDebayer = false;
     m_displayPreviewCacheNextSlot = 0;
     invalidateDisplayPreviewCache();
 
@@ -3369,6 +3385,13 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         gpuBilinearDebayerRequestedByEnvironment();
     renderPolicy.gpuBilinearDebayerCompatible =
         m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
+    renderPolicy.gpuAmazeDebayerBackendRequest = m_gpuAmazeDebayerBackendRequest;
+    renderPolicy.gpuAmazeDebayerEnvironmentRequested =
+        gpuAmazeDebayerRequestedByEnvironment();
+    renderPolicy.gpuAmazeDebayerCompatible =
+        m_pMlvObject
+        && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
+        && !ui->actionCaching->isChecked();
     renderPolicy.histogramEnabled = ui->actionShowHistogram->isChecked();
     renderPolicy.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
     renderPolicy.paradeEnabled = ui->actionShowParade->isChecked();
@@ -3381,12 +3404,14 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
     m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
     m_renderThreadUsingGpuBilinearDebayer = shouldUseGpuBilinearDebayerPath();
+    m_renderThreadUsingGpuAmazeDebayer = shouldUseGpuAmazeDebayerPath();
     m_renderThreadUsingCpuPreviewProcessing = false;
     const bool playbackProcessingSelected =
         playbackPolicyActive() && ui->actionUseFastProcessingForPlayback->isChecked();
     renderPolicy.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
     renderPolicy.renderThreadUsingGpuProcessingPreview = m_renderThreadUsingGpuPreviewProcessing;
     renderPolicy.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
+    renderPolicy.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
     m_lastQueuedGpuPreviewPolicy = renderPolicy;
     m_lastQueuedGpuPresentationOptions =
         mainWindowBuildGpuPresentationOptions( renderPolicy );
@@ -3441,6 +3466,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.renderThreadUsing16BitPreview = m_renderThreadUsing16BitPreview;
     requestContext.renderThreadUsingGpuPreviewProcessing = m_renderThreadUsingGpuPreviewProcessing;
     requestContext.renderThreadUsingGpuBilinearDebayer = m_renderThreadUsingGpuBilinearDebayer;
+    requestContext.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
         playbackProcessingSelected;
@@ -3516,7 +3542,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     {
         logInteractionEvent(
             QStringLiteral("draw_frame.request"),
-            QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 frame_changed=%10 requested_scale=%11 generation=%12 target=%13x%14")
+            QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 gpu_amaze=%10 frame_changed=%11 requested_scale=%12 generation=%13 target=%14x%15")
                 .arg( static_cast<qulonglong>( requestSerial ) )
                 .arg( requestedFrame )
                 .arg( bool01( ui->actionPlay->isChecked() ) )
@@ -3526,6 +3552,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                 .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
                 .arg( bool01( m_renderThreadUsingCpuPreviewProcessing ) )
                 .arg( bool01( m_renderThreadUsingGpuBilinearDebayer ) )
+                .arg( bool01( m_renderThreadUsingGpuAmazeDebayer ) )
                 .arg( bool01( m_frameChanged ) )
                 .arg( requestContext.playbackScaleFactor )
                 .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
@@ -3543,6 +3570,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
+                                      m_renderThreadUsingGpuAmazeDebayer,
                                       requestSerial,
                                       requestContext,
                                       presentationPreparation );
@@ -3558,6 +3586,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
                                       m_renderThreadUsingGpuBilinearDebayer,
+                                      m_renderThreadUsingGpuAmazeDebayer,
                                       requestSerial,
                                       requestContext,
                                       presentationPreparation );
@@ -3582,6 +3611,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     m_lookAssistUnsettledAnalysisCount = 0;
     m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
     m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
+    m_gpuAmazeDebayerBackendRequest = options.gpuAmazeDebayerBackend;
 
     if( options.inputPath.isEmpty() || options.outputPath.isEmpty() )
     {
@@ -4025,6 +4055,29 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                 {
                     sample.insert( QStringLiteral("gpu_bilinear_debayer_fallback_reason"),
                                    gpuBilinearFallbackReason );
+                }
+            }
+            sample.insert( QStringLiteral("gpu_amaze_debayer_active"),
+                           m_lastPresentedFrameUsedGpuAmazeDebayer );
+            {
+                const QString gpuAmazeRenderer = m_lastPresentedGpuAmazeRendererDescription;
+                const QString gpuAmazeFallbackReason = m_lastPresentedGpuAmazeFallbackReason;
+                if( !gpuAmazeFallbackReason.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_amaze_debayer_renderer"),
+                                   gpuAmazeRenderer.isEmpty()
+                                       ? QStringLiteral("unknown")
+                                       : gpuAmazeRenderer );
+                }
+                else if( !gpuAmazeRenderer.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_amaze_debayer_renderer"),
+                                   gpuAmazeRenderer );
+                }
+                if( !gpuAmazeFallbackReason.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("gpu_amaze_debayer_fallback_reason"),
+                                   gpuAmazeFallbackReason );
                 }
             }
             const qint64 engineNs = engineCompletionNs.load();
@@ -4645,6 +4698,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
 
     const GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbe =
         gpuBilinearDebayerProbeBackend();
+    const GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbe =
+        gpuAmazeDebayerProbeBackend();
     const int selectedDualIsoMode = toolButtonDualIsoCurrentIndex();
     const DualIsoPlaybackRuntimeSettings dualIsoPlaybackSettings =
         effectiveDualIsoPlaybackRuntimeSettings(
@@ -4792,6 +4847,18 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     gpuBilinearDebayerProbe.reason );
     metadata.insert( QStringLiteral("gpu_bilinear_debayer_probe_renderer"),
                     gpuBilinearDebayerProbe.rendererDescription );
+    metadata.insert( QStringLiteral("gpu_amaze_debayer_backend_request"),
+                     QString::fromLatin1(
+                         playback_profile_gpu_amaze_debayer_backend_name(
+                             options.gpuAmazeDebayerBackend ) ) );
+    metadata.insert( QStringLiteral("gpu_amaze_debayer_environment_requested"),
+                     gpuAmazeDebayerRequestedByEnvironment() );
+    metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_available"),
+                    gpuAmazeDebayerProbe.available );
+    metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_reason"),
+                    gpuAmazeDebayerProbe.reason );
+    metadata.insert( QStringLiteral("gpu_amaze_debayer_probe_renderer"),
+                    gpuAmazeDebayerProbe.rendererDescription );
     metadata.insert( QStringLiteral("dual_iso_mode_selected"),
                     selectedDualIsoMode );
     metadata.insert( QStringLiteral("dual_iso_mode_effective"),
@@ -5679,6 +5746,9 @@ int MainWindow::openMlv( QString fileName )
     m_lastPresentedPlaybackScaleFactorActive = 1;
     m_lastPresentedGpuBilinearFallbackReason.clear();
     m_lastPresentedGpuBilinearRendererDescription.clear();
+    m_lastPresentedFrameUsedGpuAmazeDebayer = false;
+    m_lastPresentedGpuAmazeFallbackReason.clear();
+    m_lastPresentedGpuAmazeRendererDescription.clear();
     m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
     m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
     m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
@@ -12379,6 +12449,28 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
     policyState.paradeEnabled = ui->actionShowParade->isChecked();
     policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
     return mainWindowAllowsGpuBilinearDebayer( policyState );
+}
+
+bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
+{
+    MainWindowGpuPreviewPolicyState policyState;
+    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
+    policyState.gpuPreviewProcessingEnvironmentRequested =
+        gpuPreviewProcessingRequestedByEnvironment();
+    policyState.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
+    policyState.gpuAmazeDebayerBackendRequest = m_gpuAmazeDebayerBackendRequest;
+    policyState.gpuAmazeDebayerEnvironmentRequested =
+        gpuAmazeDebayerRequestedByEnvironment();
+    policyState.gpuAmazeDebayerCompatible =
+        m_pMlvObject
+        && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
+        && !ui->actionCaching->isChecked();
+    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
+    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
+    policyState.paradeEnabled = ui->actionShowParade->isChecked();
+    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    return mainWindowAllowsGpuAmazeDebayer( policyState );
 }
 
 //Write the frame number into the label
@@ -19867,6 +19959,9 @@ void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &read
     m_lastPresentedPlaybackScaleFactorActive = readyFrame.playbackScaleFactorActive;
     m_lastPresentedGpuBilinearFallbackReason = readyFrame.gpuBilinearFallbackReason;
     m_lastPresentedGpuBilinearRendererDescription = readyFrame.gpuBilinearRendererDescription;
+    m_lastPresentedFrameUsedGpuAmazeDebayer = readyFrame.usedGpuAmazeDebayer;
+    m_lastPresentedGpuAmazeFallbackReason = readyFrame.gpuAmazeFallbackReason;
+    m_lastPresentedGpuAmazeRendererDescription = readyFrame.gpuAmazeRendererDescription;
     m_lastPresentedDualIsoPreviewHistogramMs = readyFrame.dualIsoPreviewHistogramMs;
     m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
     m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;

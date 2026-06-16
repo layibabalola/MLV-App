@@ -388,6 +388,16 @@ bool gpuBilinearDebayerRequestedByEnvironment(void)
     return envFlagEnabled(qgetenv(gpuBilinearDebayerEnvironmentVariableName()));
 }
 
+const char * gpuAmazeDebayerEnvironmentVariableName(void)
+{
+    return "MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER";
+}
+
+bool gpuAmazeDebayerRequestedByEnvironment(void)
+{
+    return envFlagEnabled(qgetenv(gpuAmazeDebayerEnvironmentVariableName()));
+}
+
 GpuBilinearDebayerBackendAvailability gpuBilinearDebayerProbeBackend(void)
 {
     GpuBilinearDebayerBackendAvailability availability;

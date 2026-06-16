@@ -127,6 +127,8 @@ public:
             GpuPreviewProcessingBackendRequest::Auto;
         GpuBilinearDebayerBackendRequest gpuBilinearDebayerBackend =
             GpuBilinearDebayerBackendRequest::Auto;
+        GpuAmazeDebayerBackendRequest gpuAmazeDebayerBackend =
+            GpuAmazeDebayerBackendRequest::Auto;
     };
 
     struct GuiPlaybackSmokeOptions
@@ -884,6 +886,7 @@ private:
     bool m_renderThreadUsing16BitPreview;
     bool m_renderThreadUsingGpuPreviewProcessing;
     bool m_renderThreadUsingGpuBilinearDebayer;
+    bool m_renderThreadUsingGpuAmazeDebayer;
     bool m_renderThreadUsingPlaybackPreviewProcessing = false;
     bool m_renderThreadUsingCpuPreviewProcessing = false;
     int m_playToFirstFrameTargetFrame = -1;
@@ -1160,6 +1163,8 @@ private:
         GpuPreviewProcessingBackendRequest::Auto;
     GpuBilinearDebayerBackendRequest m_gpuBilinearDebayerBackendRequest =
         GpuBilinearDebayerBackendRequest::Auto;
+    GpuAmazeDebayerBackendRequest m_gpuAmazeDebayerBackendRequest =
+        GpuAmazeDebayerBackendRequest::Auto;
     MainWindowGpuPreviewPolicyState m_lastQueuedGpuPreviewPolicy;
     GpuDisplayViewport::PresentationOptions m_lastQueuedGpuPresentationOptions;
     GpuPreviewProcessingConfig m_lastQueuedGpuPreviewProcessingConfig;
@@ -1195,6 +1200,9 @@ private:
     int m_lastPresentedPlaybackScaleFactorActive = 1;
     QString m_lastPresentedGpuBilinearFallbackReason;
     QString m_lastPresentedGpuBilinearRendererDescription;
+    bool m_lastPresentedFrameUsedGpuAmazeDebayer = false;
+    QString m_lastPresentedGpuAmazeFallbackReason;
+    QString m_lastPresentedGpuAmazeRendererDescription;
     double m_lastPresentedDualIsoPreviewHistogramMs = 0.0;
     double m_lastPresentedDualIsoPreviewRegressionMs = 0.0;
     double m_lastPresentedDualIsoPreviewRowscaleMs = 0.0;
@@ -1333,6 +1341,7 @@ private:
     bool shouldUseGpu16PreviewPath( void ) const;
     bool shouldUseGpuPreviewProcessingPath( void ) const;
     bool shouldUseGpuBilinearDebayerPath( void ) const;
+    bool shouldUseGpuAmazeDebayerPath( void ) const;
     void setToolButtonFocusPixels( int index );
     void setToolButtonFocusPixelsIntMethod( int index );
     void setToolButtonBadPixels( int index );

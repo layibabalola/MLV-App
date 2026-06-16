@@ -474,6 +474,9 @@ All GPU paths are **environment-gated and off by default**:
 - `MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1` — GPU preview processing
   (`GpuPreviewProcessing`).
 - `MLVAPP_EXPERIMENTAL_GPU_DEBAYER=1` — GPU bilinear debayer (`GpuDebayer`).
+- `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1` — explicit GPU AMaZE debayer
+  routing (`GpuDebayer` + `igpu_amaze_debayer_cuda.dll`); in auto/env mode it
+  is used with `MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1`.
 
 The production default is the CPU path in every case. A reviewer looking at
 the shipped binary behaviour should confirm these env vars are unset when
@@ -800,8 +803,9 @@ exec'd as a child, not linked.
 ### 13.4 Experimental paths off by default
 
 `MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`,
-`MLVAPP_EXPERIMENTAL_GPU_DEBAYER` all default OFF. The production surface
-an auditor evaluates for "default behaviour" is the CPU path. Confirm
+`MLVAPP_EXPERIMENTAL_GPU_DEBAYER`, and
+`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` all default OFF. The production
+surface an auditor evaluates for "default behaviour" is the CPU path. Confirm
 these env vars are unset in the runtime environment you audit.
 
 ### 13.5 Mutable state during playback (and the broader WIP surface)
@@ -945,7 +949,7 @@ the command an auditor uses to confirm them.
 | Release policy (macOS ARM) | [.github/workflows/macOS-Arm64.yml](../.github/workflows/macOS-Arm64.yml) | read |
 | Release policy (Linux AppImage) | [.github/workflows/Linux.yml](../.github/workflows/Linux.yml) | read |
 | CLI flag inventory | [platform/qt/main.cpp:26-62](../platform/qt/main.cpp) | `grep -nE "\"--" platform/qt/main.cpp` |
-| Experimental GPU env vars | `grep -rn "MLVAPP_EXPERIMENTAL_" platform/qt/` is the **primary** evidence. Hits include `platform/qt/GpuDisplayViewport.cpp`, `GpuPreviewProcessing.cpp`, `GpuDebayer.cpp`. Cross-referenced from [docs/00-overview.md](00-overview.md) "Status at a glance". | run the grep; expect 3 env vars (`MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`, `MLVAPP_EXPERIMENTAL_GPU_DEBAYER`) |
+| Experimental GPU env vars | `grep -rn "MLVAPP_EXPERIMENTAL_" platform/qt/` is the **primary** evidence. Hits include `platform/qt/GpuDisplayViewport.cpp`, `GpuPreviewProcessing.cpp`, `GpuDebayer.cpp`. Cross-referenced from [docs/00-overview.md](00-overview.md) "Status at a glance". | run the grep; expect 4 env vars (`MLVAPP_EXPERIMENTAL_GL_VIEWPORT`, `MLVAPP_EXPERIMENTAL_GPU_PROCESSING`, `MLVAPP_EXPERIMENTAL_GPU_DEBAYER`, `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER`) |
 | Prefetch disable env var | [src/mlv/video_mlv.c](../src/mlv/video_mlv.c) | `grep -n "MLVAPP_DISABLE_RAW_UINT16_PREFETCH" src/mlv/video_mlv.c` |
 
 ## 16. Citation freshness — how to spot-check this guide

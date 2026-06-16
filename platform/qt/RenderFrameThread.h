@@ -78,6 +78,7 @@ public:
             bool renderThreadUsing16BitPreview = false;
             bool renderThreadUsingGpuPreviewProcessing = false;
             bool renderThreadUsingGpuBilinearDebayer = false;
+            bool renderThreadUsingGpuAmazeDebayer = false;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
         };
@@ -98,6 +99,9 @@ public:
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
+        bool usedGpuAmazeDebayer = false;
+        QString gpuAmazeFallbackReason;
+        QString gpuAmazeRendererDescription;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -126,6 +130,7 @@ public:
         uint32_t frameNumber = 0;
         OutputMode outputMode = OutputProcessed8;
         bool useGpuBilinearDebayer = false;
+        bool useGpuAmazeDebayer = false;
         uint64_t requestSerial = 0;
         double requestStageTime = 0.0;
         Phase3Mode phase3Mode = Phase3Mode::Disabled;
@@ -154,6 +159,7 @@ public:
     void renderFrame( uint32_t frameNumber,
                       OutputMode outputMode,
                       bool useGpuBilinearDebayer,
+                      bool useGpuAmazeDebayer,
                       uint64_t requestSerial,
                       const ReadyFrame::PresentationContext &presentationContext,
                       const PresentationPreparationOptions &presentationPreparation );
@@ -165,6 +171,9 @@ public:
     bool lastFrameUsedGpuBilinearDebayer( void ) const;
     QString lastGpuBilinearFallbackReason( void ) const;
     QString lastGpuBilinearRendererDescription( void ) const;
+    bool lastFrameUsedGpuAmazeDebayer( void ) const;
+    QString lastGpuAmazeFallbackReason( void ) const;
+    QString lastGpuAmazeRendererDescription( void ) const;
     double lastDualIsoPreviewHistogramMilliseconds( void ) const;
     double lastDualIsoPreviewRegressionMilliseconds( void ) const;
     double lastDualIsoPreviewRowscaleMilliseconds( void ) const;
@@ -202,6 +211,9 @@ private:
         bool usedGpuBilinearDebayer = false;
         QString gpuBilinearFallbackReason;
         QString gpuBilinearRendererDescription;
+        bool usedGpuAmazeDebayer = false;
+        QString gpuAmazeFallbackReason;
+        QString gpuAmazeRendererDescription;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -236,6 +248,9 @@ private:
             usedGpuBilinearDebayer = false;
             gpuBilinearFallbackReason.clear();
             gpuBilinearRendererDescription.clear();
+            usedGpuAmazeDebayer = false;
+            gpuAmazeFallbackReason.clear();
+            gpuAmazeRendererDescription.clear();
             dualIsoPreviewHistogramMs = 0.0;
             dualIsoPreviewRegressionMs = 0.0;
             dualIsoPreviewRowscaleMs = 0.0;
@@ -267,15 +282,20 @@ private:
     std::deque<RenderRequest> m_renderRequests;
     OutputMode m_activeOutputMode;
     bool m_activeUseGpuBilinearDebayer;
+    bool m_activeUseGpuAmazeDebayer;
     uint32_t m_activeFrameNumber;
     uint64_t m_activeFrameRequestSerial;
     ReadyFrame::PresentationContext m_activePresentationContext;
     PresentationPreparationOptions m_activePresentationPreparationOptions;
     int m_activeQueuedPlaybackDropCount;
     bool m_loggedGpuBilinearSuccess;
+    bool m_loggedGpuAmazeSuccess;
     bool m_lastFrameUsedGpuBilinearDebayer;
     QString m_lastGpuBilinearFallbackReason;
     QString m_lastGpuBilinearRendererDescription;
+    bool m_lastFrameUsedGpuAmazeDebayer;
+    QString m_lastGpuAmazeFallbackReason;
+    QString m_lastGpuAmazeRendererDescription;
     double m_lastDualIsoPreviewHistogramMs;
     double m_lastDualIsoPreviewRegressionMs;
     double m_lastDualIsoPreviewRowscaleMs;
@@ -297,6 +317,7 @@ private:
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     CubicPlaybackScaleCache m_playbackCubicScaleCache;
     std::vector<float> m_gpuBilinearDebayerRawFrame;
+    std::vector<float> m_gpuAmazeDebayerRawFrame;
     DecodeWorker *m_decodeWorker;
     ReconWorker *m_reconWorker;
     bool m_decodeWorkerStop;

@@ -949,15 +949,17 @@ landed on this branch — see [04-external-auditor-guide.md §13.5](04-external-
 | None | `debayerNoneU16` (already-debayered) | serial | n/a |
 | Basic / Bilinear | `debayerBasic` / `debayerBasicU16` | OMP strips | Experimental (§9) |
 | AHD | `debayerAhd` | OMP strips | CPU only |
-| AMaZe | `debayerAmaze` | pthread strips | CPU only |
+| AMaZe | `debayerAmaze` | pthread strips | Experimental CUDA playback/profile path (§9) |
 | LMMSE | `debayerLibRtProcess` | librtprocess internal | CPU only |
 | IGV | `debayerLibRtProcess` | librtprocess internal | CPU only |
 | RCD | `debayerLibRtProcess` | librtprocess internal | CPU only |
 | DCB | `debayerLibRtProcess` | librtprocess internal | CPU only |
 | Markesteijn | `debayerLibRtProcess` (X-Trans only) | librtprocess | CPU only |
 
-Bilinear is the only algorithm with an experimental GPU path
-(`MLVAPP_EXPERIMENTAL_GPU_DEBAYER=1`).
+Bilinear and AMaZE have explicit experimental GPU playback/profile paths
+(`MLVAPP_EXPERIMENTAL_GPU_DEBAYER=1` and
+`MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1`). Other debayer algorithms remain
+CPU-only.
 
 #### (6) `applyProcessingObject[8]` — 9 stages
 
@@ -1145,7 +1147,7 @@ see `docs/12-gpu-viewport-architecture.md`.
 
 ### 9.3 `MLVAPP_EXPERIMENTAL_GPU_DEBAYER=1`
 
-- Bilinear only (`GpuDebayer.cpp`). AMaZE remains CPU.
+- Bilinear GPU debayer (`GpuDebayer.cpp`).
 - A one-time runtime probe writes probe results into the
   `--profile-playback` JSON:
   - `gpu_bilinear_debayer_probe_available` (bool)
@@ -1157,6 +1159,19 @@ see `docs/12-gpu-viewport-architecture.md`.
   - `gpu_bilinear_debayer_fallback_reason`
 - CPU fallback is automatic on `llvmpipe` / software renderer /
   missing extension.
+
+### 9.4 `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER=1`
+
+- Explicit AMaZE CUDA debayer request for the GPU preview-processing path.
+- The CUDA backend is loaded from `MLVAPP_GPU_AMAZE_DEBAYER_DLL`, a deployed
+  `igpu_amaze_debayer_cuda.dll`, or the process DLL search path.
+- Per-frame telemetry:
+  - `gpu_amaze_debayer_active`
+  - `gpu_amaze_debayer_renderer`
+  - `gpu_amaze_debayer_fallback_reason`
+- CPU AMaZE fallback is automatic when the CUDA DLL is unavailable, ABI
+  validation fails, the backend run fails, or an unsupported case such as CA
+  correction is active.
 
 ---
 
@@ -1175,6 +1190,7 @@ happen pre-Qt because `--batch` and `--trim-mlv` must not bring up a
 | `--gpu-viewport` | Passed through to `MainWindow` ctor | Forces experimental GL viewport for this run. |
 | `--gpu-preview-processing {auto\|cpu\|gpu}` | Passed through | Selects preview-processing backend. `gpu` implies `--gpu-viewport`. |
 | `--gpu-bilinear-debayer {auto\|cpu\|gpu}` | Passed through | Selects bilinear debayer backend for the GPU preview-processing path. `gpu` implies `--gpu-viewport`. |
+| `--gpu-amaze-debayer {auto\|cpu\|gpu}` | Passed through | Selects Full Quality AMaZE debayer backend for the GPU preview-processing path. `gpu` implies `--gpu-viewport` and `--gpu-preview-processing gpu`; explicit `cpu` preview processing conflicts with `gpu` AMaZE. |
 
 Default (no recognised pre-QApplication flag): `MainWindow` is
 constructed and the GUI comes up.
@@ -1207,6 +1223,8 @@ Legend: **compile** = read at qmake/compile time;
 | `MLVAPP_EXPERIMENTAL_GL_VIEWPORT` | unset | runtime | `1` installs `GpuDisplayViewport`. |
 | `MLVAPP_EXPERIMENTAL_GPU_PROCESSING` | unset | runtime | `1` enables shader-side preview processing. |
 | `MLVAPP_EXPERIMENTAL_GPU_DEBAYER` | unset | runtime | `1` enables bilinear GPU debayer. |
+| `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` | unset | runtime | `1` enables explicit AMaZE CUDA debayer routing when the GPU preview-processing path is active. |
+| `MLVAPP_GPU_AMAZE_DEBAYER_DLL` | unset | runtime | Optional path to `igpu_amaze_debayer_cuda.dll`; otherwise app-dir/search-path lookup is used. |
 | `MLVAPP_STAGE_TIMING` | unset | runtime | Non-empty and not `"0"` → emit per-stage lines via `mlv_stage_timing_note` (`StageTiming.h:44`). |
 | `MLVAPP_STAGE_TIMING_FILE` | unset | runtime | Path to redirect stage-timing lines to a file. Default is stderr. |
 | `MLVAPP_PRED1_FASTPATH_MEASUREMENT` | unset | runtime | Truthy → enables LJ92 Pred1 fast-path telemetry split; also implicitly disables raw uint16 prefetch worker (`video_mlv.c:204`). |

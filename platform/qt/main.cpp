@@ -68,6 +68,7 @@ static bool hasGpuRelatedFlag(int argc, char *argv[])
         if (std::strcmp(argv[i], "--gpu-viewport") == 0) return true;
         if (std::strcmp(argv[i], "--gpu-preview-processing") == 0) return true;
         if (std::strcmp(argv[i], "--gpu-bilinear-debayer") == 0) return true;
+        if (std::strcmp(argv[i], "--gpu-amaze-debayer") == 0) return true;
     }
     return false;
 }
@@ -86,6 +87,7 @@ static bool shouldPreferDesktopOpenGl(int argc,
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
 #else
     Q_UNUSED(argc)
     Q_UNUSED(argv)
@@ -241,6 +243,30 @@ static GpuBilinearDebayerBackendRequest parsePlaybackProfileGpuBilinearDebayerBa
 
     if (ok) *ok = false;
     return GpuBilinearDebayerBackendRequest::Auto;
+}
+
+static GpuAmazeDebayerBackendRequest parsePlaybackProfileGpuAmazeDebayerBackend(
+    const QString & value,
+    bool * ok)
+{
+    if (ok) *ok = true;
+
+    const QString normalized = value.trimmed().toLower();
+    if (normalized.isEmpty() || normalized == QStringLiteral("auto"))
+    {
+        return GpuAmazeDebayerBackendRequest::Auto;
+    }
+    if (normalized == QStringLiteral("cpu"))
+    {
+        return GpuAmazeDebayerBackendRequest::Cpu;
+    }
+    if (normalized == QStringLiteral("gpu"))
+    {
+        return GpuAmazeDebayerBackendRequest::Gpu;
+    }
+
+    if (ok) *ok = false;
+    return GpuAmazeDebayerBackendRequest::Auto;
 }
 
 static int runBatch(QCoreApplication &app)
@@ -479,6 +505,13 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("auto"));
     parser.addOption(gpuBilinearDebayerOpt);
 
+    const QCommandLineOption gpuAmazeDebayerOpt(
+        QStringLiteral("gpu-amaze-debayer"),
+        QStringLiteral("Experimental AMaZE debayer backend selection for the GPU preview-processing path: auto, cpu, gpu. Selecting gpu implies --gpu-viewport and --gpu-preview-processing gpu, and falls back to CPU AMaZE if the CUDA backend is unavailable."),
+        QStringLiteral("backend"),
+        QStringLiteral("auto"));
+    parser.addOption(gpuAmazeDebayerOpt);
+
     const QCommandLineOption showWindowOpt(
         QStringLiteral("show-window"),
         QStringLiteral("Show the main window while profiling instead of keeping it hidden."));
@@ -617,7 +650,7 @@ static int runPlaybackProfile(QApplication &app)
     }
 
     bool gpuPreviewProcessingOk = false;
-    const GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackend =
+    GpuPreviewProcessingBackendRequest gpuPreviewProcessingBackend =
         parsePlaybackProfileGpuPreviewProcessingBackend(
             parser.value(gpuPreviewProcessingOpt),
             &gpuPreviewProcessingOk);
@@ -638,6 +671,26 @@ static int runPlaybackProfile(QApplication &app)
         return 2;
     }
 
+    bool gpuAmazeDebayerOk = false;
+    const GpuAmazeDebayerBackendRequest gpuAmazeDebayerBackend =
+        parsePlaybackProfileGpuAmazeDebayerBackend(
+            parser.value(gpuAmazeDebayerOpt),
+            &gpuAmazeDebayerOk);
+    if (!gpuAmazeDebayerOk)
+    {
+        err << "[PROFILE] ERROR: --gpu-amaze-debayer must be one of auto, cpu, gpu.\n";
+        return 2;
+    }
+    if (gpuAmazeDebayerBackend == GpuAmazeDebayerBackendRequest::Gpu)
+    {
+        if (gpuPreviewProcessingBackend == GpuPreviewProcessingBackendRequest::Cpu)
+        {
+            err << "[PROFILE] ERROR: --gpu-amaze-debayer gpu requires --gpu-preview-processing gpu or auto.\n";
+            return 2;
+        }
+        gpuPreviewProcessingBackend = GpuPreviewProcessingBackendRequest::Gpu;
+    }
+
     if (autoThreads)
     {
         qunsetenv("MLVAPP_FORCE_THREADS");
@@ -652,6 +705,10 @@ static int runPlaybackProfile(QApplication &app)
         qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
     }
     if (gpuBilinearDebayerBackend == GpuBilinearDebayerBackendRequest::Gpu)
+    {
+        qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
+    }
+    if (gpuAmazeDebayerBackend == GpuAmazeDebayerBackendRequest::Gpu)
     {
         qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
     }
@@ -702,6 +759,7 @@ static int runPlaybackProfile(QApplication &app)
     options.playbackProcessing = playbackProcessing;
     options.gpuPreviewProcessingBackend = gpuPreviewProcessingBackend;
     options.gpuBilinearDebayerBackend = gpuBilinearDebayerBackend;
+    options.gpuAmazeDebayerBackend = gpuAmazeDebayerBackend;
 
     QByteArray appName = QCoreApplication::applicationFilePath().toLocal8Bit();
     char *profileArgv[] = { appName.data(), nullptr };

@@ -491,7 +491,7 @@ private slots:
     void gpuViewportPresentsRgb16PatternExactly();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
-    void mainWindowGpuPreviewPolicyBlocksGpuBilinearForFullQualityAmazeUntilPPre();
+    void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -707,7 +707,7 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOn
     QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
 }
 
-void GuiSmokeTest::mainWindowGpuPreviewPolicyBlocksGpuBilinearForFullQualityAmazeUntilPPre()
+void GuiSmokeTest::mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate()
 {
     MainWindowGpuPreviewPolicyState state;
     state.gpuViewportInstalled = true;
@@ -720,19 +720,45 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyBlocksGpuBilinearForFullQualityAmaz
     // MainWindow sets this false while AMaZE/full-quality debayer is active.
     state.gpuBilinearDebayerCompatible = false;
     state.renderThreadUsingGpuBilinearDebayer = true;
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Gpu;
+    state.gpuAmazeDebayerCompatible = true;
+    state.renderThreadUsingGpuAmazeDebayer = true;
 
     QVERIFY(mainWindowAllowsGpuPreviewProcessing(state));
     QVERIFY(mainWindowUsesGpuPreviewProcessing(state));
     QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
     QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
+    QVERIFY(mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(mainWindowUsesGpuAmazeDebayer(state));
 
     state.gpuBilinearDebayerBackendRequest = GpuBilinearDebayerBackendRequest::Auto;
     QVERIFY(!mainWindowAllowsGpuBilinearDebayer(state));
     QVERIFY(!mainWindowUsesGpuBilinearDebayer(state));
 
+    state.renderThreadUsingGpuAmazeDebayer = false;
+    QVERIFY(mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowUsesGpuAmazeDebayer(state));
+
+    state.renderThreadUsingGpuAmazeDebayer = true;
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Cpu;
+    QVERIFY(!mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowUsesGpuAmazeDebayer(state));
+
+    state.gpuAmazeDebayerBackendRequest = GpuAmazeDebayerBackendRequest::Auto;
+    state.gpuAmazeDebayerEnvironmentRequested = false;
+    QVERIFY(!mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowUsesGpuAmazeDebayer(state));
+
+    state.gpuAmazeDebayerEnvironmentRequested = true;
+    QVERIFY(mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(mainWindowUsesGpuAmazeDebayer(state));
+
     state.gpuBilinearDebayerCompatible = true;
+    state.gpuAmazeDebayerCompatible = false;
     QVERIFY(mainWindowAllowsGpuBilinearDebayer(state));
     QVERIFY(mainWindowUsesGpuBilinearDebayer(state));
+    QVERIFY(!mainWindowAllowsGpuAmazeDebayer(state));
+    QVERIFY(!mainWindowUsesGpuAmazeDebayer(state));
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()
