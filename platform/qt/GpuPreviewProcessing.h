@@ -20,6 +20,26 @@ struct GpuPreviewProcessingConfig
     QByteArray matrixLutG;
     QByteArray matrixLutB;
     QByteArray gammaLut;
+    bool applyCreativeCurves = false;
+    bool applyToning = false;
+    float toningGain[3] = { 1.0f, 1.0f, 1.0f };
+    bool applyVibrance = false;
+    float vibrance = 1.0f;
+    bool applySaturation = false;
+    float saturation = 1.0f;
+    bool applyHueVs = false;
+    bool applyInLoopContrast = false;
+    float sourceContrast = 0.0f;
+    QByteArray inLoopContrastCurve;
+    QByteArray contrastCurveLut;
+    QByteArray gradationLutY;
+    QByteArray gradationLutR;
+    QByteArray gradationLutG;
+    QByteArray gradationLutB;
+    QByteArray hueVsHueCurve;
+    QByteArray hueVsSaturationCurve;
+    QByteArray hueVsLumaCurve;
+    QByteArray lumaVsSaturationCurve;
     uint64_t signature = 0;
 };
 

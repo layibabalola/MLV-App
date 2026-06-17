@@ -5,6 +5,17 @@ Status: 2026-06-15. The CUDA recon lane is proven on an RTX 4090 (validated bit-
 a DLL gate with no GUI claim. This doc remains the plan of record for the
 remaining playback/export rollout.
 
+Update 2026-06-16: P-pre **processing parity** is being extended from the
+supported levels / matrix / camera-matrix WB / gamut / gamma subset to the
+`allow_creative_adjustments` family, staged as curve-first parity slices
+(see §8.1). Slice 1 (the creative contrast-curve LUT) is designed and next to
+implement; each slice is bit-aligned CPU-vs-GPU and validated by an RTX 4090
+frame diff before the `gpuPreviewProcessingIsSupported` gate relaxes. Note also
+that Lane A **E1** is currently realized as an off-by-default *shadow validator*
+(`MLVAPP_GPU_EXPORT`): `llrawproc` runs the CUDA recon into a scratch buffer and
+copies it over the CPU output only when byte-identical, so the CPU path stays
+authoritative until the E2 parity gate promotes it.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -125,6 +136,73 @@ Minimal   — Basic / None (Fastest, last-resort cadence rescue)
 | 2 | P-pre passes (AMaZE debayer + processing parity) | `GPU · Full Quality · AMaZE` becomes a true explicit path, with CPU AMaZE fallback reported instead of silent bilinear substitution |
 
 P-pre is therefore both the engineering gate and the GUI-claim gate — it's what prevents a "Full Quality" toggle that silently isn't.
+
+### 8.1 Processing-parity slices (extending P-pre to `allow_creative_adjustments`)
+
+The GPU preview-processing shader today reproduces only the levels / matrix /
+camera-matrix WB / gamut / gamma subset and fails closed on
+`allow_creative_adjustments` (the creative grade). Extending it to full parity —
+so a normally-graded clip can use the GPU path instead of falling back to CPU —
+is staged as curve-first slices, because at the default image profile the
+creative **contrast curve** (`pre_calc_curve_r`, built from the non-zero base
+contrast params) is the only creative-family stage that is both active and
+non-identity; gradation and toning execute but are identity, and
+shadows/highlights and clarity are inert by default.
+
+The post-gamma creative pipeline is ported as bit-aligned slices, in the exact
+order `raw_processing.c` applies them (gamma → hue-vs → vibrance → saturation →
+toning → contrast curve → gradation):
+
+- **Slice 1 (DONE, `d77a26c6`):** creative contrast-curve LUT (`pre_calc_curve_r`)
+  + gradation curves (`gcurve_*`) — 1D 16-bit LUT lookups, no spatial pass.
+- **Slice 2 (DONE, `7c59d699`):** toning (per-channel `toning_dry + toning_wet`).
+- **Slice 3 (DONE, `2e04516b`):** saturation (`Y1 + trunc((pix-Y1)*sat)`).
+- **Slice 4 (DONE, `6ee4b4f3`):** vibrance (saturation-weighted blend).
+- **Slice 5 (DONE):** hue-vs / luma-vs curves — RGB→HSV, four signed-`float[36000]`
+  curve adjustments indexed by hue (`H*100`) and luma (`V*36000`), HSV→RGB. The
+  curves are carried as **R32F** textures (units 11-14) so the GPU, the CPU
+  reference and the production `float` curves stay bit-aligned (the uint16 LUT
+  path would quantize the [-1,1] curve to ~3e-5 and break parity).
+  - **Parity caveat (OOB clamp):** `hue_vs_luma` can push `V` to ≥ 1.0, after
+    which `(uint16)(V*36000)` indexes `luma_vs_saturation[]` (exactly 36000
+    entries) out of bounds — `V == 1.0` alone already yields index 36000. That
+    read is undefined on the production CPU path, so both the GPU shader and the
+    CPU reference **clamp the luma index to 35999** (the last valid sample)
+    instead of reproducing undefined behaviour. This diverges from production
+    only for boosted highlights (`V ≥ 1.0`) when a non-neutral
+    `luma_vs_saturation` curve is set; clamping is the correct, deterministic
+    behaviour and the production CPU path should adopt the same clamp (tracked
+    separately — out of GPU-lane scope).
+- **Slice 6 (DONE):** in-loop **simple-contrast factor** (`processing->contrast`,
+  a per-pixel luma-dependent exposure multiply via `contrast_curve[cval]`,
+  `raw_processing.c:2941-2954`). `cval` is the integer luma `(4R+11G+B)>>4` of the
+  matrix-applied (pre camera-WB) pixel; the value is multiplied by
+  `contrast_curve[cval]`. Because the factor is luma-dependent it cannot be folded
+  into the per-channel matrix/gamma LUTs, so it is applied in-shader after the
+  matrix sample and before the camera matrix/gamma (the scalar commutes with the
+  linear WB). `contrast_curve` (`double[65536]`) is narrowed to `float` and carried
+  as an R32F texture (unit 15).
+- **Later slices (non-creative features, gated independently of the creative flag):**
+  shadows/highlights + clarity (spatial RBF blur-mask pre-pass), then 1D/3D LUT,
+  creative filter, AgX, median/RBF denoise, grain, CA correction, sharpen,
+  vignette, non-Rec709 gamut.
+
+**After slices 1-6 the creative-adjustments family is fully ported.**
+`gpuPreviewProcessingIsSupported` no longer rejects `allow_creative_adjustments`
+on its own — it accepts any grade (default or hand-graded: in-loop contrast +
+hue-vs/luma-vs + vibrance + saturation + toning + contrast curve + gradation) and
+fails closed only on the non-creative features listed above, which are gated
+independently of the creative flag. The P-pre creative-parity goal (a normally
+graded clip uses the GPU path instead of the CPU fallback) is met for the
+creative-grade family, pending the RTX 4090 GL frame-diff that validates the
+shader against this CPU reference.
+
+Each slice keeps the CPU reference (`applyPreviewProcessingPixel`) and the GPU
+subset shader bit-aligned, adds unit parity tests (the CPU reference is the local
+bit-exact oracle), and is validated by a CPU-vs-GPU frame diff on the RTX 4090
+before the support gate relaxes for that stage. P-pre — and the honest GUI
+"GPU · Full Quality · AMaZE" claim per §8 stage 2 — completes when every creative
+stage reaches parity.
 
 ## 9. UI truth / status language
 
