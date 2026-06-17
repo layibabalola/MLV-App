@@ -388,6 +388,46 @@ void cpuSharpenPostPass(uint16_t * img, int width, int height, double a, double 
     }
 }
 
+/* CPU median denoise post-pass replicating denoise_2D_median_with_context
+ * (denoiser_2d_median.c:132-225): per-pixel square-window median (the middle order
+ * statistic) blended with the original by strength/100; border pixels (within
+ * window/2 of an edge) untouched. */
+void cpuMedianPostPass(uint16_t * img, int width, int height, int window, int strength)
+{
+    if ( strength > 100 ) strength = 100;
+    if ( strength == 0 || window == 0 ) return;
+    const float strengthF = strength / 100.0f;
+    const float antiStrengthF = 1.0f - strengthF;
+    const int winSize = window * window;
+    const int edge = window / 2;
+    const int middle = winSize / 2;
+    if ( width <= edge * 2 || height <= edge * 2 ) return;
+
+    std::vector<uint16_t> noisy(img, img + static_cast<size_t>(width) * height * 3u);
+    std::vector<int> winR(winSize), winG(winSize), winB(winSize);
+    for (int x = edge; x < width - edge; ++x)
+        for (int y = edge; y < height - edge; ++y)
+        {
+            int idx = 0;
+            for (int fx = 0; fx < window; ++fx)
+                for (int fy = 0; fy < window; ++fy)
+                {
+                    const int ww = x + fx - edge;
+                    const int hh = y + fy - edge;
+                    winR[idx] = noisy[(hh * width + ww) * 3 + 0];
+                    winG[idx] = noisy[(hh * width + ww) * 3 + 1];
+                    winB[idx] = noisy[(hh * width + ww) * 3 + 2];
+                    ++idx;
+                }
+            std::nth_element(winR.begin(), winR.begin() + middle, winR.end());
+            std::nth_element(winG.begin(), winG.begin() + middle, winG.end());
+            std::nth_element(winB.begin(), winB.begin() + middle, winB.end());
+            img[(y * width + x) * 3 + 0] = static_cast<uint16_t>(strengthF * winR[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 0]);
+            img[(y * width + x) * 3 + 1] = static_cast<uint16_t>(strengthF * winG[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 1]);
+            img[(y * width + x) * 3 + 2] = static_cast<uint16_t>(strengthF * winB[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 2]);
+        }
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
                                  uint16_t * outputPixel,
@@ -1858,7 +1898,12 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     /* EXR/cyan-highlight mode is compatible with the preview subset as long as
      * gamut compression stays disabled. The config builder already derives that
      * via applyGamutCompression = false, so do not reject it here. */
-    if ( processing->denoiserStrength > 0 ) return reject(QStringLiteral("median denoiser enabled"));
+    /* Median denoise is supported for windows up to 5 (the GLSL window-median is
+     * O(winSize^2)); a larger window is rejected. */
+    if ( processing->denoiserStrength > 0 && processing->denoiserWindow > 5 )
+    {
+        return reject(QStringLiteral("median denoiser window exceeds 5"));
+    }
     if ( processing->rbfDenoiserLuma > 0 || processing->rbfDenoiserChroma > 0 ) return reject(QStringLiteral("RBF denoiser enabled"));
     if ( processing->grainStrength > 0 ) return reject(QStringLiteral("grain enabled"));
     if ( processing->ca_desaturate > 0 ) return reject(QStringLiteral("CA correction enabled"));
@@ -2155,6 +2200,15 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
         config.sharpenY = s * (1.0 + processing->sharpen_bias);
         config.sharpenA = 1.0 + (2.0 * config.sharpenX) + (2.0 * config.sharpenY);
     }
+
+    /* Median denoise: per-pixel square-window median blended by strength/100
+     * (denoiser_2d_median.c). Supported for windows up to 5 (winSize<=25); larger
+     * windows are rejected (the GLSL order-statistic selection is O(winSize^2)). */
+    config.applyMedian = processing->denoiserStrength > 0
+                      && processing->denoiserWindow >= 1
+                      && processing->denoiserWindow <= 5;
+    config.medianWindow = static_cast<int>(processing->denoiserWindow);
+    config.medianStrength = static_cast<int>(processing->denoiserStrength);
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -2227,6 +2281,9 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.sharpenA, sizeof(config.sharpenA));
     hash = fnv1a64_append(hash, &config.sharpenX, sizeof(config.sharpenX));
     hash = fnv1a64_append(hash, &config.sharpenY, sizeof(config.sharpenY));
+    hash = fnv1a64_append(hash, &config.applyMedian, sizeof(config.applyMedian));
+    hash = fnv1a64_append(hash, &config.medianWindow, sizeof(config.medianWindow));
+    hash = fnv1a64_append(hash, &config.medianStrength, sizeof(config.medianStrength));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -2314,6 +2371,10 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
     {
         cpuSharpenPostPass(outputRgb16, width, height, config.sharpenA, config.sharpenX, config.sharpenY);
     }
+    if ( config.applyMedian )
+    {
+        cpuMedianPostPass(outputRgb16, width, height, config.medianWindow, config.medianStrength);
+    }
 }
 
 static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
@@ -2321,6 +2382,9 @@ static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int ra
 static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
                                     double a, double x, double y,
                                     QString * reason, QString * rendererDescription);
+static bool applyMedianPostPassGpu(uint16_t * img, int width, int height,
+                                   int window, int strength,
+                                   QString * reason, QString * rendererDescription);
 
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
@@ -2737,6 +2801,21 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         if ( rendererDescription && !sharpenRenderer.isEmpty() )
         {
             *rendererDescription = sharpenRenderer;
+        }
+    }
+    if ( config.applyMedian )
+    {
+        QString medianReason;
+        QString medianRenderer;
+        if ( !applyMedianPostPassGpu(outputRgb16, width, height,
+                                     config.medianWindow, config.medianStrength,
+                                     &medianReason, &medianRenderer) )
+        {
+            return fail(medianReason);
+        }
+        if ( rendererDescription && !medianRenderer.isEmpty() )
+        {
+            *rendererDescription = medianRenderer;
         }
     }
 
@@ -3302,6 +3381,183 @@ static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
 
     program.release();
     delete srcTexture; delete sharpLut;
+    context.doneCurrent();
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray medianShaderSource()
+{
+    /* Per-pixel square-window median (the middle order statistic, found by counting
+     * so any sort order yields the same value) blended with the original by
+     * strength (denoiser_2d_median.c). Window up to 5x5 (25 samples). Border pixels
+     * (within window/2 of an edge) pass through. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform float windowF;\n"
+        "uniform float edgeF;\n"
+        "uniform float middleF;\n"
+        "uniform float strengthF;\n"
+        "varying vec2 vTexCoord;\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    vec3 center = floor(texture2D(src, (px + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    if (px.x < edgeF - 0.5 || px.x > texSize.x - edgeF - 0.5 ||\n"
+        "        px.y < edgeF - 0.5 || px.y > texSize.y - edgeF - 0.5)\n"
+        "    {\n"
+        "        gl_FragColor = vec4(center / 65535.0, 1.0);\n"
+        "        return;\n"
+        "    }\n"
+        "    float wr[25]; float wg[25]; float wb[25];\n"
+        "    int n = 0;\n"
+        "    for (int fx = 0; fx < 5; fx++)\n"
+        "    {\n"
+        "        if (float(fx) >= windowF) break;\n"
+        "        for (int fy = 0; fy < 5; fy++)\n"
+        "        {\n"
+        "            if (float(fy) >= windowF) break;\n"
+        "            vec2 wpx = vec2(px.x + float(fx) - edgeF, px.y + float(fy) - edgeF);\n"
+        "            vec3 s = floor(texture2D(src, (wpx + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "            wr[n] = s.r; wg[n] = s.g; wb[n] = s.b;\n"
+        "            n++;\n"
+        "        }\n"
+        "    }\n"
+        "    int mid = int(middleF + 0.5);\n"
+        "    vec3 med = vec3(0.0);\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wr[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wr[b] < cand) less++;\n"
+        "            if (wr[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.r = cand; break; }\n"
+        "    }\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wg[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wg[b] < cand) less++;\n"
+        "            if (wg[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.g = cand; break; }\n"
+        "    }\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wb[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wb[b] < cand) less++;\n"
+        "            if (wb[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.b = cand; break; }\n"
+        "    }\n"
+        "    vec3 outv = floor(strengthF * med + (1.0 - strengthF) * center);\n"
+        "    gl_FragColor = vec4(clamp(outv, 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+}
+
+static bool applyMedianPostPassGpu(uint16_t * img, int width, int height,
+                                   int window, int strength,
+                                   QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("median post-pass invalid buffer"));
+    if ( strength > 100 ) strength = 100;
+    const int winSize = window * window;
+    const int edge = window / 2;
+    const int middle = winSize / 2;
+    if ( strength == 0 || window == 0 || width <= edge * 2 || height <= edge * 2 )
+    {
+        if ( reason ) reason->clear();
+        return true;  /* engine no-op cases */
+    }
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram program;
+    if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, gpuPreviewProcessingVertexShaderSource())
+      || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, medianShaderSource())
+      || !program.link() )
+    {
+        const QString log = program.log();
+        context.doneCurrent();
+        return fail(QStringLiteral("median shader setup failed: %1").arg(log));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fbo(width, height, fmt);
+    if ( !fbo.isValid() )
+    {
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("median framebuffer creation failed"));
+    }
+
+    fbo.bind();
+    gl->glViewport(0, 0, width, height);
+    gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+    gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    program.bind();
+    program.setUniformValue("src", 0);
+    program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("windowF", static_cast<float>(window));
+    program.setUniformValue("edgeF", static_cast<float>(edge));
+    program.setUniformValue("middleF", static_cast<float>(middle));
+    program.setUniformValue("strengthF", static_cast<float>(strength) / 100.0f);
+    srcTexture->bind(0);
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+    program.enableAttributeArray(posLoc);
+    program.enableAttributeArray(texLoc);
+    program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+    program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+    gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    gl->glFinish();
+    program.disableAttributeArray(posLoc);
+    program.disableAttributeArray(texLoc);
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture;
     context.doneCurrent();
     if ( reason ) reason->clear();
     return true;

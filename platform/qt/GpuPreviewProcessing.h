@@ -61,6 +61,9 @@ struct GpuPreviewProcessingConfig
     double sharpenA = 1.0;
     double sharpenX = 0.0;
     double sharpenY = 0.0;
+    bool applyMedian = false;
+    int medianWindow = 0;
+    int medianStrength = 0;
     /* Raw pointer into processing->gradient_mask (uint16, frame-sized). The
      * gradient mask has no companion length on the processing object, so it is
      * carried as a pointer and read by the callers, which know the frame

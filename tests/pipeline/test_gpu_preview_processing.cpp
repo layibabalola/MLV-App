@@ -319,10 +319,12 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "filter",
         QStringLiteral("filter enabled"),
         [](processingObject_t * processing) { processing->filter_on = 1; });
+    /* median denoise is now supported for windows <=5 (see MedianIsSupportedAndMatchesCpuReference);
+     * a larger window is rejected. */
     assert_gpu_preview_rejects_processing_feature(
-        "median_denoiser",
-        QStringLiteral("median denoiser enabled"),
-        [](processingObject_t * processing) { processing->denoiserStrength = 1; });
+        "median_window_too_large",
+        QStringLiteral("median denoiser window exceeds 5"),
+        [](processingObject_t * processing) { processing->denoiserStrength = 50; processing->denoiserWindow = 7; });
     assert_gpu_preview_rejects_processing_feature(
         "rbf_denoiser",
         QStringLiteral("RBF denoiser enabled"),
@@ -862,6 +864,36 @@ TEST(GpuPreviewProcessing, SharpenIsSupportedAndMatchesCpuReference)
     ASSERT_TRUE(base_hash != sharp_hash);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "sharpen");
+}
+
+TEST(GpuPreviewProcessing, MedianIsSupportedAndMatchesCpuReference)
+{
+    /* Median denoise is now supported (windows <=5): a per-pixel window-median
+     * post-pass blended by strength. Verify the gate accepts it, the config carries
+     * the median fields, the output changes vs the baseline, and the GPU offscreen
+     * output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    p->denoiserWindow = 3;
+    p->denoiserStrength = 80;
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyMedian);
+    ASSERT_EQ(3, cfg.medianWindow);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string median_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != median_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "median");
 }
 
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
