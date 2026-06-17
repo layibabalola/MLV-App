@@ -146,8 +146,10 @@ explicit decision on the recursive stages:
 
 **Sub-phase A — per-pixel, bit-exact, no architecture change (proven slice
 pattern):**
-1. **highlight reconstruction** — cleanest first stage; one per-frame scalar
-   uniform, no new textures, all-float-expressible. *(first stage to implement)*
+1. **highlight reconstruction — DONE (`d3b52237`).** Per-pixel clipped-green
+   replace; 4 uniforms, no new textures. 218 tests/0 failed on llvmpipe and the
+   RTX 4090 (max=9 LSB). Caveat: production preview wiring must refresh the config
+   per frame so the dual-ISO `highest_green_diso` peak is current.
 2. **gradient** — vignette-class mask + a second LUT set; per-pixel but heavier.
 
 **Sub-phase B — the box-blur FBO architecture lift (validate the blur in
