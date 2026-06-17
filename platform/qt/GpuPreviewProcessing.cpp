@@ -220,6 +220,36 @@ float lutLerp(float x, float x1, float x2, float q00, float q01)
     return ((x2 - x) / (x2 - x1)) * q00 + ((x - x1) / (x2 - x1)) * q01;
 }
 
+/* Reinhard gamut compression on a white-balanced float triplet
+ * (raw_processing.c:3173-3200), shared by the base and gradient layers and
+ * mirrored by the in-shader gamut block. */
+void applyPreviewGamutCompression(float wb[3], const float rgbToY[3])
+{
+    const float y = rgbToY[0] * wb[0] + rgbToY[1] * wb[1] + rgbToY[2] * wb[2];
+    const float minChannel = std::min(std::min(wb[0], wb[1]), wb[2]);
+    float gamutReference[3];
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        const float yToMinChannel = (y != 0.0f) ? ((y - wb[channel]) / y) : 0.0f;
+        const float tonemapped = (channel == 0)
+            ? reinhardForColour(yToMinChannel)
+            : reinhardForBlue(yToMinChannel);
+        gamutReference[channel] = -(tonemapped * y) + y;
+    }
+    const float gamutMin =
+        std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
+    float desaturateFactor = 1.0f;
+    const float denominator = y - minChannel;
+    if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
+    {
+        desaturateFactor = (y - gamutMin) / denominator;
+    }
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        wb[channel] = (wb[channel] - y) * desaturateFactor + y;
+    }
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
                                  uint16_t * outputPixel,
@@ -241,6 +271,13 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
      * vignette/contrast expo multiplies (raw_processing.c:3008 tmp1 = wb_g). */
     const float reconMatrixGreen = matrixApplied[1];
 
+    /* The gradient layer reuses the SHARED expo_correction (vignette x base
+     * in-loop-contrast) and the base luma index cval. Capture them here. */
+    float sharedVignetteFactor = 1.0f;
+    float sharedContrastFactor = 1.0f;
+    int sharedCval = 0;
+    bool sharedHaveCval = false;
+
     if ( config.applyVignette )
     {
         /* Vignette: a per-pixel exposure multiply, the first expo_correction
@@ -258,27 +295,36 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
             const float m = reinterpret_cast<const float *>(config.vignetteMask.constData())[maskIdx];
             const double base = 1.0 + (static_cast<double>(m) * config.vignetteStrength / 128.0);
             const float vfactor = static_cast<float>(std::pow(base, 4.0));
+            sharedVignetteFactor = vfactor;
             matrixApplied[0] *= vfactor;
             matrixApplied[1] *= vfactor;
             matrixApplied[2] *= vfactor;
         }
     }
 
-    if ( config.applyInLoopContrast )
+    if ( config.applyInLoopContrast || config.applyGradientContrast )
     {
         /* In-loop simple-contrast factor (raw_processing.c:2941-2954): a per-pixel
          * exposure multiply by contrast_curve[cval], where cval is the integer
          * luma (4R+11G+B)>>4 of the matrix-applied (pre camera-WB) pixel. Applied
          * to the matrix value before the camera matrix and gamma, matching
-         * pix0 = wb_r * expo_correction. */
+         * pix0 = wb_r * expo_correction. The cval is also shared by the gradient
+         * layer (base contrast feeds the shared expo_correction; gradient contrast
+         * uses the same index into its own curve), so it is computed whenever
+         * either the base or the gradient contrast is active. */
         const int32_t matR = static_cast<int32_t>(matrixApplied[0] * 65535.0f + 0.5f);
         const int32_t matG = static_cast<int32_t>(matrixApplied[1] * 65535.0f + 0.5f);
         const int32_t matB = static_cast<int32_t>(matrixApplied[2] * 65535.0f + 0.5f);
-        const int32_t cval = ((matR << 2) + (matG * 11) + matB) >> 4;
-        const float factor = sampleInLoopContrastFactor(config.inLoopContrastCurve, cval);
-        matrixApplied[0] *= factor;
-        matrixApplied[1] *= factor;
-        matrixApplied[2] *= factor;
+        sharedCval = ((matR << 2) + (matG * 11) + matB) >> 4;
+        sharedHaveCval = true;
+        if ( config.applyInLoopContrast )
+        {
+            const float factor = sampleInLoopContrastFactor(config.inLoopContrastCurve, sharedCval);
+            sharedContrastFactor = factor;
+            matrixApplied[0] *= factor;
+            matrixApplied[1] *= factor;
+            matrixApplied[2] *= factor;
+        }
     }
 
     if ( config.applyHighlightReconstruction )
@@ -333,35 +379,7 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
 
         if ( config.applyGamutCompression )
         {
-            const float y = config.rgbToY[0] * wbApplied[0]
-                          + config.rgbToY[1] * wbApplied[1]
-                          + config.rgbToY[2] * wbApplied[2];
-            const float minChannel =
-                std::min(std::min(wbApplied[0], wbApplied[1]), wbApplied[2]);
-            float gamutReference[3];
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                const float yToMinChannel =
-                    (y != 0.0f) ? ((y - wbApplied[channel]) / y) : 0.0f;
-                const float tonemapped = (channel == 0)
-                    ? reinhardForColour(yToMinChannel)
-                    : reinhardForBlue(yToMinChannel);
-                gamutReference[channel] = -(tonemapped * y) + y;
-            }
-
-            const float gamutMin =
-                std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
-            float desaturateFactor = 1.0f;
-            const float denominator = y - minChannel;
-            if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
-            {
-                desaturateFactor = (y - gamutMin) / denominator;
-            }
-
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                wbApplied[channel] = (wbApplied[channel] - y) * desaturateFactor + y;
-            }
+            applyPreviewGamutCompression(wbApplied, config.rgbToY);
         }
 
         std::memcpy(matrixApplied, wbApplied, sizeof(matrixApplied));
@@ -396,6 +414,97 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     {
         const float gammaInput = clamp01(matrixApplied[channel]);
         gammaOut[channel] = sampleLut(config.gammaLut, gammaInput);
+    }
+
+    if ( config.applyGradient )
+    {
+        /* Gradient layer (raw_processing.c:3021-3078 + 3311-3492): a second copy of
+         * the pre-creative pipeline through the gradient LUTs, blended into the base
+         * in gamma space by the per-pixel mask BEFORE the creative chain (which runs
+         * once on the blended result). Shares proper_wb / gamut weights / AgX
+         * matrices and the shared expo_correction (vignette x base contrast); adds a
+         * gradient-contrast factor, a gradient gamma LUT, and gradient highlight-
+         * recon green keys. The engine keeps the gradient pixel a fractional float
+         * through Part 1 (LIMIT16 = clamp, not truncate), its recon divides in float,
+         * and it truncates only at the gradient gamma index -- all mirrored here. The
+         * gradient 3x3/gamut run in float (engine uses double; the <=1 LSB delta
+         * after the gamma LUT is within the parity tolerance). */
+        float g[3];
+        g[0] = sampleNormalizedLut(config.gradientMatrixLutR, color[0]) * 65535.0f;
+        g[1] = sampleNormalizedLut(config.gradientMatrixLutG, color[1]) * 65535.0f;
+        g[2] = sampleNormalizedLut(config.gradientMatrixLutB, color[2]) * 65535.0f;
+        const float gradTmpGreen = g[1];
+        float gradContrastFactor = 1.0f;
+        if ( config.applyGradientContrast && sharedHaveCval )
+        {
+            gradContrastFactor = sampleInLoopContrastFactor(config.gradientContrastCurve, sharedCval);
+        }
+        const float gradExpo = sharedVignetteFactor * sharedContrastFactor * gradContrastFactor;
+        g[0] = clamp16(g[0] * gradExpo);
+        g[1] = clamp16(g[1] * gradExpo);
+        g[2] = clamp16(g[2] * gradExpo);
+        if ( config.applyHighlightReconstruction )
+        {
+            const float gt1 = std::floor(clamp16(gradTmpGreen + 0.5f));
+            bool grep = false;
+            if ( config.highlightReconDualIso )
+            {
+                const float lo = clamp16(static_cast<float>(config.gradientHighestGreenDiso) - 5000.0f);
+                const float hi = clamp16(static_cast<float>(config.gradientHighestGreenDiso) + 5000.0f);
+                if ( gt1 >= lo && gt1 <= hi && g[1] < 1.1f * g[0] && g[1] < g[2] ) grep = true;
+            }
+            else if ( gt1 == static_cast<float>(config.gradientHighestGreen) )
+            {
+                grep = true;
+            }
+            if ( grep ) g[1] = (g[0] + g[2]) / 2.0f;
+        }
+        float gm[3] = { g[0] / 65535.0f, g[1] / 65535.0f, g[2] / 65535.0f };
+        if ( config.useCameraMatrix )
+        {
+            float w[3];
+            w[0] = config.properWbMatrix[0] * gm[0] + config.properWbMatrix[1] * gm[1] + config.properWbMatrix[2] * gm[2];
+            w[1] = config.properWbMatrix[3] * gm[0] + config.properWbMatrix[4] * gm[1] + config.properWbMatrix[5] * gm[2];
+            w[2] = config.properWbMatrix[6] * gm[0] + config.properWbMatrix[7] * gm[1] + config.properWbMatrix[8] * gm[2];
+            if ( config.applyGamutCompression )
+            {
+                applyPreviewGamutCompression(w, config.rgbToY);
+            }
+            gm[0] = w[0]; gm[1] = w[1]; gm[2] = w[2];
+        }
+        if ( config.applyAgx )
+        {
+            double v[3];
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                v[channel] = static_cast<double>(gm[channel]) * 65535.0;
+                if ( v[channel] < 0.0 ) v[channel] = 0.0;
+            }
+            const double a[3] = {
+                v[0] * config.agxForward[0] + v[1] * config.agxForward[1] + v[2] * config.agxForward[2],
+                v[0] * config.agxForward[3] + v[1] * config.agxForward[4] + v[2] * config.agxForward[5],
+                v[0] * config.agxForward[6] + v[1] * config.agxForward[7] + v[2] * config.agxForward[8] };
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const double clamped = a[channel] < 0.0 ? 0.0 : (a[channel] > 65535.0 ? 65535.0 : a[channel]);
+                gm[channel] = static_cast<float>(static_cast<uint16_t>(clamped)) / 65535.0f;
+            }
+        }
+        const uint16_t * gradGamma = reinterpret_cast<const uint16_t *>(config.gradientGammaLut.constData());
+        uint16_t pixg[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const int idx = static_cast<int>(clamp16(gm[channel] * 65535.0f));
+            pixg[channel] = gradGamma[idx];
+        }
+        const float blend = (config.gradientMaskData != nullptr)
+            ? (static_cast<float>(config.gradientMaskData[pixelIndex]) / 65535.0f) : 0.0f;
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const float blended = blend * static_cast<float>(pixg[channel])
+                                + (1.0f - blend) * static_cast<float>(gammaOut[channel]);
+            gammaOut[channel] = static_cast<uint16_t>(blended);
+        }
     }
 
     if ( config.applyHueVs )
@@ -1142,11 +1251,30 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewHighlightReconDualIso;\n"
         "uniform float previewHighestGreen;\n"
         "uniform float previewHighestGreenDiso;\n"
+        "uniform sampler2D gradMatrixLutR;\n"
+        "uniform sampler2D gradMatrixLutG;\n"
+        "uniform sampler2D gradMatrixLutB;\n"
+        "uniform sampler2D gradGammaLut;\n"
+        "uniform sampler2D gradientContrastCurve;\n"
+        "uniform sampler2D gradientMask;\n"
+        "uniform float previewApplyGradient;\n"
+        "uniform float previewApplyGradientContrast;\n"
+        "uniform float previewGradientHighestGreen;\n"
+        "uniform float previewGradientHighestGreenDiso;\n"
         "varying vec2 vTexCoord;\n"
         "float sampleU16Lut(sampler2D lut, float value)\n"
         "{\n"
         "    float clamped = clamp(value, 0.0, 1.0);\n"
         "    float index = floor(clamped * 65535.0 + 0.5);\n"
+        "    float x = mod(index, 256.0);\n"
+        "    float y = floor(index / 256.0);\n"
+        "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
+        "    return texture2D(lut, uv).r;\n"
+        "}\n"
+        "float sampleU16LutTrunc(sampler2D lut, float value)\n"
+        "{\n"
+        "    float clamped = clamp(value, 0.0, 1.0);\n"
+        "    float index = floor(clamped * 65535.0);\n"
         "    float x = mod(index, 256.0);\n"
         "    float y = floor(index / 256.0);\n"
         "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
@@ -1314,6 +1442,82 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyGradient > 0.5)\n"
+        "    {\n"
+        "        vec2 gfc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
+        "        float gblend = texture2D(gradientMask, (floor(gfc) + vec2(0.5)) / frameSize).r / 65535.0;\n"
+        "        vec3 g = vec3(sampleU16Lut(gradMatrixLutR, leveled.r), sampleU16Lut(gradMatrixLutG, leveled.g), sampleU16Lut(gradMatrixLutB, leveled.b)) * 65535.0;\n"
+        "        float gtmpGreen = g.g;\n"
+        "        float vigF = 1.0;\n"
+        "        if (previewApplyVignette > 0.5)\n"
+        "        {\n"
+        "            float vmidx = floor(gfc.y) * frameSize.x + floor(gfc.x) + 1.0;\n"
+        "            if (vmidx < frameSize.x * frameSize.y)\n"
+        "            {\n"
+        "                float vmx = mod(vmidx, frameSize.x);\n"
+        "                float vmy = floor(vmidx / frameSize.x);\n"
+        "                float vm = texture2D(vignetteMask, (vec2(vmx, vmy) + vec2(0.5)) / frameSize).r;\n"
+        "                float vb = 1.0 + (vm * previewVignetteStrength / 128.0);\n"
+        "                float vb2 = vb * vb;\n"
+        "                vigF = vb2 * vb2;\n"
+        "            }\n"
+        "        }\n"
+        "        float baseContrastF = 1.0;\n"
+        "        float gradContrastF = 1.0;\n"
+        "        if (previewApplyInLoopContrast > 0.5 || previewApplyGradientContrast > 0.5)\n"
+        "        {\n"
+        "            vec3 bm = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b)) * vigF;\n"
+        "            vec3 bm16 = floor(bm * 65535.0 + 0.5);\n"
+        "            float gcval = floor((bm16.r * 4.0 + bm16.g * 11.0 + bm16.b) / 16.0);\n"
+        "            if (previewApplyInLoopContrast > 0.5) baseContrastF = sampleContrastCurve(inLoopContrastCurve, gcval);\n"
+        "            if (previewApplyGradientContrast > 0.5) gradContrastF = sampleContrastCurve(gradientContrastCurve, gcval);\n"
+        "        }\n"
+        "        g = clamp(g * (vigF * baseContrastF * gradContrastF), 0.0, 65535.0);\n"
+        "        if (previewApplyHighlightRecon > 0.5)\n"
+        "        {\n"
+        "            float gt1 = floor(clamp(gtmpGreen + 0.5, 0.0, 65535.0));\n"
+        "            bool grep = false;\n"
+        "            if (previewHighlightReconDualIso > 0.5)\n"
+        "            {\n"
+        "                float glo = clamp(previewGradientHighestGreenDiso - 5000.0, 0.0, 65535.0);\n"
+        "                float ghi = clamp(previewGradientHighestGreenDiso + 5000.0, 0.0, 65535.0);\n"
+        "                if (gt1 >= glo && gt1 <= ghi && g.g < 1.1 * g.r && g.g < g.b) grep = true;\n"
+        "            }\n"
+        "            else if (gt1 == previewGradientHighestGreen)\n"
+        "            {\n"
+        "                grep = true;\n"
+        "            }\n"
+        "            if (grep) g.g = (g.r + g.b) / 2.0;\n"
+        "        }\n"
+        "        vec3 gmv = g / 65535.0;\n"
+        "        if (previewUseCameraMatrix > 0.5)\n"
+        "        {\n"
+        "            vec3 gw = vec3(dot(previewProperWbRow0, gmv), dot(previewProperWbRow1, gmv), dot(previewProperWbRow2, gmv));\n"
+        "            if (previewApplyGamutCompression > 0.5)\n"
+        "            {\n"
+        "                float Y = dot(previewRgbToY, gw);\n"
+        "                float minC = min(min(gw.r, gw.g), gw.b);\n"
+        "                vec3 gref = vec3(-(reinhardForColour((Y != 0.0) ? ((Y - gw.r) / Y) : 0.0) * Y) + Y,\n"
+        "                                 -(reinhardForBlue((Y != 0.0) ? ((Y - gw.g) / Y) : 0.0) * Y) + Y,\n"
+        "                                 -(reinhardForBlue((Y != 0.0) ? ((Y - gw.b) / Y) : 0.0) * Y) + Y);\n"
+        "                float gmin = min(min(gref.r, gref.g), gref.b);\n"
+        "                float gdes = 1.0;\n"
+        "                float gden = Y - minC;\n"
+        "                if (Y > 0.0 && abs(gden) > 0.00000001) gdes = (Y - gmin) / gden;\n"
+        "                gw = (gw - vec3(Y)) * gdes + vec3(Y);\n"
+        "            }\n"
+        "            gmv = gw;\n"
+        "        }\n"
+        "        if (previewApplyAgx > 0.5)\n"
+        "        {\n"
+        "            vec3 av = max(gmv * 65535.0, 0.0);\n"
+        "            vec3 aa = vec3(dot(previewAgxFwd0, av), dot(previewAgxFwd1, av), dot(previewAgxFwd2, av));\n"
+        "            gmv = floor(clamp(aa, 0.0, 65535.0)) / 65535.0;\n"
+        "        }\n"
+        "        vec3 pixg = vec3(sampleU16LutTrunc(gradGammaLut, gmv.r), sampleU16LutTrunc(gradGammaLut, gmv.g), sampleU16LutTrunc(gradGammaLut, gmv.b));\n"
+        "        vec3 gblended = vec3(gblend) * pixg + vec3(1.0 - gblend) * result;\n"
+        "        result = floor(clamp(gblended * 65535.0, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    if (previewApplyHueVs > 0.5)\n"
         "    {\n"
         "        vec3 hv = result * 65535.0;\n"
@@ -1492,7 +1696,15 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
      * implement (gradient, LUT, filter, AgX, denoise, grain, CA, sharpen, chroma
      * separation/blur, clarity, shadows/highlights, vignette, non-Rec709 gamut),
      * which are gated independently of the creative flag. */
-    if ( processing->gradient_enable ) return reject(QStringLiteral("gradient enabled"));
+    /* gradient is now supported: a second pre-creative pipeline through the
+     * gradient LUTs, blended into the base in gamma space by the gradient mask
+     * before the creative chain. Ported as a per-pixel stage (no spatial pass).
+     * Reject only when enabled-but-unbuilt (no mask), which the subset cannot
+     * reproduce. */
+    if ( processing->gradient_enable && processing->gradient_mask == NULL )
+    {
+        return reject(QStringLiteral("gradient mask unavailable"));
+    }
     /* 1D/3D .cube LUTs are supported: applied as the last stage (tetrahedral 3D /
      * per-channel-lerp 1D) from a volume/1D texture. Reject only a malformed cube
      * (the subset cannot reproduce a LUT without valid cube data). */
@@ -1724,6 +1936,49 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     config.highlightReconDualIso = (processing->dual_iso != NULL && *processing->dual_iso != 0);
     config.highestGreen = static_cast<int>(processing->highest_green);
     config.highestGreenDiso = static_cast<int>(processing->highest_green_diso);
+
+    /* Gradient: a second pre-creative pipeline blended into the base by the
+     * per-pixel mask. Active only when enabled with non-trivial gradient
+     * exposure/contrast (the engine's use_gradient_adjustments) and a built mask.
+     * The mask is carried as a pointer (frame-sized, no companion length here);
+     * the callers read it by pixel index / width*height. */
+    const bool gradientAdjustments =
+        (processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01)
+     || (processing->gradient_contrast < -0.01 || processing->gradient_contrast > 0.01);
+    config.applyGradient = processing->gradient_enable != 0
+                        && gradientAdjustments
+                        && processing->gradient_mask != NULL;
+    if ( config.applyGradient )
+    {
+        config.gradientMaskData = processing->gradient_mask;
+        config.applyGradientContrast = std::fabs(processing->gradient_contrast) >= 0.01;
+        config.gradientHighestGreen = static_cast<int>(processing->highest_green_gradient);
+        config.gradientHighestGreenDiso = static_cast<int>(processing->highest_green_gradient_diso);
+        config.gradientMatrixLutR.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradientMatrixLutG.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradientMatrixLutB.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        uint16_t * gmR = reinterpret_cast<uint16_t *>(config.gradientMatrixLutR.data());
+        uint16_t * gmG = reinterpret_cast<uint16_t *>(config.gradientMatrixLutG.data());
+        uint16_t * gmB = reinterpret_cast<uint16_t *>(config.gradientMatrixLutB.data());
+        for (int index = 0; index < 65536; ++index)
+        {
+            gmR[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[0][index], 65535));
+            gmG[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[4][index], 65535));
+            gmB[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[8][index], 65535));
+        }
+        config.gradientGammaLut = QByteArray(
+            reinterpret_cast<const char *>(processing->pre_calc_gamma_gradient),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        if ( config.applyGradientContrast )
+        {
+            config.gradientContrastCurve.resize(static_cast<int>(65536u * sizeof(float)));
+            float * gdst = reinterpret_cast<float *>(config.gradientContrastCurve.data());
+            for (int index = 0; index < 65536; ++index)
+            {
+                gdst[index] = static_cast<float>(processing->gradient_contrast_curve[index]);
+            }
+        }
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1781,6 +2036,15 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.highlightReconDualIso, sizeof(config.highlightReconDualIso));
     hash = fnv1a64_append(hash, &config.highestGreen, sizeof(config.highestGreen));
     hash = fnv1a64_append(hash, &config.highestGreenDiso, sizeof(config.highestGreenDiso));
+    hash = fnv1a64_append(hash, &config.applyGradient, sizeof(config.applyGradient));
+    hash = fnv1a64_append(hash, &config.applyGradientContrast, sizeof(config.applyGradientContrast));
+    hash = fnv1a64_append(hash, &config.gradientHighestGreen, sizeof(config.gradientHighestGreen));
+    hash = fnv1a64_append(hash, &config.gradientHighestGreenDiso, sizeof(config.gradientHighestGreenDiso));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutR.constData(), static_cast<size_t>(config.gradientMatrixLutR.size()));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutG.constData(), static_cast<size_t>(config.gradientMatrixLutG.size()));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutB.constData(), static_cast<size_t>(config.gradientMatrixLutB.size()));
+    hash = fnv1a64_append(hash, config.gradientGammaLut.constData(), static_cast<size_t>(config.gradientGammaLut.size()));
+    hash = fnv1a64_append(hash, config.gradientContrastCurve.constData(), static_cast<size_t>(config.gradientContrastCurve.size()));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1943,6 +2207,16 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         config.applyHueVs ? config.lumaVsSaturationCurve : QByteArray());
     const QByteArray inLoopContrastBytes = packContrastCurveR32F(
         config.applyInLoopContrast ? config.inLoopContrastCurve : QByteArray());
+    const QByteArray gradMatrixRBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutR : config.gammaLut);
+    const QByteArray gradMatrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutG : config.gammaLut);
+    const QByteArray gradMatrixBBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutB : config.gammaLut);
+    const QByteArray gradGammaBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientGammaLut : config.gammaLut);
+    const QByteArray gradContrastBytes = packContrastCurveR32F(
+        config.applyGradientContrast ? config.gradientContrastCurve : QByteArray());
 
     QOpenGLTexture * frameTexture = createFrameTexture(width, height);
     QOpenGLTexture * levelsTexture = createLookupTexture();
@@ -1969,6 +2243,28 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     const bool lut1dActive = lutActive && !config.lut3d;
     QOpenGLTexture * lut3dTexture = createLut3dTexture(lut3dActive ? config.lutDimension : 1);
     QOpenGLTexture * lut1dTexture = createLut1dTexture(lut1dActive ? config.lutDimension : 1);
+    QOpenGLTexture * gradMatrixRTexture = createLookupTexture();
+    QOpenGLTexture * gradMatrixGTexture = createLookupTexture();
+    QOpenGLTexture * gradMatrixBTexture = createLookupTexture();
+    QOpenGLTexture * gradGammaTexture = createLookupTexture();
+    QOpenGLTexture * gradContrastTexture = createContrastCurveTexture();
+    const bool gradientReady = config.applyGradient && config.gradientMaskData != nullptr;
+    QByteArray gradientMaskBytes;
+    if ( gradientReady )
+    {
+        gradientMaskBytes.resize(static_cast<int>(static_cast<size_t>(width) * height * sizeof(float)));
+        float * gmDst = reinterpret_cast<float *>(gradientMaskBytes.data());
+        for (int i = 0; i < width * height; ++i)
+        {
+            gmDst[i] = static_cast<float>(config.gradientMaskData[i]);
+        }
+    }
+    else
+    {
+        gradientMaskBytes = QByteArray(static_cast<int>(sizeof(float)), '\0');
+    }
+    QOpenGLTexture * gradientMaskTexture = createVignetteMaskTexture(
+        gradientReady ? width : 1, gradientReady ? height : 1);
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -2011,6 +2307,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         : lutDummy;
     lut3dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut3dBytes.constData());
     lut1dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut1dBytes.constData());
+    gradMatrixRTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixRBytes.constData());
+    gradMatrixGTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixGBytes.constData());
+    gradMatrixBTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixBBytes.constData());
+    gradGammaTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradGammaBytes.constData());
+    gradContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradContrastBytes.constData());
+    gradientMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradientMaskBytes.constData());
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -2088,6 +2390,16 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("previewHighlightReconDualIso", config.highlightReconDualIso ? 1.0f : 0.0f);
     program.setUniformValue("previewHighestGreen", static_cast<float>(config.highestGreen));
     program.setUniformValue("previewHighestGreenDiso", static_cast<float>(config.highestGreenDiso));
+    program.setUniformValue("gradMatrixLutR", 19);
+    program.setUniformValue("gradMatrixLutG", 20);
+    program.setUniformValue("gradMatrixLutB", 21);
+    program.setUniformValue("gradGammaLut", 22);
+    program.setUniformValue("gradientContrastCurve", 23);
+    program.setUniformValue("gradientMask", 24);
+    program.setUniformValue("previewApplyGradient", gradientReady ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyGradientContrast", config.applyGradientContrast ? 1.0f : 0.0f);
+    program.setUniformValue("previewGradientHighestGreen", static_cast<float>(config.gradientHighestGreen));
+    program.setUniformValue("previewGradientHighestGreenDiso", static_cast<float>(config.gradientHighestGreenDiso));
 
     frameTexture->bind(0);
     levelsTexture->bind(1);
@@ -2108,6 +2420,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     vignetteMaskTexture->bind(16);
     lut3dTexture->bind(17);
     lut1dTexture->bind(18);
+    gradMatrixRTexture->bind(19);
+    gradMatrixGTexture->bind(20);
+    gradMatrixBTexture->bind(21);
+    gradGammaTexture->bind(22);
+    gradContrastTexture->bind(23);
+    gradientMaskTexture->bind(24);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -2150,6 +2468,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     vignetteMaskTexture->release();
     lut3dTexture->release();
     lut1dTexture->release();
+    gradMatrixRTexture->release();
+    gradMatrixGTexture->release();
+    gradMatrixBTexture->release();
+    gradGammaTexture->release();
+    gradContrastTexture->release();
+    gradientMaskTexture->release();
     program.release();
     fbo.release();
 
@@ -2172,6 +2496,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete vignetteMaskTexture;
     delete lut3dTexture;
     delete lut1dTexture;
+    delete gradMatrixRTexture;
+    delete gradMatrixGTexture;
+    delete gradMatrixBTexture;
+    delete gradGammaTexture;
+    delete gradContrastTexture;
+    delete gradientMaskTexture;
     context.doneCurrent();
 
     if ( reason ) reason->clear();

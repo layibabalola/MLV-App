@@ -46,6 +46,21 @@ struct GpuPreviewProcessingConfig
     bool highlightReconDualIso = false;
     int highestGreen = 0;
     int highestGreenDiso = 0;
+    bool applyGradient = false;
+    bool applyGradientContrast = false;
+    int gradientHighestGreen = 0;
+    int gradientHighestGreenDiso = 0;
+    QByteArray gradientMatrixLutR;
+    QByteArray gradientMatrixLutG;
+    QByteArray gradientMatrixLutB;
+    QByteArray gradientGammaLut;
+    QByteArray gradientContrastCurve;
+    /* Raw pointer into processing->gradient_mask (uint16, frame-sized). The
+     * gradient mask has no companion length on the processing object, so it is
+     * carried as a pointer and read by the callers, which know the frame
+     * dimensions (CPU reference by pixel index, GPU offscreen by width*height).
+     * Production must keep this current per frame (like highest_green_diso). */
+    const uint16_t * gradientMaskData = nullptr;
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;

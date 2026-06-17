@@ -301,10 +301,12 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
      * curve and the gradation curves. Clips are still failed closed on the
      * non-creative features below, which are gated independently of the creative
      * flag. */
+    /* gradient is now supported (see GradientIsSupportedAndMatchesCpuReference);
+     * it is only rejected when enabled without a built mask. */
     assert_gpu_preview_rejects_processing_feature(
-        "gradient",
-        QStringLiteral("gradient enabled"),
-        [](processingObject_t * processing) { processing->gradient_enable = 1; });
+        "gradient_no_mask",
+        QStringLiteral("gradient mask unavailable"),
+        [](processingObject_t * processing) { processing->gradient_enable = 1; processing->gradient_mask = nullptr; });
     assert_gpu_preview_rejects_processing_feature(
         "lut_no_cube",
         QStringLiteral("LUT enabled but cube unavailable"),
@@ -695,6 +697,43 @@ TEST(GpuPreviewProcessing, HighlightReconstructionIsSupportedAndMatchesCpuRefere
     ASSERT_TRUE(base_hash != recon_hash);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "highlight_recon");
+}
+
+TEST(GpuPreviewProcessing, GradientIsSupportedAndMatchesCpuReference)
+{
+    /* Gradient used to fail closed. It is now supported as a per-pixel stage: a
+     * second pre-creative pipeline through the gradient LUTs (shared WB/gamut/AgX,
+     * separate gradient matrix + gamma + contrast), blended into the base in gamma
+     * space by the per-pixel mask BEFORE the creative chain (which runs once on the
+     * blended result). Enable a non-identity gradient (diagonal mask ramp + one
+     * stop of gradient exposure) and verify the gate accepts it, the config carries
+     * the frame-sized mask, the output changes vs the baseline, and the GPU
+     * offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    const uint16_t w = static_cast<uint16_t>(fixture.width());
+    const uint16_t h = static_cast<uint16_t>(fixture.height());
+    processingSetGradientEnable(p, 1);
+    processingSetGradientMask(p, w, h, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
+    processingSetGradientExposure(p, 1.0);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyGradient);
+    ASSERT_TRUE(cfg.gradientMaskData != nullptr);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string grad_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != grad_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "gradient");
 }
 
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
