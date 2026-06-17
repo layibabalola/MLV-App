@@ -150,7 +150,15 @@ pattern):**
    replace; 4 uniforms, no new textures. 218 tests/0 failed on llvmpipe and the
    RTX 4090 (max=9 LSB). Caveat: production preview wiring must refresh the config
    per frame so the dual-ISO `highest_green_diso` peak is current.
-2. **gradient** — vignette-class mask + a second LUT set; per-pixel but heavier.
+2. **gradient — DONE (`9f4dbc50`).** A second pre-creative pipeline through the
+   gradient LUTs, blended in gamma space by the mask before the creative chain.
+   6 new textures (units 19-24); mask carried as a raw pointer (read by the
+   callers, which know the frame dims). 219 tests/0 failed on llvmpipe and the
+   RTX 4090 (max=8 LSB). Same per-frame caveat as highlight-recon (mask +
+   `highest_green_gradient_diso` must be refreshed per frame in production).
+
+**Sub-phase A is complete** — every per-pixel, bit-exact, no-architecture-change
+stage is ported (highlight-recon + gradient). Next is the architecture lift.
 
 **Sub-phase B — the box-blur FBO architecture lift (validate the blur in
 isolation first, then stack):**
