@@ -357,10 +357,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "vignette",
         QStringLiteral("vignette enabled"),
         [](processingObject_t * processing) { processing->vignette_strength = 1; });
-    assert_gpu_preview_rejects_processing_feature(
-        "unsupported_gamut",
-        QStringLiteral("unsupported gamut"),
-        [](processingObject_t * processing) { processingSetGamut(processing, GAMUT_Rec2020); });
 }
 
 TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
@@ -562,6 +558,28 @@ TEST(GpuPreviewProcessing, NonNeutralInLoopContrastIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != contrast_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.in_loop_contrast.frame0", contrast_hash);
+}
+
+TEST(GpuPreviewProcessing, NonRec709GamutIsSupportedAndMatchesCpuReference)
+{
+    /* Non-Rec709 gamut used to fail closed. It is now supported: the gamut is
+     * baked into proper_wb_matrix (applied in-shader) and the gamut-compression
+     * luma weights are derived per-gamut (config.rgbToY via processingGamutRgbToY)
+     * rather than assuming Rec709. Verify the gate accepts it, the config differs
+     * from Rec709, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig rec709 = assert_gpu_preview_subset_supported(fixture);
+
+    processingSetGamut(fixture.processing(), GAMUT_Rec2020);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig rec2020 =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(rec2020.enabled);
+    ASSERT_NE(rec709.signature, rec2020.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, rec2020, "gamut_rec2020");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)

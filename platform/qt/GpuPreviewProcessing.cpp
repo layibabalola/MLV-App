@@ -1142,7 +1142,9 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
         return reject(QStringLiteral("shadows/highlights enabled"));
     }
     if ( processing->vignette_strength != 0 ) return reject(QStringLiteral("vignette enabled"));
-    if ( processing->colour_gamut != GAMUT_Rec709 ) return reject(QStringLiteral("unsupported gamut"));
+    /* Non-Rec709 gamut is now supported: the gamut is baked into proper_wb_matrix
+     * (already applied in-shader) and the gamut-compression luma weights are
+     * derived per-gamut in gpuPreviewProcessingBuildConfig (rgbToY). No reject. */
 
     if ( reason ) reason->clear();
     return true;
@@ -1170,7 +1172,25 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     {
         config.properWbMatrix[index] = static_cast<float>(processing->proper_wb_matrix[index]);
     }
-    std::memcpy(config.rgbToY, kRec709RgbToY, sizeof(config.rgbToY));
+    /* Gamut-compression desaturation weights. raw_processing derives rgb_to_Y
+     * per gamut (second row of inverse(gamut matrix), raw_processing.c ~2680).
+     * Rec709 keeps the exact hardcoded constants so the validated golden output
+     * is byte-stable; other gamuts use the engine-derived weights so the GPU
+     * gamut-compression path matches production. The matrix itself already
+     * carries the gamut via proper_wb_matrix. */
+    if ( processing->colour_gamut == GAMUT_Rec709 )
+    {
+        std::memcpy(config.rgbToY, kRec709RgbToY, sizeof(config.rgbToY));
+    }
+    else
+    {
+        double gamutRgbToY[3] = { 0.0, 0.0, 0.0 };
+        processingGamutRgbToY(processing->colour_gamut, gamutRgbToY);
+        for (int index = 0; index < 3; ++index)
+        {
+            config.rgbToY[index] = static_cast<float>(gamutRgbToY[index]);
+        }
+    }
     config.levelsLut = QByteArray(
         reinterpret_cast<const char *>(processing->pre_calc_levels),
         static_cast<int>(65536u * sizeof(uint16_t)));

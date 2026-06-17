@@ -5371,3 +5371,14 @@ char * processingGetTransferFunction(processingObject_t * processing)
 {
     return processing->transfer_function_string;
 }
+
+/* Luma weights for a colour gamut, mirroring the per-gamut derivation used in
+ * the main processing loop (rgb_to_Y = second row of inverse(gamut RGB->XYZ)).
+ * processing.c (which defines the file-local colour_gamuts table) is unity-
+ * #included into this TU, so the table and invertMatrix are both in scope here. */
+void processingGamutRgbToY(int colour_gamut, double out_rgb_to_Y[3])
+{
+    double inversemat[9];
+    invertMatrix(colour_gamuts[colour_gamut], inversemat);
+    for (int i = 0; i < 3; ++i) out_rgb_to_Y[i] = inversemat[3 + i];
+}
