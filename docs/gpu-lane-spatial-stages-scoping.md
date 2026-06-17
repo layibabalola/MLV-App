@@ -160,25 +160,40 @@ pattern):**
 **Sub-phase A is complete** — every per-pixel, bit-exact, no-architecture-change
 stage is ported (highlight-recon + gradient). Next is the architecture lift.
 
-**Sub-phase B — the box-blur FBO architecture lift (validate the blur in
-isolation first, then stack):**
-3. **box-blur pre-pass infra + `BlurImageBoxParity` 0-LSB test** (§2).
-4. **chroma separation + chroma blur** — first consumer of the box blur.
-5. **sharpen** — reuse the intermediate-texture infra (5-tap cross + optional
-   sobel mask pass).
-6. **median denoise** — single-pass neighbor read; implement if the cost is
-   acceptable for preview.
+**Sub-phase B — the box-blur FBO architecture lift — COMPLETE:**
+3. **box-blur pre-pass infra + `BlurImageBoxParity` 0-LSB test — DONE
+   (`e657f0ed`).** Separable integer box blur (two FBO passes) reproducing
+   `blur_image` bit-exactly incl its off-by-one window `[j-r+1, j+r+1]`; 0-LSB on
+   llvmpipe and the RTX 4090. Radius capped at 127.
+4. **chroma separation + chroma blur — DONE (`00bb0638`).** YCbCr round-trip
+   (int LUT terms in RGBA32F) + box blur of Cb/Cr; multi-pass post-pass. 4090
+   max=6 LSB.
+5. **sharpen — DONE (`85b3dfbe`).** 5-tap cross post-pass, `ka/kx/ky` in one
+   RGBA32F LUT. Standalone only (sharpen+chroma-sep and sharpen+sobel-mask are
+   rejected — the engine interleaves sharpen-on-Y in YCbCr, deferred). 4090
+   max=16 LSB (sharpen math bit-identical; the 16 is upstream per-pixel noise
+   amplified by the high-boost gain).
+6. **median denoise — DONE (`fc0f107e`).** Per-pixel window-median (middle order
+   statistic via counting) blended by strength; windows ≤5 (larger rejected,
+   O(winSize²)). 4090 max=7 LSB.
 
-**Sub-phase C — recursive bilateral filter + CA (explicit decision, NOT a port
-by default):**
-7. **shadows/highlights, clarity, RBF denoise, CA** — recommended outcome:
-   **keep as labelled CPU fallback** (the gate keeps rejecting them, which is
-   correct and honest per roadmap §9). Bit-exact GPU ports of a recursive
-   bilateral filter and a sequential edge-window scan are fragile-to-infeasible
-   under the strict gate, and the roadmap explicitly treats CPU fallback as a
-   feature, not a failure. Revisit only as a future *tolerance-opt-in* preview
-   path (approximate domain-transform / guided-filter), separate from the
-   bit-exact parity gate.
+**Sub-phase C — recursive bilateral filter + CA — CONFIRMED CPU-fallback by design:**
+7. **shadows/highlights, clarity, RBF denoise, CA** — the gate still fails closed
+   on these (verified: `clarity`, `shadows/highlights`, `RBF denoiser`,
+   `CA correction` rejects remain). Bit-exact GPU ports of a recursive bilateral
+   filter and a sequential edge-window scan are fragile-to-infeasible under the
+   strict gate; the roadmap treats CPU fallback as a feature (§9). Revisit only as
+   a future *tolerance-opt-in* preview path. **Class A′ (grain, creative-filter
+   NN)** also remain rejected (GLSL-110 bitwise / double-sigmoid), deferred.
+
+**STATUS 2026-06-17 — P-pre processing parity COMPLETE (`fc0f107e`).** Every
+bit-reproducible stage is ported and RTX-4090-validated: the creative family +
+gamut/AgX/vignette/LUT (prior), highlight-recon, gradient, box blur, chroma
+sep/blur, standalone sharpen, median (≤5). The gate now accepts a normally-graded
+clip with these and fails closed only on the recursive/sequential stages
+(shadows-highlights/clarity/RBF-denoise/CA → CPU fallback) and the deferred
+Class A′ (grain, filter NN). 223 GpuPreviewProcessing tests pass on llvmpipe and
+the 4090. Next: brokered finalize (Codex-review-gated), then Lane A/B.
 
 **P-pre completion definition (updated):** the GPU preview path reaches parity
 for every stage that is bit-reproducible under GLSL 110 + the strict gate
