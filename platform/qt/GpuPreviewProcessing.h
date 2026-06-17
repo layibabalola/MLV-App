@@ -42,6 +42,10 @@ struct GpuPreviewProcessingConfig
     float lutDomainMin[3] = { 0.0f, 0.0f, 0.0f };
     float lutDomainMax[3] = { 1.0f, 1.0f, 1.0f };
     QByteArray lutCube;
+    bool applyHighlightReconstruction = false;
+    bool highlightReconDualIso = false;
+    int highestGreen = 0;
+    int highestGreenDiso = 0;
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;

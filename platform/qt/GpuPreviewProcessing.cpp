@@ -63,6 +63,11 @@ float clamp01(float value)
     return std::max(0.0f, std::min(1.0f, value));
 }
 
+float clamp16(float value)
+{
+    return std::max(0.0f, std::min(65535.0f, value));
+}
+
 float reinhardTonemap(float value)
 {
     return (value < 0.0f) ? value : value / (1.0f + value);
@@ -232,6 +237,10 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     matrixApplied[1] = sampleNormalizedLut(config.matrixLutG, color[1]);
     matrixApplied[2] = sampleNormalizedLut(config.matrixLutB, color[2]);
 
+    /* tmp1 for highlight reconstruction = the diagonal-matrix green BEFORE the
+     * vignette/contrast expo multiplies (raw_processing.c:3008 tmp1 = wb_g). */
+    const float reconMatrixGreen = matrixApplied[1];
+
     if ( config.applyVignette )
     {
         /* Vignette: a per-pixel exposure multiply, the first expo_correction
@@ -270,6 +279,43 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         matrixApplied[0] *= factor;
         matrixApplied[1] *= factor;
         matrixApplied[2] *= factor;
+    }
+
+    if ( config.applyHighlightReconstruction )
+    {
+        /* Highlight reconstruction (raw_processing.c:3088-3119): for a clipped
+         * green it replaces green with (R+B)/2. The engine applies it to the
+         * uint16-quantized diagonal*expo pixel (pix[i] = (uint16)LIMIT16(...)) and
+         * keys on tmp1 = (uint16)LIMIT16(diagonal green pre-expo), comparing
+         * against the static white-level green (highest_green) or, for dual-ISO,
+         * a +/-5000 window around the per-frame highest_green_diso peak plus the
+         * pix[1]<1.1*pix[0] && pix[1]<pix[2] green-dominance guard. Enabling recon
+         * forces the engine's general loop (uint16-quantize before the 3x3); the
+         * subset models the float-3x3 fast path, a structural delta already inside
+         * the parity tolerance for the vignette/AgX slices. LIMIT16 is clamp-only;
+         * the (uint16) cast truncates toward zero (floor on the clamped value). */
+        const float p0 = std::floor(clamp16(matrixApplied[0] * 65535.0f));
+        const float p1 = std::floor(clamp16(matrixApplied[1] * 65535.0f));
+        const float p2 = std::floor(clamp16(matrixApplied[2] * 65535.0f));
+        const float tmp1 = std::floor(clamp16(reconMatrixGreen * 65535.0f + 0.5f));
+        bool replace = false;
+        if ( config.highlightReconDualIso )
+        {
+            const float lo = clamp16(static_cast<float>(config.highestGreenDiso) - 5000.0f);
+            const float hi = clamp16(static_cast<float>(config.highestGreenDiso) + 5000.0f);
+            if ( tmp1 >= lo && tmp1 <= hi && p1 < 1.1f * p0 && p1 < p2 )
+            {
+                replace = true;
+            }
+        }
+        else if ( tmp1 == static_cast<float>(config.highestGreen) )
+        {
+            replace = true;
+        }
+        if ( replace )
+        {
+            matrixApplied[1] = std::floor((p0 + p2) / 2.0f) / 65535.0f;
+        }
     }
 
     if ( config.useCameraMatrix )
@@ -1092,6 +1138,10 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform vec3 previewProperWbRow1;\n"
         "uniform vec3 previewProperWbRow2;\n"
         "uniform vec3 previewRgbToY;\n"
+        "uniform float previewApplyHighlightRecon;\n"
+        "uniform float previewHighlightReconDualIso;\n"
+        "uniform float previewHighestGreen;\n"
+        "uniform float previewHighestGreenDiso;\n"
         "varying vec2 vTexCoord;\n"
         "float sampleU16Lut(sampler2D lut, float value)\n"
         "{\n"
@@ -1195,6 +1245,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    vec3 leveled = vec3(sampleU16Lut(levelsLut, color.r), sampleU16Lut(levelsLut, color.g), sampleU16Lut(levelsLut, color.b));\n"
         "    vec3 matrixApplied = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b));\n"
+        "    float reconMatrixGreen = matrixApplied.g;\n"
         "    if (previewApplyVignette > 0.5)\n"
         "    {\n"
         "        vec2 fc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
@@ -1214,6 +1265,25 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        vec3 m16 = floor(matrixApplied * 65535.0 + 0.5);\n"
         "        float cval = floor((m16.r * 4.0 + m16.g * 11.0 + m16.b) / 16.0);\n"
         "        matrixApplied *= sampleContrastCurve(inLoopContrastCurve, cval);\n"
+        "    }\n"
+        "    if (previewApplyHighlightRecon > 0.5)\n"
+        "    {\n"
+        "        float p0 = floor(clamp(matrixApplied.r * 65535.0, 0.0, 65535.0));\n"
+        "        float p1 = floor(clamp(matrixApplied.g * 65535.0, 0.0, 65535.0));\n"
+        "        float p2 = floor(clamp(matrixApplied.b * 65535.0, 0.0, 65535.0));\n"
+        "        float tmp1 = floor(clamp(reconMatrixGreen * 65535.0 + 0.5, 0.0, 65535.0));\n"
+        "        bool replace = false;\n"
+        "        if (previewHighlightReconDualIso > 0.5)\n"
+        "        {\n"
+        "            float lo = clamp(previewHighestGreenDiso - 5000.0, 0.0, 65535.0);\n"
+        "            float hi = clamp(previewHighestGreenDiso + 5000.0, 0.0, 65535.0);\n"
+        "            if (tmp1 >= lo && tmp1 <= hi && p1 < 1.1 * p0 && p1 < p2) replace = true;\n"
+        "        }\n"
+        "        else if (tmp1 == previewHighestGreen)\n"
+        "        {\n"
+        "            replace = true;\n"
+        "        }\n"
+        "        if (replace) matrixApplied.g = floor((p0 + p2) / 2.0) / 65535.0;\n"
         "    }\n"
         "    if (previewUseCameraMatrix > 0.5)\n"
         "    {\n"
@@ -1411,7 +1481,9 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     };
 
     if ( !processing ) return reject(QStringLiteral("processing object missing"));
-    if ( processing->highlight_reconstruction ) return reject(QStringLiteral("highlight reconstruction enabled"));
+    /* highlight_reconstruction is now supported: a per-pixel clipped-green replace
+     * (green -> (R+B)/2) keyed on the matrix-green white level / dual-ISO peak,
+     * ported as a per-pixel stage (no spatial pass). No reject. */
     /* allow_creative_adjustments no longer has its own reject: the GPU subset
      * shader ports every creative-family stage -- the in-loop simple-contrast
      * factor, hue-vs / luma-vs curves, vibrance, saturation, toning, the contrast
@@ -1643,6 +1715,15 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
         config.lutCube = QByteArray(reinterpret_cast<const char *>(lut->cube),
                                     entries * 3 * static_cast<int>(sizeof(float)));
     }
+    /* Highlight reconstruction: a per-pixel clipped-green replace. highest_green
+     * (non-dual-ISO white-level green) is computed once at matrix build
+     * (processing_update_highest_green, processing.c:572); highest_green_diso is
+     * the per-frame dual-ISO peak from analyse_frame_highest_green -- production
+     * must refresh the config per frame so the diso peak is current. */
+    config.applyHighlightReconstruction = processing->highlight_reconstruction != 0;
+    config.highlightReconDualIso = (processing->dual_iso != NULL && *processing->dual_iso != 0);
+    config.highestGreen = static_cast<int>(processing->highest_green);
+    config.highestGreenDiso = static_cast<int>(processing->highest_green_diso);
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1696,6 +1777,10 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.lutDomainMin, sizeof(config.lutDomainMin));
     hash = fnv1a64_append(hash, config.lutDomainMax, sizeof(config.lutDomainMax));
     hash = fnv1a64_append(hash, config.lutCube.constData(), static_cast<size_t>(config.lutCube.size()));
+    hash = fnv1a64_append(hash, &config.applyHighlightReconstruction, sizeof(config.applyHighlightReconstruction));
+    hash = fnv1a64_append(hash, &config.highlightReconDualIso, sizeof(config.highlightReconDualIso));
+    hash = fnv1a64_append(hash, &config.highestGreen, sizeof(config.highestGreen));
+    hash = fnv1a64_append(hash, &config.highestGreenDiso, sizeof(config.highestGreenDiso));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1999,6 +2084,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
                             QVector3D(config.rgbToY[0],
                                       config.rgbToY[1],
                                       config.rgbToY[2]));
+    program.setUniformValue("previewApplyHighlightRecon", config.applyHighlightReconstruction ? 1.0f : 0.0f);
+    program.setUniformValue("previewHighlightReconDualIso", config.highlightReconDualIso ? 1.0f : 0.0f);
+    program.setUniformValue("previewHighestGreen", static_cast<float>(config.highestGreen));
+    program.setUniformValue("previewHighestGreenDiso", static_cast<float>(config.highestGreenDiso));
 
     frameTexture->bind(0);
     levelsTexture->bind(1);

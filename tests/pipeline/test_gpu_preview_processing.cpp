@@ -293,10 +293,8 @@ TEST(GpuPreviewProcessing, ExposureStopsChangesSubsetConfigAndStableOutput)
 
 TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
 {
-    assert_gpu_preview_rejects_processing_feature(
-        "highlight_reconstruction",
-        QStringLiteral("highlight reconstruction enabled"),
-        [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
+    /* highlight_reconstruction is no longer rejected: it is ported as a per-pixel
+     * clipped-green replace (see HighlightReconstructionIsSupportedAndMatchesCpuReference). */
     /* allow_creative_adjustments is no longer rejected on its own: the GPU subset
      * shader now ports every creative-family stage -- the in-loop simple-contrast
      * factor, hue-vs/luma-vs curves, vibrance, saturation, toning, the contrast
@@ -636,6 +634,67 @@ TEST(GpuPreviewProcessing, VignetteIsSupportedAndMatchesCpuReference)
     ASSERT_NE(base.signature, vig.signature);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, vig, "vignette");
+}
+
+TEST(GpuPreviewProcessing, HighlightReconstructionIsSupportedAndMatchesCpuReference)
+{
+    /* Highlight reconstruction used to fail closed. It is now supported as a
+     * per-pixel stage: for a clipped green it replaces green with (R+B)/2, keyed on
+     * the uint16 matrix-green (tmp1) matching the static white-level green (non
+     * dual-ISO) or a +/-5000 window around the per-frame dual-ISO peak plus the
+     * green-dominance guard. Verify the gate accepts it, the config carries the
+     * recon fields, the recon actually FIRES (output changes vs the baseline), and
+     * the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    /* Pick a dual-ISO peak that is GUARANTEED to fire on this frame instead of
+     * guessing one: replicate the engine's levels->diagonal-matrix lookup
+     * (tmp1 = matrixG[levels[green]], pix = matrix[levels[*]]) using the config
+     * LUTs, and find a pixel whose matrix-green satisfies the green-dominance
+     * guard (mg < 1.1*mr && mg < mb). Setting highest_green_diso to that pixel's
+     * matrix-green puts it inside the +/-5000 window, so the replace branch fires. */
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    const uint16_t * levels = reinterpret_cast<const uint16_t *>(base.levelsLut.constData());
+    const uint16_t * mtxR = reinterpret_cast<const uint16_t *>(base.matrixLutR.constData());
+    const uint16_t * mtxG = reinterpret_cast<const uint16_t *>(base.matrixLutG.constData());
+    const uint16_t * mtxB = reinterpret_cast<const uint16_t *>(base.matrixLutB.constData());
+    int target_diso = -1;
+    const int pixel_count = fixture.width() * fixture.height();
+    for (int i = 0; i < pixel_count; ++i)
+    {
+        const int mr = mtxR[levels[debayered[i * 3 + 0]]];
+        const int mg = mtxG[levels[debayered[i * 3 + 1]]];
+        const int mb = mtxB[levels[debayered[i * 3 + 2]]];
+        /* Margin keeps the chosen firing pixel clear of the guard boundary so
+         * CPU/GPU float rounding of p0/p1/p2 cannot flip its replace decision. */
+        if (mg + 50 < (1.1 * mr) && mg + 50 < mb) { target_diso = mg; break; }
+    }
+    ASSERT_TRUE(target_diso >= 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    ASSERT_TRUE(p->dual_iso != nullptr);
+    p->highlight_reconstruction = 1;
+    *p->dual_iso = 1;
+    p->highest_green_diso = static_cast<uint16_t>(target_diso);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyHighlightReconstruction);
+    ASSERT_TRUE(cfg.highlightReconDualIso);
+    ASSERT_EQ(target_diso, cfg.highestGreenDiso);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string recon_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != recon_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "highlight_recon");
 }
 
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
