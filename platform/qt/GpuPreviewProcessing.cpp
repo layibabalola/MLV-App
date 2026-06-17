@@ -352,6 +352,42 @@ void cpuChromaPostPass(uint16_t * img, int width, int height, int radius)
     }
 }
 
+/* CPU sharpen post-pass replicating raw_processing.c:1849-1965 (standalone: no
+ * chroma separation, no sobel mask): a fixed 5-tap cross,
+ * sharp = ka[center] - ky[up] - ky[down] - kx[left] - kx[right], clamped.
+ * ka=(uint32)(v*a), kx/ky=LIMIT16(v*x/y). First/last column pass through; rows
+ * clamp to edge. The engine's bottom row is UB (it sets p_row instead of n_row,
+ * leaving n_row uninitialized); the GPU/CPU use a clean clamp instead (documented
+ * divergence on the bottom row only, like the vignette per-chunk note). */
+void cpuSharpenPostPass(uint16_t * img, int width, int height, double a, double x, double y)
+{
+    std::vector<uint16_t> src(img, img + static_cast<size_t>(width) * height * 3u);
+    auto ka = [&](int v) -> int { return static_cast<int>(static_cast<uint32_t>(static_cast<double>(v) * a)); };
+    auto kx = [&](int v) -> int { int t = static_cast<int>(static_cast<double>(v) * x); return t < 0 ? 0 : (t > 65535 ? 65535 : t); };
+    auto ky = [&](int v) -> int { int t = static_cast<int>(static_cast<double>(v) * y); return t < 0 ? 0 : (t > 65535 ? 65535 : t); };
+    for (int yy = 0; yy < height; ++yy)
+    {
+        const int up = (yy == 0) ? 0 : yy - 1;
+        const int dn = (yy == height - 1) ? height - 1 : yy + 1;
+        for (int xx = 0; xx < width; ++xx)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( xx == 0 || xx == width - 1 )
+                {
+                    img[(yy * width + xx) * 3 + c] = src[(yy * width + xx) * 3 + c];
+                    continue;
+                }
+                const int center = src[(yy * width + xx) * 3 + c];
+                const int left  = src[(yy * width + (xx - 1)) * 3 + c];
+                const int right = src[(yy * width + (xx + 1)) * 3 + c];
+                const int u = src[(up * width + xx) * 3 + c];
+                const int d = src[(dn * width + xx) * 3 + c];
+                const int sharp = ka(center) - ky(u) - ky(d) - kx(left) - kx(right);
+                img[(yy * width + xx) * 3 + c] = static_cast<uint16_t>(chromaClamp16(sharp));
+            }
+    }
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
                                  uint16_t * outputPixel,
@@ -1826,7 +1862,18 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     if ( processing->rbfDenoiserLuma > 0 || processing->rbfDenoiserChroma > 0 ) return reject(QStringLiteral("RBF denoiser enabled"));
     if ( processing->grainStrength > 0 ) return reject(QStringLiteral("grain enabled"));
     if ( processing->ca_desaturate > 0 ) return reject(QStringLiteral("CA correction enabled"));
-    if ( processing->sharpen > 0.005 ) return reject(QStringLiteral("sharpening enabled"));
+    /* Sharpen is supported standalone (a 5-tap cross post-pass). The engine
+     * interleaves sharpen-on-Y inside the chroma YCbCr round-trip and offers an
+     * optional sobel edge mask; those combined paths are not yet ported, so reject
+     * sharpen + chroma-separation and sharpen + sobel-mask. */
+    if ( processing->sharpen > 0.005 && processing->sh_masking > 0 )
+    {
+        return reject(QStringLiteral("sharpen edge mask enabled"));
+    }
+    if ( processing->sharpen > 0.005 && processing->cs_zone.use_cs )
+    {
+        return reject(QStringLiteral("sharpen with chroma separation enabled"));
+    }
     /* Chroma separation/blur is supported: a YCbCr round-trip + optional box blur
      * of Cb/Cr as a post-pass. Reject only an over-radius chroma blur (the GPU box
      * blur is float32-exact only up to radius 127); chroma_blur_radius without
@@ -2093,6 +2140,21 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     config.applyChroma = processing->cs_zone.use_cs != 0;
     config.chromaBlurRadius = config.applyChroma
         ? static_cast<int>(processing->cs_zone.chroma_blur_radius) : 0;
+
+    /* Sharpen: a fixed 5-tap cross post-pass (processingSetSharpening,
+     * raw_processing.c:4461). Supported standalone (the gate rejects it combined
+     * with chroma separation or the sobel mask). Compute the engine's a/x/y from
+     * the slider + bias in double so the GPU LUT and CPU reference match exactly. */
+    config.applySharpen = processing->sharpen > 0.005
+                       && processing->sh_masking == 0
+                       && processing->cs_zone.use_cs == 0;
+    if ( config.applySharpen )
+    {
+        const double s = std::pow(processing->sharpen, 1.5) * 0.55;
+        config.sharpenX = s * (1.0 - processing->sharpen_bias);
+        config.sharpenY = s * (1.0 + processing->sharpen_bias);
+        config.sharpenA = 1.0 + (2.0 * config.sharpenX) + (2.0 * config.sharpenY);
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -2161,6 +2223,10 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.gradientContrastCurve.constData(), static_cast<size_t>(config.gradientContrastCurve.size()));
     hash = fnv1a64_append(hash, &config.applyChroma, sizeof(config.applyChroma));
     hash = fnv1a64_append(hash, &config.chromaBlurRadius, sizeof(config.chromaBlurRadius));
+    hash = fnv1a64_append(hash, &config.applySharpen, sizeof(config.applySharpen));
+    hash = fnv1a64_append(hash, &config.sharpenA, sizeof(config.sharpenA));
+    hash = fnv1a64_append(hash, &config.sharpenX, sizeof(config.sharpenX));
+    hash = fnv1a64_append(hash, &config.sharpenY, sizeof(config.sharpenY));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -2236,16 +2302,25 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
         applyPreviewProcessingPixel(config, inputPixel, outputPixel, pixelIndex);
     }
 
-    /* Spatial post-pass on the developed image (raw_processing.c:1816+). Chroma
-     * separation/blur runs after the per-pixel colour pipeline, in YCbCr space. */
+    /* Spatial post-passes on the developed image (raw_processing.c:1816+). Chroma
+     * separation/blur runs in YCbCr space; sharpen is a 5-tap cross. They are
+     * mutually exclusive in this subset (the engine interleaves sharpen-on-Y with
+     * chroma, which the gate rejects as a combined case). */
     if ( config.applyChroma )
     {
         cpuChromaPostPass(outputRgb16, width, height, config.chromaBlurRadius);
+    }
+    if ( config.applySharpen )
+    {
+        cpuSharpenPostPass(outputRgb16, width, height, config.sharpenA, config.sharpenX, config.sharpenY);
     }
 }
 
 static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
                                    QString * reason, QString * rendererDescription);
+static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
+                                    double a, double x, double y,
+                                    QString * reason, QString * rendererDescription);
 
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
@@ -2647,6 +2722,21 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         if ( rendererDescription && !chromaRenderer.isEmpty() )
         {
             *rendererDescription = chromaRenderer;
+        }
+    }
+    if ( config.applySharpen )
+    {
+        QString sharpenReason;
+        QString sharpenRenderer;
+        if ( !applySharpenPostPassGpu(outputRgb16, width, height,
+                                      config.sharpenA, config.sharpenX, config.sharpenY,
+                                      &sharpenReason, &sharpenRenderer) )
+        {
+            return fail(sharpenReason);
+        }
+        if ( rendererDescription && !sharpenRenderer.isEmpty() )
+        {
+            *rendererDescription = sharpenRenderer;
         }
     }
 
@@ -3067,6 +3157,151 @@ static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int ra
     }
 
     delete srcTexture; delete fwdR; delete fwdG; delete fwdB; delete invCr; delete invCb;
+    context.doneCurrent();
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray sharpenShaderSource()
+{
+    /* Fixed 5-tap cross sharpen (raw_processing.c:1911-1915):
+     * sharp = ka[center] - ky[up] - ky[down] - kx[left] - kx[right], clamped.
+     * sharpLut holds (ka, kx, ky) per value. First/last column pass through; rows
+     * clamp to edge. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform sampler2D sharpLut;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 slut(float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(sharpLut, uv).rgb;\n"
+        "}\n"
+        "vec3 fetch(vec2 p)\n"
+        "{\n"
+        "    return floor(texture2D(src, (p + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    vec3 center = fetch(px);\n"
+        "    if (px.x < 0.5 || px.x > texSize.x - 1.5)\n"
+        "    {\n"
+        "        gl_FragColor = vec4(center / 65535.0, 1.0);\n"
+        "        return;\n"
+        "    }\n"
+        "    vec3 left  = fetch(vec2(px.x - 1.0, px.y));\n"
+        "    vec3 right = fetch(vec2(px.x + 1.0, px.y));\n"
+        "    vec3 up    = fetch(vec2(px.x, max(px.y - 1.0, 0.0)));\n"
+        "    vec3 down  = fetch(vec2(px.x, min(px.y + 1.0, texSize.y - 1.0)));\n"
+        "    vec3 sharp;\n"
+        "    sharp.r = slut(center.r).r - slut(up.r).b - slut(down.r).b - slut(left.r).g - slut(right.r).g;\n"
+        "    sharp.g = slut(center.g).r - slut(up.g).b - slut(down.g).b - slut(left.g).g - slut(right.g).g;\n"
+        "    sharp.b = slut(center.b).r - slut(up.b).b - slut(down.b).b - slut(left.b).g - slut(right.b).g;\n"
+        "    gl_FragColor = vec4(clamp(sharp, 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+/* 256x256 RGBA32F LUT: texel[v] = (ka=(uint32)(v*a), kx=LIMIT16(v*x),
+ * ky=LIMIT16(v*y), 0), matching processingSetSharpening. */
+QByteArray packSharpenLutRgba32F(double a, double x, double y)
+{
+    QByteArray packed(256 * 256 * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    for (int v = 0; v < 65536; ++v)
+    {
+        dst[v * 4 + 0] = static_cast<float>(static_cast<uint32_t>(static_cast<double>(v) * a));
+        int kxv = static_cast<int>(static_cast<double>(v) * x); kxv = kxv < 0 ? 0 : (kxv > 65535 ? 65535 : kxv);
+        int kyv = static_cast<int>(static_cast<double>(v) * y); kyv = kyv < 0 ? 0 : (kyv > 65535 ? 65535 : kyv);
+        dst[v * 4 + 1] = static_cast<float>(kxv);
+        dst[v * 4 + 2] = static_cast<float>(kyv);
+        dst[v * 4 + 3] = 0.0f;
+    }
+    return packed;
+}
+}
+
+static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
+                                    double a, double x, double y,
+                                    QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("sharpen post-pass invalid buffer"));
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram program;
+    if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, gpuPreviewProcessingVertexShaderSource())
+      || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, sharpenShaderSource())
+      || !program.link() )
+    {
+        const QString log = program.log();
+        context.doneCurrent();
+        return fail(QStringLiteral("sharpen shader setup failed: %1").arg(log));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+    QOpenGLTexture * sharpLut = createChromaLutTexture();
+    const QByteArray lutBytes = packSharpenLutRgba32F(a, x, y);
+    sharpLut->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lutBytes.constData());
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fbo(width, height, fmt);
+    if ( !fbo.isValid() )
+    {
+        delete srcTexture; delete sharpLut;
+        context.doneCurrent();
+        return fail(QStringLiteral("sharpen framebuffer creation failed"));
+    }
+
+    fbo.bind();
+    gl->glViewport(0, 0, width, height);
+    gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+    gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    program.bind();
+    program.setUniformValue("src", 0);
+    program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("sharpLut", 1);
+    srcTexture->bind(0);
+    sharpLut->bind(1);
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+    program.enableAttributeArray(posLoc);
+    program.enableAttributeArray(texLoc);
+    program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+    program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+    gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    gl->glFinish();
+    program.disableAttributeArray(posLoc);
+    program.disableAttributeArray(texLoc);
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture; delete sharpLut;
     context.doneCurrent();
     if ( reason ) reason->clear();
     return true;

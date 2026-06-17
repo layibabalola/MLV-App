@@ -335,10 +335,12 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "ca_correction",
         QStringLiteral("CA correction enabled"),
         [](processingObject_t * processing) { processing->ca_desaturate = 1; });
+    /* sharpen is now supported standalone (see SharpenIsSupportedAndMatchesCpuReference);
+     * rejected only combined with the sobel edge mask or chroma separation. */
     assert_gpu_preview_rejects_processing_feature(
-        "sharpening",
-        QStringLiteral("sharpening enabled"),
-        [](processingObject_t * processing) { processing->sharpen = 0.25; });
+        "sharpen_with_chroma",
+        QStringLiteral("sharpen with chroma separation enabled"),
+        [](processingObject_t * processing) { processing->sharpen = 0.25; processing->cs_zone.use_cs = 1; });
     /* chroma separation/blur is now supported (see ChromaIsSupportedAndMatchesCpuReference);
      * only an over-radius chroma blur is rejected (the GPU box blur is float32-exact
      * to radius 127). chroma_blur_radius without use_cs is a no-op in the engine. */
@@ -832,6 +834,34 @@ TEST(GpuPreviewProcessing, ChromaIsSupportedAndMatchesCpuReference)
     ASSERT_TRUE(base_hash != chroma_hash);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "chroma");
+}
+
+TEST(GpuPreviewProcessing, SharpenIsSupportedAndMatchesCpuReference)
+{
+    /* Sharpen is now supported standalone: a fixed 5-tap cross post-pass over the
+     * developed image (no chroma separation, no sobel mask). Verify the gate
+     * accepts it, the config carries the sharpen coefficients, the output changes
+     * vs the baseline, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    processingSetSharpening(p, 0.5);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applySharpen);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string sharp_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != sharp_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "sharpen");
 }
 
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
