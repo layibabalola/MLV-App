@@ -55,6 +55,8 @@ struct GpuPreviewProcessingConfig
     QByteArray gradientMatrixLutB;
     QByteArray gradientGammaLut;
     QByteArray gradientContrastCurve;
+    bool applyChroma = false;
+    int chromaBlurRadius = 0;
     /* Raw pointer into processing->gradient_mask (uint16, frame-sized). The
      * gradient mask has no companion length on the processing object, so it is
      * carried as a pointer and read by the callers, which know the frame
@@ -97,7 +99,8 @@ GpuPreviewProcessingBackendAvailability gpuPreviewProcessingProbeGpuBackend(void
 void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,
-                                           int pixelCount);
+                                           int width,
+                                           int height);
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,

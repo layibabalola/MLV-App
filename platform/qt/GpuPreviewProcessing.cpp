@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include <omp.h>
 
 namespace
@@ -247,6 +248,107 @@ void applyPreviewGamutCompression(float wb[3], const float rgbToY[3])
     for (int channel = 0; channel < 3; ++channel)
     {
         wb[channel] = (wb[channel] - y) * desaturateFactor + y;
+    }
+}
+
+/* CPU box blur replicating the engine blur_image bit-exactly: separable, the
+ * window for output j is [j-r+1, j+r+1] clamped (the engine's off-by-one shift),
+ * truncating integer divide, uint16 intermediate between the two passes.
+ * Disabled channels pass through. Mirrors gpuPreviewProcessingApplyBoxBlurOffscreen
+ * (validated 0-LSB vs blur_image). */
+void cpuBoxBlur(uint16_t * img, int width, int height, int radius, bool doR, bool doG, bool doB)
+{
+    if ( radius <= 0 ) return;
+    const int diameter = 2 * radius + 1;
+    const bool ch[3] = { doR, doG, doB };
+    std::vector<uint16_t> temp(static_cast<size_t>(width) * height * 3u);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( ch[c] )
+                {
+                    int sum = 0;
+                    for (int k = 0; k < diameter; ++k)
+                    {
+                        int xx = x - radius + 1 + k;
+                        xx = xx < 0 ? 0 : (xx >= width ? width - 1 : xx);
+                        sum += img[(y * width + xx) * 3 + c];
+                    }
+                    temp[(y * width + x) * 3 + c] = static_cast<uint16_t>(sum / diameter);
+                }
+                else
+                {
+                    temp[(y * width + x) * 3 + c] = img[(y * width + x) * 3 + c];
+                }
+            }
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( ch[c] )
+                {
+                    int sum = 0;
+                    for (int k = 0; k < diameter; ++k)
+                    {
+                        int yy = y - radius + 1 + k;
+                        yy = yy < 0 ? 0 : (yy >= height ? height - 1 : yy);
+                        sum += temp[(yy * width + x) * 3 + c];
+                    }
+                    img[(y * width + x) * 3 + c] = static_cast<uint16_t>(sum / diameter);
+                }
+                else
+                {
+                    img[(y * width + x) * 3 + c] = temp[(y * width + x) * 3 + c];
+                }
+            }
+}
+
+inline int chromaClamp16(int v)
+{
+    return v < 0 ? 0 : (v > 65535 ? 65535 : v);
+}
+
+/* CPU chroma separation/blur post-pass replicating raw_processing.c:1832-1971:
+ * RGB->YCbCr (JPEG transform via truncated-int terms), optional box blur of
+ * Cb/Cr, YCbCr->RGB. Uses double*(coeff) truncated to int exactly like the engine
+ * cs_zone LUTs ((int32)((double)j*coeff)). The GPU path uses RGBA32F LUTs holding
+ * the identical truncated integers, so all three (CPU/GPU/engine) agree. */
+void cpuChromaPostPass(uint16_t * img, int width, int height, int radius)
+{
+    const int n = width * height;
+    for (int i = 0; i < n; ++i)
+    {
+        const int R = img[i * 3 + 0];
+        const int G = img[i * 3 + 1];
+        const int B = img[i * 3 + 2];
+        const int Y  = static_cast<int>(static_cast<double>(R) * 0.299)
+                     + static_cast<int>(static_cast<double>(G) * 0.587)
+                     + static_cast<int>(static_cast<double>(B) * 0.114);
+        const int Cb = 32768 + static_cast<int>(static_cast<double>(R) * -0.168736)
+                     + static_cast<int>(static_cast<double>(G) * -0.331264) + (B >> 1);
+        const int Cr = 32768 + (R >> 1) + static_cast<int>(static_cast<double>(G) * -0.418688)
+                     + static_cast<int>(static_cast<double>(B) * -0.081312);
+        img[i * 3 + 0] = static_cast<uint16_t>(chromaClamp16(Y));
+        img[i * 3 + 1] = static_cast<uint16_t>(chromaClamp16(Cb));
+        img[i * 3 + 2] = static_cast<uint16_t>(chromaClamp16(Cr));
+    }
+    if ( radius > 0 )
+    {
+        cpuBoxBlur(img, width, height, radius, false, true, true);
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        const int Y  = img[i * 3 + 0];
+        const int Cb = img[i * 3 + 1];
+        const int Cr = img[i * 3 + 2];
+        const int R = Y + static_cast<int>(static_cast<double>(Cr - 32768) * 1.402);
+        const int G = Y + static_cast<int>(static_cast<double>(Cb - 32768) * -0.344136)
+                        + static_cast<int>(static_cast<double>(Cr - 32768) * -0.714136);
+        const int B = Y + static_cast<int>(static_cast<double>(Cb - 32768) * 1.772);
+        img[i * 3 + 0] = static_cast<uint16_t>(chromaClamp16(R));
+        img[i * 3 + 1] = static_cast<uint16_t>(chromaClamp16(G));
+        img[i * 3 + 2] = static_cast<uint16_t>(chromaClamp16(B));
     }
 }
 
@@ -1725,8 +1827,14 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     if ( processing->grainStrength > 0 ) return reject(QStringLiteral("grain enabled"));
     if ( processing->ca_desaturate > 0 ) return reject(QStringLiteral("CA correction enabled"));
     if ( processing->sharpen > 0.005 ) return reject(QStringLiteral("sharpening enabled"));
-    if ( processing->cs_zone.use_cs ) return reject(QStringLiteral("chroma separation enabled"));
-    if ( processing->cs_zone.chroma_blur_radius > 0 ) return reject(QStringLiteral("chroma blur enabled"));
+    /* Chroma separation/blur is supported: a YCbCr round-trip + optional box blur
+     * of Cb/Cr as a post-pass. Reject only an over-radius chroma blur (the GPU box
+     * blur is float32-exact only up to radius 127); chroma_blur_radius without
+     * use_cs is a no-op in the engine, so it needs no reject. */
+    if ( processing->cs_zone.use_cs && processing->cs_zone.chroma_blur_radius > 127 )
+    {
+        return reject(QStringLiteral("chroma blur radius exceeds 127"));
+    }
     if ( std::fabs(processing->clarity) >= 0.01 ) return reject(QStringLiteral("clarity enabled"));
     if ( std::fabs(processing->shadows_highlights.shadows) >= 0.01
       || std::fabs(processing->shadows_highlights.highlights) >= 0.01 )
@@ -1979,6 +2087,12 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             }
         }
     }
+    /* Chroma separation/blur: a YCbCr round-trip post-pass with an optional box
+     * blur of Cb/Cr (raw_processing.c:1816-1971). The engine runs the chroma blur
+     * only inside the use_cs block, so chroma_blur_radius without use_cs is inert. */
+    config.applyChroma = processing->cs_zone.use_cs != 0;
+    config.chromaBlurRadius = config.applyChroma
+        ? static_cast<int>(processing->cs_zone.chroma_blur_radius) : 0;
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -2045,6 +2159,8 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.gradientMatrixLutB.constData(), static_cast<size_t>(config.gradientMatrixLutB.size()));
     hash = fnv1a64_append(hash, config.gradientGammaLut.constData(), static_cast<size_t>(config.gradientGammaLut.size()));
     hash = fnv1a64_append(hash, config.gradientContrastCurve.constData(), static_cast<size_t>(config.gradientContrastCurve.size()));
+    hash = fnv1a64_append(hash, &config.applyChroma, sizeof(config.applyChroma));
+    hash = fnv1a64_append(hash, &config.chromaBlurRadius, sizeof(config.chromaBlurRadius));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -2092,8 +2208,10 @@ GpuPreviewProcessingBackendAvailability gpuPreviewProcessingProbeGpuBackend(void
 void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,
-                                           int pixelCount)
+                                           int width,
+                                           int height)
 {
+    const int pixelCount = width * height;
     if ( !inputRgb16 || !outputRgb16 || pixelCount <= 0 )
     {
         return;
@@ -2117,7 +2235,17 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
         uint16_t * outputPixel = outputRgb16 + pixelIndex * 3;
         applyPreviewProcessingPixel(config, inputPixel, outputPixel, pixelIndex);
     }
+
+    /* Spatial post-pass on the developed image (raw_processing.c:1816+). Chroma
+     * separation/blur runs after the per-pixel colour pipeline, in YCbCr space. */
+    if ( config.applyChroma )
+    {
+        cpuChromaPostPass(outputRgb16, width, height, config.chromaBlurRadius);
+    }
 }
+
+static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
+                                   QString * reason, QString * rendererDescription);
 
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
@@ -2504,6 +2632,24 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete gradientMaskTexture;
     context.doneCurrent();
 
+    /* Spatial post-pass on the developed image, in its own GL context (the per-
+     * pixel pass above has released this one). Chroma separation/blur reproduces
+     * raw_processing.c:1816-1971. */
+    if ( config.applyChroma )
+    {
+        QString chromaReason;
+        QString chromaRenderer;
+        if ( !applyChromaPostPassGpu(outputRgb16, width, height, config.chromaBlurRadius,
+                                     &chromaReason, &chromaRenderer) )
+        {
+            return fail(chromaReason);
+        }
+        if ( rendererDescription && !chromaRenderer.isEmpty() )
+        {
+            *rendererDescription = chromaRenderer;
+        }
+    }
+
     if ( reason ) reason->clear();
     return true;
 }
@@ -2684,6 +2830,244 @@ bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
     delete srcTexture;
     context.doneCurrent();
 
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray chromaForwardShaderSource()
+{
+    /* RGB -> YCbCr (JPEG transform, raw_processing.c convert_rgb_to_YCbCr_omp).
+     * Each term is read from an RGBA32F LUT holding the engine's truncated-int
+     * products; the 0.5 R/B terms are integer >>1 (floor(v/2)). */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform sampler2D fwdR;\n"
+        "uniform sampler2D fwdG;\n"
+        "uniform sampler2D fwdB;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 chromaLut(sampler2D lut, float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(lut, uv).rgb;\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec3 rgb = floor(texture2D(src, vTexCoord).rgb * 65535.0 + 0.5);\n"
+        "    vec3 fr = chromaLut(fwdR, rgb.r);\n"
+        "    vec3 fg = chromaLut(fwdG, rgb.g);\n"
+        "    vec3 fb = chromaLut(fwdB, rgb.b);\n"
+        "    float Y  = fr.r + fg.r + fb.r;\n"
+        "    float Cb = 32768.0 + fr.g + fg.g + floor(rgb.b / 2.0);\n"
+        "    float Cr = 32768.0 + floor(rgb.r / 2.0) + fg.b + fb.g;\n"
+        "    vec3 ycc = clamp(vec3(Y, Cb, Cr), 0.0, 65535.0);\n"
+        "    gl_FragColor = vec4(ycc / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+QByteArray chromaInverseShaderSource()
+{
+    /* YCbCr -> RGB (raw_processing.c convert_YCbCr_to_rgb_omp). */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform sampler2D invCr;\n"
+        "uniform sampler2D invCb;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 chromaLut(sampler2D lut, float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(lut, uv).rgb;\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec3 ycc = floor(texture2D(src, vTexCoord).rgb * 65535.0 + 0.5);\n"
+        "    vec3 icr = chromaLut(invCr, ycc.b);\n"
+        "    vec3 icb = chromaLut(invCb, ycc.g);\n"
+        "    float R = ycc.r + icr.r;\n"
+        "    float G = ycc.r + icb.r + icr.g;\n"
+        "    float B = ycc.r + icb.g;\n"
+        "    gl_FragColor = vec4(clamp(vec3(R, G, B), 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+/* 256x256 RGBA32F LUT: texel[j] = ((int)((j-bias)*cR), (int)((j-bias)*cG),
+ * (int)((j-bias)*cB), 0), matching the engine cs_zone LUT build
+ * ((int32)((double)j*coeff)). bias=0 forward, 32768 inverse. */
+QByteArray packChromaLutRgba32F(double cR, double cG, double cB, int bias)
+{
+    QByteArray packed(256 * 256 * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    for (int j = 0; j < 65536; ++j)
+    {
+        const double d = static_cast<double>(j - bias);
+        dst[j * 4 + 0] = static_cast<float>(static_cast<int>(d * cR));
+        dst[j * 4 + 1] = static_cast<float>(static_cast<int>(d * cG));
+        dst[j * 4 + 2] = static_cast<float>(static_cast<int>(d * cB));
+        dst[j * 4 + 3] = 0.0f;
+    }
+    return packed;
+}
+
+QOpenGLTexture * createChromaLutTexture()
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(256, 256);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+}
+
+static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
+                                   QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("chroma post-pass invalid buffer"));
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram forwardProgram, inverseProgram, blurProgram;
+    const QByteArray vs = gpuPreviewProcessingVertexShaderSource();
+    auto buildProg = [&](QOpenGLShaderProgram & p, const QByteArray & fs) -> bool {
+        return p.addShaderFromSourceCode(QOpenGLShader::Vertex, vs)
+            && p.addShaderFromSourceCode(QOpenGLShader::Fragment, fs)
+            && p.link();
+    };
+    if ( !buildProg(forwardProgram, chromaForwardShaderSource())
+      || !buildProg(inverseProgram, chromaInverseShaderSource())
+      || !buildProg(blurProgram, gpuPreviewProcessingBoxBlurFragmentShaderSource()) )
+    {
+        context.doneCurrent();
+        return fail(QStringLiteral("chroma shader setup failed"));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLTexture * fwdR = createChromaLutTexture();
+    QOpenGLTexture * fwdG = createChromaLutTexture();
+    QOpenGLTexture * fwdB = createChromaLutTexture();
+    QOpenGLTexture * invCr = createChromaLutTexture();
+    QOpenGLTexture * invCb = createChromaLutTexture();
+    {
+        const QByteArray a = packChromaLutRgba32F(0.299, -0.168736, 0.0, 0);
+        const QByteArray b = packChromaLutRgba32F(0.587, -0.331264, -0.418688, 0);
+        const QByteArray c = packChromaLutRgba32F(0.114, -0.081312, 0.0, 0);
+        const QByteArray d = packChromaLutRgba32F(1.402, -0.714136, 0.0, 32768);
+        const QByteArray e = packChromaLutRgba32F(-0.344136, 1.772, 0.0, 32768);
+        fwdR->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, a.constData());
+        fwdG->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, b.constData());
+        fwdB->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, c.constData());
+        invCr->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, d.constData());
+        invCb->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, e.constData());
+    }
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fboA(width, height, fmt);
+    QOpenGLFramebufferObject fboB(width, height, fmt);
+    QOpenGLFramebufferObject fboC(width, height, fmt);
+    if ( !fboA.isValid() || !fboB.isValid() || !fboC.isValid() )
+    {
+        delete srcTexture; delete fwdR; delete fwdG; delete fwdB; delete invCr; delete invCb;
+        context.doneCurrent();
+        return fail(QStringLiteral("chroma framebuffer creation failed"));
+    }
+
+    auto drawQuad = [&](QOpenGLShaderProgram & p) {
+        const int posLoc = p.attributeLocation("position");
+        const int texLoc = p.attributeLocation("texCoord");
+        p.enableAttributeArray(posLoc);
+        p.enableAttributeArray(texLoc);
+        p.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+        p.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+        gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        gl->glFinish();
+        p.disableAttributeArray(posLoc);
+        p.disableAttributeArray(texLoc);
+    };
+    auto beginPass = [&](QOpenGLFramebufferObject & fbo) {
+        fbo.bind();
+        gl->glViewport(0, 0, width, height);
+        gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+        gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    };
+
+    beginPass(fboA);
+    forwardProgram.bind();
+    forwardProgram.setUniformValue("src", 0);
+    forwardProgram.setUniformValue("fwdR", 1);
+    forwardProgram.setUniformValue("fwdG", 2);
+    forwardProgram.setUniformValue("fwdB", 3);
+    gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, srcTexture->textureId());
+    fwdR->bind(1); fwdG->bind(2); fwdB->bind(3);
+    drawQuad(forwardProgram);
+    forwardProgram.release();
+    fboA.release();
+
+    GLuint ycctex = fboA.texture();
+    if ( radius > 0 )
+    {
+        auto blurPass = [&](GLuint inTex, QOpenGLFramebufferObject & target, float horizontal) {
+            beginPass(target);
+            blurProgram.bind();
+            blurProgram.setUniformValue("src", 0);
+            blurProgram.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+            blurProgram.setUniformValue("radius", static_cast<float>(radius));
+            blurProgram.setUniformValue("horizontal", horizontal);
+            blurProgram.setUniformValue("channelMask", QVector3D(0.0f, 1.0f, 1.0f));
+            gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, inTex);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            drawQuad(blurProgram);
+            blurProgram.release();
+            target.release();
+        };
+        blurPass(fboA.texture(), fboB, 1.0f);
+        blurPass(fboB.texture(), fboC, 0.0f);
+        ycctex = fboC.texture();
+    }
+
+    QOpenGLFramebufferObject & finalFbo = (ycctex == fboB.texture()) ? fboA : fboB;
+    beginPass(finalFbo);
+    inverseProgram.bind();
+    inverseProgram.setUniformValue("src", 0);
+    inverseProgram.setUniformValue("invCr", 1);
+    inverseProgram.setUniformValue("invCb", 2);
+    gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, ycctex);
+    invCr->bind(1); invCb->bind(2);
+    drawQuad(inverseProgram);
+    inverseProgram.release();
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    finalFbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    delete srcTexture; delete fwdR; delete fwdG; delete fwdB; delete invCr; delete invCb;
+    context.doneCurrent();
     if ( reason ) reason->clear();
     return true;
 }

@@ -116,7 +116,8 @@ static std::vector<uint16_t> render_gpu_preview_subset_cpu_reference(MlvPipeline
     gpuPreviewProcessingApplyCpuReference(config,
                                           debayered.data(),
                                           output.data(),
-                                          fixture.width() * fixture.height());
+                                          fixture.width(),
+                                          fixture.height());
     return output;
 }
 
@@ -186,7 +187,7 @@ static void assert_gpu_offscreen_matches_cpu_reference(MlvPipelineFixture & fixt
 
     std::vector<uint16_t> cpu_output(debayered.size(), 0);
     gpuPreviewProcessingApplyCpuReference(config, debayered.data(),
-                                          cpu_output.data(), pixel_count);
+                                          cpu_output.data(), fixture.width(), fixture.height());
 
     std::vector<uint16_t> gpu_output(debayered.size(), 0);
     QString reason;
@@ -338,14 +339,13 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "sharpening",
         QStringLiteral("sharpening enabled"),
         [](processingObject_t * processing) { processing->sharpen = 0.25; });
+    /* chroma separation/blur is now supported (see ChromaIsSupportedAndMatchesCpuReference);
+     * only an over-radius chroma blur is rejected (the GPU box blur is float32-exact
+     * to radius 127). chroma_blur_radius without use_cs is a no-op in the engine. */
     assert_gpu_preview_rejects_processing_feature(
-        "chroma_separation",
-        QStringLiteral("chroma separation enabled"),
-        [](processingObject_t * processing) { processing->cs_zone.use_cs = 1; });
-    assert_gpu_preview_rejects_processing_feature(
-        "chroma_blur",
-        QStringLiteral("chroma blur enabled"),
-        [](processingObject_t * processing) { processing->cs_zone.chroma_blur_radius = 3; });
+        "chroma_blur_over_radius",
+        QStringLiteral("chroma blur radius exceeds 127"),
+        [](processingObject_t * processing) { processing->cs_zone.use_cs = 1; processing->cs_zone.chroma_blur_radius = 200; });
     assert_gpu_preview_rejects_processing_feature(
         "clarity",
         QStringLiteral("clarity enabled"),
@@ -800,6 +800,38 @@ TEST(GpuPreviewProcessing, BlurImageBoxParity)
             }
         }
     }
+}
+
+TEST(GpuPreviewProcessing, ChromaIsSupportedAndMatchesCpuReference)
+{
+    /* Chroma separation/blur is now supported: a YCbCr round-trip post-pass with
+     * an optional box blur of Cb/Cr (reusing the bit-exact box blur), applied after
+     * the per-pixel colour pipeline. Verify the gate accepts use_cs, the config
+     * carries the chroma fields, the output changes vs the baseline, and the GPU
+     * offscreen output (per-pixel pass + GPU chroma post-pass) matches the CPU
+     * reference (per-pixel + CPU chroma post-pass). */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    processingEnableChromaSeparation(p);
+    processingSetChromaBlurRadius(p, 3);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyChroma);
+    ASSERT_EQ(3, cfg.chromaBlurRadius);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string chroma_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != chroma_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "chroma");
 }
 
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
