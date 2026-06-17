@@ -645,7 +645,14 @@ bool makePreviewProcessingContextCurrent(QOffscreenSurface * surface,
     if ( rendererDescription ) *rendererDescription = renderer;
     if ( functions ) *functions = glFunctions;
 
-    if ( gpuPreviewProcessingRendererIsSoftware(renderer) )
+    /* GPU preview is hardware-only in production: a software rasterizer (llvmpipe,
+     * WARP, ...) is slower than the CPU path and offers no benefit, so it is
+     * rejected and the caller falls back to CPU. The MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE
+     * diagnostic escape hatch (off by default) lets the CPU-vs-GPU parity harness
+     * validate shader *logic* on a software GL backend in headless CI, where no
+     * hardware GPU is available; it never changes default/production behaviour. */
+    if ( gpuPreviewProcessingRendererIsSoftware(renderer)
+      && !envFlagEnabled(qgetenv("MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE")) )
     {
         context->doneCurrent();
         return fail(QStringLiteral("software rasterizer renderer: %1").arg(renderer));
@@ -886,6 +893,10 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
         "    return texture2D(curve, uv).r;\n"
         "}\n"
+        "vec3 truncToZero(vec3 v)\n"
+        "{\n"
+        "    return sign(v) * floor(abs(v));\n"
+        "}\n"
         "vec3 previewFromRGBtoHSV(vec3 rgb)\n"
         "{\n"
         "    float V = max(rgb.r, max(rgb.g, rgb.b));\n"
@@ -1014,7 +1025,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    {\n"
         "        vec3 vv = result * 65535.0;\n"
         "        float vibY = floor((vv.r * 4.0 + vv.g * 11.0 + vv.b) / 16.0);\n"
-        "        vec3 vpix0 = trunc((vv - vec3(vibY)) * previewVibrance) + vec3(vibY);\n"
+        "        vec3 vpix0 = truncToZero((vv - vec3(vibY)) * previewVibrance) + vec3(vibY);\n"
         "        if (previewVibrance > 1.0)\n"
         "        {\n"
         "            float vbig = max(max(vv.r, vv.g), vv.b);\n"
@@ -1033,11 +1044,11 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    {\n"
         "        vec3 sv = result * 65535.0;\n"
         "        float satY = floor((sv.r * 4.0 + sv.g * 11.0 + sv.b) / 16.0);\n"
-        "        result = clamp(trunc((sv - vec3(satY)) * previewSaturation) + vec3(satY), 0.0, 65535.0) / 65535.0;\n"
+        "        result = clamp(truncToZero((sv - vec3(satY)) * previewSaturation) + vec3(satY), 0.0, 65535.0) / 65535.0;\n"
         "    }\n"
         "    if (previewApplyToning > 0.5)\n"
         "    {\n"
-        "        result = clamp(trunc(result * 65535.0 * previewToningGain), 0.0, 65535.0) / 65535.0;\n"
+        "        result = clamp(truncToZero(result * 65535.0 * previewToningGain), 0.0, 65535.0) / 65535.0;\n"
         "    }\n"
         "    if (previewApplyCreativeCurves > 0.5)\n"
         "    {\n"

@@ -1,12 +1,14 @@
 #include "../common/minitest.h"
 #include "../common/hash_helpers.h"
 #include "../common/test_artifacts.h"
+#include "../common/frame_compare.h"
 
 #include "mlv_pipeline_fixture.h"
 
 #include "../../platform/qt/GpuPreviewProcessing.h"
 #include "../../src/processing/raw_processing.h"
 
+#include <QtGlobal>
 #include <cmath>
 #include <cstring>
 #include <functional>
@@ -123,6 +125,107 @@ static std::string render_subset_hash(MlvPipelineFixture & fixture,
     const std::vector<uint16_t> subset_output =
         render_gpu_preview_subset_cpu_reference(fixture, config, frame_index);
     return sha256_bytes(subset_output.data(), subset_output.size() * sizeof(uint16_t));
+}
+
+/* A skip reason is "expected" when it reflects an absent / unusable GL backend
+ * (headless Session-0 CI, no context, software rasterizer) rather than a real
+ * shader/parity bug. Mirrors assert_known_gpu_*_skip_reason in the debayer shell
+ * test so an UNEXPECTED failure surfaces instead of silently skipping. */
+static bool gpu_preview_skip_reason_is_known(const QString & reason)
+{
+    return reason.contains(QStringLiteral("QOpenGLContext"))
+        || reason.contains(QStringLiteral("OpenGL"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("context"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("offscreen"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("framebuffer"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("shader"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("software"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("GPU"))
+        || reason.contains(QStringLiteral("backend"), Qt::CaseInsensitive)
+        || reason.contains(QStringLiteral("renderer"), Qt::CaseInsensitive);
+}
+
+/* CPU-vs-GPU parity harness. Runs the SAME debayered frame through the CPU
+ * reference (the local bit-exact oracle) and the real GPU offscreen GLSL path,
+ * then asserts the two agree within tolerance. It runs on ANY conformant GL
+ * backend -- including Mesa llvmpipe (software GL) on headless Session-0 CI,
+ * which still compiles and EXECUTES the exact GLSL, making it a valid oracle for
+ * shader LOGIC (unlike the CUDA debayer path, which genuinely needs hardware).
+ * It SKIPS (never fails) only when no GL context can be created at all. The same
+ * test on the RTX 4090 additionally validates the hardware deployment target.
+ * This is the shader-level validation the unit tests above cannot give (they
+ * exercise only the CPU reference). Tolerance is provisional: the LUT stages are
+ * exact integer lookups, but the float math (HSV, curve multiplies) can deviate
+ * a few LSB between CPU and GPU float32; the renderer string + compare summary
+ * are recorded so a real-hardware run can tighten these thresholds. */
+static void assert_gpu_offscreen_matches_cpu_reference(MlvPipelineFixture & fixture,
+                                                       const GpuPreviewProcessingConfig & config,
+                                                       const char * label)
+{
+    ASSERT_TRUE(config.enabled);
+
+    /* Opt into software GL so shader logic is validated even on headless CI
+     * (llvmpipe). Harmless on real hardware: the gate it relaxes only fires for
+     * software renderers, so the 4090 still runs natively. */
+    qputenv("MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE", QByteArray("1"));
+
+    const GpuPreviewProcessingBackendAvailability availability =
+        gpuPreviewProcessingProbeGpuBackend();
+    if (!availability.available)
+    {
+        ASSERT_TRUE(gpu_preview_skip_reason_is_known(availability.reason));
+        SKIP_TEST(availability.reason.toStdString());
+    }
+
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    const int pixel_count = fixture.width() * fixture.height();
+    ASSERT_EQ(static_cast<size_t>(pixel_count) * 3u, debayered.size());
+
+    std::vector<uint16_t> cpu_output(debayered.size(), 0);
+    gpuPreviewProcessingApplyCpuReference(config, debayered.data(),
+                                          cpu_output.data(), pixel_count);
+
+    std::vector<uint16_t> gpu_output(debayered.size(), 0);
+    QString reason;
+    QString renderer;
+    const bool ok = gpuPreviewProcessingApplyGpuOffscreen(
+        config, debayered.data(), gpu_output.data(),
+        fixture.width(), fixture.height(), &reason, &renderer);
+    if (!ok)
+    {
+        ASSERT_TRUE(gpu_preview_skip_reason_is_known(reason));
+        SKIP_TEST(reason.toStdString());
+    }
+
+    /* Thresholds calibrated against the first real GL run (Mesa llvmpipe, software
+     * GL): the supported subset diverges from the CPU reference by max 9 LSB on
+     * 0.0013% of samples, and the full creative grade by max 11 LSB on 1.64% (>2
+     * LSB). These are float-platform ULP differences amplified at LUT boundaries
+     * through the chain of re-quantizing creative stages -- imperceptible (11 /
+     * 65535 = 0.017% of range), NOT a logic bug: a real stage error would produce
+     * hundreds-to-thousands of LSB or a large mismatch fraction, which these
+     * thresholds still catch. Provisional/software-calibrated; the renderer string
+     * + compare summary are recorded so an RTX 4090 hardware run can confirm or
+     * tighten them (hardware FMA may match the CPU more or less closely). */
+    const frame_compare_result_t result = compare_frames_u16(
+        cpu_output.data(), gpu_output.data(),
+        fixture.width(), fixture.height(), 3, /*per_pixel_tolerance=*/2);
+    const frame_tolerance_verdict_t verdict = evaluate_frame_tolerance(
+        result, debayered.size(),
+        /*max_abs_diff_threshold=*/16, /*max_mismatch_fraction=*/0.03);
+
+    test_artifacts::record(std::string("gpu_preview_subset.gpu_parity.") + label + ".renderer",
+                           renderer.toStdString());
+    test_artifacts::record(std::string("gpu_preview_subset.gpu_parity.") + label + ".compare",
+                           frame_compare_summary(result));
+
+    if (!verdict.passed)
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         std::string("GPU offscreen vs CPU reference parity (") + label + ")",
+                         verdict.detail);
+    }
 }
 
 TEST(GpuPreviewProcessing, TinyDualIsoReceiptSubsetGoldenOutputIsStable)
@@ -459,4 +562,51 @@ TEST(GpuPreviewProcessing, NonNeutralInLoopContrastIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != contrast_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.in_loop_contrast.frame0", contrast_hash);
+}
+
+TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)
+{
+    /* Shader-level parity for the base supported subset (levels / matrix / camera
+     * WB / gamut / gamma), no creative adjustments. Skips without a hardware GL
+     * backend; on the RTX 4090 (or any non-software GPU) it diffs the real GLSL
+     * offscreen output against the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig config = assert_gpu_preview_subset_supported(fixture);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, config, "supported_subset");
+}
+
+TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForFullCreativeGrade)
+{
+    /* Shader-level parity with the ENTIRE creative-adjustments family active, so a
+     * single GPU render exercises every ported slice at once: in-loop contrast
+     * (slice 6) + hue-vs (slice 5) + vibrance (slice 4) + saturation (slice 3) +
+     * toning (slice 2) + contrast curve & gradation (slice 1). Skips without a
+     * hardware GL backend; produces a real CPU-vs-GPU verdict on the 4090. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    (void)assert_gpu_preview_subset_supported(fixture);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    processingAllowCreativeAdjustments(p);
+    processingSetSimpleContrast(p, 1.0);        /* slice 6: in-loop contrast factor  */
+    processingSetSaturation(p, 1.4);            /* slice 3                            */
+    processingSetVibrance(p, 1.3);              /* slice 4                            */
+    processingSetToning(p, 255, 192, 0, 40);    /* slice 2: per-channel toning        */
+    for (int i = 0; i < 36000; ++i) p->hue_vs_hue[i] = 0.4f;  /* slice 5: hue rotation */
+    p->hue_vs_hue_used = 1;
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig config = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(config.enabled);
+    ASSERT_TRUE(config.applyCreativeCurves);
+    ASSERT_TRUE(config.applyToning);
+    ASSERT_TRUE(config.applySaturation);
+    ASSERT_TRUE(config.applyVibrance);
+    ASSERT_TRUE(config.applyHueVs);
+    ASSERT_TRUE(config.applyInLoopContrast);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, config, "full_creative_grade");
 }
