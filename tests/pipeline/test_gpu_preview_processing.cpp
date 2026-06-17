@@ -736,6 +736,72 @@ TEST(GpuPreviewProcessing, GradientIsSupportedAndMatchesCpuReference)
     assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "gradient");
 }
 
+TEST(GpuPreviewProcessing, BlurImageBoxParity)
+{
+    /* The GPU separable integer box blur is the keystone pre-pass for the spatial
+     * stages (chroma blur / sharpen / median). It must reproduce the engine
+     * blur_image (processing.c:589) BIT-EXACTLY (0 LSB). Run the same debayered
+     * frame through engine blur_image and the GPU offscreen box blur at several
+     * radii -- all channels, then the chroma Cb/Cr (do_r=0) case -- and assert
+     * byte equality. Skips only when no GL backend is available. */
+    qputenv("MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE", QByteArray("1"));
+    const GpuPreviewProcessingBackendAvailability availability =
+        gpuPreviewProcessingProbeGpuBackend();
+    if (!availability.available)
+    {
+        ASSERT_TRUE(gpu_preview_skip_reason_is_known(availability.reason));
+        SKIP_TEST(availability.reason.toStdString());
+    }
+
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    const int width = fixture.width();
+    const int height = fixture.height();
+    ASSERT_EQ(static_cast<size_t>(width) * height * 3u, debayered.size());
+
+    const int radii[] = { 1, 2, 3, 5 };
+    const int channelCases[2][3] = { {1, 1, 1}, {0, 1, 1} };
+    for (const auto & ch : channelCases)
+    {
+        for (int radius : radii)
+        {
+            std::vector<uint16_t> reference = debayered;
+            std::vector<uint16_t> scratch(debayered.size(), 0);
+            blur_image(reference.data(), scratch.data(), width, height, radius,
+                       ch[0], ch[1], ch[2], 0, height);
+
+            std::vector<uint16_t> gpu(debayered.size(), 0);
+            QString reason;
+            QString renderer;
+            const bool ok = gpuPreviewProcessingApplyBoxBlurOffscreen(
+                debayered.data(), gpu.data(), width, height, radius,
+                ch[0] != 0, ch[1] != 0, ch[2] != 0, &reason, &renderer);
+            if (!ok)
+            {
+                ASSERT_TRUE(gpu_preview_skip_reason_is_known(reason));
+                SKIP_TEST(reason.toStdString());
+            }
+
+            const frame_compare_result_t result = compare_frames_u16(
+                reference.data(), gpu.data(), width, height, 3, /*per_pixel_tolerance=*/0);
+            const std::string label = "box_blur.r" + std::to_string(radius) + ".ch"
+                + std::to_string(ch[0]) + std::to_string(ch[1]) + std::to_string(ch[2]);
+            test_artifacts::record("gpu_preview_subset.gpu_parity." + label + ".renderer",
+                                   renderer.toStdString());
+            test_artifacts::record("gpu_preview_subset.gpu_parity." + label + ".compare",
+                                   frame_compare_summary(result));
+            if (result.max_abs_diff != 0)
+            {
+                ::minitest::fail(__FILE__, __LINE__,
+                                 std::string("GPU box blur vs engine blur_image (") + label + ")",
+                                 frame_compare_summary(result));
+            }
+        }
+    }
+}
+
 static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
 {
     lut_t * lut = fixture.processing()->lut;

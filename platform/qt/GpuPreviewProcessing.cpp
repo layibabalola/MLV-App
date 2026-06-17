@@ -2507,3 +2507,183 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     if ( reason ) reason->clear();
     return true;
 }
+
+QByteArray gpuPreviewProcessingBoxBlurFragmentShaderSource(void)
+{
+    /* One separable box-blur pass (axis chosen by `horizontal`). Each fragment
+     * sums the (2*radius+1)-tap window of EXACT integer texel values, divides by
+     * the diameter with a truncating floor (matching the engine's integer
+     * sum/blur_diameter), and clamps the tap coordinate to the edge. Disabled
+     * channels pass the center texel through unchanged (blur_image leaves
+     * do_*=0 channels untouched). Radius<=127 keeps the window sum < 2^24 so the
+     * float32 accumulation is exact. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform float radius;\n"
+        "uniform float horizontal;\n"
+        "uniform vec3 channelMask;\n"
+        "varying vec2 vTexCoord;\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    float diameter = 2.0 * radius + 1.0;\n"
+        "    vec3 center = floor(texture2D(src, (px + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    vec3 sum = vec3(0.0);\n"
+        "    for (int k = 0; k < 255; k++)\n"
+        "    {\n"
+        "        if (float(k) > 2.0 * radius) break;\n"
+        "        /* Engine blur_image window for output j is [j-r+1, j+r+1] -- a\n"
+        "         * centered box shifted right by exactly one pixel (its off-by-one\n"
+        "         * quirk), clamped to the edge. Reproduce that shift here. */\n"
+        "        float off = float(k) - radius + 1.0;\n"
+        "        vec2 c = px;\n"
+        "        if (horizontal > 0.5) c.x = clamp(px.x + off, 0.0, texSize.x - 1.0);\n"
+        "        else c.y = clamp(px.y + off, 0.0, texSize.y - 1.0);\n"
+        "        sum += floor(texture2D(src, (c + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    }\n"
+        "    vec3 blurred = floor(sum / diameter);\n"
+        "    vec3 outv = mix(center, blurred, channelMask);\n"
+        "    gl_FragColor = vec4(outv / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
+                                               uint16_t * outputRgb16,
+                                               int width,
+                                               int height,
+                                               int radius,
+                                               bool doR,
+                                               bool doG,
+                                               bool doB,
+                                               QString * reason,
+                                               QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        return false;
+    };
+
+    if ( !inputRgb16 || !outputRgb16 || width <= 0 || height <= 0 )
+    {
+        return fail(QStringLiteral("box blur input/output buffers are invalid"));
+    }
+    if ( radius < 0 )
+    {
+        return fail(QStringLiteral("box blur radius is negative"));
+    }
+    if ( radius > 127 )
+    {
+        return fail(QStringLiteral("box blur radius exceeds the float32-exact limit (127)"));
+    }
+    if ( radius == 0 )
+    {
+        std::memcpy(outputRgb16, inputRgb16,
+                    static_cast<size_t>(width) * height * 3u * sizeof(uint16_t));
+        if ( reason ) reason->clear();
+        return true;
+    }
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * glFunctions = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &glFunctions,
+                                              reason, rendererDescription) )
+    {
+        return false;
+    }
+
+    QOpenGLShaderProgram program;
+    {
+        const QByteArray vertexShader = gpuPreviewProcessingVertexShaderSource();
+        const QByteArray fragmentShader = gpuPreviewProcessingBoxBlurFragmentShaderSource();
+        if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)
+          || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)
+          || !program.link() )
+        {
+            const QString log = program.log();
+            context.doneCurrent();
+            return fail(QStringLiteral("box blur shader setup failed: %1").arg(log));
+        }
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(inputRgb16, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLFramebufferObjectFormat fboFormat;
+    fboFormat.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fboFormat.setTextureTarget(GL_TEXTURE_2D);
+    fboFormat.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fboHorizontal(width, height, fboFormat);
+    QOpenGLFramebufferObject fboVertical(width, height, fboFormat);
+    if ( !fboHorizontal.isValid() || !fboVertical.isValid() )
+    {
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("box blur framebuffer creation failed"));
+    }
+
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+
+    auto drawPass = [&](GLuint inputTexture, QOpenGLFramebufferObject & target, float horizontal)
+    {
+        target.bind();
+        glFunctions->glViewport(0, 0, width, height);
+        glFunctions->glDisable(GL_DEPTH_TEST);
+        glFunctions->glDisable(GL_BLEND);
+        glFunctions->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glFunctions->glClear(GL_COLOR_BUFFER_BIT);
+        program.bind();
+        program.setUniformValue("src", 0);
+        program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+        program.setUniformValue("radius", static_cast<float>(radius));
+        program.setUniformValue("horizontal", horizontal);
+        program.setUniformValue("channelMask",
+                                QVector3D(doR ? 1.0f : 0.0f, doG ? 1.0f : 0.0f, doB ? 1.0f : 0.0f));
+        glFunctions->glActiveTexture(GL_TEXTURE0);
+        glFunctions->glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        program.enableAttributeArray(posLoc);
+        program.enableAttributeArray(texLoc);
+        program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+        program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+        glFunctions->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glFunctions->glFinish();
+        program.disableAttributeArray(posLoc);
+        program.disableAttributeArray(texLoc);
+        target.release();
+    };
+
+    /* Horizontal pass into fboHorizontal, then vertical pass reading it into
+     * fboVertical. The passes do NOT flip Y (unlike the main preview offscreen),
+     * so readback row 0 maps to input row 0 -- the box is symmetric and the
+     * edge clamp is position-dependent, so the orientation must match blur_image. */
+    drawPass(srcTexture->textureId(), fboHorizontal, 1.0f);
+    drawPass(fboHorizontal.texture(), fboVertical, 0.0f);
+
+    fboVertical.bind();
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    glFunctions->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fboVertical.release();
+
+    const uint16_t * pixels = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        outputRgb16[i * 3 + 0] = pixels[i * 4 + 0];
+        outputRgb16[i * 3 + 1] = pixels[i * 4 + 1];
+        outputRgb16[i * 3 + 2] = pixels[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture;
+    context.doneCurrent();
+
+    if ( reason ) reason->clear();
+    return true;
+}

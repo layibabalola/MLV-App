@@ -106,4 +106,24 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
                                            QString * reason = nullptr,
                                            QString * rendererDescription = nullptr);
 
+/* Separable integer box blur on the GPU, the bit-exact reproduction of the
+ * engine's blur_image (processing.c:589): two render-to-texture passes
+ * (horizontal then vertical), each summing the (2*radius+1)-tap window with a
+ * truncating integer divide and GL_CLAMP_TO_EDGE addressing. This is the
+ * keystone pre-pass for the spatial stages (chroma blur / sharpen / median).
+ * do_r/do_g/do_b select which interleaved channels are blurred (disabled
+ * channels pass through), matching blur_image's channel flags. Radius must be
+ * <= 127 so the integer window sum stays exact in float32. */
+QByteArray gpuPreviewProcessingBoxBlurFragmentShaderSource(void);
+bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
+                                               uint16_t * outputRgb16,
+                                               int width,
+                                               int height,
+                                               int radius,
+                                               bool doR,
+                                               bool doG,
+                                               bool doB,
+                                               QString * reason = nullptr,
+                                               QString * rendererDescription = nullptr);
+
 #endif // GPUPREVIEWPROCESSING_H
