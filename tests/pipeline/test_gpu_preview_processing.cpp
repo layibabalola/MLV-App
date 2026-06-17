@@ -9,7 +9,9 @@
 #include "../../src/processing/raw_processing.h"
 
 #include <QtGlobal>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -114,7 +116,8 @@ static std::vector<uint16_t> render_gpu_preview_subset_cpu_reference(MlvPipeline
     gpuPreviewProcessingApplyCpuReference(config,
                                           debayered.data(),
                                           output.data(),
-                                          fixture.width() * fixture.height());
+                                          fixture.width(),
+                                          fixture.height());
     return output;
 }
 
@@ -184,7 +187,7 @@ static void assert_gpu_offscreen_matches_cpu_reference(MlvPipelineFixture & fixt
 
     std::vector<uint16_t> cpu_output(debayered.size(), 0);
     gpuPreviewProcessingApplyCpuReference(config, debayered.data(),
-                                          cpu_output.data(), pixel_count);
+                                          cpu_output.data(), fixture.width(), fixture.height());
 
     std::vector<uint16_t> gpu_output(debayered.size(), 0);
     QString reason;
@@ -291,36 +294,37 @@ TEST(GpuPreviewProcessing, ExposureStopsChangesSubsetConfigAndStableOutput)
 
 TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
 {
-    assert_gpu_preview_rejects_processing_feature(
-        "highlight_reconstruction",
-        QStringLiteral("highlight reconstruction enabled"),
-        [](processingObject_t * processing) { processing->highlight_reconstruction = 1; });
+    /* highlight_reconstruction is no longer rejected: it is ported as a per-pixel
+     * clipped-green replace (see HighlightReconstructionIsSupportedAndMatchesCpuReference). */
     /* allow_creative_adjustments is no longer rejected on its own: the GPU subset
      * shader now ports every creative-family stage -- the in-loop simple-contrast
      * factor, hue-vs/luma-vs curves, vibrance, saturation, toning, the contrast
      * curve and the gradation curves. Clips are still failed closed on the
      * non-creative features below, which are gated independently of the creative
      * flag. */
+    /* gradient is now supported (see GradientIsSupportedAndMatchesCpuReference);
+     * it is only rejected when enabled without a built mask. */
     assert_gpu_preview_rejects_processing_feature(
-        "gradient",
-        QStringLiteral("gradient enabled"),
-        [](processingObject_t * processing) { processing->gradient_enable = 1; });
+        "gradient_no_mask",
+        QStringLiteral("gradient mask unavailable"),
+        [](processingObject_t * processing) { processing->gradient_enable = 1; processing->gradient_mask = nullptr; });
     assert_gpu_preview_rejects_processing_feature(
-        "lut",
-        QStringLiteral("LUT enabled"),
-        [](processingObject_t * processing) { processing->lut_on = 1; });
+        "lut_no_cube",
+        QStringLiteral("LUT enabled but cube unavailable"),
+        [](processingObject_t * processing) {
+            processing->lut_on = 1;
+            if (processing->lut) { processing->lut->cube = nullptr; processing->lut->dimension = 0; }
+        });
     assert_gpu_preview_rejects_processing_feature(
         "filter",
         QStringLiteral("filter enabled"),
         [](processingObject_t * processing) { processing->filter_on = 1; });
+    /* median denoise is now supported for windows <=5 (see MedianIsSupportedAndMatchesCpuReference);
+     * a larger window is rejected. */
     assert_gpu_preview_rejects_processing_feature(
-        "agx",
-        QStringLiteral("AgX enabled"),
-        [](processingObject_t * processing) { processing->AgX = 1; });
-    assert_gpu_preview_rejects_processing_feature(
-        "median_denoiser",
-        QStringLiteral("median denoiser enabled"),
-        [](processingObject_t * processing) { processing->denoiserStrength = 1; });
+        "median_window_too_large",
+        QStringLiteral("median denoiser window exceeds 5"),
+        [](processingObject_t * processing) { processing->denoiserStrength = 50; processing->denoiserWindow = 7; });
     assert_gpu_preview_rejects_processing_feature(
         "rbf_denoiser",
         QStringLiteral("RBF denoiser enabled"),
@@ -333,18 +337,19 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         "ca_correction",
         QStringLiteral("CA correction enabled"),
         [](processingObject_t * processing) { processing->ca_desaturate = 1; });
+    /* sharpen is now supported standalone (see SharpenIsSupportedAndMatchesCpuReference);
+     * rejected only combined with the sobel edge mask or chroma separation. */
     assert_gpu_preview_rejects_processing_feature(
-        "sharpening",
-        QStringLiteral("sharpening enabled"),
-        [](processingObject_t * processing) { processing->sharpen = 0.25; });
+        "sharpen_with_chroma",
+        QStringLiteral("sharpen with chroma separation enabled"),
+        [](processingObject_t * processing) { processing->sharpen = 0.25; processing->cs_zone.use_cs = 1; });
+    /* chroma separation/blur is now supported (see ChromaIsSupportedAndMatchesCpuReference);
+     * only an over-radius chroma blur is rejected (the GPU box blur is float32-exact
+     * to radius 127). chroma_blur_radius without use_cs is a no-op in the engine. */
     assert_gpu_preview_rejects_processing_feature(
-        "chroma_separation",
-        QStringLiteral("chroma separation enabled"),
-        [](processingObject_t * processing) { processing->cs_zone.use_cs = 1; });
-    assert_gpu_preview_rejects_processing_feature(
-        "chroma_blur",
-        QStringLiteral("chroma blur enabled"),
-        [](processingObject_t * processing) { processing->cs_zone.chroma_blur_radius = 3; });
+        "chroma_blur_over_radius",
+        QStringLiteral("chroma blur radius exceeds 127"),
+        [](processingObject_t * processing) { processing->cs_zone.use_cs = 1; processing->cs_zone.chroma_blur_radius = 200; });
     assert_gpu_preview_rejects_processing_feature(
         "clarity",
         QStringLiteral("clarity enabled"),
@@ -354,13 +359,13 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("shadows/highlights enabled"),
         [](processingObject_t * processing) { processing->shadows_highlights.shadows = 0.25; });
     assert_gpu_preview_rejects_processing_feature(
-        "vignette",
-        QStringLiteral("vignette enabled"),
-        [](processingObject_t * processing) { processing->vignette_strength = 1; });
-    assert_gpu_preview_rejects_processing_feature(
-        "unsupported_gamut",
-        QStringLiteral("unsupported gamut"),
-        [](processingObject_t * processing) { processingSetGamut(processing, GAMUT_Rec2020); });
+        "vignette_no_mask",
+        QStringLiteral("vignette mask unavailable"),
+        [](processingObject_t * processing) {
+            processing->vignette_strength = 1;
+            processing->vignette_mask = nullptr;
+            processing->vignette_end = nullptr;
+        });
 }
 
 TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
@@ -562,6 +567,413 @@ TEST(GpuPreviewProcessing, NonNeutralInLoopContrastIsSupportedAndChangesOutput)
     ASSERT_TRUE(neutral_hash != contrast_hash);
 
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.in_loop_contrast.frame0", contrast_hash);
+}
+
+TEST(GpuPreviewProcessing, NonRec709GamutIsSupportedAndMatchesCpuReference)
+{
+    /* Non-Rec709 gamut used to fail closed. It is now supported: the gamut is
+     * baked into proper_wb_matrix (applied in-shader) and the gamut-compression
+     * luma weights are derived per-gamut (config.rgbToY via processingGamutRgbToY)
+     * rather than assuming Rec709. Verify the gate accepts it, the config differs
+     * from Rec709, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig rec709 = assert_gpu_preview_subset_supported(fixture);
+
+    processingSetGamut(fixture.processing(), GAMUT_Rec2020);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig rec2020 =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(rec2020.enabled);
+    ASSERT_NE(rec709.signature, rec2020.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, rec2020, "gamut_rec2020");
+}
+
+TEST(GpuPreviewProcessing, AgXIsSupportedAndMatchesCpuReference)
+{
+    /* AgX used to fail closed. It is now supported: a forward compressed-gamut
+     * matmul before gamma and the inverse after the creative curves, carried as
+     * uniform matrices (engine-derived via processingAgxMatrices). Verify the gate
+     * accepts it, the config differs, and the GPU offscreen output matches the
+     * CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+
+    processingEnableAgX(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig agx =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(agx.enabled);
+    ASSERT_TRUE(agx.applyAgx);
+    ASSERT_NE(base.signature, agx.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, agx, "agx");
+}
+
+TEST(GpuPreviewProcessing, VignetteIsSupportedAndMatchesCpuReference)
+{
+    /* Vignette is the first position-dependent stage: a per-pixel exposure
+     * multiply by a full-frame mask, applied with the vmpix pre-increment off-by-
+     * one. Build an ASYMMETRIC mask (xStretch != yStretch) so a raster-flip bug in
+     * the GPU mask sampling changes the output (a symmetric 4-way-mirrored mask
+     * could hide it). Verify the gate accepts it, the config carries the frame-
+     * sized mask, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+
+    processingSetVignetteMask(fixture.processing(), static_cast<uint16_t>(fixture.width()),
+                              static_cast<uint16_t>(fixture.height()), 0.5f, 0.2f, 1.0f, 1.4f);
+    processingSetVignetteStrength(fixture.processing(), 60);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig vig =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(vig.enabled);
+    ASSERT_TRUE(vig.applyVignette);
+    ASSERT_EQ(static_cast<int>(static_cast<size_t>(fixture.width()) * fixture.height() * sizeof(float)),
+              vig.vignetteMask.size());
+    ASSERT_NE(base.signature, vig.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, vig, "vignette");
+}
+
+TEST(GpuPreviewProcessing, HighlightReconstructionIsSupportedAndMatchesCpuReference)
+{
+    /* Highlight reconstruction used to fail closed. It is now supported as a
+     * per-pixel stage: for a clipped green it replaces green with (R+B)/2, keyed on
+     * the uint16 matrix-green (tmp1) matching the static white-level green (non
+     * dual-ISO) or a +/-5000 window around the per-frame dual-ISO peak plus the
+     * green-dominance guard. Verify the gate accepts it, the config carries the
+     * recon fields, the recon actually FIRES (output changes vs the baseline), and
+     * the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    /* Pick a dual-ISO peak that is GUARANTEED to fire on this frame instead of
+     * guessing one: replicate the engine's levels->diagonal-matrix lookup
+     * (tmp1 = matrixG[levels[green]], pix = matrix[levels[*]]) using the config
+     * LUTs, and find a pixel whose matrix-green satisfies the green-dominance
+     * guard (mg < 1.1*mr && mg < mb). Setting highest_green_diso to that pixel's
+     * matrix-green puts it inside the +/-5000 window, so the replace branch fires. */
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    const uint16_t * levels = reinterpret_cast<const uint16_t *>(base.levelsLut.constData());
+    const uint16_t * mtxR = reinterpret_cast<const uint16_t *>(base.matrixLutR.constData());
+    const uint16_t * mtxG = reinterpret_cast<const uint16_t *>(base.matrixLutG.constData());
+    const uint16_t * mtxB = reinterpret_cast<const uint16_t *>(base.matrixLutB.constData());
+    int target_diso = -1;
+    const int pixel_count = fixture.width() * fixture.height();
+    for (int i = 0; i < pixel_count; ++i)
+    {
+        const int mr = mtxR[levels[debayered[i * 3 + 0]]];
+        const int mg = mtxG[levels[debayered[i * 3 + 1]]];
+        const int mb = mtxB[levels[debayered[i * 3 + 2]]];
+        /* Margin keeps the chosen firing pixel clear of the guard boundary so
+         * CPU/GPU float rounding of p0/p1/p2 cannot flip its replace decision. */
+        if (mg + 50 < (1.1 * mr) && mg + 50 < mb) { target_diso = mg; break; }
+    }
+    ASSERT_TRUE(target_diso >= 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    ASSERT_TRUE(p->dual_iso != nullptr);
+    p->highlight_reconstruction = 1;
+    *p->dual_iso = 1;
+    p->highest_green_diso = static_cast<uint16_t>(target_diso);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyHighlightReconstruction);
+    ASSERT_TRUE(cfg.highlightReconDualIso);
+    ASSERT_EQ(target_diso, cfg.highestGreenDiso);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string recon_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != recon_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "highlight_recon");
+}
+
+TEST(GpuPreviewProcessing, GradientIsSupportedAndMatchesCpuReference)
+{
+    /* Gradient used to fail closed. It is now supported as a per-pixel stage: a
+     * second pre-creative pipeline through the gradient LUTs (shared WB/gamut/AgX,
+     * separate gradient matrix + gamma + contrast), blended into the base in gamma
+     * space by the per-pixel mask BEFORE the creative chain (which runs once on the
+     * blended result). Enable a non-identity gradient (diagonal mask ramp + one
+     * stop of gradient exposure) and verify the gate accepts it, the config carries
+     * the frame-sized mask, the output changes vs the baseline, and the GPU
+     * offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    const uint16_t w = static_cast<uint16_t>(fixture.width());
+    const uint16_t h = static_cast<uint16_t>(fixture.height());
+    processingSetGradientEnable(p, 1);
+    processingSetGradientMask(p, w, h, 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h));
+    processingSetGradientExposure(p, 1.0);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyGradient);
+    ASSERT_TRUE(cfg.gradientMaskData != nullptr);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string grad_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != grad_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "gradient");
+}
+
+TEST(GpuPreviewProcessing, BlurImageBoxParity)
+{
+    /* The GPU separable integer box blur is the keystone pre-pass for the spatial
+     * stages (chroma blur / sharpen / median). It must reproduce the engine
+     * blur_image (processing.c:589) BIT-EXACTLY (0 LSB). Run the same debayered
+     * frame through engine blur_image and the GPU offscreen box blur at several
+     * radii -- all channels, then the chroma Cb/Cr (do_r=0) case -- and assert
+     * byte equality. Skips only when no GL backend is available. */
+    qputenv("MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE", QByteArray("1"));
+    const GpuPreviewProcessingBackendAvailability availability =
+        gpuPreviewProcessingProbeGpuBackend();
+    if (!availability.available)
+    {
+        ASSERT_TRUE(gpu_preview_skip_reason_is_known(availability.reason));
+        SKIP_TEST(availability.reason.toStdString());
+    }
+
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const std::vector<uint16_t> debayered = fixture.renderDebayeredFrame16(0);
+    ASSERT_TRUE(!debayered.empty());
+    const int width = fixture.width();
+    const int height = fixture.height();
+    ASSERT_EQ(static_cast<size_t>(width) * height * 3u, debayered.size());
+
+    const int radii[] = { 1, 2, 3, 5 };
+    const int channelCases[2][3] = { {1, 1, 1}, {0, 1, 1} };
+    for (const auto & ch : channelCases)
+    {
+        for (int radius : radii)
+        {
+            std::vector<uint16_t> reference = debayered;
+            std::vector<uint16_t> scratch(debayered.size(), 0);
+            blur_image(reference.data(), scratch.data(), width, height, radius,
+                       ch[0], ch[1], ch[2], 0, height);
+
+            std::vector<uint16_t> gpu(debayered.size(), 0);
+            QString reason;
+            QString renderer;
+            const bool ok = gpuPreviewProcessingApplyBoxBlurOffscreen(
+                debayered.data(), gpu.data(), width, height, radius,
+                ch[0] != 0, ch[1] != 0, ch[2] != 0, &reason, &renderer);
+            if (!ok)
+            {
+                ASSERT_TRUE(gpu_preview_skip_reason_is_known(reason));
+                SKIP_TEST(reason.toStdString());
+            }
+
+            const frame_compare_result_t result = compare_frames_u16(
+                reference.data(), gpu.data(), width, height, 3, /*per_pixel_tolerance=*/0);
+            const std::string label = "box_blur.r" + std::to_string(radius) + ".ch"
+                + std::to_string(ch[0]) + std::to_string(ch[1]) + std::to_string(ch[2]);
+            test_artifacts::record("gpu_preview_subset.gpu_parity." + label + ".renderer",
+                                   renderer.toStdString());
+            test_artifacts::record("gpu_preview_subset.gpu_parity." + label + ".compare",
+                                   frame_compare_summary(result));
+            if (result.max_abs_diff != 0)
+            {
+                ::minitest::fail(__FILE__, __LINE__,
+                                 std::string("GPU box blur vs engine blur_image (") + label + ")",
+                                 frame_compare_summary(result));
+            }
+        }
+    }
+}
+
+TEST(GpuPreviewProcessing, ChromaIsSupportedAndMatchesCpuReference)
+{
+    /* Chroma separation/blur is now supported: a YCbCr round-trip post-pass with
+     * an optional box blur of Cb/Cr (reusing the bit-exact box blur), applied after
+     * the per-pixel colour pipeline. Verify the gate accepts use_cs, the config
+     * carries the chroma fields, the output changes vs the baseline, and the GPU
+     * offscreen output (per-pixel pass + GPU chroma post-pass) matches the CPU
+     * reference (per-pixel + CPU chroma post-pass). */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    processingEnableChromaSeparation(p);
+    processingSetChromaBlurRadius(p, 3);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyChroma);
+    ASSERT_EQ(3, cfg.chromaBlurRadius);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string chroma_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != chroma_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "chroma");
+}
+
+TEST(GpuPreviewProcessing, SharpenIsSupportedAndMatchesCpuReference)
+{
+    /* Sharpen is now supported standalone: a fixed 5-tap cross post-pass over the
+     * developed image (no chroma separation, no sobel mask). Verify the gate
+     * accepts it, the config carries the sharpen coefficients, the output changes
+     * vs the baseline, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    processingSetSharpening(p, 0.5);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applySharpen);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string sharp_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != sharp_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "sharpen");
+}
+
+TEST(GpuPreviewProcessing, MedianIsSupportedAndMatchesCpuReference)
+{
+    /* Median denoise is now supported (windows <=5): a per-pixel window-median
+     * post-pass blended by strength. Verify the gate accepts it, the config carries
+     * the median fields, the output changes vs the baseline, and the GPU offscreen
+     * output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base, 0);
+
+    processingObject_t * p = fixture.processing();
+    ASSERT_TRUE(p != nullptr);
+    p->denoiserWindow = 3;
+    p->denoiserStrength = 80;
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(p, &reason));
+    const GpuPreviewProcessingConfig cfg = gpuPreviewProcessingBuildConfig(p, &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyMedian);
+    ASSERT_EQ(3, cfg.medianWindow);
+    ASSERT_NE(base.signature, cfg.signature);
+
+    const std::string median_hash = render_subset_hash(fixture, cfg, 0);
+    ASSERT_TRUE(base_hash != median_hash);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "median");
+}
+
+static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
+{
+    lut_t * lut = fixture.processing()->lut;
+    ASSERT_TRUE(lut != nullptr);
+    if (lut->cube) { free(lut->cube); lut->cube = nullptr; }
+    lut->dimension = static_cast<uint16_t>(dim);
+    lut->is3d = is3d ? 1 : 0;
+    lut->intensity = 100;
+    for (int i = 0; i < 3; ++i) { lut->domain_min[i] = 0.0f; lut->domain_max[i] = 1.0f; }
+    const int entries = is3d ? (dim * dim * dim) : dim;
+    lut->cube = static_cast<float *>(malloc(static_cast<size_t>(entries) * 3 * sizeof(float)));
+    ASSERT_TRUE(lut->cube != nullptr);
+    if (is3d)
+    {
+        for (int b = 0; b < dim; ++b)
+            for (int g = 0; g < dim; ++g)
+                for (int r = 0; r < dim; ++r)
+                {
+                    const int e = r + g * dim + b * dim * dim;
+                    const float rn = static_cast<float>(r) / (dim - 1);
+                    const float gn = static_cast<float>(g) / (dim - 1);
+                    const float bn = static_cast<float>(b) / (dim - 1);
+                    lut->cube[e * 3 + 0] = std::min(1.0f, rn * 0.95f + bn * 0.05f);
+                    lut->cube[e * 3 + 1] = gn * 0.90f + 0.03f;
+                    lut->cube[e * 3 + 2] = std::min(1.0f, bn * 1.05f);
+                }
+    }
+    else
+    {
+        for (int k = 0; k < dim; ++k)
+        {
+            const float t = static_cast<float>(k) / (dim - 1);
+            lut->cube[k * 3 + 0] = std::min(1.0f, t * 0.95f + 0.02f);
+            lut->cube[k * 3 + 1] = t * 0.90f + 0.03f;
+            lut->cube[k * 3 + 2] = std::min(1.0f, t * 1.05f);
+        }
+    }
+    fixture.processing()->lut_on = 1;
+}
+
+TEST(GpuPreviewProcessing, Lut3dIsSupportedAndMatchesCpuReference)
+{
+    /* 3D .cube LUT (the engine's tetrahedral output-stage stage) is now supported,
+     * applied last from a dim^3 RGBA32F volume texture. Install a smooth non-
+     * identity 17^3 cube and verify the GPU offscreen output matches the CPU
+     * reference (which replicates the exact tetrahedral T1-T6 selection). */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    install_test_lut(fixture, 17, true);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig cfg =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyLut);
+    ASSERT_TRUE(cfg.lut3d);
+    ASSERT_NE(base.signature, cfg.signature);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "lut_3d");
+}
+
+TEST(GpuPreviewProcessing, Lut1dIsSupportedAndMatchesCpuReference)
+{
+    /* 1D .cube LUT (per-channel lerp) is now supported, applied last from a dim x 1
+     * RGBA32F texture. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    install_test_lut(fixture, 33, false);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig cfg =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyLut);
+    ASSERT_TRUE(!cfg.lut3d);
+    ASSERT_NE(base.signature, cfg.signature);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "lut_1d");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)

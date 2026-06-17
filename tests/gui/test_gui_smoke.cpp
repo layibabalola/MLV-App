@@ -1168,7 +1168,7 @@ void GuiSmokeTest::gpuViewportPreviewProcessingMatchesCpuReference()
     const std::vector<uint16_t> rgb16 = make_presenter_pattern_rgb16();
     const GpuPreviewProcessingConfig processing = make_synthetic_preview_processing_config();
     std::vector<uint16_t> expected16(rgb16.size(), 0);
-    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width() * submitted.height());
+    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width(), submitted.height());
     const QImage expected = presenter_expected_orientation(rgb16_to_qimage(expected16, submitted.width(), submitted.height()));
 
     QGraphicsScene scene;
@@ -1217,7 +1217,7 @@ void GuiSmokeTest::gpuViewportPreviewProcessingWithZebrasMatchesCpuReference()
     const std::vector<uint16_t> rgb16 = make_presenter_pattern_rgb16();
     const GpuPreviewProcessingConfig processing = make_synthetic_preview_processing_config();
     std::vector<uint16_t> expected16(rgb16.size(), 0);
-    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width() * submitted.height());
+    gpuPreviewProcessingApplyCpuReference(processing, rgb16.data(), expected16.data(), submitted.width(), submitted.height());
     const QImage expected = presenter_expected_orientation(apply_cpu_zebras(rgb16_to_qimage(expected16, submitted.width(), submitted.height())));
 
     QGraphicsScene scene;

@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <vector>
 #include <omp.h>
 
 namespace
@@ -61,6 +62,11 @@ uint64_t fnv1a64_append(uint64_t hash, const void * data, size_t size)
 float clamp01(float value)
 {
     return std::max(0.0f, std::min(1.0f, value));
+}
+
+float clamp16(float value)
+{
+    return std::max(0.0f, std::min(65535.0f, value));
 }
 
 float reinhardTonemap(float value)
@@ -208,9 +214,224 @@ void previewFromHSVtoRGB(const float hsv[3], float rgb[3])
     }
 }
 
+/* Linear interpolation matching cube_lut.c lerp() for the 1D LUT path. */
+float lutLerp(float x, float x1, float x2, float q00, float q01)
+{
+    if ( (x2 - x1) == 0.0f ) return q00;
+    return ((x2 - x) / (x2 - x1)) * q00 + ((x - x1) / (x2 - x1)) * q01;
+}
+
+/* Reinhard gamut compression on a white-balanced float triplet
+ * (raw_processing.c:3173-3200), shared by the base and gradient layers and
+ * mirrored by the in-shader gamut block. */
+void applyPreviewGamutCompression(float wb[3], const float rgbToY[3])
+{
+    const float y = rgbToY[0] * wb[0] + rgbToY[1] * wb[1] + rgbToY[2] * wb[2];
+    const float minChannel = std::min(std::min(wb[0], wb[1]), wb[2]);
+    float gamutReference[3];
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        const float yToMinChannel = (y != 0.0f) ? ((y - wb[channel]) / y) : 0.0f;
+        const float tonemapped = (channel == 0)
+            ? reinhardForColour(yToMinChannel)
+            : reinhardForBlue(yToMinChannel);
+        gamutReference[channel] = -(tonemapped * y) + y;
+    }
+    const float gamutMin =
+        std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
+    float desaturateFactor = 1.0f;
+    const float denominator = y - minChannel;
+    if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
+    {
+        desaturateFactor = (y - gamutMin) / denominator;
+    }
+    for (int channel = 0; channel < 3; ++channel)
+    {
+        wb[channel] = (wb[channel] - y) * desaturateFactor + y;
+    }
+}
+
+/* CPU box blur replicating the engine blur_image bit-exactly: separable, the
+ * window for output j is [j-r+1, j+r+1] clamped (the engine's off-by-one shift),
+ * truncating integer divide, uint16 intermediate between the two passes.
+ * Disabled channels pass through. Mirrors gpuPreviewProcessingApplyBoxBlurOffscreen
+ * (validated 0-LSB vs blur_image). */
+void cpuBoxBlur(uint16_t * img, int width, int height, int radius, bool doR, bool doG, bool doB)
+{
+    if ( radius <= 0 ) return;
+    const int diameter = 2 * radius + 1;
+    const bool ch[3] = { doR, doG, doB };
+    std::vector<uint16_t> temp(static_cast<size_t>(width) * height * 3u);
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( ch[c] )
+                {
+                    int sum = 0;
+                    for (int k = 0; k < diameter; ++k)
+                    {
+                        int xx = x - radius + 1 + k;
+                        xx = xx < 0 ? 0 : (xx >= width ? width - 1 : xx);
+                        sum += img[(y * width + xx) * 3 + c];
+                    }
+                    temp[(y * width + x) * 3 + c] = static_cast<uint16_t>(sum / diameter);
+                }
+                else
+                {
+                    temp[(y * width + x) * 3 + c] = img[(y * width + x) * 3 + c];
+                }
+            }
+    for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( ch[c] )
+                {
+                    int sum = 0;
+                    for (int k = 0; k < diameter; ++k)
+                    {
+                        int yy = y - radius + 1 + k;
+                        yy = yy < 0 ? 0 : (yy >= height ? height - 1 : yy);
+                        sum += temp[(yy * width + x) * 3 + c];
+                    }
+                    img[(y * width + x) * 3 + c] = static_cast<uint16_t>(sum / diameter);
+                }
+                else
+                {
+                    img[(y * width + x) * 3 + c] = temp[(y * width + x) * 3 + c];
+                }
+            }
+}
+
+inline int chromaClamp16(int v)
+{
+    return v < 0 ? 0 : (v > 65535 ? 65535 : v);
+}
+
+/* CPU chroma separation/blur post-pass replicating raw_processing.c:1832-1971:
+ * RGB->YCbCr (JPEG transform via truncated-int terms), optional box blur of
+ * Cb/Cr, YCbCr->RGB. Uses double*(coeff) truncated to int exactly like the engine
+ * cs_zone LUTs ((int32)((double)j*coeff)). The GPU path uses RGBA32F LUTs holding
+ * the identical truncated integers, so all three (CPU/GPU/engine) agree. */
+void cpuChromaPostPass(uint16_t * img, int width, int height, int radius)
+{
+    const int n = width * height;
+    for (int i = 0; i < n; ++i)
+    {
+        const int R = img[i * 3 + 0];
+        const int G = img[i * 3 + 1];
+        const int B = img[i * 3 + 2];
+        const int Y  = static_cast<int>(static_cast<double>(R) * 0.299)
+                     + static_cast<int>(static_cast<double>(G) * 0.587)
+                     + static_cast<int>(static_cast<double>(B) * 0.114);
+        const int Cb = 32768 + static_cast<int>(static_cast<double>(R) * -0.168736)
+                     + static_cast<int>(static_cast<double>(G) * -0.331264) + (B >> 1);
+        const int Cr = 32768 + (R >> 1) + static_cast<int>(static_cast<double>(G) * -0.418688)
+                     + static_cast<int>(static_cast<double>(B) * -0.081312);
+        img[i * 3 + 0] = static_cast<uint16_t>(chromaClamp16(Y));
+        img[i * 3 + 1] = static_cast<uint16_t>(chromaClamp16(Cb));
+        img[i * 3 + 2] = static_cast<uint16_t>(chromaClamp16(Cr));
+    }
+    if ( radius > 0 )
+    {
+        cpuBoxBlur(img, width, height, radius, false, true, true);
+    }
+    for (int i = 0; i < n; ++i)
+    {
+        const int Y  = img[i * 3 + 0];
+        const int Cb = img[i * 3 + 1];
+        const int Cr = img[i * 3 + 2];
+        const int R = Y + static_cast<int>(static_cast<double>(Cr - 32768) * 1.402);
+        const int G = Y + static_cast<int>(static_cast<double>(Cb - 32768) * -0.344136)
+                        + static_cast<int>(static_cast<double>(Cr - 32768) * -0.714136);
+        const int B = Y + static_cast<int>(static_cast<double>(Cb - 32768) * 1.772);
+        img[i * 3 + 0] = static_cast<uint16_t>(chromaClamp16(R));
+        img[i * 3 + 1] = static_cast<uint16_t>(chromaClamp16(G));
+        img[i * 3 + 2] = static_cast<uint16_t>(chromaClamp16(B));
+    }
+}
+
+/* CPU sharpen post-pass replicating raw_processing.c:1849-1965 (standalone: no
+ * chroma separation, no sobel mask): a fixed 5-tap cross,
+ * sharp = ka[center] - ky[up] - ky[down] - kx[left] - kx[right], clamped.
+ * ka=(uint32)(v*a), kx/ky=LIMIT16(v*x/y). First/last column pass through; rows
+ * clamp to edge. The engine's bottom row is UB (it sets p_row instead of n_row,
+ * leaving n_row uninitialized); the GPU/CPU use a clean clamp instead (documented
+ * divergence on the bottom row only, like the vignette per-chunk note). */
+void cpuSharpenPostPass(uint16_t * img, int width, int height, double a, double x, double y)
+{
+    std::vector<uint16_t> src(img, img + static_cast<size_t>(width) * height * 3u);
+    auto ka = [&](int v) -> int { return static_cast<int>(static_cast<uint32_t>(static_cast<double>(v) * a)); };
+    auto kx = [&](int v) -> int { int t = static_cast<int>(static_cast<double>(v) * x); return t < 0 ? 0 : (t > 65535 ? 65535 : t); };
+    auto ky = [&](int v) -> int { int t = static_cast<int>(static_cast<double>(v) * y); return t < 0 ? 0 : (t > 65535 ? 65535 : t); };
+    for (int yy = 0; yy < height; ++yy)
+    {
+        const int up = (yy == 0) ? 0 : yy - 1;
+        const int dn = (yy == height - 1) ? height - 1 : yy + 1;
+        for (int xx = 0; xx < width; ++xx)
+            for (int c = 0; c < 3; ++c)
+            {
+                if ( xx == 0 || xx == width - 1 )
+                {
+                    img[(yy * width + xx) * 3 + c] = src[(yy * width + xx) * 3 + c];
+                    continue;
+                }
+                const int center = src[(yy * width + xx) * 3 + c];
+                const int left  = src[(yy * width + (xx - 1)) * 3 + c];
+                const int right = src[(yy * width + (xx + 1)) * 3 + c];
+                const int u = src[(up * width + xx) * 3 + c];
+                const int d = src[(dn * width + xx) * 3 + c];
+                const int sharp = ka(center) - ky(u) - ky(d) - kx(left) - kx(right);
+                img[(yy * width + xx) * 3 + c] = static_cast<uint16_t>(chromaClamp16(sharp));
+            }
+    }
+}
+
+/* CPU median denoise post-pass replicating denoise_2D_median_with_context
+ * (denoiser_2d_median.c:132-225): per-pixel square-window median (the middle order
+ * statistic) blended with the original by strength/100; border pixels (within
+ * window/2 of an edge) untouched. */
+void cpuMedianPostPass(uint16_t * img, int width, int height, int window, int strength)
+{
+    if ( strength > 100 ) strength = 100;
+    if ( strength == 0 || window == 0 ) return;
+    const float strengthF = strength / 100.0f;
+    const float antiStrengthF = 1.0f - strengthF;
+    const int winSize = window * window;
+    const int edge = window / 2;
+    const int middle = winSize / 2;
+    if ( width <= edge * 2 || height <= edge * 2 ) return;
+
+    std::vector<uint16_t> noisy(img, img + static_cast<size_t>(width) * height * 3u);
+    std::vector<int> winR(winSize), winG(winSize), winB(winSize);
+    for (int x = edge; x < width - edge; ++x)
+        for (int y = edge; y < height - edge; ++y)
+        {
+            int idx = 0;
+            for (int fx = 0; fx < window; ++fx)
+                for (int fy = 0; fy < window; ++fy)
+                {
+                    const int ww = x + fx - edge;
+                    const int hh = y + fy - edge;
+                    winR[idx] = noisy[(hh * width + ww) * 3 + 0];
+                    winG[idx] = noisy[(hh * width + ww) * 3 + 1];
+                    winB[idx] = noisy[(hh * width + ww) * 3 + 2];
+                    ++idx;
+                }
+            std::nth_element(winR.begin(), winR.begin() + middle, winR.end());
+            std::nth_element(winG.begin(), winG.begin() + middle, winG.end());
+            std::nth_element(winB.begin(), winB.begin() + middle, winB.end());
+            img[(y * width + x) * 3 + 0] = static_cast<uint16_t>(strengthF * winR[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 0]);
+            img[(y * width + x) * 3 + 1] = static_cast<uint16_t>(strengthF * winG[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 1]);
+            img[(y * width + x) * 3 + 2] = static_cast<uint16_t>(strengthF * winB[middle] + antiStrengthF * noisy[(y * width + x) * 3 + 2]);
+        }
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
-                                 uint16_t * outputPixel)
+                                 uint16_t * outputPixel,
+                                 int pixelIndex)
 {
     float color[3];
     for (int channel = 0; channel < 3; ++channel)
@@ -224,21 +445,101 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     matrixApplied[1] = sampleNormalizedLut(config.matrixLutG, color[1]);
     matrixApplied[2] = sampleNormalizedLut(config.matrixLutB, color[2]);
 
-    if ( config.applyInLoopContrast )
+    /* tmp1 for highlight reconstruction = the diagonal-matrix green BEFORE the
+     * vignette/contrast expo multiplies (raw_processing.c:3008 tmp1 = wb_g). */
+    const float reconMatrixGreen = matrixApplied[1];
+
+    /* The gradient layer reuses the SHARED expo_correction (vignette x base
+     * in-loop-contrast) and the base luma index cval. Capture them here. */
+    float sharedVignetteFactor = 1.0f;
+    float sharedContrastFactor = 1.0f;
+    int sharedCval = 0;
+    bool sharedHaveCval = false;
+
+    if ( config.applyVignette )
+    {
+        /* Vignette: a per-pixel exposure multiply, the first expo_correction
+         * contributor (raw_processing.c:2881-2889). The engine pre-increments the
+         * mask pointer before reading, so pixel i uses mask[i+1]; the last pixel
+         * (i+1 >= count) skips the multiply (the vignette_end guard). expo_correction
+         * is applied to the matrix value before camera-WB, so it multiplies
+         * matrixApplied here (commutes with the in-loop-contrast multiply). The
+         * whole-frame flat index matches the GPU's single-pass contract (the engine's
+         * per-OpenMP-chunk off-by-one is not reproduced; documented). */
+        const int maskCount = static_cast<int>(config.vignetteMask.size() / static_cast<int>(sizeof(float)));
+        const int maskIdx = pixelIndex + 1;
+        if ( maskIdx < maskCount )
+        {
+            const float m = reinterpret_cast<const float *>(config.vignetteMask.constData())[maskIdx];
+            const double base = 1.0 + (static_cast<double>(m) * config.vignetteStrength / 128.0);
+            const float vfactor = static_cast<float>(std::pow(base, 4.0));
+            sharedVignetteFactor = vfactor;
+            matrixApplied[0] *= vfactor;
+            matrixApplied[1] *= vfactor;
+            matrixApplied[2] *= vfactor;
+        }
+    }
+
+    if ( config.applyInLoopContrast || config.applyGradientContrast )
     {
         /* In-loop simple-contrast factor (raw_processing.c:2941-2954): a per-pixel
          * exposure multiply by contrast_curve[cval], where cval is the integer
          * luma (4R+11G+B)>>4 of the matrix-applied (pre camera-WB) pixel. Applied
          * to the matrix value before the camera matrix and gamma, matching
-         * pix0 = wb_r * expo_correction. */
+         * pix0 = wb_r * expo_correction. The cval is also shared by the gradient
+         * layer (base contrast feeds the shared expo_correction; gradient contrast
+         * uses the same index into its own curve), so it is computed whenever
+         * either the base or the gradient contrast is active. */
         const int32_t matR = static_cast<int32_t>(matrixApplied[0] * 65535.0f + 0.5f);
         const int32_t matG = static_cast<int32_t>(matrixApplied[1] * 65535.0f + 0.5f);
         const int32_t matB = static_cast<int32_t>(matrixApplied[2] * 65535.0f + 0.5f);
-        const int32_t cval = ((matR << 2) + (matG * 11) + matB) >> 4;
-        const float factor = sampleInLoopContrastFactor(config.inLoopContrastCurve, cval);
-        matrixApplied[0] *= factor;
-        matrixApplied[1] *= factor;
-        matrixApplied[2] *= factor;
+        sharedCval = ((matR << 2) + (matG * 11) + matB) >> 4;
+        sharedHaveCval = true;
+        if ( config.applyInLoopContrast )
+        {
+            const float factor = sampleInLoopContrastFactor(config.inLoopContrastCurve, sharedCval);
+            sharedContrastFactor = factor;
+            matrixApplied[0] *= factor;
+            matrixApplied[1] *= factor;
+            matrixApplied[2] *= factor;
+        }
+    }
+
+    if ( config.applyHighlightReconstruction )
+    {
+        /* Highlight reconstruction (raw_processing.c:3088-3119): for a clipped
+         * green it replaces green with (R+B)/2. The engine applies it to the
+         * uint16-quantized diagonal*expo pixel (pix[i] = (uint16)LIMIT16(...)) and
+         * keys on tmp1 = (uint16)LIMIT16(diagonal green pre-expo), comparing
+         * against the static white-level green (highest_green) or, for dual-ISO,
+         * a +/-5000 window around the per-frame highest_green_diso peak plus the
+         * pix[1]<1.1*pix[0] && pix[1]<pix[2] green-dominance guard. Enabling recon
+         * forces the engine's general loop (uint16-quantize before the 3x3); the
+         * subset models the float-3x3 fast path, a structural delta already inside
+         * the parity tolerance for the vignette/AgX slices. LIMIT16 is clamp-only;
+         * the (uint16) cast truncates toward zero (floor on the clamped value). */
+        const float p0 = std::floor(clamp16(matrixApplied[0] * 65535.0f));
+        const float p1 = std::floor(clamp16(matrixApplied[1] * 65535.0f));
+        const float p2 = std::floor(clamp16(matrixApplied[2] * 65535.0f));
+        const float tmp1 = std::floor(clamp16(reconMatrixGreen * 65535.0f + 0.5f));
+        bool replace = false;
+        if ( config.highlightReconDualIso )
+        {
+            const float lo = clamp16(static_cast<float>(config.highestGreenDiso) - 5000.0f);
+            const float hi = clamp16(static_cast<float>(config.highestGreenDiso) + 5000.0f);
+            if ( tmp1 >= lo && tmp1 <= hi && p1 < 1.1f * p0 && p1 < p2 )
+            {
+                replace = true;
+            }
+        }
+        else if ( tmp1 == static_cast<float>(config.highestGreen) )
+        {
+            replace = true;
+        }
+        if ( replace )
+        {
+            matrixApplied[1] = std::floor((p0 + p2) / 2.0f) / 65535.0f;
+        }
     }
 
     if ( config.useCameraMatrix )
@@ -256,38 +557,34 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
 
         if ( config.applyGamutCompression )
         {
-            const float y = config.rgbToY[0] * wbApplied[0]
-                          + config.rgbToY[1] * wbApplied[1]
-                          + config.rgbToY[2] * wbApplied[2];
-            const float minChannel =
-                std::min(std::min(wbApplied[0], wbApplied[1]), wbApplied[2]);
-            float gamutReference[3];
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                const float yToMinChannel =
-                    (y != 0.0f) ? ((y - wbApplied[channel]) / y) : 0.0f;
-                const float tonemapped = (channel == 0)
-                    ? reinhardForColour(yToMinChannel)
-                    : reinhardForBlue(yToMinChannel);
-                gamutReference[channel] = -(tonemapped * y) + y;
-            }
-
-            const float gamutMin =
-                std::min(std::min(gamutReference[0], gamutReference[1]), gamutReference[2]);
-            float desaturateFactor = 1.0f;
-            const float denominator = y - minChannel;
-            if ( y > 0.0f && std::fabs(denominator) > 1e-8f )
-            {
-                desaturateFactor = (y - gamutMin) / denominator;
-            }
-
-            for (int channel = 0; channel < 3; ++channel)
-            {
-                wbApplied[channel] = (wbApplied[channel] - y) * desaturateFactor + y;
-            }
+            applyPreviewGamutCompression(wbApplied, config.rgbToY);
         }
 
         std::memcpy(matrixApplied, wbApplied, sizeof(matrixApplied));
+    }
+
+    if ( config.applyAgx )
+    {
+        /* AgX forward, after WB/gamut and before gamma (raw_processing_8bit_kernel
+         * .inc:264-281): clip negatives, scale to 16-bit, apply the compressed-
+         * gamut matrix (double accumulation, float coeffs), then (uint16_t)LIMIT16
+         * = clamp+truncate, and renormalize so the gamma LUT indexes identically.
+         * preview routes through the direct8 kernel that this mirrors. */
+        double v[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            v[channel] = static_cast<double>(matrixApplied[channel]) * 65535.0;
+            if ( v[channel] < 0.0 ) v[channel] = 0.0;
+        }
+        const double a[3] = {
+            v[0] * config.agxForward[0] + v[1] * config.agxForward[1] + v[2] * config.agxForward[2],
+            v[0] * config.agxForward[3] + v[1] * config.agxForward[4] + v[2] * config.agxForward[5],
+            v[0] * config.agxForward[6] + v[1] * config.agxForward[7] + v[2] * config.agxForward[8] };
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const double clamped = a[channel] < 0.0 ? 0.0 : (a[channel] > 65535.0 ? 65535.0 : a[channel]);
+            matrixApplied[channel] = static_cast<float>(static_cast<uint16_t>(clamped)) / 65535.0f;
+        }
     }
 
     uint16_t gammaOut[3];
@@ -295,6 +592,97 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     {
         const float gammaInput = clamp01(matrixApplied[channel]);
         gammaOut[channel] = sampleLut(config.gammaLut, gammaInput);
+    }
+
+    if ( config.applyGradient )
+    {
+        /* Gradient layer (raw_processing.c:3021-3078 + 3311-3492): a second copy of
+         * the pre-creative pipeline through the gradient LUTs, blended into the base
+         * in gamma space by the per-pixel mask BEFORE the creative chain (which runs
+         * once on the blended result). Shares proper_wb / gamut weights / AgX
+         * matrices and the shared expo_correction (vignette x base contrast); adds a
+         * gradient-contrast factor, a gradient gamma LUT, and gradient highlight-
+         * recon green keys. The engine keeps the gradient pixel a fractional float
+         * through Part 1 (LIMIT16 = clamp, not truncate), its recon divides in float,
+         * and it truncates only at the gradient gamma index -- all mirrored here. The
+         * gradient 3x3/gamut run in float (engine uses double; the <=1 LSB delta
+         * after the gamma LUT is within the parity tolerance). */
+        float g[3];
+        g[0] = sampleNormalizedLut(config.gradientMatrixLutR, color[0]) * 65535.0f;
+        g[1] = sampleNormalizedLut(config.gradientMatrixLutG, color[1]) * 65535.0f;
+        g[2] = sampleNormalizedLut(config.gradientMatrixLutB, color[2]) * 65535.0f;
+        const float gradTmpGreen = g[1];
+        float gradContrastFactor = 1.0f;
+        if ( config.applyGradientContrast && sharedHaveCval )
+        {
+            gradContrastFactor = sampleInLoopContrastFactor(config.gradientContrastCurve, sharedCval);
+        }
+        const float gradExpo = sharedVignetteFactor * sharedContrastFactor * gradContrastFactor;
+        g[0] = clamp16(g[0] * gradExpo);
+        g[1] = clamp16(g[1] * gradExpo);
+        g[2] = clamp16(g[2] * gradExpo);
+        if ( config.applyHighlightReconstruction )
+        {
+            const float gt1 = std::floor(clamp16(gradTmpGreen + 0.5f));
+            bool grep = false;
+            if ( config.highlightReconDualIso )
+            {
+                const float lo = clamp16(static_cast<float>(config.gradientHighestGreenDiso) - 5000.0f);
+                const float hi = clamp16(static_cast<float>(config.gradientHighestGreenDiso) + 5000.0f);
+                if ( gt1 >= lo && gt1 <= hi && g[1] < 1.1f * g[0] && g[1] < g[2] ) grep = true;
+            }
+            else if ( gt1 == static_cast<float>(config.gradientHighestGreen) )
+            {
+                grep = true;
+            }
+            if ( grep ) g[1] = (g[0] + g[2]) / 2.0f;
+        }
+        float gm[3] = { g[0] / 65535.0f, g[1] / 65535.0f, g[2] / 65535.0f };
+        if ( config.useCameraMatrix )
+        {
+            float w[3];
+            w[0] = config.properWbMatrix[0] * gm[0] + config.properWbMatrix[1] * gm[1] + config.properWbMatrix[2] * gm[2];
+            w[1] = config.properWbMatrix[3] * gm[0] + config.properWbMatrix[4] * gm[1] + config.properWbMatrix[5] * gm[2];
+            w[2] = config.properWbMatrix[6] * gm[0] + config.properWbMatrix[7] * gm[1] + config.properWbMatrix[8] * gm[2];
+            if ( config.applyGamutCompression )
+            {
+                applyPreviewGamutCompression(w, config.rgbToY);
+            }
+            gm[0] = w[0]; gm[1] = w[1]; gm[2] = w[2];
+        }
+        if ( config.applyAgx )
+        {
+            double v[3];
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                v[channel] = static_cast<double>(gm[channel]) * 65535.0;
+                if ( v[channel] < 0.0 ) v[channel] = 0.0;
+            }
+            const double a[3] = {
+                v[0] * config.agxForward[0] + v[1] * config.agxForward[1] + v[2] * config.agxForward[2],
+                v[0] * config.agxForward[3] + v[1] * config.agxForward[4] + v[2] * config.agxForward[5],
+                v[0] * config.agxForward[6] + v[1] * config.agxForward[7] + v[2] * config.agxForward[8] };
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                const double clamped = a[channel] < 0.0 ? 0.0 : (a[channel] > 65535.0 ? 65535.0 : a[channel]);
+                gm[channel] = static_cast<float>(static_cast<uint16_t>(clamped)) / 65535.0f;
+            }
+        }
+        const uint16_t * gradGamma = reinterpret_cast<const uint16_t *>(config.gradientGammaLut.constData());
+        uint16_t pixg[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const int idx = static_cast<int>(clamp16(gm[channel] * 65535.0f));
+            pixg[channel] = gradGamma[idx];
+        }
+        const float blend = (config.gradientMaskData != nullptr)
+            ? (static_cast<float>(config.gradientMaskData[pixelIndex]) / 65535.0f) : 0.0f;
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const float blended = blend * static_cast<float>(pixg[channel])
+                                + (1.0f - blend) * static_cast<float>(gammaOut[channel]);
+            gammaOut[channel] = static_cast<uint16_t>(blended);
+        }
     }
 
     if ( config.applyHueVs )
@@ -431,6 +819,97 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         }
         outputPixel[channel] = value;
     }
+
+    if ( config.applyAgx )
+    {
+        /* AgX inverse, at the very end after gamma + all creative stages
+         * (raw_processing_8bit_kernel.inc:358-368): undo the compressed-gamut
+         * matrix (double accumulation, float coeffs), then (uint16_t)LIMIT16 =
+         * clamp+truncate. */
+        const double f0 = static_cast<double>(outputPixel[0]);
+        const double f1 = static_cast<double>(outputPixel[1]);
+        const double f2 = static_cast<double>(outputPixel[2]);
+        const double iv[3] = {
+            f0 * config.agxInverse[0] + f1 * config.agxInverse[1] + f2 * config.agxInverse[2],
+            f0 * config.agxInverse[3] + f1 * config.agxInverse[4] + f2 * config.agxInverse[5],
+            f0 * config.agxInverse[6] + f1 * config.agxInverse[7] + f2 * config.agxInverse[8] };
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const double clamped = iv[channel] < 0.0 ? 0.0 : (iv[channel] > 65535.0 ? 65535.0 : iv[channel]);
+            outputPixel[channel] = static_cast<uint16_t>(clamped);
+        }
+    }
+
+    if ( config.applyLut )
+    {
+        /* LUT (.cube) is the LAST stage (cube_lut.c apply_lut, run last at
+         * raw_processing.c:3767). Domain-scaled index (note the 65536.0 divisor and
+         * the domain_min post-subtract), then 1D per-channel lerp or 3D TETRAHEDRAL
+         * interpolation (USE_TRILIN_INT is off in the engine), blended with the
+         * pre-LUT pixel by lutIntensity. Negative indices floor to 0 (the engine's
+         * (uint16_t) wrap differs only for domain_min>0 + dark pixels). */
+        const float * cube = reinterpret_cast<const float *>(config.lutCube.constData());
+        const int dim = config.lutDimension;
+        const float fA = (dim - 1) / 65536.0f / (config.lutDomainMax[0] - config.lutDomainMin[0]);
+        const float fB = (dim - 1) / 65536.0f / (config.lutDomainMax[1] - config.lutDomainMin[1]);
+        const float fC = (dim - 1) / 65536.0f / (config.lutDomainMax[2] - config.lutDomainMin[2]);
+        const float red   = outputPixel[0] * fA - config.lutDomainMin[0];
+        const float green = outputPixel[1] * fB - config.lutDomainMin[1];
+        const float blue  = outputPixel[2] * fC - config.lutDomainMin[2];
+        int r0 = red   < 0.0f ? 0 : static_cast<int>(red);
+        int g0 = green < 0.0f ? 0 : static_cast<int>(green);
+        int b0 = blue  < 0.0f ? 0 : static_cast<int>(blue);
+        int r1 = r0 + 1, g1 = g0 + 1, b1 = b0 + 1;
+        if ( r0 >= dim ) r0 = dim - 1;
+        if ( g0 >= dim ) g0 = dim - 1;
+        if ( b0 >= dim ) b0 = dim - 1;
+        if ( r1 >= dim ) r1 = dim - 1;
+        if ( g1 >= dim ) g1 = dim - 1;
+        if ( b1 >= dim ) b1 = dim - 1;
+        const float f1 = config.lutIntensity;
+        const float f2 = 1.0f - f1;
+        float outC[3];
+        if ( !config.lut3d )
+        {
+            outC[0] = lutLerp(red,   static_cast<float>(r0), static_cast<float>(r1), cube[r0 * 3 + 0], cube[r1 * 3 + 0]);
+            outC[1] = lutLerp(green, static_cast<float>(g0), static_cast<float>(g1), cube[g0 * 3 + 1], cube[g1 * 3 + 1]);
+            outC[2] = lutLerp(blue,  static_cast<float>(b0), static_cast<float>(b1), cube[b0 * 3 + 2], cube[b1 * 3 + 2]);
+        }
+        else
+        {
+            const int dim2 = dim * dim;
+            const float rf = red - static_cast<float>(r0);
+            const float gf = green - static_cast<float>(g0);
+            const float bf = blue - static_cast<float>(b0);
+            for (int i = 0; i < 3; ++i)
+            {
+                const float q000 = cube[((r0) + (g0) * dim + (b0) * dim2) * 3 + i];
+                const float q001 = cube[((r0) + (g0) * dim + (b1) * dim2) * 3 + i];
+                const float q010 = cube[((r0) + (g1) * dim + (b0) * dim2) * 3 + i];
+                const float q011 = cube[((r0) + (g1) * dim + (b1) * dim2) * 3 + i];
+                const float q100 = cube[((r1) + (g0) * dim + (b0) * dim2) * 3 + i];
+                const float q101 = cube[((r1) + (g0) * dim + (b1) * dim2) * 3 + i];
+                const float q110 = cube[((r1) + (g1) * dim + (b0) * dim2) * 3 + i];
+                const float q111 = cube[((r1) + (g1) * dim + (b1) * dim2) * 3 + i];
+                float o;
+                if ( gf >= bf && bf >= rf )      o = (1.0f - gf) * q000 + (gf - bf) * q010 + (bf - rf) * q011 + rf * q111;
+                else if ( bf > rf && rf > gf )   o = (1.0f - bf) * q000 + (bf - rf) * q001 + (rf - gf) * q101 + gf * q111;
+                else if ( bf > gf && gf >= rf )  o = (1.0f - bf) * q000 + (bf - gf) * q001 + (gf - rf) * q011 + rf * q111;
+                else if ( rf >= gf && gf > bf )  o = (1.0f - rf) * q000 + (rf - gf) * q100 + (gf - bf) * q110 + bf * q111;
+                else if ( gf > rf && rf >= bf )  o = (1.0f - gf) * q000 + (gf - rf) * q010 + (rf - bf) * q110 + bf * q111;
+                else                             o = (1.0f - rf) * q000 + (rf - bf) * q100 + (bf - gf) * q101 + gf * q111;
+                outC[i] = o;
+            }
+        }
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const float scaled = outC[channel] * 65535.0f;
+            const float limited = scaled < 0.0f ? 0.0f : (scaled > 65535.0f ? 65535.0f : scaled);
+            const float blended = static_cast<float>(outputPixel[channel]) * f2 + limited * f1;
+            const int v = static_cast<int>(blended);
+            outputPixel[channel] = static_cast<uint16_t>(v < 0 ? 0 : (v > 65535 ? 65535 : v));
+        }
+    }
 }
 
 QSurfaceFormat previewProcessingSurfaceFormat()
@@ -507,6 +986,66 @@ QOpenGLTexture * createContrastCurveTexture()
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
     texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
     return texture;
+}
+
+/* The vignette mask is a full-frame R32F texture (one texel per source pixel,
+ * raster-ordered to match the CPU debayered buffer). Dynamic width x height,
+ * unlike the fixed-size LUT textures. */
+QOpenGLTexture * createVignetteMaskTexture(int width, int height)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::R32F);
+    texture->setSize(width, height);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* 3D LUT cube as a dim x dim x dim RGBA32F volume texture (Target3D, core since
+ * GL 1.2 / sampler3D in GLSL 110). The cube's flat index r + g*dim + b*dim^2 maps
+ * to texel (r,g,b) row-major, so the shader samples the 8 corners directly. */
+QOpenGLTexture * createLut3dTexture(int dim)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target3D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(dim, dim, dim);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* 1D LUT as a dim x 1 RGBA32F texture (one texel per cube entry). */
+QOpenGLTexture * createLut1dTexture(int dim)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(dim, 1);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* Pack the raw RGB float cube (3 floats/entry) into RGBA32F (A=0) for upload. */
+QByteArray packLutCubeRgba32F(const QByteArray & cubeBytes, int entries)
+{
+    QByteArray packed(entries * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    const float * src = reinterpret_cast<const float *>(cubeBytes.constData());
+    const int srcFloats = cubeBytes.size() / static_cast<int>(sizeof(float));
+    for (int e = 0; e < entries; ++e)
+    {
+        dst[e * 4 + 0] = (e * 3 + 0 < srcFloats) ? src[e * 3 + 0] : 0.0f;
+        dst[e * 4 + 1] = (e * 3 + 1 < srcFloats) ? src[e * 3 + 1] : 0.0f;
+        dst[e * 4 + 2] = (e * 3 + 2 < srcFloats) ? src[e * 3 + 2] : 0.0f;
+        dst[e * 4 + 3] = 0.0f;
+    }
+    return packed;
 }
 
 QByteArray packContrastCurveR32F(const QByteArray & curveBytes)
@@ -861,17 +1400,59 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewSaturation;\n"
         "uniform float previewApplyHueVs;\n"
         "uniform float previewApplyInLoopContrast;\n"
+        "uniform float previewApplyAgx;\n"
+        "uniform vec3 previewAgxFwd0;\n"
+        "uniform vec3 previewAgxFwd1;\n"
+        "uniform vec3 previewAgxFwd2;\n"
+        "uniform vec3 previewAgxInv0;\n"
+        "uniform vec3 previewAgxInv1;\n"
+        "uniform vec3 previewAgxInv2;\n"
+        "uniform sampler2D vignetteMask;\n"
+        "uniform float previewApplyVignette;\n"
+        "uniform float previewVignetteStrength;\n"
+        "uniform vec2 frameSize;\n"
+        "uniform sampler3D lut3dTexture;\n"
+        "uniform sampler2D lut1dTexture;\n"
+        "uniform float previewApplyLut;\n"
+        "uniform float previewLut3d;\n"
+        "uniform float previewLutDimension;\n"
+        "uniform float previewLutIntensity;\n"
+        "uniform vec3 previewLutDomainMin;\n"
+        "uniform vec3 previewLutDomainMax;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
         "uniform vec3 previewProperWbRow1;\n"
         "uniform vec3 previewProperWbRow2;\n"
         "uniform vec3 previewRgbToY;\n"
+        "uniform float previewApplyHighlightRecon;\n"
+        "uniform float previewHighlightReconDualIso;\n"
+        "uniform float previewHighestGreen;\n"
+        "uniform float previewHighestGreenDiso;\n"
+        "uniform sampler2D gradMatrixLutR;\n"
+        "uniform sampler2D gradMatrixLutG;\n"
+        "uniform sampler2D gradMatrixLutB;\n"
+        "uniform sampler2D gradGammaLut;\n"
+        "uniform sampler2D gradientContrastCurve;\n"
+        "uniform sampler2D gradientMask;\n"
+        "uniform float previewApplyGradient;\n"
+        "uniform float previewApplyGradientContrast;\n"
+        "uniform float previewGradientHighestGreen;\n"
+        "uniform float previewGradientHighestGreenDiso;\n"
         "varying vec2 vTexCoord;\n"
         "float sampleU16Lut(sampler2D lut, float value)\n"
         "{\n"
         "    float clamped = clamp(value, 0.0, 1.0);\n"
         "    float index = floor(clamped * 65535.0 + 0.5);\n"
+        "    float x = mod(index, 256.0);\n"
+        "    float y = floor(index / 256.0);\n"
+        "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
+        "    return texture2D(lut, uv).r;\n"
+        "}\n"
+        "float sampleU16LutTrunc(sampler2D lut, float value)\n"
+        "{\n"
+        "    float clamped = clamp(value, 0.0, 1.0);\n"
+        "    float index = floor(clamped * 65535.0);\n"
         "    float x = mod(index, 256.0);\n"
         "    float y = floor(index / 256.0);\n"
         "    vec2 uv = (vec2(x, y) + vec2(0.5)) / vec2(256.0, 256.0);\n"
@@ -896,6 +1477,11 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "vec3 truncToZero(vec3 v)\n"
         "{\n"
         "    return sign(v) * floor(abs(v));\n"
+        "}\n"
+        "float lutLerp1d(float x, float x1, float x2, float q00, float q01)\n"
+        "{\n"
+        "    if (x2 - x1 == 0.0) return q00;\n"
+        "    return ((x2 - x) / (x2 - x1)) * q00 + ((x - x1) / (x2 - x1)) * q01;\n"
         "}\n"
         "vec3 previewFromRGBtoHSV(vec3 rgb)\n"
         "{\n"
@@ -965,11 +1551,45 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    vec3 leveled = vec3(sampleU16Lut(levelsLut, color.r), sampleU16Lut(levelsLut, color.g), sampleU16Lut(levelsLut, color.b));\n"
         "    vec3 matrixApplied = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b));\n"
+        "    float reconMatrixGreen = matrixApplied.g;\n"
+        "    if (previewApplyVignette > 0.5)\n"
+        "    {\n"
+        "        vec2 fc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
+        "        float idx = floor(fc.y) * frameSize.x + floor(fc.x) + 1.0;\n"
+        "        if (idx < frameSize.x * frameSize.y)\n"
+        "        {\n"
+        "            float mx = mod(idx, frameSize.x);\n"
+        "            float my = floor(idx / frameSize.x);\n"
+        "            float m = texture2D(vignetteMask, (vec2(mx, my) + vec2(0.5)) / frameSize).r;\n"
+        "            float base = 1.0 + (m * previewVignetteStrength / 128.0);\n"
+        "            float b2 = base * base;\n"
+        "            matrixApplied *= b2 * b2;\n"
+        "        }\n"
+        "    }\n"
         "    if (previewApplyInLoopContrast > 0.5)\n"
         "    {\n"
         "        vec3 m16 = floor(matrixApplied * 65535.0 + 0.5);\n"
         "        float cval = floor((m16.r * 4.0 + m16.g * 11.0 + m16.b) / 16.0);\n"
         "        matrixApplied *= sampleContrastCurve(inLoopContrastCurve, cval);\n"
+        "    }\n"
+        "    if (previewApplyHighlightRecon > 0.5)\n"
+        "    {\n"
+        "        float p0 = floor(clamp(matrixApplied.r * 65535.0, 0.0, 65535.0));\n"
+        "        float p1 = floor(clamp(matrixApplied.g * 65535.0, 0.0, 65535.0));\n"
+        "        float p2 = floor(clamp(matrixApplied.b * 65535.0, 0.0, 65535.0));\n"
+        "        float tmp1 = floor(clamp(reconMatrixGreen * 65535.0 + 0.5, 0.0, 65535.0));\n"
+        "        bool replace = false;\n"
+        "        if (previewHighlightReconDualIso > 0.5)\n"
+        "        {\n"
+        "            float lo = clamp(previewHighestGreenDiso - 5000.0, 0.0, 65535.0);\n"
+        "            float hi = clamp(previewHighestGreenDiso + 5000.0, 0.0, 65535.0);\n"
+        "            if (tmp1 >= lo && tmp1 <= hi && p1 < 1.1 * p0 && p1 < p2) replace = true;\n"
+        "        }\n"
+        "        else if (tmp1 == previewHighestGreen)\n"
+        "        {\n"
+        "            replace = true;\n"
+        "        }\n"
+        "        if (replace) matrixApplied.g = floor((p0 + p2) / 2.0) / 65535.0;\n"
         "    }\n"
         "    if (previewUseCameraMatrix > 0.5)\n"
         "    {\n"
@@ -992,8 +1612,90 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        }\n"
         "        matrixApplied = wbApplied;\n"
         "    }\n"
+        "    if (previewApplyAgx > 0.5)\n"
+        "    {\n"
+        "        vec3 v = max(matrixApplied * 65535.0, 0.0);\n"
+        "        vec3 a = vec3(dot(previewAgxFwd0, v), dot(previewAgxFwd1, v), dot(previewAgxFwd2, v));\n"
+        "        matrixApplied = floor(clamp(a, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
+        "    if (previewApplyGradient > 0.5)\n"
+        "    {\n"
+        "        vec2 gfc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
+        "        float gblend = texture2D(gradientMask, (floor(gfc) + vec2(0.5)) / frameSize).r / 65535.0;\n"
+        "        vec3 g = vec3(sampleU16Lut(gradMatrixLutR, leveled.r), sampleU16Lut(gradMatrixLutG, leveled.g), sampleU16Lut(gradMatrixLutB, leveled.b)) * 65535.0;\n"
+        "        float gtmpGreen = g.g;\n"
+        "        float vigF = 1.0;\n"
+        "        if (previewApplyVignette > 0.5)\n"
+        "        {\n"
+        "            float vmidx = floor(gfc.y) * frameSize.x + floor(gfc.x) + 1.0;\n"
+        "            if (vmidx < frameSize.x * frameSize.y)\n"
+        "            {\n"
+        "                float vmx = mod(vmidx, frameSize.x);\n"
+        "                float vmy = floor(vmidx / frameSize.x);\n"
+        "                float vm = texture2D(vignetteMask, (vec2(vmx, vmy) + vec2(0.5)) / frameSize).r;\n"
+        "                float vb = 1.0 + (vm * previewVignetteStrength / 128.0);\n"
+        "                float vb2 = vb * vb;\n"
+        "                vigF = vb2 * vb2;\n"
+        "            }\n"
+        "        }\n"
+        "        float baseContrastF = 1.0;\n"
+        "        float gradContrastF = 1.0;\n"
+        "        if (previewApplyInLoopContrast > 0.5 || previewApplyGradientContrast > 0.5)\n"
+        "        {\n"
+        "            vec3 bm = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b)) * vigF;\n"
+        "            vec3 bm16 = floor(bm * 65535.0 + 0.5);\n"
+        "            float gcval = floor((bm16.r * 4.0 + bm16.g * 11.0 + bm16.b) / 16.0);\n"
+        "            if (previewApplyInLoopContrast > 0.5) baseContrastF = sampleContrastCurve(inLoopContrastCurve, gcval);\n"
+        "            if (previewApplyGradientContrast > 0.5) gradContrastF = sampleContrastCurve(gradientContrastCurve, gcval);\n"
+        "        }\n"
+        "        g = clamp(g * (vigF * baseContrastF * gradContrastF), 0.0, 65535.0);\n"
+        "        if (previewApplyHighlightRecon > 0.5)\n"
+        "        {\n"
+        "            float gt1 = floor(clamp(gtmpGreen + 0.5, 0.0, 65535.0));\n"
+        "            bool grep = false;\n"
+        "            if (previewHighlightReconDualIso > 0.5)\n"
+        "            {\n"
+        "                float glo = clamp(previewGradientHighestGreenDiso - 5000.0, 0.0, 65535.0);\n"
+        "                float ghi = clamp(previewGradientHighestGreenDiso + 5000.0, 0.0, 65535.0);\n"
+        "                if (gt1 >= glo && gt1 <= ghi && g.g < 1.1 * g.r && g.g < g.b) grep = true;\n"
+        "            }\n"
+        "            else if (gt1 == previewGradientHighestGreen)\n"
+        "            {\n"
+        "                grep = true;\n"
+        "            }\n"
+        "            if (grep) g.g = (g.r + g.b) / 2.0;\n"
+        "        }\n"
+        "        vec3 gmv = g / 65535.0;\n"
+        "        if (previewUseCameraMatrix > 0.5)\n"
+        "        {\n"
+        "            vec3 gw = vec3(dot(previewProperWbRow0, gmv), dot(previewProperWbRow1, gmv), dot(previewProperWbRow2, gmv));\n"
+        "            if (previewApplyGamutCompression > 0.5)\n"
+        "            {\n"
+        "                float Y = dot(previewRgbToY, gw);\n"
+        "                float minC = min(min(gw.r, gw.g), gw.b);\n"
+        "                vec3 gref = vec3(-(reinhardForColour((Y != 0.0) ? ((Y - gw.r) / Y) : 0.0) * Y) + Y,\n"
+        "                                 -(reinhardForBlue((Y != 0.0) ? ((Y - gw.g) / Y) : 0.0) * Y) + Y,\n"
+        "                                 -(reinhardForBlue((Y != 0.0) ? ((Y - gw.b) / Y) : 0.0) * Y) + Y);\n"
+        "                float gmin = min(min(gref.r, gref.g), gref.b);\n"
+        "                float gdes = 1.0;\n"
+        "                float gden = Y - minC;\n"
+        "                if (Y > 0.0 && abs(gden) > 0.00000001) gdes = (Y - gmin) / gden;\n"
+        "                gw = (gw - vec3(Y)) * gdes + vec3(Y);\n"
+        "            }\n"
+        "            gmv = gw;\n"
+        "        }\n"
+        "        if (previewApplyAgx > 0.5)\n"
+        "        {\n"
+        "            vec3 av = max(gmv * 65535.0, 0.0);\n"
+        "            vec3 aa = vec3(dot(previewAgxFwd0, av), dot(previewAgxFwd1, av), dot(previewAgxFwd2, av));\n"
+        "            gmv = floor(clamp(aa, 0.0, 65535.0)) / 65535.0;\n"
+        "        }\n"
+        "        vec3 pixg = vec3(sampleU16LutTrunc(gradGammaLut, gmv.r), sampleU16LutTrunc(gradGammaLut, gmv.g), sampleU16LutTrunc(gradGammaLut, gmv.b));\n"
+        "        vec3 gblended = vec3(gblend) * pixg + vec3(1.0 - gblend) * result;\n"
+        "        result = floor(clamp(gblended * 65535.0, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    if (previewApplyHueVs > 0.5)\n"
         "    {\n"
         "        vec3 hv = result * 65535.0;\n"
@@ -1056,6 +1758,55 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        result = vec3(sampleU16Lut(gradationLutY, result.r), sampleU16Lut(gradationLutY, result.g), sampleU16Lut(gradationLutY, result.b));\n"
         "        result = vec3(sampleU16Lut(gradationLutR, result.r), sampleU16Lut(gradationLutG, result.g), sampleU16Lut(gradationLutB, result.b));\n"
         "    }\n"
+        "    if (previewApplyAgx > 0.5)\n"
+        "    {\n"
+        "        vec3 f = result * 65535.0;\n"
+        "        vec3 iv = vec3(dot(previewAgxInv0, f), dot(previewAgxInv1, f), dot(previewAgxInv2, f));\n"
+        "        result = floor(clamp(iv, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
+        "    if (previewApplyLut > 0.5)\n"
+        "    {\n"
+        "        float dimF = previewLutDimension;\n"
+        "        vec3 pixv = floor(result * 65535.0 + 0.5);\n"
+        "        vec3 fABC = vec3(dimF - 1.0) / 65536.0 / (previewLutDomainMax - previewLutDomainMin);\n"
+        "        vec3 sc = pixv * fABC - previewLutDomainMin;\n"
+        "        vec3 base = max(floor(sc), vec3(0.0));\n"
+        "        vec3 i0 = min(base, vec3(dimF - 1.0));\n"
+        "        vec3 i1 = min(base + 1.0, vec3(dimF - 1.0));\n"
+        "        vec3 outc;\n"
+        "        if (previewLut3d > 0.5)\n"
+        "        {\n"
+        "            vec3 fr = sc - i0;\n"
+        "            float rf = fr.r; float gf = fr.g; float bf = fr.b;\n"
+        "            vec3 q000 = texture3D(lut3dTexture, (vec3(i0.r, i0.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q001 = texture3D(lut3dTexture, (vec3(i0.r, i0.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q010 = texture3D(lut3dTexture, (vec3(i0.r, i1.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q011 = texture3D(lut3dTexture, (vec3(i0.r, i1.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q100 = texture3D(lut3dTexture, (vec3(i1.r, i0.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q101 = texture3D(lut3dTexture, (vec3(i1.r, i0.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q110 = texture3D(lut3dTexture, (vec3(i1.r, i1.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q111 = texture3D(lut3dTexture, (vec3(i1.r, i1.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            if (gf >= bf && bf >= rf) outc = (1.0 - gf) * q000 + (gf - bf) * q010 + (bf - rf) * q011 + rf * q111;\n"
+        "            else if (bf > rf && rf > gf) outc = (1.0 - bf) * q000 + (bf - rf) * q001 + (rf - gf) * q101 + gf * q111;\n"
+        "            else if (bf > gf && gf >= rf) outc = (1.0 - bf) * q000 + (bf - gf) * q001 + (gf - rf) * q011 + rf * q111;\n"
+        "            else if (rf >= gf && gf > bf) outc = (1.0 - rf) * q000 + (rf - gf) * q100 + (gf - bf) * q110 + bf * q111;\n"
+        "            else if (gf > rf && rf >= bf) outc = (1.0 - gf) * q000 + (gf - rf) * q010 + (rf - bf) * q110 + bf * q111;\n"
+        "            else outc = (1.0 - rf) * q000 + (rf - bf) * q100 + (bf - gf) * q101 + gf * q111;\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            float r0v = texture2D(lut1dTexture, vec2((i0.r + 0.5) / dimF, 0.5)).r;\n"
+        "            float r1v = texture2D(lut1dTexture, vec2((i1.r + 0.5) / dimF, 0.5)).r;\n"
+        "            float g0v = texture2D(lut1dTexture, vec2((i0.g + 0.5) / dimF, 0.5)).g;\n"
+        "            float g1v = texture2D(lut1dTexture, vec2((i1.g + 0.5) / dimF, 0.5)).g;\n"
+        "            float b0v = texture2D(lut1dTexture, vec2((i0.b + 0.5) / dimF, 0.5)).b;\n"
+        "            float b1v = texture2D(lut1dTexture, vec2((i1.b + 0.5) / dimF, 0.5)).b;\n"
+        "            outc = vec3(lutLerp1d(sc.r, i0.r, i1.r, r0v, r1v), lutLerp1d(sc.g, i0.g, i1.g, g0v, g1v), lutLerp1d(sc.b, i0.b, i1.b, b0v, b1v));\n"
+        "        }\n"
+        "        vec3 limited = clamp(outc * 65535.0, 0.0, 65535.0);\n"
+        "        vec3 blended = pixv * (1.0 - previewLutIntensity) + limited * previewLutIntensity;\n"
+        "        result = floor(clamp(blended, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    return result;\n"
         "}\n"
         "void main()\n"
@@ -1112,7 +1863,9 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     };
 
     if ( !processing ) return reject(QStringLiteral("processing object missing"));
-    if ( processing->highlight_reconstruction ) return reject(QStringLiteral("highlight reconstruction enabled"));
+    /* highlight_reconstruction is now supported: a per-pixel clipped-green replace
+     * (green -> (R+B)/2) keyed on the matrix-green white level / dual-ISO peak,
+     * ported as a per-pixel stage (no spatial pass). No reject. */
     /* allow_creative_adjustments no longer has its own reject: the GPU subset
      * shader ports every creative-family stage -- the in-loop simple-contrast
      * factor, hue-vs / luma-vs curves, vibrance, saturation, toning, the contrast
@@ -1121,28 +1874,76 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
      * implement (gradient, LUT, filter, AgX, denoise, grain, CA, sharpen, chroma
      * separation/blur, clarity, shadows/highlights, vignette, non-Rec709 gamut),
      * which are gated independently of the creative flag. */
-    if ( processing->gradient_enable ) return reject(QStringLiteral("gradient enabled"));
-    if ( processing->lut_on ) return reject(QStringLiteral("LUT enabled"));
+    /* gradient is now supported: a second pre-creative pipeline through the
+     * gradient LUTs, blended into the base in gamma space by the gradient mask
+     * before the creative chain. Ported as a per-pixel stage (no spatial pass).
+     * Reject only when enabled-but-unbuilt (no mask), which the subset cannot
+     * reproduce. */
+    if ( processing->gradient_enable && processing->gradient_mask == NULL )
+    {
+        return reject(QStringLiteral("gradient mask unavailable"));
+    }
+    /* 1D/3D .cube LUTs are supported: applied as the last stage (tetrahedral 3D /
+     * per-channel-lerp 1D) from a volume/1D texture. Reject only a malformed cube
+     * (the subset cannot reproduce a LUT without valid cube data). */
+    if ( processing->lut_on
+      && (!processing->lut || !processing->lut->cube || processing->lut->dimension <= 1) )
+    {
+        return reject(QStringLiteral("LUT enabled but cube unavailable"));
+    }
     if ( processing->filter_on ) return reject(QStringLiteral("filter enabled"));
-    if ( processing->AgX ) return reject(QStringLiteral("AgX enabled"));
+    /* AgX is now supported: a forward compressed-gamut matmul before gamma and
+     * the inverse after the creative curves, carried as uniform matrices (no new
+     * textures). No reject. */
     /* EXR/cyan-highlight mode is compatible with the preview subset as long as
      * gamut compression stays disabled. The config builder already derives that
      * via applyGamutCompression = false, so do not reject it here. */
-    if ( processing->denoiserStrength > 0 ) return reject(QStringLiteral("median denoiser enabled"));
+    /* Median denoise is supported for windows up to 5 (the GLSL window-median is
+     * O(winSize^2)); a larger window is rejected. */
+    if ( processing->denoiserStrength > 0 && processing->denoiserWindow > 5 )
+    {
+        return reject(QStringLiteral("median denoiser window exceeds 5"));
+    }
     if ( processing->rbfDenoiserLuma > 0 || processing->rbfDenoiserChroma > 0 ) return reject(QStringLiteral("RBF denoiser enabled"));
     if ( processing->grainStrength > 0 ) return reject(QStringLiteral("grain enabled"));
     if ( processing->ca_desaturate > 0 ) return reject(QStringLiteral("CA correction enabled"));
-    if ( processing->sharpen > 0.005 ) return reject(QStringLiteral("sharpening enabled"));
-    if ( processing->cs_zone.use_cs ) return reject(QStringLiteral("chroma separation enabled"));
-    if ( processing->cs_zone.chroma_blur_radius > 0 ) return reject(QStringLiteral("chroma blur enabled"));
+    /* Sharpen is supported standalone (a 5-tap cross post-pass). The engine
+     * interleaves sharpen-on-Y inside the chroma YCbCr round-trip and offers an
+     * optional sobel edge mask; those combined paths are not yet ported, so reject
+     * sharpen + chroma-separation and sharpen + sobel-mask. */
+    if ( processing->sharpen > 0.005 && processing->sh_masking > 0 )
+    {
+        return reject(QStringLiteral("sharpen edge mask enabled"));
+    }
+    if ( processing->sharpen > 0.005 && processing->cs_zone.use_cs )
+    {
+        return reject(QStringLiteral("sharpen with chroma separation enabled"));
+    }
+    /* Chroma separation/blur is supported: a YCbCr round-trip + optional box blur
+     * of Cb/Cr as a post-pass. Reject only an over-radius chroma blur (the GPU box
+     * blur is float32-exact only up to radius 127); chroma_blur_radius without
+     * use_cs is a no-op in the engine, so it needs no reject. */
+    if ( processing->cs_zone.use_cs && processing->cs_zone.chroma_blur_radius > 127 )
+    {
+        return reject(QStringLiteral("chroma blur radius exceeds 127"));
+    }
     if ( std::fabs(processing->clarity) >= 0.01 ) return reject(QStringLiteral("clarity enabled"));
     if ( std::fabs(processing->shadows_highlights.shadows) >= 0.01
       || std::fabs(processing->shadows_highlights.highlights) >= 0.01 )
     {
         return reject(QStringLiteral("shadows/highlights enabled"));
     }
-    if ( processing->vignette_strength != 0 ) return reject(QStringLiteral("vignette enabled"));
-    if ( processing->colour_gamut != GAMUT_Rec709 ) return reject(QStringLiteral("unsupported gamut"));
+    /* Vignette is supported via a full-frame R32F mask texture sampled by the
+     * fragment's raster index (the vmpix off-by-one + vignette_end guard mirrored).
+     * Reject only when the strength is set but the mask buffer was never built
+     * (the subset cannot reproduce vignette without the mask). */
+    if ( processing->vignette_strength != 0 && processing->vignette_mask == NULL )
+    {
+        return reject(QStringLiteral("vignette mask unavailable"));
+    }
+    /* Non-Rec709 gamut is now supported: the gamut is baked into proper_wb_matrix
+     * (already applied in-shader) and the gamut-compression luma weights are
+     * derived per-gamut in gpuPreviewProcessingBuildConfig (rgbToY). No reject. */
 
     if ( reason ) reason->clear();
     return true;
@@ -1170,7 +1971,25 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     {
         config.properWbMatrix[index] = static_cast<float>(processing->proper_wb_matrix[index]);
     }
-    std::memcpy(config.rgbToY, kRec709RgbToY, sizeof(config.rgbToY));
+    /* Gamut-compression desaturation weights. raw_processing derives rgb_to_Y
+     * per gamut (second row of inverse(gamut matrix), raw_processing.c ~2680).
+     * Rec709 keeps the exact hardcoded constants so the validated golden output
+     * is byte-stable; other gamuts use the engine-derived weights so the GPU
+     * gamut-compression path matches production. The matrix itself already
+     * carries the gamut via proper_wb_matrix. */
+    if ( processing->colour_gamut == GAMUT_Rec709 )
+    {
+        std::memcpy(config.rgbToY, kRec709RgbToY, sizeof(config.rgbToY));
+    }
+    else
+    {
+        double gamutRgbToY[3] = { 0.0, 0.0, 0.0 };
+        processingGamutRgbToY(processing->colour_gamut, gamutRgbToY);
+        for (int index = 0; index < 3; ++index)
+        {
+            config.rgbToY[index] = static_cast<float>(gamutRgbToY[index]);
+        }
+    }
     config.levelsLut = QByteArray(
         reinterpret_cast<const char *>(processing->pre_calc_levels),
         static_cast<int>(65536u * sizeof(uint16_t)));
@@ -1245,6 +2064,151 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             dst[index] = static_cast<float>(processing->contrast_curve[index]);
         }
     }
+    config.applyAgx = processing->AgX != 0;
+    if ( config.applyAgx )
+    {
+        /* AgX is a forward compressed-gamut matmul before gamma + the inverse
+         * after the creative curves (raw_processing_8bit_kernel.inc:264-281 /
+         * 358-368). Carry float-narrowed copies of the engine's double matrices;
+         * +/-1 LSB vs the production double path, within the parity tolerance. */
+        double fwd[9] = { 0.0 };
+        double inv[9] = { 0.0 };
+        processingAgxMatrices(fwd, inv);
+        for (int index = 0; index < 9; ++index)
+        {
+            config.agxForward[index] = static_cast<float>(fwd[index]);
+            config.agxInverse[index] = static_cast<float>(inv[index]);
+        }
+    }
+    config.applyVignette = processing->vignette_strength != 0;
+    config.vignetteStrength = processing->vignette_strength;
+    if ( config.applyVignette )
+    {
+        /* The vignette mask is a full-resolution float[w*h] alpha buffer
+         * (processing_object.h:209), copied verbatim. Application matches
+         * raw_processing.c:2881-2889: expo_correction *= pow(1 + mask*strength/128,
+         * 4), with the vmpix pre-increment (pixel i reads mask[i+1]) and the
+         * vignette_end guard (last pixel skips). The gate already failed closed if
+         * the mask was unbuilt, so it is non-null here. */
+        const float * mask = processing->vignette_mask;
+        const ptrdiff_t count = (mask && processing->vignette_end > mask)
+            ? (processing->vignette_end - mask) : 0;
+        if ( count > 0 )
+        {
+            config.vignetteMask = QByteArray(reinterpret_cast<const char *>(mask),
+                                             static_cast<int>(count * static_cast<ptrdiff_t>(sizeof(float))));
+        }
+        else
+        {
+            config.applyVignette = false;
+        }
+    }
+    config.applyLut = processing->lut_on != 0 && processing->lut != NULL
+                   && processing->lut->cube != NULL && processing->lut->dimension > 1;
+    if ( config.applyLut )
+    {
+        /* LUT (.cube) is the engine's OUTPUT-stage stage (apply_lut, cube_lut.c:209-340,
+         * run last at raw_processing.c:3767, not in the creative loop or direct8 kernel).
+         * Copy the raw float cube + params; the shader + CPU reference replicate the
+         * domain scaling, tetrahedral (3D) / per-channel-lerp (1D) interpolation, and the
+         * intensity blend, applied as the last stage. */
+        const lut_t * lut = processing->lut;
+        config.lut3d = lut->is3d != 0;
+        config.lutDimension = lut->dimension;
+        const int clampedIntensity = lut->intensity > 100 ? 100 : lut->intensity;
+        config.lutIntensity = clampedIntensity / 100.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            config.lutDomainMin[i] = lut->domain_min[i];
+            config.lutDomainMax[i] = lut->domain_max[i];
+        }
+        const int dim = config.lutDimension;
+        const int entries = config.lut3d ? (dim * dim * dim) : dim;
+        config.lutCube = QByteArray(reinterpret_cast<const char *>(lut->cube),
+                                    entries * 3 * static_cast<int>(sizeof(float)));
+    }
+    /* Highlight reconstruction: a per-pixel clipped-green replace. highest_green
+     * (non-dual-ISO white-level green) is computed once at matrix build
+     * (processing_update_highest_green, processing.c:572); highest_green_diso is
+     * the per-frame dual-ISO peak from analyse_frame_highest_green -- production
+     * must refresh the config per frame so the diso peak is current. */
+    config.applyHighlightReconstruction = processing->highlight_reconstruction != 0;
+    config.highlightReconDualIso = (processing->dual_iso != NULL && *processing->dual_iso != 0);
+    config.highestGreen = static_cast<int>(processing->highest_green);
+    config.highestGreenDiso = static_cast<int>(processing->highest_green_diso);
+
+    /* Gradient: a second pre-creative pipeline blended into the base by the
+     * per-pixel mask. Active only when enabled with non-trivial gradient
+     * exposure/contrast (the engine's use_gradient_adjustments) and a built mask.
+     * The mask is carried as a pointer (frame-sized, no companion length here);
+     * the callers read it by pixel index / width*height. */
+    const bool gradientAdjustments =
+        (processing->gradient_exposure_stops < -0.01 || processing->gradient_exposure_stops > 0.01)
+     || (processing->gradient_contrast < -0.01 || processing->gradient_contrast > 0.01);
+    config.applyGradient = processing->gradient_enable != 0
+                        && gradientAdjustments
+                        && processing->gradient_mask != NULL;
+    if ( config.applyGradient )
+    {
+        config.gradientMaskData = processing->gradient_mask;
+        config.applyGradientContrast = std::fabs(processing->gradient_contrast) >= 0.01;
+        config.gradientHighestGreen = static_cast<int>(processing->highest_green_gradient);
+        config.gradientHighestGreenDiso = static_cast<int>(processing->highest_green_gradient_diso);
+        config.gradientMatrixLutR.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradientMatrixLutG.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        config.gradientMatrixLutB.resize(static_cast<int>(65536u * sizeof(uint16_t)));
+        uint16_t * gmR = reinterpret_cast<uint16_t *>(config.gradientMatrixLutR.data());
+        uint16_t * gmG = reinterpret_cast<uint16_t *>(config.gradientMatrixLutG.data());
+        uint16_t * gmB = reinterpret_cast<uint16_t *>(config.gradientMatrixLutB.data());
+        for (int index = 0; index < 65536; ++index)
+        {
+            gmR[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[0][index], 65535));
+            gmG[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[4][index], 65535));
+            gmB[index] = static_cast<uint16_t>(qBound(0, processing->pre_calc_matrix_gradient[8][index], 65535));
+        }
+        config.gradientGammaLut = QByteArray(
+            reinterpret_cast<const char *>(processing->pre_calc_gamma_gradient),
+            static_cast<int>(65536u * sizeof(uint16_t)));
+        if ( config.applyGradientContrast )
+        {
+            config.gradientContrastCurve.resize(static_cast<int>(65536u * sizeof(float)));
+            float * gdst = reinterpret_cast<float *>(config.gradientContrastCurve.data());
+            for (int index = 0; index < 65536; ++index)
+            {
+                gdst[index] = static_cast<float>(processing->gradient_contrast_curve[index]);
+            }
+        }
+    }
+    /* Chroma separation/blur: a YCbCr round-trip post-pass with an optional box
+     * blur of Cb/Cr (raw_processing.c:1816-1971). The engine runs the chroma blur
+     * only inside the use_cs block, so chroma_blur_radius without use_cs is inert. */
+    config.applyChroma = processing->cs_zone.use_cs != 0;
+    config.chromaBlurRadius = config.applyChroma
+        ? static_cast<int>(processing->cs_zone.chroma_blur_radius) : 0;
+
+    /* Sharpen: a fixed 5-tap cross post-pass (processingSetSharpening,
+     * raw_processing.c:4461). Supported standalone (the gate rejects it combined
+     * with chroma separation or the sobel mask). Compute the engine's a/x/y from
+     * the slider + bias in double so the GPU LUT and CPU reference match exactly. */
+    config.applySharpen = processing->sharpen > 0.005
+                       && processing->sh_masking == 0
+                       && processing->cs_zone.use_cs == 0;
+    if ( config.applySharpen )
+    {
+        const double s = std::pow(processing->sharpen, 1.5) * 0.55;
+        config.sharpenX = s * (1.0 - processing->sharpen_bias);
+        config.sharpenY = s * (1.0 + processing->sharpen_bias);
+        config.sharpenA = 1.0 + (2.0 * config.sharpenX) + (2.0 * config.sharpenY);
+    }
+
+    /* Median denoise: per-pixel square-window median blended by strength/100
+     * (denoiser_2d_median.c). Supported for windows up to 5 (winSize<=25); larger
+     * windows are rejected (the GLSL order-statistic selection is O(winSize^2)). */
+    config.applyMedian = processing->denoiserStrength > 0
+                      && processing->denoiserWindow >= 1
+                      && processing->denoiserWindow <= 5;
+    config.medianWindow = static_cast<int>(processing->denoiserWindow);
+    config.medianStrength = static_cast<int>(processing->denoiserStrength);
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1285,6 +2249,41 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyHueVs, sizeof(config.applyHueVs));
     hash = fnv1a64_append(hash, &config.applyInLoopContrast, sizeof(config.applyInLoopContrast));
     hash = fnv1a64_append(hash, &config.sourceContrast, sizeof(config.sourceContrast));
+    hash = fnv1a64_append(hash, &config.applyAgx, sizeof(config.applyAgx));
+    hash = fnv1a64_append(hash, config.agxForward, sizeof(config.agxForward));
+    hash = fnv1a64_append(hash, config.agxInverse, sizeof(config.agxInverse));
+    hash = fnv1a64_append(hash, &config.applyVignette, sizeof(config.applyVignette));
+    hash = fnv1a64_append(hash, &config.vignetteStrength, sizeof(config.vignetteStrength));
+    hash = fnv1a64_append(hash, config.vignetteMask.constData(), static_cast<size_t>(config.vignetteMask.size()));
+    hash = fnv1a64_append(hash, &config.applyLut, sizeof(config.applyLut));
+    hash = fnv1a64_append(hash, &config.lut3d, sizeof(config.lut3d));
+    hash = fnv1a64_append(hash, &config.lutDimension, sizeof(config.lutDimension));
+    hash = fnv1a64_append(hash, &config.lutIntensity, sizeof(config.lutIntensity));
+    hash = fnv1a64_append(hash, config.lutDomainMin, sizeof(config.lutDomainMin));
+    hash = fnv1a64_append(hash, config.lutDomainMax, sizeof(config.lutDomainMax));
+    hash = fnv1a64_append(hash, config.lutCube.constData(), static_cast<size_t>(config.lutCube.size()));
+    hash = fnv1a64_append(hash, &config.applyHighlightReconstruction, sizeof(config.applyHighlightReconstruction));
+    hash = fnv1a64_append(hash, &config.highlightReconDualIso, sizeof(config.highlightReconDualIso));
+    hash = fnv1a64_append(hash, &config.highestGreen, sizeof(config.highestGreen));
+    hash = fnv1a64_append(hash, &config.highestGreenDiso, sizeof(config.highestGreenDiso));
+    hash = fnv1a64_append(hash, &config.applyGradient, sizeof(config.applyGradient));
+    hash = fnv1a64_append(hash, &config.applyGradientContrast, sizeof(config.applyGradientContrast));
+    hash = fnv1a64_append(hash, &config.gradientHighestGreen, sizeof(config.gradientHighestGreen));
+    hash = fnv1a64_append(hash, &config.gradientHighestGreenDiso, sizeof(config.gradientHighestGreenDiso));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutR.constData(), static_cast<size_t>(config.gradientMatrixLutR.size()));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutG.constData(), static_cast<size_t>(config.gradientMatrixLutG.size()));
+    hash = fnv1a64_append(hash, config.gradientMatrixLutB.constData(), static_cast<size_t>(config.gradientMatrixLutB.size()));
+    hash = fnv1a64_append(hash, config.gradientGammaLut.constData(), static_cast<size_t>(config.gradientGammaLut.size()));
+    hash = fnv1a64_append(hash, config.gradientContrastCurve.constData(), static_cast<size_t>(config.gradientContrastCurve.size()));
+    hash = fnv1a64_append(hash, &config.applyChroma, sizeof(config.applyChroma));
+    hash = fnv1a64_append(hash, &config.chromaBlurRadius, sizeof(config.chromaBlurRadius));
+    hash = fnv1a64_append(hash, &config.applySharpen, sizeof(config.applySharpen));
+    hash = fnv1a64_append(hash, &config.sharpenA, sizeof(config.sharpenA));
+    hash = fnv1a64_append(hash, &config.sharpenX, sizeof(config.sharpenX));
+    hash = fnv1a64_append(hash, &config.sharpenY, sizeof(config.sharpenY));
+    hash = fnv1a64_append(hash, &config.applyMedian, sizeof(config.applyMedian));
+    hash = fnv1a64_append(hash, &config.medianWindow, sizeof(config.medianWindow));
+    hash = fnv1a64_append(hash, &config.medianStrength, sizeof(config.medianStrength));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1332,8 +2331,10 @@ GpuPreviewProcessingBackendAvailability gpuPreviewProcessingProbeGpuBackend(void
 void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,
-                                           int pixelCount)
+                                           int width,
+                                           int height)
 {
+    const int pixelCount = width * height;
     if ( !inputRgb16 || !outputRgb16 || pixelCount <= 0 )
     {
         return;
@@ -1355,9 +2356,35 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
     {
         const uint16_t * inputPixel = inputRgb16 + pixelIndex * 3;
         uint16_t * outputPixel = outputRgb16 + pixelIndex * 3;
-        applyPreviewProcessingPixel(config, inputPixel, outputPixel);
+        applyPreviewProcessingPixel(config, inputPixel, outputPixel, pixelIndex);
+    }
+
+    /* Spatial post-passes on the developed image (raw_processing.c:1816+). Chroma
+     * separation/blur runs in YCbCr space; sharpen is a 5-tap cross. They are
+     * mutually exclusive in this subset (the engine interleaves sharpen-on-Y with
+     * chroma, which the gate rejects as a combined case). */
+    if ( config.applyChroma )
+    {
+        cpuChromaPostPass(outputRgb16, width, height, config.chromaBlurRadius);
+    }
+    if ( config.applySharpen )
+    {
+        cpuSharpenPostPass(outputRgb16, width, height, config.sharpenA, config.sharpenX, config.sharpenY);
+    }
+    if ( config.applyMedian )
+    {
+        cpuMedianPostPass(outputRgb16, width, height, config.medianWindow, config.medianStrength);
     }
 }
+
+static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
+                                   QString * reason, QString * rendererDescription);
+static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
+                                    double a, double x, double y,
+                                    QString * reason, QString * rendererDescription);
+static bool applyMedianPostPassGpu(uint16_t * img, int width, int height,
+                                   int window, int strength,
+                                   QString * reason, QString * rendererDescription);
 
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
@@ -1447,6 +2474,16 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         config.applyHueVs ? config.lumaVsSaturationCurve : QByteArray());
     const QByteArray inLoopContrastBytes = packContrastCurveR32F(
         config.applyInLoopContrast ? config.inLoopContrastCurve : QByteArray());
+    const QByteArray gradMatrixRBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutR : config.gammaLut);
+    const QByteArray gradMatrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutG : config.gammaLut);
+    const QByteArray gradMatrixBBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientMatrixLutB : config.gammaLut);
+    const QByteArray gradGammaBytes = gpuPreviewProcessingPackLookupTextureRgba16(
+        config.applyGradient ? config.gradientGammaLut : config.gammaLut);
+    const QByteArray gradContrastBytes = packContrastCurveR32F(
+        config.applyGradientContrast ? config.gradientContrastCurve : QByteArray());
 
     QOpenGLTexture * frameTexture = createFrameTexture(width, height);
     QOpenGLTexture * levelsTexture = createLookupTexture();
@@ -1464,6 +2501,37 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * hueVsLumaTexture = createCurveTexture();
     QOpenGLTexture * lumaVsSaturationTexture = createCurveTexture();
     QOpenGLTexture * inLoopContrastTexture = createContrastCurveTexture();
+    const bool vignetteReady = config.applyVignette
+        && config.vignetteMask.size() == static_cast<int>(static_cast<size_t>(width) * height * sizeof(float));
+    QOpenGLTexture * vignetteMaskTexture = createVignetteMaskTexture(
+        vignetteReady ? width : 1, vignetteReady ? height : 1);
+    const bool lutActive = config.applyLut && config.lutDimension > 1;
+    const bool lut3dActive = lutActive && config.lut3d;
+    const bool lut1dActive = lutActive && !config.lut3d;
+    QOpenGLTexture * lut3dTexture = createLut3dTexture(lut3dActive ? config.lutDimension : 1);
+    QOpenGLTexture * lut1dTexture = createLut1dTexture(lut1dActive ? config.lutDimension : 1);
+    QOpenGLTexture * gradMatrixRTexture = createLookupTexture();
+    QOpenGLTexture * gradMatrixGTexture = createLookupTexture();
+    QOpenGLTexture * gradMatrixBTexture = createLookupTexture();
+    QOpenGLTexture * gradGammaTexture = createLookupTexture();
+    QOpenGLTexture * gradContrastTexture = createContrastCurveTexture();
+    const bool gradientReady = config.applyGradient && config.gradientMaskData != nullptr;
+    QByteArray gradientMaskBytes;
+    if ( gradientReady )
+    {
+        gradientMaskBytes.resize(static_cast<int>(static_cast<size_t>(width) * height * sizeof(float)));
+        float * gmDst = reinterpret_cast<float *>(gradientMaskBytes.data());
+        for (int i = 0; i < width * height; ++i)
+        {
+            gmDst[i] = static_cast<float>(config.gradientMaskData[i]);
+        }
+    }
+    else
+    {
+        gradientMaskBytes = QByteArray(static_cast<int>(sizeof(float)), '\0');
+    }
+    QOpenGLTexture * gradientMaskTexture = createVignetteMaskTexture(
+        gradientReady ? width : 1, gradientReady ? height : 1);
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -1493,6 +2561,25 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsLumaBytes.constData());
     lumaVsSaturationTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, lumaVsSaturationBytes.constData());
     inLoopContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, inLoopContrastBytes.constData());
+    const float vignetteDummy = 0.0f;
+    vignetteMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32,
+                                 vignetteReady ? config.vignetteMask.constData()
+                                               : reinterpret_cast<const char *>(&vignetteDummy));
+    const QByteArray lutDummy(4 * static_cast<int>(sizeof(float)), '\0');
+    const QByteArray lut3dBytes = lut3dActive
+        ? packLutCubeRgba32F(config.lutCube, config.lutDimension * config.lutDimension * config.lutDimension)
+        : lutDummy;
+    const QByteArray lut1dBytes = lut1dActive
+        ? packLutCubeRgba32F(config.lutCube, config.lutDimension)
+        : lutDummy;
+    lut3dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut3dBytes.constData());
+    lut1dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut1dBytes.constData());
+    gradMatrixRTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixRBytes.constData());
+    gradMatrixGTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixGBytes.constData());
+    gradMatrixBTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradMatrixBBytes.constData());
+    gradGammaTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, gradGammaBytes.constData());
+    gradContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradContrastBytes.constData());
+    gradientMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradientMaskBytes.constData());
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -1518,8 +2605,27 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("hueVsLumaCurve", 13);
     program.setUniformValue("lumaVsSaturationCurve", 14);
     program.setUniformValue("inLoopContrastCurve", 15);
+    program.setUniformValue("vignetteMask", 16);
+    program.setUniformValue("previewApplyVignette", vignetteReady ? 1.0f : 0.0f);
+    program.setUniformValue("previewVignetteStrength", static_cast<float>(config.vignetteStrength));
+    program.setUniformValue("frameSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("lut3dTexture", 17);
+    program.setUniformValue("lut1dTexture", 18);
+    program.setUniformValue("previewApplyLut", lutActive ? 1.0f : 0.0f);
+    program.setUniformValue("previewLut3d", lut3dActive ? 1.0f : 0.0f);
+    program.setUniformValue("previewLutDimension", static_cast<float>(config.lutDimension));
+    program.setUniformValue("previewLutIntensity", config.lutIntensity);
+    program.setUniformValue("previewLutDomainMin", QVector3D(config.lutDomainMin[0], config.lutDomainMin[1], config.lutDomainMin[2]));
+    program.setUniformValue("previewLutDomainMax", QVector3D(config.lutDomainMax[0], config.lutDomainMax[1], config.lutDomainMax[2]));
     program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyInLoopContrast", config.applyInLoopContrast ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyAgx", config.applyAgx ? 1.0f : 0.0f);
+    program.setUniformValue("previewAgxFwd0", QVector3D(config.agxForward[0], config.agxForward[1], config.agxForward[2]));
+    program.setUniformValue("previewAgxFwd1", QVector3D(config.agxForward[3], config.agxForward[4], config.agxForward[5]));
+    program.setUniformValue("previewAgxFwd2", QVector3D(config.agxForward[6], config.agxForward[7], config.agxForward[8]));
+    program.setUniformValue("previewAgxInv0", QVector3D(config.agxInverse[0], config.agxInverse[1], config.agxInverse[2]));
+    program.setUniformValue("previewAgxInv1", QVector3D(config.agxInverse[3], config.agxInverse[4], config.agxInverse[5]));
+    program.setUniformValue("previewAgxInv2", QVector3D(config.agxInverse[6], config.agxInverse[7], config.agxInverse[8]));
     program.setUniformValue("previewApplyCreativeCurves", config.applyCreativeCurves ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyToning", config.applyToning ? 1.0f : 0.0f);
     program.setUniformValue("previewToningGain",
@@ -1547,6 +2653,20 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
                             QVector3D(config.rgbToY[0],
                                       config.rgbToY[1],
                                       config.rgbToY[2]));
+    program.setUniformValue("previewApplyHighlightRecon", config.applyHighlightReconstruction ? 1.0f : 0.0f);
+    program.setUniformValue("previewHighlightReconDualIso", config.highlightReconDualIso ? 1.0f : 0.0f);
+    program.setUniformValue("previewHighestGreen", static_cast<float>(config.highestGreen));
+    program.setUniformValue("previewHighestGreenDiso", static_cast<float>(config.highestGreenDiso));
+    program.setUniformValue("gradMatrixLutR", 19);
+    program.setUniformValue("gradMatrixLutG", 20);
+    program.setUniformValue("gradMatrixLutB", 21);
+    program.setUniformValue("gradGammaLut", 22);
+    program.setUniformValue("gradientContrastCurve", 23);
+    program.setUniformValue("gradientMask", 24);
+    program.setUniformValue("previewApplyGradient", gradientReady ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyGradientContrast", config.applyGradientContrast ? 1.0f : 0.0f);
+    program.setUniformValue("previewGradientHighestGreen", static_cast<float>(config.gradientHighestGreen));
+    program.setUniformValue("previewGradientHighestGreenDiso", static_cast<float>(config.gradientHighestGreenDiso));
 
     frameTexture->bind(0);
     levelsTexture->bind(1);
@@ -1564,6 +2684,15 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->bind(13);
     lumaVsSaturationTexture->bind(14);
     inLoopContrastTexture->bind(15);
+    vignetteMaskTexture->bind(16);
+    lut3dTexture->bind(17);
+    lut1dTexture->bind(18);
+    gradMatrixRTexture->bind(19);
+    gradMatrixGTexture->bind(20);
+    gradMatrixBTexture->bind(21);
+    gradGammaTexture->bind(22);
+    gradContrastTexture->bind(23);
+    gradientMaskTexture->bind(24);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -1603,6 +2732,15 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->release();
     lumaVsSaturationTexture->release();
     inLoopContrastTexture->release();
+    vignetteMaskTexture->release();
+    lut3dTexture->release();
+    lut1dTexture->release();
+    gradMatrixRTexture->release();
+    gradMatrixGTexture->release();
+    gradMatrixBTexture->release();
+    gradGammaTexture->release();
+    gradContrastTexture->release();
+    gradientMaskTexture->release();
     program.release();
     fbo.release();
 
@@ -1622,8 +2760,805 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete hueVsLumaTexture;
     delete lumaVsSaturationTexture;
     delete inLoopContrastTexture;
+    delete vignetteMaskTexture;
+    delete lut3dTexture;
+    delete lut1dTexture;
+    delete gradMatrixRTexture;
+    delete gradMatrixGTexture;
+    delete gradMatrixBTexture;
+    delete gradGammaTexture;
+    delete gradContrastTexture;
+    delete gradientMaskTexture;
     context.doneCurrent();
 
+    /* Spatial post-pass on the developed image, in its own GL context (the per-
+     * pixel pass above has released this one). Chroma separation/blur reproduces
+     * raw_processing.c:1816-1971. */
+    if ( config.applyChroma )
+    {
+        QString chromaReason;
+        QString chromaRenderer;
+        if ( !applyChromaPostPassGpu(outputRgb16, width, height, config.chromaBlurRadius,
+                                     &chromaReason, &chromaRenderer) )
+        {
+            return fail(chromaReason);
+        }
+        if ( rendererDescription && !chromaRenderer.isEmpty() )
+        {
+            *rendererDescription = chromaRenderer;
+        }
+    }
+    if ( config.applySharpen )
+    {
+        QString sharpenReason;
+        QString sharpenRenderer;
+        if ( !applySharpenPostPassGpu(outputRgb16, width, height,
+                                      config.sharpenA, config.sharpenX, config.sharpenY,
+                                      &sharpenReason, &sharpenRenderer) )
+        {
+            return fail(sharpenReason);
+        }
+        if ( rendererDescription && !sharpenRenderer.isEmpty() )
+        {
+            *rendererDescription = sharpenRenderer;
+        }
+    }
+    if ( config.applyMedian )
+    {
+        QString medianReason;
+        QString medianRenderer;
+        if ( !applyMedianPostPassGpu(outputRgb16, width, height,
+                                     config.medianWindow, config.medianStrength,
+                                     &medianReason, &medianRenderer) )
+        {
+            return fail(medianReason);
+        }
+        if ( rendererDescription && !medianRenderer.isEmpty() )
+        {
+            *rendererDescription = medianRenderer;
+        }
+    }
+
+    if ( reason ) reason->clear();
+    return true;
+}
+
+QByteArray gpuPreviewProcessingBoxBlurFragmentShaderSource(void)
+{
+    /* One separable box-blur pass (axis chosen by `horizontal`). Each fragment
+     * sums the (2*radius+1)-tap window of EXACT integer texel values, divides by
+     * the diameter with a truncating floor (matching the engine's integer
+     * sum/blur_diameter), and clamps the tap coordinate to the edge. Disabled
+     * channels pass the center texel through unchanged (blur_image leaves
+     * do_*=0 channels untouched). Radius<=127 keeps the window sum < 2^24 so the
+     * float32 accumulation is exact. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform float radius;\n"
+        "uniform float horizontal;\n"
+        "uniform vec3 channelMask;\n"
+        "varying vec2 vTexCoord;\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    float diameter = 2.0 * radius + 1.0;\n"
+        "    vec3 center = floor(texture2D(src, (px + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    vec3 sum = vec3(0.0);\n"
+        "    for (int k = 0; k < 255; k++)\n"
+        "    {\n"
+        "        if (float(k) > 2.0 * radius) break;\n"
+        "        /* Engine blur_image window for output j is [j-r+1, j+r+1] -- a\n"
+        "         * centered box shifted right by exactly one pixel (its off-by-one\n"
+        "         * quirk), clamped to the edge. Reproduce that shift here. */\n"
+        "        float off = float(k) - radius + 1.0;\n"
+        "        vec2 c = px;\n"
+        "        if (horizontal > 0.5) c.x = clamp(px.x + off, 0.0, texSize.x - 1.0);\n"
+        "        else c.y = clamp(px.y + off, 0.0, texSize.y - 1.0);\n"
+        "        sum += floor(texture2D(src, (c + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    }\n"
+        "    vec3 blurred = floor(sum / diameter);\n"
+        "    vec3 outv = mix(center, blurred, channelMask);\n"
+        "    gl_FragColor = vec4(outv / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
+                                               uint16_t * outputRgb16,
+                                               int width,
+                                               int height,
+                                               int radius,
+                                               bool doR,
+                                               bool doG,
+                                               bool doB,
+                                               QString * reason,
+                                               QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        return false;
+    };
+
+    if ( !inputRgb16 || !outputRgb16 || width <= 0 || height <= 0 )
+    {
+        return fail(QStringLiteral("box blur input/output buffers are invalid"));
+    }
+    if ( radius < 0 )
+    {
+        return fail(QStringLiteral("box blur radius is negative"));
+    }
+    if ( radius > 127 )
+    {
+        return fail(QStringLiteral("box blur radius exceeds the float32-exact limit (127)"));
+    }
+    if ( radius == 0 )
+    {
+        std::memcpy(outputRgb16, inputRgb16,
+                    static_cast<size_t>(width) * height * 3u * sizeof(uint16_t));
+        if ( reason ) reason->clear();
+        return true;
+    }
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * glFunctions = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &glFunctions,
+                                              reason, rendererDescription) )
+    {
+        return false;
+    }
+
+    QOpenGLShaderProgram program;
+    {
+        const QByteArray vertexShader = gpuPreviewProcessingVertexShaderSource();
+        const QByteArray fragmentShader = gpuPreviewProcessingBoxBlurFragmentShaderSource();
+        if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, vertexShader)
+          || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, fragmentShader)
+          || !program.link() )
+        {
+            const QString log = program.log();
+            context.doneCurrent();
+            return fail(QStringLiteral("box blur shader setup failed: %1").arg(log));
+        }
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(inputRgb16, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLFramebufferObjectFormat fboFormat;
+    fboFormat.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fboFormat.setTextureTarget(GL_TEXTURE_2D);
+    fboFormat.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fboHorizontal(width, height, fboFormat);
+    QOpenGLFramebufferObject fboVertical(width, height, fboFormat);
+    if ( !fboHorizontal.isValid() || !fboVertical.isValid() )
+    {
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("box blur framebuffer creation failed"));
+    }
+
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+
+    auto drawPass = [&](GLuint inputTexture, QOpenGLFramebufferObject & target, float horizontal)
+    {
+        target.bind();
+        glFunctions->glViewport(0, 0, width, height);
+        glFunctions->glDisable(GL_DEPTH_TEST);
+        glFunctions->glDisable(GL_BLEND);
+        glFunctions->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glFunctions->glClear(GL_COLOR_BUFFER_BIT);
+        program.bind();
+        program.setUniformValue("src", 0);
+        program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+        program.setUniformValue("radius", static_cast<float>(radius));
+        program.setUniformValue("horizontal", horizontal);
+        program.setUniformValue("channelMask",
+                                QVector3D(doR ? 1.0f : 0.0f, doG ? 1.0f : 0.0f, doB ? 1.0f : 0.0f));
+        glFunctions->glActiveTexture(GL_TEXTURE0);
+        glFunctions->glBindTexture(GL_TEXTURE_2D, inputTexture);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glFunctions->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        program.enableAttributeArray(posLoc);
+        program.enableAttributeArray(texLoc);
+        program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+        program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+        glFunctions->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glFunctions->glFinish();
+        program.disableAttributeArray(posLoc);
+        program.disableAttributeArray(texLoc);
+        target.release();
+    };
+
+    /* Horizontal pass into fboHorizontal, then vertical pass reading it into
+     * fboVertical. The passes do NOT flip Y (unlike the main preview offscreen),
+     * so readback row 0 maps to input row 0 -- the box is symmetric and the
+     * edge clamp is position-dependent, so the orientation must match blur_image. */
+    drawPass(srcTexture->textureId(), fboHorizontal, 1.0f);
+    drawPass(fboHorizontal.texture(), fboVertical, 0.0f);
+
+    fboVertical.bind();
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    glFunctions->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fboVertical.release();
+
+    const uint16_t * pixels = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        outputRgb16[i * 3 + 0] = pixels[i * 4 + 0];
+        outputRgb16[i * 3 + 1] = pixels[i * 4 + 1];
+        outputRgb16[i * 3 + 2] = pixels[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture;
+    context.doneCurrent();
+
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray chromaForwardShaderSource()
+{
+    /* RGB -> YCbCr (JPEG transform, raw_processing.c convert_rgb_to_YCbCr_omp).
+     * Each term is read from an RGBA32F LUT holding the engine's truncated-int
+     * products; the 0.5 R/B terms are integer >>1 (floor(v/2)). */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform sampler2D fwdR;\n"
+        "uniform sampler2D fwdG;\n"
+        "uniform sampler2D fwdB;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 chromaLut(sampler2D lut, float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(lut, uv).rgb;\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec3 rgb = floor(texture2D(src, vTexCoord).rgb * 65535.0 + 0.5);\n"
+        "    vec3 fr = chromaLut(fwdR, rgb.r);\n"
+        "    vec3 fg = chromaLut(fwdG, rgb.g);\n"
+        "    vec3 fb = chromaLut(fwdB, rgb.b);\n"
+        "    float Y  = fr.r + fg.r + fb.r;\n"
+        "    float Cb = 32768.0 + fr.g + fg.g + floor(rgb.b / 2.0);\n"
+        "    float Cr = 32768.0 + floor(rgb.r / 2.0) + fg.b + fb.g;\n"
+        "    vec3 ycc = clamp(vec3(Y, Cb, Cr), 0.0, 65535.0);\n"
+        "    gl_FragColor = vec4(ycc / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+QByteArray chromaInverseShaderSource()
+{
+    /* YCbCr -> RGB (raw_processing.c convert_YCbCr_to_rgb_omp). */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform sampler2D invCr;\n"
+        "uniform sampler2D invCb;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 chromaLut(sampler2D lut, float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(lut, uv).rgb;\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec3 ycc = floor(texture2D(src, vTexCoord).rgb * 65535.0 + 0.5);\n"
+        "    vec3 icr = chromaLut(invCr, ycc.b);\n"
+        "    vec3 icb = chromaLut(invCb, ycc.g);\n"
+        "    float R = ycc.r + icr.r;\n"
+        "    float G = ycc.r + icb.r + icr.g;\n"
+        "    float B = ycc.r + icb.g;\n"
+        "    gl_FragColor = vec4(clamp(vec3(R, G, B), 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+/* 256x256 RGBA32F LUT: texel[j] = ((int)((j-bias)*cR), (int)((j-bias)*cG),
+ * (int)((j-bias)*cB), 0), matching the engine cs_zone LUT build
+ * ((int32)((double)j*coeff)). bias=0 forward, 32768 inverse. */
+QByteArray packChromaLutRgba32F(double cR, double cG, double cB, int bias)
+{
+    QByteArray packed(256 * 256 * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    for (int j = 0; j < 65536; ++j)
+    {
+        const double d = static_cast<double>(j - bias);
+        dst[j * 4 + 0] = static_cast<float>(static_cast<int>(d * cR));
+        dst[j * 4 + 1] = static_cast<float>(static_cast<int>(d * cG));
+        dst[j * 4 + 2] = static_cast<float>(static_cast<int>(d * cB));
+        dst[j * 4 + 3] = 0.0f;
+    }
+    return packed;
+}
+
+QOpenGLTexture * createChromaLutTexture()
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(256, 256);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+}
+
+static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int radius,
+                                   QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("chroma post-pass invalid buffer"));
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram forwardProgram, inverseProgram, blurProgram;
+    const QByteArray vs = gpuPreviewProcessingVertexShaderSource();
+    auto buildProg = [&](QOpenGLShaderProgram & p, const QByteArray & fs) -> bool {
+        return p.addShaderFromSourceCode(QOpenGLShader::Vertex, vs)
+            && p.addShaderFromSourceCode(QOpenGLShader::Fragment, fs)
+            && p.link();
+    };
+    if ( !buildProg(forwardProgram, chromaForwardShaderSource())
+      || !buildProg(inverseProgram, chromaInverseShaderSource())
+      || !buildProg(blurProgram, gpuPreviewProcessingBoxBlurFragmentShaderSource()) )
+    {
+        context.doneCurrent();
+        return fail(QStringLiteral("chroma shader setup failed"));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLTexture * fwdR = createChromaLutTexture();
+    QOpenGLTexture * fwdG = createChromaLutTexture();
+    QOpenGLTexture * fwdB = createChromaLutTexture();
+    QOpenGLTexture * invCr = createChromaLutTexture();
+    QOpenGLTexture * invCb = createChromaLutTexture();
+    {
+        const QByteArray a = packChromaLutRgba32F(0.299, -0.168736, 0.0, 0);
+        const QByteArray b = packChromaLutRgba32F(0.587, -0.331264, -0.418688, 0);
+        const QByteArray c = packChromaLutRgba32F(0.114, -0.081312, 0.0, 0);
+        const QByteArray d = packChromaLutRgba32F(1.402, -0.714136, 0.0, 32768);
+        const QByteArray e = packChromaLutRgba32F(-0.344136, 1.772, 0.0, 32768);
+        fwdR->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, a.constData());
+        fwdG->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, b.constData());
+        fwdB->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, c.constData());
+        invCr->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, d.constData());
+        invCb->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, e.constData());
+    }
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fboA(width, height, fmt);
+    QOpenGLFramebufferObject fboB(width, height, fmt);
+    QOpenGLFramebufferObject fboC(width, height, fmt);
+    if ( !fboA.isValid() || !fboB.isValid() || !fboC.isValid() )
+    {
+        delete srcTexture; delete fwdR; delete fwdG; delete fwdB; delete invCr; delete invCb;
+        context.doneCurrent();
+        return fail(QStringLiteral("chroma framebuffer creation failed"));
+    }
+
+    auto drawQuad = [&](QOpenGLShaderProgram & p) {
+        const int posLoc = p.attributeLocation("position");
+        const int texLoc = p.attributeLocation("texCoord");
+        p.enableAttributeArray(posLoc);
+        p.enableAttributeArray(texLoc);
+        p.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+        p.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+        gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        gl->glFinish();
+        p.disableAttributeArray(posLoc);
+        p.disableAttributeArray(texLoc);
+    };
+    auto beginPass = [&](QOpenGLFramebufferObject & fbo) {
+        fbo.bind();
+        gl->glViewport(0, 0, width, height);
+        gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+        gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    };
+
+    beginPass(fboA);
+    forwardProgram.bind();
+    forwardProgram.setUniformValue("src", 0);
+    forwardProgram.setUniformValue("fwdR", 1);
+    forwardProgram.setUniformValue("fwdG", 2);
+    forwardProgram.setUniformValue("fwdB", 3);
+    gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, srcTexture->textureId());
+    fwdR->bind(1); fwdG->bind(2); fwdB->bind(3);
+    drawQuad(forwardProgram);
+    forwardProgram.release();
+    fboA.release();
+
+    GLuint ycctex = fboA.texture();
+    if ( radius > 0 )
+    {
+        auto blurPass = [&](GLuint inTex, QOpenGLFramebufferObject & target, float horizontal) {
+            beginPass(target);
+            blurProgram.bind();
+            blurProgram.setUniformValue("src", 0);
+            blurProgram.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+            blurProgram.setUniformValue("radius", static_cast<float>(radius));
+            blurProgram.setUniformValue("horizontal", horizontal);
+            blurProgram.setUniformValue("channelMask", QVector3D(0.0f, 1.0f, 1.0f));
+            gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, inTex);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            gl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            drawQuad(blurProgram);
+            blurProgram.release();
+            target.release();
+        };
+        blurPass(fboA.texture(), fboB, 1.0f);
+        blurPass(fboB.texture(), fboC, 0.0f);
+        ycctex = fboC.texture();
+    }
+
+    QOpenGLFramebufferObject & finalFbo = (ycctex == fboB.texture()) ? fboA : fboB;
+    beginPass(finalFbo);
+    inverseProgram.bind();
+    inverseProgram.setUniformValue("src", 0);
+    inverseProgram.setUniformValue("invCr", 1);
+    inverseProgram.setUniformValue("invCb", 2);
+    gl->glActiveTexture(GL_TEXTURE0); gl->glBindTexture(GL_TEXTURE_2D, ycctex);
+    invCr->bind(1); invCb->bind(2);
+    drawQuad(inverseProgram);
+    inverseProgram.release();
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    finalFbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    delete srcTexture; delete fwdR; delete fwdG; delete fwdB; delete invCr; delete invCb;
+    context.doneCurrent();
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray sharpenShaderSource()
+{
+    /* Fixed 5-tap cross sharpen (raw_processing.c:1911-1915):
+     * sharp = ka[center] - ky[up] - ky[down] - kx[left] - kx[right], clamped.
+     * sharpLut holds (ka, kx, ky) per value. First/last column pass through; rows
+     * clamp to edge. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform sampler2D sharpLut;\n"
+        "varying vec2 vTexCoord;\n"
+        "vec3 slut(float v)\n"
+        "{\n"
+        "    float i = clamp(v, 0.0, 65535.0);\n"
+        "    vec2 uv = (vec2(mod(i, 256.0), floor(i / 256.0)) + vec2(0.5)) / 256.0;\n"
+        "    return texture2D(sharpLut, uv).rgb;\n"
+        "}\n"
+        "vec3 fetch(vec2 p)\n"
+        "{\n"
+        "    return floor(texture2D(src, (p + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "}\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    vec3 center = fetch(px);\n"
+        "    if (px.x < 0.5 || px.x > texSize.x - 1.5)\n"
+        "    {\n"
+        "        gl_FragColor = vec4(center / 65535.0, 1.0);\n"
+        "        return;\n"
+        "    }\n"
+        "    vec3 left  = fetch(vec2(px.x - 1.0, px.y));\n"
+        "    vec3 right = fetch(vec2(px.x + 1.0, px.y));\n"
+        "    vec3 up    = fetch(vec2(px.x, max(px.y - 1.0, 0.0)));\n"
+        "    vec3 down  = fetch(vec2(px.x, min(px.y + 1.0, texSize.y - 1.0)));\n"
+        "    vec3 sharp;\n"
+        "    sharp.r = slut(center.r).r - slut(up.r).b - slut(down.r).b - slut(left.r).g - slut(right.r).g;\n"
+        "    sharp.g = slut(center.g).r - slut(up.g).b - slut(down.g).b - slut(left.g).g - slut(right.g).g;\n"
+        "    sharp.b = slut(center.b).r - slut(up.b).b - slut(down.b).b - slut(left.b).g - slut(right.b).g;\n"
+        "    gl_FragColor = vec4(clamp(sharp, 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+
+/* 256x256 RGBA32F LUT: texel[v] = (ka=(uint32)(v*a), kx=LIMIT16(v*x),
+ * ky=LIMIT16(v*y), 0), matching processingSetSharpening. */
+QByteArray packSharpenLutRgba32F(double a, double x, double y)
+{
+    QByteArray packed(256 * 256 * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    for (int v = 0; v < 65536; ++v)
+    {
+        dst[v * 4 + 0] = static_cast<float>(static_cast<uint32_t>(static_cast<double>(v) * a));
+        int kxv = static_cast<int>(static_cast<double>(v) * x); kxv = kxv < 0 ? 0 : (kxv > 65535 ? 65535 : kxv);
+        int kyv = static_cast<int>(static_cast<double>(v) * y); kyv = kyv < 0 ? 0 : (kyv > 65535 ? 65535 : kyv);
+        dst[v * 4 + 1] = static_cast<float>(kxv);
+        dst[v * 4 + 2] = static_cast<float>(kyv);
+        dst[v * 4 + 3] = 0.0f;
+    }
+    return packed;
+}
+}
+
+static bool applySharpenPostPassGpu(uint16_t * img, int width, int height,
+                                    double a, double x, double y,
+                                    QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("sharpen post-pass invalid buffer"));
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram program;
+    if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, gpuPreviewProcessingVertexShaderSource())
+      || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, sharpenShaderSource())
+      || !program.link() )
+    {
+        const QString log = program.log();
+        context.doneCurrent();
+        return fail(QStringLiteral("sharpen shader setup failed: %1").arg(log));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+    QOpenGLTexture * sharpLut = createChromaLutTexture();
+    const QByteArray lutBytes = packSharpenLutRgba32F(a, x, y);
+    sharpLut->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lutBytes.constData());
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fbo(width, height, fmt);
+    if ( !fbo.isValid() )
+    {
+        delete srcTexture; delete sharpLut;
+        context.doneCurrent();
+        return fail(QStringLiteral("sharpen framebuffer creation failed"));
+    }
+
+    fbo.bind();
+    gl->glViewport(0, 0, width, height);
+    gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+    gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    program.bind();
+    program.setUniformValue("src", 0);
+    program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("sharpLut", 1);
+    srcTexture->bind(0);
+    sharpLut->bind(1);
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+    program.enableAttributeArray(posLoc);
+    program.enableAttributeArray(texLoc);
+    program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+    program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+    gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    gl->glFinish();
+    program.disableAttributeArray(posLoc);
+    program.disableAttributeArray(texLoc);
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture; delete sharpLut;
+    context.doneCurrent();
+    if ( reason ) reason->clear();
+    return true;
+}
+
+namespace
+{
+QByteArray medianShaderSource()
+{
+    /* Per-pixel square-window median (the middle order statistic, found by counting
+     * so any sort order yields the same value) blended with the original by
+     * strength (denoiser_2d_median.c). Window up to 5x5 (25 samples). Border pixels
+     * (within window/2 of an edge) pass through. */
+    return QByteArrayLiteral(
+        "uniform sampler2D src;\n"
+        "uniform vec2 texSize;\n"
+        "uniform float windowF;\n"
+        "uniform float edgeF;\n"
+        "uniform float middleF;\n"
+        "uniform float strengthF;\n"
+        "varying vec2 vTexCoord;\n"
+        "void main()\n"
+        "{\n"
+        "    vec2 px = floor(vTexCoord * texSize);\n"
+        "    vec3 center = floor(texture2D(src, (px + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "    if (px.x < edgeF - 0.5 || px.x > texSize.x - edgeF - 0.5 ||\n"
+        "        px.y < edgeF - 0.5 || px.y > texSize.y - edgeF - 0.5)\n"
+        "    {\n"
+        "        gl_FragColor = vec4(center / 65535.0, 1.0);\n"
+        "        return;\n"
+        "    }\n"
+        "    float wr[25]; float wg[25]; float wb[25];\n"
+        "    int n = 0;\n"
+        "    for (int fx = 0; fx < 5; fx++)\n"
+        "    {\n"
+        "        if (float(fx) >= windowF) break;\n"
+        "        for (int fy = 0; fy < 5; fy++)\n"
+        "        {\n"
+        "            if (float(fy) >= windowF) break;\n"
+        "            vec2 wpx = vec2(px.x + float(fx) - edgeF, px.y + float(fy) - edgeF);\n"
+        "            vec3 s = floor(texture2D(src, (wpx + vec2(0.5)) / texSize).rgb * 65535.0 + 0.5);\n"
+        "            wr[n] = s.r; wg[n] = s.g; wb[n] = s.b;\n"
+        "            n++;\n"
+        "        }\n"
+        "    }\n"
+        "    int mid = int(middleF + 0.5);\n"
+        "    vec3 med = vec3(0.0);\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wr[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wr[b] < cand) less++;\n"
+        "            if (wr[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.r = cand; break; }\n"
+        "    }\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wg[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wg[b] < cand) less++;\n"
+        "            if (wg[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.g = cand; break; }\n"
+        "    }\n"
+        "    for (int a = 0; a < 25; a++)\n"
+        "    {\n"
+        "        if (a >= n) break;\n"
+        "        float cand = wb[a];\n"
+        "        int less = 0; int leq = 0;\n"
+        "        for (int b = 0; b < 25; b++)\n"
+        "        {\n"
+        "            if (b >= n) break;\n"
+        "            if (wb[b] < cand) less++;\n"
+        "            if (wb[b] <= cand) leq++;\n"
+        "        }\n"
+        "        if (less <= mid && mid < leq) { med.b = cand; break; }\n"
+        "    }\n"
+        "    vec3 outv = floor(strengthF * med + (1.0 - strengthF) * center);\n"
+        "    gl_FragColor = vec4(clamp(outv, 0.0, 65535.0) / 65535.0, 1.0);\n"
+        "}\n");
+}
+}
+
+static bool applyMedianPostPassGpu(uint16_t * img, int width, int height,
+                                   int window, int strength,
+                                   QString * reason, QString * rendererDescription)
+{
+    auto fail = [&](const QString & why) -> bool { if ( reason ) *reason = why; return false; };
+    if ( !img || width <= 0 || height <= 0 ) return fail(QStringLiteral("median post-pass invalid buffer"));
+    if ( strength > 100 ) strength = 100;
+    const int winSize = window * window;
+    const int edge = window / 2;
+    const int middle = winSize / 2;
+    if ( strength == 0 || window == 0 || width <= edge * 2 || height <= edge * 2 )
+    {
+        if ( reason ) reason->clear();
+        return true;  /* engine no-op cases */
+    }
+
+    QOffscreenSurface surface;
+    QOpenGLContext context;
+    QOpenGLFunctions * gl = nullptr;
+    if ( !makePreviewProcessingContextCurrent(&surface, &context, &gl, reason, rendererDescription) )
+        return false;
+
+    QOpenGLShaderProgram program;
+    if ( !program.addShaderFromSourceCode(QOpenGLShader::Vertex, gpuPreviewProcessingVertexShaderSource())
+      || !program.addShaderFromSourceCode(QOpenGLShader::Fragment, medianShaderSource())
+      || !program.link() )
+    {
+        const QString log = program.log();
+        context.doneCurrent();
+        return fail(QStringLiteral("median shader setup failed: %1").arg(log));
+    }
+
+    const QByteArray packedFrame = packRgb16Texture(img, width * height);
+    QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
+
+    QOpenGLFramebufferObjectFormat fmt;
+    fmt.setAttachment(QOpenGLFramebufferObject::NoAttachment);
+    fmt.setTextureTarget(GL_TEXTURE_2D);
+    fmt.setInternalTextureFormat(GL_RGBA16);
+    QOpenGLFramebufferObject fbo(width, height, fmt);
+    if ( !fbo.isValid() )
+    {
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("median framebuffer creation failed"));
+    }
+
+    fbo.bind();
+    gl->glViewport(0, 0, width, height);
+    gl->glDisable(GL_DEPTH_TEST); gl->glDisable(GL_BLEND);
+    gl->glClearColor(0.0f, 0.0f, 0.0f, 1.0f); gl->glClear(GL_COLOR_BUFFER_BIT);
+    program.bind();
+    program.setUniformValue("src", 0);
+    program.setUniformValue("texSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("windowF", static_cast<float>(window));
+    program.setUniformValue("edgeF", static_cast<float>(edge));
+    program.setUniformValue("middleF", static_cast<float>(middle));
+    program.setUniformValue("strengthF", static_cast<float>(strength) / 100.0f);
+    srcTexture->bind(0);
+    const int posLoc = program.attributeLocation("position");
+    const int texLoc = program.attributeLocation("texCoord");
+    program.enableAttributeArray(posLoc);
+    program.enableAttributeArray(texLoc);
+    program.setAttributeArray(posLoc, GL_FLOAT, kQuadVertices, 2, 4 * sizeof(GLfloat));
+    program.setAttributeArray(texLoc, GL_FLOAT, kQuadVertices + 2, 2, 4 * sizeof(GLfloat));
+    gl->glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    gl->glFinish();
+    program.disableAttributeArray(posLoc);
+    program.disableAttributeArray(texLoc);
+
+    QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
+    gl->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
+    fbo.release();
+
+    const uint16_t * px = reinterpret_cast<const uint16_t *>(readback.constData());
+    for (int i = 0; i < width * height; ++i)
+    {
+        img[i * 3 + 0] = px[i * 4 + 0];
+        img[i * 3 + 1] = px[i * 4 + 1];
+        img[i * 3 + 2] = px[i * 4 + 2];
+    }
+
+    program.release();
+    delete srcTexture;
+    context.doneCurrent();
     if ( reason ) reason->clear();
     return true;
 }

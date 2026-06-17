@@ -158,7 +158,6 @@ std::vector<uint16_t> BackendParametricFixture::renderPreviewProcessingSubset(
     }
 
     std::vector<uint16_t> output(debayered.size(), 0);
-    const int pixel_count = width() * height();
 
     switch (backend)
     {
@@ -166,7 +165,8 @@ std::vector<uint16_t> BackendParametricFixture::renderPreviewProcessingSubset(
         gpuPreviewProcessingApplyCpuReference(config,
                                               debayered.data(),
                                               output.data(),
-                                              pixel_count);
+                                              width(),
+                                              height());
         return output;
 
     case Backend::Gpu:

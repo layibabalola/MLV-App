@@ -204,6 +204,28 @@ before the support gate relaxes for that stage. P-pre — and the honest GUI
 "GPU · Full Quality · AMaZE" claim per §8 stage 2 — completes when every creative
 stage reaches parity.
 
+### 8.2 Spatial-stages phase (completing P-pre beyond the creative family)
+
+Update 2026-06-17: the creative family + the tractable non-creative per-pixel
+stages (gamut / AgX / vignette / 1D-3D LUT) are ported and 4090-validated. The
+remaining gate rejects were recon'd stage-by-stage and scoped in
+[`gpu-lane-spatial-stages-scoping.md`](gpu-lane-spatial-stages-scoping.md). Key
+correction to the earlier "the rest all need a blur pre-pass" assumption: most
+remaining rejects are actually **per-pixel** (highlight reconstruction, gradient,
+grain, creative filter) and only **chroma blur / sharpen / median** genuinely
+need a neighborhood pass; **shadows/highlights, clarity, RBF denoise and CA** are
+inherently **sequential** (a recursive bilateral filter / edge-window scan) and
+are recommended to stay **CPU-fallback by design** (roadmap §9 honesty), not
+bit-exact GPU ports. Two hard constraints drive the ranking: the shader is
+**GLSL 110** (no bitwise ops/`uint`/`%` — all integer math float-emulated, which
+blocks bit-exact grain and the NN sigmoid) and the **strict parity gate**
+(≤16 LSB). The box blur (`blur_image`) is a separable integer box, bit-exactly
+reproducible and validated in isolation before any consumer is wired. Order:
+A) per-pixel bit-exact (highlight-recon → gradient); B) box-blur FBO infra +
+chroma/sharpen/median; C) explicit CPU-fallback decision for the recursive
+stages. See the scoping doc for the per-stage primitive table, apply-order map,
+and the box-blur bit-exactness analysis.
+
 ## 9. UI truth / status language
 
 Always surface the active path, quietly (no fake green lights, no alarms unless the user asked for GPU-only):

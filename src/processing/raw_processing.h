@@ -16,6 +16,25 @@ void freeProcessingObject(processingObject_t * processing);
 /* Set processing gamut */
 void processingSetGamut(processingObject_t * processing, int gamut);
 int processingGetGamut(processingObject_t * processing);
+/* Luma weights (rgb_to_Y) for a colour gamut: the second row of the inverse of
+ * the gamut's RGB->XYZ matrix, matching the per-gamut derivation in the main
+ * processing loop. Lets the GPU preview config use gamut-correct gamut-
+ * compression weights instead of assuming Rec709. Explicit C linkage so the C++
+ * GPU-preview TU (which includes this header without an extern "C" wrap and is
+ * the only one that calls a raw_processing function directly) resolves the C
+ * symbol that raw_processing.c (compiled as C) actually exports. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+void processingGamutRgbToY(int colour_gamut, double out_rgb_to_Y[3]);
+/* AgX compressed-gamut matrix (forward) and its inverse, for the GPU preview
+ * port of the AgX stage. Computed in the engine TU (where the file-scope
+ * agx_compressed_matrix and invertMatrix live) so the C++ TU never references
+ * the engine global directly. */
+void processingAgxMatrices(double out_forward[9], double out_inverse[9]);
+#ifdef __cplusplus
+}
+#endif
 #define GAMUT_Rec709 0
 #define GAMUT_Rec2020 1
 #define GAMUT_ACES_AP0 2

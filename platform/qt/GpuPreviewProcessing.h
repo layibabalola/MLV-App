@@ -29,6 +29,47 @@ struct GpuPreviewProcessingConfig
     float saturation = 1.0f;
     bool applyHueVs = false;
     bool applyInLoopContrast = false;
+    bool applyAgx = false;
+    float agxForward[9] = { 0.0f };
+    float agxInverse[9] = { 0.0f };
+    bool applyVignette = false;
+    int vignetteStrength = 0;
+    QByteArray vignetteMask;
+    bool applyLut = false;
+    bool lut3d = false;
+    int lutDimension = 0;
+    float lutIntensity = 1.0f;
+    float lutDomainMin[3] = { 0.0f, 0.0f, 0.0f };
+    float lutDomainMax[3] = { 1.0f, 1.0f, 1.0f };
+    QByteArray lutCube;
+    bool applyHighlightReconstruction = false;
+    bool highlightReconDualIso = false;
+    int highestGreen = 0;
+    int highestGreenDiso = 0;
+    bool applyGradient = false;
+    bool applyGradientContrast = false;
+    int gradientHighestGreen = 0;
+    int gradientHighestGreenDiso = 0;
+    QByteArray gradientMatrixLutR;
+    QByteArray gradientMatrixLutG;
+    QByteArray gradientMatrixLutB;
+    QByteArray gradientGammaLut;
+    QByteArray gradientContrastCurve;
+    bool applyChroma = false;
+    int chromaBlurRadius = 0;
+    bool applySharpen = false;
+    double sharpenA = 1.0;
+    double sharpenX = 0.0;
+    double sharpenY = 0.0;
+    bool applyMedian = false;
+    int medianWindow = 0;
+    int medianStrength = 0;
+    /* Raw pointer into processing->gradient_mask (uint16, frame-sized). The
+     * gradient mask has no companion length on the processing object, so it is
+     * carried as a pointer and read by the callers, which know the frame
+     * dimensions (CPU reference by pixel index, GPU offscreen by width*height).
+     * Production must keep this current per frame (like highest_green_diso). */
+    const uint16_t * gradientMaskData = nullptr;
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;
@@ -65,7 +106,8 @@ GpuPreviewProcessingBackendAvailability gpuPreviewProcessingProbeGpuBackend(void
 void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,
-                                           int pixelCount);
+                                           int width,
+                                           int height);
 bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & config,
                                            const uint16_t * inputRgb16,
                                            uint16_t * outputRgb16,
@@ -73,5 +115,25 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
                                            int height,
                                            QString * reason = nullptr,
                                            QString * rendererDescription = nullptr);
+
+/* Separable integer box blur on the GPU, the bit-exact reproduction of the
+ * engine's blur_image (processing.c:589): two render-to-texture passes
+ * (horizontal then vertical), each summing the (2*radius+1)-tap window with a
+ * truncating integer divide and GL_CLAMP_TO_EDGE addressing. This is the
+ * keystone pre-pass for the spatial stages (chroma blur / sharpen / median).
+ * do_r/do_g/do_b select which interleaved channels are blurred (disabled
+ * channels pass through), matching blur_image's channel flags. Radius must be
+ * <= 127 so the integer window sum stays exact in float32. */
+QByteArray gpuPreviewProcessingBoxBlurFragmentShaderSource(void);
+bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
+                                               uint16_t * outputRgb16,
+                                               int width,
+                                               int height,
+                                               int radius,
+                                               bool doR,
+                                               bool doG,
+                                               bool doB,
+                                               QString * reason = nullptr,
+                                               QString * rendererDescription = nullptr);
 
 #endif // GPUPREVIEWPROCESSING_H

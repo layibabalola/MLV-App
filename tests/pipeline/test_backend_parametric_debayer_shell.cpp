@@ -167,7 +167,8 @@ std::vector<uint16_t> apply_p_pre_processing_frame(
         gpuPreviewProcessingApplyCpuReference(config,
                                               debayered.data(),
                                               output.data(),
-                                              fixture.width() * fixture.height());
+                                              fixture.width(),
+                                              fixture.height());
         return output;
 
     case BackendParametricFixture::Backend::Gpu:
