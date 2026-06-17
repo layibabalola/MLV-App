@@ -32,6 +32,9 @@ struct GpuPreviewProcessingConfig
     bool applyAgx = false;
     float agxForward[9] = { 0.0f };
     float agxInverse[9] = { 0.0f };
+    bool applyVignette = false;
+    int vignetteStrength = 0;
+    QByteArray vignetteMask;
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;

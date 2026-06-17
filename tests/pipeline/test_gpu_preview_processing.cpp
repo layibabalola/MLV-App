@@ -350,9 +350,13 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("shadows/highlights enabled"),
         [](processingObject_t * processing) { processing->shadows_highlights.shadows = 0.25; });
     assert_gpu_preview_rejects_processing_feature(
-        "vignette",
-        QStringLiteral("vignette enabled"),
-        [](processingObject_t * processing) { processing->vignette_strength = 1; });
+        "vignette_no_mask",
+        QStringLiteral("vignette mask unavailable"),
+        [](processingObject_t * processing) {
+            processing->vignette_strength = 1;
+            processing->vignette_mask = nullptr;
+            processing->vignette_end = nullptr;
+        });
 }
 
 TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
@@ -599,6 +603,34 @@ TEST(GpuPreviewProcessing, AgXIsSupportedAndMatchesCpuReference)
     ASSERT_NE(base.signature, agx.signature);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, agx, "agx");
+}
+
+TEST(GpuPreviewProcessing, VignetteIsSupportedAndMatchesCpuReference)
+{
+    /* Vignette is the first position-dependent stage: a per-pixel exposure
+     * multiply by a full-frame mask, applied with the vmpix pre-increment off-by-
+     * one. Build an ASYMMETRIC mask (xStretch != yStretch) so a raster-flip bug in
+     * the GPU mask sampling changes the output (a symmetric 4-way-mirrored mask
+     * could hide it). Verify the gate accepts it, the config carries the frame-
+     * sized mask, and the GPU offscreen output matches the CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+
+    processingSetVignetteMask(fixture.processing(), static_cast<uint16_t>(fixture.width()),
+                              static_cast<uint16_t>(fixture.height()), 0.5f, 0.2f, 1.0f, 1.4f);
+    processingSetVignetteStrength(fixture.processing(), 60);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig vig =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(vig.enabled);
+    ASSERT_TRUE(vig.applyVignette);
+    ASSERT_EQ(static_cast<int>(static_cast<size_t>(fixture.width()) * fixture.height() * sizeof(float)),
+              vig.vignetteMask.size());
+    ASSERT_NE(base.signature, vig.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, vig, "vignette");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)

@@ -210,7 +210,8 @@ void previewFromHSVtoRGB(const float hsv[3], float rgb[3])
 
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
-                                 uint16_t * outputPixel)
+                                 uint16_t * outputPixel,
+                                 int pixelIndex)
 {
     float color[3];
     for (int channel = 0; channel < 3; ++channel)
@@ -223,6 +224,29 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     matrixApplied[0] = sampleNormalizedLut(config.matrixLutR, color[0]);
     matrixApplied[1] = sampleNormalizedLut(config.matrixLutG, color[1]);
     matrixApplied[2] = sampleNormalizedLut(config.matrixLutB, color[2]);
+
+    if ( config.applyVignette )
+    {
+        /* Vignette: a per-pixel exposure multiply, the first expo_correction
+         * contributor (raw_processing.c:2881-2889). The engine pre-increments the
+         * mask pointer before reading, so pixel i uses mask[i+1]; the last pixel
+         * (i+1 >= count) skips the multiply (the vignette_end guard). expo_correction
+         * is applied to the matrix value before camera-WB, so it multiplies
+         * matrixApplied here (commutes with the in-loop-contrast multiply). The
+         * whole-frame flat index matches the GPU's single-pass contract (the engine's
+         * per-OpenMP-chunk off-by-one is not reproduced; documented). */
+        const int maskCount = static_cast<int>(config.vignetteMask.size() / static_cast<int>(sizeof(float)));
+        const int maskIdx = pixelIndex + 1;
+        if ( maskIdx < maskCount )
+        {
+            const float m = reinterpret_cast<const float *>(config.vignetteMask.constData())[maskIdx];
+            const double base = 1.0 + (static_cast<double>(m) * config.vignetteStrength / 128.0);
+            const float vfactor = static_cast<float>(std::pow(base, 4.0));
+            matrixApplied[0] *= vfactor;
+            matrixApplied[1] *= vfactor;
+            matrixApplied[2] *= vfactor;
+        }
+    }
 
     if ( config.applyInLoopContrast )
     {
@@ -546,6 +570,21 @@ QOpenGLTexture * createContrastCurveTexture()
     QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
     texture->setFormat(QOpenGLTexture::R32F);
     texture->setSize(kLutTextureEdge, kLutTextureEdge);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* The vignette mask is a full-frame R32F texture (one texel per source pixel,
+ * raster-ordered to match the CPU debayered buffer). Dynamic width x height,
+ * unlike the fixed-size LUT textures. */
+QOpenGLTexture * createVignetteMaskTexture(int width, int height)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::R32F);
+    texture->setSize(width, height);
     texture->setMipLevels(1);
     texture->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::Float32);
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
@@ -912,6 +951,10 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform vec3 previewAgxInv0;\n"
         "uniform vec3 previewAgxInv1;\n"
         "uniform vec3 previewAgxInv2;\n"
+        "uniform sampler2D vignetteMask;\n"
+        "uniform float previewApplyVignette;\n"
+        "uniform float previewVignetteStrength;\n"
+        "uniform vec2 frameSize;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -1016,6 +1059,20 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    }\n"
         "    vec3 leveled = vec3(sampleU16Lut(levelsLut, color.r), sampleU16Lut(levelsLut, color.g), sampleU16Lut(levelsLut, color.b));\n"
         "    vec3 matrixApplied = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b));\n"
+        "    if (previewApplyVignette > 0.5)\n"
+        "    {\n"
+        "        vec2 fc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
+        "        float idx = floor(fc.y) * frameSize.x + floor(fc.x) + 1.0;\n"
+        "        if (idx < frameSize.x * frameSize.y)\n"
+        "        {\n"
+        "            float mx = mod(idx, frameSize.x);\n"
+        "            float my = floor(idx / frameSize.x);\n"
+        "            float m = texture2D(vignetteMask, (vec2(mx, my) + vec2(0.5)) / frameSize).r;\n"
+        "            float base = 1.0 + (m * previewVignetteStrength / 128.0);\n"
+        "            float b2 = base * base;\n"
+        "            matrixApplied *= b2 * b2;\n"
+        "        }\n"
+        "    }\n"
         "    if (previewApplyInLoopContrast > 0.5)\n"
         "    {\n"
         "        vec3 m16 = floor(matrixApplied * 65535.0 + 0.5);\n"
@@ -1206,7 +1263,14 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     {
         return reject(QStringLiteral("shadows/highlights enabled"));
     }
-    if ( processing->vignette_strength != 0 ) return reject(QStringLiteral("vignette enabled"));
+    /* Vignette is supported via a full-frame R32F mask texture sampled by the
+     * fragment's raster index (the vmpix off-by-one + vignette_end guard mirrored).
+     * Reject only when the strength is set but the mask buffer was never built
+     * (the subset cannot reproduce vignette without the mask). */
+    if ( processing->vignette_strength != 0 && processing->vignette_mask == NULL )
+    {
+        return reject(QStringLiteral("vignette mask unavailable"));
+    }
     /* Non-Rec709 gamut is now supported: the gamut is baked into proper_wb_matrix
      * (already applied in-shader) and the gamut-compression luma weights are
      * derived per-gamut in gpuPreviewProcessingBuildConfig (rgbToY). No reject. */
@@ -1346,6 +1410,29 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             config.agxInverse[index] = static_cast<float>(inv[index]);
         }
     }
+    config.applyVignette = processing->vignette_strength != 0;
+    config.vignetteStrength = processing->vignette_strength;
+    if ( config.applyVignette )
+    {
+        /* The vignette mask is a full-resolution float[w*h] alpha buffer
+         * (processing_object.h:209), copied verbatim. Application matches
+         * raw_processing.c:2881-2889: expo_correction *= pow(1 + mask*strength/128,
+         * 4), with the vmpix pre-increment (pixel i reads mask[i+1]) and the
+         * vignette_end guard (last pixel skips). The gate already failed closed if
+         * the mask was unbuilt, so it is non-null here. */
+        const float * mask = processing->vignette_mask;
+        const ptrdiff_t count = (mask && processing->vignette_end > mask)
+            ? (processing->vignette_end - mask) : 0;
+        if ( count > 0 )
+        {
+            config.vignetteMask = QByteArray(reinterpret_cast<const char *>(mask),
+                                             static_cast<int>(count * static_cast<ptrdiff_t>(sizeof(float))));
+        }
+        else
+        {
+            config.applyVignette = false;
+        }
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1389,6 +1476,9 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyAgx, sizeof(config.applyAgx));
     hash = fnv1a64_append(hash, config.agxForward, sizeof(config.agxForward));
     hash = fnv1a64_append(hash, config.agxInverse, sizeof(config.agxInverse));
+    hash = fnv1a64_append(hash, &config.applyVignette, sizeof(config.applyVignette));
+    hash = fnv1a64_append(hash, &config.vignetteStrength, sizeof(config.vignetteStrength));
+    hash = fnv1a64_append(hash, config.vignetteMask.constData(), static_cast<size_t>(config.vignetteMask.size()));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1459,7 +1549,7 @@ void gpuPreviewProcessingApplyCpuReference(const GpuPreviewProcessingConfig & co
     {
         const uint16_t * inputPixel = inputRgb16 + pixelIndex * 3;
         uint16_t * outputPixel = outputRgb16 + pixelIndex * 3;
-        applyPreviewProcessingPixel(config, inputPixel, outputPixel);
+        applyPreviewProcessingPixel(config, inputPixel, outputPixel, pixelIndex);
     }
 }
 
@@ -1568,6 +1658,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * hueVsLumaTexture = createCurveTexture();
     QOpenGLTexture * lumaVsSaturationTexture = createCurveTexture();
     QOpenGLTexture * inLoopContrastTexture = createContrastCurveTexture();
+    const bool vignetteReady = config.applyVignette
+        && config.vignetteMask.size() == static_cast<int>(static_cast<size_t>(width) * height * sizeof(float));
+    QOpenGLTexture * vignetteMaskTexture = createVignetteMaskTexture(
+        vignetteReady ? width : 1, vignetteReady ? height : 1);
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -1597,6 +1691,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsLumaBytes.constData());
     lumaVsSaturationTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, lumaVsSaturationBytes.constData());
     inLoopContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, inLoopContrastBytes.constData());
+    const float vignetteDummy = 0.0f;
+    vignetteMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32,
+                                 vignetteReady ? config.vignetteMask.constData()
+                                               : reinterpret_cast<const char *>(&vignetteDummy));
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -1622,6 +1720,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("hueVsLumaCurve", 13);
     program.setUniformValue("lumaVsSaturationCurve", 14);
     program.setUniformValue("inLoopContrastCurve", 15);
+    program.setUniformValue("vignetteMask", 16);
+    program.setUniformValue("previewApplyVignette", vignetteReady ? 1.0f : 0.0f);
+    program.setUniformValue("previewVignetteStrength", static_cast<float>(config.vignetteStrength));
+    program.setUniformValue("frameSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
     program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyInLoopContrast", config.applyInLoopContrast ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyAgx", config.applyAgx ? 1.0f : 0.0f);
@@ -1675,6 +1777,7 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->bind(13);
     lumaVsSaturationTexture->bind(14);
     inLoopContrastTexture->bind(15);
+    vignetteMaskTexture->bind(16);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -1714,6 +1817,7 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->release();
     lumaVsSaturationTexture->release();
     inLoopContrastTexture->release();
+    vignetteMaskTexture->release();
     program.release();
     fbo.release();
 
@@ -1733,6 +1837,7 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete hueVsLumaTexture;
     delete lumaVsSaturationTexture;
     delete inLoopContrastTexture;
+    delete vignetteMaskTexture;
     context.doneCurrent();
 
     if ( reason ) reason->clear();
