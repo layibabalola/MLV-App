@@ -290,6 +290,30 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         std::memcpy(matrixApplied, wbApplied, sizeof(matrixApplied));
     }
 
+    if ( config.applyAgx )
+    {
+        /* AgX forward, after WB/gamut and before gamma (raw_processing_8bit_kernel
+         * .inc:264-281): clip negatives, scale to 16-bit, apply the compressed-
+         * gamut matrix (double accumulation, float coeffs), then (uint16_t)LIMIT16
+         * = clamp+truncate, and renormalize so the gamma LUT indexes identically.
+         * preview routes through the direct8 kernel that this mirrors. */
+        double v[3];
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            v[channel] = static_cast<double>(matrixApplied[channel]) * 65535.0;
+            if ( v[channel] < 0.0 ) v[channel] = 0.0;
+        }
+        const double a[3] = {
+            v[0] * config.agxForward[0] + v[1] * config.agxForward[1] + v[2] * config.agxForward[2],
+            v[0] * config.agxForward[3] + v[1] * config.agxForward[4] + v[2] * config.agxForward[5],
+            v[0] * config.agxForward[6] + v[1] * config.agxForward[7] + v[2] * config.agxForward[8] };
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const double clamped = a[channel] < 0.0 ? 0.0 : (a[channel] > 65535.0 ? 65535.0 : a[channel]);
+            matrixApplied[channel] = static_cast<float>(static_cast<uint16_t>(clamped)) / 65535.0f;
+        }
+    }
+
     uint16_t gammaOut[3];
     for (int channel = 0; channel < 3; ++channel)
     {
@@ -430,6 +454,26 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
             value = sampleLut(perChannelGradation, value / 65535.0f);
         }
         outputPixel[channel] = value;
+    }
+
+    if ( config.applyAgx )
+    {
+        /* AgX inverse, at the very end after gamma + all creative stages
+         * (raw_processing_8bit_kernel.inc:358-368): undo the compressed-gamut
+         * matrix (double accumulation, float coeffs), then (uint16_t)LIMIT16 =
+         * clamp+truncate. */
+        const double f0 = static_cast<double>(outputPixel[0]);
+        const double f1 = static_cast<double>(outputPixel[1]);
+        const double f2 = static_cast<double>(outputPixel[2]);
+        const double iv[3] = {
+            f0 * config.agxInverse[0] + f1 * config.agxInverse[1] + f2 * config.agxInverse[2],
+            f0 * config.agxInverse[3] + f1 * config.agxInverse[4] + f2 * config.agxInverse[5],
+            f0 * config.agxInverse[6] + f1 * config.agxInverse[7] + f2 * config.agxInverse[8] };
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const double clamped = iv[channel] < 0.0 ? 0.0 : (iv[channel] > 65535.0 ? 65535.0 : iv[channel]);
+            outputPixel[channel] = static_cast<uint16_t>(clamped);
+        }
     }
 }
 
@@ -861,6 +905,13 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewSaturation;\n"
         "uniform float previewApplyHueVs;\n"
         "uniform float previewApplyInLoopContrast;\n"
+        "uniform float previewApplyAgx;\n"
+        "uniform vec3 previewAgxFwd0;\n"
+        "uniform vec3 previewAgxFwd1;\n"
+        "uniform vec3 previewAgxFwd2;\n"
+        "uniform vec3 previewAgxInv0;\n"
+        "uniform vec3 previewAgxInv1;\n"
+        "uniform vec3 previewAgxInv2;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -992,6 +1043,12 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        }\n"
         "        matrixApplied = wbApplied;\n"
         "    }\n"
+        "    if (previewApplyAgx > 0.5)\n"
+        "    {\n"
+        "        vec3 v = max(matrixApplied * 65535.0, 0.0);\n"
+        "        vec3 a = vec3(dot(previewAgxFwd0, v), dot(previewAgxFwd1, v), dot(previewAgxFwd2, v));\n"
+        "        matrixApplied = floor(clamp(a, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    matrixApplied = clamp(matrixApplied, 0.0, 1.0);\n"
         "    vec3 result = vec3(sampleU16Lut(gammaLut, matrixApplied.r), sampleU16Lut(gammaLut, matrixApplied.g), sampleU16Lut(gammaLut, matrixApplied.b));\n"
         "    if (previewApplyHueVs > 0.5)\n"
@@ -1055,6 +1112,12 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        result = vec3(sampleU16Lut(contrastCurveLut, result.r), sampleU16Lut(contrastCurveLut, result.g), sampleU16Lut(contrastCurveLut, result.b));\n"
         "        result = vec3(sampleU16Lut(gradationLutY, result.r), sampleU16Lut(gradationLutY, result.g), sampleU16Lut(gradationLutY, result.b));\n"
         "        result = vec3(sampleU16Lut(gradationLutR, result.r), sampleU16Lut(gradationLutG, result.g), sampleU16Lut(gradationLutB, result.b));\n"
+        "    }\n"
+        "    if (previewApplyAgx > 0.5)\n"
+        "    {\n"
+        "        vec3 f = result * 65535.0;\n"
+        "        vec3 iv = vec3(dot(previewAgxInv0, f), dot(previewAgxInv1, f), dot(previewAgxInv2, f));\n"
+        "        result = floor(clamp(iv, 0.0, 65535.0)) / 65535.0;\n"
         "    }\n"
         "    return result;\n"
         "}\n"
@@ -1124,7 +1187,9 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
     if ( processing->gradient_enable ) return reject(QStringLiteral("gradient enabled"));
     if ( processing->lut_on ) return reject(QStringLiteral("LUT enabled"));
     if ( processing->filter_on ) return reject(QStringLiteral("filter enabled"));
-    if ( processing->AgX ) return reject(QStringLiteral("AgX enabled"));
+    /* AgX is now supported: a forward compressed-gamut matmul before gamma and
+     * the inverse after the creative curves, carried as uniform matrices (no new
+     * textures). No reject. */
     /* EXR/cyan-highlight mode is compatible with the preview subset as long as
      * gamut compression stays disabled. The config builder already derives that
      * via applyGamutCompression = false, so do not reject it here. */
@@ -1265,6 +1330,22 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             dst[index] = static_cast<float>(processing->contrast_curve[index]);
         }
     }
+    config.applyAgx = processing->AgX != 0;
+    if ( config.applyAgx )
+    {
+        /* AgX is a forward compressed-gamut matmul before gamma + the inverse
+         * after the creative curves (raw_processing_8bit_kernel.inc:264-281 /
+         * 358-368). Carry float-narrowed copies of the engine's double matrices;
+         * +/-1 LSB vs the production double path, within the parity tolerance. */
+        double fwd[9] = { 0.0 };
+        double inv[9] = { 0.0 };
+        processingAgxMatrices(fwd, inv);
+        for (int index = 0; index < 9; ++index)
+        {
+            config.agxForward[index] = static_cast<float>(fwd[index]);
+            config.agxInverse[index] = static_cast<float>(inv[index]);
+        }
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1305,6 +1386,9 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyHueVs, sizeof(config.applyHueVs));
     hash = fnv1a64_append(hash, &config.applyInLoopContrast, sizeof(config.applyInLoopContrast));
     hash = fnv1a64_append(hash, &config.sourceContrast, sizeof(config.sourceContrast));
+    hash = fnv1a64_append(hash, &config.applyAgx, sizeof(config.applyAgx));
+    hash = fnv1a64_append(hash, config.agxForward, sizeof(config.agxForward));
+    hash = fnv1a64_append(hash, config.agxInverse, sizeof(config.agxInverse));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1540,6 +1624,13 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("inLoopContrastCurve", 15);
     program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyInLoopContrast", config.applyInLoopContrast ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyAgx", config.applyAgx ? 1.0f : 0.0f);
+    program.setUniformValue("previewAgxFwd0", QVector3D(config.agxForward[0], config.agxForward[1], config.agxForward[2]));
+    program.setUniformValue("previewAgxFwd1", QVector3D(config.agxForward[3], config.agxForward[4], config.agxForward[5]));
+    program.setUniformValue("previewAgxFwd2", QVector3D(config.agxForward[6], config.agxForward[7], config.agxForward[8]));
+    program.setUniformValue("previewAgxInv0", QVector3D(config.agxInverse[0], config.agxInverse[1], config.agxInverse[2]));
+    program.setUniformValue("previewAgxInv1", QVector3D(config.agxInverse[3], config.agxInverse[4], config.agxInverse[5]));
+    program.setUniformValue("previewAgxInv2", QVector3D(config.agxInverse[6], config.agxInverse[7], config.agxInverse[8]));
     program.setUniformValue("previewApplyCreativeCurves", config.applyCreativeCurves ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyToning", config.applyToning ? 1.0f : 0.0f);
     program.setUniformValue("previewToningGain",

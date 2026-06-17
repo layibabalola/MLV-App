@@ -314,10 +314,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("filter enabled"),
         [](processingObject_t * processing) { processing->filter_on = 1; });
     assert_gpu_preview_rejects_processing_feature(
-        "agx",
-        QStringLiteral("AgX enabled"),
-        [](processingObject_t * processing) { processing->AgX = 1; });
-    assert_gpu_preview_rejects_processing_feature(
         "median_denoiser",
         QStringLiteral("median denoiser enabled"),
         [](processingObject_t * processing) { processing->denoiserStrength = 1; });
@@ -580,6 +576,29 @@ TEST(GpuPreviewProcessing, NonRec709GamutIsSupportedAndMatchesCpuReference)
     ASSERT_NE(rec709.signature, rec2020.signature);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, rec2020, "gamut_rec2020");
+}
+
+TEST(GpuPreviewProcessing, AgXIsSupportedAndMatchesCpuReference)
+{
+    /* AgX used to fail closed. It is now supported: a forward compressed-gamut
+     * matmul before gamma and the inverse after the creative curves, carried as
+     * uniform matrices (engine-derived via processingAgxMatrices). Verify the gate
+     * accepts it, the config differs, and the GPU offscreen output matches the
+     * CPU reference. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+
+    processingEnableAgX(fixture.processing());
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig agx =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(agx.enabled);
+    ASSERT_TRUE(agx.applyAgx);
+    ASSERT_NE(base.signature, agx.signature);
+
+    assert_gpu_offscreen_matches_cpu_reference(fixture, agx, "agx");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)

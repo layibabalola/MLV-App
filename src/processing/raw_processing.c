@@ -5382,3 +5382,14 @@ void processingGamutRgbToY(int colour_gamut, double out_rgb_to_Y[3])
     invertMatrix(colour_gamuts[colour_gamut], inversemat);
     for (int i = 0; i < 3; ++i) out_rgb_to_Y[i] = inversemat[3 + i];
 }
+
+/* AgX forward (compressed-gamut) matrix and its inverse, mirroring how the main
+ * loop sources them (forward = the file-scope agx_compressed_matrix at ~613;
+ * inverse = invertMatrix(agx_compressed_matrix), as at ~2686). Both are in scope
+ * in this unity TU; exposed so the GPU-preview config can carry float-narrowed
+ * copies without referencing the engine global from C++. */
+void processingAgxMatrices(double out_forward[9], double out_inverse[9])
+{
+    for (int i = 0; i < 9; ++i) out_forward[i] = agx_compressed_matrix[i];
+    invertMatrix(agx_compressed_matrix, out_inverse);
+}

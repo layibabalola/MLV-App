@@ -29,6 +29,9 @@ struct GpuPreviewProcessingConfig
     float saturation = 1.0f;
     bool applyHueVs = false;
     bool applyInLoopContrast = false;
+    bool applyAgx = false;
+    float agxForward[9] = { 0.0f };
+    float agxInverse[9] = { 0.0f };
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;

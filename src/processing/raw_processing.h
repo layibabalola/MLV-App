@@ -27,6 +27,11 @@ int processingGetGamut(processingObject_t * processing);
 extern "C" {
 #endif
 void processingGamutRgbToY(int colour_gamut, double out_rgb_to_Y[3]);
+/* AgX compressed-gamut matrix (forward) and its inverse, for the GPU preview
+ * port of the AgX stage. Computed in the engine TU (where the file-scope
+ * agx_compressed_matrix and invertMatrix live) so the C++ TU never references
+ * the engine global directly. */
+void processingAgxMatrices(double out_forward[9], double out_inverse[9]);
 #ifdef __cplusplus
 }
 #endif
