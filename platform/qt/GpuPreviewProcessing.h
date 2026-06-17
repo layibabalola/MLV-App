@@ -35,6 +35,13 @@ struct GpuPreviewProcessingConfig
     bool applyVignette = false;
     int vignetteStrength = 0;
     QByteArray vignetteMask;
+    bool applyLut = false;
+    bool lut3d = false;
+    int lutDimension = 0;
+    float lutIntensity = 1.0f;
+    float lutDomainMin[3] = { 0.0f, 0.0f, 0.0f };
+    float lutDomainMax[3] = { 1.0f, 1.0f, 1.0f };
+    QByteArray lutCube;
     float sourceContrast = 0.0f;
     QByteArray inLoopContrastCurve;
     QByteArray contrastCurveLut;

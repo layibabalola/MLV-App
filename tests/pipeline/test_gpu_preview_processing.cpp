@@ -9,7 +9,9 @@
 #include "../../src/processing/raw_processing.h"
 
 #include <QtGlobal>
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -306,9 +308,12 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("gradient enabled"),
         [](processingObject_t * processing) { processing->gradient_enable = 1; });
     assert_gpu_preview_rejects_processing_feature(
-        "lut",
-        QStringLiteral("LUT enabled"),
-        [](processingObject_t * processing) { processing->lut_on = 1; });
+        "lut_no_cube",
+        QStringLiteral("LUT enabled but cube unavailable"),
+        [](processingObject_t * processing) {
+            processing->lut_on = 1;
+            if (processing->lut) { processing->lut->cube = nullptr; processing->lut->dimension = 0; }
+        });
     assert_gpu_preview_rejects_processing_feature(
         "filter",
         QStringLiteral("filter enabled"),
@@ -631,6 +636,86 @@ TEST(GpuPreviewProcessing, VignetteIsSupportedAndMatchesCpuReference)
     ASSERT_NE(base.signature, vig.signature);
 
     assert_gpu_offscreen_matches_cpu_reference(fixture, vig, "vignette");
+}
+
+static void install_test_lut(MlvPipelineFixture & fixture, int dim, bool is3d)
+{
+    lut_t * lut = fixture.processing()->lut;
+    ASSERT_TRUE(lut != nullptr);
+    if (lut->cube) { free(lut->cube); lut->cube = nullptr; }
+    lut->dimension = static_cast<uint16_t>(dim);
+    lut->is3d = is3d ? 1 : 0;
+    lut->intensity = 100;
+    for (int i = 0; i < 3; ++i) { lut->domain_min[i] = 0.0f; lut->domain_max[i] = 1.0f; }
+    const int entries = is3d ? (dim * dim * dim) : dim;
+    lut->cube = static_cast<float *>(malloc(static_cast<size_t>(entries) * 3 * sizeof(float)));
+    ASSERT_TRUE(lut->cube != nullptr);
+    if (is3d)
+    {
+        for (int b = 0; b < dim; ++b)
+            for (int g = 0; g < dim; ++g)
+                for (int r = 0; r < dim; ++r)
+                {
+                    const int e = r + g * dim + b * dim * dim;
+                    const float rn = static_cast<float>(r) / (dim - 1);
+                    const float gn = static_cast<float>(g) / (dim - 1);
+                    const float bn = static_cast<float>(b) / (dim - 1);
+                    lut->cube[e * 3 + 0] = std::min(1.0f, rn * 0.95f + bn * 0.05f);
+                    lut->cube[e * 3 + 1] = gn * 0.90f + 0.03f;
+                    lut->cube[e * 3 + 2] = std::min(1.0f, bn * 1.05f);
+                }
+    }
+    else
+    {
+        for (int k = 0; k < dim; ++k)
+        {
+            const float t = static_cast<float>(k) / (dim - 1);
+            lut->cube[k * 3 + 0] = std::min(1.0f, t * 0.95f + 0.02f);
+            lut->cube[k * 3 + 1] = t * 0.90f + 0.03f;
+            lut->cube[k * 3 + 2] = std::min(1.0f, t * 1.05f);
+        }
+    }
+    fixture.processing()->lut_on = 1;
+}
+
+TEST(GpuPreviewProcessing, Lut3dIsSupportedAndMatchesCpuReference)
+{
+    /* 3D .cube LUT (the engine's tetrahedral output-stage stage) is now supported,
+     * applied last from a dim^3 RGBA32F volume texture. Install a smooth non-
+     * identity 17^3 cube and verify the GPU offscreen output matches the CPU
+     * reference (which replicates the exact tetrahedral T1-T6 selection). */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    install_test_lut(fixture, 17, true);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig cfg =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyLut);
+    ASSERT_TRUE(cfg.lut3d);
+    ASSERT_NE(base.signature, cfg.signature);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "lut_3d");
+}
+
+TEST(GpuPreviewProcessing, Lut1dIsSupportedAndMatchesCpuReference)
+{
+    /* 1D .cube LUT (per-channel lerp) is now supported, applied last from a dim x 1
+     * RGBA32F texture. */
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base = assert_gpu_preview_subset_supported(fixture);
+    install_test_lut(fixture, 33, false);
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(fixture.processing(), &reason));
+    const GpuPreviewProcessingConfig cfg =
+        gpuPreviewProcessingBuildConfig(fixture.processing(), &reason);
+    ASSERT_TRUE(cfg.enabled);
+    ASSERT_TRUE(cfg.applyLut);
+    ASSERT_TRUE(!cfg.lut3d);
+    ASSERT_NE(base.signature, cfg.signature);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, cfg, "lut_1d");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)

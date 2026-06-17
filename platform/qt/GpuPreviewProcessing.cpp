@@ -208,6 +208,13 @@ void previewFromHSVtoRGB(const float hsv[3], float rgb[3])
     }
 }
 
+/* Linear interpolation matching cube_lut.c lerp() for the 1D LUT path. */
+float lutLerp(float x, float x1, float x2, float q00, float q01)
+{
+    if ( (x2 - x1) == 0.0f ) return q00;
+    return ((x2 - x) / (x2 - x1)) * q00 + ((x - x1) / (x2 - x1)) * q01;
+}
+
 void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
                                  const uint16_t * inputPixel,
                                  uint16_t * outputPixel,
@@ -499,6 +506,77 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
             outputPixel[channel] = static_cast<uint16_t>(clamped);
         }
     }
+
+    if ( config.applyLut )
+    {
+        /* LUT (.cube) is the LAST stage (cube_lut.c apply_lut, run last at
+         * raw_processing.c:3767). Domain-scaled index (note the 65536.0 divisor and
+         * the domain_min post-subtract), then 1D per-channel lerp or 3D TETRAHEDRAL
+         * interpolation (USE_TRILIN_INT is off in the engine), blended with the
+         * pre-LUT pixel by lutIntensity. Negative indices floor to 0 (the engine's
+         * (uint16_t) wrap differs only for domain_min>0 + dark pixels). */
+        const float * cube = reinterpret_cast<const float *>(config.lutCube.constData());
+        const int dim = config.lutDimension;
+        const float fA = (dim - 1) / 65536.0f / (config.lutDomainMax[0] - config.lutDomainMin[0]);
+        const float fB = (dim - 1) / 65536.0f / (config.lutDomainMax[1] - config.lutDomainMin[1]);
+        const float fC = (dim - 1) / 65536.0f / (config.lutDomainMax[2] - config.lutDomainMin[2]);
+        const float red   = outputPixel[0] * fA - config.lutDomainMin[0];
+        const float green = outputPixel[1] * fB - config.lutDomainMin[1];
+        const float blue  = outputPixel[2] * fC - config.lutDomainMin[2];
+        int r0 = red   < 0.0f ? 0 : static_cast<int>(red);
+        int g0 = green < 0.0f ? 0 : static_cast<int>(green);
+        int b0 = blue  < 0.0f ? 0 : static_cast<int>(blue);
+        int r1 = r0 + 1, g1 = g0 + 1, b1 = b0 + 1;
+        if ( r0 >= dim ) r0 = dim - 1;
+        if ( g0 >= dim ) g0 = dim - 1;
+        if ( b0 >= dim ) b0 = dim - 1;
+        if ( r1 >= dim ) r1 = dim - 1;
+        if ( g1 >= dim ) g1 = dim - 1;
+        if ( b1 >= dim ) b1 = dim - 1;
+        const float f1 = config.lutIntensity;
+        const float f2 = 1.0f - f1;
+        float outC[3];
+        if ( !config.lut3d )
+        {
+            outC[0] = lutLerp(red,   static_cast<float>(r0), static_cast<float>(r1), cube[r0 * 3 + 0], cube[r1 * 3 + 0]);
+            outC[1] = lutLerp(green, static_cast<float>(g0), static_cast<float>(g1), cube[g0 * 3 + 1], cube[g1 * 3 + 1]);
+            outC[2] = lutLerp(blue,  static_cast<float>(b0), static_cast<float>(b1), cube[b0 * 3 + 2], cube[b1 * 3 + 2]);
+        }
+        else
+        {
+            const int dim2 = dim * dim;
+            const float rf = red - static_cast<float>(r0);
+            const float gf = green - static_cast<float>(g0);
+            const float bf = blue - static_cast<float>(b0);
+            for (int i = 0; i < 3; ++i)
+            {
+                const float q000 = cube[((r0) + (g0) * dim + (b0) * dim2) * 3 + i];
+                const float q001 = cube[((r0) + (g0) * dim + (b1) * dim2) * 3 + i];
+                const float q010 = cube[((r0) + (g1) * dim + (b0) * dim2) * 3 + i];
+                const float q011 = cube[((r0) + (g1) * dim + (b1) * dim2) * 3 + i];
+                const float q100 = cube[((r1) + (g0) * dim + (b0) * dim2) * 3 + i];
+                const float q101 = cube[((r1) + (g0) * dim + (b1) * dim2) * 3 + i];
+                const float q110 = cube[((r1) + (g1) * dim + (b0) * dim2) * 3 + i];
+                const float q111 = cube[((r1) + (g1) * dim + (b1) * dim2) * 3 + i];
+                float o;
+                if ( gf >= bf && bf >= rf )      o = (1.0f - gf) * q000 + (gf - bf) * q010 + (bf - rf) * q011 + rf * q111;
+                else if ( bf > rf && rf > gf )   o = (1.0f - bf) * q000 + (bf - rf) * q001 + (rf - gf) * q101 + gf * q111;
+                else if ( bf > gf && gf >= rf )  o = (1.0f - bf) * q000 + (bf - gf) * q001 + (gf - rf) * q011 + rf * q111;
+                else if ( rf >= gf && gf > bf )  o = (1.0f - rf) * q000 + (rf - gf) * q100 + (gf - bf) * q110 + bf * q111;
+                else if ( gf > rf && rf >= bf )  o = (1.0f - gf) * q000 + (gf - rf) * q010 + (rf - bf) * q110 + bf * q111;
+                else                             o = (1.0f - rf) * q000 + (rf - bf) * q100 + (bf - gf) * q101 + gf * q111;
+                outC[i] = o;
+            }
+        }
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const float scaled = outC[channel] * 65535.0f;
+            const float limited = scaled < 0.0f ? 0.0f : (scaled > 65535.0f ? 65535.0f : scaled);
+            const float blended = static_cast<float>(outputPixel[channel]) * f2 + limited * f1;
+            const int v = static_cast<int>(blended);
+            outputPixel[channel] = static_cast<uint16_t>(v < 0 ? 0 : (v > 65535 ? 65535 : v));
+        }
+    }
 }
 
 QSurfaceFormat previewProcessingSurfaceFormat()
@@ -590,6 +668,51 @@ QOpenGLTexture * createVignetteMaskTexture(int width, int height)
     texture->setWrapMode(QOpenGLTexture::ClampToEdge);
     texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
     return texture;
+}
+
+/* 3D LUT cube as a dim x dim x dim RGBA32F volume texture (Target3D, core since
+ * GL 1.2 / sampler3D in GLSL 110). The cube's flat index r + g*dim + b*dim^2 maps
+ * to texel (r,g,b) row-major, so the shader samples the 8 corners directly. */
+QOpenGLTexture * createLut3dTexture(int dim)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target3D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(dim, dim, dim);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* 1D LUT as a dim x 1 RGBA32F texture (one texel per cube entry). */
+QOpenGLTexture * createLut1dTexture(int dim)
+{
+    QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+    texture->setFormat(QOpenGLTexture::RGBA32F);
+    texture->setSize(dim, 1);
+    texture->setMipLevels(1);
+    texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::Float32);
+    texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    texture->setMinMagFilters(QOpenGLTexture::Nearest, QOpenGLTexture::Nearest);
+    return texture;
+}
+
+/* Pack the raw RGB float cube (3 floats/entry) into RGBA32F (A=0) for upload. */
+QByteArray packLutCubeRgba32F(const QByteArray & cubeBytes, int entries)
+{
+    QByteArray packed(entries * 4 * static_cast<int>(sizeof(float)), Qt::Uninitialized);
+    float * dst = reinterpret_cast<float *>(packed.data());
+    const float * src = reinterpret_cast<const float *>(cubeBytes.constData());
+    const int srcFloats = cubeBytes.size() / static_cast<int>(sizeof(float));
+    for (int e = 0; e < entries; ++e)
+    {
+        dst[e * 4 + 0] = (e * 3 + 0 < srcFloats) ? src[e * 3 + 0] : 0.0f;
+        dst[e * 4 + 1] = (e * 3 + 1 < srcFloats) ? src[e * 3 + 1] : 0.0f;
+        dst[e * 4 + 2] = (e * 3 + 2 < srcFloats) ? src[e * 3 + 2] : 0.0f;
+        dst[e * 4 + 3] = 0.0f;
+    }
+    return packed;
 }
 
 QByteArray packContrastCurveR32F(const QByteArray & curveBytes)
@@ -955,6 +1078,14 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewApplyVignette;\n"
         "uniform float previewVignetteStrength;\n"
         "uniform vec2 frameSize;\n"
+        "uniform sampler3D lut3dTexture;\n"
+        "uniform sampler2D lut1dTexture;\n"
+        "uniform float previewApplyLut;\n"
+        "uniform float previewLut3d;\n"
+        "uniform float previewLutDimension;\n"
+        "uniform float previewLutIntensity;\n"
+        "uniform vec3 previewLutDomainMin;\n"
+        "uniform vec3 previewLutDomainMax;\n"
         "uniform float previewUseCameraMatrix;\n"
         "uniform float previewApplyGamutCompression;\n"
         "uniform vec3 previewProperWbRow0;\n"
@@ -990,6 +1121,11 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "vec3 truncToZero(vec3 v)\n"
         "{\n"
         "    return sign(v) * floor(abs(v));\n"
+        "}\n"
+        "float lutLerp1d(float x, float x1, float x2, float q00, float q01)\n"
+        "{\n"
+        "    if (x2 - x1 == 0.0) return q00;\n"
+        "    return ((x2 - x) / (x2 - x1)) * q00 + ((x - x1) / (x2 - x1)) * q01;\n"
         "}\n"
         "vec3 previewFromRGBtoHSV(vec3 rgb)\n"
         "{\n"
@@ -1176,6 +1312,49 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "        vec3 iv = vec3(dot(previewAgxInv0, f), dot(previewAgxInv1, f), dot(previewAgxInv2, f));\n"
         "        result = floor(clamp(iv, 0.0, 65535.0)) / 65535.0;\n"
         "    }\n"
+        "    if (previewApplyLut > 0.5)\n"
+        "    {\n"
+        "        float dimF = previewLutDimension;\n"
+        "        vec3 pixv = floor(result * 65535.0 + 0.5);\n"
+        "        vec3 fABC = vec3(dimF - 1.0) / 65536.0 / (previewLutDomainMax - previewLutDomainMin);\n"
+        "        vec3 sc = pixv * fABC - previewLutDomainMin;\n"
+        "        vec3 base = max(floor(sc), vec3(0.0));\n"
+        "        vec3 i0 = min(base, vec3(dimF - 1.0));\n"
+        "        vec3 i1 = min(base + 1.0, vec3(dimF - 1.0));\n"
+        "        vec3 outc;\n"
+        "        if (previewLut3d > 0.5)\n"
+        "        {\n"
+        "            vec3 fr = sc - i0;\n"
+        "            float rf = fr.r; float gf = fr.g; float bf = fr.b;\n"
+        "            vec3 q000 = texture3D(lut3dTexture, (vec3(i0.r, i0.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q001 = texture3D(lut3dTexture, (vec3(i0.r, i0.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q010 = texture3D(lut3dTexture, (vec3(i0.r, i1.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q011 = texture3D(lut3dTexture, (vec3(i0.r, i1.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q100 = texture3D(lut3dTexture, (vec3(i1.r, i0.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q101 = texture3D(lut3dTexture, (vec3(i1.r, i0.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q110 = texture3D(lut3dTexture, (vec3(i1.r, i1.g, i0.b) + 0.5) / dimF).rgb;\n"
+        "            vec3 q111 = texture3D(lut3dTexture, (vec3(i1.r, i1.g, i1.b) + 0.5) / dimF).rgb;\n"
+        "            if (gf >= bf && bf >= rf) outc = (1.0 - gf) * q000 + (gf - bf) * q010 + (bf - rf) * q011 + rf * q111;\n"
+        "            else if (bf > rf && rf > gf) outc = (1.0 - bf) * q000 + (bf - rf) * q001 + (rf - gf) * q101 + gf * q111;\n"
+        "            else if (bf > gf && gf >= rf) outc = (1.0 - bf) * q000 + (bf - gf) * q001 + (gf - rf) * q011 + rf * q111;\n"
+        "            else if (rf >= gf && gf > bf) outc = (1.0 - rf) * q000 + (rf - gf) * q100 + (gf - bf) * q110 + bf * q111;\n"
+        "            else if (gf > rf && rf >= bf) outc = (1.0 - gf) * q000 + (gf - rf) * q010 + (rf - bf) * q110 + bf * q111;\n"
+        "            else outc = (1.0 - rf) * q000 + (rf - bf) * q100 + (bf - gf) * q101 + gf * q111;\n"
+        "        }\n"
+        "        else\n"
+        "        {\n"
+        "            float r0v = texture2D(lut1dTexture, vec2((i0.r + 0.5) / dimF, 0.5)).r;\n"
+        "            float r1v = texture2D(lut1dTexture, vec2((i1.r + 0.5) / dimF, 0.5)).r;\n"
+        "            float g0v = texture2D(lut1dTexture, vec2((i0.g + 0.5) / dimF, 0.5)).g;\n"
+        "            float g1v = texture2D(lut1dTexture, vec2((i1.g + 0.5) / dimF, 0.5)).g;\n"
+        "            float b0v = texture2D(lut1dTexture, vec2((i0.b + 0.5) / dimF, 0.5)).b;\n"
+        "            float b1v = texture2D(lut1dTexture, vec2((i1.b + 0.5) / dimF, 0.5)).b;\n"
+        "            outc = vec3(lutLerp1d(sc.r, i0.r, i1.r, r0v, r1v), lutLerp1d(sc.g, i0.g, i1.g, g0v, g1v), lutLerp1d(sc.b, i0.b, i1.b, b0v, b1v));\n"
+        "        }\n"
+        "        vec3 limited = clamp(outc * 65535.0, 0.0, 65535.0);\n"
+        "        vec3 blended = pixv * (1.0 - previewLutIntensity) + limited * previewLutIntensity;\n"
+        "        result = floor(clamp(blended, 0.0, 65535.0)) / 65535.0;\n"
+        "    }\n"
         "    return result;\n"
         "}\n"
         "void main()\n"
@@ -1242,7 +1421,14 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
      * separation/blur, clarity, shadows/highlights, vignette, non-Rec709 gamut),
      * which are gated independently of the creative flag. */
     if ( processing->gradient_enable ) return reject(QStringLiteral("gradient enabled"));
-    if ( processing->lut_on ) return reject(QStringLiteral("LUT enabled"));
+    /* 1D/3D .cube LUTs are supported: applied as the last stage (tetrahedral 3D /
+     * per-channel-lerp 1D) from a volume/1D texture. Reject only a malformed cube
+     * (the subset cannot reproduce a LUT without valid cube data). */
+    if ( processing->lut_on
+      && (!processing->lut || !processing->lut->cube || processing->lut->dimension <= 1) )
+    {
+        return reject(QStringLiteral("LUT enabled but cube unavailable"));
+    }
     if ( processing->filter_on ) return reject(QStringLiteral("filter enabled"));
     /* AgX is now supported: a forward compressed-gamut matmul before gamma and
      * the inverse after the creative curves, carried as uniform matrices (no new
@@ -1433,6 +1619,30 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             config.applyVignette = false;
         }
     }
+    config.applyLut = processing->lut_on != 0 && processing->lut != NULL
+                   && processing->lut->cube != NULL && processing->lut->dimension > 1;
+    if ( config.applyLut )
+    {
+        /* LUT (.cube) is the engine's OUTPUT-stage stage (apply_lut, cube_lut.c:209-340,
+         * run last at raw_processing.c:3767, not in the creative loop or direct8 kernel).
+         * Copy the raw float cube + params; the shader + CPU reference replicate the
+         * domain scaling, tetrahedral (3D) / per-channel-lerp (1D) interpolation, and the
+         * intensity blend, applied as the last stage. */
+        const lut_t * lut = processing->lut;
+        config.lut3d = lut->is3d != 0;
+        config.lutDimension = lut->dimension;
+        const int clampedIntensity = lut->intensity > 100 ? 100 : lut->intensity;
+        config.lutIntensity = clampedIntensity / 100.0f;
+        for (int i = 0; i < 3; ++i)
+        {
+            config.lutDomainMin[i] = lut->domain_min[i];
+            config.lutDomainMax[i] = lut->domain_max[i];
+        }
+        const int dim = config.lutDimension;
+        const int entries = config.lut3d ? (dim * dim * dim) : dim;
+        config.lutCube = QByteArray(reinterpret_cast<const char *>(lut->cube),
+                                    entries * 3 * static_cast<int>(sizeof(float)));
+    }
     if ( config.applyCreativeCurves )
     {
         config.contrastCurveLut = QByteArray(
@@ -1479,6 +1689,13 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyVignette, sizeof(config.applyVignette));
     hash = fnv1a64_append(hash, &config.vignetteStrength, sizeof(config.vignetteStrength));
     hash = fnv1a64_append(hash, config.vignetteMask.constData(), static_cast<size_t>(config.vignetteMask.size()));
+    hash = fnv1a64_append(hash, &config.applyLut, sizeof(config.applyLut));
+    hash = fnv1a64_append(hash, &config.lut3d, sizeof(config.lut3d));
+    hash = fnv1a64_append(hash, &config.lutDimension, sizeof(config.lutDimension));
+    hash = fnv1a64_append(hash, &config.lutIntensity, sizeof(config.lutIntensity));
+    hash = fnv1a64_append(hash, config.lutDomainMin, sizeof(config.lutDomainMin));
+    hash = fnv1a64_append(hash, config.lutDomainMax, sizeof(config.lutDomainMax));
+    hash = fnv1a64_append(hash, config.lutCube.constData(), static_cast<size_t>(config.lutCube.size()));
     hash = fnv1a64_append(hash, config.inLoopContrastCurve.constData(), static_cast<size_t>(config.inLoopContrastCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsHueCurve.constData(), static_cast<size_t>(config.hueVsHueCurve.size()));
     hash = fnv1a64_append(hash, config.hueVsSaturationCurve.constData(), static_cast<size_t>(config.hueVsSaturationCurve.size()));
@@ -1662,6 +1879,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         && config.vignetteMask.size() == static_cast<int>(static_cast<size_t>(width) * height * sizeof(float));
     QOpenGLTexture * vignetteMaskTexture = createVignetteMaskTexture(
         vignetteReady ? width : 1, vignetteReady ? height : 1);
+    const bool lutActive = config.applyLut && config.lutDimension > 1;
+    const bool lut3dActive = lutActive && config.lut3d;
+    const bool lut1dActive = lutActive && !config.lut3d;
+    QOpenGLTexture * lut3dTexture = createLut3dTexture(lut3dActive ? config.lutDimension : 1);
+    QOpenGLTexture * lut1dTexture = createLut1dTexture(lut1dActive ? config.lutDimension : 1);
 
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
@@ -1695,6 +1917,15 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     vignetteMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32,
                                  vignetteReady ? config.vignetteMask.constData()
                                                : reinterpret_cast<const char *>(&vignetteDummy));
+    const QByteArray lutDummy(4 * static_cast<int>(sizeof(float)), '\0');
+    const QByteArray lut3dBytes = lut3dActive
+        ? packLutCubeRgba32F(config.lutCube, config.lutDimension * config.lutDimension * config.lutDimension)
+        : lutDummy;
+    const QByteArray lut1dBytes = lut1dActive
+        ? packLutCubeRgba32F(config.lutCube, config.lutDimension)
+        : lutDummy;
+    lut3dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut3dBytes.constData());
+    lut1dTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::Float32, lut1dBytes.constData());
 
     fbo.bind();
     glFunctions->glViewport(0, 0, width, height);
@@ -1724,6 +1955,14 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("previewApplyVignette", vignetteReady ? 1.0f : 0.0f);
     program.setUniformValue("previewVignetteStrength", static_cast<float>(config.vignetteStrength));
     program.setUniformValue("frameSize", QVector2D(static_cast<float>(width), static_cast<float>(height)));
+    program.setUniformValue("lut3dTexture", 17);
+    program.setUniformValue("lut1dTexture", 18);
+    program.setUniformValue("previewApplyLut", lutActive ? 1.0f : 0.0f);
+    program.setUniformValue("previewLut3d", lut3dActive ? 1.0f : 0.0f);
+    program.setUniformValue("previewLutDimension", static_cast<float>(config.lutDimension));
+    program.setUniformValue("previewLutIntensity", config.lutIntensity);
+    program.setUniformValue("previewLutDomainMin", QVector3D(config.lutDomainMin[0], config.lutDomainMin[1], config.lutDomainMin[2]));
+    program.setUniformValue("previewLutDomainMax", QVector3D(config.lutDomainMax[0], config.lutDomainMax[1], config.lutDomainMax[2]));
     program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyInLoopContrast", config.applyInLoopContrast ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyAgx", config.applyAgx ? 1.0f : 0.0f);
@@ -1778,6 +2017,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     lumaVsSaturationTexture->bind(14);
     inLoopContrastTexture->bind(15);
     vignetteMaskTexture->bind(16);
+    lut3dTexture->bind(17);
+    lut1dTexture->bind(18);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -1818,6 +2059,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     lumaVsSaturationTexture->release();
     inLoopContrastTexture->release();
     vignetteMaskTexture->release();
+    lut3dTexture->release();
+    lut1dTexture->release();
     program.release();
     fbo.release();
 
@@ -1838,6 +2081,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete lumaVsSaturationTexture;
     delete inLoopContrastTexture;
     delete vignetteMaskTexture;
+    delete lut3dTexture;
+    delete lut1dTexture;
     context.doneCurrent();
 
     if ( reason ) reason->clear();
