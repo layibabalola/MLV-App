@@ -48,6 +48,9 @@ struct MainWindowGpuPreviewPolicyState
     bool gpuAmazeDebayerEnvironmentRequested = false;
     bool gpuAmazeDebayerCompatible = false;
     bool gpuAmazeTexturePresentationEnvironmentRequested = false;
+    bool gpuPlaybackReconEnvironmentRequested = false;
+    bool gpuPlaybackReconTexturePresentationEnvironmentRequested = false;
+    bool gpuPlaybackReconTexturePresentationCompatible = false;
     bool histogramEnabled = false;
     bool waveformEnabled = false;
     bool paradeEnabled = false;
@@ -57,6 +60,7 @@ struct MainWindowGpuPreviewPolicyState
     bool renderThreadUsingGpuBilinearDebayer = false;
     bool renderThreadUsingGpuAmazeDebayer = false;
     bool renderThreadUsingGpuAmazeTexturePresentation = false;
+    bool renderThreadUsingGpuPlaybackReconTexturePresentation = false;
     int playbackScaleFactorActive = 1;
     bool betterResizerEnabled = false;
     bool zebrasEnabled = false;
@@ -187,6 +191,22 @@ inline bool mainWindowUsesGpuAmazeTexturePresentation(
 {
     return mainWindowAllowsGpuAmazeTexturePresentation(state)
         && state.renderThreadUsingGpuAmazeTexturePresentation;
+}
+
+inline bool mainWindowAllowsGpuPlaybackReconTexturePresentation(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    return mainWindowAllowsGpu16PreviewRender(state)
+        && state.gpuPlaybackReconEnvironmentRequested
+        && state.gpuPlaybackReconTexturePresentationEnvironmentRequested
+        && state.gpuPlaybackReconTexturePresentationCompatible;
+}
+
+inline bool mainWindowUsesGpuPlaybackReconTexturePresentation(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    return mainWindowAllowsGpuPlaybackReconTexturePresentation(state)
+        && state.renderThreadUsingGpuPlaybackReconTexturePresentation;
 }
 
 inline bool mainWindowUsesGpuImagePresentation(

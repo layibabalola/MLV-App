@@ -493,6 +493,7 @@ private slots:
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
+    void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentFailClosed();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -798,6 +799,39 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAnd
     state.renderThreadUsingGpuAmazeDebayer = false;
     QVERIFY(!mainWindowAllowsGpuAmazeTexturePresentation(state));
     QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentFailClosed()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.gpuPlaybackReconEnvironmentRequested = true;
+    state.gpuPlaybackReconTexturePresentationEnvironmentRequested = true;
+
+    QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+
+    state.gpuPlaybackReconTexturePresentationCompatible = true;
+    QVERIFY(mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+
+    state.renderThreadUsingGpuPlaybackReconTexturePresentation = true;
+    QVERIFY(mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+
+    state.gpuPlaybackReconEnvironmentRequested = false;
+    QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+
+    state.gpuPlaybackReconEnvironmentRequested = true;
+    state.gpuPlaybackReconTexturePresentationEnvironmentRequested = false;
+    QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+
+    state.gpuPlaybackReconTexturePresentationEnvironmentRequested = true;
+    state.histogramEnabled = true;
+    QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
+    QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()

@@ -80,6 +80,8 @@ public:
             bool renderThreadUsingGpuBilinearDebayer = false;
             bool renderThreadUsingGpuAmazeDebayer = false;
             bool gpuAmazeTexturePresentRequested = false;
+            bool gpuPlaybackReconTexturePresentRequested = false;
+            QString gpuPlaybackReconTexturePresentFallbackReason;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
         };

@@ -1246,6 +1246,7 @@ Legend: **compile** = read at qmake/compile time;
 | `MLVAPP_EXPERIMENTAL_GPU_DEBAYER` | unset | runtime | `1` enables bilinear GPU debayer. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` | unset | runtime | `1` enables explicit AMaZE CUDA debayer routing when the GPU preview-processing path is active. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT` | unset | runtime | `1` requests the non-default AMaZE CUDA-to-GL texture-present path nested under GPU preview processing and GPU AMaZE; CPU-readback fallback remains available. |
+| `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT` | unset | runtime | `1` requests the Lane B P3 playback-recon texture-present path. It currently fails closed with telemetry because the recon backend exposes `GL_R16` Bayer, not final RGB display pixels. |
 | `MLVAPP_GPU_AMAZE_DEBAYER_DLL` | unset | runtime | Optional path to `igpu_amaze_debayer_cuda.dll`; otherwise app-dir/search-path lookup is used. |
 | `MLVAPP_STAGE_TIMING` | unset | runtime | Non-empty and not `"0"` → emit per-stage lines via `mlv_stage_timing_note` (`StageTiming.h:44`). |
 | `MLVAPP_STAGE_TIMING_FILE` | unset | runtime | Path to redirect stage-timing lines to a file. Default is stderr. |

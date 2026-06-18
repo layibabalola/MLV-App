@@ -18,6 +18,7 @@ SOURCES += \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/image_regression.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
+    $$REPO_ROOT/tests/gui/raw_processing_gpu_preview_stubs.cpp \
     $$REPO_ROOT/tests/gui/test_gui_smoke.cpp
 
 HEADERS += \

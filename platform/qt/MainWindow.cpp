@@ -1151,6 +1151,24 @@ static bool playback_start_preroll_disabled_by_environment()
         && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
 }
 
+static bool playback_recon_texture_present_requested_by_environment()
+{
+    const QString value =
+        qEnvironmentVariable("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT").trimmed();
+    return !value.isEmpty()
+        && value != QStringLiteral("0")
+        && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
+}
+
+static bool playback_recon_requested_by_environment()
+{
+    const QString value =
+        qEnvironmentVariable("MLVAPP_GPU_PLAYBACK_RECON").trimmed();
+    return !value.isEmpty()
+        && value != QStringLiteral("0")
+        && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
+}
+
 /* Read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the request.
  * Accepts "1", "2", "4", "8", or "auto". Returns 0 when unset so the
  * caller can fall back to the GUI dial; returns -1 for "auto" so smoke/dev
@@ -3175,6 +3193,29 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             QStringLiteral("gpu_amaze_texture_present_active"),
             false );
     }
+    const bool gpuPlaybackReconTexturePresentEnvRequested =
+        task.requestContext.gpuPreviewPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested;
+    const bool gpuPlaybackReconTexturePresentRequested =
+        task.requestContext.gpuPlaybackReconTexturePresentRequested;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_texture_present_environment_requested"),
+        gpuPlaybackReconTexturePresentEnvRequested );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_texture_present_requested"),
+        gpuPlaybackReconTexturePresentRequested );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_texture_present_candidate"),
+        false );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_texture_present_active"),
+        false );
+    if( gpuPlaybackReconTexturePresentEnvRequested
+     && !task.requestContext.gpuPlaybackReconTexturePresentFallbackReason.isEmpty() )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_fallback_reason"),
+            task.requestContext.gpuPlaybackReconTexturePresentFallbackReason );
+    }
     uint8_t underOver = result.underOver;
     if( !framePresentedByViewport && gpu16PreviewActive )
     {
@@ -3538,6 +3579,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         gpuAmazeDebayerRequestedByEnvironment();
     renderPolicy.gpuAmazeTexturePresentationEnvironmentRequested =
         gpuAmazeTexturePresentRequestedByEnvironment();
+    renderPolicy.gpuPlaybackReconEnvironmentRequested =
+        playback_recon_requested_by_environment();
+    renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested =
+        playback_recon_texture_present_requested_by_environment();
+    renderPolicy.gpuPlaybackReconTexturePresentationCompatible = false;
     renderPolicy.gpuAmazeDebayerCompatible =
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
@@ -3564,6 +3610,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
     renderPolicy.renderThreadUsingGpuAmazeTexturePresentation =
         mainWindowAllowsGpuAmazeTexturePresentation( renderPolicy );
+    renderPolicy.renderThreadUsingGpuPlaybackReconTexturePresentation =
+        mainWindowAllowsGpuPlaybackReconTexturePresentation( renderPolicy );
     m_lastQueuedGpuPreviewPolicy = renderPolicy;
     m_lastQueuedGpuPresentationOptions =
         mainWindowBuildGpuPresentationOptions( renderPolicy );
@@ -3621,6 +3669,14 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
     requestContext.gpuAmazeTexturePresentRequested =
         mainWindowUsesGpuAmazeTexturePresentation( renderPolicy );
+    requestContext.gpuPlaybackReconTexturePresentRequested =
+        mainWindowUsesGpuPlaybackReconTexturePresentation( renderPolicy );
+    if( renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested
+     && !requestContext.gpuPlaybackReconTexturePresentRequested )
+    {
+        requestContext.gpuPlaybackReconTexturePresentFallbackReason =
+            QStringLiteral("GPU playback recon texture-present requires a final RGB CUDA-to-GL backend; the current igpu_recon GL_R16 Bayer output is not presented as a user-visible frame");
+    }
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
         playbackProcessingSelected;
