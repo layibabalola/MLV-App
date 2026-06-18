@@ -2573,7 +2573,8 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
             gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
                                                    rgb16DisplaySource,
                                                    gpu16FallbackProcessed.data(),
-                                                   static_cast<int>(pixelCount) );
+                                                   sourceWidth,
+                                                   sourceHeight );
             convert_rgb16_to_rgb8( gpu16FallbackProcessed.data(),
                                    gpu16FallbackRgb8.data(),
                                    sourceWidth * sourceHeight );
@@ -2597,7 +2598,8 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         gpuPreviewProcessingApplyCpuReference( gpuPreviewProcessingConfig,
                                                rgb16DisplaySource,
                                                cpuPreviewProcessed.data(),
-                                               static_cast<int>(pixelCount) );
+                                               sourceWidth,
+                                               sourceHeight );
         convert_rgb16_to_rgb8( cpuPreviewProcessed.data(),
                                cpuPreviewRgb8.data(),
                                sourceWidth * sourceHeight );

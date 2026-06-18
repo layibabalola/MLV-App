@@ -15,6 +15,7 @@
 
 #include "../../src/batch/WorkerThreadCount.h"
 #include "../../src/debayer/debayer.h"
+#include "../../src/mlv/llrawproc/llrawproc.h"
 #include "../../src/processing/raw_processing.h"
 #include "debug/FrameChecksum.h"
 #include "debug/StageTimingCsvSink.h"
@@ -113,6 +114,30 @@ void insertStageResolutionTelemetry( QJsonObject &telemetry,
                           : 0.0 );
     telemetry.insert( prefix + QStringLiteral("_preview_resolution"),
                       sourcePixels > 0 && pixels > 0 && pixels < sourcePixels );
+}
+
+class GpuPlaybackReconScope
+{
+public:
+    explicit GpuPlaybackReconScope( bool enabled )
+    {
+        llrpSetGpuPlaybackReconAllowedForCurrentThread( enabled ? 1 : 0 );
+    }
+
+    ~GpuPlaybackReconScope()
+    {
+        llrpSetGpuPlaybackReconAllowedForCurrentThread( 0 );
+    }
+};
+
+bool gpuPlaybackReconEnvRequested()
+{
+    const QByteArray value = qgetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    if( value.isEmpty() || value == QByteArrayLiteral("0") )
+    {
+        return false;
+    }
+    return value.toLower() != QByteArrayLiteral("false");
 }
 
 } // namespace
@@ -752,6 +777,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         * static_cast<size_t>( qMax( 0, m_imageHeight ) );
     if( rawPixelCount > 0 && m_pMlvObject && slot.rawImage16.size() >= rawPixelCount )
     {
+        const GpuPlaybackReconScope gpuPlaybackReconScope(
+            entry.request.presentationContext.playbackActive );
         mlv_pipeline_capture_set_current_frame( entry.request.frameNumber );
         applyLLRawProcObjectWorker( m_pMlvObject,
                                     slot.rawImage16.data(),
@@ -1591,6 +1618,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         int previousAggressivePreviewMode;
         int previousScaleFactor;
     } playbackPreviewModeGuard( playbackPreviewFastPathActive, playbackScaleFactor );
+    const GpuPlaybackReconScope gpuPlaybackReconScope(
+        m_activePresentationContext.playbackActive );
     const double frameRequestStageTime = m_activeFrameRequestStageTime;
     const double renderThreadQueueWaitMs =
         (frameRequestStageTime > 0.0 && render_start >= frameRequestStageTime)
@@ -1950,6 +1979,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
         mlv_stage_timing_note("render_thread_draw", frameNumber, render_start);
     }
+
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_env_enabled"),
+        gpuPlaybackReconEnvRequested() );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_attempted"),
+        llrpGpuPlaybackReconLastRunAttemptedForTesting() != 0 );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_used"),
+        llrpGpuPlaybackReconLastUsedForTesting() != 0 );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_state_valid"),
+        llrpGpuPlaybackReconLastStateValidForTesting() != 0 );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_rc"),
+        llrpGpuPlaybackReconLastRunRcForTesting() );
 
     int playbackScaleFactorActive = playbackScaleFactor;
     if( m_pMlvObject
