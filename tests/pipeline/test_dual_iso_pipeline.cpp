@@ -1101,7 +1101,15 @@ TEST(DualIsoPipeline, GpuExportParityMatrixIneligibleConfigsFallBackToCpu)
             const int replaced = llrpGpuExportLastReplacedForTesting();
             const int mismatch = llrpGpuExportLastMismatchForTesting();
             const bool bytes_equal = (cpu_bytes == gpu_bytes);
-            const bool ok = (replaced == 0 && bytes_equal && !gpu_bytes.isEmpty());
+            // Fail closed: the backend must be genuinely loaded + attempted (so a silent
+            // CUDA dropout can't make every case pass for the wrong reason), and the GPU
+            // recon must NOT have engaged for this ineligible config (run_attempted==0),
+            // leaving the CPU output authoritative (replaced==0) and the DNG byte-equal +
+            // valid (non-empty). This distinguishes "config correctly disengaged the GPU
+            // export" from "GPU backend never came up".
+            const bool ok = (backend_attempted == 1 && backend_unavailable == 0
+                             && run_attempted == 0 && replaced == 0
+                             && bytes_equal && !gpu_bytes.isEmpty());
             if (!ok) { all_ok = false; }
             const QByteArray sb = suffix.toLocal8Bit();
             std::fprintf(stderr,
