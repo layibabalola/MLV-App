@@ -487,13 +487,14 @@ private slots:
     void gpuViewportFallsBackToPixmapWhenNotInstalled();
     void gpuViewportQueuesAndClearsPresentedFrame();
     void gpuViewportQueuesRgb16Frame();
+    void gpuViewportQueuesBayer16Frame();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyAllowsExperimentalBilinearDebayerOnlyWhenCompatible();
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
-    void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentFailClosed();
+    void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -801,7 +802,7 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAnd
     QVERIFY(!mainWindowUsesGpuAmazeTexturePresentation(state));
 }
 
-void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentFailClosed()
+void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested()
 {
     MainWindowGpuPreviewPolicyState state;
     state.gpuViewportInstalled = true;
@@ -980,6 +981,37 @@ void GuiSmokeTest::gpuViewportQueuesRgb16Frame()
     GpuDisplayViewport::PresentationOptions options;
     options.samplingMode = GpuDisplayViewport::SamplingLinear;
     QVERIFY(GpuDisplayViewport::presentRgb16(&view, item, rgb16, 2, 2, options));
+    QVERIFY(GpuDisplayViewport::hasPresentedImage(&view));
+    QVERIFY(!item->isVisible());
+    QApplication::processEvents();
+    QVERIFY(GpuDisplayViewport::hasPresentedImage(&view));
+
+    GpuDisplayViewport::clearPresentedImage(&view, item);
+    QVERIFY(item->isVisible());
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportQueuesBayer16Frame()
+{
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    QGraphicsScene scene;
+    QGraphicsPixmapItem *item = scene.addPixmap(QPixmap(4, 4));
+    QGraphicsView view(&scene);
+    view.resize(64, 64);
+    view.show();
+    QApplication::processEvents();
+
+    QVERIFY(GpuDisplayViewport::installOn(&view));
+
+    const uint16_t bayer16[] = {
+        65535, 0,
+        0, 65535
+    };
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingBicubic;
+    QVERIFY(GpuDisplayViewport::presentBayer16(&view, item, bayer16, 2, 2, options));
     QVERIFY(GpuDisplayViewport::hasPresentedImage(&view));
     QVERIFY(!item->isVisible());
     QApplication::processEvents();

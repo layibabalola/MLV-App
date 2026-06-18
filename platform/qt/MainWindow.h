@@ -634,6 +634,8 @@ private:
         size_t sourceImage16Size = 0;
         const float *gpuAmazeTextureRawFrame = nullptr;
         size_t gpuAmazeTextureRawFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureBayerFrame = nullptr;
+        size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;
         bool cpuPreviewProcessingActive = false;
@@ -648,6 +650,7 @@ private:
         std::vector<uint8_t> ownedSourceImage;
         std::vector<uint16_t> ownedSourceImage16;
         std::vector<float> ownedGpuAmazeTextureRawFrame;
+        std::vector<uint16_t> ownedGpuPlaybackReconTextureBayerFrame;
         std::vector<uint8_t> ownedPlaybackScaledImage8;
 
         void rebindOwnedImagePointers()
@@ -672,6 +675,17 @@ private:
                 gpuAmazeTextureRawFrameSize = ownedGpuAmazeTextureRawFrame.size();
                 readyFrame.gpuAmazeTextureRawFrame = gpuAmazeTextureRawFrame;
                 readyFrame.gpuAmazeTextureRawFrameSize = gpuAmazeTextureRawFrameSize;
+            }
+            if( !ownedGpuPlaybackReconTextureBayerFrame.empty() )
+            {
+                gpuPlaybackReconTextureBayerFrame =
+                    ownedGpuPlaybackReconTextureBayerFrame.data();
+                gpuPlaybackReconTextureBayerFrameSize =
+                    ownedGpuPlaybackReconTextureBayerFrame.size();
+                readyFrame.gpuPlaybackReconTextureBayerFrame =
+                    gpuPlaybackReconTextureBayerFrame;
+                readyFrame.gpuPlaybackReconTextureBayerFrameSize =
+                    gpuPlaybackReconTextureBayerFrameSize;
             }
             if( !ownedPlaybackScaledImage8.empty() )
             {

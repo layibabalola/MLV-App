@@ -112,6 +112,11 @@ public:
         int gpuAmazeTextureHeight = 0;
         int gpuAmazeTextureBlackLevel = 0;
         std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
+        bool gpuPlaybackReconTexturePresentCandidate = false;
+        const uint16_t *gpuPlaybackReconTextureBayerFrame = nullptr;
+        size_t gpuPlaybackReconTextureBayerFrameSize = 0;
+        int gpuPlaybackReconTextureWidth = 0;
+        int gpuPlaybackReconTextureHeight = 0;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -230,6 +235,9 @@ private:
         int gpuAmazeTextureHeight = 0;
         int gpuAmazeTextureBlackLevel = 0;
         std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
+        bool gpuPlaybackReconTexturePresentCandidate = false;
+        int gpuPlaybackReconTextureWidth = 0;
+        int gpuPlaybackReconTextureHeight = 0;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -273,6 +281,9 @@ private:
             gpuAmazeTextureHeight = 0;
             gpuAmazeTextureBlackLevel = 0;
             gpuAmazeTextureWbMultipliers = {{1.0, 1.0, 1.0}};
+            gpuPlaybackReconTexturePresentCandidate = false;
+            gpuPlaybackReconTextureWidth = 0;
+            gpuPlaybackReconTextureHeight = 0;
             dualIsoPreviewHistogramMs = 0.0;
             dualIsoPreviewRegressionMs = 0.0;
             dualIsoPreviewRowscaleMs = 0.0;

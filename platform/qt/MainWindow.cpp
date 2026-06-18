@@ -3197,6 +3197,15 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         task.requestContext.gpuPreviewPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested;
     const bool gpuPlaybackReconTexturePresentRequested =
         task.requestContext.gpuPlaybackReconTexturePresentRequested;
+    const size_t expectedPlaybackReconTextureBayerPixels =
+        static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+    const bool gpuPlaybackReconTexturePresentCandidate =
+        gpuPlaybackReconTexturePresentRequested
+        && readyFrame.gpuPlaybackReconTexturePresentCandidate
+        && task.gpuPlaybackReconTextureBayerFrame
+        && task.gpuPlaybackReconTextureBayerFrameSize >= expectedPlaybackReconTextureBayerPixels
+        && readyFrame.gpuPlaybackReconTextureWidth == sourceWidth
+        && readyFrame.gpuPlaybackReconTextureHeight == sourceHeight;
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_environment_requested"),
         gpuPlaybackReconTexturePresentEnvRequested );
@@ -3205,10 +3214,47 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         gpuPlaybackReconTexturePresentRequested );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_candidate"),
-        false );
+        gpuPlaybackReconTexturePresentCandidate );
     readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("gpu_playback_recon_texture_present_active"),
+        QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
         false );
+    if( gpuPlaybackReconTexturePresentCandidate )
+    {
+        const double texturePresentStart = mlv_stage_timing_now();
+        framePresentedByViewport =
+            GpuDisplayViewport::presentBayer16( ui->graphicsView,
+                                                m_pGraphicsItem,
+                                                task.gpuPlaybackReconTextureBayerFrame,
+                                                sourceWidth,
+                                                sourceHeight,
+                                                task.gpuPresentationOptions );
+        const double texturePresentMs =
+            (mlv_stage_timing_now() - texturePresentStart) * 1000.0;
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_active"),
+            framePresentedByViewport );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_source"),
+            QStringLiteral("cpu16_readback_reconstructed_bayer") );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_upload_ms"),
+            texturePresentMs );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_total_ms"),
+            texturePresentMs );
+        if( !framePresentedByViewport )
+        {
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_texture_present_fallback_reason"),
+                QStringLiteral("GPU playback recon Bayer texture-present viewport upload failed; falling back to the ordinary RGB presentation path") );
+        }
+    }
+    else
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_active"),
+            false );
+    }
     if( gpuPlaybackReconTexturePresentEnvRequested
      && !task.requestContext.gpuPlaybackReconTexturePresentFallbackReason.isEmpty() )
     {
@@ -3583,6 +3629,9 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         playback_recon_requested_by_environment();
     renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested =
         playback_recon_texture_present_requested_by_environment();
+    const int requestedPlaybackScaleFactor = effectivePlaybackScaleFactorForRequest();
+    const Phase3Mode requestedPhase3Mode =
+        phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) );
     renderPolicy.gpuPlaybackReconTexturePresentationCompatible = false;
     renderPolicy.gpuAmazeDebayerCompatible =
         m_pMlvObject
@@ -3595,7 +3644,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.betterResizerEnabled = ui->actionBetterResizer->isChecked();
     renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
     renderPolicy.transformationMode = transformationMode;
-    renderPolicy.playbackScaleFactorActive = effectivePlaybackScaleFactorForRequest();
+    renderPolicy.playbackScaleFactorActive = requestedPlaybackScaleFactor;
 
     m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
     m_renderThreadUsingGpuPreviewProcessing = shouldUseGpuPreviewProcessingPath();
@@ -3610,6 +3659,13 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.renderThreadUsingGpuAmazeDebayer = m_renderThreadUsingGpuAmazeDebayer;
     renderPolicy.renderThreadUsingGpuAmazeTexturePresentation =
         mainWindowAllowsGpuAmazeTexturePresentation( renderPolicy );
+    renderPolicy.gpuPlaybackReconTexturePresentationCompatible =
+        renderPolicy.gpuViewportInstalled
+        && renderPolicy.gpuPlaybackReconEnvironmentRequested
+        && m_renderThreadUsingGpuPreviewProcessing
+        && requestedPhase3Mode == Phase3Mode::DecodeReconProcess
+        && requestedPlaybackScaleFactor == 1
+        && !ui->actionCaching->isChecked();
     renderPolicy.renderThreadUsingGpuPlaybackReconTexturePresentation =
         mainWindowAllowsGpuPlaybackReconTexturePresentation( renderPolicy );
     m_lastQueuedGpuPreviewPolicy = renderPolicy;
@@ -3675,7 +3731,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
      && !requestContext.gpuPlaybackReconTexturePresentRequested )
     {
         requestContext.gpuPlaybackReconTexturePresentFallbackReason =
-            QStringLiteral("GPU playback recon texture-present requires a final RGB CUDA-to-GL backend; the current igpu_recon GL_R16 Bayer output is not presented as a user-visible frame");
+            QStringLiteral("GPU playback recon texture-present requires the experimental GL viewport, GPU preview processing, MLVAPP_GPU_PLAYBACK_RECON=1, Decode/Reconstruct/Process playback mode, x1 scale, and caching off");
     }
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
@@ -20979,6 +21035,10 @@ void MainWindow::drawFrameReady()
             : 0.0;
     task.gpuAmazeTextureRawFrame = readyFrame.gpuAmazeTextureRawFrame;
     task.gpuAmazeTextureRawFrameSize = readyFrame.gpuAmazeTextureRawFrameSize;
+    task.gpuPlaybackReconTextureBayerFrame =
+        readyFrame.gpuPlaybackReconTextureBayerFrame;
+    task.gpuPlaybackReconTextureBayerFrameSize =
+        readyFrame.gpuPlaybackReconTextureBayerFrameSize;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
@@ -20999,6 +21059,15 @@ void MainWindow::drawFrameReady()
         task.ownedGpuAmazeTextureRawFrame.assign(
             readyFrame.gpuAmazeTextureRawFrame,
             readyFrame.gpuAmazeTextureRawFrame + readyFrame.gpuAmazeTextureRawFrameSize );
+    }
+    if( readyFrame.gpuPlaybackReconTexturePresentCandidate
+     && readyFrame.gpuPlaybackReconTextureBayerFrame
+     && readyFrame.gpuPlaybackReconTextureBayerFrameSize > 0 )
+    {
+        task.ownedGpuPlaybackReconTextureBayerFrame.assign(
+            readyFrame.gpuPlaybackReconTextureBayerFrame,
+            readyFrame.gpuPlaybackReconTextureBayerFrame
+                + readyFrame.gpuPlaybackReconTextureBayerFrameSize );
     }
     const size_t playbackScaledImageBytes =
         (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
@@ -21021,6 +21090,9 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_amaze_texture_raw_bytes"),
         static_cast<qint64>( task.ownedGpuAmazeTextureRawFrame.size() * sizeof( float ) ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_bayer_bytes"),
+        static_cast<qint64>( task.ownedGpuPlaybackReconTextureBayerFrame.size() * sizeof( uint16_t ) ) );
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
         static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );
