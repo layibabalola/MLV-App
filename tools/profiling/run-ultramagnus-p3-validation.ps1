@@ -14,7 +14,11 @@ param(
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$EvidencePacketPath = "",
+    [string]$ImportEvidencePacket = "",
+    [string]$ImportOutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\imported",
+    [switch]$AllowRepoHeadMismatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -78,11 +82,298 @@ function Write-JsonFile {
     $Value | ConvertTo-Json -Depth 24 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-GitScalar {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string[]]$Args
+    )
+    $output = & git -C $Repo @Args 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+    return ([string]($output | Select-Object -First 1)).Trim()
+}
+
+function Get-GitStatusLines {
+    param([Parameter(Mandatory = $true)][string]$Repo)
+    $output = & git -C $Repo status --short --branch 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return @()
+    }
+    return @($output | ForEach-Object { [string]$_ })
+}
+
+function Get-RelativeArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    return ([System.IO.Path]::GetRelativePath($Root, $Path) -replace '\\', '/')
+}
+
+function Get-ArtifactFileEntries {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $rootPath = (Resolve-Path -LiteralPath $Root).Path
+    return @(Get-ChildItem -LiteralPath $rootPath -Recurse -File | Sort-Object FullName | ForEach-Object {
+        [pscustomobject]@{
+            relativePath = Get-RelativeArtifactPath -Root $rootPath -Path $_.FullName
+            length = $_.Length
+            sha256 = Get-FileSha256 -Path $_.FullName
+        }
+    })
+}
+
+function New-EvidencePacket {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunRoot,
+        [Parameter(Mandatory = $true)][string]$PacketPath,
+        [Parameter(Mandatory = $true)]$Summary,
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$ExpectedHostName,
+        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern
+    )
+
+    $runRootResolved = (Resolve-Path -LiteralPath $RunRoot).Path
+    $packetFullPath = Resolve-RepoPath -Root $Repo -Path $PacketPath
+    $packetParent = Split-Path -Parent $packetFullPath
+    if ($packetParent) {
+        New-Item -ItemType Directory -Force -Path $packetParent | Out-Null
+    }
+
+    $manifestPath = Join-Path $runRootResolved "evidence-packet-manifest.json"
+    if (Test-Path -LiteralPath $manifestPath) {
+        Remove-Item -LiteralPath $manifestPath -Force
+    }
+
+    $clipProof = @($Summary.clipResults | ForEach-Object {
+        [pscustomobject]@{
+            clip = $_.clip
+            status = $_.status
+            gpuTextureNoReadbackFrames = $_.gpuTextureNoReadbackFrames
+            activeNoReadbackFrameCount = $_.activeNoReadbackFrameCount
+            cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
+            fallbackFrameCount = $_.fallbackFrameCount
+            validationOk = $_.validationOk
+        }
+    })
+
+    $manifest = [pscustomobject]@{
+        schema = "mlvapp-ultramagnus-p3-evidence-packet.v1"
+        createdAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        source = [pscustomobject]@{
+            host = [Environment]::MachineName
+            expectedHost = $ExpectedHostName
+            requiredGpuNamePattern = $RequiredGpuNamePattern
+            repoRoot = $Repo
+            repoHead = Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD")
+            branch = Get-GitScalar -Repo $Repo -Args @("rev-parse", "--abbrev-ref", "HEAD")
+            gitStatus = Get-GitStatusLines -Repo $Repo
+        }
+        proof = [pscustomobject]@{
+            summaryStatus = $Summary.status
+            dryRun = [bool]$Summary.dryRun
+            releaseSha256 = $Summary.release.sha256
+            clipCount = @($Summary.clipResults).Count
+            totalGpuTextureNoReadbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.gpuTextureNoReadbackFrames }) | Measure-Object -Sum).Sum
+            totalFallbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.fallbackFrameCount }) | Measure-Object -Sum).Sum
+            clips = $clipProof
+        }
+        files = @()
+    }
+
+    Write-JsonFile -Value $manifest -Path $manifestPath
+    $manifest.files = @(Get-ArtifactFileEntries -Root $runRootResolved | Where-Object {
+        $_.relativePath -ne "evidence-packet-manifest.json"
+    })
+    Write-JsonFile -Value $manifest -Path $manifestPath
+
+    if (Test-Path -LiteralPath $packetFullPath) {
+        Remove-Item -LiteralPath $packetFullPath -Force
+    }
+    Compress-Archive -Path (Join-Path $runRootResolved "*") -DestinationPath $packetFullPath -Force
+    $packetItem = Get-Item -LiteralPath $packetFullPath
+
+    return [pscustomobject]@{
+        path = $packetItem.FullName
+        length = $packetItem.Length
+        sha256 = Get-FileSha256 -Path $packetItem.FullName
+        manifest = $manifestPath
+        manifestSha256 = Get-FileSha256 -Path $manifestPath
+    }
+}
+
+function Import-EvidencePacket {
+    param(
+        [Parameter(Mandatory = $true)][string]$PacketPath,
+        [Parameter(Mandatory = $true)][string]$DestinationRoot,
+        [Parameter(Mandatory = $true)][string]$Repo,
+        [Parameter(Mandatory = $true)][string]$ExpectedHostName,
+        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern,
+        [Parameter(Mandatory = $true)][bool]$AllowRepoHeadMismatch
+    )
+
+    $importFailures = [System.Collections.Generic.List[string]]::new()
+    $importWarnings = [System.Collections.Generic.List[string]]::new()
+    $packetResolved = Resolve-RepoPath -Root $Repo -Path $PacketPath
+    $destinationRootResolved = Resolve-RepoPath -Root $Repo -Path $DestinationRoot
+    New-Item -ItemType Directory -Force -Path $destinationRootResolved | Out-Null
+
+    if (!(Test-Path -LiteralPath $packetResolved)) {
+        Add-Failure $importFailures "Missing evidence packet: $packetResolved"
+    }
+
+    $packetItem = $null
+    $extractRoot = Join-Path $destinationRootResolved ("packet-" + (Get-Date -Format "yyyyMMddTHHmmss"))
+    if ($importFailures.Count -eq 0) {
+        $packetItem = Get-Item -LiteralPath $packetResolved
+        New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+        Expand-Archive -LiteralPath $packetItem.FullName -DestinationPath $extractRoot -Force
+    }
+
+    $manifestPath = Join-Path $extractRoot "evidence-packet-manifest.json"
+    $summaryPath = Join-Path $extractRoot "summary.json"
+    $manifest = $null
+    $summary = $null
+
+    if ($importFailures.Count -eq 0) {
+        if (!(Test-Path -LiteralPath $manifestPath)) {
+            Add-Failure $importFailures "Packet is missing evidence-packet-manifest.json."
+        }
+        if (!(Test-Path -LiteralPath $summaryPath)) {
+            Add-Failure $importFailures "Packet is missing summary.json."
+        }
+    }
+
+    if ($importFailures.Count -eq 0) {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+
+        if ($manifest.schema -ne "mlvapp-ultramagnus-p3-evidence-packet.v1") {
+            Add-Failure $importFailures "Unexpected evidence manifest schema: $($manifest.schema)"
+        }
+        if ([string]$manifest.source.host -ine $ExpectedHostName) {
+            Add-Failure $importFailures "Evidence source host was '$($manifest.source.host)'; expected '$ExpectedHostName'."
+        }
+        $gpuNames = @($summary.gpu.devices | ForEach-Object { [string]$_.name })
+        $matchedGpu = $false
+        foreach ($gpuName in $gpuNames) {
+            if ($gpuName -match $RequiredGpuNamePattern) {
+                $matchedGpu = $true
+                break
+            }
+        }
+        if (!$matchedGpu) {
+            Add-Failure $importFailures "Evidence packet has no GPU matching '$RequiredGpuNamePattern': $($gpuNames -join '; ')"
+        }
+
+        $currentHead = Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD")
+        if (!$AllowRepoHeadMismatch -and $currentHead -and $manifest.source.repoHead -and $currentHead -ne $manifest.source.repoHead) {
+            Add-Failure $importFailures "Current repo HEAD $currentHead does not match evidence repo HEAD $($manifest.source.repoHead)."
+        }
+        $sourceDirtyEntries = @($manifest.source.gitStatus | Where-Object { !([string]$_).StartsWith("## ") })
+        if ($sourceDirtyEntries.Count -gt 0) {
+            Add-Failure $importFailures "Evidence source worktree was dirty: $($sourceDirtyEntries -join '; ')"
+        }
+
+        foreach ($file in @($manifest.files)) {
+            $artifactPath = Join-Path $extractRoot ([string]$file.relativePath)
+            if (!(Test-Path -LiteralPath $artifactPath)) {
+                Add-Failure $importFailures "Packet missing artifact listed in manifest: $($file.relativePath)"
+                continue
+            }
+            $artifact = Get-Item -LiteralPath $artifactPath
+            if ($artifact.Length -ne [int64]$file.length) {
+                Add-Failure $importFailures "Artifact length mismatch for $($file.relativePath): expected $($file.length), got $($artifact.Length)."
+            }
+            $actualHash = Get-FileSha256 -Path $artifact.FullName
+            if ($actualHash -ne [string]$file.sha256) {
+                Add-Failure $importFailures "Artifact hash mismatch for $($file.relativePath): expected $($file.sha256), got $actualHash."
+            }
+        }
+
+        if ($summary.status -ne "success") {
+            Add-Failure $importFailures "Evidence summary status was '$($summary.status)'; expected success."
+        }
+        if ([bool]$summary.dryRun) {
+            Add-Failure $importFailures "Evidence summary is a dry run; dry-run packets are not proof."
+        }
+        if (@($summary.failures).Count -gt 0) {
+            Add-Failure $importFailures "Evidence summary contains failures: $((@($summary.failures) | ForEach-Object { [string]$_ }) -join '; ')"
+        }
+        foreach ($clip in @($summary.clipResults)) {
+            $clipName = [string]$clip.clip
+            if ($clip.status -ne "success") {
+                Add-Failure $importFailures "$clipName status was '$($clip.status)'; expected success."
+            }
+            if (-not [bool]$clip.validationOk) {
+                Add-Failure $importFailures "$clipName validationOk was not true."
+            }
+            if ([int]$clip.gpuTextureNoReadbackFrames -le 0) {
+                Add-Failure $importFailures "$clipName had gpuTextureNoReadbackFrames=$($clip.gpuTextureNoReadbackFrames); expected > 0."
+            }
+            if ([int]$clip.activeNoReadbackFrameCount -le 0) {
+                Add-Failure $importFailures "$clipName had activeNoReadbackFrameCount=$($clip.activeNoReadbackFrameCount); expected > 0."
+            }
+            if ([int]$clip.cudaTextureSourceFrameCount -le 0) {
+                Add-Failure $importFailures "$clipName had cudaTextureSourceFrameCount=$($clip.cudaTextureSourceFrameCount); expected > 0."
+            }
+            if ([int]$clip.fallbackFrameCount -ne 0) {
+                Add-Failure $importFailures "$clipName had fallbackFrameCount=$($clip.fallbackFrameCount); expected 0."
+            }
+        }
+    }
+
+    $packetHash = if ($packetItem) { Get-FileSha256 -Path $packetItem.FullName } else { $null }
+    $status = if ($importFailures.Count -eq 0) { "success" } else { "failed" }
+    $result = [pscustomobject]@{
+        schema = "mlvapp-ultramagnus-p3-evidence-import.v1"
+        importedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+        status = $status
+        packet = [pscustomobject]@{
+            path = $packetResolved
+            length = if ($packetItem) { $packetItem.Length } else { $null }
+            sha256 = $packetHash
+        }
+        extractedTo = $extractRoot
+        manifest = if ($manifest) { $manifestPath } else { $null }
+        summary = if ($summary) { $summaryPath } else { $null }
+        source = if ($manifest) { $manifest.source } else { $null }
+        proof = if ($manifest) { $manifest.proof } else { $null }
+        warnings = @($importWarnings)
+        failures = @($importFailures)
+    }
+
+    Write-JsonFile -Value $result -Path (Join-Path $extractRoot "import-result.json")
+    Write-JsonFile -Value $result -Path (Join-Path $destinationRootResolved "latest-import.json")
+    $result | ConvertTo-Json -Depth 12
+    if ($status -eq "success") {
+        exit 0
+    }
+    exit 2
+}
+
 $repo = (Resolve-Path -LiteralPath $RepoRoot).Path
 $smokeScript = Join-Path $repo "tools\profiling\run-release-gui-smoke.ps1"
 $releaseExe = Join-Path $repo "platform\qt\build-release\release\MLVApp.exe"
 $receiptPath = Resolve-RepoPath -Root $repo -Path $Receipt
 $outputRootResolved = Resolve-RepoPath -Root $repo -Path $OutputRoot
+$importOutputRootResolved = Resolve-RepoPath -Root $repo -Path $ImportOutputRoot
+
+if (![string]::IsNullOrWhiteSpace($ImportEvidencePacket)) {
+    Import-EvidencePacket `
+        -PacketPath $ImportEvidencePacket `
+        -DestinationRoot $importOutputRootResolved `
+        -Repo $repo `
+        -ExpectedHostName $ExpectedHostName `
+        -RequiredGpuNamePattern $RequiredGpuNamePattern `
+        -AllowRepoHeadMismatch ([bool]$AllowRepoHeadMismatch)
+}
+
 $stamp = Get-Date -Format "yyyyMMddTHHmmss"
 $runRoot = Join-Path $outputRootResolved $stamp
 $summaryPath = Join-Path $runRoot "summary.json"
@@ -440,6 +731,7 @@ $summary = [pscustomobject]@{
         summary = $summaryPath
         latest = $latestPath
         plannedCommands = $plannedCommands
+        evidencePacket = $null
     }
     clipResults = $clipResults
     warnings = @($warnings)
@@ -447,6 +739,25 @@ $summary = [pscustomobject]@{
 }
 
 Write-JsonFile -Value $summary -Path $summaryPath
+
+if ($status -eq "success" -or $status -eq "planned") {
+    $packetPath =
+        if (![string]::IsNullOrWhiteSpace($EvidencePacketPath)) {
+            Resolve-RepoPath -Root $repo -Path $EvidencePacketPath
+        }
+        else {
+            Join-Path $outputRootResolved ("mlvapp-p3-evidence-$stamp.zip")
+        }
+    $summary.outputs.evidencePacket = New-EvidencePacket `
+        -RunRoot $runRoot `
+        -PacketPath $packetPath `
+        -Summary $summary `
+        -Repo $repo `
+        -ExpectedHostName $ExpectedHostName `
+        -RequiredGpuNamePattern $RequiredGpuNamePattern
+    Write-JsonFile -Value $summary -Path $summaryPath
+}
+
 Write-JsonFile -Value $summary -Path $latestPath
 $summary | ConvertTo-Json -Depth 8
 
