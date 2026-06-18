@@ -40,6 +40,12 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 size_t raw_image_size,
                                 llrawprocWorkerState_t * worker,
                                 int stop_before_dual_iso);
+void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
+int llrpResetGpuPlaybackReconRunForTesting(void);
+int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
+int llrpGpuPlaybackReconLastRunRcForTesting(void);
+int llrpGpuPlaybackReconLastUsedForTesting(void);
+int llrpGpuPlaybackReconLastStateValidForTesting(void);
 
 /* Playback-only helper: apply the full-res raw coordinate/fix stages and stop
  * before Dual ISO recon. Used by the x4 quality-preserving early-reduction

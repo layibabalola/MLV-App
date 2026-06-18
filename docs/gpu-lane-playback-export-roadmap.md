@@ -16,6 +16,21 @@ that Lane A **E1** is currently realized as an off-by-default *shadow validator*
 copies it over the CPU output only when byte-identical, so the CPU path stays
 authoritative until the E2 parity gate promotes it.
 
+Update 2026-06-18: Lane B **P1/P2** has an experimental readback bridge behind
+`MLVAPP_GPU_PLAYBACK_RECON=1`. Playback render/recon threads opt in explicitly,
+then `llrawproc` prepares only the CPU-side Dual-ISO match/LUT state and runs
+`igpu_recon` to `IGPU_OUT_CPU16` in a temporary output buffer that is copied
+back only after success; on missing DLL, unsupported config, invalid state, or
+backend error it falls back to the existing CPU `diso_get_full20bit`.
+The bridge is limited to the already-proven v1 recon shape
+(`MEAN23 + alias_map ON + fullres ON + chroma OFF`) and is telemetry-only: it
+does not add a GUI quality claim, no-readback present path, or adaptive mode.
+Unlike export's CPU-authoritative shadow replacement, playback P2 deliberately
+trusts a successful backend `rc==0` and does not run a per-frame CPU memcmp;
+that trust boundary is accepted only for this experimental, env-gated bridge
+after the 4090 parity pass, with any future shadow-verify mode tracked as a
+canary/follow-up rather than the normal playback path.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -72,8 +87,8 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
   DLL gate) + GPU **processing** parity + clean x1 CPU-vs-GPU frame diff. Required
   before the GUI may claim "GPU Full Quality AMaZE" (see §8).
-- **P1** loader/fallback: load `igpu_recon_cuda.dll` if present + capable, else CPU. No hard dependency.
-- **P2** GPU recon + CPU readback: CUDA recon → Bayer16 readback → existing CPU debayer/process/present. Integration bridge, not final UX.
+- **P1** loader/fallback: load `igpu_recon_cuda.dll` if present + capable, else CPU. No hard dependency. Experimental playback bridge present behind `MLVAPP_GPU_PLAYBACK_RECON=1`.
+- **P2** GPU recon + CPU readback: CUDA recon → Bayer16 readback → existing CPU debayer/process/present. Integration bridge, not final UX. Implemented for the v1 proven config only; missing/unsupported backend falls back to CPU.
 - **P3** no-readback playback: CPU decode/prefetch → CUDA recon/debayer/process → CUDA→GL texture present (no `QImage`, no `glReadPixels`); `GpuDisplayViewport` gains a texture-in path.
 - **P4** adaptive quality + polish: hardware-capability-driven auto quality/scale, visible A/B + frame diffs, status UI, telemetry.
 - Decode (LJ92, CPU, overlapped via prefetch ~7-9 ms @ 4.1 MP) is the steady-state gate once recon is on GPU — tune the overlap.

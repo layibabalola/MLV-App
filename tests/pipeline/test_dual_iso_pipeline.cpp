@@ -42,6 +42,12 @@ extern "C" unsigned long long llrpGpuExportLastMismatchFirstIndexForTesting(void
 extern "C" int llrpGpuExportLastMismatchFirstCpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchFirstGpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchMaxAbsForTesting(void);
+extern "C" void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
+extern "C" int llrpResetGpuPlaybackReconRunForTesting(void);
+extern "C" int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
+extern "C" int llrpGpuPlaybackReconLastRunRcForTesting(void);
+extern "C" int llrpGpuPlaybackReconLastUsedForTesting(void);
+extern "C" int llrpGpuPlaybackReconLastStateValidForTesting(void);
 
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
 {
@@ -114,6 +120,20 @@ static void configure_gpu_export_supported_dual_iso(MlvPipelineFixture & fixture
 {
     configure_gpu_export_dual_iso(fixture, kGpuExportSupportedDualIsoConfig);
 }
+
+class GpuPlaybackReconThreadOptIn
+{
+public:
+    explicit GpuPlaybackReconThreadOptIn(bool enabled)
+    {
+        llrpSetGpuPlaybackReconAllowedForCurrentThread(enabled ? 1 : 0);
+    }
+
+    ~GpuPlaybackReconThreadOptIn()
+    {
+        llrpSetGpuPlaybackReconAllowedForCurrentThread(0);
+    }
+};
 
 // Deterministic Look-Assist-style DNG metadata overrides for the parity matrix.
 // The exact values are arbitrary but fixed: both the CPU and GPU export of a case
@@ -736,6 +756,192 @@ TEST(DualIsoPipeline, GpuExportMissingDllFallbackIsByteInertForCompressedAndUnco
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
 
+TEST(DualIsoPipeline, GpuPlaybackReconEnvAloneDoesNotTouchBackend)
+{
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_GPU_RECON_DLL", QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    configure_gpu_export_supported_dual_iso(fixture);
+    const std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastUsedForTesting());
+    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconFalseEnvDoesNotTouchBackendWhenOptedIn)
+{
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("0"));
+    qputenv("MLVAPP_GPU_RECON_DLL", QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    configure_gpu_export_supported_dual_iso(fixture);
+    std::vector<uint16_t> frame;
+    {
+        const GpuPlaybackReconThreadOptIn opt_in(true);
+        frame = fixture.renderFrame16(0, 1);
+    }
+    ASSERT_TRUE(!frame.empty());
+
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastUsedForTesting());
+    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconIneligibleConfigDoesNotTouchBackendWhenOptedIn)
+{
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    const GpuExportDualIsoConfig ineligible_cfg = {
+        DISOI_MEAN23, FR_OFF, FR_ON, CS_OFF
+    };
+
+    MlvPipelineFixture cpu_fixture;
+    assert_fixture_ready(cpu_fixture);
+    configure_gpu_export_dual_iso(cpu_fixture, ineligible_cfg);
+    const std::vector<uint16_t> cpu_frame = cpu_fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!cpu_frame.empty());
+
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_GPU_RECON_DLL", QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture fallback_fixture;
+    assert_fixture_ready(fallback_fixture);
+    configure_gpu_export_dual_iso(fallback_fixture, ineligible_cfg);
+    std::vector<uint16_t> fallback_frame;
+    {
+        const GpuPlaybackReconThreadOptIn opt_in(true);
+        fallback_frame = fallback_fixture.renderFrame16(0, 1);
+    }
+
+    ASSERT_TRUE(cpu_frame == fallback_frame);
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastUsedForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastStateValidForTesting());
+    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconMissingDllFallsBackByteInert)
+{
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture cpu_fixture;
+    assert_fixture_ready(cpu_fixture);
+    configure_gpu_export_supported_dual_iso(cpu_fixture);
+    const std::vector<uint16_t> cpu_frame = cpu_fixture.renderFrame16(0, 1);
+
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_GPU_RECON_DLL", QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture fallback_fixture;
+    assert_fixture_ready(fallback_fixture);
+    configure_gpu_export_supported_dual_iso(fallback_fixture);
+    std::vector<uint16_t> fallback_frame;
+    {
+        const GpuPlaybackReconThreadOptIn opt_in(true);
+        fallback_frame = fallback_fixture.renderFrame16(0, 1);
+    }
+
+    ASSERT_TRUE(cpu_frame == fallback_frame);
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastUsedForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastStateValidForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconCudaReadbackMatchesCpuWhenBackendAvailable)
+{
+    QByteArray dll_env = qgetenv("MLVAPP_GPU_PLAYBACK_RECON_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    }
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_PLAYBACK_RECON_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture cpu_fixture;
+    assert_fixture_ready(cpu_fixture);
+    configure_gpu_export_supported_dual_iso(cpu_fixture);
+    const std::vector<uint16_t> cpu_frame = cpu_fixture.renderFrame16(0, 1);
+
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON_DLL", dll_path.toLocal8Bit());
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture gpu_fixture;
+    assert_fixture_ready(gpu_fixture);
+    configure_gpu_export_supported_dual_iso(gpu_fixture);
+    std::vector<uint16_t> gpu_frame;
+    {
+        const GpuPlaybackReconThreadOptIn opt_in(true);
+        gpu_frame = gpu_fixture.renderFrame16(0, 1);
+    }
+
+    ASSERT_TRUE(cpu_frame == gpu_frame);
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastUsedForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastStateValidForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastRunRcForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
 TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompressedDng)
 {
     const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
@@ -1034,6 +1240,47 @@ TEST(DualIsoPipeline, GpuExportParityMatrixIsByteExactAcrossEligibleConfigs)
         }
     }
 
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuExportDllIgnoresBadPlaybackReconDllOverride)
+{
+    const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_EXPORT_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString missing_playback_dll =
+        temp_dir.filePath(QStringLiteral("does-not-exist-playback-recon.dll"));
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON_DLL", missing_playback_dll.toLocal8Bit());
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+
+    const QString cpu_dng = temp_dir.filePath(QStringLiteral("cpu.dng"));
+    const QString gpu_dng = temp_dir.filePath(QStringLiteral("gpu.dng"));
+    const QByteArray cpu_bytes =
+        export_tiny_dng_for_gpu_export_gate(UNCOMPRESSED_RAW, false, QString(), cpu_dng);
+    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+
+    const QByteArray gpu_bytes =
+        export_tiny_dng_for_gpu_export_gate(UNCOMPRESSED_RAW, true, dll_path, gpu_dng);
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuExportBackendUnavailableForTesting());
+    ASSERT_EQ(1, llrpGpuExportLastRunAttemptedForTesting());
+    ASSERT_EQ(0, llrpGpuExportLastRunRcForTesting());
+    ASSERT_EQ(1, llrpGpuExportLastReplacedForTesting());
+    ASSERT_TRUE(cpu_bytes == gpu_bytes);
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
     qunsetenv("MLVAPP_GPU_EXPORT");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
