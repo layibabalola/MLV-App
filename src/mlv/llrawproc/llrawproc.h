@@ -106,6 +106,12 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      unsigned int gl_texture_id,
                                      int * rc_out,
                                      llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size,
+                                      uint16_t * output_bayer16,
+                                      int * rc_out,
+                                      llrpGpuPlaybackReconTiming_t * timing_out);
 
 typedef struct
 {

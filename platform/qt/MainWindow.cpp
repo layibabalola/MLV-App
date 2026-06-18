@@ -3460,6 +3460,62 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                         task.gpuPlaybackReconTextureBayerFrame,
                         expectedPlaybackReconTextureBayerPixels )
                     : Bayer16ParitySummary();
+            const QString inputHash =
+                task.gpuPlaybackReconTextureInputBayerFrame
+                    ? sha256HexForRawBytes(
+                        task.gpuPlaybackReconTextureInputBayerFrame,
+                        expectedPlaybackReconTextureBayerPixels * sizeof( uint16_t ) )
+                    : QStringLiteral("none");
+            QByteArray gpuCpuReplayBytes;
+            int gpuCpuReplayRc = -1;
+            bool gpuCpuReplayOk = false;
+            QString gpuCpuReplayHash = QStringLiteral("none");
+            Bayer16ParitySummary gpuCpuReplayParity;
+            Bayer16ParitySummary glVsGpuCpuReplayParity;
+            llrpGpuPlaybackReconTiming_t gpuCpuReplayTiming;
+            memset( &gpuCpuReplayTiming, 0, sizeof( gpuCpuReplayTiming ) );
+            if( task.gpuPlaybackReconTextureInputBayerFrame
+             && task.gpuPlaybackReconTextureInputBayerFrameSize
+                >= expectedPlaybackReconTextureBayerPixels
+             && expectedPlaybackReconTextureBayerPixels
+                <= static_cast<size_t>( std::numeric_limits<int>::max() / sizeof( uint16_t ) ) )
+            {
+                gpuCpuReplayBytes.resize(
+                    static_cast<int>(
+                        expectedPlaybackReconTextureBayerPixels * sizeof( uint16_t ) ) );
+                gpuCpuReplayOk =
+                    llrpGpuPlaybackReconRunCpu16Probe(
+                        &gpuReconState,
+                        task.gpuPlaybackReconTextureInputBayerFrame,
+                        expectedPlaybackReconTextureBayerPixels * sizeof( uint16_t ),
+                        reinterpret_cast<uint16_t *>( gpuCpuReplayBytes.data() ),
+                        &gpuCpuReplayRc,
+                        &gpuCpuReplayTiming ) != 0;
+                if( gpuCpuReplayOk )
+                {
+                    gpuCpuReplayHash =
+                        sha256HexForRawBytes(
+                            gpuCpuReplayBytes.constData(),
+                            static_cast<size_t>( gpuCpuReplayBytes.size() ) );
+                    if( oracleAvailable )
+                    {
+                        gpuCpuReplayParity =
+                            compareBayer16ToOracle(
+                                gpuCpuReplayBytes,
+                                task.gpuPlaybackReconTextureBayerFrame,
+                                expectedPlaybackReconTextureBayerPixels );
+                    }
+                    if( glTextureReadbackOk )
+                    {
+                        glVsGpuCpuReplayParity =
+                            compareBayer16ToOracle(
+                                glTextureBytes,
+                                reinterpret_cast<const uint16_t *>(
+                                    gpuCpuReplayBytes.constData() ),
+                                expectedPlaybackReconTextureBayerPixels );
+                    }
+                }
+            }
             const QString renderer =
                 sanitizeLogValue(
                     GpuDisplayViewport::rendererDescriptionFor( ui->graphicsView ) );
@@ -3537,6 +3593,79 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                        .arg( backendResolvedPath )
                        .arg( backendDescription )
                        .arg( reason );
+
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.gl_probe_detail session=%1 index=%2 "
+                       "input_hash=%3 state_width=%4 state_height=%5 "
+                       "state_black=%6 state_white=%7 state_white_darkened=%8 "
+                       "state_black_delta=%9 state_ev_correction=%10 "
+                       "state_dark_noise=%11 state_interp=%12 "
+                       "state_alias_map=%13 state_fullres=%14 "
+                       "state_chroma_smooth=%15 state_apply_dither=%16 "
+                       "state_is_bright=%17%18%19%20 "
+                       "gpu_cpu_replay_ok=%21 gpu_cpu_replay_rc=%22 "
+                       "gpu_cpu_replay_hash=%23 "
+                       "gpu_cpu_oracle_parity_checked=%24 "
+                       "gpu_cpu_oracle_parity_match=%25 "
+                       "gpu_cpu_oracle_mismatch_count=%26 "
+                       "gpu_cpu_oracle_mismatch_first_index=%27 "
+                       "gpu_cpu_oracle_mismatch_first_gpu=%28 "
+                       "gpu_cpu_oracle_mismatch_first_oracle=%29 "
+                       "gpu_cpu_oracle_mismatch_max_abs=%30 "
+                       "gl_vs_gpu_cpu_parity_checked=%31 "
+                       "gl_vs_gpu_cpu_parity_match=%32 "
+                       "gl_vs_gpu_cpu_mismatch_count=%33 "
+                       "gpu_cpu_upload_ms=%34 gpu_cpu_kernel_ms=%35 "
+                       "gpu_cpu_download_ms=%36 gpu_cpu_total_ms=%37" )
+                       .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                       .arg( m_playbackSmokePresentedFrames + 1 )
+                       .arg( inputHash )
+                       .arg( gpuReconState.width )
+                       .arg( gpuReconState.height )
+                       .arg( gpuReconState.black_level )
+                       .arg( gpuReconState.white_level )
+                       .arg( gpuReconState.white_darkened )
+                       .arg( gpuReconState.black_delta )
+                       .arg( gpuReconState.ev_correction, 0, 'f', 6 )
+                       .arg( gpuReconState.dark_noise, 0, 'f', 6 )
+                       .arg( gpuReconState.interp_method )
+                       .arg( gpuReconState.use_alias_map )
+                       .arg( gpuReconState.use_fullres )
+                       .arg( gpuReconState.chroma_smooth_method )
+                       .arg( gpuReconState.apply_dither )
+                       .arg( gpuReconState.is_bright[0] )
+                       .arg( gpuReconState.is_bright[1] )
+                       .arg( gpuReconState.is_bright[2] )
+                       .arg( gpuReconState.is_bright[3] )
+                       .arg( bool01( gpuCpuReplayOk ) )
+                       .arg( gpuCpuReplayRc )
+                       .arg( gpuCpuReplayHash )
+                       .arg( bool01( gpuCpuReplayParity.checked ) )
+                       .arg( bool01( gpuCpuReplayParity.match ) )
+                       .arg( static_cast<qulonglong>(
+                           gpuCpuReplayParity.mismatchCount ) )
+                       .arg( static_cast<qulonglong>(
+                           gpuCpuReplayParity.firstMismatchIndex ) )
+                       .arg( gpuCpuReplayParity.firstGl )
+                       .arg( gpuCpuReplayParity.firstOracle )
+                       .arg( gpuCpuReplayParity.maxAbsDiff )
+                       .arg( bool01( glVsGpuCpuReplayParity.checked ) )
+                       .arg( bool01( glVsGpuCpuReplayParity.match ) )
+                       .arg( static_cast<qulonglong>(
+                           glVsGpuCpuReplayParity.mismatchCount ) )
+                       .arg( gpuCpuReplayTiming.available
+                           ? gpuCpuReplayTiming.upload_ms
+                           : 0.0, 0, 'f', 3 )
+                       .arg( gpuCpuReplayTiming.available
+                           ? gpuCpuReplayTiming.kernel_ms
+                           : 0.0, 0, 'f', 3 )
+                       .arg( gpuCpuReplayTiming.available
+                           ? gpuCpuReplayTiming.interop_ms
+                           : 0.0, 0, 'f', 3 )
+                       .arg( gpuCpuReplayTiming.available
+                           ? gpuCpuReplayTiming.total_ms
+                           : 0.0, 0, 'f', 3 );
         }
         if( !framePresentedByViewport )
         {

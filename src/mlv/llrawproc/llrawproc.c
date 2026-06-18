@@ -929,6 +929,40 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                           NULL,
                                           timing_out);
 }
+
+int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size,
+                                      uint16_t * output_bayer16,
+                                      int * rc_out,
+                                      llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size,
+                                      uint16_t * output_bayer16,
+                                      int * rc_out,
+                                      llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    dualiso_gpu_recon_state_t private_state;
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    if(!output_bayer16) return 0;
+    if(!llrawproc_gpu_playback_dualiso_state_from_public(state, &private_state))
+    {
+        return 0;
+    }
+    return llrawproc_gpu_recon_run_backend(&private_state,
+                                          raw_input_bayer14,
+                                          output_bayer16,
+                                          0,
+                                          IGPU_OUT_CPU16,
+                                          raw_image_size,
+                                          1,
+                                          rc_out,
+                                          NULL,
+                                          NULL,
+                                          timing_out);
+}
 #else
 static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
 {
@@ -1001,6 +1035,28 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
     (void)raw_input_bayer14;
     (void)raw_image_size;
     (void)gl_texture_id;
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    return 0;
+}
+
+int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size,
+                                      uint16_t * output_bayer16,
+                                      int * rc_out,
+                                      llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size,
+                                      uint16_t * output_bayer16,
+                                      int * rc_out,
+                                      llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    (void)state;
+    (void)raw_input_bayer14;
+    (void)raw_image_size;
+    (void)output_bayer16;
     if(rc_out) *rc_out = -1;
     if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
     return 0;
