@@ -9,6 +9,9 @@ param(
     [string]$RemotePacketPath = "",
     [string]$LocalPacketRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\remote-packets",
     [string]$ImportOutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\imported",
+    [string]$ClipRoot = "G:\Temp\mlv-gpu-profile\clips",
+    [string[]]$ClipNames = @("M16-1327.MLV"),
+    [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
     [int]$AgentTimeoutSec = 2700,
@@ -53,6 +56,25 @@ function Write-JsonFile {
 function Convert-ToPowerShellSingleQuotedString {
     param([AllowNull()][string]$Value)
     return "'" + (($Value -replace "'", "''")) + "'"
+}
+
+function Convert-ToPowerShellArrayLiteral {
+    param([AllowNull()][string[]]$Values)
+    $quoted = @($Values | ForEach-Object {
+        Convert-ToPowerShellSingleQuotedString ([string]$_)
+    })
+    return "@(" + ($quoted -join ", ") + ")"
+}
+
+function Convert-AgentExitCode {
+    param($Value)
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value.PSObject.Properties.Name -contains "value") {
+        return [int]$Value.value
+    }
+    return [int]$Value
 }
 
 function Join-WindowsPathLiteral {
@@ -341,12 +363,17 @@ elseif ($failures.Count -eq 0) {
 
         $jobId = "mlvapp-p3-$stamp"
         $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
+        $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
+        $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
 `$packet = $(Convert-ToPowerShellSingleQuotedString $RemotePacketPath)
 `$jobOutput = $(Convert-ToPowerShellSingleQuotedString $remoteJobOutputPath)
 `$expectedHost = $(Convert-ToPowerShellSingleQuotedString $ExpectedEvidenceHostName)
+`$clipRoot = $(Convert-ToPowerShellSingleQuotedString $ClipRoot)
+`$clipNames = $clipNamesLiteral
+`$clipPaths = $clipPathsLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
@@ -383,6 +410,16 @@ try {
         '-SettleMs',
         '$( [string]$SettleMs )'
     )
+    if (`$clipPaths.Count -gt 0) {
+        `$args += '-ClipPaths'
+        `$args += `$clipPaths
+    }
+    else {
+        `$args += '-ClipRoot'
+        `$args += `$clipRoot
+        `$args += '-ClipNames'
+        `$args += `$clipNames
+    }
     if ($skipBuildLiteral) {
         `$args += '-SkipBuild'
     }
@@ -420,13 +457,19 @@ catch {
         if ($agentSubmission.timedOut) {
             Add-Failure $failures "Timed out waiting for UltraMagnus SMB agent job '$jobId' after $AgentTimeoutSec seconds."
         }
-        elseif ($agentSubmission.result.exitCode -ne 0) {
-            Add-Failure $failures "UltraMagnus SMB agent job '$jobId' exited with code $($agentSubmission.result.exitCode)."
+        else {
+            $agentExitCode = Convert-AgentExitCode $agentSubmission.result.exitCode
+            if ($agentExitCode -ne 0) {
+                Add-Failure $failures "UltraMagnus SMB agent job '$jobId' exited with code $agentExitCode."
+            }
         }
     }
 
-    if ($failures.Count -eq 0 -and (Test-Path -LiteralPath $remoteJobOutputShare)) {
+    if (Test-Path -LiteralPath $remoteJobOutputShare) {
         $remoteJobOutput = Get-Content -LiteralPath $remoteJobOutputShare -Raw | ConvertFrom-Json
+    }
+
+    if ($failures.Count -eq 0 -and $remoteJobOutput) {
         if ($remoteJobOutput.validatorExitCode -ne 0) {
             Add-Failure $failures "Remote UltraMagnus validator exited with code $($remoteJobOutput.validatorExitCode)."
         }
