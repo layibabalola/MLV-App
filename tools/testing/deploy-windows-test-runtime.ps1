@@ -47,6 +47,27 @@ function Find-FirstFile {
     return $null
 }
 
+function Find-QtPluginFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath,
+        [Parameter(Mandatory = $true)]
+        [string[]]$QtBinDirectories
+    )
+
+    foreach ($binDir in $QtBinDirectories) {
+        $qtRoot = Split-Path -Parent $binDir
+        if ([string]::IsNullOrWhiteSpace($qtRoot)) {
+            continue
+        }
+        $candidate = Join-Path (Join-Path $qtRoot "plugins") $RelativePath
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 $target = New-Item -ItemType Directory -Force -Path $TargetDir
 $pathDirs = @()
 if (-not [string]::IsNullOrWhiteSpace($env:PATH)) {
@@ -132,6 +153,26 @@ foreach ($entry in $required) {
 
     Copy-Item -LiteralPath $source -Destination (Join-Path $target.FullName $entry.Name) -Force
     $copied.Add($entry.Name)
+}
+
+if ($testExeNames -contains "gui_tests.exe") {
+    $offscreenPlugin = Find-QtPluginFile `
+        -RelativePath "platforms\qoffscreen.dll" `
+        -QtBinDirectories $qtDirs
+    if ($null -eq $offscreenPlugin) {
+        $missing.Add("platforms\qoffscreen.dll")
+    }
+    else {
+        $platformDir = New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path (Join-Path $target.FullName "platforms")
+        Copy-Item `
+            -LiteralPath $offscreenPlugin `
+            -Destination (Join-Path $platformDir.FullName "qoffscreen.dll") `
+            -Force
+        $copied.Add("platforms\qoffscreen.dll")
+    }
 }
 
 if ($missing.Count -gt 0) {

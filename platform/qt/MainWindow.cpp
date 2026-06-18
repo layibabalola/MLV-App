@@ -38,6 +38,7 @@ extern "C" {
 #include <QDate>
 #include <QStorageInfo>
 #include <QColorDialog>
+#include <cstring>
 #include <memory>
 #include <unistd.h>
 #include <math.h>
@@ -57,6 +58,53 @@ static bool interactiveTraceEnabled()
         qEnvironmentVariableIsSet( "MLVAPP_INTERACTIVE_TRACE" )
         && qEnvironmentVariable( "MLVAPP_INTERACTIVE_TRACE" ) != QStringLiteral("0");
     return enabled;
+}
+
+static bool buildGpuPlaybackReconStateForTexturePresent(
+    const RenderFrameThread::GpuPlaybackReconTextureState &source,
+    llrpGpuPlaybackReconState_t *destination)
+{
+    if( !destination ) return false;
+    memset( destination, 0, sizeof( *destination ) );
+    if( !source.valid
+     || source.width <= 0
+     || source.height <= 0
+     || !source.luts
+     || source.luts->raw2ev.size() < LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT
+     || source.luts->ev2raw.size() < LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT
+     || source.luts->mixCurve.size() < LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT
+     || source.luts->fullresCurve.size() < LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT
+     || ( source.applyDither
+       && source.luts->randn05.size() < LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT ) )
+    {
+        return false;
+    }
+
+    destination->valid = 1;
+    destination->width = source.width;
+    destination->height = source.height;
+    destination->black_level = source.blackLevel;
+    destination->white_level = source.whiteLevel;
+    destination->white_darkened = source.whiteDarkened;
+    destination->black_delta = source.blackDelta;
+    destination->ev_correction = source.evCorrection;
+    destination->dark_noise = source.darkNoise;
+    destination->interp_method = source.interpMethod;
+    destination->use_alias_map = source.useAliasMap ? 1 : 0;
+    destination->use_fullres = source.useFullres ? 1 : 0;
+    destination->chroma_smooth_method = source.chromaSmoothMethod;
+    for( size_t i = 0; i < source.isBright.size(); ++i )
+    {
+        destination->is_bright[i] = source.isBright[i];
+    }
+    destination->raw2ev = source.luts->raw2ev.data();
+    destination->ev2raw = source.luts->ev2raw.data();
+    destination->mix_curve = source.luts->mixCurve.data();
+    destination->fullres_curve = source.luts->fullresCurve.data();
+    destination->randn05 =
+        source.applyDither ? source.luts->randn05.data() : nullptr;
+    destination->apply_dither = source.applyDither ? 1 : 0;
+    return true;
 }
 
 static bool playbackSmokeFrameTelemetryEnabled()
@@ -3206,6 +3254,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         && task.gpuPlaybackReconTextureBayerFrameSize >= expectedPlaybackReconTextureBayerPixels
         && readyFrame.gpuPlaybackReconTextureWidth == sourceWidth
         && readyFrame.gpuPlaybackReconTextureHeight == sourceHeight;
+    const bool gpuPlaybackReconTextureNoReadbackCandidate =
+        gpuPlaybackReconTexturePresentRequested
+        && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+        && task.gpuPlaybackReconTextureInputBayerFrame
+        && task.gpuPlaybackReconTextureInputBayerFrameSize >= expectedPlaybackReconTextureBayerPixels
+        && task.gpuPlaybackReconTextureState.valid
+        && task.gpuPlaybackReconTextureState.width == sourceWidth
+        && task.gpuPlaybackReconTextureState.height == sourceHeight;
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_environment_requested"),
         gpuPlaybackReconTexturePresentEnvRequested );
@@ -3216,9 +3272,79 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QStringLiteral("gpu_playback_recon_texture_present_candidate"),
         gpuPlaybackReconTexturePresentCandidate );
     readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_texture_present_no_readback_candidate"),
+        gpuPlaybackReconTextureNoReadbackCandidate );
+    readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
         false );
-    if( gpuPlaybackReconTexturePresentCandidate )
+    if( gpuPlaybackReconTextureNoReadbackCandidate )
+    {
+        llrpGpuPlaybackReconState_t gpuReconState;
+        memset( &gpuReconState, 0, sizeof( gpuReconState ) );
+        const bool hasGpuReconState =
+            buildGpuPlaybackReconStateForTexturePresent(
+                task.gpuPlaybackReconTextureState,
+                &gpuReconState );
+        const double texturePresentStart = mlv_stage_timing_now();
+        QString texturePresentReason;
+        llrpGpuPlaybackReconTiming_t texturePresentTiming;
+        memset( &texturePresentTiming, 0, sizeof( texturePresentTiming ) );
+        framePresentedByViewport =
+            hasGpuReconState
+                && GpuDisplayViewport::presentGpuPlaybackReconTexture(
+                    ui->graphicsView,
+                    m_pGraphicsItem,
+                    task.gpuPlaybackReconTextureInputBayerFrame,
+                    task.gpuPlaybackReconTextureInputBayerFrameSize,
+                    &gpuReconState,
+                    task.gpuPresentationOptions,
+                    &texturePresentReason,
+                    &texturePresentTiming );
+        const double texturePresentMs =
+            (mlv_stage_timing_now() - texturePresentStart) * 1000.0;
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_active"),
+            framePresentedByViewport );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
+            framePresentedByViewport );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_source"),
+            framePresentedByViewport
+                ? QStringLiteral("cuda_gl_r16_texture")
+                : QStringLiteral("cuda_gl_r16_texture_failed") );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_upload_ms"),
+            texturePresentTiming.available
+                ? texturePresentTiming.upload_ms
+                : texturePresentMs );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_kernel_ms"),
+            texturePresentTiming.available
+                ? texturePresentTiming.kernel_ms
+                : 0.0 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_interop_ms"),
+            texturePresentTiming.available
+                ? texturePresentTiming.interop_ms
+                : 0.0 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_total_ms"),
+            texturePresentTiming.available
+                ? texturePresentTiming.total_ms
+                : texturePresentMs );
+        if( !framePresentedByViewport )
+        {
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_texture_present_no_readback_fallback_reason"),
+                hasGpuReconState
+                    ? ( texturePresentReason.isEmpty()
+                        ? QStringLiteral("GPU playback recon CUDA-to-GL handoff failed")
+                        : texturePresentReason )
+                    : QStringLiteral("GPU playback recon no-readback snapshot was incomplete") );
+        }
+    }
+    if( !framePresentedByViewport && gpuPlaybackReconTexturePresentCandidate )
     {
         const double texturePresentStart = mlv_stage_timing_now();
         framePresentedByViewport =
@@ -3234,8 +3360,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             QStringLiteral("gpu_playback_recon_texture_present_active"),
             framePresentedByViewport );
         readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
+            false );
+        readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_source"),
-            QStringLiteral("cpu16_readback_reconstructed_bayer") );
+            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                "gpu_playback_recon_used" )
+                ? QStringLiteral("cpu16_readback_reconstructed_bayer")
+                : QStringLiteral("cpu16_reconstructed_bayer_fallback") );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_upload_ms"),
             texturePresentMs );
@@ -3249,7 +3381,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                 QStringLiteral("GPU playback recon Bayer texture-present viewport upload failed; falling back to the ordinary RGB presentation path") );
         }
     }
-    else
+    if( !gpuPlaybackReconTextureNoReadbackCandidate
+     && !gpuPlaybackReconTexturePresentCandidate )
     {
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_active"),
@@ -5338,14 +5471,34 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         return 3;
     }
 
+    auto forceLookAssistOffForSmoke = [&]()
+    {
+        if( !options.disableLookAssist ) return;
+        if( ACTIVE_RECEIPT )
+        {
+            ACTIVE_RECEIPT->setLookAssistEnabled( false );
+        }
+        QSignalBlocker blocker( ui->checkBoxLookAssistEnable );
+        ui->checkBoxLookAssistEnable->setChecked( false );
+        m_lastLookAssistDiagnosticsValid = false;
+        m_lookAssistAppliedReceipt = nullptr;
+    };
+
     m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
     m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
     m_gpuAmazeDebayerBackendRequest = options.gpuAmazeDebayerBackend;
+
+    if( options.disableLookAssist && ui->actionUseDefaultReceipt )
+    {
+        QSignalBlocker blocker( ui->actionUseDefaultReceipt );
+        ui->actionUseDefaultReceipt->setChecked( false );
+    }
 
     show();
     qApp->processEvents( QEventLoop::AllEvents );
 
     openMlvSet( QStringList() << inputInfo.absoluteFilePath() );
+    forceLookAssistOffForSmoke();
     if( !m_pMlvObject || !m_fileLoaded )
     {
         err << "[GUI-SMOKE] ERROR: failed to open clip: "
@@ -5366,6 +5519,10 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             return 5;
         }
 
+        if( options.disableLookAssist )
+        {
+            receipt.setLookAssistEnabled( false );
+        }
         if( ACTIVE_RECEIPT )
         {
             *ACTIVE_RECEIPT = receipt;
@@ -5377,6 +5534,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         }
         qApp->processEvents( QEventLoop::AllEvents );
         m_frameChanged = true;
+        forceLookAssistOffForSmoke();
     }
 
     if( options.forceScope )
@@ -18493,9 +18651,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "playback_smoke.gpu_frame session=%1 index=%2 status=%3 "
                    "recon_env=%4 recon_attempted=%5 recon_used=%6 "
                    "recon_state_valid=%7 recon_rc=%8 texture_requested=%9 "
-                   "texture_candidate=%10 texture_active=%11 "
-                   "texture_no_readback_active=%12 texture_source=%13 "
-                   "texture_upload_ms=%14 texture_total_ms=%15" )
+                   "texture_candidate=%10 texture_readback_candidate=%11 "
+                   "texture_no_readback_candidate=%12 texture_active=%13 "
+                   "texture_no_readback_active=%14 texture_source=%15 "
+                   "texture_no_readback_fallback_reason=\"%16\" "
+                   "texture_upload_ms=%17 texture_total_ms=%18" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -18511,16 +18671,23 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( telemetryIntValue( timing, "gpu_playback_recon_rc" ) )
                    .arg( bool01( telemetryBoolValue(
                        timing, "gpu_playback_recon_texture_present_requested" ) ) )
-                   .arg( bool01( telemetryBoolValue(
-                       timing, "gpu_playback_recon_texture_present_candidate" ) ) )
-                   .arg( bool01( gpuPlaybackReconTexturePresentActive ) )
-                   .arg( bool01( gpuPlaybackReconTexturePresentNoReadbackActive ) )
-                   .arg( timing.value(
-                       QStringLiteral("gpu_playback_recon_texture_present_source") )
-                       .toString( QStringLiteral("none") ) )
-                   .arg( telemetryDoubleValue(
-                       timing, "gpu_playback_recon_texture_present_upload_ms" ),
-                       0, 'f', 3 )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_candidate" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_readback_bayer_candidate" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_no_readback_candidate" ) ) )
+                    .arg( bool01( gpuPlaybackReconTexturePresentActive ) )
+                    .arg( bool01( gpuPlaybackReconTexturePresentNoReadbackActive ) )
+                    .arg( timing.value(
+                        QStringLiteral("gpu_playback_recon_texture_present_source") )
+                        .toString( QStringLiteral("none") ) )
+                    .arg( timing.value(
+                        QStringLiteral("gpu_playback_recon_texture_present_no_readback_fallback_reason") )
+                        .toString( QStringLiteral("none") ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_upload_ms" ),
+                        0, 'f', 3 )
                    .arg( telemetryDoubleValue(
                        timing, "gpu_playback_recon_texture_present_total_ms" ),
                        0, 'f', 3 );
@@ -21150,6 +21317,12 @@ void MainWindow::drawFrameReady()
         readyFrame.gpuPlaybackReconTextureBayerFrame;
     task.gpuPlaybackReconTextureBayerFrameSize =
         readyFrame.gpuPlaybackReconTextureBayerFrameSize;
+    task.gpuPlaybackReconTextureInputBayerFrame =
+        readyFrame.gpuPlaybackReconTextureInputBayerFrame;
+    task.gpuPlaybackReconTextureInputBayerFrameSize =
+        readyFrame.gpuPlaybackReconTextureInputBayerFrameSize;
+    task.gpuPlaybackReconTextureState =
+        readyFrame.gpuPlaybackReconTextureState;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
     const bool needsOwnedRgb16 =
@@ -21180,6 +21353,15 @@ void MainWindow::drawFrameReady()
             readyFrame.gpuPlaybackReconTextureBayerFrame
                 + readyFrame.gpuPlaybackReconTextureBayerFrameSize );
     }
+    if( readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+     && readyFrame.gpuPlaybackReconTextureInputBayerFrame
+     && readyFrame.gpuPlaybackReconTextureInputBayerFrameSize > 0 )
+    {
+        task.ownedGpuPlaybackReconTextureInputBayerFrame.assign(
+            readyFrame.gpuPlaybackReconTextureInputBayerFrame,
+            readyFrame.gpuPlaybackReconTextureInputBayerFrame
+                + readyFrame.gpuPlaybackReconTextureInputBayerFrameSize );
+    }
     const size_t playbackScaledImageBytes =
         (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
             ? static_cast<size_t>(
@@ -21204,6 +21386,9 @@ void MainWindow::drawFrameReady()
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_bayer_bytes"),
         static_cast<qint64>( task.ownedGpuPlaybackReconTextureBayerFrame.size() * sizeof( uint16_t ) ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_input_bytes"),
+        static_cast<qint64>( task.ownedGpuPlaybackReconTextureInputBayerFrame.size() * sizeof( uint16_t ) ) );
     task.readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
         static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );

@@ -1,3 +1,27 @@
+# 2026-06-18 - GPU Lane P3 no-readback validation belongs on UltraMagnus
+
+### Verified locally
+
+- The current VM host is `Virtual-Ten`, with `VMware SVGA 3D`; `nvidia-smi` is unavailable. This environment can validate build correctness, Qt/runtime wrapper behavior, policy/UI wiring, telemetry shape, fail-closed CPU fallback, and handoff automation, but it cannot authoritatively validate CUDA/GL interop or the real P3 no-readback win.
+- For Lane B P3, do not claim `texture_no_readback_active=1`, x1 realtime improvement, CUDA-to-GL interop success, or pixel-validated no-readback presentation from VM-local runs.
+- The real P3 validation host is UltraMagnus with the NVIDIA/4090 stack and local MLV files. MLV clip paths used by the standard smoke set should be resolved on UltraMagnus, not assumed to exist on `Virtual-Ten`.
+- Look Assist must be disabled through GUI/receipt smoke controls for P3 validation. Do not use pre-window `MLVAPP_NO_LOOK_ASSIST`; that path caused early GUI startup access violations during VM smoke investigation.
+
+### Cross-checked from prior analysis
+
+- P1/P2 CPU-readback proof can be reviewed on the VM if the backend/test harness is present, but P3's intended gain is specifically no-readback CUDA-to-GL texture presentation, so it needs the real NVIDIA/OpenGL stack.
+- VM-local P3 smoke may still be useful when it proves `texture_requested=1`, `texture_candidate=1`, fail-closed fallback, and telemetry parsing, but that remains a plumbing check rather than P3 success.
+
+### Needs runtime profiling
+
+- Run unattended UltraMagnus validation against the user-facing release executable with:
+  - `MLVAPP_GPU_PLAYBACK_RECON=1`
+  - `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1`
+  - Phase 3 quality enabled for unattended smoke when needed
+  - Per-frame telemetry showing `texture_requested=1`, `texture_candidate=1`, `texture_no_readback_active=1`, and `texture_source=cuda_gl_r16_texture`
+  - Screenshot/pixel validation when claiming visual correctness
+- Use `tools\profiling\run-ultramagnus-p3-validation.ps1` for the no-human-loop UltraMagnus run once this branch lands there. The runner is expected to fail closed off UltraMagnus or without the required NVIDIA GPU unless explicitly dry-run/override flags are supplied for plumbing checks.
+
 # 2026-06-09 - real "flicker to first frame" found + fixed (forward-only present guard); built a headless temporal-artifact detector
 
 ### Verified locally
@@ -898,4 +922,3 @@
 - x4 quarter-res should stay off by default unless a different candidate path proves it can improve x4 without dragging x4 or x8.
 - With x1/x2 now improved, the next bottleneck hunt should keep following the shared processing tail and related I/O pressure rather than reopening the rejected x4 lever.
 - Future probes should compare against the new `M16-1327` x2 probe result (`25.404 ms` render total) instead of the older `80.600 ms` baseline when ranking the next bottleneck.
-

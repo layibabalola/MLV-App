@@ -21,6 +21,9 @@
 #ifndef _llrawproc_h
 #define _llrawproc_h
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include "llrawproc_object.h"
 #include "../mlv_object.h"
 
@@ -41,11 +44,57 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 llrawprocWorkerState_t * worker,
                                 int stop_before_dual_iso);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
+void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled);
 int llrpResetGpuPlaybackReconRunForTesting(void);
 int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
 int llrpGpuPlaybackReconLastRunRcForTesting(void);
 int llrpGpuPlaybackReconLastUsedForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void);
+
+#define LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT (1u << 20)
+#define LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT (24u * 65536u)
+#define LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT 1024u
+
+typedef struct
+{
+    int valid;
+    int width;
+    int height;
+    int black_level;
+    int white_level;
+    int white_darkened;
+    int black_delta;
+    double ev_correction;
+    double dark_noise;
+    int interp_method;
+    int use_alias_map;
+    int use_fullres;
+    int chroma_smooth_method;
+    int is_bright[4];
+    const int * raw2ev;
+    const int * ev2raw;
+    const double * mix_curve;
+    const double * fullres_curve;
+    const float * randn05;
+    int apply_dither;
+} llrpGpuPlaybackReconState_t;
+
+typedef struct
+{
+    int available;
+    double upload_ms;
+    double kernel_ms;
+    double interop_ms;
+    double total_ms;
+} llrpGpuPlaybackReconTiming_t;
+
+int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state);
+int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
+                                     const uint16_t * raw_input_bayer14,
+                                     size_t raw_image_size,
+                                     unsigned int gl_texture_id,
+                                     int * rc_out,
+                                     llrpGpuPlaybackReconTiming_t * timing_out);
 
 typedef struct
 {

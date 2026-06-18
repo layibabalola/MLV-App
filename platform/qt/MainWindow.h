@@ -156,6 +156,7 @@ public:
             GpuAmazeDebayerBackendRequest::Auto;
         bool forceScope = false;
         bool forcePlaybackDebayer = false;
+        bool disableLookAssist = false;
         bool zebras = false;
         bool forceZebras = false;
     };
@@ -636,6 +637,9 @@ private:
         size_t gpuAmazeTextureRawFrameSize = 0;
         const uint16_t *gpuPlaybackReconTextureBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
+        size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
+        RenderFrameThread::GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;
         bool cpuPreviewProcessingActive = false;
@@ -651,6 +655,7 @@ private:
         std::vector<uint16_t> ownedSourceImage16;
         std::vector<float> ownedGpuAmazeTextureRawFrame;
         std::vector<uint16_t> ownedGpuPlaybackReconTextureBayerFrame;
+        std::vector<uint16_t> ownedGpuPlaybackReconTextureInputBayerFrame;
         std::vector<uint8_t> ownedPlaybackScaledImage8;
 
         void rebindOwnedImagePointers()
@@ -686,6 +691,17 @@ private:
                     gpuPlaybackReconTextureBayerFrame;
                 readyFrame.gpuPlaybackReconTextureBayerFrameSize =
                     gpuPlaybackReconTextureBayerFrameSize;
+            }
+            if( !ownedGpuPlaybackReconTextureInputBayerFrame.empty() )
+            {
+                gpuPlaybackReconTextureInputBayerFrame =
+                    ownedGpuPlaybackReconTextureInputBayerFrame.data();
+                gpuPlaybackReconTextureInputBayerFrameSize =
+                    ownedGpuPlaybackReconTextureInputBayerFrame.size();
+                readyFrame.gpuPlaybackReconTextureInputBayerFrame =
+                    gpuPlaybackReconTextureInputBayerFrame;
+                readyFrame.gpuPlaybackReconTextureInputBayerFrameSize =
+                    gpuPlaybackReconTextureInputBayerFrameSize;
             }
             if( !ownedPlaybackScaledImage8.empty() )
             {

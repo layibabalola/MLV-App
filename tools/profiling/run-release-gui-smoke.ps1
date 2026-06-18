@@ -44,6 +44,8 @@ param(
     [ValidateSet("", "auto", "cpu", "gpu")]
     [string]$GpuAmazeDebayer = "",
     [switch]$GpuAmazeTexturePresent,
+    [switch]$DisableLookAssist,
+    [switch]$EnablePhase3QualityModes,
     [string]$StageLog = "",
     [ValidateSet("", "on", "off")]
     [string]$Zebras = "",
@@ -788,6 +790,12 @@ if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
 if ($GpuAmazeTexturePresent) {
     $arguments += "--gpu-amaze-texture-present"
 }
+if ($DisableLookAssist) {
+    $arguments += "--no-look-assist"
+}
+if ($EnablePhase3QualityModes) {
+    $arguments += "--enable-phase3-quality-modes"
+}
 if (-not [string]::IsNullOrWhiteSpace($StageLog)) {
     $stageLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StageLog)
     $stageLogDir = [IO.Path]::GetDirectoryName($stageLogPath)
@@ -826,6 +834,9 @@ if ($FrameTelemetry) {
 $launchEnv["MLVAPP_CRASH_FORENSICS_LOG_DIR"] = $logRoot
 if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
     $launchEnv["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
+}
+if ($EnablePhase3QualityModes) {
+    $launchEnv["MLVAPP_PLAYBACK_PHASE3_UNATTENDED"] = "1"
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $launchEnv["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -869,6 +880,9 @@ if (-not $FrameTelemetry) {
 }
 if ([string]::IsNullOrWhiteSpace($QualityMode) -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_QUALITY_MODE")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_QUALITY_MODE"
+}
+if (-not $EnablePhase3QualityModes -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_PHASE3_UNATTENDED"
 }
 if (-not $RbfDetailTiming -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"
@@ -949,6 +963,12 @@ if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
 }
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_QUALITY_MODE")
+}
+if ($EnablePhase3QualityModes) {
+    $envBlock["MLVAPP_PLAYBACK_PHASE3_UNATTENDED"] = "1"
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $envBlock["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -1176,6 +1196,9 @@ $colorArtifactScanPassed =
     -not ($colorArtifactFailureVerdicts -contains $colorArtifactVerdict)
 
 $validationFailures = @()
+if ($null -ne $process -and $process.ExitCode -ne 0) {
+    $validationFailures += "MLVApp exited with code $($process.ExitCode)."
+}
 if ($RequireLookAssist -and -not $lookAssistApplied) {
     $validationFailures += "Look Assist did not settle/apply before playback."
 }

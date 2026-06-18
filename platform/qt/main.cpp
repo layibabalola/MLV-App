@@ -80,6 +80,7 @@ static bool hasGpuRelatedFlag(int argc, char *argv[])
         if (argvOptionMatches(argv[i], "--gpu-bilinear-debayer")) return true;
         if (argvOptionMatches(argv[i], "--gpu-amaze-debayer")) return true;
         if (argvOptionMatches(argv[i], "--gpu-amaze-texture-present")) return true;
+        if (argvOptionMatches(argv[i], "--enable-phase3-quality-modes")) return true;
     }
     return false;
 }
@@ -100,6 +101,7 @@ static bool shouldPreferDesktopOpenGl(int argc,
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")) return true;
 #else
     Q_UNUSED(argc)
     Q_UNUSED(argv)
@@ -914,6 +916,16 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("Request experimental AMaZE CUDA-to-GL texture presentation during the smoke. Requires the GPU AMaZE selector chain to become active."));
     parser.addOption(gpuAmazeTexturePresentOpt);
 
+    const QCommandLineOption noLookAssistOpt(
+        QStringLiteral("no-look-assist"),
+        QStringLiteral("Disable Look Assist during this GUI smoke run."));
+    parser.addOption(noLookAssistOpt);
+
+    const QCommandLineOption enablePhase3QualityModesOpt(
+        QStringLiteral("enable-phase3-quality-modes"),
+        QStringLiteral("Allow unattended Phase 3 quality-mode selection during this GUI smoke run."));
+    parser.addOption(enablePhase3QualityModesOpt);
+
     const QCommandLineOption zebrasOpt(
         QStringLiteral("zebras"),
         QStringLiteral("Force zebra overlay on during the smoke."));
@@ -1078,6 +1090,10 @@ static int runGuiPlaybackSmoke(QApplication &app)
     {
         qputenv("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT", QByteArrayLiteral("1"));
     }
+    if (parser.isSet(enablePhase3QualityModesOpt))
+    {
+        qputenv("MLVAPP_PLAYBACK_PHASE3_UNATTENDED", QByteArrayLiteral("1"));
+    }
 
     const QString stageLogPath = parser.value(stageLogOpt).isEmpty()
         ? QString()
@@ -1119,6 +1135,7 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.gpuAmazeDebayerBackend = gpuAmazeDebayerBackend;
     options.forceScope = parser.isSet(scopeOpt);
     options.forcePlaybackDebayer = parser.isSet(playbackDebayerOpt);
+    options.disableLookAssist = parser.isSet(noLookAssistOpt);
     options.zebras = parser.isSet(zebrasOpt);
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
 

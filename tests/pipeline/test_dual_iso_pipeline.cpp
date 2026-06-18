@@ -819,6 +819,38 @@ TEST(DualIsoPipeline, GpuPlaybackReconFalseEnvDoesNotTouchBackendWhenOptedIn)
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 }
 
+TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsInvalidSnapshot)
+{
+    uint16_t rawInput[4] = { 1024, 2048, 3072, 4096 };
+    llrpGpuPlaybackReconState_t state = {};
+    llrpGpuPlaybackReconTiming_t timing = {};
+    timing.available = 1;
+    int rc = 123;
+
+    ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                  rawInput,
+                                                  sizeof(rawInput),
+                                                  7,
+                                                  &rc,
+                                                  &timing));
+    ASSERT_EQ(-1, rc);
+    ASSERT_EQ(0, timing.available);
+
+    state.valid = 1;
+    state.width = 2;
+    state.height = 2;
+    rc = 123;
+    timing.available = 1;
+    ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                  rawInput,
+                                                  sizeof(rawInput),
+                                                  7,
+                                                  &rc,
+                                                  &timing));
+    ASSERT_EQ(-1, rc);
+    ASSERT_EQ(0, timing.available);
+}
+
 TEST(DualIsoPipeline, GpuPlaybackReconIneligibleConfigDoesNotTouchBackendWhenOptedIn)
 {
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");

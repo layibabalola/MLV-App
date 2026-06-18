@@ -193,6 +193,11 @@ inline int playbackQualityModeEnvOverride()
     return playbackQualityModeParseOverride( raw, &mode ) ? mode : -2;
 }
 
+inline bool playbackQualityPhase3UnattendedEnvOverride()
+{
+    return playbackQualityEnvVarTruthy( std::getenv( "MLVAPP_PLAYBACK_PHASE3_UNATTENDED" ) );
+}
+
 inline int playbackPreviewAggressiveEnvOverride()
 {
     const char * raw = std::getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
@@ -350,7 +355,8 @@ inline bool playbackQualityShowExperimentalPhase3ModesFromSettings()
     QSettings set( QSettings::UserScope,
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
-    return set.value( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes(),
+    return playbackQualityPhase3UnattendedEnvOverride()
+        || set.value( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes(),
                       PlaybackQualitySettings::kDefaultShowExperimentalPhase3Modes() ).toBool();
 }
 
@@ -359,7 +365,8 @@ inline bool playbackQualityPhase3AcknowledgedFromSettings()
     QSettings set( QSettings::UserScope,
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
-    return set.value( PlaybackQualitySettings::kKeyPhase3Acknowledged(),
+    return playbackQualityPhase3UnattendedEnvOverride()
+        || set.value( PlaybackQualitySettings::kKeyPhase3Acknowledged(),
                       PlaybackQualitySettings::kDefaultPhase3Acknowledged() ).toBool();
 }
 
