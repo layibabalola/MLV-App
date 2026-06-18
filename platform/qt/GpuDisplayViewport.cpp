@@ -279,6 +279,18 @@ bool GpuDisplayViewport::hasPresentedImage(const QGraphicsView *view)
     return viewport && viewport->hasPendingFrame();
 }
 
+bool GpuDisplayViewport::hasPresentedGpuReconTexture(const QGraphicsView *view)
+{
+    const GpuDisplayViewport *viewport = from(view);
+    return viewport
+        && viewport->m_texture
+        && viewport->m_pendingTextureFromGpuRecon
+        && viewport->m_textureIs16Bit
+        && viewport->m_textureIsBayer16
+        && viewport->m_pendingTextureWidth > 0
+        && viewport->m_pendingTextureHeight > 0;
+}
+
 bool GpuDisplayViewport::isTexturePresentationActive(const QGraphicsView *view)
 {
     const GpuDisplayViewport *viewport = from(view);

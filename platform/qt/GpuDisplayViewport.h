@@ -58,6 +58,7 @@ public:
     static bool installOn(QGraphicsView *view);
     static bool isInstalledOn(const QGraphicsView *view);
     static bool hasPresentedImage(const QGraphicsView *view);
+    static bool hasPresentedGpuReconTexture(const QGraphicsView *view);
     static bool isTexturePresentationActive(const QGraphicsView *view);
     static SamplingMode samplingModeFor(const QGraphicsView *view);
     static QString rendererDescriptionFor(const QGraphicsView *view);

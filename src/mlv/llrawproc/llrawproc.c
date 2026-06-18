@@ -2077,6 +2077,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             uint16_t * gpu_playback_input = NULL;
             int gpu_playback_recon_used = 0;
             int dual_iso_recon_ok = 0;
+            int capture_gpu_recon_state = 0;
             int explicit_auto_correction = 0;
             double explicit_ev_correction = worker->diso_ev_correction;
             int explicit_black_delta = worker->diso_black_delta;
@@ -2160,7 +2161,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
             if (!gpu_playback_recon_used)
             {
-                dualiso_debug_set_gpu_recon_state_capture_enabled(gpu_export_input != NULL);
+                capture_gpu_recon_state =
+                    (gpu_export_input != NULL)
+                    || (gpu_playback_input != NULL
+                     && g_llrawproc_gpu_playback_texture_present_preferred);
+                dualiso_debug_set_gpu_recon_state_capture_enabled(capture_gpu_recon_state);
                 dual_iso_recon_ok =
                     diso_get_full20bit(raw_info,
                                        raw_image_buff,
@@ -2177,6 +2182,21 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                        chroma_smooth_mode,
                                        video->cpu_cores,
                                        &worker->diso_full20bit_scratch);
+            }
+            if (!gpu_playback_recon_used
+             && dual_iso_recon_ok
+             && gpu_playback_input
+             && g_llrawproc_gpu_playback_texture_present_preferred
+             && capture_gpu_recon_state)
+            {
+                dualiso_gpu_recon_state_t cpu_oracle_state;
+                memset(&cpu_oracle_state, 0, sizeof(cpu_oracle_state));
+                if (dualiso_debug_get_last_gpu_recon_state(&cpu_oracle_state)
+                 && cpu_oracle_state.valid)
+                {
+                    g_llrawproc_gpu_playback_last_state_valid = 1;
+                    g_llrawproc_gpu_playback_last_prepared_state = cpu_oracle_state;
+                }
             }
             if (gpu_export_input)
             {

@@ -6094,7 +6094,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
-        if( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
+        if( ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
+           || GpuDisplayViewport::hasPresentedGpuReconTexture( ui->graphicsView ) )
          && ui->graphicsView
          && ui->graphicsView->viewport() )
         {
