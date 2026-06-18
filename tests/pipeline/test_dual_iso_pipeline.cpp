@@ -90,12 +90,56 @@ static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
     return read_all_bytes(dng_path);
 }
 
+struct GpuExportDualIsoConfig {
+    int interp;   // DISOI_MEAN23 (GPU-eligible) or DISOI_AMAZE (ineligible)
+    int alias;    // FR_OFF / FR_ON
+    int fullres;  // FR_OFF / FR_ON
+    int chroma;   // CS_OFF (GPU-eligible) / CS_2x2 / CS_3x3 / CS_5x5 (ineligible)
+};
+
+static const GpuExportDualIsoConfig kGpuExportSupportedDualIsoConfig = {
+    DISOI_MEAN23, FR_ON, FR_ON, CS_OFF
+};
+
+static void configure_gpu_export_dual_iso(MlvPipelineFixture & fixture,
+                                          const GpuExportDualIsoConfig & cfg)
+{
+    llrpSetDualIsoInterpolationMethod(fixture.video(), cfg.interp);
+    llrpSetDualIsoAliasMapMode(fixture.video(), cfg.alias);
+    llrpSetDualIsoFullResBlendingMode(fixture.video(), cfg.fullres);
+    llrpSetChromaSmoothMode(fixture.video(), cfg.chroma);
+}
+
 static void configure_gpu_export_supported_dual_iso(MlvPipelineFixture & fixture)
 {
-    llrpSetDualIsoInterpolationMethod(fixture.video(), DISOI_MEAN23);
-    llrpSetDualIsoAliasMapMode(fixture.video(), FR_ON);
-    llrpSetDualIsoFullResBlendingMode(fixture.video(), FR_ON);
-    llrpSetChromaSmoothMode(fixture.video(), CS_OFF);
+    configure_gpu_export_dual_iso(fixture, kGpuExportSupportedDualIsoConfig);
+}
+
+// Deterministic Look-Assist-style DNG metadata overrides for the parity matrix.
+// The exact values are arbitrary but fixed: both the CPU and GPU export of a case
+// receive the SAME overrides, so a byte-for-byte mismatch can only come from the
+// recon payload, never from the override-write path. This exercises the
+// dng_fill_header override branches for tags 50714/50717/50730/50728.
+static dngExportOverrides_t make_gpu_export_test_overrides()
+{
+    dngExportOverrides_t overrides;
+    memset(&overrides, 0, sizeof(overrides));
+    overrides.enabled = 1;
+    overrides.black_level_enabled = 1;
+    overrides.black_level = 2048;
+    overrides.white_level_enabled = 1;
+    overrides.white_level = 15000;
+    overrides.baseline_exposure_enabled = 1;
+    overrides.baseline_exposure[0] = 50;   // +0.50 EV as a rational (50/100)
+    overrides.baseline_exposure[1] = 100;
+    overrides.as_shot_neutral_enabled = 1;
+    overrides.as_shot_neutral[0] = 473;    // R numerator
+    overrides.as_shot_neutral[1] = 1000;   // R denominator
+    overrides.as_shot_neutral[2] = 1;      // G numerator
+    overrides.as_shot_neutral[3] = 1;      // G denominator
+    overrides.as_shot_neutral[4] = 624;    // B numerator
+    overrides.as_shot_neutral[5] = 1000;   // B denominator
+    return overrides;
 }
 
 static void assert_gpu_export_fixture_ready(MlvPipelineFixture & fixture,
@@ -108,12 +152,14 @@ static void assert_gpu_export_fixture_ready(MlvPipelineFixture & fixture,
     ASSERT_TRUE(fixture.applyReceipt(&error_message));
 }
 
-static QByteArray export_dng_for_gpu_export_gate(int raw_state,
-                                                 bool gpu_enabled,
-                                                 const QString & dll_path,
-                                                 const QString & dng_path,
-                                                 const QString & clip_relative_path,
-                                                 const QString & receipt_relative_path)
+static QByteArray export_dng_for_gpu_export_gate_cfg(int raw_state,
+                                                     bool gpu_enabled,
+                                                     const QString & dll_path,
+                                                     const QString & dng_path,
+                                                     const QString & clip_relative_path,
+                                                     const QString & receipt_relative_path,
+                                                     const GpuExportDualIsoConfig & cfg,
+                                                     const dngExportOverrides_t * overrides)
 {
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
@@ -125,7 +171,7 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
 
     MlvPipelineFixture fixture;
     assert_gpu_export_fixture_ready(fixture, clip_relative_path, receipt_relative_path);
-    configure_gpu_export_supported_dual_iso(fixture);
+    configure_gpu_export_dual_iso(fixture, cfg);
     std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
     ASSERT_TRUE(!frame.empty());
 
@@ -137,11 +183,79 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
     int32_t par[4] = { 1, 1, 1, 1 };
     dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
     ASSERT_TRUE(dng != nullptr);
+    if (overrides != nullptr) {
+        setDngExportOverrides(dng, overrides);
+    }
 
     QByteArray dng_path_bytes = dng_path.toLocal8Bit();
     ASSERT_EQ(0, saveDngFrame(fixture.video(),
                               dng,
                               0,
+                              dng_path_bytes.data(),
+                              nullptr));
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
+static QByteArray export_dng_for_gpu_export_gate(int raw_state,
+                                                 bool gpu_enabled,
+                                                 const QString & dll_path,
+                                                 const QString & dng_path,
+                                                 const QString & clip_relative_path,
+                                                 const QString & receipt_relative_path)
+{
+    return export_dng_for_gpu_export_gate_cfg(raw_state,
+                                              gpu_enabled,
+                                              dll_path,
+                                              dng_path,
+                                              clip_relative_path,
+                                              receipt_relative_path,
+                                              kGpuExportSupportedDualIsoConfig,
+                                              nullptr);
+}
+
+// Lane A E2 (slice 4) helper: export `target_frame` of a clip and return its DNG
+// bytes. When export_prefix is true, frames [0..target_frame-1] are first written
+// through the SAME dngObject (a full sequential run up to target_frame); when false,
+// target_frame is written directly (a resume that starts mid-sequence). CPU-only (no
+// GPU env) — this probes per-frame export determinism, not GPU parity.
+static QByteArray export_one_frame_for_resume_proxy(int raw_state,
+                                                    const QString & clip_relative_path,
+                                                    const QString & receipt_relative_path,
+                                                    uint64_t target_frame,
+                                                    bool export_prefix,
+                                                    const QString & dng_path)
+{
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+
+    MlvPipelineFixture fixture;
+    assert_gpu_export_fixture_ready(fixture, clip_relative_path, receipt_relative_path);
+    configure_gpu_export_supported_dual_iso(fixture);
+    std::vector<uint16_t> warm = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!warm.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    if (export_prefix) {
+        for (uint64_t f = 0; f < target_frame; ++f) {
+            const QString throwaway = dng_path + QStringLiteral(".prefix%1").arg(f);
+            QByteArray throwaway_bytes = throwaway.toLocal8Bit();
+            ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                      dng,
+                                      static_cast<uint32_t>(f),
+                                      throwaway_bytes.data(),
+                                      nullptr));
+        }
+    }
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                              dng,
+                              static_cast<uint32_t>(target_frame),
                               dng_path_bytes.data(),
                               nullptr));
     freeDngObject(dng);
@@ -748,6 +862,320 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+// Lane A E2 (slice 1): exercise the full export config matrix WITHOUT a real GPU
+// backend. With a missing DLL the gate is fail-closed (backend unavailable) and the
+// "GPU" export falls back to the authoritative CPU output, so cpu==fallback for every
+// config x Look-Assist x compression combination. This runs on any host (llvmpipe,
+// no CUDA) and proves the harness drives every config and override through
+// saveDngFrame cleanly and byte-inertly. The real GPU-replacement assertions live in
+// GpuExportParityMatrixIsByteExactAcrossEligibleConfigs (4090-gated).
+TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossConfigs)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const GpuExportDualIsoConfig matrix_configs[] = {
+        { DISOI_MEAN23, FR_OFF, FR_OFF, CS_OFF },
+        { DISOI_MEAN23, FR_OFF, FR_ON,  CS_OFF },
+        { DISOI_MEAN23, FR_ON,  FR_OFF, CS_OFF },
+        { DISOI_MEAN23, FR_ON,  FR_ON,  CS_OFF },
+    };
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    const dngExportOverrides_t look_assist = make_gpu_export_test_overrides();
+
+    int config_index = 0;
+    for (const GpuExportDualIsoConfig & cfg : matrix_configs) {
+        for (int override_on = 0; override_on <= 1; ++override_on) {
+            const dngExportOverrides_t * overrides = override_on ? &look_assist : nullptr;
+            for (int raw_state : raw_states) {
+                const QString suffix = QStringLiteral("cfg%1-%2-%3")
+                    .arg(config_index)
+                    .arg(override_on ? QStringLiteral("la") : QStringLiteral("nola"))
+                    .arg(raw_state == COMPRESSED_RAW
+                         ? QStringLiteral("compressed")
+                         : QStringLiteral("uncompressed"));
+                const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
+                const QString fallback_dng =
+                    temp_dir.filePath(suffix + QStringLiteral("-missing-dll-fallback.dng"));
+                const QString missing_dll =
+                    temp_dir.filePath(suffix + QStringLiteral("-does-not-exist-igpu.dll"));
+
+                const QByteArray cpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                    raw_state, false, QString(), cpu_dng,
+                    QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv"),
+                    QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                    cfg, overrides);
+                ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+
+                const QByteArray fallback_bytes = export_dng_for_gpu_export_gate_cfg(
+                    raw_state, true, missing_dll, fallback_dng,
+                    QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv"),
+                    QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                    cfg, overrides);
+                ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+                ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+
+                ASSERT_TRUE(cpu_bytes == fallback_bytes);
+            }
+        }
+        ++config_index;
+    }
+
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+// Lane A E2 (slice 1): with the real CUDA backend on the RTX 4090, every eligible
+// case must produce a byte-identical DNG via a genuine GPU replacement (replaced==1,
+// mismatch==0). Slice 1 keeps the recon config at the E1-proven configuration and
+// broadens coverage only along the recon-invariant Look-Assist override axis (the
+// overrides write metadata tags 50714/50717/50730/50728 and do not change the recon
+// payload) plus the existing {tiny,large} x {uncompressed,compressed} axes. Alias /
+// full-res config variations are added in a later slice once the 4090 confirms each
+// one still replaces. Gated on MLVAPP_GPU_EXPORT_TEST_DLL so it SKIPs on llvmpipe.
+TEST(DualIsoPipeline, GpuExportParityMatrixIsByteExactAcrossEligibleConfigs)
+{
+    const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_EXPORT_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+    const QByteArray dll_path_bytes = dll_path.toLocal8Bit();
+    std::fprintf(stderr, "[gpu-export-parity-matrix] dll=%s\n", dll_path_bytes.constData());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    struct EligibleClip {
+        const char * name;
+        const char * clip_path;
+        const char * receipt_path;
+    };
+    const EligibleClip clips[] = {
+        {
+            "tiny-hq",
+            "tests/fixtures/clips/tiny_dual_iso.mlv",
+            "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+        },
+        {
+            "large-hq",
+            "tests/fixtures/clips/large_dual_iso.mlv",
+            "tests/fixtures/receipts/large_dual_iso_hq.marxml",
+        },
+    };
+    const GpuExportDualIsoConfig cfg = kGpuExportSupportedDualIsoConfig;
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    const dngExportOverrides_t look_assist = make_gpu_export_test_overrides();
+
+    for (const EligibleClip & clip : clips) {
+        for (int override_on = 0; override_on <= 1; ++override_on) {
+            const dngExportOverrides_t * overrides = override_on ? &look_assist : nullptr;
+            for (int raw_state : raw_states) {
+                const QString raw_name = raw_state == COMPRESSED_RAW
+                    ? QStringLiteral("compressed")
+                    : QStringLiteral("uncompressed");
+                const QString suffix = QString::fromLatin1(clip.name)
+                    + QStringLiteral("-")
+                    + (override_on ? QStringLiteral("la") : QStringLiteral("nola"))
+                    + QStringLiteral("-") + raw_name;
+                const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
+                const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
+
+                const QByteArray cpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                    raw_state, false, QString(), cpu_dng,
+                    QString::fromLatin1(clip.clip_path),
+                    QString::fromLatin1(clip.receipt_path), cfg, overrides);
+                ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+                ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+
+                const QByteArray gpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                    raw_state, true, dll_path, gpu_dng,
+                    QString::fromLatin1(clip.clip_path),
+                    QString::fromLatin1(clip.receipt_path), cfg, overrides);
+                const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+                const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+                const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+                const int run_rc = llrpGpuExportLastRunRcForTesting();
+                const int replaced = llrpGpuExportLastReplacedForTesting();
+                const int mismatch = llrpGpuExportLastMismatchForTesting();
+                const unsigned long long mismatch_count =
+                    llrpGpuExportLastMismatchCountForTesting();
+                const QByteArray suffix_bytes = suffix.toLocal8Bit();
+                std::fprintf(stderr,
+                             "[gpu-export-parity-matrix] case=%s backend_attempted=%d "
+                             "backend_unavailable=%d run_attempted=%d run_rc=%d replaced=%d "
+                             "mismatch=%d mismatch_count=%llu cpu_len=%lld gpu_len=%lld\n",
+                             suffix_bytes.constData(),
+                             backend_attempted,
+                             backend_unavailable,
+                             run_attempted,
+                             run_rc,
+                             replaced,
+                             mismatch,
+                             mismatch_count,
+                             static_cast<long long>(cpu_bytes.size()),
+                             static_cast<long long>(gpu_bytes.size()));
+                ASSERT_EQ(1, backend_attempted);
+                ASSERT_EQ(0, backend_unavailable);
+                ASSERT_EQ(1, run_attempted);
+                ASSERT_EQ(0, run_rc);
+                ASSERT_EQ(1, replaced);
+                ASSERT_EQ(0, mismatch);
+
+                preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
+                ASSERT_TRUE(cpu_bytes == gpu_bytes);
+            }
+        }
+    }
+
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+// Lane A E2 (slice 3): GPU-INELIGIBLE configs must fall back to CPU cleanly. The GPU
+// export shadow path only ENGAGES for the base HQ config (MEAN23 + alias-on + full-res-
+// on + chroma-off); turning alias-map or full-res off, selecting AMAZE, or enabling
+// chroma smoothing disengages it (4090 finding 2026-06-17). For every such config the
+// export must keep the CPU output authoritative: replaced==0, cpu_bytes==gpu_bytes, and
+// a valid (non-empty) DNG. The per-config (backend_attempted, run_attempted, replaced,
+// mismatch) signature is logged for diagnostics, and failures do NOT abort mid-loop, so
+// a single run both classifies and validates every config (if one turns out to actually
+// engage the GPU, the log names it and the final assert fails). 4090-gated; SKIPs on
+// llvmpipe (where the backend is unavailable and the export is byte-inert anyway).
+TEST(DualIsoPipeline, GpuExportParityMatrixIneligibleConfigsFallBackToCpu)
+{
+    const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_EXPORT_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+    const QByteArray dll_path_bytes = dll_path.toLocal8Bit();
+    std::fprintf(stderr, "[gpu-export-parity-negative] dll=%s\n", dll_path_bytes.constData());
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    struct IneligibleConfig {
+        const char * name;
+        GpuExportDualIsoConfig cfg;
+    };
+    const IneligibleConfig configs[] = {
+        { "alias-off-fr-off", { DISOI_MEAN23, FR_OFF, FR_OFF, CS_OFF } },
+        { "alias-off-fr-on",  { DISOI_MEAN23, FR_OFF, FR_ON,  CS_OFF } },
+        { "alias-on-fr-off",  { DISOI_MEAN23, FR_ON,  FR_OFF, CS_OFF } },
+        { "amaze",            { DISOI_AMAZE,  FR_ON,  FR_ON,  CS_OFF } },
+        { "chroma-3x3",       { DISOI_MEAN23, FR_ON,  FR_ON,  CS_3x3 } },
+    };
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    const QString clip = QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv");
+    const QString receipt = QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml");
+
+    bool all_ok = true;
+    for (const IneligibleConfig & ic : configs) {
+        for (int raw_state : raw_states) {
+            const QString raw_name = raw_state == COMPRESSED_RAW
+                ? QStringLiteral("compressed")
+                : QStringLiteral("uncompressed");
+            const QString suffix = QString::fromLatin1(ic.name)
+                + QStringLiteral("-") + raw_name;
+            const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
+            const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
+
+            const QByteArray cpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                raw_state, false, QString(), cpu_dng, clip, receipt, ic.cfg, nullptr);
+            const QByteArray gpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                raw_state, true, dll_path, gpu_dng, clip, receipt, ic.cfg, nullptr);
+
+            const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+            const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+            const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+            const int replaced = llrpGpuExportLastReplacedForTesting();
+            const int mismatch = llrpGpuExportLastMismatchForTesting();
+            const bool bytes_equal = (cpu_bytes == gpu_bytes);
+            // Fail closed: the backend must be genuinely loaded + attempted (so a silent
+            // CUDA dropout can't make every case pass for the wrong reason), and the GPU
+            // recon must NOT have engaged for this ineligible config (run_attempted==0),
+            // leaving the CPU output authoritative (replaced==0) and the DNG byte-equal +
+            // valid (non-empty). This distinguishes "config correctly disengaged the GPU
+            // export" from "GPU backend never came up".
+            const bool ok = (backend_attempted == 1 && backend_unavailable == 0
+                             && run_attempted == 0 && replaced == 0
+                             && bytes_equal && !gpu_bytes.isEmpty());
+            if (!ok) { all_ok = false; }
+            const QByteArray sb = suffix.toLocal8Bit();
+            std::fprintf(stderr,
+                         "[gpu-export-parity-negative] case=%s backend_attempted=%d "
+                         "backend_unavailable=%d run_attempted=%d replaced=%d mismatch=%d "
+                         "bytes_equal=%d gpu_len=%lld ok=%d\n",
+                         sb.constData(),
+                         backend_attempted,
+                         backend_unavailable,
+                         run_attempted,
+                         replaced,
+                         mismatch,
+                         bytes_equal ? 1 : 0,
+                         static_cast<long long>(gpu_bytes.size()),
+                         ok ? 1 : 0);
+        }
+    }
+    ASSERT_TRUE(all_ok);
+
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+// Lane A E2 (slice 4): resume-safety proxy. Exporting a frame standalone (a resume
+// that starts mid-sequence) must produce a byte-identical DNG to reaching that same
+// frame through a full sequential run from frame 0. Byte-equality proves per-frame
+// DNG export carries no cross-frame state, so a resumed/partial export is bit-for-bit
+// identical to the corresponding frame of a full export. True skip-existing resume is
+// GUI-only (BatchPrompts::shouldSkipFrame); this is the headless determinism proxy.
+// CPU-only — fully validatable on llvmpipe (no GPU backend involved).
+TEST(DualIsoPipeline, GpuExportResumeSubrangeProxyIsByteIdenticalToFullRun)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString clip = QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv");
+    const QString receipt = QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml");
+
+    MlvPipelineFixture probe;
+    assert_gpu_export_fixture_ready(probe, clip, receipt);
+    const uint64_t total_frames = getMlvFrames(probe.video());
+    if (total_frames < 2) {
+        SKIP_TEST("Resume proxy needs a clip with >= 2 frames.");
+    }
+    const uint64_t target_frame = 1;  // smallest meaningful mid-sequence frame (prefix = {0})
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString raw_name = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString full_dng =
+            temp_dir.filePath(raw_name + QStringLiteral("-full.dng"));
+        const QString resume_dng =
+            temp_dir.filePath(raw_name + QStringLiteral("-resume.dng"));
+
+        const QByteArray full_bytes = export_one_frame_for_resume_proxy(
+            raw_state, clip, receipt, target_frame, /*export_prefix=*/true, full_dng);
+        const QByteArray resume_bytes = export_one_frame_for_resume_proxy(
+            raw_state, clip, receipt, target_frame, /*export_prefix=*/false, resume_dng);
+
+        ASSERT_TRUE(!full_bytes.isEmpty());
+        ASSERT_TRUE(full_bytes == resume_bytes);
+    }
 }
 
 TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressedDng)
