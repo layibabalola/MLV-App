@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <QByteArray>
 #include <QColor>
 #include <QGraphicsPixmapItem>
@@ -294,6 +295,100 @@ QString GpuDisplayViewport::rendererDescriptionFor(const QGraphicsView *view)
 {
     const GpuDisplayViewport *viewport = from(view);
     return viewport ? viewport->m_rendererDescription : QString();
+}
+
+bool GpuDisplayViewport::readPresentedBayer16Texture(QGraphicsView *view,
+                                                     QByteArray *textureBytes,
+                                                     int *width,
+                                                     int *height,
+                                                     QString *reason)
+{
+    GpuDisplayViewport *viewport = from(view);
+    auto fail = [reason](const QString &why) -> bool
+    {
+        if ( reason ) *reason = why;
+        return false;
+    };
+
+    if ( textureBytes ) textureBytes->clear();
+    if ( width ) *width = 0;
+    if ( height ) *height = 0;
+
+    if ( !viewport || !textureBytes )
+    {
+        return fail(QStringLiteral("GL texture readback requires an installed GPU viewport"));
+    }
+    if ( !viewport->m_texture
+      || !viewport->m_pendingTextureFromGpuRecon
+      || !viewport->m_textureIs16Bit
+      || !viewport->m_textureIsBayer16
+      || viewport->m_pendingTextureWidth <= 0
+      || viewport->m_pendingTextureHeight <= 0 )
+    {
+        return fail(QStringLiteral("GL texture readback requires an active GPU recon R16 Bayer texture"));
+    }
+
+    QOpenGLContext *glContext = viewport->context();
+    if ( !glContext )
+    {
+        return fail(QStringLiteral("GL texture readback requires an initialized OpenGL context"));
+    }
+
+#if defined(QT_OPENGL_ES_2)
+    return fail(QStringLiteral("GL texture readback via glGetTexImage is unavailable on OpenGL ES"));
+#else
+    const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
+    const bool madeCurrent = needsCurrent ? (viewport->makeCurrent(), true) : false;
+
+    const int texWidth = viewport->m_pendingTextureWidth;
+    const int texHeight = viewport->m_pendingTextureHeight;
+    const size_t byteCount =
+        static_cast<size_t>(texWidth) * static_cast<size_t>(texHeight) * sizeof(uint16_t);
+    if ( byteCount > static_cast<size_t>(std::numeric_limits<int>::max()) )
+    {
+        if ( madeCurrent ) viewport->doneCurrent();
+        return fail(QStringLiteral("GL texture readback frame is too large"));
+    }
+
+    QOpenGLFunctions *gl = glContext->functions();
+    if ( !gl )
+    {
+        if ( madeCurrent ) viewport->doneCurrent();
+        return fail(QStringLiteral("GL texture readback requires OpenGL functions"));
+    }
+    using GlGetTexImageFn = void (*)(GLenum, GLint, GLenum, GLenum, void *);
+    GlGetTexImageFn glGetTexImageProc =
+        reinterpret_cast<GlGetTexImageFn>(glContext->getProcAddress("glGetTexImage"));
+    if ( !glGetTexImageProc )
+    {
+        if ( madeCurrent ) viewport->doneCurrent();
+        return fail(QStringLiteral("GL texture readback function glGetTexImage is unavailable"));
+    }
+
+    textureBytes->resize(static_cast<int>(byteCount));
+    viewport->m_texture->bind(0);
+    gl->glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glGetTexImageProc(GL_TEXTURE_2D,
+                      0,
+                      GL_RED,
+                      GL_UNSIGNED_SHORT,
+                      textureBytes->data());
+    const GLenum error = gl->glGetError();
+    viewport->m_texture->release();
+    if ( madeCurrent ) viewport->doneCurrent();
+
+    if ( error != GL_NO_ERROR )
+    {
+        textureBytes->clear();
+        return fail(QStringLiteral("glGetTexImage failed with GL error 0x%1")
+                    .arg(static_cast<unsigned int>(error), 0, 16));
+    }
+
+    if ( width ) *width = texWidth;
+    if ( height ) *height = texHeight;
+    if ( reason ) reason->clear();
+    return true;
+#endif
 }
 
 bool GpuDisplayViewport::presentImage(QGraphicsView *view,

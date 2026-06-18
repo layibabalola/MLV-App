@@ -88,7 +88,18 @@ typedef struct
     double total_ms;
 } llrpGpuPlaybackReconTiming_t;
 
+typedef struct
+{
+    int available;
+    int attempted;
+    int unavailable;
+    char requested_path[1024];
+    char resolved_path[1024];
+    char description[1024];
+} llrpGpuPlaybackReconBackendInfo_t;
+
 int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state);
+int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
 int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      const uint16_t * raw_input_bayer14,
                                      size_t raw_image_size,

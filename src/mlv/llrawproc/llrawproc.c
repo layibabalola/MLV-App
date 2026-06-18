@@ -452,6 +452,7 @@ typedef struct
     int attempted;
     int unavailable;
     char dll_path[1024];
+    char dll_resolved_path[1024];
     igpu_recon_backend * backend;
     llrawproc_gpu_create_fn create;
     llrawproc_gpu_destroy_fn destroy;
@@ -466,6 +467,38 @@ typedef struct
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
 static pthread_mutex_t g_llrawproc_gpu_recon_backend_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
+int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    const char * description = NULL;
+    if(!info) return 0;
+    memset(info, 0, sizeof(*info));
+
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    info->available = (g->backend && !g->unavailable) ? 1 : 0;
+    info->attempted = g->attempted;
+    info->unavailable = g->unavailable;
+    snprintf(info->requested_path,
+             sizeof(info->requested_path),
+             "%s",
+             g->dll_path);
+    snprintf(info->resolved_path,
+             sizeof(info->resolved_path),
+             "%s",
+             g->dll_resolved_path);
+    if(g->backend && g->describe)
+    {
+        description = g->describe(g->backend);
+    }
+    snprintf(info->description,
+             sizeof(info->description),
+             "%s",
+             description ? description : "");
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+    return 1;
+}
 
 static const char * llrawproc_gpu_recon_backend_dll_path(int prefer_playback_dll)
 {
@@ -566,6 +599,13 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
     {
         llrawproc_gpu_export_backend_mark_unavailable(g, dll_path);
         return 0;
+    }
+    if(!GetModuleFileNameA(g->dll, g->dll_resolved_path, sizeof(g->dll_resolved_path)))
+    {
+        snprintf(g->dll_resolved_path,
+                 sizeof(g->dll_resolved_path),
+                 "%s",
+                 dll_path);
     }
 
 #define LLRAWPROC_GPU_RESOLVE_TYPED(member, type, symbol) \
@@ -964,6 +1004,15 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
     if(rc_out) *rc_out = -1;
     if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
     return 0;
+}
+
+int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
+int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
+{
+    if(!info) return 0;
+    memset(info, 0, sizeof(*info));
+    info->unavailable = 1;
+    return 1;
 }
 #endif
 

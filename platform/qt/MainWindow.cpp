@@ -39,6 +39,7 @@ extern "C" {
 #include <QStorageInfo>
 #include <QColorDialog>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <unistd.h>
 #include <math.h>
@@ -114,6 +115,94 @@ static bool playbackSmokeFrameTelemetryEnabled()
         && qEnvironmentVariable( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
            != QStringLiteral("0");
     return enabled;
+}
+
+static bool playbackGpuNoReadbackOutputValidationEnabled()
+{
+    static const bool enabled =
+        qEnvironmentVariableIsSet( "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT" )
+        && qEnvironmentVariable( "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT" )
+           != QStringLiteral("0");
+    return enabled;
+}
+
+static QString sanitizeLogValue( QString value )
+{
+    if( value.isEmpty() ) return QStringLiteral("none");
+    value.replace( QLatin1Char('"'), QLatin1Char('\'') );
+    value.replace( QLatin1Char('\r'), QLatin1Char(' ') );
+    value.replace( QLatin1Char('\n'), QLatin1Char(' ') );
+    return value;
+}
+
+static QString sha256HexForRawBytes( const void *data, size_t bytes )
+{
+    if( !data || bytes == 0 ) return QStringLiteral("none");
+    QCryptographicHash hash( QCryptographicHash::Sha256 );
+    const char *cursor = static_cast<const char *>( data );
+    size_t remaining = bytes;
+    while( remaining > 0 )
+    {
+        const int chunk =
+            remaining > static_cast<size_t>( std::numeric_limits<int>::max() )
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>( remaining );
+        hash.addData( cursor, chunk );
+        cursor += chunk;
+        remaining -= static_cast<size_t>( chunk );
+    }
+    return QString::fromLatin1( hash.result().toHex() );
+}
+
+struct Bayer16ParitySummary
+{
+    bool checked = false;
+    bool match = false;
+    unsigned long long mismatchCount = 0;
+    unsigned long long firstMismatchIndex = 0;
+    int firstGl = 0;
+    int firstOracle = 0;
+    int maxAbsDiff = 0;
+};
+
+static Bayer16ParitySummary compareBayer16ToOracle( const QByteArray &glTextureBytes,
+                                                    const uint16_t *oracle,
+                                                    size_t oracleWords )
+{
+    Bayer16ParitySummary summary;
+    const size_t glWords =
+        static_cast<size_t>( glTextureBytes.size() ) / sizeof( uint16_t );
+    if( glTextureBytes.isEmpty()
+     || !oracle
+     || oracleWords == 0
+     || glWords != oracleWords )
+    {
+        return summary;
+    }
+
+    summary.checked = true;
+    const uint16_t *glWordsPtr =
+        reinterpret_cast<const uint16_t *>( glTextureBytes.constData() );
+    for( size_t i = 0; i < oracleWords; ++i )
+    {
+        const int gl = static_cast<int>( glWordsPtr[i] );
+        const int cpu = static_cast<int>( oracle[i] );
+        const int diff = gl - cpu;
+        if( diff != 0 )
+        {
+            const int absDiff = diff < 0 ? -diff : diff;
+            if( summary.mismatchCount == 0 )
+            {
+                summary.firstMismatchIndex = static_cast<unsigned long long>( i );
+                summary.firstGl = gl;
+                summary.firstOracle = cpu;
+            }
+            if( absDiff > summary.maxAbsDiff ) summary.maxAbsDiff = absDiff;
+            ++summary.mismatchCount;
+        }
+    }
+    summary.match = summary.mismatchCount == 0;
+    return summary;
 }
 
 static QString playbackFpsStatusText( double fps )
@@ -3277,7 +3366,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
         false );
-    if( gpuPlaybackReconTextureNoReadbackCandidate )
+    if( !framePresentedByViewport && gpuPlaybackReconTextureNoReadbackCandidate )
     {
         llrpGpuPlaybackReconState_t gpuReconState;
         memset( &gpuReconState, 0, sizeof( gpuReconState ) );
@@ -3333,6 +3422,122 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             texturePresentTiming.available
                 ? texturePresentTiming.total_ms
                 : texturePresentMs );
+        if( framePresentedByViewport
+         && playbackGpuNoReadbackOutputValidationEnabled() )
+        {
+            QByteArray glTextureBytes;
+            int glTextureWidth = 0;
+            int glTextureHeight = 0;
+            QString glTextureReason;
+            const bool glTextureReadbackOk =
+                GpuDisplayViewport::readPresentedBayer16Texture(
+                    ui->graphicsView,
+                    &glTextureBytes,
+                    &glTextureWidth,
+                    &glTextureHeight,
+                    &glTextureReason );
+            const size_t glTextureWords =
+                static_cast<size_t>( glTextureBytes.size() ) / sizeof( uint16_t );
+            const QString glTextureHash =
+                glTextureReadbackOk
+                    ? sha256HexForRawBytes( glTextureBytes.constData(),
+                                            static_cast<size_t>( glTextureBytes.size() ) )
+                    : QStringLiteral("none");
+            const bool oracleAvailable =
+                task.gpuPlaybackReconTextureBayerFrame
+                && task.gpuPlaybackReconTextureBayerFrameSize
+                    >= expectedPlaybackReconTextureBayerPixels;
+            const QString oracleHash =
+                oracleAvailable
+                    ? sha256HexForRawBytes(
+                        task.gpuPlaybackReconTextureBayerFrame,
+                        expectedPlaybackReconTextureBayerPixels * sizeof( uint16_t ) )
+                    : QStringLiteral("none");
+            const Bayer16ParitySummary parity =
+                glTextureReadbackOk && oracleAvailable
+                    ? compareBayer16ToOracle(
+                        glTextureBytes,
+                        task.gpuPlaybackReconTextureBayerFrame,
+                        expectedPlaybackReconTextureBayerPixels )
+                    : Bayer16ParitySummary();
+            const QString renderer =
+                sanitizeLogValue(
+                    GpuDisplayViewport::rendererDescriptionFor( ui->graphicsView ) );
+            llrpGpuPlaybackReconBackendInfo_t backendInfo;
+            memset( &backendInfo, 0, sizeof( backendInfo ) );
+            llrpGpuPlaybackReconGetBackendInfo( &backendInfo );
+            const QString backendRequestedPath =
+                sanitizeLogValue( QString::fromLocal8Bit( backendInfo.requested_path ) );
+            const QString backendResolvedPath =
+                sanitizeLogValue( QString::fromLocal8Bit( backendInfo.resolved_path ) );
+            const QString backendDescription =
+                sanitizeLogValue( QString::fromLocal8Bit( backendInfo.description ) );
+            const QString reason =
+                sanitizeLogValue(
+                    glTextureReadbackOk
+                        ? QStringLiteral("ok")
+                        : glTextureReason );
+
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_gl_probe_active"),
+                true );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_gl_probe_texture_readback_ok"),
+                glTextureReadbackOk );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_gl_probe_parity_checked"),
+                parity.checked );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_gl_probe_parity_match"),
+                parity.match );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_gl_probe_mismatch_count"),
+                static_cast<double>( parity.mismatchCount ) );
+
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.gl_probe session=%1 index=%2 "
+                       "display_frame=%3 play_checked=%4 position=%5 "
+                       "active=1 surface=gl_texture_r16 source=cuda_gl_r16_texture "
+                       "renderer=\"%6\" texture_readback_ok=%7 "
+                       "texture_width=%8 texture_height=%9 texture_words=%10 "
+                       "texture_hash=%11 oracle=cpu_dual_iso_recon_frame "
+                       "oracle_available=%12 oracle_words=%13 oracle_hash=%14 "
+                       "parity_checked=%15 parity_match=%16 mismatch_count=%17 "
+                       "mismatch_first_index=%18 mismatch_first_gl=%19 "
+                       "mismatch_first_oracle=%20 mismatch_max_abs=%21 "
+                       "backend_available=%22 backend_requested_path=\"%23\" "
+                       "backend_resolved_path=\"%24\" backend_description=\"%25\" "
+                       "reason=\"%26\"" )
+                       .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                       .arg( m_playbackSmokePresentedFrames + 1 )
+                       .arg( static_cast<qulonglong>( display_frame ) )
+                       .arg( bool01( ui->actionPlay->isChecked() ) )
+                       .arg( ui->horizontalSliderPosition->value() )
+                       .arg( renderer )
+                       .arg( bool01( glTextureReadbackOk ) )
+                       .arg( glTextureWidth )
+                       .arg( glTextureHeight )
+                       .arg( static_cast<qulonglong>( glTextureWords ) )
+                       .arg( glTextureHash )
+                       .arg( bool01( oracleAvailable ) )
+                       .arg( static_cast<qulonglong>(
+                           expectedPlaybackReconTextureBayerPixels ) )
+                       .arg( oracleHash )
+                       .arg( bool01( parity.checked ) )
+                       .arg( bool01( parity.match ) )
+                       .arg( static_cast<qulonglong>( parity.mismatchCount ) )
+                       .arg( static_cast<qulonglong>(
+                           parity.firstMismatchIndex ) )
+                       .arg( parity.firstGl )
+                       .arg( parity.firstOracle )
+                       .arg( parity.maxAbsDiff )
+                       .arg( bool01( backendInfo.available != 0 ) )
+                       .arg( backendRequestedPath )
+                       .arg( backendResolvedPath )
+                       .arg( backendDescription )
+                       .arg( reason );
+        }
         if( !framePresentedByViewport )
         {
             readyFrame.stageTimingTelemetry.insert(
@@ -5889,7 +6094,14 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
-        if( m_pGraphicsItem )
+        if( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
+         && ui->graphicsView
+         && ui->graphicsView->viewport() )
+        {
+            screenshot = ui->graphicsView->viewport()->grab();
+            screenshotMethod = QStringLiteral("app_internal_gl_viewport_grab");
+        }
+        if( screenshot.isNull() && m_pGraphicsItem )
         {
             screenshot = m_pGraphicsItem->pixmap();
         }

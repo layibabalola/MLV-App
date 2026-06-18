@@ -10,8 +10,9 @@
 #   - FROZEN CONTENT: the displayed BYTES not changing while the playback position advances. Frame
 #              numbers / fps / timecode all advance on metadata and cannot see this (the 2026-06-10
 #              poisoned-prefetch stuck-frame shipped green on every cadence metric); the
-#              draw_frame_ready.present_content hash is the content ground truth. Logs from builds
-#              without that event get a NOTE and the check is skipped (no false pass/fail).
+#              draw_frame_ready.present_content hash is the content ground truth. No-readback GL
+#              validation builds use playback_smoke.gl_probe texture_hash instead. Logs without
+#              either event get a NOTE and the check is skipped (no false pass/fail).
 # Emits a machine-readable verdict line and a non-zero exit code on FAIL.
 param(
     [Parameter(Mandatory = $true)][string]$TraceLog,
@@ -30,6 +31,7 @@ if (-not (Test-Path -LiteralPath $TraceLog)) { Write-Error "trace log not found:
 
 $rxBegin = [regex]'draw_frame_ready\.begin .*?display_frame=(\d+) play_checked=(\d+) position=(\d+)'
 $rxContent = [regex]'draw_frame_ready\.present_content .*?display_frame=(\d+) play_checked=(\d+) position=(\d+) hash=([0-9a-fA-F]+)'
+$rxGlContent = [regex]'playback_smoke\.gl_probe .*?display_frame=(\d+) .*?play_checked=(\d+) .*?position=(\d+) .*?active=1 .*?texture_hash=([0-9a-fA-F]+)'
 $rxTs    = [regex]'^\[\d{4}-\d{2}-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d+)Z\]'
 function Get-TsMs($m) {
     $d=[int]$m.Groups[1].Value; $h=[int]$m.Groups[2].Value; $mi=[int]$m.Groups[3].Value
@@ -63,6 +65,10 @@ foreach ($line in [System.IO.File]::ReadLines((Resolve-Path $TraceLog))) {
     $cm = $rxContent.Match($line)
     if ($cm.Success -and $cm.Groups[2].Value -eq '1') {
         $chPos.Add([int]$cm.Groups[3].Value); $chHash.Add($cm.Groups[4].Value)
+    }
+    $gm = $rxGlContent.Match($line)
+    if ($gm.Success -and $gm.Groups[2].Value -eq '1') {
+        $chPos.Add([int]$gm.Groups[3].Value); $chHash.Add($gm.Groups[4].Value)
     }
 }
 # --- Session segmentation ---------------------------------------------------
@@ -207,7 +213,7 @@ if ($flicker)   { Write-Host ("  FLICKER: presented frame jumped backward by up 
 if ($realStall) { Write-Host ("  STALL: image fell {0} frames behind the seek bar (~{1:N1}s freeze)" -f $maxLag, ($maxLag/24.0)) }
 if ($jittery)   { Write-Host ("  JITTER: {0:P1} of frames hitch (interval > 2.5x median); worst {1} ms - visible micro-stutter" -f $hitchFrac, [int]$maxIv) }
 if ($frozenContent) { Write-Host ("  FROZEN-CONTENT: displayed bytes identical across {0} consecutive presents while the position advanced - the image is stuck even though cadence looks healthy (validate by pixels)" -f $longestFrozenRun) }
-if ($contentEvents -eq 0) { Write-Host "  NOTE: no draw_frame_ready.present_content telemetry in this log (build predates the content hash) - frozen-content check skipped" }
+if ($contentEvents -eq 0) { Write-Host "  NOTE: no draw_frame_ready.present_content or playback_smoke.gl_probe telemetry in this log - frozen-content check skipped" }
 if ($stallIsScreenshot) { Write-Host "  NOTE: max-lag spike coincides with a window-screenshot grab (harness artifact); re-run without -CaptureScreenshot for clean stall detection" }
 if ($shotIntervals -gt 0) { Write-Host ("  NOTE: excluded {0} present interval(s) spanning a window-screenshot grab from the cadence stats (harness UI freeze, not playback)" -f $shotIntervals) }
 if ($longGaps -gt 0) { Write-Host ("  NOTE: {0} long gap(s) > {1} ms excluded from cadence stats as playback discontinuities (worst {2} ms){3}" -f $longGaps, $MaxPlausibleHitchMs, [int]$maxGap, $(if($interiorLongGap){' - at least one is mid-playback, counted as a freeze (FAIL)'}else{' - sequence boundary only, discounted'})) }

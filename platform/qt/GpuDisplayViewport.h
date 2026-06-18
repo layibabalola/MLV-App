@@ -61,6 +61,11 @@ public:
     static bool isTexturePresentationActive(const QGraphicsView *view);
     static SamplingMode samplingModeFor(const QGraphicsView *view);
     static QString rendererDescriptionFor(const QGraphicsView *view);
+    static bool readPresentedBayer16Texture(QGraphicsView *view,
+                                            QByteArray *textureBytes,
+                                            int *width,
+                                            int *height,
+                                            QString *reason = nullptr);
     static bool presentImage(QGraphicsView *view,
                              QGraphicsPixmapItem *fallbackItem,
                              const QImage &image,

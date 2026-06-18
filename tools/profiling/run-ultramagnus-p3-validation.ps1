@@ -2,8 +2,8 @@ param(
     [string]$RepoRoot = ".",
     [string]$ExpectedHostName = "ULTRA-MAGNUS",
     [string]$RequiredGpuNamePattern = "4090",
-    [string]$ClipRoot = "C:\temp\MLV",
-    [string[]]$ClipNames = @("M16-1327.MLV", "M16-1347.MLV", "M16-1446.MLV"),
+    [string]$ClipRoot = "G:\Temp\mlv-gpu-profile\clips",
+    [string[]]$ClipNames = @("M16-1327.MLV"),
     [string[]]$ClipPaths = @(),
     [string]$Receipt = "receipts\FastProxy.marxml",
     [string]$OutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present",
@@ -108,6 +108,31 @@ function Get-GitStatusLines {
     return @($output | ForEach-Object { [string]$_ })
 }
 
+function Get-GpuPreferenceValue {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    if (!(Test-Path -LiteralPath $prefKey)) {
+        return $null
+    }
+    $item = Get-ItemProperty -LiteralPath $prefKey -Name $Executable -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        return $null
+    }
+    return [string]$item.$Executable
+}
+
+function Set-GpuPreferenceHighPerformance {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    New-Item -Path $prefKey -Force | Out-Null
+    New-ItemProperty `
+        -Path $prefKey `
+        -Name $Executable `
+        -Value "GpuPreference=2;" `
+        -PropertyType String `
+        -Force | Out-Null
+}
+
 function Get-RelativeArtifactPath {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -158,6 +183,15 @@ function New-EvidencePacket {
             activeNoReadbackFrameCount = $_.activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
             fallbackFrameCount = $_.fallbackFrameCount
+            glProbeActiveCount = $_.glProbeActiveCount
+            glTextureReadbackOkCount = $_.glTextureReadbackOkCount
+            glParityCheckedCount = $_.glParityCheckedCount
+            glParityMatchCount = $_.glParityMatchCount
+            glMismatchTotal = $_.glMismatchTotal
+            glDistinctTextureHashes = $_.glDistinctTextureHashes
+            glRendererDescriptions = $_.glRendererDescriptions
+            glBackendArtifacts = $_.glBackendArtifacts
+            glScreenshotMethod = $_.glScreenshotMethod
             validationOk = $_.validationOk
         }
     })
@@ -181,6 +215,9 @@ function New-EvidencePacket {
             clipCount = @($Summary.clipResults).Count
             totalGpuTextureNoReadbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.gpuTextureNoReadbackFrames }) | Measure-Object -Sum).Sum
             totalFallbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.fallbackFrameCount }) | Measure-Object -Sum).Sum
+            correctnessValidated = [bool]$Summary.proof.correctnessValidated
+            totalGlProbeActiveFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.glProbeActiveCount }) | Measure-Object -Sum).Sum
+            totalGlParityMismatches = (@($Summary.clipResults | ForEach-Object { [long]$_.glMismatchTotal }) | Measure-Object -Sum).Sum
             clips = $clipProof
         }
         files = @()
@@ -305,6 +342,9 @@ function Import-EvidencePacket {
         if (@($summary.failures).Count -gt 0) {
             Add-Failure $importFailures "Evidence summary contains failures: $((@($summary.failures) | ForEach-Object { [string]$_ }) -join '; ')"
         }
+        if (-not [bool]$summary.proof.correctnessValidated) {
+            Add-Failure $importFailures "Evidence summary proof.correctnessValidated was not true."
+        }
         foreach ($clip in @($summary.clipResults)) {
             $clipName = [string]$clip.clip
             if ($clip.status -ne "success") {
@@ -324,6 +364,40 @@ function Import-EvidencePacket {
             }
             if ([int]$clip.fallbackFrameCount -ne 0) {
                 Add-Failure $importFailures "$clipName had fallbackFrameCount=$($clip.fallbackFrameCount); expected 0."
+            }
+            if ([int]$clip.glProbeActiveCount -le 0) {
+                Add-Failure $importFailures "$clipName had glProbeActiveCount=$($clip.glProbeActiveCount); expected > 0."
+            }
+            if ([int]$clip.glTextureReadbackOkCount -ne [int]$clip.glProbeActiveCount) {
+                Add-Failure $importFailures "$clipName had glTextureReadbackOkCount=$($clip.glTextureReadbackOkCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+            }
+            if ([int]$clip.glParityCheckedCount -ne [int]$clip.glProbeActiveCount) {
+                Add-Failure $importFailures "$clipName had glParityCheckedCount=$($clip.glParityCheckedCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+            }
+            if ([int]$clip.glParityMatchCount -ne [int]$clip.glProbeActiveCount) {
+                Add-Failure $importFailures "$clipName had glParityMatchCount=$($clip.glParityMatchCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+            }
+            if ([long]$clip.glMismatchTotal -ne 0) {
+                Add-Failure $importFailures "$clipName had glMismatchTotal=$($clip.glMismatchTotal); expected 0."
+            }
+            if ([int]$clip.glDistinctTextureHashes -le 1) {
+                Add-Failure $importFailures "$clipName had glDistinctTextureHashes=$($clip.glDistinctTextureHashes); expected > 1."
+            }
+            if ([string]$clip.glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
+                Add-Failure $importFailures "$clipName had glScreenshotMethod='$($clip.glScreenshotMethod)'; expected app_internal_gl_viewport_grab."
+            }
+            $clipRendererMatched = $false
+            foreach ($renderer in @($clip.glRendererDescriptions | ForEach-Object { [string]$_ })) {
+                if ($renderer -match $RequiredGpuNamePattern) {
+                    $clipRendererMatched = $true
+                    break
+                }
+            }
+            if (!$clipRendererMatched) {
+                Add-Failure $importFailures "$clipName had no GL renderer matching '$RequiredGpuNamePattern': $((@($clip.glRendererDescriptions) | ForEach-Object { [string]$_ }) -join '; ')"
+            }
+            if (@($clip.glBackendArtifacts).Count -le 0) {
+                Add-Failure $importFailures "$clipName did not include a backend DLL hash artifact."
             }
         }
     }
@@ -389,6 +463,11 @@ if (!(Test-Path -LiteralPath $receiptPath)) {
 }
 
 $hostName = [Environment]::MachineName
+$sessionInfo = [pscustomobject]@{
+    sessionName = $env:SESSIONNAME
+    processSessionId = (Get-Process -Id $PID).SessionId
+    userInteractive = [Environment]::UserInteractive
+}
 if (!$AllowNonUltraMagnus -and $hostName -ine $ExpectedHostName) {
     $hostMessage = "Host is '$hostName'; expected '$ExpectedHostName'. Use -AllowNonUltraMagnus only for dry plumbing checks."
     if ($DryRun) {
@@ -397,6 +476,12 @@ if (!$AllowNonUltraMagnus -and $hostName -ine $ExpectedHostName) {
     else {
         Add-Failure $failures $hostMessage
     }
+}
+if (!$DryRun -and [int]$sessionInfo.processSessionId -eq 0) {
+    Add-Failure $failures "Validator is running in Session 0; GL no-readback validation requires an interactive console session."
+}
+if (!$DryRun -and [string]$sessionInfo.sessionName -match '^Services$') {
+    Add-Failure $failures "Validator SESSIONNAME is '$($sessionInfo.sessionName)'; GL no-readback validation requires the console user session."
 }
 
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
@@ -474,6 +559,8 @@ foreach ($clip in $resolvedClips) {
 
 $releaseInfo = $null
 $releaseHash = $null
+$gpuPreferenceBefore = $null
+$gpuPreferenceAfter = $null
 
 if ($failures.Count -eq 0 -and !$DryRun -and !$SkipBuild) {
     $env:PATH = "C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH
@@ -491,6 +578,14 @@ if (Test-Path -LiteralPath $releaseExe) {
         length = $item.Length
     }
     $releaseHash = (Get-FileHash -LiteralPath $releaseExe -Algorithm SHA256).Hash
+    $gpuPreferenceBefore = Get-GpuPreferenceValue -Executable $item.FullName
+    if (!$DryRun) {
+        Set-GpuPreferenceHighPerformance -Executable $item.FullName
+    }
+    $gpuPreferenceAfter = Get-GpuPreferenceValue -Executable $item.FullName
+    if (!$DryRun -and $gpuPreferenceAfter -ne "GpuPreference=2;") {
+        Add-Failure $failures "Windows per-app GPU preference for '$($item.FullName)' was '$gpuPreferenceAfter'; expected 'GpuPreference=2;'."
+    }
 }
 else {
     $exeMessage = "Missing release executable: $releaseExe"
@@ -514,7 +609,7 @@ if ($failures.Count -eq 0) {
         $clipOutput = Join-Path $runRoot ($clipStem + "-p3-texture-present.json")
         $screenshots = Join-Path $runRoot ($clipStem + "-screenshots")
         $invokeScript = Join-Path $runRoot ("invoke-" + $clipStem + ".ps1")
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1')"
+        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','QT_OPENGL=desktop')"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -529,6 +624,7 @@ if ($failures.Count -eq 0) {
     FrameTelemetry = `$true
     CaptureScreenshot = `$true
     FailOnColorArtifact = `$true
+    DetectPlaybackArtifacts = `$true
     ScreenshotOutputDir = '$screenshots'
     Scope = 'none'
     PlaybackDebayer = 'amaze'
@@ -586,6 +682,16 @@ exit `$LASTEXITCODE
         $fallbackFrameCount = 0
         $noReadbackFallbackReasons = [ordered]@{}
         $logPath = $null
+        $glOutputProof = $null
+        $glProbeActiveCount = 0
+        $glTextureReadbackOkCount = 0
+        $glParityCheckedCount = 0
+        $glParityMatchCount = 0
+        $glMismatchTotal = 0
+        $glDistinctTextureHashes = 0
+        $glRendererDescriptions = @()
+        $glBackendArtifacts = @()
+        $glScreenshotMethod = $null
 
         if (Test-Path -LiteralPath $clipOutput) {
             $result = Get-Content -LiteralPath $clipOutput -Raw | ConvertFrom-Json
@@ -596,6 +702,32 @@ exit `$LASTEXITCODE
                 Add-Failure $clipFailures "MLVApp process exit code was $($result.process.exitCode)."
             }
             $logPath = $result.log.path
+            $glOutputProof = $result.visualQuality.glOutputProof
+            if ($glOutputProof) {
+                $glProbeActiveCount = [int]$glOutputProof.activeProbeCount
+                $glTextureReadbackOkCount = [int]$glOutputProof.textureReadbackOkCount
+                $glParityCheckedCount = [int]$glOutputProof.parityCheckedCount
+                $glParityMatchCount = [int]$glOutputProof.parityMatchCount
+                $glMismatchTotal = [long]$glOutputProof.mismatchCountTotal
+                $glDistinctTextureHashes = [int]$glOutputProof.distinctTextureHashes
+                $glRendererDescriptions = @($glOutputProof.rendererDescriptions | ForEach-Object { [string]$_ })
+                $glScreenshotMethod = [string]$glOutputProof.screenshotMethod
+                foreach ($backendPath in @($glOutputProof.backendResolvedPaths | ForEach-Object { [string]$_ })) {
+                    if ([string]::IsNullOrWhiteSpace($backendPath) -or $backendPath -eq "none") {
+                        continue
+                    }
+                    if (!(Test-Path -LiteralPath $backendPath)) {
+                        Add-Failure $clipFailures "Backend DLL path from GL probe does not exist on evidence host: $backendPath"
+                        continue
+                    }
+                    $backendItem = Get-Item -LiteralPath $backendPath
+                    $glBackendArtifacts += [pscustomobject]@{
+                        path = $backendItem.FullName
+                        length = $backendItem.Length
+                        sha256 = Get-FileSha256 -Path $backendItem.FullName
+                    }
+                }
+            }
         }
 
         if ($logPath -and (Test-Path -LiteralPath $logPath)) {
@@ -657,6 +789,48 @@ exit `$LASTEXITCODE
         if ($fallbackFrameCount -gt 0) {
             Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
         }
+        if ($null -eq $glOutputProof) {
+            Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
+        }
+        else {
+            if (-not [bool]$glOutputProof.requested) {
+                Add-Failure $clipFailures "GL output proof was not requested by the smoke wrapper."
+            }
+            if ($glProbeActiveCount -le 0) {
+                Add-Failure $clipFailures "No active GL output probe rows were logged."
+            }
+            if ($glProbeActiveCount -gt 0 -and $glTextureReadbackOkCount -ne $glProbeActiveCount) {
+                Add-Failure $clipFailures "GL texture readback did not succeed for every probe ($glTextureReadbackOkCount/$glProbeActiveCount)."
+            }
+            if ($glProbeActiveCount -gt 1 -and $glDistinctTextureHashes -le 1) {
+                Add-Failure $clipFailures "GL texture content did not advance: distinctTextureHashes=$glDistinctTextureHashes."
+            }
+            if ($glProbeActiveCount -gt 0 -and $glParityCheckedCount -ne $glProbeActiveCount) {
+                Add-Failure $clipFailures "GL texture parity was not checked for every probe ($glParityCheckedCount/$glProbeActiveCount)."
+            }
+            if ($glProbeActiveCount -gt 0 -and $glParityMatchCount -ne $glProbeActiveCount) {
+                Add-Failure $clipFailures "GL texture parity did not match the CPU oracle for every probe ($glParityMatchCount/$glProbeActiveCount; mismatches=$glMismatchTotal)."
+            }
+            if ($glMismatchTotal -ne 0) {
+                Add-Failure $clipFailures "GL texture parity mismatch count was $glMismatchTotal; expected 0."
+            }
+            if ($glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
+                Add-Failure $clipFailures "Color scan screenshot method was '$glScreenshotMethod'; expected app_internal_gl_viewport_grab."
+            }
+            $rendererMatched = $false
+            foreach ($renderer in $glRendererDescriptions) {
+                if ($renderer -match $RequiredGpuNamePattern) {
+                    $rendererMatched = $true
+                    break
+                }
+            }
+            if (!$rendererMatched) {
+                Add-Failure $clipFailures "No GL_RENDERER from playback_smoke.gl_probe matched '$RequiredGpuNamePattern': $($glRendererDescriptions -join '; ')"
+            }
+            if (@($glBackendArtifacts).Count -le 0) {
+                Add-Failure $clipFailures "No backend DLL artifact hash was captured from playback_smoke.gl_probe."
+            }
+        }
 
         $clipStatus = if ($clipFailures.Count -eq 0) { "success" } else { "failed" }
         $clipResults += [pscustomobject]@{
@@ -679,6 +853,16 @@ exit `$LASTEXITCODE
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             fallbackFrameCount = $fallbackFrameCount
             noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
+            glOutputProof = $glOutputProof
+            glProbeActiveCount = $glProbeActiveCount
+            glTextureReadbackOkCount = $glTextureReadbackOkCount
+            glParityCheckedCount = $glParityCheckedCount
+            glParityMatchCount = $glParityMatchCount
+            glMismatchTotal = $glMismatchTotal
+            glDistinctTextureHashes = $glDistinctTextureHashes
+            glRendererDescriptions = $glRendererDescriptions
+            glBackendArtifacts = $glBackendArtifacts
+            glScreenshotMethod = $glScreenshotMethod
             gpuSummary = $gpuSummary
         }
 
@@ -698,6 +882,21 @@ $status =
         "failed"
     }
 
+$correctnessValidated =
+    ($status -eq "success") -and
+    (-not [bool]$DryRun) -and
+    (@($clipResults).Count -gt 0) -and
+    (@($clipResults | Where-Object {
+        $_.status -ne "success" -or
+        [int]$_.glProbeActiveCount -le 0 -or
+        [int]$_.glTextureReadbackOkCount -ne [int]$_.glProbeActiveCount -or
+        [int]$_.glParityCheckedCount -ne [int]$_.glProbeActiveCount -or
+        [int]$_.glParityMatchCount -ne [int]$_.glProbeActiveCount -or
+        [long]$_.glMismatchTotal -ne 0 -or
+        [int]$_.glDistinctTextureHashes -le 1 -or
+        [string]$_.glScreenshotMethod -ne "app_internal_gl_viewport_grab"
+    }).Count -eq 0)
+
 $summary = [pscustomobject]@{
     schema = "mlvapp-ultramagnus-p3-validation.v1"
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -708,6 +907,7 @@ $summary = [pscustomobject]@{
         actual = $hostName
         expected = $ExpectedHostName
         allowNonUltraMagnus = [bool]$AllowNonUltraMagnus
+        session = $sessionInfo
     }
     gpu = [pscustomobject]@{
         requiredNamePattern = $RequiredGpuNamePattern
@@ -718,6 +918,8 @@ $summary = [pscustomobject]@{
         exe = $releaseInfo
         sha256 = $releaseHash
         buildSkipped = [bool]$SkipBuild
+        gpuPreferenceBefore = $gpuPreferenceBefore
+        gpuPreferenceAfter = $gpuPreferenceAfter
     }
     inputs = [pscustomobject]@{
         clipRoot = $ClipRoot
@@ -735,6 +937,12 @@ $summary = [pscustomobject]@{
         latest = $latestPath
         plannedCommands = $plannedCommands
         evidencePacket = $null
+    }
+    proof = [pscustomobject]@{
+        correctnessValidated = [bool]$correctnessValidated
+        validationSurface = "gl_texture_r16_readback_vs_cpu_dual_iso_recon_frame"
+        frameAdvanceSurface = "playback_smoke.gl_probe texture_hash parsed by detect-playback-artifacts.ps1"
+        colorScanSurface = "app_internal_gl_viewport_grab"
     }
     clipResults = $clipResults
     warnings = @($warnings)
