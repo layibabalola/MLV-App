@@ -893,26 +893,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         bool gpuPlaybackReconTexturePreparedStateValid = false;
         bool gpuPlaybackReconTextureStateSnapshotOk = false;
         QString gpuPlaybackReconTextureNoReadbackFallbackReason;
-        if( wantsGpuPlaybackReconTextureNoReadback )
-        {
-            try
-            {
-                slot.gpuPlaybackReconTextureInputBayerFrame.assign(
-                    slot.rawImage16.begin(),
-                    slot.rawImage16.begin()
-                        + static_cast<std::ptrdiff_t>( rawPixelCount ) );
-                gpuPlaybackReconTextureInputSnapshotCopied = true;
-            }
-            catch( const std::bad_alloc & )
-            {
-                slot.gpuPlaybackReconTextureInputBayerFrame.clear();
-                slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
-                slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
-                gpuPlaybackReconTextureNoReadbackFallbackReason =
-                    QStringLiteral("GPU playback recon input snapshot allocation failed");
-            }
-        }
-        else
+        if( !wantsGpuPlaybackReconTextureNoReadback )
         {
             slot.gpuPlaybackReconTextureInputBayerFrame.clear();
             slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
@@ -932,6 +913,38 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                                     0 );
         if( wantsGpuPlaybackReconTextureNoReadback )
         {
+            const size_t preparedInputWords =
+                llrpGpuPlaybackReconGetLastInputBayer16( nullptr, 0 );
+            if( preparedInputWords == rawPixelCount )
+            {
+                try
+                {
+                    slot.gpuPlaybackReconTextureInputBayerFrame.assign(
+                        rawPixelCount,
+                        0u );
+                    const size_t copiedWords =
+                        llrpGpuPlaybackReconGetLastInputBayer16(
+                            slot.gpuPlaybackReconTextureInputBayerFrame.data(),
+                            slot.gpuPlaybackReconTextureInputBayerFrame.size() );
+                    gpuPlaybackReconTextureInputSnapshotCopied =
+                        copiedWords == rawPixelCount;
+                }
+                catch( const std::bad_alloc & )
+                {
+                    slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                    slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
+                    slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
+                    gpuPlaybackReconTextureNoReadbackFallbackReason =
+                        QStringLiteral("GPU playback recon prepared input snapshot allocation failed");
+                }
+            }
+            else
+            {
+                slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                gpuPlaybackReconTextureNoReadbackFallbackReason =
+                    QStringLiteral("GPU playback recon prepared input snapshot was unavailable");
+            }
+
             llrpGpuPlaybackReconState_t preparedState;
             memset( &preparedState, 0, sizeof( preparedState ) );
             const bool preparedStateAvailable =

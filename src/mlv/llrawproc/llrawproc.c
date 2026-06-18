@@ -220,6 +220,8 @@ static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_used = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_state_valid = 0;
 static MLV_THREAD_LOCAL dualiso_gpu_recon_state_t g_llrawproc_gpu_playback_last_prepared_state = {0};
+static MLV_THREAD_LOCAL uint16_t *g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
+static MLV_THREAD_LOCAL size_t g_llrawproc_gpu_playback_last_input_words = 0;
 
 static void llrawproc_gpu_export_reset_last_run_state(void)
 {
@@ -245,6 +247,44 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
     g_llrawproc_gpu_playback_last_state_valid = 0;
     memset(&g_llrawproc_gpu_playback_last_prepared_state, 0,
            sizeof(g_llrawproc_gpu_playback_last_prepared_state));
+    if(g_llrawproc_gpu_playback_last_input_bayer16)
+    {
+        free(g_llrawproc_gpu_playback_last_input_bayer16);
+        g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
+    }
+    g_llrawproc_gpu_playback_last_input_words = 0;
+}
+
+static int llrawproc_gpu_playback_store_last_input_bayer16(const uint16_t * input,
+                                                           size_t input_words)
+{
+    uint16_t * copy = NULL;
+    const size_t bytes = input_words * sizeof(uint16_t);
+    if(!input || input_words == 0 || input_words > ((size_t)-1) / sizeof(uint16_t))
+    {
+        return 0;
+    }
+
+    copy = (uint16_t *)malloc(bytes);
+    if(!copy)
+    {
+        if(g_llrawproc_gpu_playback_last_input_bayer16)
+        {
+            free(g_llrawproc_gpu_playback_last_input_bayer16);
+            g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
+        }
+        g_llrawproc_gpu_playback_last_input_words = 0;
+        return 0;
+    }
+
+    memcpy(copy, input, bytes);
+    if(g_llrawproc_gpu_playback_last_input_bayer16)
+    {
+        free(g_llrawproc_gpu_playback_last_input_bayer16);
+    }
+    g_llrawproc_gpu_playback_last_input_bayer16 = copy;
+    g_llrawproc_gpu_playback_last_input_words = input_words;
+    return 1;
 }
 
 int llrpResetGpuExportRunForTesting(void);
@@ -416,6 +456,26 @@ int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state
         &g_llrawproc_gpu_playback_last_prepared_state,
         state);
     return state && state->valid;
+}
+
+size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
+                                               size_t output_words);
+size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
+                                               size_t output_words)
+{
+    const size_t words = g_llrawproc_gpu_playback_last_input_words;
+    if(!output || output_words == 0 || !g_llrawproc_gpu_playback_last_input_bayer16)
+    {
+        return words;
+    }
+    if(output_words < words)
+    {
+        return words;
+    }
+    memcpy(output,
+           g_llrawproc_gpu_playback_last_input_bayer16,
+           words * sizeof(uint16_t));
+    return words;
 }
 
 void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry)
@@ -2172,6 +2232,12 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 if (gpu_playback_input)
                 {
                     memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    if (g_llrawproc_gpu_playback_texture_present_preferred)
+                    {
+                        (void)llrawproc_gpu_playback_store_last_input_bayer16(
+                            gpu_playback_input,
+                            raw_image_size / sizeof(uint16_t));
+                    }
                 }
             }
 

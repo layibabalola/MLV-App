@@ -99,6 +99,8 @@ typedef struct
 } llrpGpuPlaybackReconBackendInfo_t;
 
 int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state);
+size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
+                                               size_t output_words);
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
 int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      const uint16_t * raw_input_bayer14,
