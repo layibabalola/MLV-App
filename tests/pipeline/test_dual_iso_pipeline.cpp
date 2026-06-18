@@ -929,14 +929,14 @@ TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossCo
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
 }
 
-// Lane A E2 (slice 1): with the real CUDA backend on the RTX 4090, every eligible
+// Lane A E2 (slices 1-2): with the real CUDA backend on the RTX 4090, every eligible
 // case must produce a byte-identical DNG via a genuine GPU replacement (replaced==1,
-// mismatch==0). Slice 1 keeps the recon config at the E1-proven configuration and
-// broadens coverage only along the recon-invariant Look-Assist override axis (the
-// overrides write metadata tags 50714/50717/50730/50728 and do not change the recon
-// payload) plus the existing {tiny,large} x {uncompressed,compressed} axes. Alias /
-// full-res config variations are added in a later slice once the 4090 confirms each
-// one still replaces. Gated on MLVAPP_GPU_EXPORT_TEST_DLL so it SKIPs on llvmpipe.
+// mismatch==0). The matrix spans: the GPU-eligible alias x full-res config variations
+// (all MEAN23 + chroma off), the recon-invariant Look-Assist override axis (overrides
+// write metadata tags 50714/50717/50730/50728, not the recon payload), and the
+// {uncompressed,compressed} axis. The base config (alias on, full-res on) also covers
+// the large clip; the other configs use the tiny clip to bound wall-clock. Gated on
+// MLVAPP_GPU_EXPORT_TEST_DLL so it SKIPs on llvmpipe.
 TEST(DualIsoPipeline, GpuExportParityMatrixIsByteExactAcrossEligibleConfigs)
 {
     const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
@@ -969,67 +969,91 @@ TEST(DualIsoPipeline, GpuExportParityMatrixIsByteExactAcrossEligibleConfigs)
             "tests/fixtures/receipts/large_dual_iso_hq.marxml",
         },
     };
-    const GpuExportDualIsoConfig cfg = kGpuExportSupportedDualIsoConfig;
+    // Slice 2: enumerate the GPU-eligible alias x full-res config variations (all
+    // MEAN23 + chroma off). The base config (alias on, full-res on) was 4090-proven in
+    // slice 1; slice 2 confirms the other three configurations still replace byte-for-
+    // byte. The heavy large clip is gated to the base config to bound wall-clock; the
+    // alias/full-res variations run on the tiny clip across the Look-Assist x
+    // compression axes.
+    struct EligibleConfig {
+        const char * name;
+        GpuExportDualIsoConfig cfg;
+        bool include_large;
+    };
+    const EligibleConfig eligible_configs[] = {
+        { "alias-on-fr-on",   { DISOI_MEAN23, FR_ON,  FR_ON,  CS_OFF }, true  },
+        { "alias-off-fr-off", { DISOI_MEAN23, FR_OFF, FR_OFF, CS_OFF }, false },
+        { "alias-off-fr-on",  { DISOI_MEAN23, FR_OFF, FR_ON,  CS_OFF }, false },
+        { "alias-on-fr-off",  { DISOI_MEAN23, FR_ON,  FR_OFF, CS_OFF }, false },
+    };
     const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
     const dngExportOverrides_t look_assist = make_gpu_export_test_overrides();
 
-    for (const EligibleClip & clip : clips) {
-        for (int override_on = 0; override_on <= 1; ++override_on) {
-            const dngExportOverrides_t * overrides = override_on ? &look_assist : nullptr;
-            for (int raw_state : raw_states) {
-                const QString raw_name = raw_state == COMPRESSED_RAW
-                    ? QStringLiteral("compressed")
-                    : QStringLiteral("uncompressed");
-                const QString suffix = QString::fromLatin1(clip.name)
-                    + QStringLiteral("-")
-                    + (override_on ? QStringLiteral("la") : QStringLiteral("nola"))
-                    + QStringLiteral("-") + raw_name;
-                const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
-                const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
+    for (const EligibleConfig & econf : eligible_configs) {
+        for (const EligibleClip & clip : clips) {
+            const bool is_large =
+                (QString::fromLatin1(clip.name) == QStringLiteral("large-hq"));
+            if (is_large && !econf.include_large) {
+                continue;
+            }
+            for (int override_on = 0; override_on <= 1; ++override_on) {
+                const dngExportOverrides_t * overrides = override_on ? &look_assist : nullptr;
+                for (int raw_state : raw_states) {
+                    const QString raw_name = raw_state == COMPRESSED_RAW
+                        ? QStringLiteral("compressed")
+                        : QStringLiteral("uncompressed");
+                    const QString suffix = QString::fromLatin1(econf.name)
+                        + QStringLiteral("-") + QString::fromLatin1(clip.name)
+                        + QStringLiteral("-")
+                        + (override_on ? QStringLiteral("la") : QStringLiteral("nola"))
+                        + QStringLiteral("-") + raw_name;
+                    const QString cpu_dng = temp_dir.filePath(suffix + QStringLiteral("-cpu.dng"));
+                    const QString gpu_dng = temp_dir.filePath(suffix + QStringLiteral("-gpu.dng"));
 
-                const QByteArray cpu_bytes = export_dng_for_gpu_export_gate_cfg(
-                    raw_state, false, QString(), cpu_dng,
-                    QString::fromLatin1(clip.clip_path),
-                    QString::fromLatin1(clip.receipt_path), cfg, overrides);
-                ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
-                ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+                    const QByteArray cpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                        raw_state, false, QString(), cpu_dng,
+                        QString::fromLatin1(clip.clip_path),
+                        QString::fromLatin1(clip.receipt_path), econf.cfg, overrides);
+                    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+                    ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
 
-                const QByteArray gpu_bytes = export_dng_for_gpu_export_gate_cfg(
-                    raw_state, true, dll_path, gpu_dng,
-                    QString::fromLatin1(clip.clip_path),
-                    QString::fromLatin1(clip.receipt_path), cfg, overrides);
-                const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
-                const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
-                const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
-                const int run_rc = llrpGpuExportLastRunRcForTesting();
-                const int replaced = llrpGpuExportLastReplacedForTesting();
-                const int mismatch = llrpGpuExportLastMismatchForTesting();
-                const unsigned long long mismatch_count =
-                    llrpGpuExportLastMismatchCountForTesting();
-                const QByteArray suffix_bytes = suffix.toLocal8Bit();
-                std::fprintf(stderr,
-                             "[gpu-export-parity-matrix] case=%s backend_attempted=%d "
-                             "backend_unavailable=%d run_attempted=%d run_rc=%d replaced=%d "
-                             "mismatch=%d mismatch_count=%llu cpu_len=%lld gpu_len=%lld\n",
-                             suffix_bytes.constData(),
-                             backend_attempted,
-                             backend_unavailable,
-                             run_attempted,
-                             run_rc,
-                             replaced,
-                             mismatch,
-                             mismatch_count,
-                             static_cast<long long>(cpu_bytes.size()),
-                             static_cast<long long>(gpu_bytes.size()));
-                ASSERT_EQ(1, backend_attempted);
-                ASSERT_EQ(0, backend_unavailable);
-                ASSERT_EQ(1, run_attempted);
-                ASSERT_EQ(0, run_rc);
-                ASSERT_EQ(1, replaced);
-                ASSERT_EQ(0, mismatch);
+                    const QByteArray gpu_bytes = export_dng_for_gpu_export_gate_cfg(
+                        raw_state, true, dll_path, gpu_dng,
+                        QString::fromLatin1(clip.clip_path),
+                        QString::fromLatin1(clip.receipt_path), econf.cfg, overrides);
+                    const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+                    const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+                    const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+                    const int run_rc = llrpGpuExportLastRunRcForTesting();
+                    const int replaced = llrpGpuExportLastReplacedForTesting();
+                    const int mismatch = llrpGpuExportLastMismatchForTesting();
+                    const unsigned long long mismatch_count =
+                        llrpGpuExportLastMismatchCountForTesting();
+                    const QByteArray suffix_bytes = suffix.toLocal8Bit();
+                    std::fprintf(stderr,
+                                 "[gpu-export-parity-matrix] case=%s backend_attempted=%d "
+                                 "backend_unavailable=%d run_attempted=%d run_rc=%d replaced=%d "
+                                 "mismatch=%d mismatch_count=%llu cpu_len=%lld gpu_len=%lld\n",
+                                 suffix_bytes.constData(),
+                                 backend_attempted,
+                                 backend_unavailable,
+                                 run_attempted,
+                                 run_rc,
+                                 replaced,
+                                 mismatch,
+                                 mismatch_count,
+                                 static_cast<long long>(cpu_bytes.size()),
+                                 static_cast<long long>(gpu_bytes.size()));
+                    ASSERT_EQ(1, backend_attempted);
+                    ASSERT_EQ(0, backend_unavailable);
+                    ASSERT_EQ(1, run_attempted);
+                    ASSERT_EQ(0, run_rc);
+                    ASSERT_EQ(1, replaced);
+                    ASSERT_EQ(0, mismatch);
 
-                preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
-                ASSERT_TRUE(cpu_bytes == gpu_bytes);
+                    preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
+                    ASSERT_TRUE(cpu_bytes == gpu_bytes);
+                }
             }
         }
     }
