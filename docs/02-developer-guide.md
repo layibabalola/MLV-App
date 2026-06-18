@@ -658,6 +658,14 @@ reductions do not apply to this export path. Disable the headless auto look by
 turning off `lookAssistEnabled` in the receipt or setting
 `MLVAPP_NO_LOOK_ASSIST=1`.
 
+When `MLVAPP_GPU_EXPORT=1` causes the CUDA shadow export path to run and the
+loaded backend supports the optional VRAM query, batch stdout includes an
+additive line such as `[BATCH] GPU <clip> frame=<n> rc=<rc> replaced=<0|1> vramAllocatedMB=<mb>`.
+The reported MB is the backend's per-worker VRAM
+working-set budget (tracked device buffers plus a conservative CUDA context
+reserve), intended for external batch schedulers; CPU-only and older-DLL runs do
+not emit the line.
+
 #### `--trim-mlv` — cut a clip
 
 Runs `src/batch/MlvTrim` to write a new `.mlv` containing a frame range from

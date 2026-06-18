@@ -13,3 +13,4 @@ EXPORTS
     igpu_recon_set_luts
     igpu_recon_run
     igpu_recon_last_timing
+    igpu_recon_allocated_bytes

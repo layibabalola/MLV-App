@@ -201,6 +201,8 @@ static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_replaced = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_apply_dither = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_allocated_bytes_valid = 0;
+static MLV_THREAD_LOCAL uint64_t g_llrawproc_gpu_export_last_allocated_bytes = 0;
 static MLV_THREAD_LOCAL unsigned long long g_llrawproc_gpu_export_last_mismatch_count = 0;
 static MLV_THREAD_LOCAL unsigned long long g_llrawproc_gpu_export_last_mismatch_first_index = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch_first_cpu = 0;
@@ -218,6 +220,8 @@ static void llrawproc_gpu_export_reset_last_run_state(void)
     g_llrawproc_gpu_export_last_replaced = 0;
     g_llrawproc_gpu_export_last_mismatch = 0;
     g_llrawproc_gpu_export_last_apply_dither = 0;
+    g_llrawproc_gpu_export_last_allocated_bytes_valid = 0;
+    g_llrawproc_gpu_export_last_allocated_bytes = 0;
     g_llrawproc_gpu_export_last_mismatch_count = 0;
     g_llrawproc_gpu_export_last_mismatch_first_index = 0;
     g_llrawproc_gpu_export_last_mismatch_first_cpu = 0;
@@ -331,6 +335,18 @@ int llrpGpuPlaybackReconLastStateValidForTesting(void)
     return g_llrawproc_gpu_playback_last_state_valid;
 }
 
+void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry)
+{
+    if(!telemetry) return;
+    memset(telemetry, 0, sizeof(*telemetry));
+    telemetry->attempted = g_llrawproc_gpu_export_last_run_attempted;
+    telemetry->rc = g_llrawproc_gpu_export_last_run_rc;
+    telemetry->replaced = g_llrawproc_gpu_export_last_replaced;
+    telemetry->allocated_bytes_valid =
+        g_llrawproc_gpu_export_last_allocated_bytes_valid;
+    telemetry->allocated_bytes = g_llrawproc_gpu_export_last_allocated_bytes;
+}
+
 #if defined(_WIN32)
 typedef igpu_recon_backend* (*llrawproc_gpu_create_fn)(const char*);
 typedef void (*llrawproc_gpu_destroy_fn)(igpu_recon_backend*);
@@ -345,6 +361,7 @@ typedef int (*llrawproc_gpu_run_fn)(igpu_recon_backend*,
                                     uint16_t*,
                                     unsigned int);
 typedef int (*llrawproc_gpu_last_timing_fn)(igpu_recon_backend*, igpu_recon_timing_t*);
+typedef int (*llrawproc_gpu_allocated_bytes_fn)(igpu_recon_backend*, uint64_t*);
 
 typedef struct
 {
@@ -361,6 +378,7 @@ typedef struct
     llrawproc_gpu_set_luts_fn set_luts;
     llrawproc_gpu_run_fn run;
     llrawproc_gpu_last_timing_fn last_timing;
+    llrawproc_gpu_allocated_bytes_fn allocated_bytes;
 } llrawprocGpuExportBackend_t;
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
@@ -482,6 +500,11 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
     LLRAWPROC_GPU_RESOLVE_TYPED(set_luts, llrawproc_gpu_set_luts_fn, "igpu_recon_set_luts");
     LLRAWPROC_GPU_RESOLVE_TYPED(run, llrawproc_gpu_run_fn, "igpu_recon_run");
     LLRAWPROC_GPU_RESOLVE_TYPED(last_timing, llrawproc_gpu_last_timing_fn, "igpu_recon_last_timing");
+    {
+        union { FARPROC raw; llrawproc_gpu_allocated_bytes_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_allocated_bytes");
+        g->allocated_bytes = resolved.typed;
+    }
 
 #undef LLRAWPROC_GPU_RESOLVE_TYPED
 
@@ -521,7 +544,9 @@ static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state
                                          uint16_t * gpu_output,
                                          size_t raw_image_size,
                                          int prefer_playback_dll,
-                                         int * rc_out)
+                                         int * rc_out,
+                                         uint64_t * allocated_bytes_out,
+                                         int * allocated_bytes_valid_out)
 {
     llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
     igpu_recon_clip_t clip;
@@ -531,6 +556,8 @@ static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
 
     if(rc_out) *rc_out = -1;
+    if(allocated_bytes_out) *allocated_bytes_out = 0;
+    if(allocated_bytes_valid_out) *allocated_bytes_valid_out = 0;
     if(!state || !state->valid || !gpu_input || !gpu_output || raw_image_size == 0) return 0;
     if(pixel_count != (size_t)state->width * (size_t)state->height) return 0;
 
@@ -568,6 +595,15 @@ static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state
     rc = g->set_clip(g->backend, &clip);
     if(rc == 0) rc = g->set_luts(g->backend, &luts);
     if(rc == 0) rc = g->run(g->backend, &frame, gpu_input, IGPU_OUT_CPU16, gpu_output, 0);
+    if(g->allocated_bytes && allocated_bytes_out && allocated_bytes_valid_out)
+    {
+        uint64_t allocated_bytes = 0;
+        if(g->allocated_bytes(g->backend, &allocated_bytes) == 0)
+        {
+            *allocated_bytes_out = allocated_bytes;
+            *allocated_bytes_valid_out = 1;
+        }
+    }
     pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
 
     if(rc_out) *rc_out = rc;
@@ -581,6 +617,8 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     dualiso_gpu_recon_state_t state;
     uint16_t * gpu_output = NULL;
     int rc = 0;
+    uint64_t allocated_bytes = 0;
+    int allocated_bytes_valid = 0;
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
 
     llrawproc_gpu_export_reset_last_run_state();
@@ -598,8 +636,15 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
                                         gpu_output,
                                         raw_image_size,
                                         0,
-                                        &rc);
+                                        &rc,
+                                        &allocated_bytes,
+                                        &allocated_bytes_valid);
     g_llrawproc_gpu_export_last_run_rc = rc;
+    if(allocated_bytes_valid)
+    {
+        g_llrawproc_gpu_export_last_allocated_bytes_valid = 1;
+        g_llrawproc_gpu_export_last_allocated_bytes = allocated_bytes;
+    }
     if(rc == 0 && memcmp(cpu_output, gpu_output, raw_image_size) == 0)
     {
         g_llrawproc_gpu_export_last_replaced = 1;
@@ -668,7 +713,9 @@ static int llrawproc_gpu_playback_try_reconstruct(const dualiso_gpu_recon_state_
                                      gpu_recon_output,
                                      raw_image_size,
                                      1,
-                                     &rc))
+                                     &rc,
+                                     NULL,
+                                     NULL))
     {
         memcpy(gpu_output, gpu_recon_output, raw_image_size);
         free(gpu_recon_output);
@@ -1318,6 +1365,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     llrawprocWorkerState_t * worker = supplied_worker;
     int using_stack_worker = 0;
 
+    llrawproc_gpu_export_reset_last_run_state();
     g_llrawproc_last_shared_lock_ms = 0.0;
     g_llrawproc_last_dualiso_refine_lock_ms = 0.0;
     g_llrawproc_last_publish_lock_ms = 0.0;

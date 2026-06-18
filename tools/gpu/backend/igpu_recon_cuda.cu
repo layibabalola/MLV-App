@@ -66,6 +66,7 @@
 #define ALIAS_MAP_MAX 15000
 #define HOST_FULLRES_THR 0.8   /* fullres_thr (dualiso.c:1678) */
 #define HOST_FACTOR   0.125    /* pow(2,-3); fixed for the 3 EV / 8x ISO ratio */
+#define CUDA_CONTEXT_RESERVE_BYTES (410ull * 1024ull * 1024ull)
 
 /* Device constants are set per set_clip()/set_luts(); kept in __constant__ so
  * the verbatim kernels reference them exactly as the parity probe did. */
@@ -571,11 +572,13 @@ struct igpu_recon_backend {
     /* device buffers (W*H sized; allocated on set_clip) */
     uint16_t *d_in, *d_out, *d_alias, *d_aliasaux, *d_over, *d_overaux;
     uint32_t *d_raw32, *d_dark, *d_bright, *d_fullres, *d_halfres;
+    uint64_t clip_allocated_bytes;
 
     /* device LUTs (uploaded once on set_luts) */
     int      *dd_raw2ev, *dd_ev2raw;     /* ev2raw is BASE; origin = +EV2RAW_ORIGIN */
     double   *dd_mix, *dd_frc_f, *dd_frc_d;
     float    *df_randn05;
+    uint64_t lut_allocated_bytes;
 
     /* timing */
     igpu_recon_timing_t last_timing;
@@ -661,6 +664,7 @@ static void free_clip_buffers(igpu_recon_backend* b) {
     if (b->d_halfres)  cudaFree(b->d_halfres);
     b->d_in=b->d_out=b->d_alias=b->d_aliasaux=b->d_over=b->d_overaux=NULL;
     b->d_raw32=b->d_dark=b->d_bright=b->d_fullres=b->d_halfres=NULL;
+    b->clip_allocated_bytes = 0;
 }
 
 static void free_lut_buffers(igpu_recon_backend* b) {
@@ -674,6 +678,7 @@ static void free_lut_buffers(igpu_recon_backend* b) {
     b->dd_raw2ev=b->dd_ev2raw=NULL;
     b->dd_mix=b->dd_frc_f=b->dd_frc_d=NULL;
     b->df_randn05=NULL;
+    b->lut_allocated_bytes = 0;
 }
 
 extern "C" {
@@ -770,6 +775,9 @@ int igpu_recon_set_clip(igpu_recon_backend* b, const igpu_recon_clip_t* clip)
     CK(cudaMalloc(&b->d_bright,  n*sizeof(uint32_t)));
     CK(cudaMalloc(&b->d_fullres, n*sizeof(uint32_t)));
     CK(cudaMalloc(&b->d_halfres, n*sizeof(uint32_t)));
+    b->clip_allocated_bytes =
+        (uint64_t)n * (6ull * (uint64_t)sizeof(uint16_t)
+                     + 5ull * (uint64_t)sizeof(uint32_t));
 
     /* push the static per-clip constants to __constant__.
      * white_darkened is recomputed in set_clip exactly as the engine does,
@@ -817,6 +825,9 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts)
     if (!b->dd_mix)    CK(cudaMalloc(&b->dd_mix,    (size_t)RAW2EV_COUNT*sizeof(double)));
     if (!b->dd_frc_f)  CK(cudaMalloc(&b->dd_frc_f,  (size_t)RAW2EV_COUNT*sizeof(double)));
     if (!b->dd_frc_d)  CK(cudaMalloc(&b->dd_frc_d,  (size_t)RAW2EV_COUNT*sizeof(double)));
+    b->lut_allocated_bytes =
+        (uint64_t)RAW2EV_COUNT * ((uint64_t)sizeof(int) + 3ull * (uint64_t)sizeof(double))
+      + (uint64_t)EV2RAW_COUNT * (uint64_t)sizeof(int);
 
     /* NULL pointer means "unchanged since last set" per the ABI contract. */
     if (luts->raw2ev)
@@ -837,6 +848,9 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts)
     if (luts->randn05) {
         if (!b->df_randn05) CK(cudaMalloc(&b->df_randn05, (size_t)1024*sizeof(float)));
         CK(cudaMemcpy(b->df_randn05, luts->randn05, (size_t)1024*sizeof(float), cudaMemcpyHostToDevice));
+    }
+    if (b->df_randn05) {
+        b->lut_allocated_bytes += 1024ull * (uint64_t)sizeof(float);
     }
 
     b->have_luts = 1;
@@ -1016,6 +1030,15 @@ int igpu_recon_last_timing(igpu_recon_backend* b, igpu_recon_timing_t* t)
 {
     if (!b || !t) return -1;
     *t = b->last_timing;
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_allocated_bytes(igpu_recon_backend* b, uint64_t* bytes)
+{
+    if (!b || !bytes) return -1;
+    const uint64_t tracked = b->clip_allocated_bytes + b->lut_allocated_bytes;
+    *bytes = tracked ? tracked + CUDA_CONTEXT_RESERVE_BYTES : 0;
     return 0;
 }
 

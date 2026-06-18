@@ -8122,6 +8122,8 @@ ProcessResult MainWindow::exportCdngSequence(
     /* --- Frame export loop (cutIn/cutOut are 1-based) --- */
     int totalFrames = cutOut - cutIn + 1;
     bool aborted = false;
+    uint64_t lastReportedGpuVramBytes = 0;
+    bool hasReportedGpuVramBytes = false;
     for( uint32_t frame = cutIn - 1; frame < cutOut; frame++ )
     {
         /* Build frame filename */
@@ -8177,6 +8179,30 @@ ProcessResult MainWindow::exportCdngSequence(
         else
         {
             result.framesExported++;
+        }
+
+        if( BatchContext::isBatchMode() )
+        {
+            llrpGpuExportTelemetry_t gpuTelemetry;
+            llrpGetLastGpuExportTelemetry( &gpuTelemetry );
+            if( gpuTelemetry.attempted
+             && gpuTelemetry.allocated_bytes_valid
+             && gpuTelemetry.allocated_bytes > 0
+             && ( !hasReportedGpuVramBytes
+               || lastReportedGpuVramBytes != gpuTelemetry.allocated_bytes ) )
+            {
+                const double allocatedMb =
+                    (double)gpuTelemetry.allocated_bytes / ( 1024.0 * 1024.0 );
+                BatchLogger::out(QStringLiteral(
+                    "[BATCH] GPU %1 frame=%2 rc=%3 replaced=%4 vramAllocatedMB=%5\n")
+                    .arg( clipBaseName )
+                    .arg( frame )
+                    .arg( gpuTelemetry.rc )
+                    .arg( gpuTelemetry.replaced )
+                    .arg( allocatedMb, 0, 'f', 1 ));
+                lastReportedGpuVramBytes = gpuTelemetry.allocated_bytes;
+                hasReportedGpuVramBytes = true;
+            }
         }
 
         /* Check disk space */
