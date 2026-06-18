@@ -44,6 +44,8 @@ param(
     [ValidateSet("", "auto", "cpu", "gpu")]
     [string]$GpuAmazeDebayer = "",
     [switch]$GpuAmazeTexturePresent,
+    [switch]$DisableLookAssist,
+    [switch]$EnablePhase3QualityModes,
     [string]$StageLog = "",
     [ValidateSet("", "on", "off")]
     [string]$Zebras = "",
@@ -788,6 +790,12 @@ if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
 if ($GpuAmazeTexturePresent) {
     $arguments += "--gpu-amaze-texture-present"
 }
+if ($DisableLookAssist) {
+    $arguments += "--no-look-assist"
+}
+if ($EnablePhase3QualityModes) {
+    $arguments += "--enable-phase3-quality-modes"
+}
 if (-not [string]::IsNullOrWhiteSpace($StageLog)) {
     $stageLogPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StageLog)
     $stageLogDir = [IO.Path]::GetDirectoryName($stageLogPath)
@@ -826,6 +834,9 @@ if ($FrameTelemetry) {
 $launchEnv["MLVAPP_CRASH_FORENSICS_LOG_DIR"] = $logRoot
 if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
     $launchEnv["MLVAPP_PLAYBACK_QUALITY_MODE"] = $QualityMode
+}
+if ($EnablePhase3QualityModes) {
+    $launchEnv["MLVAPP_PLAYBACK_PHASE3_UNATTENDED"] = "1"
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $launchEnv["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -869,6 +880,9 @@ if (-not $FrameTelemetry) {
 }
 if ([string]::IsNullOrWhiteSpace($QualityMode) -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_QUALITY_MODE")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_QUALITY_MODE"
+}
+if (-not $EnablePhase3QualityModes -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")) {
+    $clearedEnvironment += "MLVAPP_PLAYBACK_PHASE3_UNATTENDED"
 }
 if (-not $RbfDetailTiming -and -not $launchEnv.Contains("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")) {
     $clearedEnvironment += "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"
@@ -949,6 +963,12 @@ if (-not [string]::IsNullOrWhiteSpace($QualityMode)) {
 }
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_QUALITY_MODE")
+}
+if ($EnablePhase3QualityModes) {
+    $envBlock["MLVAPP_PLAYBACK_PHASE3_UNATTENDED"] = "1"
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")
 }
 if (-not [string]::IsNullOrWhiteSpace($ScaleFactor)) {
     $envBlock["MLVAPP_PLAYBACK_SCALE_FACTOR"] = $ScaleFactor
@@ -1107,6 +1127,11 @@ $cpuSettleLine = $recentLines |
 $windowScreenshotLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.window_screenshot*" } |
     Select-Object -Last 1
+$screenshotLine = $recentLines |
+    Where-Object { $_ -like "*gui_smoke.screenshot*" } |
+    Select-Object -Last 1
+$glProbeLines = @($recentLines |
+    Where-Object { $_ -like "*playback_smoke.gl_probe*" })
 
 $runMetadata = $null
 if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})') {
@@ -1139,11 +1164,71 @@ $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualSt
 $playbackPolicy = if ($playbackPolicyLine) { Convert-PlaybackLogLineToObject $playbackPolicyLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
+$screenshotLog = if ($screenshotLine) { Convert-PlaybackLogLineToObject $screenshotLine } else { $null }
+if ($screenshotCapture -and $screenshotLog -and (Get-ObjectPropertyValue $screenshotLog "method")) {
+    $screenshotCapture.method = [string](Get-ObjectPropertyValue $screenshotLog "method")
+}
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
 $windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
 $requestedPlaybackDurationMs = [int]([Math]::Max(100, $Seconds * 1000))
 $sustainedGuiFpsSample =
     "end-of-requested-duration window screenshot after ${Seconds}s playback"
+
+$glProbeObjects = @($glProbeLines | ForEach-Object { Convert-PlaybackLogLineToObject $_ })
+$glProbeActiveObjects = @($glProbeObjects | Where-Object {
+    [int](Get-ObjectPropertyValue $_ "active") -eq 1
+})
+$glTextureHashes = @($glProbeActiveObjects | ForEach-Object {
+    [string](Get-ObjectPropertyValue $_ "texture_hash")
+} | Where-Object { $_ -and $_ -ne "none" })
+$glRendererDescriptions = @($glProbeActiveObjects | ForEach-Object {
+    [string](Get-ObjectPropertyValue $_ "renderer")
+} | Where-Object { $_ -and $_ -ne "none" } | Select-Object -Unique)
+$glBackendResolvedPaths = @($glProbeActiveObjects | ForEach-Object {
+    [string](Get-ObjectPropertyValue $_ "backend_resolved_path")
+} | Where-Object { $_ -and $_ -ne "none" } | Select-Object -Unique)
+$glBackendDescriptions = @($glProbeActiveObjects | ForEach-Object {
+    [string](Get-ObjectPropertyValue $_ "backend_description")
+} | Where-Object { $_ -and $_ -ne "none" } | Select-Object -Unique)
+$glTextureReadbackOkCount = @($glProbeActiveObjects | Where-Object {
+    [int](Get-ObjectPropertyValue $_ "texture_readback_ok") -eq 1
+}).Count
+$glParityCheckedCount = @($glProbeActiveObjects | Where-Object {
+    [int](Get-ObjectPropertyValue $_ "parity_checked") -eq 1
+}).Count
+$glParityMatchCount = @($glProbeActiveObjects | Where-Object {
+    [int](Get-ObjectPropertyValue $_ "parity_match") -eq 1
+}).Count
+$glMismatchTotal = 0L
+$glMismatchMaxAbs = 0L
+foreach ($probe in $glProbeActiveObjects) {
+    $mismatchCount = [long](Get-ObjectPropertyValue $probe "mismatch_count")
+    $mismatchMaxAbs = [long](Get-ObjectPropertyValue $probe "mismatch_max_abs")
+    $glMismatchTotal += $mismatchCount
+    if ($mismatchMaxAbs -gt $glMismatchMaxAbs) {
+        $glMismatchMaxAbs = $mismatchMaxAbs
+    }
+}
+$glOutputValidationRequested =
+    $launchEnv.Contains("MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT") -and
+    ([string]$launchEnv["MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT"]) -ne "0"
+$glOutputProof = [pscustomobject]@{
+    requested = [bool]$glOutputValidationRequested
+    probeCount = @($glProbeObjects).Count
+    activeProbeCount = @($glProbeActiveObjects).Count
+    textureReadbackOkCount = $glTextureReadbackOkCount
+    parityCheckedCount = $glParityCheckedCount
+    parityMatchCount = $glParityMatchCount
+    mismatchCountTotal = $glMismatchTotal
+    mismatchMaxAbs = $glMismatchMaxAbs
+    distinctTextureHashes = @($glTextureHashes | Select-Object -Unique).Count
+    textureHashes = @($glTextureHashes | Select-Object -Unique)
+    rendererDescriptions = $glRendererDescriptions
+    backendResolvedPaths = $glBackendResolvedPaths
+    backendDescriptions = $glBackendDescriptions
+    screenshotMethod = if ($screenshotCapture) { $screenshotCapture.method } else { $null }
+    rawProbeLines = $glProbeLines
+}
 
 $lookAssistApplied =
     ($null -ne $lookAssistSettle) -and
@@ -1176,6 +1261,9 @@ $colorArtifactScanPassed =
     -not ($colorArtifactFailureVerdicts -contains $colorArtifactVerdict)
 
 $validationFailures = @()
+if ($null -ne $process -and $process.ExitCode -ne 0) {
+    $validationFailures += "MLVApp exited with code $($process.ExitCode)."
+}
 if ($RequireLookAssist -and -not $lookAssistApplied) {
     $validationFailures += "Look Assist did not settle/apply before playback."
 }
@@ -1200,6 +1288,32 @@ if ($FailOnColorArtifact -and
     $null -ne $colorArtifactScan -and
     -not $colorArtifactScanPassed) {
     $validationFailures += "Color artifact scan verdict was $colorArtifactVerdict."
+}
+if ($glOutputValidationRequested) {
+    if ($glOutputProof.activeProbeCount -le 0) {
+        $validationFailures += "GL no-readback output validation was requested but no active playback_smoke.gl_probe rows were logged."
+    }
+    if ($glOutputProof.activeProbeCount -gt 0 -and
+        $glOutputProof.textureReadbackOkCount -ne $glOutputProof.activeProbeCount) {
+        $validationFailures += "GL texture readback did not succeed for every active probe ($($glOutputProof.textureReadbackOkCount)/$($glOutputProof.activeProbeCount))."
+    }
+    if ($glOutputProof.activeProbeCount -gt 1 -and
+        $glOutputProof.distinctTextureHashes -le 1) {
+        $validationFailures += "GL no-readback texture content did not advance: distinctTextureHashes=$($glOutputProof.distinctTextureHashes)."
+    }
+    if ($glOutputProof.activeProbeCount -gt 0 -and
+        $glOutputProof.parityCheckedCount -ne $glOutputProof.activeProbeCount) {
+        $validationFailures += "GL texture parity was not checked for every active probe ($($glOutputProof.parityCheckedCount)/$($glOutputProof.activeProbeCount))."
+    }
+    if ($glOutputProof.activeProbeCount -gt 0 -and
+        $glOutputProof.parityMatchCount -ne $glOutputProof.activeProbeCount) {
+        $validationFailures += "GL texture parity did not match the CPU oracle for every active probe ($($glOutputProof.parityMatchCount)/$($glOutputProof.activeProbeCount), mismatches=$($glOutputProof.mismatchCountTotal))."
+    }
+    if ($CaptureScreenshot -and
+        $glOutputProof.activeProbeCount -gt 0 -and
+        [string]$glOutputProof.screenshotMethod -ne "app_internal_gl_viewport_grab") {
+        $validationFailures += "Screenshot color scan did not use the GL viewport surface (method=$($glOutputProof.screenshotMethod))."
+    }
 }
 if ($ExpectedScaleRequest -ge 0 -and
     ($null -eq $validatedScaleRequest -or [int]$validatedScaleRequest -ne $ExpectedScaleRequest)) {
@@ -1312,6 +1426,7 @@ $result = [pscustomobject]@{
         playbackPolicy = $playbackPolicy
         aspectEvidence = $screenshotAspectEvidence
         colorArtifactScan = $colorArtifactScan
+        glOutputProof = $glOutputProof
         lookAssist = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
             asyncApplied = [bool]($null -ne $lookAssistAsyncApply)
@@ -1403,6 +1518,7 @@ $result = [pscustomobject]@{
         screenshot = $screenshotCapture
         windowScreenshot = $windowScreenshotCapture
         windowScreenshotEvent = $windowScreenshotLog
+        screenshotEvent = $screenshotLog
         fpsStatusCrop = $fpsStatusCropCapture
         raw = [pscustomobject]@{
             runMetadata = $runMetadataLine
@@ -1420,6 +1536,7 @@ $result = [pscustomobject]@{
             playbackPolicy = $playbackPolicyLine
             cpuSettle = $cpuSettleLine
             screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
+            screenshotEvent = $screenshotLine
             windowScreenshot = if ($windowScreenshotCapture) { $windowScreenshotCapture.outputPath } else { $null }
             fpsStatusCrop = if ($fpsStatusCropCapture) { $fpsStatusCropCapture.outputPath } else { $null }
             windowScreenshotEvent = $windowScreenshotLine
@@ -1438,6 +1555,7 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict
+    glOutputProof = $glOutputProof
     scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or

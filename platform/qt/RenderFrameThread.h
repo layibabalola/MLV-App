@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <deque>
+#include <memory>
 #include <vector>
 
 class DecodeWorker;
@@ -50,6 +51,35 @@ public:
         Processing,
         Ready,
         Presenting
+    };
+
+    struct GpuPlaybackReconTextureState
+    {
+        struct LutSnapshot
+        {
+            std::vector<int> raw2ev;
+            std::vector<int> ev2raw;
+            std::vector<double> mixCurve;
+            std::vector<double> fullresCurve;
+            std::vector<float> randn05;
+        };
+
+        bool valid = false;
+        int width = 0;
+        int height = 0;
+        int blackLevel = 0;
+        int whiteLevel = 0;
+        int whiteDarkened = 0;
+        int blackDelta = 0;
+        double evCorrection = 0.0;
+        double darkNoise = 0.0;
+        int interpMethod = 0;
+        bool useAliasMap = false;
+        bool useFullres = false;
+        int chromaSmoothMethod = 0;
+        std::array<int, 4> isBright{{0, 0, 0, 0}};
+        bool applyDither = false;
+        std::shared_ptr<const LutSnapshot> luts;
     };
 
     struct ReadyFrame
@@ -113,10 +143,14 @@ public:
         int gpuAmazeTextureBlackLevel = 0;
         std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
         bool gpuPlaybackReconTexturePresentCandidate = false;
+        bool gpuPlaybackReconTextureNoReadbackCandidate = false;
         const uint16_t *gpuPlaybackReconTextureBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
+        size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
+        GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -236,6 +270,9 @@ private:
         int gpuAmazeTextureBlackLevel = 0;
         std::array<double, 3> gpuAmazeTextureWbMultipliers{{1.0, 1.0, 1.0}};
         bool gpuPlaybackReconTexturePresentCandidate = false;
+        bool gpuPlaybackReconTextureNoReadbackCandidate = false;
+        std::vector<uint16_t> gpuPlaybackReconTextureInputBayerFrame;
+        GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
         double dualIsoPreviewHistogramMs = 0.0;
@@ -282,6 +319,9 @@ private:
             gpuAmazeTextureBlackLevel = 0;
             gpuAmazeTextureWbMultipliers = {{1.0, 1.0, 1.0}};
             gpuPlaybackReconTexturePresentCandidate = false;
+            gpuPlaybackReconTextureNoReadbackCandidate = false;
+            gpuPlaybackReconTextureInputBayerFrame.clear();
+            gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
             gpuPlaybackReconTextureWidth = 0;
             gpuPlaybackReconTextureHeight = 0;
             dualIsoPreviewHistogramMs = 0.0;

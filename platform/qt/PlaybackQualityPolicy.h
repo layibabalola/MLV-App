@@ -193,6 +193,11 @@ inline int playbackQualityModeEnvOverride()
     return playbackQualityModeParseOverride( raw, &mode ) ? mode : -2;
 }
 
+inline bool playbackQualityPhase3UnattendedEnvOverride()
+{
+    return playbackQualityEnvVarTruthy( std::getenv( "MLVAPP_PLAYBACK_PHASE3_UNATTENDED" ) );
+}
+
 inline int playbackPreviewAggressiveEnvOverride()
 {
     const char * raw = std::getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
@@ -350,7 +355,8 @@ inline bool playbackQualityShowExperimentalPhase3ModesFromSettings()
     QSettings set( QSettings::UserScope,
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
-    return set.value( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes(),
+    return playbackQualityPhase3UnattendedEnvOverride()
+        || set.value( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes(),
                       PlaybackQualitySettings::kDefaultShowExperimentalPhase3Modes() ).toBool();
 }
 
@@ -359,7 +365,8 @@ inline bool playbackQualityPhase3AcknowledgedFromSettings()
     QSettings set( QSettings::UserScope,
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
-    return set.value( PlaybackQualitySettings::kKeyPhase3Acknowledged(),
+    return playbackQualityPhase3UnattendedEnvOverride()
+        || set.value( PlaybackQualitySettings::kKeyPhase3Acknowledged(),
                       PlaybackQualitySettings::kDefaultPhase3Acknowledged() ).toBool();
 }
 
@@ -733,6 +740,37 @@ inline int playbackQualityScaleFactorForMode( PlaybackQualityMode mode,
  * from RenderFrameThread don't share state with this sampler, so a simple
  * mutex around the deque is enough. The whole class is intentionally
  * header-only and stateless across runs. */
+enum class PlaybackQualityAutoDecisionReason
+{
+    WarmupHq,
+    AggressiveDualIsoDeepHq,
+    MissedTargetFast,
+    MissedTargetAggressiveDeepHq,
+    HeadroomNonDualIsoSharperHq,
+    SteadyHq
+};
+
+inline const char * playbackQualityAutoDecisionReasonName(
+    PlaybackQualityAutoDecisionReason reason )
+{
+    switch ( reason )
+    {
+        case PlaybackQualityAutoDecisionReason::WarmupHq:
+            return "warmup_hq";
+        case PlaybackQualityAutoDecisionReason::AggressiveDualIsoDeepHq:
+            return "aggressive_dual_iso_deep_hq";
+        case PlaybackQualityAutoDecisionReason::MissedTargetFast:
+            return "missed_target_fast";
+        case PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq:
+            return "missed_target_aggressive_deep_hq";
+        case PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq:
+            return "headroom_non_dual_iso_sharper_hq";
+        case PlaybackQualityAutoDecisionReason::SteadyHq:
+            return "steady_hq";
+    }
+    return "unknown";
+}
+
 struct PlaybackQualityAutoSampler
 {
     static constexpr size_t kSlidingWindow = 16;
@@ -772,6 +810,10 @@ struct PlaybackQualityAutoSampler
     {
         int scaleFactor;       /* 1, 2, 4, or 8 */
         bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
+        PlaybackQualityAutoDecisionReason reason;
+        double averageFrameMs; /* 0 while still warming up */
+        double frameBudgetMs;
+        size_t sampleCount;
     };
 
     Decision decideNextSlot( int targetFps,
@@ -781,6 +823,7 @@ struct PlaybackQualityAutoSampler
         std::lock_guard<std::mutex> lock( m_mutex );
         if ( targetFps <= 0 ) targetFps = 30;
         const double frameBudgetMs = 1000.0 / static_cast<double>( targetFps );
+        const size_t sampleCount = m_window.size();
 
         if ( aggressivePreviewActive && dualIsoActive )
         {
@@ -789,18 +832,32 @@ struct PlaybackQualityAutoSampler
              * target, because x8 keeps reduction before LLRawProc/debayer and
              * the presentation scaler is now cheap. Start there immediately
              * instead of spending the warmup window in the slower x4 state. */
-            return Decision{ 8, true };
+            return Decision{
+                8,
+                true,
+                PlaybackQualityAutoDecisionReason::AggressiveDualIsoDeepHq,
+                0.0,
+                frameBudgetMs,
+                sampleCount
+            };
         }
 
-        if ( m_window.size() < kSlidingWindow )
+        if ( sampleCount < kSlidingWindow )
         {
             /* Optimistic Sharp/Smooth start: HQ scale=4 until we have a full window. */
-            return Decision{ 4, true };
+            return Decision{
+                4,
+                true,
+                PlaybackQualityAutoDecisionReason::WarmupHq,
+                0.0,
+                frameBudgetMs,
+                sampleCount
+            };
         }
 
         double sum = 0.0;
         for ( const double v : m_window ) sum += v;
-        const double avgMs = sum / static_cast<double>( m_window.size() );
+        const double avgMs = sum / static_cast<double>( sampleCount );
 
         if ( avgMs > frameBudgetMs * 1.10 )
         {
@@ -808,19 +865,47 @@ struct PlaybackQualityAutoSampler
             {
                 /* Missing target in Aggressive preview: keep HQ Dual ISO so
                  * the x8 pre-recon path can reduce in the Bayer domain. */
-                return Decision{ 8, true };
+                return Decision{
+                    8,
+                    true,
+                    PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq,
+                    avgMs,
+                    frameBudgetMs,
+                    sampleCount
+                };
             }
             /* Missing target in Sharp/Smooth preview: drop to the same x4
              * Fast contract as the fixed Fast mode. */
-            return Decision{ 4, false };
+            return Decision{
+                4,
+                false,
+                PlaybackQualityAutoDecisionReason::MissedTargetFast,
+                avgMs,
+                frameBudgetMs,
+                sampleCount
+            };
         }
         if ( !dualIsoActive && avgMs < frameBudgetMs * 0.65 )
         {
             /* Plenty of headroom on a non-DI clip: try sharper HQ. */
-            return Decision{ 2, true };
+            return Decision{
+                2,
+                true,
+                PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq,
+                avgMs,
+                frameBudgetMs,
+                sampleCount
+            };
         }
         /* Steady state: HQ scale=4. */
-        return Decision{ 4, true };
+        return Decision{
+            4,
+            true,
+            PlaybackQualityAutoDecisionReason::SteadyHq,
+            avgMs,
+            frameBudgetMs,
+            sampleCount
+        };
     }
 
 private:

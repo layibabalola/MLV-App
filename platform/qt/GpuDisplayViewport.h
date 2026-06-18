@@ -11,6 +11,7 @@
 #include "GpuDebayer.h"
 #include "ZebraThresholds.h"
 #include "GpuPreviewProcessing.h"
+#include "../../src/mlv/llrawproc/llrawproc.h"
 #include <QImage>
 #include <QOpenGLFunctions>
 #include <QtOpenGL/qopenglshaderprogram.h>
@@ -57,9 +58,15 @@ public:
     static bool installOn(QGraphicsView *view);
     static bool isInstalledOn(const QGraphicsView *view);
     static bool hasPresentedImage(const QGraphicsView *view);
+    static bool hasPresentedGpuReconTexture(const QGraphicsView *view);
     static bool isTexturePresentationActive(const QGraphicsView *view);
     static SamplingMode samplingModeFor(const QGraphicsView *view);
     static QString rendererDescriptionFor(const QGraphicsView *view);
+    static bool readPresentedBayer16Texture(QGraphicsView *view,
+                                            QByteArray *textureBytes,
+                                            int *width,
+                                            int *height,
+                                            QString *reason = nullptr);
     static bool presentImage(QGraphicsView *view,
                              QGraphicsPixmapItem *fallbackItem,
                              const QImage &image,
@@ -76,6 +83,14 @@ public:
                                int width,
                                int height,
                                const PresentationOptions &options = PresentationOptions());
+    static bool presentGpuPlaybackReconTexture(QGraphicsView *view,
+                                               QGraphicsPixmapItem *fallbackItem,
+                                               const uint16_t *rawInputBayer14,
+                                               size_t rawInputBayer14Words,
+                                               const llrpGpuPlaybackReconState_t *state,
+                                               const PresentationOptions &options,
+                                               QString *reason = nullptr,
+                                               llrpGpuPlaybackReconTiming_t *timing = nullptr);
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -104,6 +119,12 @@ private:
     void setPresentedImage(const QImage &image, const PresentationOptions &options);
     void setPresentedRgb16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
     void setPresentedBayer16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
+    bool setPresentedGpuPlaybackReconTexture(const uint16_t *rawInputBayer14,
+                                             size_t rawInputBayer14Words,
+                                             const llrpGpuPlaybackReconState_t *state,
+                                             const PresentationOptions &options,
+                                             QString *reason,
+                                             llrpGpuPlaybackReconTiming_t *timing);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,
@@ -134,6 +155,7 @@ private:
     bool m_pendingTextureIs16Bit;
     bool m_pendingTextureIsBayer16;
     bool m_pendingTextureFromGpuAmaze;
+    bool m_pendingTextureFromGpuRecon;
     bool m_textureIs16Bit;
     bool m_textureIsBayer16;
     QGraphicsView *m_view;

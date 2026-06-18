@@ -488,6 +488,7 @@ private slots:
     void gpuViewportQueuesAndClearsPresentedFrame();
     void gpuViewportQueuesRgb16Frame();
     void gpuViewportQueuesBayer16Frame();
+    void gpuViewportRejectsInvalidPlaybackReconTexture();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
@@ -1073,6 +1074,46 @@ void GuiSmokeTest::gpuViewportQueuesBayer16Frame()
     QVERIFY(GpuDisplayViewport::hasPresentedImage(&view));
 
     GpuDisplayViewport::clearPresentedImage(&view, item);
+    QVERIFY(item->isVisible());
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportRejectsInvalidPlaybackReconTexture()
+{
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    QGraphicsScene scene;
+    QGraphicsPixmapItem *item = scene.addPixmap(QPixmap(4, 4));
+    QGraphicsView view(&scene);
+    view.resize(64, 64);
+    view.show();
+    QApplication::processEvents();
+
+    QVERIFY(GpuDisplayViewport::installOn(&view));
+
+    const uint16_t rawInput[] = {
+        1024, 2048,
+        3072, 4096
+    };
+    llrpGpuPlaybackReconState_t state;
+    memset(&state, 0, sizeof(state));
+    state.valid = 1;
+    state.width = 2;
+    state.height = 2;
+
+    QString reason;
+    llrpGpuPlaybackReconTiming_t timing;
+    memset(&timing, 0, sizeof(timing));
+    GpuDisplayViewport::PresentationOptions options;
+    QVERIFY(!GpuDisplayViewport::presentGpuPlaybackReconTexture(&view,
+                                                                item,
+                                                                rawInput,
+                                                                4,
+                                                                &state,
+                                                                options,
+                                                                &reason,
+                                                                &timing));
+    QVERIFY(!reason.isEmpty());
     QVERIFY(item->isVisible());
     qunsetenv(GpuDisplayViewport::environmentVariableName());
 }

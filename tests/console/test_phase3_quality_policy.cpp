@@ -2,6 +2,7 @@
 
 #include "../../platform/qt/PlaybackQualityPolicy.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QSettings>
 #include <QStringList>
@@ -30,6 +31,31 @@ void clearPhase3PlaybackQualityKeys()
                 + QStringLiteral("clip-b") );
     set.sync();
 }
+
+class EnvGuard
+{
+public:
+    explicit EnvGuard(const char * name)
+        : m_name(name)
+        , m_hadOriginal(qEnvironmentVariableIsSet(name))
+        , m_original(qgetenv(name))
+    {
+    }
+
+    ~EnvGuard()
+    {
+        if (m_hadOriginal) {
+            qputenv(m_name, m_original);
+        } else {
+            qunsetenv(m_name);
+        }
+    }
+
+private:
+    const char * m_name;
+    bool m_hadOriginal;
+    QByteArray m_original;
+};
 
 } // namespace
 
@@ -73,6 +99,28 @@ TEST(Phase3_EXP, HiddenByDefaultUntilDogfoodGateOrTier)
     playbackQualityTierWriteToSettings(
         PlaybackQualityMode::Phase3Fast, PlaybackQualityTier::DailyUse, 1234 );
     ASSERT_TRUE( playbackQualityPhase3ModeSelectable( PlaybackQualityMode::Phase3Fast ) );
+
+    clearPhase3PlaybackQualityKeys();
+}
+
+TEST(Phase3_EXP, UnattendedEnvUnlocksPhase3WithoutPersistentDogfoodKeys)
+{
+    if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
+    EnvGuard phase3Unattended( "MLVAPP_PLAYBACK_PHASE3_UNATTENDED" );
+    clearPhase3PlaybackQualityKeys();
+    qunsetenv( "MLVAPP_PLAYBACK_PHASE3_UNATTENDED" );
+
+    ASSERT_FALSE( playbackQualityShowExperimentalPhase3ModesFromSettings() );
+    ASSERT_FALSE( playbackQualityPhase3AcknowledgedFromSettings() );
+    ASSERT_EQ( static_cast<int>( Phase3Mode::Disabled ),
+               static_cast<int>( phase3ModeFor( PlaybackQualityMode::Phase3Fast ) ) );
+
+    qputenv( "MLVAPP_PLAYBACK_PHASE3_UNATTENDED", QByteArrayLiteral( "1" ) );
+    ASSERT_TRUE( playbackQualityShowExperimentalPhase3ModesFromSettings() );
+    ASSERT_TRUE( playbackQualityPhase3AcknowledgedFromSettings() );
+    ASSERT_TRUE( playbackQualityPhase3ModeSelectable( PlaybackQualityMode::Phase3Fast ) );
+    ASSERT_EQ( static_cast<int>( Phase3Mode::DecodeReconProcess ),
+               static_cast<int>( phase3ModeFor( PlaybackQualityMode::Phase3Fast ) ) );
 
     clearPhase3PlaybackQualityKeys();
 }
