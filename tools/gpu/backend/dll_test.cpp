@@ -9,6 +9,8 @@
  * Flow:
  *   1. LoadLibrary("igpu_recon_cuda.dll") + resolve the 8 ABI functions.
  *   2. Load the oracle in.u16 + the 4 LUTs from the vectors dir.
+ *      If scalars.txt is present, use its live app state instead of the
+ *      original fixed oracle-vector defaults.
  *   3. create("cuda") / set_clip / set_luts / run(in.u16, CPU16).
  *   4. Compare run() output to oracle out.u16 -> expect max abs diff 0 LSB.
  *   5. Print last_timing (upload / kernel / download-or-interop / total).
@@ -57,6 +59,7 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #define H 2268
 #define RAW2EV_COUNT (1u << 20)
 #define EV2RAW_COUNT (24u * 65536u)
+#define RANDN05_COUNT 1024u
 
 /* ABI function pointer typedefs */
 typedef igpu_recon_backend* (*pfn_create)(const char*);
@@ -82,6 +85,65 @@ static void* load_blob(const std::string& path, size_t expect_bytes)
     if (fread(p, 1, sz, f) != (size_t)sz) { fprintf(stderr, "short read %s\n", path.c_str()); exit(3); }
     fclose(f);
     return p;
+}
+
+static bool file_exists(const std::string& path)
+{
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+struct VectorScalars
+{
+    int width = W;
+    int height = H;
+    int black_level = 131008;
+    int white_level = 960000;
+    int white_darkened = 174632;
+    int black_delta = 0;
+    double ev_correction = 3.0;
+    double dark_noise = 512.0;
+    int interp_method = 1;
+    int use_alias_map = 1;
+    int use_fullres = 1;
+    int chroma_smooth_method = 0;
+    int apply_dither = 0;
+    int is_bright[4] = {1, 1, 0, 0};
+};
+
+static bool parse_scalars_file(const std::string& path, VectorScalars* scalars)
+{
+    if (!scalars || !file_exists(path)) return false;
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return false;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char key[128] = {0};
+        char value[256] = {0};
+        if (sscanf(line, " %127[^=]=%255s", key, value) != 2) continue;
+        if (strcmp(key, "width") == 0) scalars->width = atoi(value);
+        else if (strcmp(key, "height") == 0) scalars->height = atoi(value);
+        else if (strcmp(key, "black_level") == 0) scalars->black_level = atoi(value);
+        else if (strcmp(key, "white_level") == 0) scalars->white_level = atoi(value);
+        else if (strcmp(key, "white_darkened") == 0) scalars->white_darkened = atoi(value);
+        else if (strcmp(key, "black_delta") == 0) scalars->black_delta = atoi(value);
+        else if (strcmp(key, "ev_correction") == 0) scalars->ev_correction = atof(value);
+        else if (strcmp(key, "dark_noise") == 0) scalars->dark_noise = atof(value);
+        else if (strcmp(key, "interp_method") == 0) scalars->interp_method = atoi(value);
+        else if (strcmp(key, "use_alias_map") == 0) scalars->use_alias_map = atoi(value);
+        else if (strcmp(key, "use_fullres") == 0) scalars->use_fullres = atoi(value);
+        else if (strcmp(key, "chroma_smooth_method") == 0) scalars->chroma_smooth_method = atoi(value);
+        else if (strcmp(key, "apply_dither") == 0) scalars->apply_dither = atoi(value);
+        else if (strcmp(key, "is_bright0") == 0) scalars->is_bright[0] = atoi(value);
+        else if (strcmp(key, "is_bright1") == 0) scalars->is_bright[1] = atoi(value);
+        else if (strcmp(key, "is_bright2") == 0) scalars->is_bright[2] = atoi(value);
+        else if (strcmp(key, "is_bright3") == 0) scalars->is_bright[3] = atoi(value);
+    }
+    fclose(f);
+    return true;
 }
 
 struct HiddenGlContext
@@ -178,7 +240,8 @@ static void destroy_hidden_gl_context(HiddenGlContext* gl)
 static long long compare_to_oracle(const char* label,
                                    const uint16_t* result,
                                    const uint16_t* h_out,
-                                   size_t n)
+                                   size_t n,
+                                   size_t width)
 {
     long long maxabs = 0;
     double sumabs = 0;
@@ -194,7 +257,7 @@ static long long compare_to_oracle(const char* label,
         if (a <= 0) le0++;
         if (a <= 1) le1++;
         if (a <= 2) le2++;
-        if (a > 0 && !found) { found = 1; fx = i % W; fy = i / W; fd = d; }
+        if (a > 0 && !found) { found = 1; fx = i % width; fy = i / width; fd = d; }
     }
 
     printf("\n[dll_test] PARITY THROUGH THE ABI vs oracle out.u16 (%s):\n", label);
@@ -233,11 +296,19 @@ int main(int argc, char** argv)
         }
     }
     auto P = [&](const char* n) { return vdir + "\\" + n; };
-    const size_t n = (size_t)W * H;
+    VectorScalars scalars;
+    const bool loaded_scalars = parse_scalars_file(P("scalars.txt"), &scalars);
+    if (scalars.width <= 0 || scalars.height <= 0) {
+        fprintf(stderr, "[dll_test] invalid vector dimensions %dx%d\n",
+                scalars.width, scalars.height);
+        return 3;
+    }
+    const size_t n = (size_t)scalars.width * (size_t)scalars.height;
 
     printf("[dll_test] vectors dir : %s\n", vdir.c_str());
     printf("[dll_test] dll path    : %s\n", dllpath.c_str());
     printf("[dll_test] gl texture  : %s\n", run_gl_texture ? "enabled" : "disabled");
+    printf("[dll_test] scalars     : %s\n", loaded_scalars ? "scalars.txt" : "built-in defaults");
 
     /* ---- 1. runtime-load the DLL + resolve the ABI ---- */
     HMODULE dll = LoadLibraryA(dllpath.c_str());
@@ -273,7 +344,12 @@ int main(int argc, char** argv)
     int*    h_ev2raw = (int*)   load_blob(P("ev2raw.i32"),     (size_t)EV2RAW_COUNT * sizeof(int));
     double* h_mix    = (double*)load_blob(P("mix_curve.f64"),  (size_t)RAW2EV_COUNT * sizeof(double));
     double* h_frc    = (double*)load_blob(P("fullres_curve.f64"), (size_t)RAW2EV_COUNT * sizeof(double));
-    printf("[dll_test] loaded in.u16 + out.u16 + 4 LUTs\n");
+    float*  h_randn  = NULL;
+    if (scalars.apply_dither || file_exists(P("randn05.f32"))) {
+        h_randn = (float*)load_blob(P("randn05.f32"), (size_t)RANDN05_COUNT * sizeof(float));
+    }
+    printf("[dll_test] loaded in.u16 + out.u16 + 4 LUTs%s\n",
+           h_randn ? " + randn05" : "");
 
     /* ---- 3. create / configure / run THROUGH the ABI ---- */
     igpu_recon_backend* b = f_create("cuda");
@@ -282,15 +358,18 @@ int main(int argc, char** argv)
 
     igpu_recon_clip_t clip;
     memset(&clip, 0, sizeof(clip));
-    clip.width  = W;
-    clip.height = H;
-    clip.black_level = 131008;   /* black20  (scalars.txt) */
-    clip.white_level = 960000;   /* white20  (scalars.txt) */
-    clip.is_bright[0] = 1; clip.is_bright[1] = 1;
-    clip.is_bright[2] = 0; clip.is_bright[3] = 0;
+    clip.width  = scalars.width;
+    clip.height = scalars.height;
+    clip.black_level = scalars.black_level;
+    clip.white_level = scalars.white_level;
+    clip.is_bright[0] = scalars.is_bright[0];
+    clip.is_bright[1] = scalars.is_bright[1];
+    clip.is_bright[2] = scalars.is_bright[2];
+    clip.is_bright[3] = scalars.is_bright[3];
     if (f_set_clip(b, &clip) != 0) { fprintf(stderr, "[dll_test] set_clip failed\n"); return 4; }
-    printf("[dll_test] set_clip OK  (%dx%d  black=%d white=%d)\n",
-           clip.width, clip.height, clip.black_level, clip.white_level);
+    printf("[dll_test] set_clip OK  (%dx%d  black=%d white=%d is_bright=%d%d%d%d)\n",
+           clip.width, clip.height, clip.black_level, clip.white_level,
+           clip.is_bright[0], clip.is_bright[1], clip.is_bright[2], clip.is_bright[3]);
 
     igpu_recon_luts_t luts;
     memset(&luts, 0, sizeof(luts));
@@ -298,21 +377,32 @@ int main(int argc, char** argv)
     luts.ev2raw        = h_ev2raw;
     luts.mix_curve     = h_mix;
     luts.fullres_curve = h_frc;
-    luts.randn05       = NULL;   /* dither off in v1 */
+    luts.randn05       = h_randn;
     if (f_set_luts(b, &luts) != 0) { fprintf(stderr, "[dll_test] set_luts failed\n"); return 4; }
     printf("[dll_test] set_luts OK  (uploaded 4 LUTs)\n");
 
     igpu_recon_frame_t frame;
     memset(&frame, 0, sizeof(frame));
-    frame.ev_correction       = 3.0;
-    frame.black_delta         = 0;
-    frame.white_darkened      = 174632;
-    frame.dark_noise          = 512.0;
-    frame.interp_method       = 1;
-    frame.use_alias_map       = 1;
-    frame.use_fullres         = 1;
-    frame.chroma_smooth_method= 0;
-    frame.apply_dither        = 0;
+    frame.ev_correction       = scalars.ev_correction;
+    frame.black_delta         = scalars.black_delta;
+    frame.white_darkened      = scalars.white_darkened;
+    frame.dark_noise          = scalars.dark_noise;
+    frame.interp_method       = scalars.interp_method;
+    frame.use_alias_map       = scalars.use_alias_map;
+    frame.use_fullres         = scalars.use_fullres;
+    frame.chroma_smooth_method= scalars.chroma_smooth_method;
+    frame.apply_dither        = scalars.apply_dither;
+    printf("[dll_test] frame state ev=%.6f black_delta=%d white_darkened=%d "
+           "dark_noise=%.6f interp=%d alias=%d fullres=%d chroma=%d dither=%d\n",
+           frame.ev_correction,
+           frame.black_delta,
+           frame.white_darkened,
+           frame.dark_noise,
+           frame.interp_method,
+           frame.use_alias_map,
+           frame.use_fullres,
+           frame.chroma_smooth_method,
+           frame.apply_dither);
 
     uint16_t* result = (uint16_t*)malloc(n * sizeof(uint16_t));
     memset(result, 0, n * sizeof(uint16_t));
@@ -322,7 +412,7 @@ int main(int argc, char** argv)
     printf("[dll_test] run OK\n");
 
     /* ---- 4. compare to oracle out.u16 ---- */
-    long long maxabs = compare_to_oracle("CPU16", result, h_out, n);
+    long long maxabs = compare_to_oracle("CPU16", result, h_out, n, (size_t)clip.width);
 
     /* ---- 5. timing ---- */
     igpu_recon_timing_t t;
@@ -352,8 +442,8 @@ int main(int argc, char** argv)
         glTexImage2D(GL_TEXTURE_2D,
                      0,
                      GL_R16,
-                     W,
-                     H,
+                     clip.width,
+                     clip.height,
                      0,
                      GL_RED,
                      GL_UNSIGNED_SHORT,
@@ -396,7 +486,12 @@ int main(int argc, char** argv)
             return 5;
         }
 
-        gl_maxabs = compare_to_oracle("GL_TEXTURE/R16 readback for test", gl_result, h_out, n);
+        gl_maxabs = compare_to_oracle(
+            "GL_TEXTURE/R16 readback for test",
+            gl_result,
+            h_out,
+            n,
+            (size_t)clip.width);
         free(gl_result);
         glDeleteTextures(1, &tex);
         destroy_hidden_gl_context(&gl);

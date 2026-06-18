@@ -54,6 +54,7 @@ int llrpGpuPlaybackReconLastStateValidForTesting(void);
 #define LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT (1u << 20)
 #define LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT (24u * 65536u)
 #define LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT 1024u
+#define LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE 3
 
 typedef struct
 {

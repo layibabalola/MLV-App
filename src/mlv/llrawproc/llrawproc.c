@@ -449,6 +449,23 @@ static int llrawproc_gpu_playback_dualiso_state_from_public(
     return 1;
 }
 
+static int llrawproc_gpu_playback_recon_state_matches_validated_config(
+    const dualiso_gpu_recon_state_t * state)
+{
+    if(!state || !state->valid) return 0;
+    if(state->interp_method != 1) return 0;
+    if(state->use_alias_map != 1) return 0;
+    if(state->use_fullres != 1) return 0;
+    if(state->chroma_smooth_method != 0) return 0;
+    if(state->black_delta != 0) return 0;
+    if(fabs(fabs(state->ev_correction) - 3.0) > 0.000001) return 0;
+    if(state->is_bright[0] != 1) return 0;
+    if(state->is_bright[1] != 1) return 0;
+    if(state->is_bright[2] != 0) return 0;
+    if(state->is_bright[3] != 0) return 0;
+    return 1;
+}
+
 int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state);
 int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state)
 {
@@ -749,6 +766,12 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     if(out_kind == IGPU_OUT_CPU16 && !gpu_output) return 0;
     if(out_kind == IGPU_OUT_GL_TEXTURE && gl_texture_id == 0) return 0;
     if(pixel_count != (size_t)state->width * (size_t)state->height) return 0;
+    if(prefer_playback_dll
+     && !llrawproc_gpu_playback_recon_state_matches_validated_config(state))
+    {
+        if(rc_out) *rc_out = LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE;
+        return 0;
+    }
 
     memset(&clip, 0, sizeof(clip));
     clip.width = state->width;

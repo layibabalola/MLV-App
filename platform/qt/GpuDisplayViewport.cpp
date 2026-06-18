@@ -940,7 +940,13 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
         destroyTexture();
         m_pendingTextureFromGpuRecon = false;
         if ( madeCurrent ) doneCurrent();
-        return fail(QStringLiteral("GPU playback recon CUDA-to-GL texture handoff failed (rc=%1)").arg(rc));
+        if ( rc == LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE )
+        {
+            return fail(QStringLiteral(
+                "GPU playback recon CUDA-to-GL texture handoff skipped for unsupported live Dual ISO state (rc=%1)").arg(rc));
+        }
+        return fail(QStringLiteral(
+            "GPU playback recon CUDA-to-GL texture handoff failed (rc=%1)").arg(rc));
     }
 
     m_pendingImage = QImage();

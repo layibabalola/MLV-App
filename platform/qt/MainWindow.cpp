@@ -34,6 +34,7 @@ extern "C" {
 #include <QScreen>
 #include <QMimeData>
 #include <QDir>
+#include <QFile>
 #include <QSpacerItem>
 #include <QDate>
 #include <QStorageInfo>
@@ -203,6 +204,206 @@ static Bayer16ParitySummary compareBayer16ToOracle( const QByteArray &glTextureB
     }
     summary.match = summary.mismatchCount == 0;
     return summary;
+}
+
+struct GpuPlaybackReconLiveVectorDumpResult
+{
+    bool attempted = false;
+    bool ok = false;
+    QString path;
+    QString reason = QStringLiteral("disabled");
+};
+
+static bool writeGpuPlaybackReconDumpFile( const QString &path,
+                                           const void *data,
+                                           size_t bytes )
+{
+    if( !data || bytes == 0 ) return false;
+    QFile file(path);
+    if( !file.open( QIODevice::WriteOnly ) ) return false;
+
+    const char *cursor = static_cast<const char *>( data );
+    size_t remaining = bytes;
+    while( remaining > 0 )
+    {
+        const qint64 chunk =
+            remaining > static_cast<size_t>( std::numeric_limits<int>::max() )
+                ? static_cast<qint64>( std::numeric_limits<int>::max() )
+                : static_cast<qint64>( remaining );
+        if( file.write( cursor, chunk ) != chunk ) return false;
+        cursor += chunk;
+        remaining -= static_cast<size_t>( chunk );
+    }
+    return file.flush();
+}
+
+static bool writeGpuPlaybackReconDumpTextFile( const QString &path,
+                                               const QString &text )
+{
+    const QByteArray utf8 = text.toUtf8();
+    return writeGpuPlaybackReconDumpFile(
+        path,
+        utf8.constData(),
+        static_cast<size_t>( utf8.size() ) );
+}
+
+static GpuPlaybackReconLiveVectorDumpResult dumpGpuPlaybackReconLiveVectorOnce(
+    const llrpGpuPlaybackReconState_t &state,
+    const uint16_t *input,
+    size_t pixels,
+    const uint16_t *oracle,
+    const QByteArray &glTextureBytes,
+    const QByteArray &gpuCpuReplayBytes,
+    const QString &inputHash,
+    const QString &oracleHash,
+    const QString &glTextureHash,
+    const QString &gpuCpuReplayHash,
+    const Bayer16ParitySummary &glOracleParity,
+    const Bayer16ParitySummary &gpuCpuOracleParity,
+    const Bayer16ParitySummary &glGpuCpuParity )
+{
+    GpuPlaybackReconLiveVectorDumpResult result;
+    static bool attempted = false;
+
+    const QString rootPath =
+        qEnvironmentVariable( "MLVAPP_GPU_PLAYBACK_RECON_DUMP_LIVE_VECTOR_DIR" );
+    if( rootPath.isEmpty() || rootPath == QStringLiteral("0") )
+    {
+        return result;
+    }
+    if( attempted )
+    {
+        result.reason = QStringLiteral("already_attempted");
+        return result;
+    }
+    attempted = true;
+    result.attempted = true;
+
+    if( !input || pixels == 0 || !oracle || !state.raw2ev || !state.ev2raw
+     || !state.mix_curve || !state.fullres_curve )
+    {
+        result.reason = QStringLiteral("incomplete_live_vector");
+        return result;
+    }
+
+    QDir root( QDir::fromNativeSeparators( rootPath ) );
+    if( !root.exists() && !root.mkpath( QStringLiteral(".") ) )
+    {
+        result.reason = QStringLiteral("mkdir_failed");
+        result.path = QDir::toNativeSeparators( root.absolutePath() );
+        return result;
+    }
+
+    result.path = QDir::toNativeSeparators( root.absolutePath() );
+    const size_t frameBytes = pixels * sizeof( uint16_t );
+    bool ok = true;
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("in.u16") ),
+        input,
+        frameBytes );
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("out.u16") ),
+        oracle,
+        frameBytes );
+    if( !glTextureBytes.isEmpty() )
+    {
+        ok = ok && writeGpuPlaybackReconDumpFile(
+            root.filePath( QStringLiteral("gl.u16") ),
+            glTextureBytes.constData(),
+            static_cast<size_t>( glTextureBytes.size() ) );
+    }
+    if( !gpuCpuReplayBytes.isEmpty() )
+    {
+        ok = ok && writeGpuPlaybackReconDumpFile(
+            root.filePath( QStringLiteral("backend_cpu.u16") ),
+            gpuCpuReplayBytes.constData(),
+            static_cast<size_t>( gpuCpuReplayBytes.size() ) );
+    }
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("raw2ev.i32") ),
+        state.raw2ev,
+        static_cast<size_t>( LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT )
+            * sizeof( int ) );
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("ev2raw.i32") ),
+        state.ev2raw,
+        static_cast<size_t>( LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT )
+            * sizeof( int ) );
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("mix_curve.f64") ),
+        state.mix_curve,
+        static_cast<size_t>( LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT )
+            * sizeof( double ) );
+    ok = ok && writeGpuPlaybackReconDumpFile(
+        root.filePath( QStringLiteral("fullres_curve.f64") ),
+        state.fullres_curve,
+        static_cast<size_t>( LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT )
+            * sizeof( double ) );
+    if( state.randn05 )
+    {
+        ok = ok && writeGpuPlaybackReconDumpFile(
+            root.filePath( QStringLiteral("randn05.f32") ),
+            state.randn05,
+            static_cast<size_t>( LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT )
+                * sizeof( float ) );
+    }
+
+    QString scalars;
+    scalars += QStringLiteral("width=%1\n").arg( state.width );
+    scalars += QStringLiteral("height=%1\n").arg( state.height );
+    scalars += QStringLiteral("black_level=%1\n").arg( state.black_level );
+    scalars += QStringLiteral("white_level=%1\n").arg( state.white_level );
+    scalars += QStringLiteral("white_darkened=%1\n").arg( state.white_darkened );
+    scalars += QStringLiteral("black_delta=%1\n").arg( state.black_delta );
+    scalars += QStringLiteral("ev_correction=%1\n")
+                   .arg( state.ev_correction, 0, 'f', 12 );
+    scalars += QStringLiteral("dark_noise=%1\n")
+                   .arg( state.dark_noise, 0, 'f', 12 );
+    scalars += QStringLiteral("interp_method=%1\n").arg( state.interp_method );
+    scalars += QStringLiteral("use_alias_map=%1\n").arg( state.use_alias_map );
+    scalars += QStringLiteral("use_fullres=%1\n").arg( state.use_fullres );
+    scalars += QStringLiteral("chroma_smooth_method=%1\n")
+                   .arg( state.chroma_smooth_method );
+    scalars += QStringLiteral("apply_dither=%1\n").arg( state.apply_dither );
+    scalars += QStringLiteral("is_bright0=%1\n").arg( state.is_bright[0] );
+    scalars += QStringLiteral("is_bright1=%1\n").arg( state.is_bright[1] );
+    scalars += QStringLiteral("is_bright2=%1\n").arg( state.is_bright[2] );
+    scalars += QStringLiteral("is_bright3=%1\n").arg( state.is_bright[3] );
+    scalars += QStringLiteral("input_hash=%1\n").arg( inputHash );
+    scalars += QStringLiteral("oracle_hash=%1\n").arg( oracleHash );
+    scalars += QStringLiteral("gl_hash=%1\n").arg( glTextureHash );
+    scalars += QStringLiteral("backend_cpu_hash=%1\n").arg( gpuCpuReplayHash );
+    scalars += QStringLiteral("gl_oracle_match=%1\n").arg( bool01( glOracleParity.match ) );
+    scalars += QStringLiteral("gl_oracle_mismatch_count=%1\n")
+                   .arg( static_cast<qulonglong>( glOracleParity.mismatchCount ) );
+    scalars += QStringLiteral("gl_oracle_mismatch_max_abs=%1\n")
+                   .arg( glOracleParity.maxAbsDiff );
+    scalars += QStringLiteral("backend_cpu_oracle_match=%1\n")
+                   .arg( bool01( gpuCpuOracleParity.match ) );
+    scalars += QStringLiteral("backend_cpu_oracle_mismatch_count=%1\n")
+                   .arg( static_cast<qulonglong>(
+                       gpuCpuOracleParity.mismatchCount ) );
+    scalars += QStringLiteral("backend_cpu_oracle_mismatch_max_abs=%1\n")
+                   .arg( gpuCpuOracleParity.maxAbsDiff );
+    scalars += QStringLiteral("gl_backend_cpu_match=%1\n")
+                   .arg( bool01( glGpuCpuParity.match ) );
+    scalars += QStringLiteral("gl_backend_cpu_mismatch_count=%1\n")
+                   .arg( static_cast<qulonglong>( glGpuCpuParity.mismatchCount ) );
+
+    ok = ok && writeGpuPlaybackReconDumpTextFile(
+        root.filePath( QStringLiteral("scalars.txt") ),
+        scalars );
+    ok = ok && writeGpuPlaybackReconDumpTextFile(
+        root.filePath( QStringLiteral("README.txt") ),
+        QStringLiteral(
+            "Live GPU playback recon vector dumped by "
+            "MLVAPP_GPU_PLAYBACK_RECON_DUMP_LIVE_VECTOR_DIR.\n"
+            "Use tools/gpu/backend/dll_test.exe with this directory to replay "
+            "the backend against the exact GUI CPU oracle state.\n" ) );
+
+    result.ok = ok;
+    result.reason = ok ? QStringLiteral("ok") : QStringLiteral("write_failed");
+    return result;
 }
 
 static QString playbackFpsStatusText( double fps )
@@ -3533,6 +3734,21 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                     glTextureReadbackOk
                         ? QStringLiteral("ok")
                         : glTextureReason );
+            const GpuPlaybackReconLiveVectorDumpResult liveVectorDump =
+                dumpGpuPlaybackReconLiveVectorOnce(
+                    gpuReconState,
+                    task.gpuPlaybackReconTextureInputBayerFrame,
+                    expectedPlaybackReconTextureBayerPixels,
+                    task.gpuPlaybackReconTextureBayerFrame,
+                    glTextureBytes,
+                    gpuCpuReplayBytes,
+                    inputHash,
+                    oracleHash,
+                    glTextureHash,
+                    gpuCpuReplayHash,
+                    parity,
+                    gpuCpuReplayParity,
+                    glVsGpuCpuReplayParity );
 
             readyFrame.stageTimingTelemetry.insert(
                 QStringLiteral("gpu_playback_recon_gl_probe_active"),
@@ -3593,6 +3809,20 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                        .arg( backendResolvedPath )
                        .arg( backendDescription )
                        .arg( reason );
+
+            if( liveVectorDump.attempted )
+            {
+                qInfo().noquote()
+                    << QStringLiteral(
+                           "playback_smoke.gl_probe_live_vector_dump "
+                           "session=%1 index=%2 ok=%3 path=\"%4\" reason=\"%5\"" )
+                           .arg( static_cast<qulonglong>(
+                               m_playbackSmokeSessionId ) )
+                           .arg( m_playbackSmokePresentedFrames + 1 )
+                           .arg( bool01( liveVectorDump.ok ) )
+                           .arg( sanitizeLogValue( liveVectorDump.path ) )
+                           .arg( sanitizeLogValue( liveVectorDump.reason ) );
+            }
 
             qInfo().noquote()
                 << QStringLiteral(
