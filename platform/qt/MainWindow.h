@@ -828,13 +828,23 @@ private:
     int m_playbackAutoTargetFps = 30;
     int m_playbackQualityActiveScale = 1;
     bool m_playbackQualityActiveHq = false;
+    PlaybackQualityAutoDecisionReason m_playbackQualityAutoDecisionReason =
+        PlaybackQualityAutoDecisionReason::WarmupHq;
+    double m_playbackQualityAutoDecisionAverageMs = 0.0;
+    double m_playbackQualityAutoDecisionBudgetMs = 1000.0 / 30.0;
+    size_t m_playbackQualityAutoDecisionSampleCount = 0;
     bool m_playbackQualityIndicatorVisible = true;
     struct PlaybackQualityIndicatorCache
     {
         int playbackQualityMode = -1;
+        int playbackAutoTargetFps = -1;
         int playbackScaleFactorOverride = -1;
         int playbackQualityActiveScale = -1;
         bool playbackQualityActiveHq = false;
+        int playbackQualityAutoDecisionReason = -1;
+        double playbackQualityAutoDecisionAverageMs = -1.0;
+        double playbackQualityAutoDecisionBudgetMs = -1.0;
+        size_t playbackQualityAutoDecisionSampleCount = static_cast<size_t>( -1 );
         int envScale = -2;
         bool envHq = false;
         int envPreviewOverride = -2;

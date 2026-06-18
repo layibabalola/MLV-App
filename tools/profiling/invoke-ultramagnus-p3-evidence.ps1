@@ -1,13 +1,19 @@
 param(
     [string]$RepoRoot = ".",
-    [string]$RemoteHostName = "UltraMagnus",
-    [string]$RemoteRepoRoot = "C:\!Layi Wkspc\MLV-App",
-    [string]$RemotePacketPath = ".claude-state\profiling\ultramagnus-p3-texture-present\mlvapp-p3-evidence-latest.zip",
+    [string]$RemoteHostName = "ultra-magnus",
+    [string]$ExpectedEvidenceHostName = "ULTRA-MAGNUS",
+    [string]$AgentRoot = "\\ultra-magnus\G\Temp\mlv-gpu-profile\agent",
+    [string]$RemoteStagingShare = "\\ultra-magnus\G\Temp\mlvapp-p3-evidence",
+    [string]$RemoteStagingLocal = "G:\Temp\mlvapp-p3-evidence",
+    [string]$RemoteRepoRoot = "",
+    [string]$RemotePacketPath = "",
     [string]$LocalPacketRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\remote-packets",
     [string]$ImportOutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\imported",
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [int]$AgentTimeoutSec = 2700,
     [switch]$SkipRemoteBuild,
+    [switch]$SkipStageRepo,
     [string]$ImportOnlyPacket = ""
 )
 
@@ -41,7 +47,40 @@ function Write-JsonFile {
     if ($dir) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
-    $Value | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $Path -Encoding UTF8
+    $Value | ConvertTo-Json -Depth 18 | Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Convert-ToPowerShellSingleQuotedString {
+    param([AllowNull()][string]$Value)
+    return "'" + (($Value -replace "'", "''")) + "'"
+}
+
+function Join-WindowsPathLiteral {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Child
+    )
+    return ($Root.TrimEnd("\") + "\" + $Child.TrimStart("\"))
+}
+
+function Convert-RemoteLocalPathToSharePath {
+    param(
+        [Parameter(Mandatory = $true)][string]$LocalPath,
+        [Parameter(Mandatory = $true)][string]$RemoteLocalRoot,
+        [Parameter(Mandatory = $true)][string]$RemoteShareRoot
+    )
+    if ($LocalPath.StartsWith("\\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $LocalPath
+    }
+    $localRoot = $RemoteLocalRoot.TrimEnd("\")
+    if (!$LocalPath.StartsWith($localRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    $relative = $LocalPath.Substring($localRoot.Length).TrimStart("\")
+    if ([string]::IsNullOrWhiteSpace($relative)) {
+        return $RemoteShareRoot
+    }
+    return (Join-Path $RemoteShareRoot $relative)
 }
 
 function Invoke-ImportVerifier {
@@ -49,7 +88,8 @@ function Invoke-ImportVerifier {
         [Parameter(Mandatory = $true)][string]$Repo,
         [Parameter(Mandatory = $true)][string]$ValidatorScript,
         [Parameter(Mandatory = $true)][string]$PacketPath,
-        [Parameter(Mandatory = $true)][string]$ImportRoot
+        [Parameter(Mandatory = $true)][string]$ImportRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedHost
     )
 
     $output = & pwsh.exe `
@@ -59,6 +99,7 @@ function Invoke-ImportVerifier {
         -ExecutionPolicy Bypass `
         -File $ValidatorScript `
         -RepoRoot $Repo `
+        -ExpectedHostName $ExpectedHost `
         -ImportEvidencePacket $PacketPath `
         -ImportOutputRoot $ImportRoot 2>&1
 
@@ -68,16 +109,139 @@ function Invoke-ImportVerifier {
     }
 }
 
+function Invoke-RobocopyMirror {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    $args = @(
+        $Source,
+        $Destination,
+        "/MIR",
+        "/NFL",
+        "/NDL",
+        "/NJH",
+        "/NP",
+        "/R:1",
+        "/W:1",
+        "/XD",
+        ".claude-state",
+        ".scratch",
+        ".vs"
+    )
+    $output = & robocopy.exe @args 2>&1
+    $exitCode = $LASTEXITCODE
+    return [pscustomobject]@{
+        exitCode = $exitCode
+        output = @($output | ForEach-Object { [string]$_ })
+        ok = ($exitCode -lt 8)
+    }
+}
+
+function Test-AgentHeartbeat {
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $heartbeat = Join-Path $Root "heartbeat.txt"
+    if (!(Test-Path -LiteralPath $heartbeat)) {
+        return [pscustomobject]@{
+            ok = $false
+            path = $heartbeat
+            ageSeconds = $null
+            text = $null
+            reason = "missing heartbeat"
+        }
+    }
+    $item = Get-Item -LiteralPath $heartbeat
+    $age = [int]((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds
+    $text = (Get-Content -LiteralPath $heartbeat -Raw).Trim()
+    return [pscustomobject]@{
+        ok = ($age -le 120)
+        path = $heartbeat
+        ageSeconds = $age
+        text = $text
+        reason = if ($age -le 120) { "ok" } else { "stale heartbeat" }
+    }
+}
+
+function Submit-AgentJob {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$JobId,
+        [Parameter(Mandatory = $true)][string]$ScriptText,
+        [Parameter(Mandatory = $true)][int]$TimeoutSec
+    )
+
+    $inbox = Join-Path $Root "inbox"
+    $outbox = Join-Path $Root "outbox"
+    New-Item -ItemType Directory -Force -Path $inbox | Out-Null
+    New-Item -ItemType Directory -Force -Path $outbox | Out-Null
+
+    $tmp = Join-Path $inbox "$JobId.job.tmp"
+    $job = Join-Path $inbox "$JobId.job.ps1"
+    $result = Join-Path $outbox "$JobId.result.json"
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+    if (Test-Path -LiteralPath $job) { Remove-Item -LiteralPath $job -Force }
+    if (Test-Path -LiteralPath $result) { Remove-Item -LiteralPath $result -Force }
+
+    $ScriptText | Set-Content -LiteralPath $tmp -Encoding UTF8
+    Move-Item -LiteralPath $tmp -Destination $job
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-Path -LiteralPath $result) {
+            $raw = Get-Content -LiteralPath $result -Raw
+            return [pscustomobject]@{
+                timedOut = $false
+                resultPath = $result
+                result = ($raw | ConvertFrom-Json)
+            }
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    return [pscustomobject]@{
+        timedOut = $true
+        resultPath = $result
+        result = $null
+    }
+}
+
 $repo = (Resolve-Path -LiteralPath $RepoRoot).Path
 $validatorScript = Join-Path $repo "tools\profiling\run-ultramagnus-p3-validation.ps1"
 $localPacketRootResolved = Resolve-RepoPath -Root $repo -Path $LocalPacketRoot
 $importOutputRootResolved = Resolve-RepoPath -Root $repo -Path $ImportOutputRoot
+if ([string]::IsNullOrWhiteSpace($RemoteRepoRoot)) {
+    $RemoteRepoRoot = Join-WindowsPathLiteral -Root $RemoteStagingLocal -Child "repo"
+}
+if ([string]::IsNullOrWhiteSpace($RemotePacketPath)) {
+    $RemotePacketPath = Join-WindowsPathLiteral `
+        -Root $RemoteStagingLocal `
+        -Child "mlvapp-p3-evidence-latest.zip"
+}
+$remoteRepoShare = Convert-RemoteLocalPathToSharePath `
+    -LocalPath $RemoteRepoRoot `
+    -RemoteLocalRoot $RemoteStagingLocal `
+    -RemoteShareRoot $RemoteStagingShare
+$remotePacketShare = Convert-RemoteLocalPathToSharePath `
+    -LocalPath $RemotePacketPath `
+    -RemoteLocalRoot $RemoteStagingLocal `
+    -RemoteShareRoot $RemoteStagingShare
+$remoteJobOutputPath = Join-WindowsPathLiteral `
+    -Root $RemoteStagingLocal `
+    -Child "latest-agent-job-output.json"
+$remoteJobOutputShare = Convert-RemoteLocalPathToSharePath `
+    -LocalPath $remoteJobOutputPath `
+    -RemoteLocalRoot $RemoteStagingLocal `
+    -RemoteShareRoot $RemoteStagingShare
+
 $stamp = Get-Date -Format "yyyyMMddTHHmmss"
 $summaryPath = Join-Path $localPacketRootResolved "latest-remote-invoke.json"
 $failures = [System.Collections.Generic.List[string]]::new()
 $warnings = [System.Collections.Generic.List[string]]::new()
-$session = $null
-$remoteResult = $null
+$stageResult = $null
+$agentHeartbeat = $null
+$agentSubmission = $null
+$remoteJobOutput = $null
 $copiedPacket = $null
 $importResult = $null
 
@@ -97,7 +261,8 @@ if ($failures.Count -eq 0 -and ![string]::IsNullOrWhiteSpace($ImportOnlyPacket))
             -Repo $repo `
             -ValidatorScript $validatorScript `
             -PacketPath $packetPath `
-            -ImportRoot $importOutputRootResolved
+            -ImportRoot $importOutputRootResolved `
+            -ExpectedHost $ExpectedEvidenceHostName
         if ($importResult.exitCode -ne 0) {
             Add-Failure $failures "Import verifier rejected packet with exit code $($importResult.exitCode)."
         }
@@ -119,105 +284,179 @@ elseif ($failures.Count -eq 0) {
         Add-Failure $failures "Remote host '$RemoteHostName' did not respond to ping."
     }
 
-    if ($failures.Count -eq 0) {
+    if ($failures.Count -eq 0 -and !(Test-Path -LiteralPath $RemoteStagingShare)) {
         try {
-            Test-WSMan -ComputerName $RemoteHostName -ErrorAction Stop | Out-Null
+            New-Item -ItemType Directory -Force -Path $RemoteStagingShare | Out-Null
         }
         catch {
-            Add-Failure $failures "PowerShell remoting is unavailable on '$RemoteHostName': $($_.Exception.Message)"
+            Add-Failure $failures "Remote staging share is unavailable: $RemoteStagingShare ($($_.Exception.Message))"
+        }
+    }
+
+    if ($failures.Count -eq 0 -and [string]::IsNullOrWhiteSpace($remoteRepoShare)) {
+        Add-Failure $failures "RemoteRepoRoot '$RemoteRepoRoot' is not under RemoteStagingLocal '$RemoteStagingLocal'; cannot map it to SMB share '$RemoteStagingShare'."
+    }
+    if ($failures.Count -eq 0 -and [string]::IsNullOrWhiteSpace($remotePacketShare)) {
+        Add-Failure $failures "RemotePacketPath '$RemotePacketPath' is not under RemoteStagingLocal '$RemoteStagingLocal'; cannot map it to SMB share '$RemoteStagingShare'."
+    }
+
+    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
+        $localDirty = @(& git -C $repo status --short 2>$null | ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0) {
+            Add-Failure $failures "Unable to inspect local git status before staging."
+        }
+        elseif ($localDirty.Count -gt 0) {
+            Add-Failure $failures "Local repo is dirty; commit or explicitly rerun after a clean tree before producing authoritative UltraMagnus evidence: $($localDirty -join '; ')"
+        }
+    }
+
+    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
+        $stageResult = Invoke-RobocopyMirror -Source $repo -Destination $remoteRepoShare
+        if (!$stageResult.ok) {
+            Add-Failure $failures "Repo staging to '$remoteRepoShare' failed with robocopy exit code $($stageResult.exitCode)."
+        }
+    }
+    elseif ($SkipStageRepo) {
+        [void]$warnings.Add("Skipped repo staging; remote repo root must already be current and clean: $RemoteRepoRoot")
+    }
+
+    if ($failures.Count -eq 0) {
+        $agentHeartbeat = Test-AgentHeartbeat -Root $AgentRoot
+        if (!$agentHeartbeat.ok) {
+            Add-Failure $failures "UltraMagnus SMB agent is not live at '$AgentRoot': $($agentHeartbeat.reason)."
         }
     }
 
     if ($failures.Count -eq 0) {
-        $session = New-PSSession -ComputerName $RemoteHostName
-        $remoteResult = Invoke-Command -Session $session -ScriptBlock {
-            param(
-                [string]$RepoRoot,
-                [string]$PacketPath,
-                [int]$Seconds,
-                [int]$SettleMs,
-                [bool]$SkipBuild
-            )
-
-            $validator = Join-Path $RepoRoot "tools\profiling\run-ultramagnus-p3-validation.ps1"
-            if (!(Test-Path -LiteralPath $validator)) {
-                return [pscustomobject]@{
-                    status = "failed"
-                    exitCode = 127
-                    output = @("Missing remote validator script: $validator")
-                    packet = $null
-                }
-            }
-
-            $args = @(
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                $validator,
-                "-RepoRoot",
-                $RepoRoot,
-                "-EvidencePacketPath",
-                $PacketPath,
-                "-Seconds",
-                [string]$Seconds,
-                "-SettleMs",
-                [string]$SettleMs
-            )
-            if ($SkipBuild) {
-                $args += "-SkipBuild"
-            }
-
-            $output = & pwsh.exe @args 2>&1
-            $exitCode = $LASTEXITCODE
-            $packetFullPath =
-                if ([System.IO.Path]::IsPathRooted($PacketPath)) {
-                    $PacketPath
-                }
-                else {
-                    Join-Path $RepoRoot $PacketPath
-                }
-
-            $packetInfo = $null
-            if (Test-Path -LiteralPath $packetFullPath) {
-                $item = Get-Item -LiteralPath $packetFullPath
-                $packetInfo = [pscustomobject]@{
-                    path = $item.FullName
-                    length = $item.Length
-                    sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
-                }
-            }
-
-            return [pscustomobject]@{
-                status = if ($exitCode -eq 0) { "completed" } else { "failed" }
-                exitCode = $exitCode
-                output = @($output | ForEach-Object { [string]$_ })
-                packet = $packetInfo
-            }
-        } -ArgumentList $RemoteRepoRoot, $RemotePacketPath, $Seconds, $SettleMs, ([bool]$SkipRemoteBuild)
-
-        if ($remoteResult.exitCode -ne 0) {
-            Add-Failure $failures "Remote UltraMagnus validator exited with code $($remoteResult.exitCode)."
+        $packetParentShare = Split-Path -Parent $remotePacketShare
+        if ($packetParentShare) {
+            New-Item -ItemType Directory -Force -Path $packetParentShare | Out-Null
         }
-        if (!$remoteResult.packet -or [string]::IsNullOrWhiteSpace([string]$remoteResult.packet.path)) {
-            Add-Failure $failures "Remote validator did not produce an evidence packet."
+        if (Test-Path -LiteralPath $remotePacketShare) {
+            Remove-Item -LiteralPath $remotePacketShare -Force
+        }
+        if (Test-Path -LiteralPath $remoteJobOutputShare) {
+            Remove-Item -LiteralPath $remoteJobOutputShare -Force
+        }
+
+        $jobId = "mlvapp-p3-$stamp"
+        $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
+        $jobScript = @"
+`$ErrorActionPreference = 'Stop'
+`$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
+`$packet = $(Convert-ToPowerShellSingleQuotedString $RemotePacketPath)
+`$jobOutput = $(Convert-ToPowerShellSingleQuotedString $remoteJobOutputPath)
+`$expectedHost = $(Convert-ToPowerShellSingleQuotedString $ExpectedEvidenceHostName)
+`$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
+`$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+if (-not `$psExe) { `$psExe = 'powershell.exe' }
+`$payload = [ordered]@{
+    schema = 'mlvapp-p3-agent-job-output.v1'
+    startedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    host = [Environment]::MachineName
+    repoRoot = `$repo
+    packet = `$packet
+    validator = `$validator
+    validatorExitCode = `$null
+    packetInfo = `$null
+}
+try {
+    if (!(Test-Path -LiteralPath `$validator)) {
+        throw "Missing validator script: `$validator"
+    }
+    `$args = @(
+        '-NoLogo',
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        `$validator,
+        '-RepoRoot',
+        `$repo,
+        '-ExpectedHostName',
+        `$expectedHost,
+        '-EvidencePacketPath',
+        `$packet,
+        '-Seconds',
+        '$( [string]$Seconds )',
+        '-SettleMs',
+        '$( [string]$SettleMs )'
+    )
+    if ($skipBuildLiteral) {
+        `$args += '-SkipBuild'
+    }
+    `$output = & `$psExe @args 2>&1
+    `$exitCode = `$LASTEXITCODE
+    `$payload.validatorExitCode = `$exitCode
+    `$payload.output = @(`$output | ForEach-Object { [string]`$_ })
+    if (Test-Path -LiteralPath `$packet) {
+        `$item = Get-Item -LiteralPath `$packet
+        `$payload.packetInfo = [ordered]@{
+            path = `$item.FullName
+            length = `$item.Length
+            sha256 = (Get-FileHash -LiteralPath `$item.FullName -Algorithm SHA256).Hash
+        }
+    }
+    `$payload.endedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    `$payload | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath `$jobOutput -Encoding UTF8
+    `$output | ForEach-Object { [string]`$_ }
+    exit `$exitCode
+}
+catch {
+    `$payload.error = [string]`$_.Exception.Message
+    `$payload.endedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+    `$payload | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath `$jobOutput -Encoding UTF8
+    Write-Error `$_.Exception.Message
+    exit 1
+}
+"@
+
+        $agentSubmission = Submit-AgentJob `
+            -Root $AgentRoot `
+            -JobId $jobId `
+            -ScriptText $jobScript `
+            -TimeoutSec $AgentTimeoutSec
+        if ($agentSubmission.timedOut) {
+            Add-Failure $failures "Timed out waiting for UltraMagnus SMB agent job '$jobId' after $AgentTimeoutSec seconds."
+        }
+        elseif ($agentSubmission.result.exitCode -ne 0) {
+            Add-Failure $failures "UltraMagnus SMB agent job '$jobId' exited with code $($agentSubmission.result.exitCode)."
         }
     }
 
-    if ($failures.Count -eq 0) {
-        $localPacketPath = Join-Path $localPacketRootResolved ("$RemoteHostName-$stamp-" + (Split-Path -Leaf ([string]$remoteResult.packet.path)))
-        Copy-Item -FromSession $session -LiteralPath ([string]$remoteResult.packet.path) -Destination $localPacketPath -Force
-        $localPacket = Get-Item -LiteralPath $localPacketPath
-        $copiedPacket = [pscustomobject]@{
-            path = $localPacket.FullName
-            length = $localPacket.Length
-            sha256 = (Get-FileHash -LiteralPath $localPacket.FullName -Algorithm SHA256).Hash
-            remote = $remoteResult.packet
+    if ($failures.Count -eq 0 -and (Test-Path -LiteralPath $remoteJobOutputShare)) {
+        $remoteJobOutput = Get-Content -LiteralPath $remoteJobOutputShare -Raw | ConvertFrom-Json
+        if ($remoteJobOutput.validatorExitCode -ne 0) {
+            Add-Failure $failures "Remote UltraMagnus validator exited with code $($remoteJobOutput.validatorExitCode)."
         }
-        if ($copiedPacket.sha256 -ne $remoteResult.packet.sha256) {
-            Add-Failure $failures "Copied packet hash mismatch: remote $($remoteResult.packet.sha256), local $($copiedPacket.sha256)."
+    }
+    elseif ($failures.Count -eq 0) {
+        Add-Failure $failures "Remote job did not publish job output: $remoteJobOutputShare"
+    }
+
+    if ($failures.Count -eq 0) {
+        if (!(Test-Path -LiteralPath $remotePacketShare)) {
+            Add-Failure $failures "Remote validator did not produce an evidence packet at '$remotePacketShare'."
+        }
+        else {
+            $localPacketPath = Join-Path $localPacketRootResolved ("$RemoteHostName-$stamp-" + (Split-Path -Leaf $remotePacketShare))
+            Copy-Item -LiteralPath $remotePacketShare -Destination $localPacketPath -Force
+            $localPacket = Get-Item -LiteralPath $localPacketPath
+            $remotePacketHash = (Get-FileHash -LiteralPath $remotePacketShare -Algorithm SHA256).Hash
+            $copiedPacket = [pscustomobject]@{
+                path = $localPacket.FullName
+                length = $localPacket.Length
+                sha256 = (Get-FileHash -LiteralPath $localPacket.FullName -Algorithm SHA256).Hash
+                remote = [pscustomobject]@{
+                    path = $remotePacketShare
+                    length = (Get-Item -LiteralPath $remotePacketShare).Length
+                    sha256 = $remotePacketHash
+                }
+            }
+            if ($copiedPacket.sha256 -ne $remotePacketHash) {
+                Add-Failure $failures "Copied packet hash mismatch: remote $remotePacketHash, local $($copiedPacket.sha256)."
+            }
         }
     }
 
@@ -226,36 +465,43 @@ elseif ($failures.Count -eq 0) {
             -Repo $repo `
             -ValidatorScript $validatorScript `
             -PacketPath ([string]$copiedPacket.path) `
-            -ImportRoot $importOutputRootResolved
+            -ImportRoot $importOutputRootResolved `
+            -ExpectedHost $ExpectedEvidenceHostName
         if ($importResult.exitCode -ne 0) {
             Add-Failure $failures "Import verifier rejected copied packet with exit code $($importResult.exitCode)."
         }
     }
 }
 
-if ($session) {
-    Remove-PSSession -Session $session
-}
-
 $status = if ($failures.Count -eq 0) { "success" } else { "failed" }
 $summary = [pscustomobject]@{
-    schema = "mlvapp-ultramagnus-p3-remote-evidence.v1"
+    schema = "mlvapp-ultramagnus-p3-remote-evidence.v2"
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     status = $status
     localHost = [Environment]::MachineName
+    transport = "smb-agent"
     remoteHost = $RemoteHostName
+    expectedEvidenceHost = $ExpectedEvidenceHostName
+    agentRoot = $AgentRoot
+    agentHeartbeat = $agentHeartbeat
+    remoteStagingShare = $RemoteStagingShare
+    remoteStagingLocal = $RemoteStagingLocal
     remoteRepoRoot = $RemoteRepoRoot
+    remoteRepoShare = $remoteRepoShare
     remotePacketPath = $RemotePacketPath
+    remotePacketShare = $remotePacketShare
     localPacketRoot = $localPacketRootResolved
+    stageResult = $stageResult
+    agentSubmission = $agentSubmission
+    remoteJobOutput = $remoteJobOutput
     copiedPacket = $copiedPacket
-    remoteResult = $remoteResult
     importResult = $importResult
     warnings = @($warnings)
     failures = @($failures)
 }
 
 Write-JsonFile -Value $summary -Path $summaryPath
-$summary | ConvertTo-Json -Depth 12
+$summary | ConvertTo-Json -Depth 14
 
 if ($status -eq "success") {
     exit 0

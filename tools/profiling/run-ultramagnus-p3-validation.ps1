@@ -1,6 +1,6 @@
 param(
     [string]$RepoRoot = ".",
-    [string]$ExpectedHostName = "UltraMagnus",
+    [string]$ExpectedHostName = "ULTRA-MAGNUS",
     [string]$RequiredGpuNamePattern = "4090",
     [string]$ClipRoot = "C:\temp\MLV",
     [string[]]$ClipNames = @("M16-1327.MLV", "M16-1347.MLV", "M16-1446.MLV"),

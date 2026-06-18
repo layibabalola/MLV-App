@@ -15410,6 +15410,14 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
     m_playbackQualityFrameCounter = 0;
     m_playbackQualityLastPresentedTime = 0.0;
     m_playbackQualitySampler.reset();
+    m_playbackQualityAutoDecisionReason =
+        PlaybackQualityAutoDecisionReason::WarmupHq;
+    m_playbackQualityAutoDecisionAverageMs = 0.0;
+    m_playbackQualityAutoDecisionBudgetMs =
+        1000.0 / static_cast<double>( m_playbackAutoTargetFps > 0
+                                      ? m_playbackAutoTargetFps
+                                      : 30 );
+    m_playbackQualityAutoDecisionSampleCount = 0;
 
     if ( persist )
     {
@@ -15469,6 +15477,15 @@ void MainWindow::applyPlaybackAutoTargetFps( int targetFps, bool persist )
 {
     if ( targetFps != 24 && targetFps != 30 && targetFps != 60 ) targetFps = 30;
     m_playbackAutoTargetFps = targetFps;
+    m_playbackQualityFrameCounter = 0;
+    m_playbackQualityLastPresentedTime = 0.0;
+    m_playbackQualitySampler.reset();
+    m_playbackQualityAutoDecisionReason =
+        PlaybackQualityAutoDecisionReason::WarmupHq;
+    m_playbackQualityAutoDecisionAverageMs = 0.0;
+    m_playbackQualityAutoDecisionBudgetMs =
+        1000.0 / static_cast<double>( m_playbackAutoTargetFps );
+    m_playbackQualityAutoDecisionSampleCount = 0;
     if ( ui->actionPlaybackAutoTarget24 )
         ui->actionPlaybackAutoTarget24->setChecked( targetFps == 24 );
     if ( ui->actionPlaybackAutoTarget30 )
@@ -15497,6 +15514,26 @@ void MainWindow::setPlaybackQualityIndicatorVisible( bool visible, bool persist 
         playbackQualityShowIndicatorWriteToSettings( visible );
     }
     updatePlaybackQualityIndicator();
+}
+
+static QString playbackQualityAutoDecisionReasonUiLabel(
+    PlaybackQualityAutoDecisionReason reason )
+{
+    switch( reason )
+    {
+        case PlaybackQualityAutoDecisionReason::WarmupHq:
+            return QStringLiteral( "warmup" );
+        case PlaybackQualityAutoDecisionReason::AggressiveDualIsoDeepHq:
+            return QStringLiteral( "deep" );
+        case PlaybackQualityAutoDecisionReason::MissedTargetFast:
+        case PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq:
+            return QStringLiteral( "target" );
+        case PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq:
+            return QStringLiteral( "headroom" );
+        case PlaybackQualityAutoDecisionReason::SteadyHq:
+            return QStringLiteral( "steady" );
+    }
+    return QStringLiteral( "auto" );
 }
 
 void MainWindow::updatePlaybackQualityIndicator( void )
@@ -15543,9 +15580,14 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     const PlaybackQualityIndicatorCache currentCache =
     {
         m_playbackQualityMode,
+        m_playbackAutoTargetFps,
         m_playbackScaleFactorOverride,
         m_playbackQualityActiveScale,
         m_playbackQualityActiveHq,
+        static_cast<int>( m_playbackQualityAutoDecisionReason ),
+        m_playbackQualityAutoDecisionAverageMs,
+        m_playbackQualityAutoDecisionBudgetMs,
+        m_playbackQualityAutoDecisionSampleCount,
         envScale,
         envHq,
         envPreviewOverride,
@@ -15558,9 +15600,18 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     };
     if( m_playbackQualityIndicatorCacheValid
      && currentCache.playbackQualityMode == m_playbackQualityIndicatorCache.playbackQualityMode
+     && currentCache.playbackAutoTargetFps == m_playbackQualityIndicatorCache.playbackAutoTargetFps
      && currentCache.playbackScaleFactorOverride == m_playbackQualityIndicatorCache.playbackScaleFactorOverride
      && currentCache.playbackQualityActiveScale == m_playbackQualityIndicatorCache.playbackQualityActiveScale
      && currentCache.playbackQualityActiveHq == m_playbackQualityIndicatorCache.playbackQualityActiveHq
+     && currentCache.playbackQualityAutoDecisionReason
+            == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionReason
+     && currentCache.playbackQualityAutoDecisionAverageMs
+            == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionAverageMs
+     && currentCache.playbackQualityAutoDecisionBudgetMs
+            == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionBudgetMs
+     && currentCache.playbackQualityAutoDecisionSampleCount
+            == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionSampleCount
      && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
      && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
      && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
@@ -15608,6 +15659,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
 
     QString text;
     QString color;
+    const QString autoReasonLabel =
+        playbackQualityAutoDecisionReasonUiLabel( m_playbackQualityAutoDecisionReason );
     if ( guiScaleOverrideActive )
     {
         const int scale = m_playbackScaleFactorOverride;
@@ -15624,8 +15677,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                 break;
             case 2:
                 text = m_playbackQualityActiveHq
-                    ? tr( "Quality: Auto (HQ %1) [ui]" ).arg( scaleLabel )
-                    : tr( "Quality: Auto (Fast %1) [ui]" ).arg( scaleLabel );
+                    ? tr( "Quality: Auto (HQ %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
+                    : tr( "Quality: Auto (Fast %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
@@ -15684,10 +15737,10 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                 break;
             case 2:
                 text = guiScaleOverrideActive
-                           ? ( hq ? tr( "Quality: Auto (HQ %1) [ui]" ).arg( scaleLabel )
-                                  : tr( "Quality: Auto (Fast %1) [ui]" ).arg( scaleLabel ) )
-                           : ( hq ? tr( "Quality: Auto (HQ %1)" ).arg( scaleLabel )
-                                  : tr( "Quality: Auto (Fast)" ) );
+                           ? ( hq ? tr( "Quality: Auto (HQ %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
+                                  : tr( "Quality: Auto (Fast %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel ) )
+                           : ( hq ? tr( "Quality: Auto (HQ %1) %2" ).arg( scaleLabel, autoReasonLabel )
+                                  : tr( "Quality: Auto (Fast) %1" ).arg( autoReasonLabel ) );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
@@ -15727,6 +15780,32 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                 mainWindowGpuPlaybackPipelineStatusLabel(
                     gpuPlaybackPipelineStatus ) ) );
     }
+    QString indicatorTooltip =
+        tr( "Active playback quality mode and presented pipeline. "
+            "GPU RB means CUDA reconstruction with CPU readback; "
+            "GPU Tex RB means GL texture presentation from a readback frame." );
+    QString toolButtonTooltip =
+        tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
+            "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
+            "sharp/aggressive preview mode, and x1/x2/x4/x8 playback scale. "
+            "The status suffix reports the presented pipeline: CPU, GPU RB, "
+            "GPU Tex RB, or GPU Tex NR.\n"
+            "Keyboard shortcut: Q" );
+    if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto ) )
+    {
+        const QString autoDetail = tr(
+            "\nAuto decision: %1; samples=%2/%3; avg=%4 ms; budget=%5 ms at %6 fps." )
+            .arg( QString::fromLatin1(
+                      playbackQualityAutoDecisionReasonName(
+                          m_playbackQualityAutoDecisionReason ) ) )
+            .arg( static_cast<qulonglong>( m_playbackQualityAutoDecisionSampleCount ) )
+            .arg( static_cast<qulonglong>( PlaybackQualityAutoSampler::kSlidingWindow ) )
+            .arg( m_playbackQualityAutoDecisionAverageMs, 0, 'f', 3 )
+            .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
+            .arg( m_playbackAutoTargetFps );
+        indicatorTooltip += autoDetail;
+        toolButtonTooltip += autoDetail;
+    }
     if ( m_pPlaybackQualityIndicator && m_playbackQualityIndicatorVisible )
     {
         if( m_pPlaybackQualityIndicator->text() != text )
@@ -15738,6 +15817,10 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         if( m_pPlaybackQualityIndicator->styleSheet() != indicatorStyle )
         {
             m_pPlaybackQualityIndicator->setStyleSheet( indicatorStyle );
+        }
+        if( m_pPlaybackQualityIndicator->toolTip() != indicatorTooltip )
+        {
+            m_pPlaybackQualityIndicator->setToolTip( indicatorTooltip );
         }
     }
 
@@ -15781,6 +15864,10 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         if( m_pPlaybackQualityToolButton->styleSheet() != toolButtonStyle )
         {
             m_pPlaybackQualityToolButton->setStyleSheet( toolButtonStyle );
+        }
+        if( m_pPlaybackQualityToolButton->toolTip() != toolButtonTooltip )
+        {
+            m_pPlaybackQualityToolButton->setToolTip( toolButtonTooltip );
         }
     }
 
@@ -17790,7 +17877,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                "env_disable_play_start_preroll=%25 "
                "preview_mode=%26 env_aggressive_preview=%27 env_preview_mode=%28 "
                "env_quality_mode=%29 env_gpu_playback_recon=%30 "
-               "env_gpu_playback_recon_texture_present=%31" )
+               "env_gpu_playback_recon_texture_present=%31 "
+               "auto_target_fps=%32 auto_reason_start=%33" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( m_playbackSmokeStartPosition )
                .arg( m_playbackSmokeStartCutIn )
@@ -17823,7 +17911,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_PREVIEW_MODE" ) )
                .arg( envValueForLog( "MLVAPP_PLAYBACK_QUALITY_MODE" ) )
                .arg( envValueForLog( "MLVAPP_GPU_PLAYBACK_RECON" ) )
-               .arg( envValueForLog( "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT" ) );
+               .arg( envValueForLog( "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT" ) )
+               .arg( m_playbackAutoTargetFps )
+               .arg( QString::fromLatin1(
+                   playbackQualityAutoDecisionReasonName(
+                       m_playbackQualityAutoDecisionReason ) ) );
 }
 
 void MainWindow::notePlaybackSmokePresentedFrame(
@@ -18975,7 +19067,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_playback_prep_worker_total_ms=%50 "
                "avg_playback_prep_result_queue_ms=%51 "
                "avg_playback_prep_total_before_finish_ms=%52 "
-               "playback_prep_inline_present_frames=%53" )
+               "playback_prep_inline_present_frames=%53 "
+               "auto_target_fps=%54 auto_reason_last=%55 "
+               "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -19032,7 +19126,15 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( avgSmokeMs( m_playbackSmokePrepWorkerTotalSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokePrepResultQueueSumMs ), 0, 'f', 3 )
                .arg( avgSmokeMs( m_playbackSmokePrepTotalBeforeFinishSumMs ), 0, 'f', 3 )
-               .arg( m_playbackSmokePrepInlinePresentFrames );
+               .arg( m_playbackSmokePrepInlinePresentFrames )
+               .arg( m_playbackAutoTargetFps )
+               .arg( QString::fromLatin1(
+                   playbackQualityAutoDecisionReasonName(
+                       m_playbackQualityAutoDecisionReason ) ) )
+               .arg( m_playbackQualityAutoDecisionAverageMs, 0, 'f', 3 )
+               .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
+               .arg( static_cast<qulonglong>(
+                   m_playbackQualityAutoDecisionSampleCount ) );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -20887,8 +20989,19 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                             m_playbackAutoTargetFps,
                             dualIsoActive,
                             mlvPlaybackAggressivePreviewMode() != 0 );
-                    if( decision.scaleFactor != m_playbackQualityActiveScale
-                     || decision.useHqMean23 != m_playbackQualityActiveHq )
+                    const bool effectiveQualityChanged =
+                        decision.scaleFactor != m_playbackQualityActiveScale
+                     || decision.useHqMean23 != m_playbackQualityActiveHq;
+                    const bool autoDecisionTelemetryChanged =
+                        decision.reason != m_playbackQualityAutoDecisionReason
+                     || decision.averageFrameMs != m_playbackQualityAutoDecisionAverageMs
+                     || decision.frameBudgetMs != m_playbackQualityAutoDecisionBudgetMs
+                     || decision.sampleCount != m_playbackQualityAutoDecisionSampleCount;
+                    m_playbackQualityAutoDecisionReason = decision.reason;
+                    m_playbackQualityAutoDecisionAverageMs = decision.averageFrameMs;
+                    m_playbackQualityAutoDecisionBudgetMs = decision.frameBudgetMs;
+                    m_playbackQualityAutoDecisionSampleCount = decision.sampleCount;
+                    if( effectiveQualityChanged )
                     {
                         m_playbackQualityActiveScale = decision.scaleFactor;
                         m_playbackQualityActiveHq = decision.useHqMean23;
@@ -20899,6 +21012,10 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                         m_frameChanged = true;
                         updatePlaybackQualityIndicator();
                         applyEffectiveDualIsoPlaybackSettings();
+                    }
+                    else if( autoDecisionTelemetryChanged )
+                    {
+                        updatePlaybackQualityIndicator();
                     }
                 }
             }
