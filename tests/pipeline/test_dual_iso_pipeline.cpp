@@ -214,6 +214,54 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
                                               nullptr);
 }
 
+// Lane A E2 (slice 4) helper: export `target_frame` of a clip and return its DNG
+// bytes. When export_prefix is true, frames [0..target_frame-1] are first written
+// through the SAME dngObject (a full sequential run up to target_frame); when false,
+// target_frame is written directly (a resume that starts mid-sequence). CPU-only (no
+// GPU env) — this probes per-frame export determinism, not GPU parity.
+static QByteArray export_one_frame_for_resume_proxy(int raw_state,
+                                                    const QString & clip_relative_path,
+                                                    const QString & receipt_relative_path,
+                                                    uint64_t target_frame,
+                                                    bool export_prefix,
+                                                    const QString & dng_path)
+{
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+
+    MlvPipelineFixture fixture;
+    assert_gpu_export_fixture_ready(fixture, clip_relative_path, receipt_relative_path);
+    configure_gpu_export_supported_dual_iso(fixture);
+    std::vector<uint16_t> warm = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!warm.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    if (export_prefix) {
+        for (uint64_t f = 0; f < target_frame; ++f) {
+            const QString throwaway = dng_path + QStringLiteral(".prefix%1").arg(f);
+            QByteArray throwaway_bytes = throwaway.toLocal8Bit();
+            ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                      dng,
+                                      static_cast<uint32_t>(f),
+                                      throwaway_bytes.data(),
+                                      nullptr));
+        }
+    }
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                              dng,
+                              static_cast<uint32_t>(target_frame),
+                              dng_path_bytes.data(),
+                              nullptr));
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
 static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
                                                       bool gpu_enabled,
                                                       const QString & dll_path,
@@ -990,6 +1038,49 @@ TEST(DualIsoPipeline, GpuExportParityMatrixIsByteExactAcrossEligibleConfigs)
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+// Lane A E2 (slice 4): resume-safety proxy. Exporting a frame standalone (a resume
+// that starts mid-sequence) must produce a byte-identical DNG to reaching that same
+// frame through a full sequential run from frame 0. Byte-equality proves per-frame
+// DNG export carries no cross-frame state, so a resumed/partial export is bit-for-bit
+// identical to the corresponding frame of a full export. True skip-existing resume is
+// GUI-only (BatchPrompts::shouldSkipFrame); this is the headless determinism proxy.
+// CPU-only — fully validatable on llvmpipe (no GPU backend involved).
+TEST(DualIsoPipeline, GpuExportResumeSubrangeProxyIsByteIdenticalToFullRun)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString clip = QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv");
+    const QString receipt = QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml");
+
+    MlvPipelineFixture probe;
+    assert_gpu_export_fixture_ready(probe, clip, receipt);
+    const uint64_t total_frames = getMlvFrames(probe.video());
+    if (total_frames < 2) {
+        SKIP_TEST("Resume proxy needs a clip with >= 2 frames.");
+    }
+    const uint64_t target_frame = 1;  // smallest meaningful mid-sequence frame (prefix = {0})
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString raw_name = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString full_dng =
+            temp_dir.filePath(raw_name + QStringLiteral("-full.dng"));
+        const QString resume_dng =
+            temp_dir.filePath(raw_name + QStringLiteral("-resume.dng"));
+
+        const QByteArray full_bytes = export_one_frame_for_resume_proxy(
+            raw_state, clip, receipt, target_frame, /*export_prefix=*/true, full_dng);
+        const QByteArray resume_bytes = export_one_frame_for_resume_proxy(
+            raw_state, clip, receipt, target_frame, /*export_prefix=*/false, resume_dng);
+
+        ASSERT_TRUE(!full_bytes.isEmpty());
+        ASSERT_TRUE(full_bytes == resume_bytes);
+    }
 }
 
 TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressedDng)
