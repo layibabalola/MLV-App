@@ -518,29 +518,32 @@ if ($failures.Count -eq 0) {
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
-& '$smokeScript' `
-    -RepoRoot '$repo' `
-    -Input '$($clipItem.FullName)' `
-    -Output '$clipOutput' `
-    -Receipt '$receiptPath' `
-    -Seconds $Seconds `
-    -SettleMs $SettleMs `
-    -FrameTelemetry `
-    -CaptureScreenshot `
-    -FailOnColorArtifact `
-    -ScreenshotOutputDir '$screenshots' `
-    -Scope none `
-    -PlaybackDebayer amaze `
-    -PlaybackProcessing subset `
-    -GpuPreviewProcessing gpu `
-    -ScaleFactor '$ScaleFactor' `
-    -QualityMode '$QualityMode' `
-    -ExpectedQualityMode ([int]'$QualityMode') `
-    -RequireLookAssist:`$false `
-    -PreserveExperimentalEnvironment `
-    -DisableLookAssist `
-    -EnablePhase3QualityModes `
-    -ExtraEnvironment `$envList
+`$smokeParams = @{
+    RepoRoot = '$repo'
+    ExePath = '$releaseExe'
+    ClipPath = '$($clipItem.FullName)'
+    Output = '$clipOutput'
+    Receipt = '$receiptPath'
+    Seconds = $Seconds
+    SettleMs = $SettleMs
+    FrameTelemetry = `$true
+    CaptureScreenshot = `$true
+    FailOnColorArtifact = `$true
+    ScreenshotOutputDir = '$screenshots'
+    Scope = 'none'
+    PlaybackDebayer = 'amaze'
+    PlaybackProcessing = 'subset'
+    GpuPreviewProcessing = 'gpu'
+    ScaleFactor = '$ScaleFactor'
+    QualityMode = '$QualityMode'
+    ExpectedQualityMode = ([int]'$QualityMode')
+    RequireLookAssist = `$false
+    PreserveExperimentalEnvironment = `$true
+    DisableLookAssist = `$true
+    EnablePhase3QualityModes = `$true
+    ExtraEnvironment = `$envList
+}
+& '$smokeScript' @smokeParams
 exit `$LASTEXITCODE
 "@
         $plannedCommands += [pscustomobject]@{
