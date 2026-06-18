@@ -495,6 +495,7 @@ private slots:
     void mainWindowGpuPreviewPolicyRoutesFullQualityAmazeThroughAmazeGate();
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
+    void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -833,6 +834,60 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExp
     state.histogramEnabled = true;
     QVERIFY(!mainWindowAllowsGpuPlaybackReconTexturePresentation(state));
     QVERIFY(!mainWindowUsesGpuPlaybackReconTexturePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
+{
+    MainWindowGpuPreviewPolicyState state;
+    QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
+                  state, false, false, false ) ),
+              static_cast<int>( GpuPlaybackPipelineStatus::Cpu ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::Cpu ) ),
+              QStringLiteral( "cpu" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::Cpu ) ),
+              QStringLiteral( "CPU" ) );
+
+    state.gpuViewportInstalled = true;
+    state.renderThreadUsing16BitPreview = true;
+    state.gpuPreviewProcessingBackendRequest =
+        GpuPreviewProcessingBackendRequest::Gpu;
+    state.gpuPreviewProcessingCompatible = true;
+    state.renderThreadUsingGpuProcessingPreview = true;
+    QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
+                  state, false, false, false ) ),
+              static_cast<int>( GpuPlaybackPipelineStatus::GpuPreview ) );
+
+    QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
+                  state, true, false, false ) ),
+              static_cast<int>( GpuPlaybackPipelineStatus::GpuReconReadback ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::GpuReconReadback ) ),
+              QStringLiteral( "gpu_recon_readback" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::GpuReconReadback ) ),
+              QStringLiteral( "GPU RB" ) );
+
+    QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
+                  state, true, true, false ) ),
+              static_cast<int>( GpuPlaybackPipelineStatus::GpuTextureReadback ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::GpuTextureReadback ) ),
+              QStringLiteral( "gpu_texture_readback" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::GpuTextureReadback ) ),
+              QStringLiteral( "GPU Tex RB" ) );
+
+    QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
+                  state, true, true, true ) ),
+              static_cast<int>( GpuPlaybackPipelineStatus::GpuTextureNoReadback ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::GpuTextureNoReadback ) ),
+              QStringLiteral( "gpu_texture_no_readback" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::GpuTextureNoReadback ) ),
+              QStringLiteral( "GPU Tex NR" ) );
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()

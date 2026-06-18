@@ -827,6 +827,7 @@ private:
         bool lastPresentedRequestContextValid = false;
         int lastPresentedRequestScaleFactor = -1;
         int phase3Tier = -1;
+        int gpuPlaybackPipelineStatus = -1;
     };
     PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
     bool m_playbackQualityIndicatorCacheValid = false;
@@ -1182,6 +1183,11 @@ private:
     int m_playbackSmokeProcessed8CacheHits = 0;
     int m_playbackSmokeProcessed8PrefetchHits = 0;
     int m_playbackSmokeRawPrefetchHits = 0;
+    int m_playbackSmokeGpuStatusCpuFrames = 0;
+    int m_playbackSmokeGpuStatusPreviewFrames = 0;
+    int m_playbackSmokeGpuStatusReconReadbackFrames = 0;
+    int m_playbackSmokeGpuStatusTextureReadbackFrames = 0;
+    int m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;

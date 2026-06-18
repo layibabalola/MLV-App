@@ -42,6 +42,15 @@ surface, not the final P3 win. Activating true P3 still requires a GUI-thread-sa
 CUDA `IGPU_OUT_GL_TEXTURE` producer (or final RGB CUDA-to-GL backend) so the
 recon output reaches the display without the CPU16 readback.
 
+Update 2026-06-18 P4 status/telemetry slice: the existing Playback Quality
+UI/status surface now classifies the presented pipeline as `CPU`, `GPU Preview`,
+`GPU RB`, `GPU Tex RB`, or `GPU Tex NR`. Playback smoke logs emit matching
+machine-readable tokens (`cpu`, `gpu_preview`, `gpu_recon_readback`,
+`gpu_texture_readback`, `gpu_texture_no_readback`) on per-frame GPU telemetry
+and a session summary. Current P3 work should report `GPU Tex RB` /
+`gpu_texture_readback`; only the future true no-readback producer may report
+`GPU Tex NR` / `gpu_texture_no_readback`.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -106,7 +115,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 - **P1** loader/fallback: load `igpu_recon_cuda.dll` if present + capable, else CPU. No hard dependency. Experimental playback bridge present behind `MLVAPP_GPU_PLAYBACK_RECON=1`.
 - **P2** GPU recon + CPU readback: CUDA recon → Bayer16 readback → existing CPU debayer/process/present. Integration bridge, not final UX. Implemented for the v1 proven config only; missing/unsupported backend falls back to CPU.
 - **P3** no-readback playback: CPU decode/prefetch → CUDA recon/debayer/process → CUDA→GL texture present (no `QImage`, no `glReadPixels`); `GpuDisplayViewport` gains a texture-in path. A readback-backed Bayer16 GL presenter now exists for the P2 output, but final P3 still requires the CUDA backend to fill the viewport texture directly before this can be marked no-readback active.
-- **P4** adaptive quality + polish: hardware-capability-driven auto quality/scale, visible A/B + frame diffs, status UI, telemetry.
+- **P4** adaptive quality + polish: hardware-capability-driven auto quality/scale, visible A/B + frame diffs, status UI, telemetry. Status/telemetry now distinguishes CPU, GPU preview, GPU recon readback, readback-backed texture present, and future no-readback texture present; the adaptive GPU-quality decision policy remains future work.
 - Decode (LJ92, CPU, overlapped via prefetch ~7-9 ms @ 4.1 MP) is the steady-state gate once recon is on GPU — tune the overlap.
 
 ## 5. Lane C — portable GPU (later)
