@@ -392,6 +392,15 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->gpuAmazeTextureHeight = slot.gpuAmazeTextureHeight;
         frame->gpuAmazeTextureBlackLevel = slot.gpuAmazeTextureBlackLevel;
         frame->gpuAmazeTextureWbMultipliers = slot.gpuAmazeTextureWbMultipliers;
+        frame->gpuPlaybackReconTexturePresentCandidate = slot.gpuPlaybackReconTexturePresentCandidate;
+        frame->gpuPlaybackReconTextureBayerFrame =
+            slot.gpuPlaybackReconTexturePresentCandidate && !slot.rawImage16.empty()
+                ? slot.rawImage16.data()
+                : nullptr;
+        frame->gpuPlaybackReconTextureBayerFrameSize =
+            frame->gpuPlaybackReconTextureBayerFrame ? slot.rawImage16.size() : 0;
+        frame->gpuPlaybackReconTextureWidth = slot.gpuPlaybackReconTextureWidth;
+        frame->gpuPlaybackReconTextureHeight = slot.gpuPlaybackReconTextureHeight;
         frame->dualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
         frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
@@ -1995,6 +2004,31 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_rc"),
         llrpGpuPlaybackReconLastRunRcForTesting() );
+    {
+        const size_t fullResPixelCount =
+            static_cast<size_t>( qMax( 0, m_imageWidth ) )
+            * static_cast<size_t>( qMax( 0, m_imageHeight ) );
+        slot.gpuPlaybackReconTexturePresentCandidate =
+            m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
+            && decodedRawFrameAlreadyReconned
+            && playbackScaleFactor == 1
+            && m_imageWidth > 0
+            && m_imageHeight > 0
+            && slot.rawImage16.size() >= fullResPixelCount;
+        slot.gpuPlaybackReconTextureWidth =
+            slot.gpuPlaybackReconTexturePresentCandidate ? m_imageWidth : 0;
+        slot.gpuPlaybackReconTextureHeight =
+            slot.gpuPlaybackReconTexturePresentCandidate ? m_imageHeight : 0;
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_readback_bayer_candidate"),
+            slot.gpuPlaybackReconTexturePresentCandidate );
+        if( slot.gpuPlaybackReconTexturePresentCandidate )
+        {
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_texture_present_source"),
+                QStringLiteral("cpu16_readback_reconstructed_bayer") );
+        }
+    }
 
     int playbackScaleFactorActive = playbackScaleFactor;
     if( m_pMlvObject

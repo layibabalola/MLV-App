@@ -32,6 +32,15 @@ enum class GpuAmazeDebayerBackendRequest
     Gpu
 };
 
+enum class GpuPlaybackPipelineStatus
+{
+    Cpu = 0,
+    GpuPreview,
+    GpuReconReadback,
+    GpuTextureReadback,
+    GpuTextureNoReadback
+};
+
 struct MainWindowGpuPreviewPolicyState
 {
     bool gpuViewportInstalled = false;
@@ -48,6 +57,9 @@ struct MainWindowGpuPreviewPolicyState
     bool gpuAmazeDebayerEnvironmentRequested = false;
     bool gpuAmazeDebayerCompatible = false;
     bool gpuAmazeTexturePresentationEnvironmentRequested = false;
+    bool gpuPlaybackReconEnvironmentRequested = false;
+    bool gpuPlaybackReconTexturePresentationEnvironmentRequested = false;
+    bool gpuPlaybackReconTexturePresentationCompatible = false;
     bool histogramEnabled = false;
     bool waveformEnabled = false;
     bool paradeEnabled = false;
@@ -57,6 +69,7 @@ struct MainWindowGpuPreviewPolicyState
     bool renderThreadUsingGpuBilinearDebayer = false;
     bool renderThreadUsingGpuAmazeDebayer = false;
     bool renderThreadUsingGpuAmazeTexturePresentation = false;
+    bool renderThreadUsingGpuPlaybackReconTexturePresentation = false;
     int playbackScaleFactorActive = 1;
     bool betterResizerEnabled = false;
     bool zebrasEnabled = false;
@@ -189,11 +202,90 @@ inline bool mainWindowUsesGpuAmazeTexturePresentation(
         && state.renderThreadUsingGpuAmazeTexturePresentation;
 }
 
+inline bool mainWindowAllowsGpuPlaybackReconTexturePresentation(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    return mainWindowAllowsGpu16PreviewRender(state)
+        && state.gpuPlaybackReconEnvironmentRequested
+        && state.gpuPlaybackReconTexturePresentationEnvironmentRequested
+        && state.gpuPlaybackReconTexturePresentationCompatible;
+}
+
+inline bool mainWindowUsesGpuPlaybackReconTexturePresentation(
+    const MainWindowGpuPreviewPolicyState &state)
+{
+    return mainWindowAllowsGpuPlaybackReconTexturePresentation(state)
+        && state.renderThreadUsingGpuPlaybackReconTexturePresentation;
+}
+
 inline bool mainWindowUsesGpuImagePresentation(
     const MainWindowGpuPreviewPolicyState &state)
 {
     return state.gpuViewportInstalled
         && !mainWindowUsesGpu16PreviewPresentation(state);
+}
+
+inline GpuPlaybackPipelineStatus mainWindowGpuPlaybackPipelineStatus(
+    const MainWindowGpuPreviewPolicyState &state,
+    bool gpuPlaybackReconUsed,
+    bool gpuPlaybackReconTexturePresentActive,
+    bool gpuPlaybackReconTexturePresentNoReadbackActive)
+{
+    if (gpuPlaybackReconTexturePresentActive)
+    {
+        return gpuPlaybackReconTexturePresentNoReadbackActive
+            ? GpuPlaybackPipelineStatus::GpuTextureNoReadback
+            : GpuPlaybackPipelineStatus::GpuTextureReadback;
+    }
+    if (gpuPlaybackReconUsed)
+    {
+        return GpuPlaybackPipelineStatus::GpuReconReadback;
+    }
+    if (mainWindowUsesGpuPreviewProcessing(state)
+     || mainWindowUsesGpuBilinearDebayer(state)
+     || mainWindowUsesGpuAmazeDebayer(state))
+    {
+        return GpuPlaybackPipelineStatus::GpuPreview;
+    }
+    return GpuPlaybackPipelineStatus::Cpu;
+}
+
+inline const char *mainWindowGpuPlaybackPipelineStatusToken(
+    GpuPlaybackPipelineStatus status)
+{
+    switch (status)
+    {
+    case GpuPlaybackPipelineStatus::Cpu:
+        return "cpu";
+    case GpuPlaybackPipelineStatus::GpuPreview:
+        return "gpu_preview";
+    case GpuPlaybackPipelineStatus::GpuReconReadback:
+        return "gpu_recon_readback";
+    case GpuPlaybackPipelineStatus::GpuTextureReadback:
+        return "gpu_texture_readback";
+    case GpuPlaybackPipelineStatus::GpuTextureNoReadback:
+        return "gpu_texture_no_readback";
+    }
+    return "cpu";
+}
+
+inline const char *mainWindowGpuPlaybackPipelineStatusLabel(
+    GpuPlaybackPipelineStatus status)
+{
+    switch (status)
+    {
+    case GpuPlaybackPipelineStatus::Cpu:
+        return "CPU";
+    case GpuPlaybackPipelineStatus::GpuPreview:
+        return "GPU Preview";
+    case GpuPlaybackPipelineStatus::GpuReconReadback:
+        return "GPU RB";
+    case GpuPlaybackPipelineStatus::GpuTextureReadback:
+        return "GPU Tex RB";
+    case GpuPlaybackPipelineStatus::GpuTextureNoReadback:
+        return "GPU Tex NR";
+    }
+    return "CPU";
 }
 
 inline bool mainWindowUsesGpuShaderZebraProcessing(

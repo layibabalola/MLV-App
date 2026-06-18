@@ -70,6 +70,12 @@ public:
                              int width,
                              int height,
                              const PresentationOptions &options = PresentationOptions());
+    static bool presentBayer16(QGraphicsView *view,
+                               QGraphicsPixmapItem *fallbackItem,
+                               const uint16_t *imageData,
+                               int width,
+                               int height,
+                               const PresentationOptions &options = PresentationOptions());
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -97,6 +103,7 @@ private:
     void setFallbackItem(QGraphicsPixmapItem *item);
     void setPresentedImage(const QImage &image, const PresentationOptions &options);
     void setPresentedRgb16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
+    void setPresentedBayer16(const uint16_t *imageData, int width, int height, const PresentationOptions &options);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,
@@ -125,8 +132,10 @@ private:
     bool m_samplingModeDirty;
     bool m_processingTexturesDirty;
     bool m_pendingTextureIs16Bit;
+    bool m_pendingTextureIsBayer16;
     bool m_pendingTextureFromGpuAmaze;
     bool m_textureIs16Bit;
+    bool m_textureIsBayer16;
     QGraphicsView *m_view;
     QGraphicsPixmapItem *m_fallbackItem;
     QImage m_pendingImage;

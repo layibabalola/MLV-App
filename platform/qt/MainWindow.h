@@ -634,6 +634,8 @@ private:
         size_t sourceImage16Size = 0;
         const float *gpuAmazeTextureRawFrame = nullptr;
         size_t gpuAmazeTextureRawFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureBayerFrame = nullptr;
+        size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;
         bool cpuPreviewProcessingActive = false;
@@ -648,6 +650,7 @@ private:
         std::vector<uint8_t> ownedSourceImage;
         std::vector<uint16_t> ownedSourceImage16;
         std::vector<float> ownedGpuAmazeTextureRawFrame;
+        std::vector<uint16_t> ownedGpuPlaybackReconTextureBayerFrame;
         std::vector<uint8_t> ownedPlaybackScaledImage8;
 
         void rebindOwnedImagePointers()
@@ -672,6 +675,17 @@ private:
                 gpuAmazeTextureRawFrameSize = ownedGpuAmazeTextureRawFrame.size();
                 readyFrame.gpuAmazeTextureRawFrame = gpuAmazeTextureRawFrame;
                 readyFrame.gpuAmazeTextureRawFrameSize = gpuAmazeTextureRawFrameSize;
+            }
+            if( !ownedGpuPlaybackReconTextureBayerFrame.empty() )
+            {
+                gpuPlaybackReconTextureBayerFrame =
+                    ownedGpuPlaybackReconTextureBayerFrame.data();
+                gpuPlaybackReconTextureBayerFrameSize =
+                    ownedGpuPlaybackReconTextureBayerFrame.size();
+                readyFrame.gpuPlaybackReconTextureBayerFrame =
+                    gpuPlaybackReconTextureBayerFrame;
+                readyFrame.gpuPlaybackReconTextureBayerFrameSize =
+                    gpuPlaybackReconTextureBayerFrameSize;
             }
             if( !ownedPlaybackScaledImage8.empty() )
             {
@@ -813,6 +827,7 @@ private:
         bool lastPresentedRequestContextValid = false;
         int lastPresentedRequestScaleFactor = -1;
         int phase3Tier = -1;
+        int gpuPlaybackPipelineStatus = -1;
     };
     PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
     bool m_playbackQualityIndicatorCacheValid = false;
@@ -1168,6 +1183,11 @@ private:
     int m_playbackSmokeProcessed8CacheHits = 0;
     int m_playbackSmokeProcessed8PrefetchHits = 0;
     int m_playbackSmokeRawPrefetchHits = 0;
+    int m_playbackSmokeGpuStatusCpuFrames = 0;
+    int m_playbackSmokeGpuStatusPreviewFrames = 0;
+    int m_playbackSmokeGpuStatusReconReadbackFrames = 0;
+    int m_playbackSmokeGpuStatusTextureReadbackFrames = 0;
+    int m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;

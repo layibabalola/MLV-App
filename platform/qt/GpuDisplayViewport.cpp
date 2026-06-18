@@ -216,8 +216,10 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_samplingModeDirty(false)
     , m_processingTexturesDirty(false)
     , m_pendingTextureIs16Bit(false)
+    , m_pendingTextureIsBayer16(false)
     , m_pendingTextureFromGpuAmaze(false)
     , m_textureIs16Bit(false)
+    , m_textureIsBayer16(false)
     , m_view(qobject_cast<QGraphicsView *>(parent))
     , m_fallbackItem(nullptr)
     , m_pendingTextureWidth(0)
@@ -326,6 +328,25 @@ bool GpuDisplayViewport::presentRgb16(QGraphicsView *view,
 
     viewport->setFallbackItem(fallbackItem);
     viewport->setPresentedRgb16(imageData, width, height, options);
+    return true;
+}
+
+bool GpuDisplayViewport::presentBayer16(QGraphicsView *view,
+                                        QGraphicsPixmapItem *fallbackItem,
+                                        const uint16_t *imageData,
+                                        int width,
+                                        int height,
+                                        const PresentationOptions &options)
+{
+    GpuDisplayViewport *viewport = from(view);
+    if ( !viewport || !imageData || width <= 0 || height <= 0 )
+    {
+        if ( fallbackItem ) fallbackItem->setVisible(true);
+        return false;
+    }
+
+    viewport->setFallbackItem(fallbackItem);
+    viewport->setPresentedBayer16(imageData, width, height, options);
     return true;
 }
 
@@ -480,6 +501,7 @@ void GpuDisplayViewport::paintGL()
     m_program->setUniformValue("textureSize",
                                QVector2D(static_cast<float>(pendingWidth()),
                                          static_cast<float>(pendingHeight())));
+    m_program->setUniformValue("frameTextureMode", m_textureIsBayer16 ? 1 : 0);
     m_program->setUniformValue("samplingMode", static_cast<int>(m_presentationOptions.samplingMode));
     m_program->setUniformValue("zebraEnabled", m_presentationOptions.showZebras ? 1.0f : 0.0f);
     m_program->setUniformValue("zebraUnderThreshold", m_presentationOptions.zebraUnderThreshold);
@@ -609,6 +631,7 @@ void GpuDisplayViewport::setPresentedImage(const QImage &image, const Presentati
         : image.convertToFormat(QImage::Format_RGBA8888);
     m_pendingTextureBytes.clear();
     m_pendingTextureFromGpuAmaze = false;
+    m_pendingTextureIsBayer16 = false;
     m_pendingTextureWidth = m_pendingImage.width();
     m_pendingTextureHeight = m_pendingImage.height();
     m_pendingTextureIs16Bit = false;
@@ -643,6 +666,32 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
 
     m_pendingImage = QImage();
     m_pendingTextureFromGpuAmaze = false;
+    m_pendingTextureIsBayer16 = false;
+    m_pendingTextureWidth = width;
+    m_pendingTextureHeight = height;
+    m_pendingTextureIs16Bit = true;
+    m_textureDirty = true;
+    m_samplingModeDirty = m_samplingModeDirty || (m_presentationOptions.samplingMode != options.samplingMode);
+    m_processingTexturesDirty = true;
+    m_presentationOptions = options;
+    m_texturePresentationActive = false;
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
+    update();
+}
+
+void GpuDisplayViewport::setPresentedBayer16(const uint16_t *imageData,
+                                             int width,
+                                             int height,
+                                             const PresentationOptions &options)
+{
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t bytesNeeded = pixelCount * sizeof(uint16_t);
+    m_pendingTextureBytes.resize(static_cast<int>(bytesNeeded));
+    std::memcpy(m_pendingTextureBytes.data(), imageData, bytesNeeded);
+
+    m_pendingImage = QImage();
+    m_pendingTextureFromGpuAmaze = false;
+    m_pendingTextureIsBayer16 = true;
     m_pendingTextureWidth = width;
     m_pendingTextureHeight = height;
     m_pendingTextureIs16Bit = true;
@@ -669,6 +718,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
     {
         if ( reason ) *reason = why;
         m_pendingTextureFromGpuAmaze = false;
+        m_pendingTextureIsBayer16 = false;
         m_texturePresentationActive = false;
         return false;
     };
@@ -701,7 +751,8 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
     if ( !m_texture
       || m_texture->width() != width
       || m_texture->height() != height
-      || !m_textureIs16Bit )
+      || !m_textureIs16Bit
+      || m_textureIsBayer16 )
     {
         destroyTexture();
         m_texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
@@ -711,6 +762,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
         m_texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
         m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
         m_textureIs16Bit = true;
+        m_textureIsBayer16 = false;
     }
     applySamplingMode();
 
@@ -727,6 +779,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
     {
         destroyTexture();
         m_pendingTextureFromGpuAmaze = false;
+        m_pendingTextureIsBayer16 = false;
         if ( madeCurrent ) doneCurrent();
         return false;
     }
@@ -736,6 +789,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
     m_pendingTextureWidth = width;
     m_pendingTextureHeight = height;
     m_pendingTextureIs16Bit = true;
+    m_pendingTextureIsBayer16 = false;
     m_pendingTextureFromGpuAmaze = true;
     m_textureDirty = false;
     m_samplingModeDirty = false;
@@ -753,6 +807,7 @@ void GpuDisplayViewport::clearPresentedImage()
     m_pendingTextureWidth = 0;
     m_pendingTextureHeight = 0;
     m_pendingTextureIs16Bit = false;
+    m_pendingTextureIsBayer16 = false;
     m_pendingTextureFromGpuAmaze = false;
     m_textureDirty = false;
     m_samplingModeDirty = false;
@@ -791,25 +846,41 @@ void GpuDisplayViewport::updateTextureIfNeeded()
     if ( !m_texture
       || m_texture->width() != pendingWidth()
       || m_texture->height() != pendingHeight()
-      || m_textureIs16Bit != m_pendingTextureIs16Bit )
+      || m_textureIs16Bit != m_pendingTextureIs16Bit
+      || m_textureIsBayer16 != m_pendingTextureIsBayer16 )
     {
         destroyTexture();
         m_texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
-        m_texture->setFormat(m_pendingTextureIs16Bit ? QOpenGLTexture::RGBA16_UNorm
-                                                     : QOpenGLTexture::RGBA8_UNorm);
+        if ( m_pendingTextureIsBayer16 )
+        {
+            m_texture->setFormat(QOpenGLTexture::R16_UNorm);
+        }
+        else
+        {
+            m_texture->setFormat(m_pendingTextureIs16Bit ? QOpenGLTexture::RGBA16_UNorm
+                                                         : QOpenGLTexture::RGBA8_UNorm);
+        }
         m_texture->setSize(pendingWidth(), pendingHeight());
         m_texture->setMipLevels(1);
-        m_texture->allocateStorage(QOpenGLTexture::RGBA,
+        m_texture->allocateStorage(m_pendingTextureIsBayer16 ? QOpenGLTexture::Red
+                                                             : QOpenGLTexture::RGBA,
                                    m_pendingTextureIs16Bit ? QOpenGLTexture::UInt16
                                                            : QOpenGLTexture::UInt8);
         m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
         m_textureIs16Bit = m_pendingTextureIs16Bit;
+        m_textureIsBayer16 = m_pendingTextureIsBayer16;
     }
 
     applySamplingMode();
     if ( m_pendingTextureFromGpuAmaze )
     {
         /* The CUDA backend already wrote the viewport-owned GL_RGBA16 texture. */
+    }
+    else if ( m_pendingTextureIsBayer16 )
+    {
+        m_texture->setData(QOpenGLTexture::Red,
+                           QOpenGLTexture::UInt16,
+                           m_pendingTextureBytes.constData());
     }
     else if ( m_pendingTextureIs16Bit )
     {
@@ -857,6 +928,7 @@ void GpuDisplayViewport::destroyTexture()
     m_texturePresentationActive = false;
     m_samplingModeDirty = false;
     m_textureIs16Bit = false;
+    m_textureIsBayer16 = false;
 }
 
 void GpuDisplayViewport::destroyProcessingTextures()
@@ -952,7 +1024,7 @@ void GpuDisplayViewport::applySamplingMode()
 {
     if ( !m_texture ) return;
 
-    const bool useNearest = m_presentationOptions.samplingMode == SamplingNearest;
+    const bool useNearest = m_textureIsBayer16 || m_presentationOptions.samplingMode == SamplingNearest;
     const bool useBicubic = m_presentationOptions.samplingMode == SamplingBicubic;
     const QOpenGLTexture::Filter filter = (useNearest || useBicubic)
         ? QOpenGLTexture::Nearest
@@ -978,12 +1050,12 @@ QRectF GpuDisplayViewport::targetRectInViewport() const
 
 int GpuDisplayViewport::pendingWidth() const
 {
-    return m_pendingTextureIs16Bit ? m_pendingTextureWidth : m_pendingImage.width();
+    return (m_pendingTextureIs16Bit || m_pendingTextureIsBayer16) ? m_pendingTextureWidth : m_pendingImage.width();
 }
 
 int GpuDisplayViewport::pendingHeight() const
 {
-    return m_pendingTextureIs16Bit ? m_pendingTextureHeight : m_pendingImage.height();
+    return (m_pendingTextureIs16Bit || m_pendingTextureIsBayer16) ? m_pendingTextureHeight : m_pendingImage.height();
 }
 
 bool GpuDisplayViewport::hasPendingFrame() const
@@ -992,7 +1064,7 @@ bool GpuDisplayViewport::hasPendingFrame() const
     {
         return m_pendingTextureWidth > 0 && m_pendingTextureHeight > 0 && m_texture != nullptr;
     }
-    return m_pendingTextureIs16Bit
+    return (m_pendingTextureIs16Bit || m_pendingTextureIsBayer16)
         ? (!m_pendingTextureBytes.isEmpty() && m_pendingTextureWidth > 0 && m_pendingTextureHeight > 0)
         : !m_pendingImage.isNull();
 }
