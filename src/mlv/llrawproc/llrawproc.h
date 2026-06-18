@@ -47,6 +47,17 @@ int llrpGpuPlaybackReconLastRunRcForTesting(void);
 int llrpGpuPlaybackReconLastUsedForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void);
 
+typedef struct
+{
+    int attempted;
+    int rc;
+    int replaced;
+    int allocated_bytes_valid;
+    uint64_t allocated_bytes;
+} llrpGpuExportTelemetry_t;
+
+void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry);
+
 /* Playback-only helper: apply the full-res raw coordinate/fix stages and stop
  * before Dual ISO recon. Used by the x4 quality-preserving early-reduction
  * prototype so the raw fixes can happen before the reduced path runs. */

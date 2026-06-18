@@ -49,6 +49,17 @@ extern "C" int llrpGpuPlaybackReconLastRunRcForTesting(void);
 extern "C" int llrpGpuPlaybackReconLastUsedForTesting(void);
 extern "C" int llrpGpuPlaybackReconLastStateValidForTesting(void);
 
+static void assert_gpu_export_telemetry_idle()
+{
+    llrpGpuExportTelemetry_t telemetry = {};
+    llrpGetLastGpuExportTelemetry(&telemetry);
+    ASSERT_EQ(0, telemetry.attempted);
+    ASSERT_EQ(0, telemetry.rc);
+    ASSERT_EQ(0, telemetry.replaced);
+    ASSERT_EQ(0, telemetry.allocated_bytes_valid);
+    ASSERT_EQ(static_cast<uint64_t>(0), telemetry.allocated_bytes);
+}
+
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
 {
     QString error_message;
@@ -1423,6 +1434,27 @@ TEST(DualIsoPipeline, GpuExportResumeSubrangeProxyIsByteIdenticalToFullRun)
         ASSERT_TRUE(!full_bytes.isEmpty());
         ASSERT_TRUE(full_bytes == resume_bytes);
     }
+}
+
+TEST(DualIsoPipeline, GpuExportTelemetryIsIdleWhenGpuExportIsDisabled)
+{
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+    assert_gpu_export_telemetry_idle();
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    const QString dng_path = temp_dir.filePath(QStringLiteral("cpu-only.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("cpu-only.json"));
+
+    const QByteArray bytes =
+        export_tiny_dng_for_profiler_gate(UNCOMPRESSED_RAW,
+                                          false,
+                                          dng_path,
+                                          profile_path);
+    ASSERT_TRUE(!bytes.isEmpty());
+    assert_gpu_export_telemetry_idle();
 }
 
 TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressedDng)

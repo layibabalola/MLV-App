@@ -79,6 +79,11 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 - **E0** export-stage profiler: decode / Dual-ISO recon / DNG pack / DNG compress / disk write / queue idle. Also includes an intentional CPU-export focal-plane resolution stability guard for same-process multi-frame DNG exports: frame 1 remains legacy byte-identical, while affected frames 2+ stop compounding the EXIF focal-plane denominator.
 - **E1** GPU CDNG recon: CPU decode/unpack → CUDA recon (`IGPU_OUT_CPU16`) → read back Bayer16 → existing DNG writer unchanged. Behind `MLVAPP_GPU_EXPORT` / setting.
 - **E2** export parity gate: CPU vs GPU exported DNGs match image payload + metadata (Look Assist defaults, resume, Dual-ISO pattern mapping, compressed + uncompressed). CPU fallback always.
+- **E2 batch telemetry:** when a batch export actually attempts the CUDA shadow
+  path and the backend exposes its optional VRAM query, stdout emits
+  `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
+  backend working-set budget (tracked CUDA buffers plus the measured context
+  reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
 - **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU).
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
