@@ -125,7 +125,18 @@ Minimal   — Basic / None (Fastest, last-resort cadence rescue)
   preview-processing subset (levels / matrix / camera matrix / gamut compression
   / gamma LUT path) through CPU-vs-GPU frame diffs; broader unsupported features
   still fail closed instead of silently using GPU.
-- **Export:** per-frame DNG image-payload + metadata diff, compressed + uncompressed.
+- **Export (Lane A E2):** per-frame DNG image-payload + metadata byte-diff, compressed
+  + uncompressed — **implemented + RTX-4090-validated** (CUDA `igpu_recon`). The GPU
+  export shadow path engages *only* for the base HQ dual-ISO config (MEAN23 + alias-map
+  ON + full-res ON + chroma OFF): there it replaces the CPU output byte-identically
+  (`replaced==1`, SHA256 match) across {tiny,large} × {Look-Assist off/on} ×
+  {uncompressed,compressed}. Every other config (alias/full-res OFF, AMAZE, chroma-smooth
+  ON) is GPU-ineligible and falls back to CPU cleanly (`run_attempted==0`, `replaced==0`,
+  CPU authoritative, DNG still byte-equal). Resume/partial export is byte-identical to a
+  full run (per-frame export carries no cross-frame state). Tests: `DualIsoPipeline.
+  GpuExport*` in `tests/pipeline/test_dual_iso_pipeline.cpp` — eligible matrix, ineligible
+  fallback, resume proxy, and missing-DLL byte-inert; the GPU-engaging cases are gated on
+  `MLVAPP_GPU_EXPORT_TEST_DLL` (skip on llvmpipe, run on the 4090).
 - **Playback truth:** validate by *pixels* (PrintWindow / frame diff), never FPS alone — cadence can read perfect over a frozen frame.
 
 **Parity-coupling (the honesty linchpin):** a quality option appears in the GUI **only after its parity gate passes** — so the UX rollout is staged with the engineering:
