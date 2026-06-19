@@ -804,6 +804,25 @@ reported `verdict=WITHIN_IDENTITY_ENVELOPE`,
 `compressionThroughput.participatesInFrameRegressionVerdict=false`, and no
 blocking reasons.
 
+Update 2026-06-19 Lane A E3 compression substage telemetry: the export profile
+keeps `dng_compress_ms` as the rollup and now splits it into
+`dng_compress_encode_ms`, `dng_compress_copy_ms`, and
+`dng_compress_cleanup_ms`; A/B summaries, matrix rows, and calibration
+attribution carry the matching `dngCompress*AvgDeltaMs` fields. Headless
+VM-local schema validation, not GPU proof, wrote
+`.claude-state/profiling/2026-06-19-cdng-compress-substage-smoke/profile.json`
+from the checked-in tiny Dual ISO fixture with one lossless-output frame:
+`dng_compress_ms=62.6934` ms (15.95 FPS-equivalent),
+`dng_compress_encode_ms=61.8549` ms (16.17 FPS-equivalent),
+`dng_compress_copy_ms=0.4372` ms (2287.46 FPS-equivalent), and
+`dng_compress_cleanup_ms=0.3967` ms (2520.81 FPS-equivalent). Wrapper smoke
+artifacts also passed DNG identity checks 1/1:
+`.claude-state/profiling/2026-06-19-cdng-compress-substage-ab-smoke/summary.json`,
+`.claude-state/profiling/2026-06-19-cdng-compress-substage-matrix-smoke/matrix-summary.json`,
+and
+`.claude-state/profiling/2026-06-19-cdng-compress-substage-calibration-smoke/calibration.json`
+with `verdict=WITHIN_IDENTITY_ENVELOPE`.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

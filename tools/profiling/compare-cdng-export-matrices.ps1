@@ -112,6 +112,12 @@ function Get-MatrixRuns {
                     Get-CompareStageDelta -Run $run -StageName "dng_pack_ms" -Statistic "avgMs"
                 dngCompressAvgDeltaMs =
                     Get-CompareStageDelta -Run $run -StageName "dng_compress_ms" -Statistic "avgMs"
+                dngCompressEncodeAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_compress_encode_ms" -Statistic "avgMs"
+                dngCompressCopyAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_compress_copy_ms" -Statistic "avgMs"
+                dngCompressCleanupAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_compress_cleanup_ms" -Statistic "avgMs"
                 dngCompressInputBytesTotalDelta = $run.dngCompressInputBytesTotalDelta
                 dngCompressOutputBytesTotalDelta = $run.dngCompressOutputBytesTotalDelta
                 dngCompressInputMiBPerSecondDelta = $run.dngCompressInputMiBPerSecondDelta
@@ -342,6 +348,9 @@ $metricNames = @(
     "dngHeaderAvgDeltaMs",
     "dngPackAvgDeltaMs",
     "dngCompressAvgDeltaMs",
+    "dngCompressEncodeAvgDeltaMs",
+    "dngCompressCopyAvgDeltaMs",
+    "dngCompressCleanupAvgDeltaMs",
     "diskWriteAvgDeltaMs",
     "payloadCloneAvgDeltaMs",
     "payloadCloneP95DeltaMs",
@@ -380,6 +389,9 @@ $stageAttributionMetricNames = @(
     "dngHeaderAvgDeltaMs",
     "dngPackAvgDeltaMs",
     "dngCompressAvgDeltaMs",
+    "dngCompressEncodeAvgDeltaMs",
+    "dngCompressCopyAvgDeltaMs",
+    "dngCompressCleanupAvgDeltaMs",
     "diskWriteAvgDeltaMs",
     "payloadCloneAvgDeltaMs",
     "producerFrameAvgDeltaMs",

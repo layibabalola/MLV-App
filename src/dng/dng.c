@@ -117,6 +117,9 @@ typedef enum
     EXPORT_PROFILE_DNG_HEADER,
     EXPORT_PROFILE_DNG_PACK,
     EXPORT_PROFILE_DNG_COMPRESS,
+    EXPORT_PROFILE_DNG_COMPRESS_ENCODE,
+    EXPORT_PROFILE_DNG_COMPRESS_COPY,
+    EXPORT_PROFILE_DNG_COMPRESS_CLEANUP,
     EXPORT_PROFILE_PAYLOAD_CLONE,
     EXPORT_PROFILE_DISK_WRITE,
     EXPORT_PROFILE_WRITER_QUEUE_WAIT,
@@ -226,6 +229,12 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_DNG_HEADER:   return "dng_header_ms";
         case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
         case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
+        case EXPORT_PROFILE_DNG_COMPRESS_ENCODE:
+                                          return "dng_compress_encode_ms";
+        case EXPORT_PROFILE_DNG_COMPRESS_COPY:
+                                          return "dng_compress_copy_ms";
+        case EXPORT_PROFILE_DNG_COMPRESS_CLEANUP:
+                                          return "dng_compress_cleanup_ms";
         case EXPORT_PROFILE_PAYLOAD_CLONE: return "payload_clone_ms";
         case EXPORT_PROFILE_DISK_WRITE:   return "disk_write_ms";
         case EXPORT_PROFILE_WRITER_QUEUE_WAIT:
@@ -877,6 +886,9 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "dng_header_ms", 1);
     export_profile_write_stage_stats(file, "dng_pack_ms", 1);
     export_profile_write_stage_stats(file, "dng_compress_ms", 1);
+    export_profile_write_stage_stats(file, "dng_compress_encode_ms", 1);
+    export_profile_write_stage_stats(file, "dng_compress_copy_ms", 1);
+    export_profile_write_stage_stats(file, "dng_compress_cleanup_ms", 1);
     export_profile_write_stage_stats(file, "payload_clone_ms", 1);
     export_profile_write_stage_stats(file, "disk_write_ms", 1);
     export_profile_write_stage_stats(file, "writer_queue_wait_ms", 1);
@@ -1787,17 +1799,27 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
     return ret;
 }
 
-/* compress input_buffer to LJ92 image */
-int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
+static int dng_compress_image_profiled(uint16_t * output_buffer,
+                                       uint16_t * input_buffer,
+                                       size_t * output_buffer_size,
+                                       int width,
+                                       int height,
+                                       uint32_t bpp,
+                                       exportProfileFrame_t * profile_frame)
 {
     uint8_t * compressed = NULL;
     int new_width = width * 2;
     int new_height = height / 2;
 
+    double profile_stage_start = export_profile_stage_begin(profile_frame);
     int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp, new_width * new_height, 0, NULL, 0, &compressed, (int*)output_buffer_size);
+    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_ENCODE, profile_stage_start);
+
     if(ret == LJ92_ERROR_NONE)
     {
+        profile_stage_start = export_profile_stage_begin(profile_frame);
         memcpy(output_buffer, compressed, *output_buffer_size);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_COPY, profile_stage_start);
 #ifndef STDOUT_SILENT
         size_t input_buffer_size = width * height * 2;
         printf("LJ92 encoder: "FMT_SIZE" -> "FMT_SIZE" (%2.2f%% ratio)\n", *output_buffer_size, input_buffer_size, ((float)*output_buffer_size * 100.0f) / (float)input_buffer_size);
@@ -1812,8 +1834,26 @@ int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t
 #endif
     }
 
-    if(compressed) free(compressed);
+    if(compressed)
+    {
+        profile_stage_start = export_profile_stage_begin(profile_frame);
+        free(compressed);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_CLEANUP, profile_stage_start);
+    }
+
     return ret;
+}
+
+/* compress input_buffer to LJ92 image */
+int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
+{
+    return dng_compress_image_profiled(output_buffer,
+                                      input_buffer,
+                                      output_buffer_size,
+                                      width,
+                                      height,
+                                      bpp,
+                                      NULL);
 }
 
 /* changes endianness of the 16 bit buffer values
@@ -1904,12 +1944,13 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
             profile_stage_start = export_profile_stage_begin(profile_frame);
-            ret = dng_compress_image(dng_data->image_buf,
-                                     dng_data->image_buf_unpacked,
-                                     &dng_data->image_size,
-                                     mlv_data->RAWI.xRes,
-                                     mlv_data->RAWI.yRes,
-                                     mlv_data->RAWI.raw_info.bits_per_pixel);
+            ret = dng_compress_image_profiled(dng_data->image_buf,
+                                              dng_data->image_buf_unpacked,
+                                              &dng_data->image_size,
+                                              mlv_data->RAWI.xRes,
+                                              mlv_data->RAWI.yRes,
+                                              mlv_data->RAWI.raw_info.bits_per_pixel,
+                                              profile_frame);
             export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
             export_profile_note_dng_compress_bytes(
                 profile_frame,
@@ -1975,12 +2016,13 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
                     profile_stage_start = export_profile_stage_begin(profile_frame);
-                    ret = dng_compress_image(dng_data->image_buf,
-                                             dng_data->image_buf_unpacked,
-                                             &dng_data->image_size,
-                                             mlv_data->RAWI.xRes,
-                                             mlv_data->RAWI.yRes,
-                                             (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel);
+                    ret = dng_compress_image_profiled(dng_data->image_buf,
+                                                      dng_data->image_buf_unpacked,
+                                                      &dng_data->image_size,
+                                                      mlv_data->RAWI.xRes,
+                                                      mlv_data->RAWI.yRes,
+                                                      (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel,
+                                                      profile_frame);
                     export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
                     export_profile_note_dng_compress_bytes(
                         profile_frame,
@@ -2051,12 +2093,13 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
                     profile_stage_start = export_profile_stage_begin(profile_frame);
-                    ret = dng_compress_image(dng_data->image_buf,
-                                             dng_data->image_buf_unpacked,
-                                             &dng_data->image_size,
-                                             mlv_data->RAWI.xRes,
-                                             mlv_data->RAWI.yRes,
-                                             (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel);
+                    ret = dng_compress_image_profiled(dng_data->image_buf,
+                                                      dng_data->image_buf_unpacked,
+                                                      &dng_data->image_size,
+                                                      mlv_data->RAWI.xRes,
+                                                      mlv_data->RAWI.yRes,
+                                                      (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel,
+                                                      profile_frame);
                     export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
                     export_profile_note_dng_compress_bytes(
                         profile_frame,

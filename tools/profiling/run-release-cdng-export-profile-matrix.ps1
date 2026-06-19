@@ -594,6 +594,9 @@ foreach ($case in $cases) {
             llrawprocChromaSmoothAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocChromaSmoothAvgDeltaMs } else { $null }
             llrawprocOtherAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocOtherAvgDeltaMs } else { $null }
             dngCompressAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressAvgDeltaMs } else { $null }
+            dngCompressEncodeAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressEncodeAvgDeltaMs } else { $null }
+            dngCompressCopyAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressCopyAvgDeltaMs } else { $null }
+            dngCompressCleanupAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressCleanupAvgDeltaMs } else { $null }
             dngCompressInputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressInputBytesTotalDelta } else { $null }
             dngCompressOutputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputBytesTotalDelta } else { $null }
             dngCompressInputMiBPerSecondDelta = if ($abSummary) { $abSummary.compare.dngCompressInputMiBPerSecondDelta } else { $null }

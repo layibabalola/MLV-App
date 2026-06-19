@@ -70,15 +70,19 @@ baseline/candidate GPU-export intent plus attempt/replacement/allocation counter
 frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
 writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
 (`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck
-deltas, compression byte totals, and comparator failures. Full `llrawproc_*`
-substage timing remains in each run's export profile JSON. The per-run profile
-also records `dng_compress_bytes_valid_frames`,
+deltas, compression substage deltas, compression byte totals, and comparator
+failures. Full `llrawproc_*` substage timing remains in each run's export
+profile JSON. The per-run profile also records
+`dng_compress_encode_ms`, `dng_compress_copy_ms`,
+`dng_compress_cleanup_ms`, `dng_compress_bytes_valid_frames`,
 `dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
 per-frame compression input/output byte counts so E3 compression-placement
 experiments can compare throughput, not just elapsed milliseconds. The stage
 profile comparator emits those root counters under `compression`, including
 input/output MiB/s deltas and output-ratio deltas; A/B `summary.json` and
-matrix `runs[]` rows copy the same fields forward for direct promotion review.
+matrix `runs[]` rows copy the same fields plus
+`dngCompressEncodeAvgDeltaMs`, `dngCompressCopyAvgDeltaMs`, and
+`dngCompressCleanupAvgDeltaMs` forward for direct promotion review.
 Treat
 `candidateAsyncWriterMaxActive=1` on a multi-worker candidate as evidence that
 extra workers did not overlap actual writes in that run, even if the configured
