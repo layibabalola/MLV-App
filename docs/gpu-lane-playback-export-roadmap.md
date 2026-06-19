@@ -101,6 +101,11 @@ presented frame reports the validated `GPU Tex NR` pipeline. Auto headroom
 promotion now uses that latched capability rather than the current frame alone,
 so a real no-readback proof can inform later Auto decisions in the same session
 without treating mere FPS headroom or GPU presence as proof.
+If a later frame is still a no-readback candidate but falls back before
+presenting `GPU Tex NR`, the latch is cleared and
+`auto_validated_no_readback_capability_demoted_last` reports the demotion. That
+keeps Auto's capability-aware promotion/demotion tied to actual presentation
+truth instead of stale optimism.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

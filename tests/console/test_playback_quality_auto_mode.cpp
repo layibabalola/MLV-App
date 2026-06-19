@@ -238,17 +238,26 @@ TEST(PlaybackQualityAutoCapabilityTracker, LatchesOnlyAfterValidatedNoReadback)
     PlaybackQualityAutoCapabilityTracker tracker;
     ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
     ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 
     ASSERT_FALSE( tracker.notePresentedPipeline( false ) );
     ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
     ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline( false,
+                                                 /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 
     ASSERT_TRUE( tracker.notePresentedPipeline( true ) );
     ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
     ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 
     ASSERT_TRUE( tracker.notePresentedPipeline( false ) );
     ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 
     PlaybackQualityAutoSampler s;
     feed_n( s, 15.0, kWin );
@@ -260,9 +269,22 @@ TEST(PlaybackQualityAutoCapabilityTracker, LatchesOnlyAfterValidatedNoReadback)
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );
 
+    ASSERT_FALSE( tracker.notePresentedPipeline(
+        false, /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_TRUE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline( true,
+                                                /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
     tracker.reset();
     ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
     ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 }
 
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)

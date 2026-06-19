@@ -849,6 +849,7 @@ private:
         size_t playbackQualityAutoDecisionSampleCount = static_cast<size_t>( -1 );
         bool playbackQualityAutoHeadroomCapability = false;
         bool playbackQualityAutoValidatedNoReadbackCapability = false;
+        bool playbackQualityAutoValidatedNoReadbackDemoted = false;
         int envScale = -2;
         bool envHq = false;
         int envPreviewOverride = -2;

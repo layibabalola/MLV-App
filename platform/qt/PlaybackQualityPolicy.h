@@ -952,11 +952,19 @@ private:
 
 struct PlaybackQualityAutoCapabilityTracker
 {
-    bool notePresentedPipeline( bool gpuTextureNoReadbackActive )
+    bool notePresentedPipeline( bool gpuTextureNoReadbackActive,
+                                bool gpuTextureNoReadbackCandidate = false )
     {
+        m_lastObservationDemotedCapability = false;
         if ( gpuTextureNoReadbackActive )
         {
             m_validatedNoReadbackObserved = true;
+            return m_validatedNoReadbackObserved;
+        }
+        if ( gpuTextureNoReadbackCandidate && m_validatedNoReadbackObserved )
+        {
+            m_validatedNoReadbackObserved = false;
+            m_lastObservationDemotedCapability = true;
         }
         return m_validatedNoReadbackObserved;
     }
@@ -971,13 +979,20 @@ struct PlaybackQualityAutoCapabilityTracker
         return m_validatedNoReadbackObserved;
     }
 
+    bool lastObservationDemotedCapability() const
+    {
+        return m_lastObservationDemotedCapability;
+    }
+
     void reset()
     {
         m_validatedNoReadbackObserved = false;
+        m_lastObservationDemotedCapability = false;
     }
 
 private:
     bool m_validatedNoReadbackObserved = false;
+    bool m_lastObservationDemotedCapability = false;
 };
 
 #endif // PLAYBACKQUALITYPOLICY_H

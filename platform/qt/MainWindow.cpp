@@ -5039,6 +5039,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                            m_playbackQualityAutoHeadroomCapability );
             sample.insert( QStringLiteral("auto_validated_no_readback_capability_observed"),
                            m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() );
+            sample.insert( QStringLiteral("auto_validated_no_readback_capability_demoted_last"),
+                           m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() );
             sample.insert( QStringLiteral("auto_reason_last"),
                            QString::fromLatin1(
                                playbackQualityAutoDecisionReasonName(
@@ -16292,6 +16294,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         m_playbackQualityAutoDecisionSampleCount,
         m_playbackQualityAutoHeadroomCapability,
         m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved(),
+        m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability(),
         envScale,
         envHq,
         envPreviewOverride,
@@ -16320,6 +16323,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             == m_playbackQualityIndicatorCache.playbackQualityAutoHeadroomCapability
      && currentCache.playbackQualityAutoValidatedNoReadbackCapability
             == m_playbackQualityIndicatorCache.playbackQualityAutoValidatedNoReadbackCapability
+     && currentCache.playbackQualityAutoValidatedNoReadbackDemoted
+            == m_playbackQualityIndicatorCache.playbackQualityAutoValidatedNoReadbackDemoted
      && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
      && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
      && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
@@ -16511,7 +16516,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         const QString autoDetail = tr(
             "\nAuto decision: %1; samples=%2/%3; avg=%4 ms (%5 fps-eq); "
             "budget=%6 ms (%7 fps-eq) at target %8 fps; "
-            "headroom capability=%9; validated no-readback observed=%10." )
+            "headroom capability=%9; validated no-readback observed=%10; "
+            "candidate fallback demoted=%11." )
             .arg( QString::fromLatin1(
                       playbackQualityAutoDecisionReasonName(
                           m_playbackQualityAutoDecisionReason ) ) )
@@ -16523,7 +16529,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             .arg( autoBudgetFps, 0, 'f', 3 )
             .arg( m_playbackAutoTargetFps )
             .arg( bool01( m_playbackQualityAutoHeadroomCapability ) )
-            .arg( bool01( m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) );
+            .arg( bool01( m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) )
+            .arg( bool01( m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() ) );
         indicatorTooltip += autoDetail;
         toolButtonTooltip += autoDetail;
     }
@@ -19793,7 +19800,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58 "
                "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60 "
                "auto_headroom_capability_last=%61 "
-               "auto_validated_no_readback_capability_observed=%62" )
+               "auto_validated_no_readback_capability_observed=%62 "
+               "auto_validated_no_readback_capability_demoted_last=%63" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -19865,7 +19873,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                          m_playbackQualityAutoDecisionBudgetMs ), 0, 'f', 3 )
                .arg( bool01( m_playbackQualityAutoHeadroomCapability ) )
                .arg( bool01(
-                   m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) );
+                   m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) )
+               .arg( bool01(
+                   m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() ) );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -21473,9 +21483,12 @@ void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &read
             telemetryBoolValue( readyFrame.stageTimingTelemetry,
                                 "gpu_playback_recon_texture_present_no_readback_active" ) );
     m_playbackQualityAutoCapabilityTracker.notePresentedPipeline(
-        gpuPlaybackPipelineStatus == GpuPlaybackPipelineStatus::GpuTextureNoReadback );
-    if( !priorAutoValidatedNoReadback
-     && m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() )
+        gpuPlaybackPipelineStatus == GpuPlaybackPipelineStatus::GpuTextureNoReadback,
+        telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                            "gpu_playback_recon_texture_present_no_readback_candidate" ) );
+    if( ( !priorAutoValidatedNoReadback
+       && m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() )
+     || m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() )
     {
         updatePlaybackQualityIndicator();
     }
