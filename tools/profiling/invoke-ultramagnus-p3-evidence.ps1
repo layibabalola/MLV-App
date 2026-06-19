@@ -16,6 +16,7 @@ param(
     [int]$SettleMs = 1000,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SkipRemoteBuild,
+    [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
     [string]$ImportOnlyPacket = ""
 )
@@ -363,6 +364,7 @@ elseif ($failures.Count -eq 0) {
 
         $jobId = "mlvapp-p3-$stamp"
         $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
+        $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
         $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
         $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
         $jobScript = @"
@@ -374,7 +376,12 @@ elseif ($failures.Count -eq 0) {
 `$clipRoot = $(Convert-ToPowerShellSingleQuotedString $ClipRoot)
 `$clipNames = $clipNamesLiteral
 `$clipPaths = $clipPathsLiteral
+`$skipBackendBuild = $skipBackendBuildLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
+`$backendDir = Join-Path `$repo 'tools\gpu\backend'
+`$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
+`$backendDll = Join-Path `$backendDir 'igpu_recon_cuda.dll'
+`$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 `$payload = [ordered]@{
@@ -384,12 +391,80 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     repoRoot = `$repo
     packet = `$packet
     validator = `$validator
+    backend = [ordered]@{
+        skipped = [bool]`$skipBackendBuild
+        dir = `$backendDir
+        buildScript = `$backendBuildScript
+        buildExitCode = `$null
+        deployDir = `$releaseDir
+        artifacts = @()
+        deployedArtifacts = @()
+        output = @()
+    }
     validatorExitCode = `$null
     packetInfo = `$null
 }
 try {
     if (!(Test-Path -LiteralPath `$validator)) {
         throw "Missing validator script: `$validator"
+    }
+    if (-not `$skipBackendBuild) {
+        if (!(Test-Path -LiteralPath `$backendBuildScript)) {
+            throw "Missing backend build script: `$backendBuildScript"
+        }
+        `$backendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$backendBuildScript -Dir `$backendDir 2>&1
+        `$backendExit = `$LASTEXITCODE
+        `$payload.backend.buildExitCode = `$backendExit
+        `$payload.backend.output = @(`$backendOutput | ForEach-Object { [string]`$_ })
+        `$payload.backend.artifacts = @(Get-ChildItem -LiteralPath `$backendDir -File -ErrorAction SilentlyContinue |
+            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp)|dll_test\.exe)$' } |
+            Sort-Object Name |
+            ForEach-Object {
+                [ordered]@{
+                    name = `$_.Name
+                    path = `$_.FullName
+                    length = `$_.Length
+                    sha256 = (Get-FileHash -LiteralPath `$_.FullName -Algorithm SHA256).Hash
+                }
+            })
+        if (`$backendExit -ne 0) {
+            throw "Backend DLL build failed with exit code `$backendExit"
+        }
+        if (!(Test-Path -LiteralPath `$backendDll)) {
+            throw "Backend DLL build did not produce `$backendDll"
+        }
+        New-Item -ItemType Directory -Force -Path `$releaseDir | Out-Null
+        `$deployTargets = @()
+        `$deployTargets += [ordered]@{
+            source = `$backendDll
+            destination = (Join-Path `$releaseDir 'igpu_recon_cuda.dll')
+        }
+        `$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1).FullName
+        if (`$cudaRoot) {
+            `$cudart = Get-ChildItem -LiteralPath (Join-Path `$cudaRoot 'bin') -Filter 'cudart64_*.dll' -File -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First 1
+            if (`$cudart) {
+                `$deployTargets += [ordered]@{
+                    source = `$cudart.FullName
+                    destination = (Join-Path `$releaseDir `$cudart.Name)
+                }
+            }
+        }
+        foreach (`$target in `$deployTargets) {
+            Copy-Item -LiteralPath ([string]`$target.source) -Destination ([string]`$target.destination) -Force
+        }
+        `$payload.backend.deployedArtifacts = @(`$deployTargets | ForEach-Object {
+            `$item = Get-Item -LiteralPath ([string]`$_.destination)
+            [ordered]@{
+                name = `$item.Name
+                path = `$item.FullName
+                length = `$item.Length
+                sha256 = (Get-FileHash -LiteralPath `$item.FullName -Algorithm SHA256).Hash
+            }
+        })
     }
     `$args = @(
         '-NoLogo',

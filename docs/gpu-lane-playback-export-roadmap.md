@@ -66,6 +66,13 @@ UltraMagnus RTX 4090 run (`20260619T002209`, release executable SHA256
 `glParityMatchCount=10`, `glMismatchTotal=0`, and advancing GL texture hashes.
 The raw-fixes-off control receipt remains non-proof by design and must not arm
 no-readback.
+`tools/profiling/invoke-ultramagnus-p3-evidence.ps1` now treats the backend DLL
+as part of that proof surface: before validation, the UltraMagnus agent builds
+`tools/gpu/backend/igpu_recon_cuda.dll`, verifies it through `dll_test.exe`, and
+deploys the DLL plus CUDA runtime beside the staged release executable. Use
+`-SkipBackendBuild` only when deliberately reusing an already-current deployed
+backend; a staged release tree without `igpu_recon_cuda.dll` is expected to fall
+back before GL no-readback proof can occur.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
