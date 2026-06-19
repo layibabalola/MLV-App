@@ -98,7 +98,12 @@ must keep unsupported states on readback/CPU paths. Paired GUI-smoke A/B review
 now has a durable comparator (`tools/profiling/compare-release-gui-smoke-ab.ps1`)
 that reports screenshot pixel deltas, GUI/presented/timeline FPS deltas, and an
 optional screenshot-drift failure verdict from two `run-release-gui-smoke.ps1`
-JSON outputs.
+JSON outputs. The comparator also carries `visualQuality.autoDecision` deltas,
+including Auto reason, target/budget/average cadence in milliseconds and
+FPS-equivalent form, sample count, capability latches, and capability-failure
+arrays. This is a tooling-only review path over existing smoke JSON; it does
+not create a local VM playback proof, and P3/P4 no-readback promotion evidence
+still has to come from the UltraMagnus proof path.
 The Auto tooltip and playback smoke summary now report both milliseconds and
 FPS-equivalent cadence for the latest Auto decision (`auto_avg_fps_equivalent`
 and `auto_budget_fps_equivalent`), so adaptive decisions can be read without

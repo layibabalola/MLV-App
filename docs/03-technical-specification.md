@@ -1365,6 +1365,11 @@ no-readback observation in the current Auto run. `run-release-gui-smoke.ps1` als
 fails default validations when
 `presented_frames` is missing or zero; `-AllowZeroPresentedFrames` is an explicit
 launch-only opt-out and does not create playback/visual proof.
+`compare-release-gui-smoke-ab.ps1` carries the same Auto decision fields into
+its `autoDecision` comparison object, including cadence deltas in milliseconds
+and FPS-equivalent form plus the capability consistency fields. That comparator
+is a JSON artifact review surface only; it is not a replacement for
+UltraMagnus-backed no-readback evidence.
 
 ### 12.1 Cadence and render thread
 

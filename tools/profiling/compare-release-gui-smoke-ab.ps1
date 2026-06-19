@@ -99,6 +99,87 @@ function New-DeltaObject {
     }
 }
 
+function New-ValueChangeObject {
+    param(
+        [object]$BeforeValue,
+        [object]$AfterValue
+    )
+
+    [pscustomobject]@{
+        before = $BeforeValue
+        after = $AfterValue
+        changed = ([string]$BeforeValue) -ne ([string]$AfterValue)
+    }
+}
+
+function Convert-ToNonNullArray {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    @(@($Value) | Where-Object { $null -ne $_ })
+}
+
+function New-AutoDecisionComparison {
+    param(
+        [object]$BeforeSmoke,
+        [object]$AfterSmoke
+    )
+
+    [pscustomobject]@{
+        expectedAuto = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.expectedAuto") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.expectedAuto")
+        fieldsPresent = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.fieldsPresent") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.fieldsPresent")
+        source = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.source") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.source")
+        reason = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.reason") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.reason")
+        targetFps = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.targetFps") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.targetFps")
+        averageMs = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.averageMs") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.averageMs")
+        budgetMs = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.budgetMs") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.budgetMs")
+        sampleCount = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.sampleCount") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.sampleCount")
+        averageFpsEquivalent = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.averageFpsEquivalent") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.averageFpsEquivalent")
+        budgetFpsEquivalent = New-DeltaObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.budgetFpsEquivalent") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.budgetFpsEquivalent")
+        headroomCapabilityLast = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.headroomCapabilityLastBool") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.headroomCapabilityLastBool")
+        validatedNoReadbackCapabilityObserved = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.validatedNoReadbackCapabilityObservedBool") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.validatedNoReadbackCapabilityObservedBool")
+        validatedNoReadbackCapabilityDemotedLast = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.validatedNoReadbackCapabilityDemotedLastBool") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.validatedNoReadbackCapabilityDemotedLastBool")
+        capabilityConsistent = New-ValueChangeObject `
+            -BeforeValue (Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.capabilityConsistent") `
+            -AfterValue (Get-NestedValue $AfterSmoke "visualQuality.autoDecision.capabilityConsistent")
+        beforeCapabilityFailures = @(Convert-ToNonNullArray (
+            Get-NestedValue $BeforeSmoke "visualQuality.autoDecision.capabilityFailures"
+        ))
+        afterCapabilityFailures = @(Convert-ToNonNullArray (
+            Get-NestedValue $AfterSmoke "visualQuality.autoDecision.capabilityFailures"
+        ))
+    }
+}
+
 function Resolve-SmokeScreenshotPath {
     param([object]$Smoke)
 
@@ -272,6 +353,9 @@ $result = [pscustomobject]@{
         maxChangedSampleRatio = $MaxChangedSampleRatio
     }
     screenshot = $screenshotCompare
+    autoDecision = New-AutoDecisionComparison `
+        -BeforeSmoke $beforeSmoke `
+        -AfterSmoke $afterSmoke
     fps = [pscustomobject]@{
         visibleBottomLeftGuiFps = New-DeltaObject `
             -BeforeValue (Get-NestedValue $beforeSmoke "playbackFps.visibleBottomLeftGuiFps") `
@@ -311,13 +395,19 @@ if (-not [string]::IsNullOrWhiteSpace($Output)) {
 
 Write-Host ((
     "GUI-SMOKE-AB verdict={0} screenshot_status={1} mean_abs_rgb_delta={2} " +
-    "changed_sample_ratio={3} gui_fps_delta={4} presented_fps_delta={5} output={6}") -f
+    "changed_sample_ratio={3} gui_fps_delta={4} presented_fps_delta={5} " +
+    "auto_reason_before={6} auto_reason_after={7} auto_avg_ms_delta={8} " +
+    "auto_avg_fps_eq_delta={9} output={10}") -f
     $result.verdict,
     $result.screenshot.status,
     $result.screenshot.meanAbsRgbDelta,
     $result.screenshot.changedSampleRatio,
     $result.fps.visibleBottomLeftGuiFps.delta,
     $result.fps.smokePresentedFps.delta,
+    $result.autoDecision.reason.before,
+    $result.autoDecision.reason.after,
+    $result.autoDecision.averageMs.delta,
+    $result.autoDecision.averageFpsEquivalent.delta,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
 

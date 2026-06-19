@@ -467,6 +467,11 @@ no-readback observation in the current Auto run.
 Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
 Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
 must not be cited as visual playback, Auto sampler, FPS, or color proof.
+`tools/profiling/compare-release-gui-smoke-ab.ps1` preserves those Auto fields
+under `autoDecision` when comparing two smoke JSON files. Its stdout and JSON
+include Auto reason changes plus average milliseconds and FPS-equivalent deltas,
+so P4 reviews can compare sampler behavior without replaying the clip on the
+local VM; UltraMagnus remains the proof source for GPU no-readback promotion.
 
 ## Telemetry key list (playback-profile JSON)
 
