@@ -421,6 +421,19 @@ before any async writer handoff. Next E3 promotion work should therefore focus
 on stronger sampling/statistical methodology or an explicit writer-heavy
 scheduler result, not on treating this lossless PASS as broad export throughput
 proof.
+The matching lossless identity A/A matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-identity-matrix-e41e7de1/matrix-summary.json`
+also passed 6/6, and its hash sweep reported 48/48 DNG pairs matched with 0
+mismatches. The v2 calibration packet at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-calibration-e41e7de1/calibration.json`
+then compared that identity matrix against the lossless payload matrix and
+reported `verdict=EXCEEDS_IDENTITY_ENVELOPE` with compatible run keys and modes.
+The feature frame-total average positive max was 898.401425 ms versus the
+identity envelope's 35.658738 ms, and feature frame-total p95 positive max was
+1599.8133 ms versus identity 43.6239 ms. This keeps the lossless payload result
+strictly in the correctness/tooling bucket: byte output is stable, payload
+handoff cost is tiny, but the current short lossless timing envelope blocks any
+throughput promotion for that path.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
