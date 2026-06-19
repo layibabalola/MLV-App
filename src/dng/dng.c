@@ -76,8 +76,9 @@
 #define DNG_PAYLOAD_WRITER_DEFAULT_THREAD_COUNT 1
 #define DNG_PAYLOAD_WRITER_MAX_THREAD_COUNT 4
 #define DNG_PAYLOAD_WRITER_MAX_DEBUG_DELAY_MS 60000
-#define DNG_COMPRESS_PLACEMENT "producer_before_payload"
-#define DNG_COMPRESS_ASYNC_WRITER_OVERLAP_SUPPORTED 0
+#define DNG_ASYNC_WRITER_COMPRESS_ENV "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"
+#define DNG_COMPRESS_PLACEMENT_PRODUCER "producer_before_payload"
+#define DNG_COMPRESS_PLACEMENT_WRITER "async_writer_after_payload"
 
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
@@ -170,6 +171,7 @@ static unsigned g_export_profile_async_writer_max_queued = 0;
 static unsigned g_export_profile_async_writer_jobs_started = 0;
 static unsigned g_export_profile_async_writer_jobs_finished = 0;
 static unsigned g_export_profile_async_writer_max_active = 0;
+static int g_export_profile_async_writer_compress_used = 0;
 static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int export_profile_env_truthy(const char * value)
@@ -292,6 +294,7 @@ static void export_profile_reset_frames(void)
     g_export_profile_async_writer_jobs_started = 0;
     g_export_profile_async_writer_jobs_finished = 0;
     g_export_profile_async_writer_max_active = 0;
+    g_export_profile_async_writer_compress_used = 0;
 }
 
 static void export_profile_note_async_writer_threads(size_t thread_count)
@@ -333,6 +336,18 @@ static void export_profile_note_async_writer_activity(size_t active,
         g_export_profile_async_writer_jobs_finished = (unsigned)jobs_finished;
     }
     pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
+static void export_profile_note_async_writer_compress_used(void)
+{
+    pthread_mutex_lock(&g_export_profile_mutex);
+    g_export_profile_async_writer_compress_used = 1;
+    pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
+static int dng_async_writer_compress_env_enabled(void)
+{
+    return export_profile_env_truthy(getenv(DNG_ASYNC_WRITER_COMPRESS_ENV));
 }
 
 static unsigned dng_payload_writer_debug_delay_ms_from_env(void)
@@ -756,6 +771,7 @@ static void export_profile_write_json(void)
     unsigned dng_compress_bytes_valid_frames = 0;
     uint64_t dng_compress_input_bytes_total = 0;
     uint64_t dng_compress_output_bytes_total = 0;
+    int async_writer_compress_used = 0;
 
     if(g_export_profile_write_in_progress) return;
     if(g_export_profile_path[0] == '\0' || g_export_profile_frame_count == 0) return;
@@ -786,6 +802,9 @@ static void export_profile_write_json(void)
             dng_compress_output_bytes_total += frame->dng_compress_output_bytes;
         }
     }
+    pthread_mutex_lock(&g_export_profile_mutex);
+    async_writer_compress_used = g_export_profile_async_writer_compress_used;
+    pthread_mutex_unlock(&g_export_profile_mutex);
 
     g_export_profile_write_in_progress = 1;
     file = fopen(g_export_profile_path, "wb");
@@ -819,6 +838,9 @@ static void export_profile_write_json(void)
             export_profile_env_truthy(getenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER"))
                 ? "true"
                 : "false");
+    fprintf(file,
+            "  \"async_writer_compress_env_enabled\":%s,\n",
+            dng_async_writer_compress_env_enabled() ? "true" : "false");
     fputs("  \"generated_utc\":", file);
     export_profile_write_json_string(file, generated);
     fputs(",\n", file);
@@ -867,11 +889,15 @@ static void export_profile_write_json(void)
             "  \"dng_compress_output_bytes_total\":%llu,\n",
             (unsigned long long)dng_compress_output_bytes_total);
     fputs("  \"dng_compress_placement\":", file);
-    export_profile_write_json_string(file, DNG_COMPRESS_PLACEMENT);
+    export_profile_write_json_string(
+        file,
+        async_writer_compress_used
+            ? DNG_COMPRESS_PLACEMENT_WRITER
+            : DNG_COMPRESS_PLACEMENT_PRODUCER);
     fputs(",\n", file);
     fprintf(file,
             "  \"async_writer_can_overlap_dng_compress\":%s,\n",
-            DNG_COMPRESS_ASYNC_WRITER_OVERLAP_SUPPORTED ? "true" : "false");
+            async_writer_compress_used ? "true" : "false");
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);
@@ -1880,15 +1906,84 @@ static void dng_reverse_byte_order(uint16_t * input_buffer, size_t buf_size)
     }
 }
 
+static void dng_reset_deferred_payload_compress(dngObject_t * dng_data)
+{
+    if(!dng_data) return;
+    dng_data->defer_payload_compress = 0;
+    dng_data->payload_compress_width = 0;
+    dng_data->payload_compress_height = 0;
+    dng_data->payload_compress_bpp = 0;
+    dng_data->payload_compress_input_bytes = 0;
+}
+
+static int dng_defer_compress_to_payload(dngObject_t * dng_data,
+                                         mlvObject_t * mlv_data,
+                                         uint32_t frame_index,
+                                         uint32_t bpp)
+{
+    if(!dng_data || !mlv_data) return 1;
+    if(!dng_data->image_buf || !dng_data->image_buf_unpacked) return 1;
+
+    uint16_t * ready_image = dng_data->image_buf_unpacked;
+    dng_data->image_buf_unpacked = dng_data->image_buf;
+    dng_data->image_buf = ready_image;
+    dng_data->image_size =
+        dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, frame_index);
+    dng_data->defer_payload_compress = 1;
+    dng_data->payload_compress_width = mlv_data->RAWI.xRes;
+    dng_data->payload_compress_height = mlv_data->RAWI.yRes;
+    dng_data->payload_compress_bpp = bpp;
+    dng_data->payload_compress_input_bytes =
+        dng_compress_input_bytes_for_frame(mlv_data);
+    export_profile_note_async_writer_compress_used();
+    return 0;
+}
+
+static int dng_prepare_compressed_frame(mlvObject_t * mlv_data,
+                                        dngObject_t * dng_data,
+                                        uint32_t frame_index,
+                                        uint32_t bpp,
+                                        int defer_compress_to_payload,
+                                        exportProfileFrame_t * profile_frame)
+{
+    if(defer_compress_to_payload)
+    {
+        return dng_defer_compress_to_payload(dng_data,
+                                             mlv_data,
+                                             frame_index,
+                                             bpp);
+    }
+
+    double profile_stage_start = export_profile_stage_begin(profile_frame);
+    const int ret = dng_compress_image_profiled(dng_data->image_buf,
+                                                dng_data->image_buf_unpacked,
+                                                &dng_data->image_size,
+                                                mlv_data->RAWI.xRes,
+                                                mlv_data->RAWI.yRes,
+                                                bpp,
+                                                profile_frame);
+    export_profile_stage_end(profile_frame,
+                             EXPORT_PROFILE_DNG_COMPRESS,
+                             profile_stage_start);
+    export_profile_note_dng_compress_bytes(
+        profile_frame,
+        dng_compress_input_bytes_for_frame(mlv_data),
+        (uint64_t)dng_data->image_size,
+        ret == 0);
+    return ret;
+}
+
 /* build whole DNG frame (header + image), process image if needed and put to the dng struct ready to save */
 static int dng_get_frame(mlvObject_t * mlv_data,
                          dngObject_t * dng_data,
                          uint32_t frame_index,
                          const char *prop_filename,
-                         exportProfileFrame_t * profile_frame)
+                         exportProfileFrame_t * profile_frame,
+                         int defer_compress_to_payload)
 {
     int ret = 0;
     double profile_stage_start = 0.0;
+    dng_reset_deferred_payload_compress(dng_data);
 
     FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
 
@@ -1951,20 +2046,12 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
-            profile_stage_start = export_profile_stage_begin(profile_frame);
-            ret = dng_compress_image_profiled(dng_data->image_buf,
-                                              dng_data->image_buf_unpacked,
-                                              &dng_data->image_size,
-                                              mlv_data->RAWI.xRes,
-                                              mlv_data->RAWI.yRes,
-                                              mlv_data->RAWI.raw_info.bits_per_pixel,
-                                              profile_frame);
-            export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
-            export_profile_note_dng_compress_bytes(
-                profile_frame,
-                dng_compress_input_bytes_for_frame(mlv_data),
-                (uint64_t)dng_data->image_size,
-                ret == 0);
+            ret = dng_prepare_compressed_frame(mlv_data,
+                                               dng_data,
+                                               frame_index,
+                                               mlv_data->RAWI.raw_info.bits_per_pixel,
+                                               defer_compress_to_payload,
+                                               profile_frame);
         }
         else   // uncompressed and fast pass
         {
@@ -2023,20 +2110,15 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
-                    profile_stage_start = export_profile_stage_begin(profile_frame);
-                    ret = dng_compress_image_profiled(dng_data->image_buf,
-                                                      dng_data->image_buf_unpacked,
-                                                      &dng_data->image_size,
-                                                      mlv_data->RAWI.xRes,
-                                                      mlv_data->RAWI.yRes,
-                                                      (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel,
-                                                      profile_frame);
-                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
-                    export_profile_note_dng_compress_bytes(
-                        profile_frame,
-                        dng_compress_input_bytes_for_frame(mlv_data),
-                        (uint64_t)dng_data->image_size,
-                        ret == 0);
+                    ret = dng_prepare_compressed_frame(
+                        mlv_data,
+                        dng_data,
+                        frame_index,
+                        (llrpHQDualIso(mlv_data))
+                            ? 16
+                            : mlv_data->RAWI.raw_info.bits_per_pixel,
+                        defer_compress_to_payload,
+                        profile_frame);
                 }
                 else
                 {
@@ -2100,20 +2182,15 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
-                    profile_stage_start = export_profile_stage_begin(profile_frame);
-                    ret = dng_compress_image_profiled(dng_data->image_buf,
-                                                      dng_data->image_buf_unpacked,
-                                                      &dng_data->image_size,
-                                                      mlv_data->RAWI.xRes,
-                                                      mlv_data->RAWI.yRes,
-                                                      (llrpHQDualIso(mlv_data)) ? 16 : mlv_data->RAWI.raw_info.bits_per_pixel,
-                                                      profile_frame);
-                    export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS, profile_stage_start);
-                    export_profile_note_dng_compress_bytes(
-                        profile_frame,
-                        dng_compress_input_bytes_for_frame(mlv_data),
-                        (uint64_t)dng_data->image_size,
-                        ret == 0);
+                    ret = dng_prepare_compressed_frame(
+                        mlv_data,
+                        dng_data,
+                        frame_index,
+                        (llrpHQDualIso(mlv_data))
+                            ? 16
+                            : mlv_data->RAWI.raw_info.bits_per_pixel,
+                        defer_compress_to_payload,
+                        profile_frame);
                 }
                 else
                 {
@@ -2227,13 +2304,20 @@ static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
     payload->frame_index = frame_index;
     payload->raw_input_state = dng_data->raw_input_state;
     payload->raw_output_state = dng_data->raw_output_state;
+    payload->compression_deferred = dng_data->defer_payload_compress;
+    payload->compression_width = dng_data->payload_compress_width;
+    payload->compression_height = dng_data->payload_compress_height;
+    payload->compression_bpp = dng_data->payload_compress_bpp;
+    payload->compression_input_bytes = dng_data->payload_compress_input_bytes;
     payload->header_size = dng_data->header_size;
     payload->image_size = dng_data->image_size;
+    payload->image_capacity = dng_data->image_size_unpacked;
     payload->header_buf = payload_header;
     payload->image_buf = (uint8_t*)dng_data->image_buf;
 
     memcpy(payload->header_buf, dng_data->header_buf, payload->header_size);
     dng_data->image_buf = replacement_image;
+    dng_reset_deferred_payload_compress(dng_data);
     return payload;
 }
 
@@ -2244,7 +2328,7 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
 {
     if(!mlv_data || !dng_data) return NULL;
 
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL) != 0)
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL, 0) != 0)
     {
         return NULL;
     }
@@ -2252,7 +2336,98 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
     return dng_take_ready_frame_payload(dng_data, frame_index);
 }
 
-int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_filename)
+static int dng_patch_header_long_tag(uint8_t * header,
+                                     size_t header_size,
+                                     uint16_t tag,
+                                     uint32_t value)
+{
+    if(!header || header_size < 10) return 1;
+
+    uint32_t ifd_offset = 0;
+    memcpy(&ifd_offset, header + 4, sizeof(ifd_offset));
+    if((size_t)ifd_offset + sizeof(uint16_t) > header_size) return 1;
+
+    uint16_t entry_count = 0;
+    memcpy(&entry_count, header + ifd_offset, sizeof(entry_count));
+    size_t entry_offset = (size_t)ifd_offset + sizeof(uint16_t);
+    for(uint16_t i = 0; i < entry_count; i++)
+    {
+        if(entry_offset + sizeof(struct directory_entry) > header_size)
+        {
+            return 1;
+        }
+
+        struct directory_entry entry;
+        memcpy(&entry, header + entry_offset, sizeof(entry));
+        if(entry.tag == tag)
+        {
+            entry.value = value;
+            memcpy(header + entry_offset, &entry, sizeof(entry));
+            return 0;
+        }
+        entry_offset += sizeof(struct directory_entry);
+    }
+
+    return 1;
+}
+
+static int dng_prepare_payload_for_write(dngFramePayload_t * payload,
+                                         exportProfileFrame_t * profile_frame)
+{
+    if(!payload) return 1;
+    if(!payload->compression_deferred) return 0;
+    if(!payload->image_buf || payload->image_capacity < payload->image_size)
+    {
+        return 1;
+    }
+    if(payload->compression_width <= 0 || payload->compression_height <= 0)
+    {
+        return 1;
+    }
+    if(payload->compression_bpp == 0)
+    {
+        return 1;
+    }
+
+    size_t output_size = payload->image_capacity;
+    double profile_stage_start = export_profile_stage_begin(profile_frame);
+    const int ret = dng_compress_image_profiled((uint16_t*)payload->image_buf,
+                                                (uint16_t*)payload->image_buf,
+                                                &output_size,
+                                                payload->compression_width,
+                                                payload->compression_height,
+                                                payload->compression_bpp,
+                                                profile_frame);
+    export_profile_stage_end(profile_frame,
+                             EXPORT_PROFILE_DNG_COMPRESS,
+                             profile_stage_start);
+    export_profile_note_dng_compress_bytes(
+        profile_frame,
+        payload->compression_input_bytes,
+        (uint64_t)output_size,
+        ret == 0);
+    if(ret != 0)
+    {
+        return 1;
+    }
+    if(output_size > UINT32_MAX)
+    {
+        return 1;
+    }
+
+    payload->image_size = output_size;
+    if(dng_patch_header_long_tag(payload->header_buf,
+                                 payload->header_size,
+                                 tcStripByteCounts,
+                                 (uint32_t)payload->image_size) != 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
+static int writeDngFramePayloadPrepared(dngFramePayload_t * payload,
+                                        const char * dng_filename)
 {
     if(!payload || !dng_filename) return 1;
 
@@ -2266,6 +2441,19 @@ int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_fil
                                       payload->image_size);
     fclose(dngf);
     return ret;
+}
+
+static int writeDngFramePayloadProfiled(dngFramePayload_t * payload,
+                                        const char * dng_filename,
+                                        exportProfileFrame_t * profile_frame)
+{
+    if(dng_prepare_payload_for_write(payload, profile_frame) != 0) return 1;
+    return writeDngFramePayloadPrepared(payload, dng_filename);
+}
+
+int writeDngFramePayload(dngFramePayload_t * payload, const char * dng_filename)
+{
+    return writeDngFramePayloadProfiled(payload, dng_filename, NULL);
 }
 
 void freeDngFramePayload(dngFramePayload_t * payload)
@@ -2443,9 +2631,15 @@ static void * dng_payload_writer_main(void * opaque)
                                                   jobs_started,
                                                   jobs_finished);
 
-        const double write_start = export_profile_stage_begin(&job.profile_frame);
-        const int write_ret = writeDngFramePayload(job.payload, job.dng_filename);
-        export_profile_stage_end(&job.profile_frame, EXPORT_PROFILE_DISK_WRITE, write_start);
+        const int prepare_ret =
+            dng_prepare_payload_for_write(job.payload, &job.profile_frame);
+        int write_ret = 1;
+        if(prepare_ret == 0)
+        {
+            const double write_start = export_profile_stage_begin(&job.profile_frame);
+            write_ret = writeDngFramePayloadPrepared(job.payload, job.dng_filename);
+            export_profile_stage_end(&job.profile_frame, EXPORT_PROFILE_DISK_WRITE, write_start);
+        }
         export_profile_stage_end(&job.profile_frame, EXPORT_PROFILE_FRAME_TOTAL, job.profile_frame_start);
         export_profile_frame_finish(&job.profile_frame, write_ret == 0);
 
@@ -2611,6 +2805,13 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
     return 0;
 }
 
+static int dng_should_defer_compress_to_async_writer(const dngObject_t * dng_data)
+{
+    return dng_data
+        && dng_data->raw_output_state == COMPRESSED_RAW
+        && dng_async_writer_compress_env_enabled();
+}
+
 int finishDngPayloadWriter(dngPayloadWriter_t * writer)
 {
     if(!writer) return 0;
@@ -2658,7 +2859,12 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
         return 1;
     }
 
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
+    if(dng_get_frame(mlv_data,
+                     dng_data,
+                     frame_index,
+                     prop_filename,
+                     &profile_frame,
+                     dng_should_defer_compress_to_async_writer(dng_data)) != 0)
     {
         export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
@@ -2716,7 +2922,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
         return 1;
     }
 
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame, 0) != 0)
     {
         export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
@@ -2772,7 +2978,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     }
 
     /* get filled dng_data struct */
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame, 0) != 0)
     {
         fclose(dngf);
         export_profile_producer_finish(&profile_frame, profile_frame_start);

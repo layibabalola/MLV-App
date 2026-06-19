@@ -76,14 +76,18 @@ profile JSON. The per-run profile also records
 `dng_compress_encode_ms`, `dng_compress_copy_ms`,
 `dng_compress_cleanup_ms`, `dng_compress_bytes_valid_frames`,
 `dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
-per-frame compression input/output byte counts. It also records
+per-frame compression input/output byte counts. Default runs record
 `dng_compress_placement=producer_before_payload` and
-`async_writer_can_overlap_dng_compress=false` for the current architecture, so
-E3 compression-placement experiments can compare throughput and placement, not
-just elapsed milliseconds. The stage profile comparator emits those root
-counters under `compression`, including input/output MiB/s deltas,
-output-ratio deltas, and placement/overlap changes; A/B `summary.json` and
-matrix `runs[]` rows copy the same fields plus
+`async_writer_can_overlap_dng_compress=false`; opt-in async-writer compression
+runs (`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS=1` / wrapper
+`-UseAsyncWriterCompression`) can instead record
+`dng_compress_placement=async_writer_after_payload` and
+`async_writer_can_overlap_dng_compress=true`. E3 compression-placement
+experiments can therefore compare throughput and placement, not just elapsed
+milliseconds. The stage profile comparator emits those root counters under
+`compression`, including input/output MiB/s deltas, output-ratio deltas, and
+placement/overlap changes; A/B `summary.json` and matrix `runs[]` rows copy the
+same fields plus
 `dngCompressEncodeAvgDeltaMs`, `dngCompressCopyAvgDeltaMs`, and
 `dngCompressCleanupAvgDeltaMs` forward for direct promotion review.
 Treat

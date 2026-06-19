@@ -16,6 +16,8 @@ param(
     [switch]$CandidateUsePayloadHandoff,
     [switch]$BaselineUseAsyncWriter,
     [switch]$CandidateUseAsyncWriter,
+    [switch]$BaselineUseAsyncWriterCompression,
+    [switch]$CandidateUseAsyncWriterCompression,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
     [int]$BaselineAsyncWriterThreadCount = 0,
@@ -45,6 +47,12 @@ if ($Repeats -lt 1) {
 }
 if ($MaxFrames -lt 0) {
     throw "-MaxFrames must be >= 0."
+}
+if ($BaselineUseAsyncWriterCompression -and -not $BaselineUseAsyncWriter) {
+    throw "-BaselineUseAsyncWriterCompression requires -BaselineUseAsyncWriter."
+}
+if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
+    throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -363,6 +371,12 @@ function New-AbArgs {
     if ($CandidateUseAsyncWriter) {
         $args += "-CandidateUseAsyncWriter"
     }
+    if ($BaselineUseAsyncWriterCompression) {
+        $args += "-BaselineUseAsyncWriterCompression"
+    }
+    if ($CandidateUseAsyncWriterCompression) {
+        $args += "-CandidateUseAsyncWriterCompression"
+    }
     if ($BaselineAsyncWriterQueueDepth -gt 0) {
         $args += @("-BaselineAsyncWriterQueueDepth", "$BaselineAsyncWriterQueueDepth")
     }
@@ -409,6 +423,7 @@ function New-AbArgs {
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
     [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
+    [bool]$BaselineUseAsyncWriterCompression -eq [bool]$CandidateUseAsyncWriterCompression -and
     $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
     $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount -and
     $baselineGpuExportEnabled -eq $candidateGpuExportEnabled -and
@@ -468,6 +483,8 @@ if ($DryRun) {
             candidateUsePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             baselineUseAsyncWriter = [bool]$BaselineUseAsyncWriter
             candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
+            baselineUseAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
+            candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
             baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
             baselineAsyncWriterThreadCount = $BaselineAsyncWriterThreadCount
@@ -569,6 +586,8 @@ foreach ($case in $cases) {
             candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
             elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
             elapsedDeltaPercent = if ($abSummary) { $abSummary.compare.elapsedDeltaPercent } else { $null }
+            baselineAsyncWriterCompressEnvEnabled = if ($abSummary) { $abSummary.baseline.asyncWriterCompressEnvEnabled } else { $null }
+            candidateAsyncWriterCompressEnvEnabled = if ($abSummary) { $abSummary.candidate.asyncWriterCompressEnvEnabled } else { $null }
             candidateAsyncWriterThreadCount = if ($abSummary) { $abSummary.candidate.asyncWriterThreadCount } else { $null }
             candidateAsyncWriterQueueCapacity = if ($abSummary) { $abSummary.candidate.asyncWriterQueueCapacity } else { $null }
             candidateAsyncWriterMaxQueued = if ($abSummary) { $abSummary.candidate.asyncWriterMaxQueued } else { $null }
@@ -652,6 +671,8 @@ $matrix = [pscustomobject]@{
         candidateUsePayloadHandoff = [bool]$CandidateUsePayloadHandoff
         baselineUseAsyncWriter = [bool]$BaselineUseAsyncWriter
         candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
+        baselineUseAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
+        candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
         baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
         candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
         baselineAsyncWriterThreadCount = $BaselineAsyncWriterThreadCount
@@ -728,10 +749,10 @@ if ($RequireDngHashMatch) {
 Write-Host (((
     "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} cdng_codec={2} alternate_run_order={3} " +
     "cases={4} runs={5} pass={6} fail={7} candidate_payload={8} " +
-    "candidate_async={9} candidate_async_queue_depth={10} " +
-    "baseline_gpu_export_enabled={11} candidate_gpu_export_enabled={12} " +
-    "require_candidate_gpu_export_replacement={13} dng_hash_required={14} " +
-    "dng_hash_verdict={15} elapsed_delta_ms_field=True output={16}") -f
+    "candidate_async={9} candidate_async_compress={10} candidate_async_queue_depth={11} " +
+    "baseline_gpu_export_enabled={12} candidate_gpu_export_enabled={13} " +
+    "require_candidate_gpu_export_replacement={14} dng_hash_required={15} " +
+    "dng_hash_verdict={16} elapsed_delta_ms_field=True output={17}") -f
     $matrix.verdict,
     $matrix.comparisonMode,
     $(if ([string]::IsNullOrWhiteSpace($matrix.options.cdngCodec)) { "default" } else { $matrix.options.cdngCodec }),
@@ -742,6 +763,7 @@ Write-Host (((
     $matrix.totals.failCount,
     [bool]$CandidateUsePayloadHandoff,
     [bool]$CandidateUseAsyncWriter,
+    [bool]$CandidateUseAsyncWriterCompression,
     $CandidateAsyncWriterQueueDepth,
     $baselineGpuExportEnabled,
     $candidateGpuExportEnabled,

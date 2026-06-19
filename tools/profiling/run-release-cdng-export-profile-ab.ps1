@@ -12,6 +12,8 @@ param(
     [switch]$CandidateUsePayloadHandoff,
     [switch]$BaselineUseAsyncWriter,
     [switch]$CandidateUseAsyncWriter,
+    [switch]$BaselineUseAsyncWriterCompression,
+    [switch]$CandidateUseAsyncWriterCompression,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
     [int]$BaselineAsyncWriterThreadCount = 0,
@@ -36,6 +38,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($BaselineUseAsyncWriterCompression -and -not $BaselineUseAsyncWriter) {
+    throw "-BaselineUseAsyncWriterCompression requires -BaselineUseAsyncWriter."
+}
+if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
+    throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
+}
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 $runner = Join-Path $root "tools\profiling\run-release-cdng-export-profile.ps1"
@@ -92,6 +101,7 @@ function New-ProfileArgs {
         [string]$LogPath,
         [bool]$UsePayloadHandoff,
         [bool]$UseAsyncWriter,
+        [bool]$UseAsyncWriterCompression,
         [int]$AsyncWriterQueueDepth,
         [int]$AsyncWriterThreadCount,
         [bool]$UseGpuExport,
@@ -135,6 +145,9 @@ function New-ProfileArgs {
     }
     if ($UseAsyncWriter) {
         $args += "-UseAsyncWriter"
+        if ($UseAsyncWriterCompression) {
+            $args += "-UseAsyncWriterCompression"
+        }
         if ($AsyncWriterQueueDepth -gt 0) {
             $args += @("-AsyncWriterQueueDepth", "$AsyncWriterQueueDepth")
         }
@@ -237,6 +250,7 @@ $baselineArgs = New-ProfileArgs `
     -LogPath $baselineLog `
     -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$BaselineUseAsyncWriter) `
+    -UseAsyncWriterCompression ([bool]$BaselineUseAsyncWriterCompression) `
     -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth `
     -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount `
     -UseGpuExport $baselineGpuExportEnabled `
@@ -248,6 +262,7 @@ $candidateArgs = New-ProfileArgs `
     -LogPath $candidateLog `
     -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$CandidateUseAsyncWriter) `
+    -UseAsyncWriterCompression ([bool]$CandidateUseAsyncWriterCompression) `
     -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth `
     -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount `
     -UseGpuExport $candidateGpuExportEnabled `
@@ -256,6 +271,7 @@ $candidateArgs = New-ProfileArgs `
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
     [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
+    [bool]$BaselineUseAsyncWriterCompression -eq [bool]$CandidateUseAsyncWriterCompression -and
     $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
     $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount -and
     $baselineGpuExportEnabled -eq $candidateGpuExportEnabled -and
@@ -278,6 +294,7 @@ if ($DryRun) {
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
+            useAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
             enableGpuExport = $baselineGpuExportEnabled
             gpuExportDll = $baselineGpuExportDllSummary
             asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
@@ -287,6 +304,7 @@ if ($DryRun) {
         candidate = [pscustomobject]@{
             usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             useAsyncWriter = [bool]$CandidateUseAsyncWriter
+            useAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
             enableGpuExport = $candidateGpuExportEnabled
             gpuExportDll = $candidateGpuExportDllSummary
             asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
@@ -409,6 +427,7 @@ $summary = [pscustomobject]@{
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
         useAsyncWriter = [bool]$BaselineUseAsyncWriter
+        useAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
         enableGpuExport = $baselineGpuExportEnabled
         gpuExportDll = $baselineGpuExportDllSummary
         profile = $baselineProfile
@@ -418,6 +437,7 @@ $summary = [pscustomobject]@{
         frameCount = $baselineProfileJson.frame_count
         payloadHandoffEnvEnabled = $baselineProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $baselineProfileJson.async_writer_env_enabled
+        asyncWriterCompressEnvEnabled = $baselineProfileJson.async_writer_compress_env_enabled
         asyncWriterThreadCount = $baselineProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $baselineProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $baselineProfileJson.async_writer_max_queued
@@ -441,6 +461,7 @@ $summary = [pscustomobject]@{
     candidate = [pscustomobject]@{
         usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
         useAsyncWriter = [bool]$CandidateUseAsyncWriter
+        useAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
         enableGpuExport = $candidateGpuExportEnabled
         gpuExportDll = $candidateGpuExportDllSummary
         profile = $candidateProfile
@@ -450,6 +471,7 @@ $summary = [pscustomobject]@{
         frameCount = $candidateProfileJson.frame_count
         payloadHandoffEnvEnabled = $candidateProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $candidateProfileJson.async_writer_env_enabled
+        asyncWriterCompressEnvEnabled = $candidateProfileJson.async_writer_compress_env_enabled
         asyncWriterThreadCount = $candidateProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $candidateProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $candidateProfileJson.async_writer_max_queued
@@ -570,22 +592,23 @@ if ($RequireDngHashMatch) {
 Write-Host ((
     "CDNG-EXPORT-AB verdict={0} comparison_mode={1} run_order={2} cdng_codec={3} " +
     "baseline_payload={4} candidate_payload={5} baseline_async={6} candidate_async={7} " +
-    "baseline_async_threads={8} candidate_async_threads={9} " +
-    "baseline_async_queue_capacity={10} candidate_async_queue_capacity={11} " +
-    "baseline_async_max_active={12} candidate_async_max_active={13} " +
-    "baseline_gpu_export_enabled={14} candidate_gpu_export_enabled={15} " +
-    "baseline_gpu_export_attempted={16} candidate_gpu_export_attempted={17} " +
-    "candidate_gpu_export_replaced={18} proof_gate_failures={19} " +
-    "dng_hash_required={20} dng_hash_verdict={21} " +
-    "elapsed_delta_ms={22} elapsed_delta_percent={23} " +
-    "frame_total_avg_delta_ms={24} frame_total_p95_delta_ms={25} " +
-    "queue_idle_avg_delta_ms={26} payload_clone_avg_delta_ms={27} " +
-    "writer_queue_wait_avg_delta_ms={28} producer_frame_avg_delta_ms={29} " +
-    "producer_queue_idle_avg_delta_ms={30} writer_completion_lag_avg_delta_ms={31} " +
-    "llrawproc_total_avg_delta_ms={32} llrawproc_dual_iso_avg_delta_ms={33} " +
-    "dng_compress_avg_delta_ms={34} dng_compress_output_mibps_delta={35} " +
-    "dng_compress_output_bytes_delta={36} dng_compress_placement_candidate={37} " +
-    "async_writer_can_overlap_dng_compress_candidate={38} output={39}") -f
+    "baseline_async_compress={8} candidate_async_compress={9} " +
+    "baseline_async_threads={10} candidate_async_threads={11} " +
+    "baseline_async_queue_capacity={12} candidate_async_queue_capacity={13} " +
+    "baseline_async_max_active={14} candidate_async_max_active={15} " +
+    "baseline_gpu_export_enabled={16} candidate_gpu_export_enabled={17} " +
+    "baseline_gpu_export_attempted={18} candidate_gpu_export_attempted={19} " +
+    "candidate_gpu_export_replaced={20} proof_gate_failures={21} " +
+    "dng_hash_required={22} dng_hash_verdict={23} " +
+    "elapsed_delta_ms={24} elapsed_delta_percent={25} " +
+    "frame_total_avg_delta_ms={26} frame_total_p95_delta_ms={27} " +
+    "queue_idle_avg_delta_ms={28} payload_clone_avg_delta_ms={29} " +
+    "writer_queue_wait_avg_delta_ms={30} producer_frame_avg_delta_ms={31} " +
+    "producer_queue_idle_avg_delta_ms={32} writer_completion_lag_avg_delta_ms={33} " +
+    "llrawproc_total_avg_delta_ms={34} llrawproc_dual_iso_avg_delta_ms={35} " +
+    "dng_compress_avg_delta_ms={36} dng_compress_output_mibps_delta={37} " +
+    "dng_compress_output_bytes_delta={38} dng_compress_placement_candidate={39} " +
+    "async_writer_can_overlap_dng_compress_candidate={40} output={41}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -594,6 +617,8 @@ Write-Host ((
     $summary.candidate.usePayloadHandoff,
     $summary.baseline.useAsyncWriter,
     $summary.candidate.useAsyncWriter,
+    $summary.baseline.useAsyncWriterCompression,
+    $summary.candidate.useAsyncWriterCompression,
     $summary.baseline.asyncWriterThreadCount,
     $summary.candidate.asyncWriterThreadCount,
     $summary.baseline.asyncWriterQueueCapacity,

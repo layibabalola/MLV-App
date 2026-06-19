@@ -17,6 +17,7 @@ param(
     [switch]$EnableGpuExport,
     [switch]$UsePayloadHandoff,
     [switch]$UseAsyncWriter,
+    [switch]$UseAsyncWriterCompression,
     [int]$AsyncWriterQueueDepth = 0,
     [int]$AsyncWriterThreadCount = 0,
     [int]$AsyncWriterDebugDelayMs = 0,
@@ -28,6 +29,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($UseAsyncWriterCompression -and -not $UseAsyncWriter) {
+    throw "-UseAsyncWriterCompression requires -UseAsyncWriter."
+}
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
@@ -210,12 +215,19 @@ try {
         else {
             [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS")
         }
+        if ($UseAsyncWriterCompression) {
+            $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"] = "1"
+        }
+        else {
+            [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS")
+        }
     }
     else {
         [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER")
         [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH")
         [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS")
         [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS")
+        [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS")
     }
     Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
@@ -243,6 +255,7 @@ try {
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH"]
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS"]
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS"]
+                MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"]
             }
         } | ConvertTo-Json -Depth 5
         return

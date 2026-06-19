@@ -838,6 +838,18 @@ improvements while LJ92 encode still runs before payload enqueue. This is a
 guardrail and methodology improvement only; it does not move compression to a
 worker thread or claim throughput promotion.
 
+Update 2026-06-19 Lane A E3 async-writer compression experiment: an opt-in
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS=1` path, surfaced by
+`-UseAsyncWriterCompression` in the profiling runners, can now move
+`COMPRESSED_RAW` LJ92 compression after payload enqueue onto the async writer.
+The default producer-side path is unchanged. The writer-side path carries the
+processed uncompressed payload, compresses it before disk write, patches the
+DNG `StripByteCounts` header field, and profiles the run as
+`dng_compress_placement=async_writer_after_payload` with
+`async_writer_can_overlap_dng_compress=true`. This is an experimental E3
+candidate surface, not a promoted throughput policy; promotion still requires
+release-tree byte identity plus a bounded calibrated real-footage matrix.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

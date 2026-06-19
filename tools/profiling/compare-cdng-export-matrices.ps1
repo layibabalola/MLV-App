@@ -124,6 +124,8 @@ function Get-MatrixRuns {
                 candidateDngCompressPlacement = $run.candidateDngCompressPlacement
                 baselineAsyncWriterCanOverlapDngCompress = $run.baselineAsyncWriterCanOverlapDngCompress
                 candidateAsyncWriterCanOverlapDngCompress = $run.candidateAsyncWriterCanOverlapDngCompress
+                baselineAsyncWriterCompressEnvEnabled = $run.baselineAsyncWriterCompressEnvEnabled
+                candidateAsyncWriterCompressEnvEnabled = $run.candidateAsyncWriterCompressEnvEnabled
                 dngCompressInputMiBPerSecondDelta = $run.dngCompressInputMiBPerSecondDelta
                 dngCompressOutputMiBPerSecondDelta = $run.dngCompressOutputMiBPerSecondDelta
                 dngCompressOutputRatioDelta = $run.dngCompressOutputRatioDelta
