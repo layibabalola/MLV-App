@@ -647,6 +647,8 @@ if ($failures.Count -eq 0) {
         # the temporal artifact/cadence detector sees real (un-instrumented)
         # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
         $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
+        $expectedScaleRequest = -1
+        [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -669,6 +671,8 @@ if ($failures.Count -eq 0) {
     GpuPreviewProcessing = 'gpu'
     ScaleFactor = '$ScaleFactor'
     QualityMode = '$QualityMode'
+    ExpectedScaleRequest = $expectedScaleRequest
+    ExpectedVisualScaleRequest = $expectedScaleRequest
     ExpectedQualityMode = ([int]'$QualityMode')
     RequireLookAssist = `$false
     PreserveExperimentalEnvironment = `$true
