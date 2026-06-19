@@ -141,6 +141,9 @@ static double g_export_profile_last_producer_finish_ms = 0.0;
 static unsigned g_export_profile_async_writer_thread_count = 0;
 static unsigned g_export_profile_async_writer_queue_capacity = 0;
 static unsigned g_export_profile_async_writer_max_queued = 0;
+static unsigned g_export_profile_async_writer_jobs_started = 0;
+static unsigned g_export_profile_async_writer_jobs_finished = 0;
+static unsigned g_export_profile_async_writer_max_active = 0;
 static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int export_profile_env_truthy(const char * value)
@@ -228,6 +231,9 @@ static void export_profile_reset_frames(void)
     g_export_profile_async_writer_thread_count = 0;
     g_export_profile_async_writer_queue_capacity = 0;
     g_export_profile_async_writer_max_queued = 0;
+    g_export_profile_async_writer_jobs_started = 0;
+    g_export_profile_async_writer_jobs_finished = 0;
+    g_export_profile_async_writer_max_active = 0;
 }
 
 static void export_profile_note_async_writer_threads(size_t thread_count)
@@ -247,6 +253,26 @@ static void export_profile_note_async_writer_queue(size_t capacity, size_t queue
     if(queued > (size_t)g_export_profile_async_writer_max_queued)
     {
         g_export_profile_async_writer_max_queued = (unsigned)queued;
+    }
+    pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
+static void export_profile_note_async_writer_activity(size_t active,
+                                                      size_t jobs_started,
+                                                      size_t jobs_finished)
+{
+    pthread_mutex_lock(&g_export_profile_mutex);
+    if(active > (size_t)g_export_profile_async_writer_max_active)
+    {
+        g_export_profile_async_writer_max_active = (unsigned)active;
+    }
+    if(jobs_started > (size_t)g_export_profile_async_writer_jobs_started)
+    {
+        g_export_profile_async_writer_jobs_started = (unsigned)jobs_started;
+    }
+    if(jobs_finished > (size_t)g_export_profile_async_writer_jobs_finished)
+    {
+        g_export_profile_async_writer_jobs_finished = (unsigned)jobs_finished;
     }
     pthread_mutex_unlock(&g_export_profile_mutex);
 }
@@ -621,6 +647,15 @@ static void export_profile_write_json(void)
     fprintf(file,
             "  \"async_writer_max_queued\":%u,\n",
             g_export_profile_async_writer_max_queued);
+    fprintf(file,
+            "  \"async_writer_jobs_started\":%u,\n",
+            g_export_profile_async_writer_jobs_started);
+    fprintf(file,
+            "  \"async_writer_jobs_finished\":%u,\n",
+            g_export_profile_async_writer_jobs_finished);
+    fprintf(file,
+            "  \"async_writer_max_active\":%u,\n",
+            g_export_profile_async_writer_max_active);
     fprintf(file,
             "  \"async_writer_debug_delay_ms\":%u,\n",
             dng_payload_writer_debug_delay_ms_from_env());
@@ -2016,6 +2051,9 @@ struct dngPayloadWriter
     size_t queue_count;
     size_t queue_head;
     size_t queue_tail;
+    size_t active_jobs;
+    size_t jobs_started;
+    size_t jobs_finished;
     dngPayloadWriterJob_t * jobs;
 };
 
@@ -2070,6 +2108,9 @@ static void * dng_payload_writer_main(void * opaque)
     for(;;)
     {
         dngPayloadWriterJob_t job;
+        size_t active_jobs = 0;
+        size_t jobs_started = 0;
+        size_t jobs_finished = 0;
         memset(&job, 0, sizeof(job));
 
         pthread_mutex_lock(&writer->mutex);
@@ -2094,8 +2135,16 @@ static void * dng_payload_writer_main(void * opaque)
         memset(&writer->jobs[writer->queue_head], 0, sizeof(writer->jobs[writer->queue_head]));
         writer->queue_head = (writer->queue_head + 1) % writer->queue_capacity;
         writer->queue_count--;
+        writer->active_jobs++;
+        writer->jobs_started++;
+        active_jobs = writer->active_jobs;
+        jobs_started = writer->jobs_started;
+        jobs_finished = writer->jobs_finished;
         pthread_cond_signal(&writer->can_produce);
         pthread_mutex_unlock(&writer->mutex);
+        export_profile_note_async_writer_activity(active_jobs,
+                                                  jobs_started,
+                                                  jobs_finished);
 
         const double write_start = export_profile_stage_begin(&job.profile_frame);
         const int write_ret = writeDngFramePayload(job.payload, job.dng_filename);
@@ -2119,8 +2168,19 @@ static void * dng_payload_writer_main(void * opaque)
         {
             writer->first_error = write_ret;
         }
+        if(writer->active_jobs > 0)
+        {
+            writer->active_jobs--;
+        }
+        writer->jobs_finished++;
+        active_jobs = writer->active_jobs;
+        jobs_started = writer->jobs_started;
+        jobs_finished = writer->jobs_finished;
         pthread_cond_signal(&writer->can_produce);
         pthread_mutex_unlock(&writer->mutex);
+        export_profile_note_async_writer_activity(active_jobs,
+                                                  jobs_started,
+                                                  jobs_finished);
     }
 
     return NULL;

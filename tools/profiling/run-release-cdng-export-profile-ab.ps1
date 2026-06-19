@@ -299,6 +299,9 @@ $summary = [pscustomobject]@{
         asyncWriterThreadCount = $baselineProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $baselineProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $baselineProfileJson.async_writer_max_queued
+        asyncWriterJobsStarted = $baselineProfileJson.async_writer_jobs_started
+        asyncWriterJobsFinished = $baselineProfileJson.async_writer_jobs_finished
+        asyncWriterMaxActive = $baselineProfileJson.async_writer_max_active
         elapsedMs = $baselineRun.elapsedMs
     }
     candidate = [pscustomobject]@{
@@ -314,6 +317,9 @@ $summary = [pscustomobject]@{
         asyncWriterThreadCount = $candidateProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $candidateProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $candidateProfileJson.async_writer_max_queued
+        asyncWriterJobsStarted = $candidateProfileJson.async_writer_jobs_started
+        asyncWriterJobsFinished = $candidateProfileJson.async_writer_jobs_finished
+        asyncWriterMaxActive = $candidateProfileJson.async_writer_max_active
         elapsedMs = $candidateRun.elapsedMs
     }
     compare = [pscustomobject]@{
@@ -349,12 +355,13 @@ Write-Host ((
     "baseline_payload={4} candidate_payload={5} baseline_async={6} candidate_async={7} " +
     "baseline_async_threads={8} candidate_async_threads={9} " +
     "baseline_async_queue_capacity={10} candidate_async_queue_capacity={11} " +
-    "elapsed_delta_ms={12} elapsed_delta_percent={13} " +
-    "frame_total_avg_delta_ms={14} frame_total_p95_delta_ms={15} " +
-    "queue_idle_avg_delta_ms={16} payload_clone_avg_delta_ms={17} " +
-    "writer_queue_wait_avg_delta_ms={18} producer_frame_avg_delta_ms={19} " +
-    "producer_queue_idle_avg_delta_ms={20} writer_completion_lag_avg_delta_ms={21} " +
-    "output={22}") -f
+    "baseline_async_max_active={12} candidate_async_max_active={13} " +
+    "elapsed_delta_ms={14} elapsed_delta_percent={15} " +
+    "frame_total_avg_delta_ms={16} frame_total_p95_delta_ms={17} " +
+    "queue_idle_avg_delta_ms={18} payload_clone_avg_delta_ms={19} " +
+    "writer_queue_wait_avg_delta_ms={20} producer_frame_avg_delta_ms={21} " +
+    "producer_queue_idle_avg_delta_ms={22} writer_completion_lag_avg_delta_ms={23} " +
+    "output={24}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -367,6 +374,8 @@ Write-Host ((
     $summary.candidate.asyncWriterThreadCount,
     $summary.baseline.asyncWriterQueueCapacity,
     $summary.candidate.asyncWriterQueueCapacity,
+    $summary.baseline.asyncWriterMaxActive,
+    $summary.candidate.asyncWriterMaxActive,
     $summary.compare.elapsedDeltaMs,
     $summary.compare.elapsedDeltaPercent,
     $summary.compare.frameTotalAvgDeltaMs,

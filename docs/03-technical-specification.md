@@ -333,12 +333,16 @@ may raise the bounded queue depth and
 `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS` may raise the worker count, both
 clamped by the DNG writer implementation. Multi-worker runs can complete files
 out of frame order and therefore remain opt-in until a real-footage promotion
-packet proves byte identity and scheduler benefit. Export-stage profiler JSON records
+packet proves byte identity and scheduler benefit. Export-stage profiler JSON
+records
 `payload_handoff_env_enabled`, `async_writer_env_enabled`,
-`async_writer_thread_count`, `async_writer_queue_capacity`, and
-`async_writer_max_queued` so
-legacy-vs-candidate release profiles remain self-describing. Async-writer
-profiles also expose `payload_clone_ms`, the historical field name for the
+`async_writer_thread_count`, `async_writer_queue_capacity`,
+`async_writer_max_queued`, `async_writer_jobs_started`,
+`async_writer_jobs_finished`, and `async_writer_max_active` so
+legacy-vs-candidate release profiles remain self-describing. If a multi-worker
+run reports `async_writer_max_active=1`, extra workers were configured but did
+not overlap actual payload writes in that run. Async-writer profiles also
+expose `payload_clone_ms`, the historical field name for the
 small header copy plus image-buffer ownership handoff/replacement cost before a
 payload is handed to the serial or async writer, and `writer_queue_wait_ms`,
 the producer time spent waiting for the bounded writer queue to accept a

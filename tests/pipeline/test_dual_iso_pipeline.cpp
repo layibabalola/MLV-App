@@ -2136,6 +2136,9 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
     const QJsonObject root = doc.object();
     ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
     ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     ASSERT_TRUE(stages.value(QStringLiteral("disk_write_ms")).toObject()
@@ -2216,6 +2219,9 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
     ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
     ASSERT_EQ(2, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
     ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_queued")).toInt() >= 1);
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
     ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 2);
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
@@ -2317,6 +2323,10 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredThreadCountAndPreserve
     ASSERT_EQ(2, root.value(QStringLiteral("async_writer_thread_count")).toInt());
     ASSERT_EQ(3, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
     ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_queued")).toInt() >= 1);
+    ASSERT_EQ(3, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(3, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_active")).toInt() >= 1);
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_active")).toInt() <= 2);
     ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 3);
 
     const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
@@ -2386,6 +2396,9 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterDebugDelayCanFillConfiguredQueue)
     ASSERT_EQ(2, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
     ASSERT_EQ(2000, root.value(QStringLiteral("async_writer_debug_delay_ms")).toInt());
     ASSERT_EQ(2, root.value(QStringLiteral("async_writer_max_queued")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
 
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");

@@ -530,10 +530,13 @@ Update 2026-06-19 Lane A E3 writer-parallel experiment: the async writer now has
 a bounded opt-in worker-count knob, `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS`
 (`-AsyncWriterThreadCount`, surfaced through the A/B and matrix runners). The
 default remains one worker. Profiler JSON records the effective
-`async_writer_thread_count`, and the pipeline suite includes a two-worker tiny
+`async_writer_thread_count` plus utilization counters
+(`async_writer_jobs_started`, `async_writer_jobs_finished`,
+`async_writer_max_active`), and the pipeline suite includes a two-worker tiny
 DNG byte-identity test before any real-footage matrix can use the knob. This is
 the next measurement step for the `writerCompletionLagP95DeltaMs` blocker above,
-not a promoted scheduler policy.
+not a promoted scheduler policy; `async_writer_max_active=1` on a multi-worker
+run means the extra configured workers did not overlap actual writes.
 
 Update 2026-06-19 Lane A E3 writer-parallel matrix: the bounded lossless
 real-footage matrix at

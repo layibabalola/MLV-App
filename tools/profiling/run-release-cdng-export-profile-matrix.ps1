@@ -499,6 +499,9 @@ foreach ($case in $cases) {
             candidateAsyncWriterThreadCount = if ($abSummary) { $abSummary.candidate.asyncWriterThreadCount } else { $null }
             candidateAsyncWriterQueueCapacity = if ($abSummary) { $abSummary.candidate.asyncWriterQueueCapacity } else { $null }
             candidateAsyncWriterMaxQueued = if ($abSummary) { $abSummary.candidate.asyncWriterMaxQueued } else { $null }
+            candidateAsyncWriterJobsStarted = if ($abSummary) { $abSummary.candidate.asyncWriterJobsStarted } else { $null }
+            candidateAsyncWriterJobsFinished = if ($abSummary) { $abSummary.candidate.asyncWriterJobsFinished } else { $null }
+            candidateAsyncWriterMaxActive = if ($abSummary) { $abSummary.candidate.asyncWriterMaxActive } else { $null }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
             frameTotalP95DeltaMs = if ($abSummary) { $abSummary.compare.frameTotalP95DeltaMs } else { $null }
             producerFrameAvgDeltaMs = if ($abSummary) { $abSummary.compare.producerFrameAvgDeltaMs } else { $null }
