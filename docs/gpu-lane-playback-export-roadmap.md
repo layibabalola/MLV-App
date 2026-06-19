@@ -124,6 +124,12 @@ The default/fallback path now uses the same configured `Auto` default for
 missing, invalid, corrupt, or unavailable hidden Phase3 quality settings instead
 of silently falling back to legacy `Fast`, with console coverage in
 `PlaybackQualitySettings.RoundTripQualityMode`.
+The adjacent preview-mode override parser now accepts the same natural
+case-insensitive forms for `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW` and
+`MLVAPP_PLAYBACK_PREVIEW_MODE` (`Aggressive`, `AGGRESSIVE-PERFORMANCE`,
+`Sharp-Smooth`, `ON`, `Off`, etc.) while preserving the existing
+`MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW` precedence and invalid-value fallback, with
+console coverage in `PlaybackPreviewModeOverride.ParsesCaseInsensitiveEnvNames`.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

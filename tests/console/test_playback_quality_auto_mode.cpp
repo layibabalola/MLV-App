@@ -13,6 +13,9 @@
 
 #include "../common/minitest.h"
 
+#include <cstdlib>
+#include <string>
+
 #include "../../platform/qt/PlaybackQualityPolicy.h"
 
 namespace
@@ -30,6 +33,39 @@ void expect_reason( const char * expected,
 {
     ASSERT_EQ( std::string( expected ),
                std::string( playbackQualityAutoDecisionReasonName( actual ) ) );
+}
+
+void set_aggressive_preview_env( const char * value )
+{
+#ifdef _WIN32
+    static std::string env;
+    env = std::string( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=" ) + value;
+    _putenv( env.c_str() );
+#else
+    setenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW", value, 1 );
+#endif
+}
+
+void set_preview_mode_env( const char * value )
+{
+#ifdef _WIN32
+    static std::string env;
+    env = std::string( "MLVAPP_PLAYBACK_PREVIEW_MODE=" ) + value;
+    _putenv( env.c_str() );
+#else
+    setenv( "MLVAPP_PLAYBACK_PREVIEW_MODE", value, 1 );
+#endif
+}
+
+void clear_preview_mode_env()
+{
+#ifdef _WIN32
+    _putenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=" );
+    _putenv( "MLVAPP_PLAYBACK_PREVIEW_MODE=" );
+#else
+    unsetenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW" );
+    unsetenv( "MLVAPP_PLAYBACK_PREVIEW_MODE" );
+#endif
 }
 
 } // namespace
@@ -70,6 +106,36 @@ TEST(PlaybackQualityModeOverride, RejectsInvalidValues)
 
     ASSERT_FALSE( playbackQualityModeParseOverride( "8", &mode ) );
     ASSERT_EQ( 123, mode );
+}
+
+TEST(PlaybackPreviewModeOverride, ParsesCaseInsensitiveEnvNames)
+{
+    clear_preview_mode_env();
+    ASSERT_EQ( -1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Aggressive" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "AGGRESSIVE-PERFORMANCE" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Sharp-Smooth" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "ON" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Sharp" );
+    set_aggressive_preview_env( "FAST" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_aggressive_preview_env( "Off" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    set_aggressive_preview_env( "not-valid" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    clear_preview_mode_env();
 }
 
 TEST(PlaybackQualityAutoTelemetry, ConvertsMillisecondsToFpsEquivalent)

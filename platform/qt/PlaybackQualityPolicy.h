@@ -209,29 +209,26 @@ inline int playbackPreviewAggressiveEnvOverride()
     const char * raw = std::getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
     if ( raw && *raw )
     {
-        if ( std::strcmp(raw, "0") == 0
-          || std::strcmp(raw, "false") == 0
-          || std::strcmp(raw, "FALSE") == 0
-          || std::strcmp(raw, "False") == 0
-          || std::strcmp(raw, "off") == 0
-          || std::strcmp(raw, "OFF") == 0
-          || std::strcmp(raw, "sharp") == 0
-          || std::strcmp(raw, "sharp_smooth") == 0
-          || std::strcmp(raw, "smooth") == 0
-          || std::strcmp(raw, "quality") == 0 )
+        if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "false" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "off" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp_smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp-smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
         {
             return 0;
         }
-        if ( std::strcmp(raw, "1") == 0
-          || std::strcmp(raw, "true") == 0
-          || std::strcmp(raw, "TRUE") == 0
-          || std::strcmp(raw, "True") == 0
-          || std::strcmp(raw, "yes") == 0
-          || std::strcmp(raw, "on") == 0
-          || std::strcmp(raw, "aggressive") == 0
-          || std::strcmp(raw, "aggressive_performance") == 0
-          || std::strcmp(raw, "performance") == 0
-          || std::strcmp(raw, "fast") == 0 )
+        if ( playbackQualityAsciiEqualsIgnoreCase( raw, "1" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "true" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "yes" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "on" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive_performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive-performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
         {
             return 1;
         }
@@ -240,27 +237,27 @@ inline int playbackPreviewAggressiveEnvOverride()
 
     raw = std::getenv("MLVAPP_PLAYBACK_PREVIEW_MODE");
     if ( !raw || !*raw ) return -1;
-    if ( std::strcmp(raw, "1") == 0
-      || std::strcmp(raw, "aggressive") == 0
-      || std::strcmp(raw, "aggressive_performance") == 0
-      || std::strcmp(raw, "performance") == 0
-      || std::strcmp(raw, "fast") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "1" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive_performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive-performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
     {
         return 1;
     }
-    if ( std::strcmp(raw, "0") == 0
-      || std::strcmp(raw, "sharp") == 0
-      || std::strcmp(raw, "sharp_smooth") == 0
-      || std::strcmp(raw, "smooth") == 0
-      || std::strcmp(raw, "quality") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp_smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp-smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
     {
         return 0;
     }
-    if ( std::strcmp(raw, "true") == 0
-      || std::strcmp(raw, "TRUE") == 0
-      || std::strcmp(raw, "True") == 0
-      || std::strcmp(raw, "yes") == 0
-      || std::strcmp(raw, "on") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "true" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "yes" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "on" ) )
     {
         return 1;
     }
