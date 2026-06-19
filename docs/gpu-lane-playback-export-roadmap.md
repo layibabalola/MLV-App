@@ -761,7 +761,11 @@ The compact imported evidence packet lives under
 `.claude-state\profiling\ultramagnus-cdng-export\` and carries matrix summaries,
 hash comparison, release/backend hashes, and remote host/GPU context without
 zipping bulky DNG payloads. This is the correct proof path for export GPU
-promotion; VM-local runs remain fallback/tooling checks.
+promotion; VM-local runs remain fallback/tooling checks. If UltraMagnus lacks
+the Qt/MinGW release-build tree, the wrapper fails with a durable recovery path:
+rebuild the release tree locally, stage it, and rerun with `-SkipRemoteBuild`
+while still building/deploying the CUDA backend and running proof gates on the
+4090 host.
 
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its

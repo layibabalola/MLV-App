@@ -481,10 +481,16 @@ try {
         })
     }
     if (-not `$skipBuild) {
-        `$env:PATH = 'C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + `$env:PATH
-        & 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe' -C (Join-Path `$repo 'platform\qt\build-release') -B release -j4
-        if (`$LASTEXITCODE -ne 0) {
-            `$failures.Add("Release build failed with exit code `$LASTEXITCODE.")
+        `$makeExe = 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe'
+        if (!(Test-Path -LiteralPath `$makeExe)) {
+            `$failures.Add("Missing Qt/MinGW release build tool on UltraMagnus: `$makeExe. Rebuild the release tree locally, stage it, and rerun with -SkipRemoteBuild.")
+        }
+        else {
+            `$env:PATH = 'C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + `$env:PATH
+            & `$makeExe -C (Join-Path `$repo 'platform\qt\build-release') -B release -j4
+            if (`$LASTEXITCODE -ne 0) {
+                `$failures.Add("Release build failed with exit code `$LASTEXITCODE.")
+            }
         }
     }
     if (Test-Path -LiteralPath `$releaseExe) {
@@ -645,6 +651,7 @@ try {
         failures = @(`$failures)
     }
     Write-JsonFile -Value `$summary -Path `$summaryPath
+    Write-JsonFile -Value `$summary -Path `$jobOutput
     if (Test-Path -LiteralPath `$packetRoot) { Remove-Item -LiteralPath `$packetRoot -Recurse -Force }
     New-Item -ItemType Directory -Force -Path `$packetRoot | Out-Null
     Copy-Item -LiteralPath `$summaryPath -Destination (Join-Path `$packetRoot 'summary.json') -Force
@@ -680,6 +687,7 @@ catch {
         warnings = @(`$warnings)
     }
     Write-JsonFile -Value `$summary -Path `$summaryPath
+    Write-JsonFile -Value `$summary -Path `$jobOutput
     `$summary | ConvertTo-Json -Depth 8
     exit 1
 }

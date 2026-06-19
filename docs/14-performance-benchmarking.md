@@ -119,7 +119,10 @@ imports a compact JSON/log evidence packet under
 `.claude-state\profiling\ultramagnus-cdng-export\`. The default proof uses
 `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`, `receipts\FastProxy.marxml`, both
 `uncompressed` and `lossless` CDNG, `maxFrames=4`, and `repeats=1`; widen only
-when the proof question requires it.
+when the proof question requires it. If UltraMagnus is acting as a runner
+without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
+locally first, let the wrapper stage that release tree, and pass
+`-SkipRemoteBuild`; the summary records that the remote build was skipped.
 
 After any matrix or standalone A/B run that claims CDNG output correctness, run
 the DNG byte-identity companion before interpreting the timing result:
