@@ -389,6 +389,24 @@ DNG pairs matched byte-for-byte
 `7D6D00C078EAE41326F1801DFBCD3A5872D7DFDADE962CBC90E71616EF758D51`). This
 proves the lossless profiling surface and serial payload boundary work together
 on a two-frame smoke; it is not a throughput promotion or scheduler claim.
+The follow-up lossless real-footage matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-payload-matrix-74b52e39/matrix-summary.json`
+ran build `74b52e3900d7230ba806165937c3489057df2b5c` on the same three clips
+and receipt with `--cdng-codec lossless`, `maxFrames=8`, `repeats=2`,
+`-AlternateRunOrder`, and serial payload handoff. Verdict: PASS, 6/6 runs. The
+separate hash sweep at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-payload-matrix-74b52e39/dng-hash-comparison.json`
+reported 48/48 baseline-vs-payload DNG pairs matched by length and SHA256, with
+0 mismatches and 0 missing files. Aggregate payload handoff cost averaged
+0.011327 ms, while wrapper elapsed averaged +515.825 ms and frame-total average
+delta averaged +61.088788 ms (p95 delta averaged -133.297083 ms). This broadens
+the serial payload boundary's correctness evidence to lossless-output export,
+but it still does not promote a throughput win: the matrix was short, timings
+remain order/noise sensitive, and `dng_compress_ms` still runs producer-side
+before any async writer handoff. Next E3 promotion work should therefore focus
+on stronger sampling/statistical methodology or an explicit writer-heavy
+scheduler result, not on treating this lossless PASS as broad export throughput
+proof.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
