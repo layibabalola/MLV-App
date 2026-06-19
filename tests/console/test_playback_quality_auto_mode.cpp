@@ -6,7 +6,8 @@
  *   - With cadences above frame budget, Sharp/Smooth downgrades to Fast x4.
  *   - After warmup, Aggressive Dual ISO switches to HQ x8.
  *   - With cadences above frame budget, Aggressive non-DI switches to HQ x8.
- *   - With huge headroom and a non-DI clip, sampler upgrades to HQ x2.
+ *   - With huge headroom and no validated capability, sampler holds HQ x4.
+ *   - With huge headroom plus validated capability, sampler upgrades to HQ x2.
  *   - Sharp/Smooth Dual-ISO clips never get x2; they stay at x4 even with headroom.
  *   - reset() clears the window and re-enters optimistic warmup. */
 
@@ -196,10 +197,23 @@ TEST(PlaybackQualityAutoSampler, UpgradesToHqx2OnNonDIWithHeadroom)
     PlaybackQualityAutoSampler s;
     /* 30 fps target = 33.33 ms; feed 15 ms (way under budget). */
     feed_n( s, 15.0, kWin );
-    auto d = s.decideNextSlot( 30, /*dualIsoActive*/false );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/false,
+                               /*aggressivePreviewActive*/false,
+                               /*sharperHeadroomScaleAllowed*/true );
     ASSERT_EQ( 2, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );
+}
+
+TEST(PlaybackQualityAutoSampler, HoldsHqx4UntilHeadroomCapabilityIsValidated)
+{
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 15.0, kWin );
+    auto d = s.decideNextSlot( 30, /*dualIsoActive*/false );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+    expect_reason( "headroom_waiting_for_validated_capability", d.reason );
 }
 
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)
@@ -252,7 +266,10 @@ TEST(PlaybackQualityAutoSampler, SlidingWindowEvictsOldSamples)
 
     /* ... then feed 16 fast frames; the slow ones should be fully evicted. */
     feed_n( s, 15.0, kWin );
-    d = s.decideNextSlot( 30, false );
+    d = s.decideNextSlot( 30,
+                          /*dualIsoActive*/false,
+                          /*aggressivePreviewActive*/false,
+                          /*sharperHeadroomScaleAllowed*/true );
     ASSERT_EQ( 2, d.scaleFactor ); /* upgrade to HQ x2 */
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );

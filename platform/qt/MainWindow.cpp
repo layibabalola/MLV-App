@@ -16147,6 +16147,8 @@ static QString playbackQualityAutoDecisionReasonUiLabel(
         case PlaybackQualityAutoDecisionReason::MissedTargetFast:
         case PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq:
             return QStringLiteral( "target" );
+        case PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability:
+            return QStringLiteral( "capability" );
         case PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq:
             return QStringLiteral( "headroom" );
         case PlaybackQualityAutoDecisionReason::SteadyHq:
@@ -21605,11 +21607,24 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                         ( m_pMlvObject != nullptr )
                         && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
                         && ui->checkBoxRawFixEnable->isChecked();
+                    const GpuPlaybackPipelineStatus gpuPlaybackPipelineStatus =
+                        mainWindowGpuPlaybackPipelineStatus(
+                            requestContext.gpuPreviewPolicy,
+                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                                "gpu_playback_recon_used" ),
+                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                                "gpu_playback_recon_texture_present_active" ),
+                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                                "gpu_playback_recon_texture_present_no_readback_active" ) );
+                    const bool sharperHeadroomScaleAllowed =
+                        gpuPlaybackPipelineStatus
+                            == GpuPlaybackPipelineStatus::GpuTextureNoReadback;
                     const PlaybackQualityAutoSampler::Decision decision =
                         m_playbackQualitySampler.decideNextSlot(
                             m_playbackAutoTargetFps,
                             dualIsoActive,
-                            mlvPlaybackAggressivePreviewMode() != 0 );
+                            mlvPlaybackAggressivePreviewMode() != 0,
+                            sharperHeadroomScaleAllowed );
                     const bool effectiveQualityChanged =
                         decision.scaleFactor != m_playbackQualityActiveScale
                      || decision.useHqMean23 != m_playbackQualityActiveHq;

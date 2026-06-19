@@ -746,6 +746,7 @@ enum class PlaybackQualityAutoDecisionReason
     AggressiveDualIsoDeepHq,
     MissedTargetFast,
     MissedTargetAggressiveDeepHq,
+    HeadroomAwaitingValidatedCapability,
     HeadroomNonDualIsoSharperHq,
     SteadyHq
 };
@@ -763,6 +764,8 @@ inline const char * playbackQualityAutoDecisionReasonName(
             return "missed_target_fast";
         case PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq:
             return "missed_target_aggressive_deep_hq";
+        case PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability:
+            return "headroom_waiting_for_validated_capability";
         case PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq:
             return "headroom_non_dual_iso_sharper_hq";
         case PlaybackQualityAutoDecisionReason::SteadyHq:
@@ -803,7 +806,7 @@ struct PlaybackQualityAutoSampler
      *       -> downgrade to Fast (scale=4, no HQ) in Sharp/Smooth preview
      *       -> use deep HQ x8 preview in Aggressive preview
      *   - else if avg cadence < 0.65 * frame budget (lots of headroom)
-     *       and !dualIsoActive
+     *       and !dualIsoActive and sharper headroom promotion is allowed
      *       -> upgrade HQ to scale=2 (try sharper)
      *   - else stay at HQ scale=4 */
     struct Decision
@@ -818,7 +821,8 @@ struct PlaybackQualityAutoSampler
 
     Decision decideNextSlot( int targetFps,
                              bool dualIsoActive,
-                             bool aggressivePreviewActive = false ) const
+                             bool aggressivePreviewActive = false,
+                             bool sharperHeadroomScaleAllowed = false ) const
     {
         std::lock_guard<std::mutex> lock( m_mutex );
         if ( targetFps <= 0 ) targetFps = 30;
@@ -887,6 +891,20 @@ struct PlaybackQualityAutoSampler
         }
         if ( !dualIsoActive && avgMs < frameBudgetMs * 0.65 )
         {
+            if ( !sharperHeadroomScaleAllowed )
+            {
+                /* Headroom alone is not capability proof. Keep the safer x4
+                 * HQ preview until the caller has observed a validated
+                 * presentation path that can justify sharpening Auto. */
+                return Decision{
+                    4,
+                    true,
+                    PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability,
+                    avgMs,
+                    frameBudgetMs,
+                    sampleCount
+                };
+            }
             /* Plenty of headroom on a non-DI clip: try sharper HQ. */
             return Decision{
                 2,

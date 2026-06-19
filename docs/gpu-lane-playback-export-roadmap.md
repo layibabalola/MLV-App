@@ -70,8 +70,10 @@ no-readback.
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
-quality polish step; capability-aware promotion/demotion remains scoped by the
-P3 proof gate and must keep unsupported states on readback/CPU paths.
+quality polish step. The Auto sampler also keeps headroom-based sharpening at
+HQ x4 until the caller has observed a validated no-readback presentation path;
+capability-aware promotion/demotion remains scoped by the P3 proof gate and
+must keep unsupported states on readback/CPU paths.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
