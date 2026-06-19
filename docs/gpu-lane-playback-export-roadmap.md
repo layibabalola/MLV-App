@@ -529,6 +529,33 @@ DNG byte-identity test before any real-footage matrix can use the knob. This is
 the next measurement step for the `writerCompletionLagP95DeltaMs` blocker above,
 not a promoted scheduler policy.
 
+Update 2026-06-19 Lane A E3 writer-parallel matrix: the bounded lossless
+real-footage matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-matrix-16x3-f4140eaa/matrix-summary.json`
+used serial baseline versus payload-handoff plus async writer, queue depth 2,
+writer threads 2, three 16-frame M16 cases, three repeats, alternating run
+order, and frame-total regression gates. The DNG hash comparison at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-matrix-16x3-f4140eaa/dng-hash-comparison.json`
+passed with 144/144 matched pairs and zero missing or mismatched DNGs. The raw
+feature gate was still FAIL (8 pass / 1 fail): `m16-1347-master-lossless`
+repeat 2 regressed `frame_total_ms` average by 9.076% and p95 by 39.807%.
+Calibration against the same-build alternating identity matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-calibration-16x3-f4140eaa/calibration.json`
+reported `verdict=EXCEEDS_IDENTITY_ENVELOPE`, `identityRawGateUnstable=True`,
+and `blockingReasons=feature_exceeds_identity_frameTotalAvgDeltaMs`. The
+positive-max miss was small on frame-total average (`featurePositiveMax`
+17.254725 ms versus identity 16.493232 ms; margin -0.761493 ms), and p95 plus
+producer-frame metrics were inside the identity envelope, but writer completion
+lag remained outside (`writerCompletionLagAvgDeltaMs` feature average
++2.328465 ms, positive max +4.481581 ms; `writerCompletionLagP95DeltaMs`
+feature average +2.835678 ms). `candidateAsyncWriterMaxQueued` stayed 1 in all
+9 runs, so the second worker did not materially engage on this workload. This
+keeps two-worker async at HOLD: byte-correct and instrumented, but not a
+promoted throughput policy. Next E3 work should stop chasing worker count on
+this default/lossless M16 set unless a representative writer-heavy workload
+actually fills the queue; prioritize either writer-utilization instrumentation
+or the next higher-roadmap export bottleneck.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
