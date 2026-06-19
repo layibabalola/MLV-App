@@ -410,7 +410,12 @@ decision reason, average/budget milliseconds, FPS-equivalent cadence, sample
 count, headroom capability, validated no-readback latch state, and demotion
 state. Treat `visualQuality.autoDecision.fieldsPresent=true` as the first-line
 proof that an Auto smoke is carrying the P4 capability evidence, then inspect
-the specific values before claiming a capability-aware quality decision.
+the specific values before claiming a capability-aware quality decision. The
+wrapper also emits `visualQuality.autoDecision.capabilityConsistent` and
+`validation.autoDecisionCapabilityConsistent`; default Auto smokes fail when
+headroom sharpening is reported without an active validated no-readback latch,
+when headroom capability is true but validated capability is false, or when
+validated and demoted capability are both true in the same summary.
 
 ## Telemetry key list (playback-profile JSON)
 

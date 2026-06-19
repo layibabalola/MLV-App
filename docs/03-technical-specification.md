@@ -1340,7 +1340,11 @@ wrapper promotes those summary fields plus `auto_reason_last`,
 `auto_validated_no_readback_capability_observed`, and
 `auto_validated_no_readback_capability_demoted_last` into
 `visualQuality.autoDecision`; default Auto-mode smokes fail if that telemetry is
-missing.
+missing. The wrapper derives nullable boolean versions of those capability
+fields and records `visualQuality.autoDecision.capabilityConsistent` plus
+`validation.autoDecisionCapabilityConsistent`; default Auto-mode smokes also fail
+when the capability fields contradict Auto's headroom-sharpening decision or each
+other.
 
 ### 12.1 Cadence and render thread
 

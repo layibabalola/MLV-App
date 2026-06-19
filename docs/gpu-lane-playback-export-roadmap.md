@@ -98,6 +98,15 @@ Auto gate if those fields are missing. That keeps P4 smoke artifacts
 self-contained: reviewers can see target FPS, last Auto reason, ms and
 FPS-equivalent cadence, sample count, headroom capability, and validated
 no-readback latch/demotion state without hand-parsing raw log lines.
+The P4 proof wrapper now also derives boolean Auto capability fields and fails
+default Auto smokes when the capability summary is internally inconsistent:
+`headroom_non_dual_iso_sharper_hq` must carry an active validated no-readback
+capability latch, `auto_headroom_capability_last` cannot be true while
+`auto_validated_no_readback_capability_observed` is false, and observed/demoted
+cannot both be true in the same summary. The derived
+`visualQuality.autoDecision.capabilityConsistent` and
+`validation.autoDecisionCapabilityConsistent` fields make this fail-closed gate
+reviewable without widening the scoped P3 no-readback claim.
 
 Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
 carry the exact `sharperHeadroomScaleAllowed` gate that decides whether

@@ -233,6 +233,30 @@ function Convert-ToNullableDouble {
     $null
 }
 
+function Convert-ToNullableBool {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+    if ($text -match '^(1|true|yes|on)$') {
+        return $true
+    }
+    if ($text -match '^(0|false|no|off)$') {
+        return $false
+    }
+
+    $null
+}
+
 function Convert-FpsStatusTextToValue {
     param([object]$Value)
 
@@ -1292,6 +1316,38 @@ $autoDecisionFieldsPresent =
     ($null -ne $autoDecision.validatedNoReadbackCapabilityObserved) -and
     ($null -ne $autoDecision.validatedNoReadbackCapabilityDemotedLast)
 $autoDecision | Add-Member -NotePropertyName fieldsPresent -NotePropertyValue ([bool]$autoDecisionFieldsPresent)
+$autoHeadroomCapabilityLast = Convert-ToNullableBool $autoDecision.headroomCapabilityLast
+$autoValidatedNoReadbackObserved =
+    Convert-ToNullableBool $autoDecision.validatedNoReadbackCapabilityObserved
+$autoValidatedNoReadbackDemoted =
+    Convert-ToNullableBool $autoDecision.validatedNoReadbackCapabilityDemotedLast
+$autoDecisionCapabilityFailures = @()
+if ($autoDecisionFieldsPresent) {
+    if ($autoHeadroomCapabilityLast -eq $true -and
+        $autoValidatedNoReadbackObserved -ne $true) {
+        $autoDecisionCapabilityFailures += "Auto headroom capability was true without validated no-readback capability observed."
+    }
+    if ($autoValidatedNoReadbackObserved -eq $true -and
+        $autoValidatedNoReadbackDemoted -eq $true) {
+        $autoDecisionCapabilityFailures += "Auto no-readback capability was both observed and demoted in the same summary."
+    }
+    if ([string]$autoDecision.reason -eq "headroom_non_dual_iso_sharper_hq" -and
+        ($autoHeadroomCapabilityLast -ne $true -or
+         $autoValidatedNoReadbackObserved -ne $true -or
+         $autoValidatedNoReadbackDemoted -eq $true)) {
+        $autoDecisionCapabilityFailures += "Auto sharpened for headroom without an active validated no-readback capability latch."
+    }
+}
+$autoDecision | Add-Member -NotePropertyName headroomCapabilityLastBool `
+    -NotePropertyValue $autoHeadroomCapabilityLast
+$autoDecision | Add-Member -NotePropertyName validatedNoReadbackCapabilityObservedBool `
+    -NotePropertyValue $autoValidatedNoReadbackObserved
+$autoDecision | Add-Member -NotePropertyName validatedNoReadbackCapabilityDemotedLastBool `
+    -NotePropertyValue $autoValidatedNoReadbackDemoted
+$autoDecision | Add-Member -NotePropertyName capabilityConsistent `
+    -NotePropertyValue ($autoDecisionCapabilityFailures.Count -eq 0)
+$autoDecision | Add-Member -NotePropertyName capabilityFailures `
+    -NotePropertyValue $autoDecisionCapabilityFailures
 
 $cpuSettled = $true
 if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
@@ -1381,6 +1437,9 @@ if ($ExpectedQualityMode -ge 0 -and
 }
 if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent) {
     $validationFailures += "Auto playback quality telemetry was missing from playback_smoke.summary."
+}
+if ($ExpectedQualityMode -eq 2 -and $autoDecisionFieldsPresent) {
+    $validationFailures += $autoDecisionCapabilityFailures
 }
 
 $screenshotAspectEvidence = if ($CaptureScreenshot) {
@@ -1609,6 +1668,7 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     glOutputProof = $glOutputProof
     autoDecisionRequired = ($ExpectedQualityMode -eq 2)
     autoDecisionFieldsPresent = [bool]$autoDecisionFieldsPresent
+    autoDecisionCapabilityConsistent = ($autoDecisionCapabilityFailures.Count -eq 0)
     scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or
