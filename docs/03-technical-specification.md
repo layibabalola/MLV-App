@@ -1330,7 +1330,13 @@ readback; unsupported or raw-fixes-off states must stay out of that bucket.
 Downstream baselines should treat the two texture statuses as distinct.
 `playback_smoke.summary` also reports Auto-mode cadence in both milliseconds and
 FPS-equivalent form: `auto_avg_ms`, `auto_avg_fps_equivalent`,
-`auto_budget_ms`, and `auto_budget_fps_equivalent`.
+`auto_budget_ms`, and `auto_budget_fps_equivalent`. The release GUI smoke
+wrapper promotes those summary fields plus `auto_reason_last`,
+`auto_target_fps`, `auto_sample_count`, `auto_headroom_capability_last`,
+`auto_validated_no_readback_capability_observed`, and
+`auto_validated_no_readback_capability_demoted_last` into
+`visualQuality.autoDecision`; default Auto-mode smokes fail if that telemetry is
+missing.
 
 ### 12.1 Cadence and render thread
 

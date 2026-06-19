@@ -1264,6 +1264,34 @@ $qualityModeStart = Get-ObjectPropertyValue $playbackStart "quality_mode"
 $qualityModeLast = Get-ObjectPropertyValue $playbackSummary "quality_mode"
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
+$autoDecision = [pscustomobject]@{
+    expectedAuto = ($ExpectedQualityMode -eq 2)
+    source = if ($null -ne $playbackSummary) { "playback_smoke.summary" } else { $null }
+    targetFps = Get-ObjectPropertyValue $playbackSummary "auto_target_fps"
+    reason = Get-ObjectPropertyValue $playbackSummary "auto_reason_last"
+    averageMs = Get-ObjectPropertyValue $playbackSummary "auto_avg_ms"
+    budgetMs = Get-ObjectPropertyValue $playbackSummary "auto_budget_ms"
+    sampleCount = Get-ObjectPropertyValue $playbackSummary "auto_sample_count"
+    averageFpsEquivalent = Get-ObjectPropertyValue $playbackSummary "auto_avg_fps_equivalent"
+    budgetFpsEquivalent = Get-ObjectPropertyValue $playbackSummary "auto_budget_fps_equivalent"
+    headroomCapabilityLast = Get-ObjectPropertyValue $playbackSummary "auto_headroom_capability_last"
+    validatedNoReadbackCapabilityObserved =
+        Get-ObjectPropertyValue $playbackSummary "auto_validated_no_readback_capability_observed"
+    validatedNoReadbackCapabilityDemotedLast =
+        Get-ObjectPropertyValue $playbackSummary "auto_validated_no_readback_capability_demoted_last"
+}
+$autoDecisionFieldsPresent =
+    ($null -ne $autoDecision.targetFps) -and
+    ($null -ne $autoDecision.reason) -and
+    ($null -ne $autoDecision.averageMs) -and
+    ($null -ne $autoDecision.budgetMs) -and
+    ($null -ne $autoDecision.sampleCount) -and
+    ($null -ne $autoDecision.averageFpsEquivalent) -and
+    ($null -ne $autoDecision.budgetFpsEquivalent) -and
+    ($null -ne $autoDecision.headroomCapabilityLast) -and
+    ($null -ne $autoDecision.validatedNoReadbackCapabilityObserved) -and
+    ($null -ne $autoDecision.validatedNoReadbackCapabilityDemotedLast)
+$autoDecision | Add-Member -NotePropertyName fieldsPresent -NotePropertyValue ([bool]$autoDecisionFieldsPresent)
 
 $cpuSettled = $true
 if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
@@ -1350,6 +1378,9 @@ if ($ExpectedQualityMode -ge 0 -and
     $null -ne $visualState -and
     [int](Get-ObjectPropertyValue $visualState "quality_mode") -ne $ExpectedQualityMode) {
     $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
+}
+if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent) {
+    $validationFailures += "Auto playback quality telemetry was missing from playback_smoke.summary."
 }
 
 $screenshotAspectEvidence = if ($CaptureScreenshot) {
@@ -1441,6 +1472,7 @@ $result = [pscustomobject]@{
         scaleActiveLast = $scaleActiveLast
         qualityModeStart = $qualityModeStart
         qualityModeLast = $qualityModeLast
+        autoDecision = $autoDecision
         visualState = $visualState
         playbackPolicy = $playbackPolicy
         aspectEvidence = $screenshotAspectEvidence
@@ -1575,6 +1607,8 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict
     glOutputProof = $glOutputProof
+    autoDecisionRequired = ($ExpectedQualityMode -eq 2)
+    autoDecisionFieldsPresent = [bool]$autoDecisionFieldsPresent
     scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or

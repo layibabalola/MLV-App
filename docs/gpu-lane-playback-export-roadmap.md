@@ -92,6 +92,12 @@ so persisted GUI settings cannot create stale false failures. Smokes that
 intentionally exercise saved GUI state can pass `-UsePersistedPlaybackSettings`,
 and explicit forced-mode probes can still pass `-QualityMode`, `-ScaleFactor`,
 and `-Expected*` overrides.
+The wrapper now also lifts the Auto cadence/capability fields from
+`playback_smoke.summary` into `visualQuality.autoDecision` and fails the default
+Auto gate if those fields are missing. That keeps P4 smoke artifacts
+self-contained: reviewers can see target FPS, last Auto reason, ms and
+FPS-equivalent cadence, sample count, headroom capability, and validated
+no-readback latch/demotion state without hand-parsing raw log lines.
 
 Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
 carry the exact `sharperHeadroomScaleAllowed` gate that decides whether

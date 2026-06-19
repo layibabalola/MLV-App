@@ -394,6 +394,20 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
     `MLVAPP_PLAYBACK_PREVIEW_MODE=aggressive_performance`. Use `0` or
     `sharp_smooth` for the default behavior.
 
+### GUI smoke Auto proof
+
+`tools/profiling/run-release-gui-smoke.ps1` defaults to deterministic Auto
+playback validation (`-QualityMode auto`, `-ExpectedQualityMode 2`,
+`-ScaleFactor 4`, `-ExpectedScaleRequest 4`) unless
+`-UsePersistedPlaybackSettings` or explicit overrides are supplied. For default
+Auto smokes, the wrapper now requires the app's `playback_smoke.summary` Auto
+telemetry and exposes it as `visualQuality.autoDecision`: target FPS, last
+decision reason, average/budget milliseconds, FPS-equivalent cadence, sample
+count, headroom capability, validated no-readback latch state, and demotion
+state. Treat `visualQuality.autoDecision.fieldsPresent=true` as the first-line
+proof that an Auto smoke is carrying the P4 capability evidence, then inspect
+the specific values before claiming a capability-aware quality decision.
+
 ## Telemetry key list (playback-profile JSON)
 
 The headless `--profile-playback` mode emits a structured JSON document with
