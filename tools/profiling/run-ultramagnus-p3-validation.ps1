@@ -101,7 +101,11 @@ function Get-GitScalar {
         [Parameter(Mandatory = $true)][string]$Repo,
         [Parameter(Mandatory = $true)][string[]]$Args
     )
-    $output = & git -C $Repo @Args 2>$null
+    $git = Resolve-GitExecutable
+    if (-not $git) {
+        return $null
+    }
+    $output = & $git -C $Repo @Args 2>$null
     if ($LASTEXITCODE -ne 0) {
         return $null
     }
@@ -110,11 +114,40 @@ function Get-GitScalar {
 
 function Get-GitStatusLines {
     param([Parameter(Mandatory = $true)][string]$Repo)
-    $output = & git -C $Repo status --short --branch 2>$null
+    $git = Resolve-GitExecutable
+    if (-not $git) {
+        return @()
+    }
+    $output = & $git -C $Repo status --short --branch 2>$null
     if ($LASTEXITCODE -ne 0) {
         return @()
     }
     return @($output | ForEach-Object { [string]$_ })
+}
+
+function Resolve-GitExecutable {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($git) {
+        return $git.Source
+    }
+
+    $candidateRoots = @(
+        ${env:ProgramFiles},
+        ${env:ProgramFiles(x86)},
+        "C:\Program Files",
+        "C:\Program Files (x86)"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($root in $candidateRoots) {
+        foreach ($relative in @("Git\cmd\git.exe", "Git\bin\git.exe")) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    return $null
 }
 
 function Get-GpuPreferenceValue {
