@@ -19,7 +19,10 @@ param(
     [string]$EvidencePacketPath = "",
     [string]$ImportEvidencePacket = "",
     [string]$ImportOutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\imported",
-    [switch]$AllowRepoHeadMismatch
+    [switch]$AllowRepoHeadMismatch,
+    [string]$EvidenceRepoHead = "",
+    [string]$EvidenceBranch = "",
+    [string[]]$EvidenceGitStatus = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -202,7 +205,10 @@ function New-EvidencePacket {
         [Parameter(Mandatory = $true)]$Summary,
         [Parameter(Mandatory = $true)][string]$Repo,
         [Parameter(Mandatory = $true)][string]$ExpectedHostName,
-        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern
+        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern,
+        [string]$EvidenceRepoHead = "",
+        [string]$EvidenceBranch = "",
+        [string[]]$EvidenceGitStatus = @()
     )
 
     $runRootResolved = (Resolve-Path -LiteralPath $RunRoot).Path
@@ -237,6 +243,15 @@ function New-EvidencePacket {
             validationOk = $_.validationOk
         }
     })
+    $sourceRepoHead =
+        if (![string]::IsNullOrWhiteSpace($EvidenceRepoHead)) { $EvidenceRepoHead }
+        else { Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD") }
+    $sourceBranch =
+        if (![string]::IsNullOrWhiteSpace($EvidenceBranch)) { $EvidenceBranch }
+        else { Get-GitScalar -Repo $Repo -Args @("rev-parse", "--abbrev-ref", "HEAD") }
+    $sourceGitStatus =
+        if (@($EvidenceGitStatus).Count -gt 0) { @($EvidenceGitStatus | ForEach-Object { [string]$_ }) }
+        else { @(Get-GitStatusLines -Repo $Repo) }
 
     $manifest = [pscustomobject]@{
         schema = "mlvapp-ultramagnus-p3-evidence-packet.v1"
@@ -246,9 +261,9 @@ function New-EvidencePacket {
             expectedHost = $ExpectedHostName
             requiredGpuNamePattern = $RequiredGpuNamePattern
             repoRoot = $Repo
-            repoHead = Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD")
-            branch = Get-GitScalar -Repo $Repo -Args @("rev-parse", "--abbrev-ref", "HEAD")
-            gitStatus = Get-GitStatusLines -Repo $Repo
+            repoHead = $sourceRepoHead
+            branch = $sourceBranch
+            gitStatus = $sourceGitStatus
         }
         proof = [pscustomobject]@{
             summaryStatus = $Summary.status
@@ -354,7 +369,11 @@ function Import-EvidencePacket {
         if (!$AllowRepoHeadMismatch -and $currentHead -and $manifest.source.repoHead -and $currentHead -ne $manifest.source.repoHead) {
             Add-Failure $importFailures "Current repo HEAD $currentHead does not match evidence repo HEAD $($manifest.source.repoHead)."
         }
-        $sourceDirtyEntries = @($manifest.source.gitStatus | Where-Object { !([string]$_).StartsWith("## ") })
+        $sourceGitStatus = @()
+        if ($null -ne $manifest.source.gitStatus) {
+            $sourceGitStatus = @($manifest.source.gitStatus | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) })
+        }
+        $sourceDirtyEntries = @($sourceGitStatus | Where-Object { !([string]$_).StartsWith("## ") })
         if ($sourceDirtyEntries.Count -gt 0) {
             Add-Failure $importFailures "Evidence source worktree was dirty: $($sourceDirtyEntries -join '; ')"
         }
@@ -1068,7 +1087,10 @@ if ($status -eq "success" -or $status -eq "planned") {
         -Summary $summary `
         -Repo $repo `
         -ExpectedHostName $ExpectedHostName `
-        -RequiredGpuNamePattern $RequiredGpuNamePattern
+        -RequiredGpuNamePattern $RequiredGpuNamePattern `
+        -EvidenceRepoHead $EvidenceRepoHead `
+        -EvidenceBranch $EvidenceBranch `
+        -EvidenceGitStatus $EvidenceGitStatus
     Write-JsonFile -Value $summary -Path $summaryPath
 }
 

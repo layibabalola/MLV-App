@@ -267,6 +267,9 @@ $agentSubmission = $null
 $remoteJobOutput = $null
 $copiedPacket = $null
 $importResult = $null
+$localRepoHead = ""
+$localRepoBranch = ""
+$localRepoStatus = @()
 
 if (!(Test-Path -LiteralPath $validatorScript)) {
     Add-Failure $failures "Missing validator script: $validatorScript"
@@ -323,12 +326,30 @@ elseif ($failures.Count -eq 0) {
         Add-Failure $failures "RemotePacketPath '$RemotePacketPath' is not under RemoteStagingLocal '$RemoteStagingLocal'; cannot map it to SMB share '$RemoteStagingShare'."
     }
 
-    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
-        $localDirty = @(& git -C $repo status --short 2>$null | ForEach-Object { [string]$_ })
+    if ($failures.Count -eq 0) {
+        $localRepoHead = ([string](& git -C $repo rev-parse HEAD 2>$null | Select-Object -First 1)).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Add-Failure $failures "Unable to inspect local git HEAD before staging."
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        $localRepoBranch = ([string](& git -C $repo rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1)).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Add-Failure $failures "Unable to inspect local git branch before staging."
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        $localRepoStatus = @(& git -C $repo status --short --branch 2>$null | ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) {
             Add-Failure $failures "Unable to inspect local git status before staging."
         }
-        elseif ($localDirty.Count -gt 0) {
+    }
+
+    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
+        $localDirty = @($localRepoStatus | Where-Object { !([string]$_).StartsWith("## ") })
+        if ($localDirty.Count -gt 0) {
             Add-Failure $failures "Local repo is dirty; commit or explicitly rerun after a clean tree before producing authoritative UltraMagnus evidence: $($localDirty -join '; ')"
         }
     }
@@ -367,6 +388,9 @@ elseif ($failures.Count -eq 0) {
         $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
         $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
         $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
+        $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
+        $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
+        $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -376,6 +400,9 @@ elseif ($failures.Count -eq 0) {
 `$clipRoot = $(Convert-ToPowerShellSingleQuotedString $ClipRoot)
 `$clipNames = $clipNamesLiteral
 `$clipPaths = $clipPathsLiteral
+`$evidenceRepoHead = $localRepoHeadLiteral
+`$evidenceBranch = $localRepoBranchLiteral
+`$evidenceGitStatus = $localRepoStatusLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -480,6 +507,12 @@ try {
         `$expectedHost,
         '-EvidencePacketPath',
         `$packet,
+        '-EvidenceRepoHead',
+        `$evidenceRepoHead,
+        '-EvidenceBranch',
+        `$evidenceBranch,
+        '-EvidenceGitStatus',
+        `$evidenceGitStatus,
         '-Seconds',
         '$( [string]$Seconds )',
         '-SettleMs',
