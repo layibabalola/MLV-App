@@ -73,6 +73,7 @@
 
 #define DNG_PAYLOAD_WRITER_DEFAULT_QUEUE_DEPTH 1
 #define DNG_PAYLOAD_WRITER_MAX_QUEUE_DEPTH 8
+#define DNG_PAYLOAD_WRITER_MAX_DEBUG_DELAY_MS 60000
 
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
@@ -237,6 +238,55 @@ static void export_profile_note_async_writer_queue(size_t capacity, size_t queue
         g_export_profile_async_writer_max_queued = (unsigned)queued;
     }
     pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
+static unsigned dng_payload_writer_debug_delay_ms_from_env(void)
+{
+    const char * profiler_enabled = getenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    const char * profile_file = getenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    const char * value = getenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS");
+    char * end = NULL;
+    long parsed = 0;
+    if(!export_profile_env_truthy(profiler_enabled) || profile_file == NULL || profile_file[0] == '\0')
+    {
+        return 0;
+    }
+    if(value == NULL || value[0] == '\0')
+    {
+        return 0;
+    }
+
+    parsed = strtol(value, &end, 10);
+    if(end == value || parsed <= 0)
+    {
+        return 0;
+    }
+    if(parsed > DNG_PAYLOAD_WRITER_MAX_DEBUG_DELAY_MS)
+    {
+        return DNG_PAYLOAD_WRITER_MAX_DEBUG_DELAY_MS;
+    }
+    return (unsigned)parsed;
+}
+
+static void dng_payload_writer_debug_delay(void)
+{
+    const unsigned delay_ms = dng_payload_writer_debug_delay_ms_from_env();
+    if(delay_ms == 0)
+    {
+        return;
+    }
+#if defined(_WIN32) || defined(__WIN32)
+    Sleep(delay_ms);
+#elif defined(CLOCK_MONOTONIC)
+    struct timespec delay;
+    delay.tv_sec = (time_t)(delay_ms / 1000u);
+    delay.tv_nsec = (long)(delay_ms % 1000u) * 1000000L;
+    nanosleep(&delay, NULL);
+#else
+    const clock_t start = clock();
+    const clock_t ticks = (clock_t)(((double)delay_ms / 1000.0) * (double)CLOCKS_PER_SEC);
+    while((clock() - start) < ticks) {}
+#endif
 }
 
 static int export_profile_configure_from_env(void)
@@ -557,6 +607,9 @@ static void export_profile_write_json(void)
     fprintf(file,
             "  \"async_writer_max_queued\":%u,\n",
             g_export_profile_async_writer_max_queued);
+    fprintf(file,
+            "  \"async_writer_debug_delay_ms\":%u,\n",
+            dng_payload_writer_debug_delay_ms_from_env());
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);
@@ -1991,6 +2044,14 @@ static void * dng_payload_writer_main(void * opaque)
         {
             pthread_mutex_unlock(&writer->mutex);
             break;
+        }
+        pthread_mutex_unlock(&writer->mutex);
+        dng_payload_writer_debug_delay();
+        pthread_mutex_lock(&writer->mutex);
+        if(writer->queue_count == 0)
+        {
+            pthread_mutex_unlock(&writer->mutex);
+            continue;
         }
         job = writer->jobs[writer->queue_head];
         memset(&writer->jobs[writer->queue_head], 0, sizeof(writer->jobs[writer->queue_head]));

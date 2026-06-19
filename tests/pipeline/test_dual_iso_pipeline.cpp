@@ -2236,6 +2236,68 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
 }
 
+TEST(DualIsoPipeline, DngFrameAsyncWriterDebugDelayCanFillConfiguredQueue)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString first_path = temp_dir.filePath(QStringLiteral("async-delay-first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("async-delay-second.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("async-delay-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-delay-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH", QByteArrayLiteral("2"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS", QByteArrayLiteral("2000"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   first_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   second_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
+    ASSERT_EQ(2000, root.value(QStringLiteral("async_writer_debug_delay_ms")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_max_queued")).toInt());
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS");
+}
+
 TEST(DualIsoPipeline, ExportStageProfilerRecordsQueueIdleBetweenFrameSaves)
 {
     QTemporaryDir temp_dir;
