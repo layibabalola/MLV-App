@@ -104,7 +104,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kKeyPhase3HQAutoFallbackFiredEpoch() { return "Playback/Phase3HQAutoFallbackFiredEpoch"; }
     inline constexpr const char * kKeyClipPlaytimePrefix() { return "Playback/ClipPlaytime/"; }
 
-    inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
+    inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Auto ); }
     inline constexpr int kDefaultPreviewMode() { return static_cast<int>( PlaybackPreviewMode::SharpSmooth ); }
     inline constexpr int kDefaultScaleFactorOverride() { return 0; }
     inline constexpr int kDefaultPreviewResolution() { return static_cast<int>( PlaybackPreviewResolution::Auto ); }
