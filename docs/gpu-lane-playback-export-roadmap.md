@@ -138,7 +138,7 @@ and `-FailOnRegression` gates both avg and p95 frame-total regressions.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` wraps the paired
 A/B runner across named cases and repeats, writing a single
 `matrix-summary.json` with per-run frame-total, producer-frame, queue-idle,
-writer-completion-lag, payload-clone, writer-queue-wait, wrapper wall-clock
+writer-completion-lag, payload handoff (`payload_clone_ms`), writer-queue-wait, wrapper wall-clock
 elapsed-time deltas, async queue capacity, and async max-queued fields. Tiny
 fixture matrix runs are smoke tests only; E3 promotion still requires a bounded
 real-footage matrix with receipts/frame caps that match the export scenario
@@ -162,8 +162,9 @@ test suite verifies byte-for-byte parity for uncompressed and compressed tiny
 Dual-ISO DNG exports, including the async writer path. `tools/profiling/run-release-cdng-export-profile-ab.ps1` runs
 paired release-tree baseline/candidate exports and writes both profiles plus
 `compare.json`/`summary.json`, so E3 experiments have one repeatable promotion
-packet. Payload-handoff profiles now expose `payload_clone_ms`, which accounts
-for the header+image copy cost, and async writer profiles expose
+packet. Payload-handoff profiles now expose `payload_clone_ms`, the historical
+field name for the small header copy plus large image-buffer ownership
+handoff/replacement cost, and async writer profiles expose
 `writer_queue_wait_ms`, which separates bounded writer-queue backpressure from
 real `disk_write_ms`. Paired A/B summaries include producer-frame and
 producer-queue-idle deltas plus writer-completion-lag deltas so larger
@@ -181,10 +182,46 @@ averaged -118.551 ms, but `m16-1210-master` averaged +160.28 ms, and the matrix
 still recorded frame-total avg/p95 gate failures on `m16-1210-master` repeat 1
 and `m16-1327-master` repeat 1. The async writer therefore remains
 non-promoted: queue wait stayed 0.0 ms, async max queued stayed 1, average
-writer-completion lag was 3.379 ms, and average payload clone cost was 2.089 ms.
-Next E3 work should either reduce/avoid the payload clone or run a serial
-payload-only matrix to separate clone overhead from writer-thread overlap before
-any broader scheduler rewrite.
+writer-completion lag was 3.379 ms, and average payload handoff cost was
+2.089 ms. Next E3 work should either reduce/avoid the payload copy or run a
+serial payload-only matrix to separate payload overhead from writer-thread
+overlap before any broader scheduler rewrite.
+
+Follow-up payload-only matrix:
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-only-matrix/matrix-summary.json`
+used the same three clips, receipt, `maxFrames=8`, and `repeats=2`, but enabled
+only `-CandidateUsePayloadHandoff` without async writer. Verdict: FAIL, with
+4/6 runs passing and 2/6 failing. Overall wrapper elapsed delta averaged
+-38.813 ms, but `m16-1210-master` averaged +204.40 ms and still produced one
+avg/p95 frame-total gate failure; `m16-1327-master` produced one p95-only gate
+failure despite elapsed improvement. Writer-completion lag was effectively zero
+(0.000208 ms average), while payload handoff cost averaged 2.143 ms. This
+pointed the next E3 implementation step at avoiding the extra large image
+payload copy, while retaining the small header copy, instead of widening async
+writer concurrency.
+
+Image-buffer handoff follow-up:
+`.claude-state/profiling/2026-06-19-cdng-payload-move-two-frame-v2/profile.json`
+proved the real compressed-input/uncompressed-output two-frame crash repro
+clean after the payload boundary was narrowed to a small header copy plus large
+image-buffer ownership move. The profile wrote two `M16-1210` DNGs at 8,202,254
+bytes each and reported `payload_clone_ms` averaging 0.01325 ms. The bounded
+real-footage payload-only matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-payload-only-matrix-v2/matrix-summary.json`
+then completed without crashes, compared all six baseline/candidate run outputs
+with zero DNG SHA256 mismatches, and cut payload handoff cost to 0.01549 ms
+average (0.01306-0.01835 ms). It still failed promotion at 4/6 PASS and 2/6
+FAIL: overall wrapper elapsed averaged -42.40 ms, but failed runs remained
+`m16-1210-master` repeat 1 and `m16-1347-master` repeat 2, with frame-total
+gates dominated by per-run `llrawproc`/frame timing variance rather than
+payload handoff. The matching async-writer matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-async-matrix/matrix-summary.json`
+also completed with zero DNG SHA256 mismatches and 0.01505 ms average payload
+handoff cost, but remained non-promoted at 3/6 PASS and 3/6 FAIL. Queue wait
+stayed 0.0 ms, async max queued stayed 1, and writer-completion lag averaged
+3.540 ms. Next E3 work should stop treating payload copy cost as the main
+blocker and instead tighten promotion measurement: increase repeats/frame caps
+or add an A/A control before judging scheduler or async-writer changes.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
@@ -239,7 +276,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, `tools/profiling/run-release-cdng-export-profile-matrix.ps1` repeats those paired profiles across named cases into one matrix summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` single writer-worker boundary. Async writer queue depth defaults to 1 and can be raised only by opt-in env/script parameter for bounded release-tree experiments, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload clone cost, wrapper wall-clock elapsed-time deltas, writer queue capacity/max-queued, and avg/p95 frame-total regression gates across a real-footage matrix before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, `tools/profiling/run-release-cdng-export-profile-matrix.ps1` repeats those paired profiles across named cases into one matrix summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` single writer-worker boundary. Async writer queue depth defaults to 1 and can be raised only by opt-in env/script parameter for bounded release-tree experiments, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload handoff cost, wrapper wall-clock elapsed-time deltas, writer queue capacity/max-queued, and avg/p95 frame-total regression gates across a real-footage matrix before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback

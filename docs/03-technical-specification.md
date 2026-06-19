@@ -313,11 +313,15 @@ documented mechanism for keeping the hot decode path lock-light.
 `UNCOMPRESSED_RAW=0`, `COMPRESSED_RAW=1`, `UNCOMPRESSED_ORIG=2`,
 `COMPRESSED_ORIG=3`.
 
-`dngFramePayload_t` is the immutable header+image copy produced by
+`dngFramePayload_t` is the immutable header+image payload produced by
 `buildDngFramePayload()` and released with `freeDngFramePayload()`. It carries
 the frame index plus raw input/output state so writer-worker experiments can
 preserve ordering and raw-mode context without rereading mutable `dngObject_t`
-state. `saveDngFrameViaPayload()` provides an opt-in serial build-payload /
+state. The payload now copies the small ready header, takes ownership of the
+large ready image buffer, and leaves a fresh image work buffer on `dngObject_t`
+for the next frame, avoiding a full ready-frame image memcpy while preserving
+writer ownership. `saveDngFrameViaPayload()` provides an opt-in serial
+build-payload /
 write-payload path for Lane A E3 experiments; the default GUI/batch export loop
 still uses serial `saveDngFrame()` unless `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1`
 is set. `createDngPayloadWriter()`, `saveDngFrameViaAsyncPayloadWriter()`, and
@@ -330,7 +334,8 @@ implementation. Export-stage profiler JSON records
 `payload_handoff_env_enabled`, `async_writer_env_enabled`,
 `async_writer_queue_capacity`, and `async_writer_max_queued` so
 legacy-vs-candidate release profiles remain self-describing. Async-writer
-profiles also expose `payload_clone_ms`, the header+image copy cost before a
+profiles also expose `payload_clone_ms`, the historical field name for the
+small header copy plus image-buffer ownership handoff/replacement cost before a
 payload is handed to the serial or async writer, and `writer_queue_wait_ms`,
 the producer time spent waiting for the bounded writer queue to accept a
 payload, distinct from the writer thread's `disk_write_ms`. The profiler also
@@ -1554,7 +1559,7 @@ are presets over these plus per-frame sidecar generation (`.dng.xmp`).
 | `processingObject_t` | `initProcessingObject` | `freeProcessingObject` | Caller owns; link via `setMlvProcessing` does **not** transfer ownership. `freeMlvObject` does not free the linked processing. |
 | `llrawprocObject_t` | `initLLRawProcObject` | `freeLLRawProcObject(mlvObject_t *)` | Allocated inside `initMlvObject` and freed by `freeMlvObject`. **Never** call `freeLLRawProcObject` independently. |
 | `dngObject_t` | `initDngObject` | `freeDngObject` | Per-export; short-lived. |
-| `dngFramePayload_t` | `buildDngFramePayload` | `freeDngFramePayload` | Immutable DNG header+image copy for future writer handoff; write with `writeDngFramePayload`. |
+| `dngFramePayload_t` | `buildDngFramePayload` | `freeDngFramePayload` | Immutable DNG header+image payload for future writer handoff; write with `writeDngFramePayload`. |
 | Prefetch slots | Heap inside `mlvObject_t::raw_uint16_prefetch_cache` | `freeMlvObject` | Owned by the clip; not caller-visible. |
 | `FrameSlot` / `std::vector<uint8_t>` row storage | `RenderFrameThread` | `RenderFrameThread` destructor | Slot ownership tracked by `presenting` flag; consumer must call `releasePresentedFrameForRequestSerial` when done. |
 | Worker-thread copies (llrawproc) | `llrawproc_workers[]` on `mlvObject_t` | `freeMlvObject` | Copy-on-claim, version-tagged; protects the main-thread maps. |

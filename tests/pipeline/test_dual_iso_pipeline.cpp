@@ -1937,6 +1937,100 @@ TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
     }
 }
 
+TEST(DualIsoPipeline, DngFramePayloadReuseMatchesSaveDngFrame)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+
+        MlvPipelineFixture fixture;
+        assert_fixture_ready(fixture);
+        std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+        ASSERT_TRUE(!frame.empty());
+
+        int32_t par[4] = { 1, 1, 1, 1 };
+        dngObject_t * serial_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(serial_dng != nullptr);
+        dngObject_t * payload_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(payload_dng != nullptr);
+        dngObject_t * async_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(async_dng != nullptr);
+
+        dngPayloadWriter_t * writer = createDngPayloadWriter();
+        ASSERT_TRUE(writer != nullptr);
+
+        const QString serial_first_path = temp_dir.filePath(suffix + QStringLiteral("-serial-first.dng"));
+        const QString serial_second_path = temp_dir.filePath(suffix + QStringLiteral("-serial-second.dng"));
+        const QString payload_first_path = temp_dir.filePath(suffix + QStringLiteral("-payload-first.dng"));
+        const QString payload_second_path = temp_dir.filePath(suffix + QStringLiteral("-payload-second.dng"));
+        const QString async_first_path = temp_dir.filePath(suffix + QStringLiteral("-async-first.dng"));
+        const QString async_second_path = temp_dir.filePath(suffix + QStringLiteral("-async-second.dng"));
+
+        QByteArray serial_first_bytes_path = serial_first_path.toLocal8Bit();
+        QByteArray serial_second_bytes_path = serial_second_path.toLocal8Bit();
+        QByteArray payload_first_bytes_path = payload_first_path.toLocal8Bit();
+        QByteArray payload_second_bytes_path = payload_second_path.toLocal8Bit();
+        QByteArray async_first_bytes_path = async_first_path.toLocal8Bit();
+        QByteArray async_second_bytes_path = async_second_path.toLocal8Bit();
+
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  serial_dng,
+                                  0,
+                                  serial_first_bytes_path.data(),
+                                  nullptr));
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  serial_dng,
+                                  0,
+                                  serial_second_bytes_path.data(),
+                                  nullptr));
+        ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                            payload_dng,
+                                            0,
+                                            payload_first_bytes_path.data(),
+                                            nullptr));
+        ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                            payload_dng,
+                                            0,
+                                            payload_second_bytes_path.data(),
+                                            nullptr));
+        ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                       fixture.video(),
+                                                       async_dng,
+                                                       0,
+                                                       async_first_bytes_path.data(),
+                                                       nullptr));
+        ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                       fixture.video(),
+                                                       async_dng,
+                                                       0,
+                                                       async_second_bytes_path.data(),
+                                                       nullptr));
+        ASSERT_EQ(0, finishDngPayloadWriter(writer));
+
+        const QByteArray serial_first = read_all_bytes(serial_first_path);
+        const QByteArray serial_second = read_all_bytes(serial_second_path);
+        const QByteArray payload_first = read_all_bytes(payload_first_path);
+        const QByteArray payload_second = read_all_bytes(payload_second_path);
+        const QByteArray async_first = read_all_bytes(async_first_path);
+        const QByteArray async_second = read_all_bytes(async_second_path);
+
+        ASSERT_TRUE(serial_first == serial_second);
+        ASSERT_TRUE(serial_first == payload_first);
+        ASSERT_TRUE(serial_second == payload_second);
+        ASSERT_TRUE(serial_first == async_first);
+        ASSERT_TRUE(serial_second == async_second);
+
+        freeDngObject(serial_dng);
+        freeDngObject(payload_dng);
+        freeDngObject(async_dng);
+    }
+}
+
 TEST(DualIsoPipeline, DngFramePayloadSavePreservesExportStageProfiler)
 {
     QTemporaryDir temp_dir;

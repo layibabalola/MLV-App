@@ -1802,29 +1802,39 @@ static int dng_write_buffers(FILE * dngf,
     return 0;
 }
 
-static dngFramePayload_t * dng_clone_ready_frame_payload(const dngObject_t * dng_data,
-                                                         uint32_t frame_index)
+static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
+                                                        uint32_t frame_index)
 {
     if(!dng_data) return NULL;
+    if(!dng_data->header_buf || !dng_data->image_buf) return NULL;
+
+    uint16_t * replacement_image = (uint16_t*)malloc(dng_data->image_size_unpacked);
+    uint8_t * payload_header = (uint8_t*)malloc(dng_data->header_size);
+    if(!replacement_image || !payload_header)
+    {
+        if(replacement_image) free(replacement_image);
+        if(payload_header) free(payload_header);
+        return NULL;
+    }
 
     dngFramePayload_t * payload = calloc(1, sizeof(dngFramePayload_t));
-    if(!payload) return NULL;
+    if(!payload)
+    {
+        free(replacement_image);
+        free(payload_header);
+        return NULL;
+    }
 
     payload->frame_index = frame_index;
     payload->raw_input_state = dng_data->raw_input_state;
     payload->raw_output_state = dng_data->raw_output_state;
     payload->header_size = dng_data->header_size;
     payload->image_size = dng_data->image_size;
-    payload->header_buf = malloc(payload->header_size);
-    payload->image_buf = malloc(payload->image_size);
-    if(!payload->header_buf || !payload->image_buf)
-    {
-        freeDngFramePayload(payload);
-        return NULL;
-    }
+    payload->header_buf = payload_header;
+    payload->image_buf = (uint8_t*)dng_data->image_buf;
 
     memcpy(payload->header_buf, dng_data->header_buf, payload->header_size);
-    memcpy(payload->image_buf, dng_data->image_buf, payload->image_size);
+    dng_data->image_buf = replacement_image;
     return payload;
 }
 
@@ -1840,7 +1850,7 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
         return NULL;
     }
 
-    return dng_clone_ready_frame_payload(dng_data, frame_index);
+    return dng_take_ready_frame_payload(dng_data, frame_index);
 }
 
 int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_filename)
@@ -2176,7 +2186,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
     }
 
     profile_stage_start = export_profile_stage_begin(&profile_frame);
-    payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    payload = dng_take_ready_frame_payload(dng_data, frame_index);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
@@ -2234,7 +2244,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
     }
 
     profile_stage_start = export_profile_stage_begin(&profile_frame);
-    payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    payload = dng_take_ready_frame_payload(dng_data, frame_index);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
