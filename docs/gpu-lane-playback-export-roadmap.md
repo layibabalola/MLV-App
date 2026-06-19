@@ -667,7 +667,10 @@ Update 2026-06-19 Lane A E3 bottleneck breakdown: export stage profiles now
 include the same `llrawproc_*` substage split used by playback telemetry,
 including `llrawproc_total_ms`, dark-frame/stripe/focus/bad/pattern fixes,
 pre-dual-ISO fix, dual-ISO, chroma smoothing, shared/refine/publish lock time,
-and `llrawproc_other_ms`. A rebuilt release-tree smoke on
+and `llrawproc_other_ms`. Profiles also record per-frame GPU export attempt,
+return-code, replacement, and allocation telemetry, while A/B and matrix
+summaries surface candidate GPU-export attempt/replacement/allocation counters
+for future UltraMagnus proof packets. A rebuilt release-tree smoke on
 `platform/qt/build-release/release/MLVApp.exe` at commit `5e0c92ae` wrote
 `.claude-state/profiling/2026-06-19-cdng-e3-llrawproc-breakdown-smoke-5e0c92ae/profile.json`
 from `C:\temp\MLV\M29-1756.MLV` with four lossless-output frames. The measured

@@ -140,6 +140,11 @@ typedef struct
     char clip_path[EXPORT_PROFILE_PATH_MAX];
     double stages_ms[EXPORT_PROFILE_STAGE_COUNT];
     uint32_t stage_mask;
+    int gpu_export_attempted;
+    int gpu_export_rc;
+    int gpu_export_replaced;
+    int gpu_export_allocated_bytes_valid;
+    uint64_t gpu_export_allocated_bytes;
 } exportProfileFrame_t;
 
 static exportProfileFrame_t * g_export_profile_frames = NULL;
@@ -508,6 +513,23 @@ static void export_profile_note_llrawproc_breakdown(exportProfileFrame_t * frame
                              total_ms > known_ms ? total_ms - known_ms : 0.0);
 }
 
+static void export_profile_note_gpu_export_telemetry(exportProfileFrame_t * frame)
+{
+    llrpGpuExportTelemetry_t telemetry = { 0 };
+    if(frame == NULL || !frame->active)
+    {
+        return;
+    }
+
+    llrpGetLastGpuExportTelemetry(&telemetry);
+    frame->gpu_export_attempted = telemetry.attempted ? 1 : 0;
+    frame->gpu_export_rc = telemetry.rc;
+    frame->gpu_export_replaced = telemetry.replaced ? 1 : 0;
+    frame->gpu_export_allocated_bytes_valid =
+        telemetry.allocated_bytes_valid ? 1 : 0;
+    frame->gpu_export_allocated_bytes = telemetry.allocated_bytes;
+}
+
 static void export_profile_note_producer_finish(exportProfileFrame_t * frame)
 {
     if(frame == NULL || !frame->active) return;
@@ -686,9 +708,34 @@ static void export_profile_write_json(void)
     time_t now;
     struct tm * utc;
     char generated[64] = "";
+    unsigned gpu_export_attempted_frames = 0;
+    unsigned gpu_export_replaced_frames = 0;
+    unsigned gpu_export_allocated_bytes_valid_frames = 0;
+    uint64_t gpu_export_max_allocated_bytes = 0;
 
     if(g_export_profile_write_in_progress) return;
     if(g_export_profile_path[0] == '\0' || g_export_profile_frame_count == 0) return;
+
+    for(size_t i = 0; i < g_export_profile_frame_count; i++)
+    {
+        const exportProfileFrame_t * frame = &g_export_profile_frames[i];
+        if(frame->gpu_export_attempted)
+        {
+            gpu_export_attempted_frames++;
+        }
+        if(frame->gpu_export_replaced)
+        {
+            gpu_export_replaced_frames++;
+        }
+        if(frame->gpu_export_allocated_bytes_valid)
+        {
+            gpu_export_allocated_bytes_valid_frames++;
+            if(frame->gpu_export_allocated_bytes > gpu_export_max_allocated_bytes)
+            {
+                gpu_export_max_allocated_bytes = frame->gpu_export_allocated_bytes;
+            }
+        }
+    }
 
     g_export_profile_write_in_progress = 1;
     file = fopen(g_export_profile_path, "wb");
@@ -748,6 +795,18 @@ static void export_profile_write_json(void)
     fprintf(file,
             "  \"async_writer_debug_delay_ms\":%u,\n",
             dng_payload_writer_debug_delay_ms_from_env());
+    fprintf(file,
+            "  \"gpu_export_attempted_frames\":%u,\n",
+            gpu_export_attempted_frames);
+    fprintf(file,
+            "  \"gpu_export_replaced_frames\":%u,\n",
+            gpu_export_replaced_frames);
+    fprintf(file,
+            "  \"gpu_export_allocated_bytes_valid_frames\":%u,\n",
+            gpu_export_allocated_bytes_valid_frames);
+    fprintf(file,
+            "  \"gpu_export_max_allocated_bytes\":%llu,\n",
+            (unsigned long long)gpu_export_max_allocated_bytes);
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);
@@ -794,6 +853,16 @@ static void export_profile_write_json(void)
         fputs(",\"raw_output_state\":", file);
         export_profile_write_json_string(file, export_profile_raw_state_name(frame->raw_output_state));
         fprintf(file, ",\"success\":%s", frame->success ? "true" : "false");
+        fprintf(file,
+                ",\"gpu_export_attempted\":%s,\"gpu_export_rc\":%d"
+                ",\"gpu_export_replaced\":%s"
+                ",\"gpu_export_allocated_bytes_valid\":%s"
+                ",\"gpu_export_allocated_bytes\":%llu",
+                frame->gpu_export_attempted ? "true" : "false",
+                frame->gpu_export_rc,
+                frame->gpu_export_replaced ? "true" : "false",
+                frame->gpu_export_allocated_bytes_valid ? "true" : "false",
+                (unsigned long long)frame->gpu_export_allocated_bytes);
 
         for(int stage = 0; stage < EXPORT_PROFILE_STAGE_COUNT; stage++)
         {
@@ -1776,6 +1845,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
         export_profile_note_llrawproc_breakdown(profile_frame);
+        export_profile_note_gpu_export_telemetry(profile_frame);
 
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
@@ -1841,6 +1911,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
                 export_profile_note_llrawproc_breakdown(profile_frame);
+                export_profile_note_gpu_export_telemetry(profile_frame);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
@@ -1911,6 +1982,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
                 export_profile_note_llrawproc_breakdown(profile_frame);
+                export_profile_note_gpu_export_telemetry(profile_frame);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {

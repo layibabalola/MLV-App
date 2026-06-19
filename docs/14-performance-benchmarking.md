@@ -60,6 +60,7 @@ The matrix summary records case/run verdicts, selected CDNG codec,
 baseline/candidate frame counts, baseline/candidate wrapper elapsed
 milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
 candidate async worker count/jobs started/jobs finished/max-active,
+candidate GPU-export attempt/replacement/allocation counters,
 frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
 writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
 (`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck

@@ -324,6 +324,10 @@ $summary = [pscustomobject]@{
         asyncWriterJobsStarted = $baselineProfileJson.async_writer_jobs_started
         asyncWriterJobsFinished = $baselineProfileJson.async_writer_jobs_finished
         asyncWriterMaxActive = $baselineProfileJson.async_writer_max_active
+        gpuExportAttemptedFrames = $baselineProfileJson.gpu_export_attempted_frames
+        gpuExportReplacedFrames = $baselineProfileJson.gpu_export_replaced_frames
+        gpuExportAllocatedBytesValidFrames = $baselineProfileJson.gpu_export_allocated_bytes_valid_frames
+        gpuExportMaxAllocatedBytes = $baselineProfileJson.gpu_export_max_allocated_bytes
         elapsedMs = $baselineRun.elapsedMs
     }
     candidate = [pscustomobject]@{
@@ -342,6 +346,10 @@ $summary = [pscustomobject]@{
         asyncWriterJobsStarted = $candidateProfileJson.async_writer_jobs_started
         asyncWriterJobsFinished = $candidateProfileJson.async_writer_jobs_finished
         asyncWriterMaxActive = $candidateProfileJson.async_writer_max_active
+        gpuExportAttemptedFrames = $candidateProfileJson.gpu_export_attempted_frames
+        gpuExportReplacedFrames = $candidateProfileJson.gpu_export_replaced_frames
+        gpuExportAllocatedBytesValidFrames = $candidateProfileJson.gpu_export_allocated_bytes_valid_frames
+        gpuExportMaxAllocatedBytes = $candidateProfileJson.gpu_export_max_allocated_bytes
         elapsedMs = $candidateRun.elapsedMs
     }
     compare = [pscustomobject]@{
@@ -383,13 +391,15 @@ Write-Host ((
     "baseline_async_threads={8} candidate_async_threads={9} " +
     "baseline_async_queue_capacity={10} candidate_async_queue_capacity={11} " +
     "baseline_async_max_active={12} candidate_async_max_active={13} " +
-    "elapsed_delta_ms={14} elapsed_delta_percent={15} " +
-    "frame_total_avg_delta_ms={16} frame_total_p95_delta_ms={17} " +
-    "queue_idle_avg_delta_ms={18} payload_clone_avg_delta_ms={19} " +
-    "writer_queue_wait_avg_delta_ms={20} producer_frame_avg_delta_ms={21} " +
-    "producer_queue_idle_avg_delta_ms={22} writer_completion_lag_avg_delta_ms={23} " +
-    "llrawproc_total_avg_delta_ms={24} llrawproc_dual_iso_avg_delta_ms={25} " +
-    "dng_compress_avg_delta_ms={26} output={27}") -f
+    "baseline_gpu_export_attempted={14} candidate_gpu_export_attempted={15} " +
+    "candidate_gpu_export_replaced={16} elapsed_delta_ms={17} " +
+    "elapsed_delta_percent={18} frame_total_avg_delta_ms={19} " +
+    "frame_total_p95_delta_ms={20} queue_idle_avg_delta_ms={21} " +
+    "payload_clone_avg_delta_ms={22} writer_queue_wait_avg_delta_ms={23} " +
+    "producer_frame_avg_delta_ms={24} producer_queue_idle_avg_delta_ms={25} " +
+    "writer_completion_lag_avg_delta_ms={26} llrawproc_total_avg_delta_ms={27} " +
+    "llrawproc_dual_iso_avg_delta_ms={28} dng_compress_avg_delta_ms={29} " +
+    "output={30}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -404,6 +414,9 @@ Write-Host ((
     $summary.candidate.asyncWriterQueueCapacity,
     $summary.baseline.asyncWriterMaxActive,
     $summary.candidate.asyncWriterMaxActive,
+    $summary.baseline.gpuExportAttemptedFrames,
+    $summary.candidate.gpuExportAttemptedFrames,
+    $summary.candidate.gpuExportReplacedFrames,
     $summary.compare.elapsedDeltaMs,
     $summary.compare.elapsedDeltaPercent,
     $summary.compare.frameTotalAvgDeltaMs,

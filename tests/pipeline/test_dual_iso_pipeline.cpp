@@ -445,6 +445,10 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
                 == QStringLiteral("mlvapp.export_stage_profile.v1"));
     ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 1);
     ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_attempted_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_replaced_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_allocated_bytes_valid_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_max_allocated_bytes")));
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
@@ -475,6 +479,15 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     } else {
         assert_profiler_json_has_stage(stages, QStringLiteral("dng_pack_ms"));
     }
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_FALSE(frames.isEmpty());
+    const QJsonObject first_frame = frames.first().toObject();
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_attempted")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_rc")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_replaced")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes_valid")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes")));
 }
 
 static void preserve_profiler_gate_artifacts(const QString & suffix,

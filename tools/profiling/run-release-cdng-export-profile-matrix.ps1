@@ -502,6 +502,9 @@ foreach ($case in $cases) {
             candidateAsyncWriterJobsStarted = if ($abSummary) { $abSummary.candidate.asyncWriterJobsStarted } else { $null }
             candidateAsyncWriterJobsFinished = if ($abSummary) { $abSummary.candidate.asyncWriterJobsFinished } else { $null }
             candidateAsyncWriterMaxActive = if ($abSummary) { $abSummary.candidate.asyncWriterMaxActive } else { $null }
+            candidateGpuExportAttemptedFrames = if ($abSummary) { $abSummary.candidate.gpuExportAttemptedFrames } else { $null }
+            candidateGpuExportReplacedFrames = if ($abSummary) { $abSummary.candidate.gpuExportReplacedFrames } else { $null }
+            candidateGpuExportMaxAllocatedBytes = if ($abSummary) { $abSummary.candidate.gpuExportMaxAllocatedBytes } else { $null }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
             frameTotalP95DeltaMs = if ($abSummary) { $abSummary.compare.frameTotalP95DeltaMs } else { $null }
             producerFrameAvgDeltaMs = if ($abSummary) { $abSummary.compare.producerFrameAvgDeltaMs } else { $null }
