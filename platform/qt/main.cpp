@@ -380,6 +380,13 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("count"));
     parser.addOption(maxFramesOpt);
 
+    QCommandLineOption exportFormatOpt(
+        QStringLiteral("export-format"),
+        QStringLiteral("Batch export format. Supported now: cdng. Rendered video is reserved for Lane A E4 and fails closed until its prerequisite gates land."),
+        QStringLiteral("format"),
+        QStringLiteral("cdng"));
+    parser.addOption(exportFormatOpt);
+
     QCommandLineOption cdngCodecOpt(
         QStringLiteral("cdng-codec"),
         QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
@@ -420,6 +427,23 @@ static int runBatch(QCoreApplication &app)
     bool resume         = parser.isSet(resumeOpt);
     uint maxFrames      = 0;
     int cdngCodecOffset = 0;
+    const QString exportFormatRaw = parser.value(exportFormatOpt);
+    const BatchExportFormat exportFormat =
+        batchExportFormatFromString(exportFormatRaw);
+    if( exportFormat == BatchExportFormat::Unknown )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format must be cdng. Rendered-video E4 is not implemented yet.\n\n"));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
+    if( exportFormat == BatchExportFormat::RenderedVideo )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n"));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
     if( parser.isSet(maxFramesOpt) )
     {
         bool ok = false;

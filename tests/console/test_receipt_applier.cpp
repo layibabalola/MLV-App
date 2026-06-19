@@ -16,6 +16,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <string>
 
 static QString repo_receipt_path_for_apply(const QString & name)
 {
@@ -382,6 +383,40 @@ TEST(BatchRunner, MaxFramesClampPreservesCutInAndReceiptBounds)
     ASSERT_EQ(14u, BatchRunner::cutOutClampedForMaxFrames(10, 100, 5));
     ASSERT_EQ(12u, BatchRunner::cutOutClampedForMaxFrames(10, 12, 5));
     ASSERT_EQ(8u, BatchRunner::cutOutClampedForMaxFrames(10, 8, 5));
+}
+
+TEST(BatchExportFormat, ParsesCdngAliases)
+{
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::Cdng),
+               static_cast<int>(batchExportFormatFromString(QString())) );
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::Cdng),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("cdng"))) );
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::Cdng),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("Cinema-DNG"))) );
+    ASSERT_EQ( std::string("cdng"),
+               std::string(batchExportFormatName(BatchExportFormat::Cdng)) );
+}
+
+TEST(BatchExportFormat, RecognizesRenderedVideoAsBlockedE4)
+{
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("rendered-video"))) );
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("video"))) );
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("mp4"))) );
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("prores"))) );
+    ASSERT_EQ( std::string("rendered-video"),
+               std::string(batchExportFormatName(BatchExportFormat::RenderedVideo)) );
+}
+
+TEST(BatchExportFormat, RejectsUnknownFormats)
+{
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),
+               static_cast<int>(batchExportFormatFromString(QStringLiteral("gif"))) );
+    ASSERT_EQ( std::string("unknown"),
+               std::string(batchExportFormatName(BatchExportFormat::Unknown)) );
 }
 
 TEST(BatchRunner, PerClipReceiptCopyDoesNotMutateSharedBaseReceipt)
