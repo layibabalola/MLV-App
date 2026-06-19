@@ -107,6 +107,11 @@ cannot both be true in the same summary. The derived
 `visualQuality.autoDecision.capabilityConsistent` and
 `validation.autoDecisionCapabilityConsistent` fields make this fail-closed gate
 reviewable without widening the scoped P3 no-readback claim.
+The same wrapper now fails default GUI smokes when `presented_frames` is missing
+or zero; `-AllowZeroPresentedFrames` is reserved for deliberate launch-only
+probes. This closes a proof gap where a smoke could previously report
+`validation.ok=true` with Auto telemetry present but no rendered/presented frame
+sample.
 
 Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
 carry the exact `sharperHeadroomScaleAllowed` gate that decides whether

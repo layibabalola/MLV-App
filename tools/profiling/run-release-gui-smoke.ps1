@@ -54,6 +54,7 @@ param(
     [bool]$RequireCpuSettled = $true,
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
+    [switch]$AllowZeroPresentedFrames,
     [switch]$DryRun
 )
 
@@ -1286,6 +1287,7 @@ $scaleRequestLast = Get-ObjectPropertyValue $playbackSummary "scale_request_last
 $scaleActiveLast = Get-ObjectPropertyValue $playbackSummary "scale_active_last"
 $qualityModeStart = Get-ObjectPropertyValue $playbackStart "quality_mode"
 $qualityModeLast = Get-ObjectPropertyValue $playbackSummary "quality_mode"
+$presentedFrames = Get-ObjectPropertyValue $playbackSummary "presented_frames"
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
 $autoDecision = [pscustomobject]@{
@@ -1385,6 +1387,14 @@ if ($RequireCpuSettled -and
     $preLaunchSystemCpuSettle.requested -and
     -not $preLaunchSystemCpuSettle.settled) {
     $validationFailures += "System CPU did not settle before launching MLVApp."
+}
+if (-not $AllowZeroPresentedFrames) {
+    if ($null -eq $presentedFrames) {
+        $validationFailures += "Playback summary did not report presented_frames."
+    }
+    elseif ([int]$presentedFrames -le 0) {
+        $validationFailures += "Playback presented 0 frames; pass -AllowZeroPresentedFrames only for launch-only probes."
+    }
 }
 if ($FailOnColorArtifact -and
     $null -ne $colorArtifactScan -and
@@ -1508,6 +1518,7 @@ $result = [pscustomobject]@{
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
             failOnColorArtifact = [bool]$FailOnColorArtifact
+            allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
@@ -1663,6 +1674,8 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     lookAssistApplied = [bool]$lookAssistApplied
     cpuSettled = [bool]$cpuSettled
     systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
+    presentedFrames = $presentedFrames
+    allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict
     glOutputProof = $glOutputProof

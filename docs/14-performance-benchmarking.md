@@ -416,6 +416,9 @@ wrapper also emits `visualQuality.autoDecision.capabilityConsistent` and
 headroom sharpening is reported without an active validated no-readback latch,
 when headroom capability is true but validated capability is false, or when
 validated and demoted capability are both true in the same summary.
+Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
+Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
+must not be cited as visual playback, Auto sampler, FPS, or color proof.
 
 ## Telemetry key list (playback-profile JSON)
 

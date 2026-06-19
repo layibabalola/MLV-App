@@ -1344,7 +1344,9 @@ missing. The wrapper derives nullable boolean versions of those capability
 fields and records `visualQuality.autoDecision.capabilityConsistent` plus
 `validation.autoDecisionCapabilityConsistent`; default Auto-mode smokes also fail
 when the capability fields contradict Auto's headroom-sharpening decision or each
-other.
+other. `run-release-gui-smoke.ps1` also fails default validations when
+`presented_frames` is missing or zero; `-AllowZeroPresentedFrames` is an explicit
+launch-only opt-out and does not create playback/visual proof.
 
 ### 12.1 Cadence and render thread
 
