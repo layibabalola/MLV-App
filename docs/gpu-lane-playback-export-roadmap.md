@@ -73,7 +73,11 @@ round-tripping explicit `Fast` selections. This is only the first adaptive
 quality polish step. The Auto sampler also keeps headroom-based sharpening at
 HQ x4 until the caller has observed a validated no-readback presentation path;
 capability-aware promotion/demotion remains scoped by the P3 proof gate and
-must keep unsupported states on readback/CPU paths.
+must keep unsupported states on readback/CPU paths. Paired GUI-smoke A/B review
+now has a durable comparator (`tools/profiling/compare-release-gui-smoke-ab.ps1`)
+that reports screenshot pixel deltas, GUI/presented/timeline FPS deltas, and an
+optional screenshot-drift failure verdict from two `run-release-gui-smoke.ps1`
+JSON outputs.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
