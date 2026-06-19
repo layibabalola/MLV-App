@@ -354,8 +354,10 @@ that is inert unless explicitly opted in. The pipeline regression
 `DualIsoPipeline.DngFrameAsyncWriterDebugDelayCanFillConfiguredQueue` verifies
 that a queue depth of 2 can report `async_writer_max_queued=2`, and the
 release-tree smoke packet at
-`.claude-state/profiling/2026-06-19-cdng-async-delay-release-smoke/profile.json`
-exported two `M16-1210` frames with `async_writer_queue_capacity=2`,
+`.claude-state/profiling/2026-06-19-cdng-async-delay-release-smoke-18118e78/profile.json`
+exported two `M16-1210` frames on build
+`18118e7893f43174ffc275020a53c27c0e1fbc87` with
+`async_writer_queue_capacity=2`,
 `async_writer_debug_delay_ms=2000`, and `async_writer_max_queued=2`. This
 validates queue-capacity mechanics under synthetic writer backpressure, not a
 real throughput win; async writer promotion still needs a representative
