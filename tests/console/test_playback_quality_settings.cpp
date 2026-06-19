@@ -99,6 +99,19 @@ TEST(PlaybackQualitySettings, RoundTripQualityMode)
     ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Fast),
                static_cast<int>(playbackQualityModeFromSettings()) );
 
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyQualityMode(), -1 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Auto),
+               static_cast<int>(playbackQualityModeFromSettings()) );
+
+    set.setValue( PlaybackQualitySettings::kKeyQualityMode(), 999 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Auto),
+               static_cast<int>(playbackQualityModeFromSettings()) );
+
     clearAllPlaybackQualityKeys();
 }
 

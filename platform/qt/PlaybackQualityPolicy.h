@@ -311,7 +311,8 @@ inline const char * playbackPreviewModeName( PlaybackPreviewMode mode )
     return "sharp_smooth";
 }
 
-/* Returns the user's persisted QualityMode (Fast=0, HighQuality=1, Auto=2). */
+/* Returns the user's persisted QualityMode. Invalid persisted values fall back
+ * to the same configured default used when the setting is absent. */
 #ifdef QT_CORE_LIB
 inline PlaybackQualityMode playbackQualityModeFromSettings()
 {
@@ -320,7 +321,9 @@ inline PlaybackQualityMode playbackQualityModeFromSettings()
                    PlaybackQualitySettings::kApplication() );
     const int raw = set.value( PlaybackQualitySettings::kKeyQualityMode(),
                                PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
-    if ( raw < 0 || raw > 4 ) return PlaybackQualityMode::Fast;
+    if ( raw < 0 || raw > 4 )
+        return static_cast<PlaybackQualityMode>(
+            PlaybackQualitySettings::kDefaultQualityMode() );
     return static_cast<PlaybackQualityMode>( raw );
 }
 

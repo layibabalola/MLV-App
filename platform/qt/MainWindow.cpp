@@ -1370,7 +1370,8 @@ static PlaybackQualityMode playbackQualityModeFromInt( int mode )
     if( mode < static_cast<int>( PlaybackQualityMode::Fast )
      || mode > static_cast<int>( PlaybackQualityMode::Phase3HQ ) )
     {
-        return PlaybackQualityMode::Fast;
+        return static_cast<PlaybackQualityMode>(
+            PlaybackQualitySettings::kDefaultQualityMode() );
     }
     return static_cast<PlaybackQualityMode>( mode );
 }
@@ -15765,7 +15766,10 @@ void MainWindow::initPlaybackQualityFromSettings( void )
                    PlaybackQualitySettings::kApplication() );
     int rawMode = set.value( PlaybackQualitySettings::kKeyQualityMode(),
                              PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
-    if ( rawMode < 0 || rawMode > 4 ) rawMode = 0;
+    if ( rawMode < 0 || rawMode > 4 )
+    {
+        rawMode = PlaybackQualitySettings::kDefaultQualityMode();
+    }
     const int envQualityMode = playbackQualityModeEnvOverride();
     if ( envQualityMode == -2 )
     {
@@ -15783,7 +15787,7 @@ void MainWindow::initPlaybackQualityFromSettings( void )
       && ( !playbackQualityPhase3ModeSelectable( playbackQualityModeFromInt( rawMode ) )
         || !playbackQualityPhase3AcknowledgedFromSettings() ) )
     {
-        rawMode = 0;
+        rawMode = PlaybackQualitySettings::kDefaultQualityMode();
     }
     int rawTargetFps = set.value( PlaybackQualitySettings::kKeyAutoTargetFps(),
                                   PlaybackQualitySettings::kDefaultAutoTargetFps() ).toInt();
@@ -16116,13 +16120,16 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
 
 void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh )
 {
-    if ( mode < 0 || mode > 4 ) mode = 0;
+    if ( mode < 0 || mode > 4 )
+    {
+        mode = PlaybackQualitySettings::kDefaultQualityMode();
+    }
     const int previousMode = m_playbackQualityMode;
     const bool selectingPhase3 = playbackQualityModeIntIsPhase3( mode );
     const PlaybackQualityMode requestedMode = playbackQualityModeFromInt( mode );
     if( selectingPhase3 && !playbackQualityPhase3ModeSelectable( requestedMode ) )
     {
-        mode = 0;
+        mode = PlaybackQualitySettings::kDefaultQualityMode();
     }
     if( selectingPhase3 && mode != 0 && persist
      && !maybeShowPhase3AcknowledgementDialog( mode ) )
