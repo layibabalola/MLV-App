@@ -5035,6 +5035,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             sample.insert( QStringLiteral("request_ns"), requestNs );
             sample.insert( QStringLiteral("completion_ns"), completionNs );
             sample.insert( QStringLiteral("latency_ms"), static_cast<double>( completionNs - requestNs ) / 1000000.0 );
+            sample.insert( QStringLiteral("auto_headroom_capability_last"),
+                           m_playbackQualityAutoHeadroomCapability );
+            sample.insert( QStringLiteral("auto_reason_last"),
+                           QString::fromLatin1(
+                               playbackQualityAutoDecisionReasonName(
+                                   m_playbackQualityAutoDecisionReason ) ) );
             sample.insert( QStringLiteral("gpu16_preview_active"),
                            m_lastPresentedRequestContextValid
                                ? m_lastPresentedRequestContext.renderThreadUsing16BitPreview
@@ -16108,6 +16114,7 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
                                       ? m_playbackAutoTargetFps
                                       : 30 );
     m_playbackQualityAutoDecisionSampleCount = 0;
+    m_playbackQualityAutoHeadroomCapability = false;
 
     if ( persist )
     {
@@ -16176,6 +16183,7 @@ void MainWindow::applyPlaybackAutoTargetFps( int targetFps, bool persist )
     m_playbackQualityAutoDecisionBudgetMs =
         1000.0 / static_cast<double>( m_playbackAutoTargetFps );
     m_playbackQualityAutoDecisionSampleCount = 0;
+    m_playbackQualityAutoHeadroomCapability = false;
     if ( ui->actionPlaybackAutoTarget24 )
         ui->actionPlaybackAutoTarget24->setChecked( targetFps == 24 );
     if ( ui->actionPlaybackAutoTarget30 )
@@ -16280,6 +16288,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         m_playbackQualityAutoDecisionAverageMs,
         m_playbackQualityAutoDecisionBudgetMs,
         m_playbackQualityAutoDecisionSampleCount,
+        m_playbackQualityAutoHeadroomCapability,
         envScale,
         envHq,
         envPreviewOverride,
@@ -16304,6 +16313,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionBudgetMs
      && currentCache.playbackQualityAutoDecisionSampleCount
             == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionSampleCount
+     && currentCache.playbackQualityAutoHeadroomCapability
+            == m_playbackQualityIndicatorCache.playbackQualityAutoHeadroomCapability
      && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
      && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
      && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
@@ -16494,7 +16505,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                 m_playbackQualityAutoDecisionBudgetMs );
         const QString autoDetail = tr(
             "\nAuto decision: %1; samples=%2/%3; avg=%4 ms (%5 fps-eq); "
-            "budget=%6 ms (%7 fps-eq) at target %8 fps." )
+            "budget=%6 ms (%7 fps-eq) at target %8 fps; "
+            "headroom capability=%9." )
             .arg( QString::fromLatin1(
                       playbackQualityAutoDecisionReasonName(
                           m_playbackQualityAutoDecisionReason ) ) )
@@ -16504,7 +16516,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             .arg( autoAverageFps, 0, 'f', 3 )
             .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
             .arg( autoBudgetFps, 0, 'f', 3 )
-            .arg( m_playbackAutoTargetFps );
+            .arg( m_playbackAutoTargetFps )
+            .arg( bool01( m_playbackQualityAutoHeadroomCapability ) );
         indicatorTooltip += autoDetail;
         toolButtonTooltip += autoDetail;
     }
@@ -19772,7 +19785,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "playback_prep_inline_present_frames=%53 "
                "auto_target_fps=%54 auto_reason_last=%55 "
                "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58 "
-               "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60" )
+               "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60 "
+               "auto_headroom_capability_last=%61" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -19841,7 +19855,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( playbackQualityFpsEquivalentForFrameMs(
                          m_playbackQualityAutoDecisionAverageMs ), 0, 'f', 3 )
                .arg( playbackQualityFpsEquivalentForFrameMs(
-                         m_playbackQualityAutoDecisionBudgetMs ), 0, 'f', 3 );
+                         m_playbackQualityAutoDecisionBudgetMs ), 0, 'f', 3 )
+               .arg( bool01( m_playbackQualityAutoHeadroomCapability ) );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -20373,6 +20388,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playbackQualityLastPresentedTime = 0.0;
         m_playbackQualityFrameCounter = 0;
         m_playbackQualitySampler.reset();
+        m_playbackQualityAutoHeadroomCapability = false;
     }
     selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
@@ -20381,6 +20397,7 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playbackQualityLastPresentedTime = 0.0;
         m_playbackQualityFrameCounter = 0;
         m_playbackQualitySampler.reset();
+        m_playbackQualityAutoHeadroomCapability = false;
         beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
         m_playbackScopeLastUpdateTime = 0.0;
@@ -21716,11 +21733,15 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                         decision.reason != m_playbackQualityAutoDecisionReason
                      || decision.averageFrameMs != m_playbackQualityAutoDecisionAverageMs
                      || decision.frameBudgetMs != m_playbackQualityAutoDecisionBudgetMs
-                     || decision.sampleCount != m_playbackQualityAutoDecisionSampleCount;
+                     || decision.sampleCount != m_playbackQualityAutoDecisionSampleCount
+                     || decision.sharperHeadroomScaleAllowed
+                            != m_playbackQualityAutoHeadroomCapability;
                     m_playbackQualityAutoDecisionReason = decision.reason;
                     m_playbackQualityAutoDecisionAverageMs = decision.averageFrameMs;
                     m_playbackQualityAutoDecisionBudgetMs = decision.frameBudgetMs;
                     m_playbackQualityAutoDecisionSampleCount = decision.sampleCount;
+                    m_playbackQualityAutoHeadroomCapability =
+                        decision.sharperHeadroomScaleAllowed;
                     if( effectiveQualityChanged )
                     {
                         m_playbackQualityActiveScale = decision.scaleFactor;

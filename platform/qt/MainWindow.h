@@ -833,6 +833,7 @@ private:
     double m_playbackQualityAutoDecisionAverageMs = 0.0;
     double m_playbackQualityAutoDecisionBudgetMs = 1000.0 / 30.0;
     size_t m_playbackQualityAutoDecisionSampleCount = 0;
+    bool m_playbackQualityAutoHeadroomCapability = false;
     bool m_playbackQualityIndicatorVisible = true;
     struct PlaybackQualityIndicatorCache
     {
@@ -845,6 +846,7 @@ private:
         double playbackQualityAutoDecisionAverageMs = -1.0;
         double playbackQualityAutoDecisionBudgetMs = -1.0;
         size_t playbackQualityAutoDecisionSampleCount = static_cast<size_t>( -1 );
+        bool playbackQualityAutoHeadroomCapability = false;
         int envScale = -2;
         bool envHq = false;
         int envPreviewOverride = -2;

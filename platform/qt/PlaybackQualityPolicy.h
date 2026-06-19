@@ -825,6 +825,7 @@ struct PlaybackQualityAutoSampler
         int scaleFactor;       /* 1, 2, 4, or 8 */
         bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
         PlaybackQualityAutoDecisionReason reason;
+        bool sharperHeadroomScaleAllowed;
         double averageFrameMs; /* 0 while still warming up */
         double frameBudgetMs;
         size_t sampleCount;
@@ -851,6 +852,7 @@ struct PlaybackQualityAutoSampler
                 8,
                 true,
                 PlaybackQualityAutoDecisionReason::AggressiveDualIsoDeepHq,
+                sharperHeadroomScaleAllowed,
                 0.0,
                 frameBudgetMs,
                 sampleCount
@@ -864,6 +866,7 @@ struct PlaybackQualityAutoSampler
                 4,
                 true,
                 PlaybackQualityAutoDecisionReason::WarmupHq,
+                sharperHeadroomScaleAllowed,
                 0.0,
                 frameBudgetMs,
                 sampleCount
@@ -884,6 +887,7 @@ struct PlaybackQualityAutoSampler
                     8,
                     true,
                     PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq,
+                    sharperHeadroomScaleAllowed,
                     avgMs,
                     frameBudgetMs,
                     sampleCount
@@ -895,6 +899,7 @@ struct PlaybackQualityAutoSampler
                 4,
                 false,
                 PlaybackQualityAutoDecisionReason::MissedTargetFast,
+                sharperHeadroomScaleAllowed,
                 avgMs,
                 frameBudgetMs,
                 sampleCount
@@ -911,6 +916,7 @@ struct PlaybackQualityAutoSampler
                     4,
                     true,
                     PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability,
+                    sharperHeadroomScaleAllowed,
                     avgMs,
                     frameBudgetMs,
                     sampleCount
@@ -921,6 +927,7 @@ struct PlaybackQualityAutoSampler
                 2,
                 true,
                 PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq,
+                sharperHeadroomScaleAllowed,
                 avgMs,
                 frameBudgetMs,
                 sampleCount
@@ -931,6 +938,7 @@ struct PlaybackQualityAutoSampler
             4,
             true,
             PlaybackQualityAutoDecisionReason::SteadyHq,
+            sharperHeadroomScaleAllowed,
             avgMs,
             frameBudgetMs,
             sampleCount

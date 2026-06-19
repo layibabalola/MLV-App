@@ -87,6 +87,15 @@ The visible playback quality menu/status now uses the roadmap vocabulary:
 ids and legacy `fast`/`hq` automation names remain supported; the parser also
 accepts `prioritize-smoothness` and `prioritize_quality`.
 
+Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
+carry the exact `sharperHeadroomScaleAllowed` gate that decides whether
+headroom may promote a non-Dual-ISO clip from `HQ x4` to `HQ x2`. The status
+tooltip, playback-profile frame JSON, and playback smoke summary expose this as
+`auto_headroom_capability_last`, so reviewers can tell whether Auto sharpened
+because the scoped true no-readback texture path was actually observed or held
+back for lack of capability proof. This is evidence/control polish only; it
+does not widen the P3 no-readback scope.
+
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,
 while later frames measure the elapsed time between the previous profiled frame

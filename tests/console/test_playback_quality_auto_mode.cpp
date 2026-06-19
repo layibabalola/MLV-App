@@ -88,6 +88,7 @@ TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
     ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "warmup_hq", d.reason );
+    ASSERT_FALSE( d.sharperHeadroomScaleAllowed );
     ASSERT_EQ( 0u, d.sampleCount );
     ASSERT_NEAR( 1000.0 / 30.0, d.frameBudgetMs, 0.001 );
     ASSERT_NEAR( 0.0, d.averageFrameMs, 0.001 );
@@ -218,6 +219,7 @@ TEST(PlaybackQualityAutoSampler, UpgradesToHqx2OnNonDIWithHeadroom)
     ASSERT_EQ( 2, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );
+    ASSERT_TRUE( d.sharperHeadroomScaleAllowed );
 }
 
 TEST(PlaybackQualityAutoSampler, HoldsHqx4UntilHeadroomCapabilityIsValidated)
@@ -228,6 +230,7 @@ TEST(PlaybackQualityAutoSampler, HoldsHqx4UntilHeadroomCapabilityIsValidated)
     ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_waiting_for_validated_capability", d.reason );
+    ASSERT_FALSE( d.sharperHeadroomScaleAllowed );
 }
 
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)
