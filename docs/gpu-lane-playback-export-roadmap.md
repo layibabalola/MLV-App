@@ -1028,7 +1028,10 @@ improved by -102.715 ms while writer-completion lag rose +122.487 ms and
 writer-side compression averaged +11.200 ms. Next E3 work is to make the
 promotion gate distinguish export wall-clock throughput from async
 completion-lag attribution, then decide whether this lossless candidate can
-move beyond proof/experiment mode.
+move beyond proof/experiment mode. The first gate now exists as
+`-RequireElapsedImprovement` / `-MinElapsedImprovementPercent` on the A/B,
+matrix, and UltraMagnus wrappers; frame-total avg/p95 regression remains a
+separate attribution gate via `-FailOnRegression`.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

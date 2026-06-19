@@ -143,12 +143,16 @@ For the E3 lossless/compression-overlap follow-up, the wrapper can also pass
 candidate-only async writer controls to the same remote proof path:
 `-CandidateUseAsyncWriter`, `-CandidateUseAsyncWriterCompression`,
 `-CandidateAsyncWriterQueueDepth`, and `-CandidateAsyncWriterThreadCount`.
-The baseline remains the plain CPU export path; use these switches only for
-bounded candidate experiments that still require GPU attempt/replacement,
-trusted-frame, and DNG hash gates. When passing more than one clip through a
-native `pwsh.exe -File` invocation, either use a child `pwsh -Command` with an
-explicit PowerShell array or pass a comma-separated `-ClipNames` value; the
-wrapper normalizes comma-separated clip names before staging the remote job.
+Add `-RequireElapsedImprovement` and optionally
+`-MinElapsedImprovementPercent <n>` when the packet must fail unless the
+candidate improves wrapper wall-clock elapsed time; keep `-FailOnRegression`
+for the separate frame-total avg/p95 attribution gate. The baseline remains the
+plain CPU export path; use these switches only for bounded candidate
+experiments that still require GPU attempt/replacement, trusted-frame, and DNG
+hash gates. When passing more than one clip through a native `pwsh.exe -File`
+invocation, either use a child `pwsh -Command` with an explicit PowerShell array
+or pass a comma-separated `-ClipNames` value; the wrapper normalizes
+comma-separated clip names before staging the remote job.
 The accepted 2026-06-19 proof packet is
 `.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
 with local packet
@@ -205,6 +209,8 @@ opt-in candidate, not default policy: frame-total attribution still averaged
 paid back as writer-completion lag (+122.487 ms), with writer-side compression
 +11.200 ms on average. Promotion needs an explicit async-pipeline gate that
 separates wall-clock export throughput from completion-lag attribution.
+That gate is now available as `-RequireElapsedImprovement` /
+`-MinElapsedImprovementPercent` on the A/B, matrix, and UltraMagnus wrappers.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass

@@ -33,6 +33,8 @@ param(
     [switch]$RequireCandidateGpuExportReplacement,
     [switch]$RequireCandidateGpuExportTrusted,
     [switch]$RequireDngHashMatch,
+    [switch]$RequireElapsedImprovement,
+    [double]$MinElapsedImprovementPercent = 0.0,
     [ValidateSet("BaselineFirst", "CandidateFirst")]
     [string]$RunOrder = "BaselineFirst",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -48,6 +50,9 @@ if ($BaselineUseAsyncWriterCompression -and -not $BaselineUseAsyncWriter) {
 }
 if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
     throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
+}
+if ($MinElapsedImprovementPercent -lt 0.0) {
+    throw "-MinElapsedImprovementPercent must be >= 0."
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -361,6 +366,8 @@ if ($DryRun) {
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
             requireCandidateGpuExportTrusted = [bool]$RequireCandidateGpuExportTrusted
             requireDngHashMatch = [bool]$RequireDngHashMatch
+            requireElapsedImprovement = [bool]$RequireElapsedImprovement
+            minElapsedImprovementPercent = $MinElapsedImprovementPercent
         }
         compareOutput = $compareJson
         dngHashOutput = Join-Path $bundleDir "dng-hash-comparison.json"
@@ -469,7 +476,26 @@ if ($RequireCandidateGpuExportTrusted) {
         $proofFailures += "candidate-gpu-export-trusted-frame-count expected=$candidateFrameCount actual=$candidateGpuExportTrustedFrames $candidateGpuExportSkipCounts"
     }
 }
-$summaryFailures = @($compareFailures + $proofFailures)
+$elapsedGateFailures = @()
+$elapsedImprovementPercent = $null
+if ($null -ne $elapsedDelta.deltaPercent) {
+    $elapsedImprovementPercent = -1.0 * [double]$elapsedDelta.deltaPercent
+}
+if ($RequireElapsedImprovement) {
+    if ($null -eq $elapsedDelta.deltaMs) {
+        $elapsedGateFailures += "elapsed-improvement-unavailable"
+    }
+    elseif ([double]$elapsedDelta.deltaMs -ge 0.0) {
+        $elapsedGateFailures += "elapsed-not-improved baseline_ms=$($baselineRun.elapsedMs) candidate_ms=$($candidateRun.elapsedMs) delta_ms=$($elapsedDelta.deltaMs)"
+    }
+    elseif ($null -eq $elapsedImprovementPercent) {
+        $elapsedGateFailures += "elapsed-improvement-percent-unavailable"
+    }
+    elseif ($elapsedImprovementPercent -lt $MinElapsedImprovementPercent) {
+        $elapsedGateFailures += "elapsed-improvement-percent expected_min=$MinElapsedImprovementPercent actual=$elapsedImprovementPercent"
+    }
+}
+$summaryFailures = @($compareFailures + $proofFailures + $elapsedGateFailures)
 $summary = [pscustomobject]@{
     schema = "release-cdng-export-profile-ab.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -603,7 +629,13 @@ $summary = [pscustomobject]@{
         requireDngHashMatch = [bool]$RequireDngHashMatch
         failures = $proofFailures
     }
-    verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS" -and $proofFailures.Count -eq 0) { "PASS" } else { "FAIL" }
+    elapsedGate = [pscustomobject]@{
+        requireElapsedImprovement = [bool]$RequireElapsedImprovement
+        minElapsedImprovementPercent = $MinElapsedImprovementPercent
+        elapsedImprovementPercent = $elapsedImprovementPercent
+        failures = $elapsedGateFailures
+    }
+    verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS" -and $summaryFailures.Count -eq 0) { "PASS" } else { "FAIL" }
 }
 
 $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8

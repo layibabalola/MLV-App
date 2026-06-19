@@ -24,7 +24,9 @@ param(
     [switch]$CandidateUseAsyncWriter,
     [switch]$CandidateUseAsyncWriterCompression,
     [int]$CandidateAsyncWriterQueueDepth = 0,
-    [int]$CandidateAsyncWriterThreadCount = 0
+    [int]$CandidateAsyncWriterThreadCount = 0,
+    [switch]$RequireElapsedImprovement,
+    [double]$MinElapsedImprovementPercent = 0.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +39,9 @@ if ($CandidateAsyncWriterQueueDepth -lt 0) {
 }
 if ($CandidateAsyncWriterThreadCount -lt 0) {
     throw "-CandidateAsyncWriterThreadCount must be >= 0."
+}
+if ($MinElapsedImprovementPercent -lt 0.0) {
+    throw "-MinElapsedImprovementPercent must be >= 0."
 }
 
 function Normalize-CommaSeparatedArgumentList {
@@ -384,6 +389,7 @@ if ($failures.Count -eq 0) {
     $trustedGpuExportLiteral = if ($TrustedGpuExport) { '$true' } else { '$false' }
     $candidateUseAsyncWriterLiteral = if ($CandidateUseAsyncWriter) { '$true' } else { '$false' }
     $candidateUseAsyncWriterCompressionLiteral = if ($CandidateUseAsyncWriterCompression) { '$true' } else { '$false' }
+    $requireElapsedImprovementLiteral = if ($RequireElapsedImprovement) { '$true' } else { '$false' }
     $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
     $codecsLiteral = Convert-ToPowerShellArrayLiteral $CdngCodecs
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
@@ -412,6 +418,8 @@ if ($failures.Count -eq 0) {
 `$candidateUseAsyncWriterCompression = $candidateUseAsyncWriterCompressionLiteral
 `$candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
 `$candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
+`$requireElapsedImprovement = $requireElapsedImprovementLiteral
+`$minElapsedImprovementPercent = $MinElapsedImprovementPercent
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 
@@ -640,6 +648,12 @@ try {
         if (`$candidateAsyncWriterThreadCount -gt 0) {
             `$matrixArgs += @('-CandidateAsyncWriterThreadCount', [string]`$candidateAsyncWriterThreadCount)
         }
+        if (`$requireElapsedImprovement) {
+            `$matrixArgs += '-RequireElapsedImprovement'
+        }
+        if (`$minElapsedImprovementPercent -gt 0.0) {
+            `$matrixArgs += @('-MinElapsedImprovementPercent', [string]`$minElapsedImprovementPercent)
+        }
         `$matrixOutput = & `$psExe @matrixArgs 2>&1
         `$matrixExit = `$LASTEXITCODE
         `$matrixOutputTail = @(`$matrixOutput | Select-Object -Last 200 | ForEach-Object { [string]`$_ })
@@ -746,6 +760,8 @@ try {
             candidateUseAsyncWriterCompression = [bool]`$candidateUseAsyncWriterCompression
             candidateAsyncWriterQueueDepth = `$candidateAsyncWriterQueueDepth
             candidateAsyncWriterThreadCount = `$candidateAsyncWriterThreadCount
+            requireElapsedImprovement = [bool]`$requireElapsedImprovement
+            minElapsedImprovementPercent = `$minElapsedImprovementPercent
         }
         outputs = [ordered]@{
             runRoot = `$runRoot
@@ -908,6 +924,8 @@ $summary = [pscustomobject]@{
         candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
         candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
         candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
+        requireElapsedImprovement = [bool]$RequireElapsedImprovement
+        minElapsedImprovementPercent = $MinElapsedImprovementPercent
         useReceiptAsIs = [bool]$UseReceiptAsIs
         skipRemoteBuild = [bool]$SkipRemoteBuild
         skipBackendBuild = [bool]$SkipBackendBuild

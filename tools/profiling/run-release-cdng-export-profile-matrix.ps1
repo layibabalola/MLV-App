@@ -37,6 +37,8 @@ param(
     [switch]$RequireCandidateGpuExportReplacement,
     [switch]$RequireCandidateGpuExportTrusted,
     [switch]$RequireDngHashMatch,
+    [switch]$RequireElapsedImprovement,
+    [double]$MinElapsedImprovementPercent = 0.0,
     [double]$MaxFrameTotalRegressionPercent = 5.0,
     [double]$MaxFrameTotalP95RegressionPercent = 10.0,
     [switch]$FailOnRegression,
@@ -57,6 +59,9 @@ if ($BaselineUseAsyncWriterCompression -and -not $BaselineUseAsyncWriter) {
 }
 if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
     throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
+}
+if ($MinElapsedImprovementPercent -lt 0.0) {
+    throw "-MinElapsedImprovementPercent must be >= 0."
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -431,6 +436,12 @@ function New-AbArgs {
     if ($RequireCandidateGpuExportTrusted) {
         $args += "-RequireCandidateGpuExportTrusted"
     }
+    if ($RequireElapsedImprovement) {
+        $args += "-RequireElapsedImprovement"
+    }
+    if ($MinElapsedImprovementPercent -gt 0.0) {
+        $args += @("-MinElapsedImprovementPercent", "$MinElapsedImprovementPercent")
+    }
     if ($FailOnRegression) {
         $args += "-FailOnRegression"
     }
@@ -522,6 +533,8 @@ if ($DryRun) {
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
             requireCandidateGpuExportTrusted = [bool]$RequireCandidateGpuExportTrusted
             requireDngHashMatch = [bool]$RequireDngHashMatch
+            requireElapsedImprovement = [bool]$RequireElapsedImprovement
+            minElapsedImprovementPercent = $MinElapsedImprovementPercent
             alternateRunOrder = [bool]$AlternateRunOrder
             failOnRegression = [bool]$FailOnRegression
         }
@@ -636,6 +649,8 @@ foreach ($case in $cases) {
             candidateGpuExportSkippedFrames = if ($abSummary) { $abSummary.candidate.gpuExportSkippedFrames } else { $null }
             candidateGpuExportSkipReasonCounts = if ($abSummary) { $abSummary.candidate.gpuExportSkipReasonCounts } else { $null }
             proofGateFailures = if ($abSummary -and $abSummary.proofGates) { @($abSummary.proofGates.failures) } else { @() }
+            elapsedGateFailures = if ($abSummary -and $abSummary.elapsedGate) { @($abSummary.elapsedGate.failures) } else { @() }
+            elapsedImprovementPercent = if ($abSummary -and $abSummary.elapsedGate) { $abSummary.elapsedGate.elapsedImprovementPercent } else { $null }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
             frameTotalP95DeltaMs = if ($abSummary) { $abSummary.compare.frameTotalP95DeltaMs } else { $null }
             producerFrameAvgDeltaMs = if ($abSummary) { $abSummary.compare.producerFrameAvgDeltaMs } else { $null }
@@ -698,6 +713,8 @@ $matrix = [pscustomobject]@{
         failOnRegression = [bool]$FailOnRegression
         maxFrameTotalRegressionPercent = $MaxFrameTotalRegressionPercent
         maxFrameTotalP95RegressionPercent = $MaxFrameTotalP95RegressionPercent
+        requireElapsedImprovement = [bool]$RequireElapsedImprovement
+        minElapsedImprovementPercent = $MinElapsedImprovementPercent
     }
     options = [pscustomobject]@{
         baselineUsePayloadHandoff = [bool]$BaselineUsePayloadHandoff
@@ -724,6 +741,8 @@ $matrix = [pscustomobject]@{
         requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
         requireCandidateGpuExportTrusted = [bool]$RequireCandidateGpuExportTrusted
         requireDngHashMatch = [bool]$RequireDngHashMatch
+        requireElapsedImprovement = [bool]$RequireElapsedImprovement
+        minElapsedImprovementPercent = $MinElapsedImprovementPercent
         buildId = $BuildId
     }
     totals = [pscustomobject]@{
