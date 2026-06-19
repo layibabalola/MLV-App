@@ -375,6 +375,15 @@ TEST(BatchRunner, LookAssistAnalysisFrameAnchorsToOriginalCutInUnderResume)
     ASSERT_EQ(0u, BatchRunner::lookAssistAnalysisFrameIndex(0, 25));
 }
 
+TEST(BatchRunner, MaxFramesClampPreservesCutInAndReceiptBounds)
+{
+    ASSERT_EQ(10u, BatchRunner::cutOutClampedForMaxFrames(1, 10, 0));
+    ASSERT_EQ(5u, BatchRunner::cutOutClampedForMaxFrames(1, 10, 5));
+    ASSERT_EQ(14u, BatchRunner::cutOutClampedForMaxFrames(10, 100, 5));
+    ASSERT_EQ(12u, BatchRunner::cutOutClampedForMaxFrames(10, 12, 5));
+    ASSERT_EQ(8u, BatchRunner::cutOutClampedForMaxFrames(10, 8, 5));
+}
+
 TEST(BatchRunner, PerClipReceiptCopyDoesNotMutateSharedBaseReceipt)
 {
     ReceiptSettings base;

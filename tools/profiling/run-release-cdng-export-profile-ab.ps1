@@ -12,6 +12,7 @@ param(
     [switch]$CandidateUseAsyncWriter,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
+    [int]$MaxFrames = 0,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -85,6 +86,9 @@ function New-ProfileArgs {
             $args += @("-GpuExportDll", $GpuExportDll)
         }
     }
+    if ($MaxFrames -gt 0) {
+        $args += @("-MaxFrames", "$MaxFrames")
+    }
     if ($UsePayloadHandoff) {
         $args += "-UsePayloadHandoff"
     }
@@ -121,6 +125,7 @@ if ($DryRun) {
     [pscustomobject]@{
         schema = "release-cdng-export-profile-ab-plan.v1"
         bundleDir = $bundleDir
+        maxFrames = $MaxFrames
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -192,6 +197,7 @@ $summary = [pscustomobject]@{
     schema = "release-cdng-export-profile-ab.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     bundleDir = $bundleDir
+    maxFrames = $MaxFrames
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
         useAsyncWriter = [bool]$BaselineUseAsyncWriter

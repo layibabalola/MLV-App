@@ -16,6 +16,7 @@ param(
     [switch]$UsePayloadHandoff,
     [switch]$UseAsyncWriter,
     [int]$AsyncWriterQueueDepth = 0,
+    [int]$MaxFrames = 0,
     [string]$GpuExportDll = "",
     [string[]]$AdditionalArgs = @(),
     [string[]]$ExtraEnvironment = @(),
@@ -142,6 +143,9 @@ try {
     if ($Verbose) {
         $arguments += "--verbose"
     }
+    if ($MaxFrames -gt 0) {
+        $arguments += @("--max-frames", "$MaxFrames")
+    }
     if ($AdditionalArgs.Count -gt 0) {
         $arguments += $AdditionalArgs
     }
@@ -201,6 +205,7 @@ try {
             profileOutput = $profilePath
             dngOutputDir = $dngDir
             buildId = $effectiveBuildId
+            maxFrames = $MaxFrames
             qwindowsExists = $true
             environment = [pscustomobject]@{
                 QT_QPA_PLATFORM = $envBlock["QT_QPA_PLATFORM"]

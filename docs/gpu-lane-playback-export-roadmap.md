@@ -122,7 +122,9 @@ candidate runs should use
 `tools/profiling/run-release-cdng-export-profile.ps1`, which launches the
 current `MLVApp.exe --batch` CDNG export path with
 `MLVAPP_EXPORT_STAGE_PROFILER=1` and writes the profile JSON next to the exported
-DNG output bundle. `tools/profiling/compare-export-stage-profiles.ps1` now
+DNG output bundle. The runner can pass a bounded `-MaxFrames` cap through to
+batch `--max-frames`, so real-footage probes can avoid unbounded DNG output
+before full benchmark matrices are intentional. `tools/profiling/compare-export-stage-profiles.ps1` now
 summarizes frame-total avg/p95 deltas plus queue-idle avg/p95 deltas in stdout,
 and `-FailOnRegression` gates both avg and p95 frame-total regressions.
 

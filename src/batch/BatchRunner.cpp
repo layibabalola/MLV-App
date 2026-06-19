@@ -158,12 +158,16 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         }
     }
 
-    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4\n")
-               .arg( inputPath, outputPath,
-                     BatchContext::skipErrors() ? QStringLiteral("true")
-                                               : QStringLiteral("false"),
-                     BatchContext::resumeEnabled() ? QStringLiteral("true")
-                                                   : QStringLiteral("false") ));
+    const uint32_t maxFrames = BatchContext::maxFrames();
+    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5\n")
+               .arg( inputPath )
+               .arg( outputPath )
+               .arg( BatchContext::skipErrors() ? QStringLiteral("true")
+                                                 : QStringLiteral("false") )
+               .arg( BatchContext::resumeEnabled() ? QStringLiteral("true")
+                                                    : QStringLiteral("false") )
+               .arg( maxFrames > 0 ? QString::number( maxFrames )
+                                    : QStringLiteral("all") ));
 
     int succeeded = 0;
     int failed = 0;
@@ -261,6 +265,19 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     uint32_t cutOut = receipt->cutOut();
     if( cutIn == 0 )  cutIn  = 1;
     if( cutOut == 0 || cutOut > totalFrames ) cutOut = totalFrames;
+
+    const uint32_t unclampedCutOut = cutOut;
+    cutOut = BatchRunner::cutOutClampedForMaxFrames(
+        cutIn, cutOut, BatchContext::maxFrames() );
+    if( cutOut != unclampedCutOut )
+    {
+        BatchLogger::out(QStringLiteral("[BATCH] MAX_FRAMES %1 max=%2 cutIn=%3 cutOut=%4 originalCutOut=%5\n")
+                   .arg( baseName )
+                   .arg( BatchContext::maxFrames() )
+                   .arg( cutIn )
+                   .arg( cutOut )
+                   .arg( unclampedCutOut ));
+    }
 
     uint32_t effectiveCutIn = cutIn;  /* may be adjusted by resume */
 

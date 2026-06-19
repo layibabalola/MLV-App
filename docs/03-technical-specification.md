@@ -779,6 +779,7 @@ public:
     static void setReceiptPath(const QString&);       static QString receiptPath();
     static void setUseDefaultReceipt(bool);           static bool useDefaultReceipt();
     static void setResumeEnabled(bool);               static bool resumeEnabled();
+    static void setMaxFrames(uint32_t);               static uint32_t maxFrames();
 };
 
 // src/batch/MlvTrim.h
@@ -1233,7 +1234,7 @@ happen pre-Qt because `--batch` and `--trim-mlv` must not bring up a
 
 | Flag | Entry point | Description |
 |---|---|---|
-| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`. |
+| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`, `--max-frames`. |
 | `--trim-mlv` | `MlvTrim::run(QCoreApplication &)` | MLV segment trim / reconstruction. Stand-alone utility. |
 | `--profile-playback` | `runPlaybackProfile(QApplication)` (`main.cpp:346+`) | Headless playback profiler. Emits JSON to `--output`. Stacks arbitrary other `--*` options; see §5.8 `PlaybackProfileOptions`. |
 | `--gpu-viewport` | Passed through to `MainWindow` ctor | Forces experimental GL viewport for this run. |

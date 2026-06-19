@@ -39,6 +39,24 @@ public:
         return cutIn > 0 ? cutIn - 1 : 0;
     }
 
+    static uint32_t cutOutClampedForMaxFrames( uint32_t cutIn,
+                                               uint32_t cutOut,
+                                               uint32_t maxFrames )
+    {
+        if( maxFrames == 0 || cutIn == 0 || cutOut < cutIn )
+        {
+            return cutOut;
+        }
+
+        const uint64_t limitedCutOut =
+            static_cast<uint64_t>( cutIn ) + static_cast<uint64_t>( maxFrames ) - 1;
+        if( limitedCutOut < static_cast<uint64_t>( cutOut ) )
+        {
+            return static_cast<uint32_t>( limitedCutOut );
+        }
+        return cutOut;
+    }
+
 private:
     BatchRunner() = delete; /* Pure static */
 

@@ -2,6 +2,7 @@
 #define BATCHCONTEXT_H
 
 #include <QString>
+#include <cstdint>
 
 /* Static singleton holding batch-mode flags.
  * Set once at startup from CLI args, read throughout the codebase.
@@ -31,6 +32,9 @@ public:
     static void setResumeEnabled(bool enabled);
     static bool resumeEnabled();
 
+    static void setMaxFrames(uint32_t frames);
+    static uint32_t maxFrames();
+
 private:
     BatchContext() = delete; /* Pure static — no instances */
 
@@ -39,6 +43,7 @@ private:
     static bool s_verbose;
     static bool s_useDefaultReceipt;
     static bool s_resumeEnabled;
+    static uint32_t s_maxFrames;
     static QString s_logPath;
     static QString s_receiptPath;
 };

@@ -347,6 +347,12 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("Skip clips whose DNG output already matches expected frame count."));
     parser.addOption(resumeOpt);
 
+    QCommandLineOption maxFramesOpt(
+        QStringLiteral("max-frames"),
+        QStringLiteral("Limit each batch export to at most this many frames after receipt cut-in/cut-out resolution."),
+        QStringLiteral("count"));
+    parser.addOption(maxFramesOpt);
+
     parser.process(app);
 
     /* Init log file mirror as early as possible so that --help and
@@ -379,6 +385,19 @@ static int runBatch(QCoreApplication &app)
     bool useDefaultReceipt  = parser.isSet(defaultReceiptOpt);
 
     bool resume         = parser.isSet(resumeOpt);
+    uint maxFrames      = 0;
+    if( parser.isSet(maxFramesOpt) )
+    {
+        bool ok = false;
+        maxFrames = parser.value(maxFramesOpt).toUInt(&ok);
+        if( !ok || maxFrames == 0 )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --max-frames must be a positive integer.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
 
     /* Store in BatchContext for global access */
     BatchContext::setBatchMode(true);
@@ -388,6 +407,7 @@ static int runBatch(QCoreApplication &app)
     BatchContext::setReceiptPath(receiptPath);
     BatchContext::setUseDefaultReceipt(useDefaultReceipt);
     BatchContext::setResumeEnabled(resume);
+    BatchContext::setMaxFrames(static_cast<uint32_t>(maxFrames));
 
     int exitCode = BatchRunner::run(inputPath, outputPath);
     BatchLogger::shutdown();
