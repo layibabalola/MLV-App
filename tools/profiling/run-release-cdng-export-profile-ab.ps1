@@ -227,6 +227,8 @@ $summary = [pscustomobject]@{
         frameTotalP95DeltaPercent = if ($compare) { $compare.stages.frame_total_ms.p95Ms.deltaPercent } else { $null }
         queueIdleAvgDeltaMs = if ($compare) { $compare.stages.queue_idle_ms.avgMs.delta } else { $null }
         queueIdleP95DeltaMs = if ($compare) { $compare.stages.queue_idle_ms.p95Ms.delta } else { $null }
+        payloadCloneAvgDeltaMs = if ($compare -and $compare.stages.payload_clone_ms) { $compare.stages.payload_clone_ms.avgMs.delta } else { $null }
+        payloadCloneP95DeltaMs = if ($compare -and $compare.stages.payload_clone_ms) { $compare.stages.payload_clone_ms.p95Ms.delta } else { $null }
         writerQueueWaitAvgDeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.avgMs.delta } else { $null }
         writerQueueWaitP95DeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.p95Ms.delta } else { $null }
         failures = $compareFailures
@@ -241,7 +243,8 @@ Write-Host ((
     "baseline_async={3} candidate_async={4} " +
     "baseline_async_queue_capacity={5} candidate_async_queue_capacity={6} " +
     "frame_total_avg_delta_ms={7} frame_total_p95_delta_ms={8} " +
-    "queue_idle_avg_delta_ms={9} writer_queue_wait_avg_delta_ms={10} output={11}") -f
+    "queue_idle_avg_delta_ms={9} payload_clone_avg_delta_ms={10} " +
+    "writer_queue_wait_avg_delta_ms={11} output={12}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
@@ -252,6 +255,7 @@ Write-Host ((
     $summary.compare.frameTotalAvgDeltaMs,
     $summary.compare.frameTotalP95DeltaMs,
     $summary.compare.queueIdleAvgDeltaMs,
+    $summary.compare.payloadCloneAvgDeltaMs,
     $summary.compare.writerQueueWaitAvgDeltaMs,
     $summaryJson
 )

@@ -101,6 +101,7 @@ typedef enum
     EXPORT_PROFILE_DNG_HEADER,
     EXPORT_PROFILE_DNG_PACK,
     EXPORT_PROFILE_DNG_COMPRESS,
+    EXPORT_PROFILE_PAYLOAD_CLONE,
     EXPORT_PROFILE_DISK_WRITE,
     EXPORT_PROFILE_WRITER_QUEUE_WAIT,
     EXPORT_PROFILE_QUEUE_IDLE,
@@ -168,6 +169,7 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_DNG_HEADER:   return "dng_header_ms";
         case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
         case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
+        case EXPORT_PROFILE_PAYLOAD_CLONE: return "payload_clone_ms";
         case EXPORT_PROFILE_DISK_WRITE:   return "disk_write_ms";
         case EXPORT_PROFILE_WRITER_QUEUE_WAIT:
                                           return "writer_queue_wait_ms";
@@ -518,6 +520,7 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "dng_header_ms", 1);
     export_profile_write_stage_stats(file, "dng_pack_ms", 1);
     export_profile_write_stage_stats(file, "dng_compress_ms", 1);
+    export_profile_write_stage_stats(file, "payload_clone_ms", 1);
     export_profile_write_stage_stats(file, "disk_write_ms", 1);
     export_profile_write_stage_stats(file, "writer_queue_wait_ms", 1);
     export_profile_write_stage_stats(file, "queue_idle_ms", 1);
@@ -2090,6 +2093,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
 {
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
+    double profile_stage_start = 0.0;
     dngFramePayload_t * payload = NULL;
 
     export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
@@ -2109,7 +2113,9 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
         return 1;
     }
 
+    profile_stage_start = export_profile_stage_begin(&profile_frame);
     payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
@@ -2161,7 +2167,9 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
         return 1;
     }
 
+    profile_stage_start = export_profile_stage_begin(&profile_frame);
     payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);

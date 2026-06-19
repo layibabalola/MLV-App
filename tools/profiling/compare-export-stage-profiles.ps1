@@ -176,7 +176,8 @@ Write-Host ((
     "frame_total_avg_delta_percent={2} frame_total_p95_delta_ms={3} " +
     "frame_total_p95_delta_percent={4} queue_idle_avg_delta_ms={5} " +
     "queue_idle_p95_delta_ms={6} writer_queue_wait_avg_delta_ms={7} " +
-    "writer_queue_wait_p95_delta_ms={8} llrawproc_avg_delta_ms={9} output={10}") -f
+    "writer_queue_wait_p95_delta_ms={8} payload_clone_avg_delta_ms={9} " +
+    "payload_clone_p95_delta_ms={10} llrawproc_avg_delta_ms={11} output={12}") -f
     $result.verdict,
     $result.stages.frame_total_ms.avgMs.delta,
     $result.stages.frame_total_ms.avgMs.deltaPercent,
@@ -186,6 +187,8 @@ Write-Host ((
     $result.stages.queue_idle_ms.p95Ms.delta,
     $result.stages.writer_queue_wait_ms.avgMs.delta,
     $result.stages.writer_queue_wait_ms.p95Ms.delta,
+    $result.stages.payload_clone_ms.avgMs.delta,
+    $result.stages.payload_clone_ms.p95Ms.delta,
     $result.stages.llrawproc_ms.avgMs.delta,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )

@@ -330,9 +330,10 @@ implementation. Export-stage profiler JSON records
 `payload_handoff_env_enabled`, `async_writer_env_enabled`,
 `async_writer_queue_capacity`, and `async_writer_max_queued` so
 legacy-vs-candidate release profiles remain self-describing. Async-writer
-profiles also expose `writer_queue_wait_ms`: time the producer spends waiting
-for the bounded writer queue to accept a payload, distinct from the writer
-thread's `disk_write_ms`.
+profiles also expose `payload_clone_ms`, the header+image copy cost before a
+payload is handed to the serial or async writer, and `writer_queue_wait_ms`,
+the producer time spent waiting for the bounded writer queue to accept a
+payload, distinct from the writer thread's `disk_write_ms`.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 
