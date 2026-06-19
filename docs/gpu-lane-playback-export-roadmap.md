@@ -706,6 +706,20 @@ DNG hash PASS 1/1. This is VM-local fallback/tooling proof only; real export GPU
 promotion still needs an UltraMagnus run whose candidate attempts and replaces
 the expected frames with matching DNG hashes.
 
+Update 2026-06-19 Lane A E3 GPU proof gates: the same A/B and matrix wrappers
+now have opt-in promotion gates for CPU-baseline/GPU-candidate runs:
+`-RequireBaselineNoGpuExportAttempt`, `-RequireCandidateGpuExportAttempt`, and
+`-RequireCandidateGpuExportReplacement`. The ordinary local fallback A/B
+`.claude-state/profiling/2026-06-19-cdng-e3-proof-gate-pass-local-51e19138/`
+still passed and its DNG hash check matched 1/1. The intentionally gated local
+A/B
+`.claude-state/profiling/2026-06-19-cdng-e3-proof-gate-expected-fail-local-51e19138/`
+and matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-proof-gate-matrix-expected-fail-local-51e19138/`
+failed closed because the VM candidate attempted 0/1 frames and replaced 0/1
+frames. This is the desired local behavior: a real UltraMagnus export promotion
+packet must pass those gates, then pass the DNG hash companion.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

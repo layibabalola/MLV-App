@@ -27,6 +27,9 @@ param(
     [string]$GpuExportDll = "",
     [string]$BaselineGpuExportDll = "",
     [string]$CandidateGpuExportDll = "",
+    [switch]$RequireBaselineNoGpuExportAttempt,
+    [switch]$RequireCandidateGpuExportAttempt,
+    [switch]$RequireCandidateGpuExportReplacement,
     [double]$MaxFrameTotalRegressionPercent = 5.0,
     [double]$MaxFrameTotalP95RegressionPercent = 10.0,
     [switch]$FailOnRegression,
@@ -379,6 +382,15 @@ function New-AbArgs {
             $args += @("-CandidateGpuExportDll", $candidateGpuExportDllEffective)
         }
     }
+    if ($RequireBaselineNoGpuExportAttempt) {
+        $args += "-RequireBaselineNoGpuExportAttempt"
+    }
+    if ($RequireCandidateGpuExportAttempt) {
+        $args += "-RequireCandidateGpuExportAttempt"
+    }
+    if ($RequireCandidateGpuExportReplacement) {
+        $args += "-RequireCandidateGpuExportReplacement"
+    }
     if ($FailOnRegression) {
         $args += "-FailOnRegression"
     }
@@ -459,6 +471,9 @@ if ($DryRun) {
             candidateEnableGpuExport = $candidateGpuExportEnabled
             baselineGpuExportDll = $baselineGpuExportDllSummary
             candidateGpuExportDll = $candidateGpuExportDllSummary
+            requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
+            requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
+            requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
             alternateRunOrder = [bool]$AlternateRunOrder
             failOnRegression = [bool]$FailOnRegression
         }
@@ -546,6 +561,7 @@ foreach ($case in $cases) {
             candidateGpuExportAttemptedFrames = if ($abSummary) { $abSummary.candidate.gpuExportAttemptedFrames } else { $null }
             candidateGpuExportReplacedFrames = if ($abSummary) { $abSummary.candidate.gpuExportReplacedFrames } else { $null }
             candidateGpuExportMaxAllocatedBytes = if ($abSummary) { $abSummary.candidate.gpuExportMaxAllocatedBytes } else { $null }
+            proofGateFailures = if ($abSummary -and $abSummary.proofGates) { @($abSummary.proofGates.failures) } else { @() }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
             frameTotalP95DeltaMs = if ($abSummary) { $abSummary.compare.frameTotalP95DeltaMs } else { $null }
             producerFrameAvgDeltaMs = if ($abSummary) { $abSummary.compare.producerFrameAvgDeltaMs } else { $null }
@@ -613,6 +629,9 @@ $matrix = [pscustomobject]@{
         candidateEnableGpuExport = $candidateGpuExportEnabled
         baselineGpuExportDll = $baselineGpuExportDllSummary
         candidateGpuExportDll = $candidateGpuExportDllSummary
+        requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
+        requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
+        requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
         buildId = $BuildId
     }
     totals = [pscustomobject]@{
@@ -632,7 +651,7 @@ Write-Host (((
     "cases={4} runs={5} pass={6} fail={7} candidate_payload={8} " +
     "candidate_async={9} candidate_async_queue_depth={10} " +
     "baseline_gpu_export_enabled={11} candidate_gpu_export_enabled={12} " +
-    "elapsed_delta_ms_field=True output={13}") -f
+    "require_candidate_gpu_export_replacement={13} elapsed_delta_ms_field=True output={14}") -f
     $matrix.verdict,
     $matrix.comparisonMode,
     $(if ([string]::IsNullOrWhiteSpace($matrix.options.cdngCodec)) { "default" } else { $matrix.options.cdngCodec }),
@@ -646,6 +665,7 @@ Write-Host (((
     $CandidateAsyncWriterQueueDepth,
     $baselineGpuExportEnabled,
     $candidateGpuExportEnabled,
+    [bool]$RequireCandidateGpuExportReplacement,
     $summaryJson
 ))
 

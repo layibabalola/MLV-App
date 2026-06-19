@@ -360,7 +360,8 @@ candidate exports across named cases/repeats and writes
 count, async queue capacity/max-queued, per-side GPU-export intent plus
 attempt/replacement/allocation counters, wrapper wall-clock elapsed deltas,
 frame-total deltas, producer/idle deltas, writer-completion-lag deltas,
-writer-queue-wait deltas, payload-clone deltas, and comparator failures.
+writer-queue-wait deltas, payload-clone deltas, comparator failures, and
+optional proof-gate failures for CPU-baseline/GPU-candidate promotion runs.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

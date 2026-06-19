@@ -23,6 +23,9 @@ param(
     [string]$GpuExportDll = "",
     [string]$BaselineGpuExportDll = "",
     [string]$CandidateGpuExportDll = "",
+    [switch]$RequireBaselineNoGpuExportAttempt,
+    [switch]$RequireCandidateGpuExportAttempt,
+    [switch]$RequireCandidateGpuExportReplacement,
     [ValidateSet("BaselineFirst", "CandidateFirst")]
     [string]$RunOrder = "BaselineFirst",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -263,6 +266,11 @@ if ($DryRun) {
             asyncWriterThreadCount = $CandidateAsyncWriterThreadCount
             args = $candidateArgs
         }
+        proofGates = [pscustomobject]@{
+            requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
+            requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
+            requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+        }
         compareOutput = $compareJson
     } | ConvertTo-Json -Depth 8
     return
@@ -335,6 +343,31 @@ if ($compare) {
 else {
     $compareFailures += "compare-json-missing"
 }
+$proofFailures = @()
+$baselineGpuExportAttemptedFrames = [int]$baselineProfileJson.gpu_export_attempted_frames
+$candidateGpuExportAttemptedFrames = [int]$candidateProfileJson.gpu_export_attempted_frames
+$candidateGpuExportReplacedFrames = [int]$candidateProfileJson.gpu_export_replaced_frames
+$candidateFrameCount = [int]$candidateProfileJson.frame_count
+if ($RequireBaselineNoGpuExportAttempt -and $baselineGpuExportAttemptedFrames -ne 0) {
+    $proofFailures += "baseline-gpu-export-attempted-frames expected=0 actual=$baselineGpuExportAttemptedFrames"
+}
+if ($RequireCandidateGpuExportAttempt) {
+    if (-not $candidateGpuExportEnabled) {
+        $proofFailures += "candidate-gpu-export-not-enabled"
+    }
+    if ($candidateGpuExportAttemptedFrames -ne $candidateFrameCount) {
+        $proofFailures += "candidate-gpu-export-attempted-frame-count expected=$candidateFrameCount actual=$candidateGpuExportAttemptedFrames"
+    }
+}
+if ($RequireCandidateGpuExportReplacement) {
+    if (-not $candidateGpuExportEnabled) {
+        $proofFailures += "candidate-gpu-export-not-enabled"
+    }
+    if ($candidateGpuExportReplacedFrames -ne $candidateFrameCount) {
+        $proofFailures += "candidate-gpu-export-replaced-frame-count expected=$candidateFrameCount actual=$candidateGpuExportReplacedFrames"
+    }
+}
+$summaryFailures = @($compareFailures + $proofFailures)
 $summary = [pscustomobject]@{
     schema = "release-cdng-export-profile-ab.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
@@ -418,9 +451,15 @@ $summary = [pscustomobject]@{
         llrawprocChromaSmoothAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_chroma_smooth_ms" -Statistic "avgMs"
         llrawprocOtherAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_other_ms" -Statistic "avgMs"
         dngCompressAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "dng_compress_ms" -Statistic "avgMs"
-        failures = $compareFailures
+        failures = $summaryFailures
     }
-    verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS") { "PASS" } else { "FAIL" }
+    proofGates = [pscustomobject]@{
+        requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
+        requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
+        requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+        failures = $proofFailures
+    }
+    verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS" -and $proofFailures.Count -eq 0) { "PASS" } else { "FAIL" }
 }
 
 $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
@@ -433,14 +472,14 @@ Write-Host ((
     "baseline_async_max_active={12} candidate_async_max_active={13} " +
     "baseline_gpu_export_enabled={14} candidate_gpu_export_enabled={15} " +
     "baseline_gpu_export_attempted={16} candidate_gpu_export_attempted={17} " +
-    "candidate_gpu_export_replaced={18} elapsed_delta_ms={19} " +
-    "elapsed_delta_percent={20} frame_total_avg_delta_ms={21} " +
-    "frame_total_p95_delta_ms={22} queue_idle_avg_delta_ms={23} " +
-    "payload_clone_avg_delta_ms={24} writer_queue_wait_avg_delta_ms={25} " +
-    "producer_frame_avg_delta_ms={26} producer_queue_idle_avg_delta_ms={27} " +
-    "writer_completion_lag_avg_delta_ms={28} llrawproc_total_avg_delta_ms={29} " +
-    "llrawproc_dual_iso_avg_delta_ms={30} dng_compress_avg_delta_ms={31} " +
-    "output={32}") -f
+    "candidate_gpu_export_replaced={18} proof_gate_failures={19} " +
+    "elapsed_delta_ms={20} elapsed_delta_percent={21} " +
+    "frame_total_avg_delta_ms={22} frame_total_p95_delta_ms={23} " +
+    "queue_idle_avg_delta_ms={24} payload_clone_avg_delta_ms={25} " +
+    "writer_queue_wait_avg_delta_ms={26} producer_frame_avg_delta_ms={27} " +
+    "producer_queue_idle_avg_delta_ms={28} writer_completion_lag_avg_delta_ms={29} " +
+    "llrawproc_total_avg_delta_ms={30} llrawproc_dual_iso_avg_delta_ms={31} " +
+    "dng_compress_avg_delta_ms={32} output={33}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -460,6 +499,7 @@ Write-Host ((
     $summary.baseline.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportReplacedFrames,
+    $summary.proofGates.failures.Count,
     $summary.compare.elapsedDeltaMs,
     $summary.compare.elapsedDeltaPercent,
     $summary.compare.frameTotalAvgDeltaMs,

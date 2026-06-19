@@ -36,6 +36,9 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -CandidateAsyncWriterThreadCount 2 `
   -CandidateEnableGpuExport `
   -CandidateGpuExportDll C:\path\to\igpu_recon_cuda.dll `
+  -RequireBaselineNoGpuExportAttempt `
+  -RequireCandidateGpuExportAttempt `
+  -RequireCandidateGpuExportReplacement `
   -MaxFrames 16 `
   -Repeats 3 `
   -FailOnRegression
@@ -77,9 +80,13 @@ the export scenario being judged.
 
 For UltraMagnus CPU-vs-GPU export proof, leave the baseline on CPU and enable
 only the candidate with `-CandidateEnableGpuExport` plus
-`-CandidateGpuExportDll`. The legacy `-EnableGpuExport` switch remains valid,
-but it enables both sides and is therefore better suited to same-mode A/A or
-GPU-vs-GPU profiling.
+`-CandidateGpuExportDll`. Add `-RequireBaselineNoGpuExportAttempt`,
+`-RequireCandidateGpuExportAttempt`, and
+`-RequireCandidateGpuExportReplacement` when the run is meant to promote GPU
+export; those gates fail the A/B or matrix verdict if the baseline attempts GPU
+work or if the candidate does not attempt/replace every profiled frame. The
+legacy `-EnableGpuExport` switch remains valid, but it enables both sides and is
+therefore better suited to same-mode A/A or GPU-vs-GPU profiling.
 
 After any matrix or standalone A/B run that claims CDNG output correctness, run
 the DNG byte-identity companion before interpreting the timing result:
