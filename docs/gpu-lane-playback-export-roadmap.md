@@ -671,17 +671,24 @@ and `llrawproc_other_ms`. Profiles also record per-frame GPU export attempt,
 return-code, replacement, and allocation telemetry, while A/B and matrix
 summaries surface candidate GPU-export attempt/replacement/allocation counters
 for future UltraMagnus proof packets. A rebuilt release-tree smoke on
-`platform/qt/build-release/release/MLVApp.exe` at commit `5e0c92ae` wrote
-`.claude-state/profiling/2026-06-19-cdng-e3-llrawproc-breakdown-smoke-5e0c92ae/profile.json`
-from `C:\temp\MLV\M29-1756.MLV` with four lossless-output frames. The measured
-`frame_total_ms` average was 206.18 ms (4.85 FPS-equivalent). The dominant
-local bottlenecks were `llrawproc_total_ms` at 93.00 ms (10.75
-FPS-equivalent), entirely `llrawproc_dual_iso_ms` on this clip, and
-`dng_compress_ms` at 94.98 ms (10.53 FPS-equivalent). `disk_write_ms` stayed
-small at 2.04 ms (490.53 FPS-equivalent). This reinforces the async-writer HOLD
-decision on available local footage: the next E3 implementation should target
-dual-ISO/recon scheduling and/or compression placement/parallelism, not disk
-write overlap alone.
+`platform/qt/build-release/release/MLVApp.exe` at commit `3fc78aee` wrote
+`.claude-state/profiling/2026-06-19-cdng-e3-gpu-telemetry-profile-smoke-3fc78aee/profile.json`
+from `C:\temp\MLV\M29-1756.MLV` with two lossless-output frames. On this VM the
+GPU-export counters correctly stayed inactive:
+`gpu_export_attempted_frames=0`, `gpu_export_replaced_frames=0`, and
+`gpu_export_max_allocated_bytes=0`; this is local fallback telemetry, not
+UltraMagnus GPU proof. The measured `frame_total_ms` average was 361.06 ms
+(2.77 FPS-equivalent). The dominant local bottleneck was `llrawproc_total_ms`
+at 265.50 ms (3.77 FPS-equivalent), almost entirely `llrawproc_dual_iso_ms` on
+this clip, followed by `dng_compress_ms` at 76.17 ms (13.13 FPS-equivalent).
+`disk_write_ms` stayed small at 1.48 ms (674.90 FPS-equivalent). A one-frame
+release A/B wrapper smoke at
+`.claude-state/profiling/2026-06-19-cdng-e3-gpu-telemetry-ab-smoke-3fc78aee/`
+reported the same zero GPU-attempt/replacement counters, preserved the new
+summary fields, and passed standalone DNG hash comparison 1/1. This reinforces
+the async-writer HOLD decision on available local footage: the next E3
+implementation should target dual-ISO/recon scheduling and/or compression
+placement/parallelism, not disk write overlap alone.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
