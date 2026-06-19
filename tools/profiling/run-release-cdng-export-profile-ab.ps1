@@ -104,6 +104,44 @@ function New-ProfileArgs {
     $args
 }
 
+function New-ElapsedDelta {
+    param(
+        [double]$BaselineMs,
+        [double]$CandidateMs
+    )
+
+    $deltaMs = [Math]::Round($CandidateMs - $BaselineMs, 3)
+    $deltaPercent = $null
+    if ([Math]::Abs($BaselineMs) -gt 0.001) {
+        $deltaPercent = [Math]::Round((($CandidateMs - $BaselineMs) / $BaselineMs) * 100.0, 3)
+    }
+
+    [pscustomobject]@{
+        baselineMs = $BaselineMs
+        candidateMs = $CandidateMs
+        deltaMs = $deltaMs
+        deltaPercent = $deltaPercent
+    }
+}
+
+function Invoke-ProfileRun {
+    param(
+        [string]$Label,
+        [string[]]$CommandArgs
+    )
+
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    & pwsh.exe @CommandArgs
+    $exitCode = $LASTEXITCODE
+    $stopwatch.Stop()
+
+    [pscustomobject]@{
+        label = $Label
+        exitCode = $exitCode
+        elapsedMs = [Math]::Round($stopwatch.Elapsed.TotalMilliseconds, 3)
+    }
+}
+
 $baselineArgs = New-ProfileArgs `
     -Label "baseline" `
     -DngDir $baselineDngDir `
@@ -145,14 +183,14 @@ if ($DryRun) {
 
 New-Item -ItemType Directory -Force -Path $baselineDir, $candidateDir | Out-Null
 
-& pwsh.exe @baselineArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "Baseline CDNG export profile failed with exit code $LASTEXITCODE"
+$baselineRun = Invoke-ProfileRun -Label "baseline" -CommandArgs $baselineArgs
+if ($baselineRun.exitCode -ne 0) {
+    throw "Baseline CDNG export profile failed with exit code $($baselineRun.exitCode)"
 }
 
-& pwsh.exe @candidateArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "Candidate CDNG export profile failed with exit code $LASTEXITCODE"
+$candidateRun = Invoke-ProfileRun -Label "candidate" -CommandArgs $candidateArgs
+if ($candidateRun.exitCode -ne 0) {
+    throw "Candidate CDNG export profile failed with exit code $($candidateRun.exitCode)"
 }
 
 $compareArgs = @(
@@ -182,6 +220,7 @@ if ($compareExit -ne 0) {
 
 $baselineProfileJson = Get-Content -LiteralPath $baselineProfile -Raw | ConvertFrom-Json -Depth 100
 $candidateProfileJson = Get-Content -LiteralPath $candidateProfile -Raw | ConvertFrom-Json -Depth 100
+$elapsedDelta = New-ElapsedDelta -BaselineMs $baselineRun.elapsedMs -CandidateMs $candidateRun.elapsedMs
 $compareFailures = @()
 if ($compare) {
     foreach ($failure in @($compare.failures)) {
@@ -210,6 +249,7 @@ $summary = [pscustomobject]@{
         asyncWriterEnvEnabled = $baselineProfileJson.async_writer_env_enabled
         asyncWriterQueueCapacity = $baselineProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $baselineProfileJson.async_writer_max_queued
+        elapsedMs = $baselineRun.elapsedMs
     }
     candidate = [pscustomobject]@{
         usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
@@ -223,10 +263,13 @@ $summary = [pscustomobject]@{
         asyncWriterEnvEnabled = $candidateProfileJson.async_writer_env_enabled
         asyncWriterQueueCapacity = $candidateProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $candidateProfileJson.async_writer_max_queued
+        elapsedMs = $candidateRun.elapsedMs
     }
     compare = [pscustomobject]@{
         profile = $compareJson
         verdict = if ($compare) { $compare.verdict } else { "ERROR" }
+        elapsedDeltaMs = $elapsedDelta.deltaMs
+        elapsedDeltaPercent = $elapsedDelta.deltaPercent
         frameTotalAvgDeltaMs = if ($compare) { $compare.stages.frame_total_ms.avgMs.delta } else { $null }
         frameTotalAvgDeltaPercent = if ($compare) { $compare.stages.frame_total_ms.avgMs.deltaPercent } else { $null }
         frameTotalP95DeltaMs = if ($compare) { $compare.stages.frame_total_ms.p95Ms.delta } else { $null }
@@ -254,11 +297,12 @@ Write-Host ((
     "CDNG-EXPORT-AB verdict={0} baseline_payload={1} candidate_payload={2} " +
     "baseline_async={3} candidate_async={4} " +
     "baseline_async_queue_capacity={5} candidate_async_queue_capacity={6} " +
-    "frame_total_avg_delta_ms={7} frame_total_p95_delta_ms={8} " +
-    "queue_idle_avg_delta_ms={9} payload_clone_avg_delta_ms={10} " +
-    "writer_queue_wait_avg_delta_ms={11} producer_frame_avg_delta_ms={12} " +
-    "producer_queue_idle_avg_delta_ms={13} writer_completion_lag_avg_delta_ms={14} " +
-    "output={15}") -f
+    "elapsed_delta_ms={7} elapsed_delta_percent={8} " +
+    "frame_total_avg_delta_ms={9} frame_total_p95_delta_ms={10} " +
+    "queue_idle_avg_delta_ms={11} payload_clone_avg_delta_ms={12} " +
+    "writer_queue_wait_avg_delta_ms={13} producer_frame_avg_delta_ms={14} " +
+    "producer_queue_idle_avg_delta_ms={15} writer_completion_lag_avg_delta_ms={16} " +
+    "output={17}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
@@ -266,6 +310,8 @@ Write-Host ((
     $summary.candidate.useAsyncWriter,
     $summary.baseline.asyncWriterQueueCapacity,
     $summary.candidate.asyncWriterQueueCapacity,
+    $summary.compare.elapsedDeltaMs,
+    $summary.compare.elapsedDeltaPercent,
     $summary.compare.frameTotalAvgDeltaMs,
     $summary.compare.frameTotalP95DeltaMs,
     $summary.compare.queueIdleAvgDeltaMs,

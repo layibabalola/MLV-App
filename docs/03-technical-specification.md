@@ -344,9 +344,9 @@ producer_frame_ms`, making post-producer writer completion time explicit.
 release-tree promotion harness for these fields: it runs paired baseline and
 candidate exports across named cases/repeats and writes
 `release-cdng-export-profile-matrix.v1` with per-run frame counts, async queue
-capacity/max-queued, frame-total deltas, producer/idle deltas,
-writer-completion-lag deltas, writer-queue-wait deltas, payload-clone deltas,
-and comparator failures.
+capacity/max-queued, wrapper wall-clock elapsed deltas, frame-total deltas,
+producer/idle deltas, writer-completion-lag deltas, writer-queue-wait deltas,
+payload-clone deltas, and comparator failures.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

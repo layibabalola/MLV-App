@@ -416,6 +416,10 @@ foreach ($case in $cases) {
             error = $errorMessage
             baselineFrameCount = if ($abSummary) { $abSummary.baseline.frameCount } else { $null }
             candidateFrameCount = if ($abSummary) { $abSummary.candidate.frameCount } else { $null }
+            baselineElapsedMs = if ($abSummary) { $abSummary.baseline.elapsedMs } else { $null }
+            candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
+            elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
+            elapsedDeltaPercent = if ($abSummary) { $abSummary.compare.elapsedDeltaPercent } else { $null }
             candidateAsyncWriterQueueCapacity = if ($abSummary) { $abSummary.candidate.asyncWriterQueueCapacity } else { $null }
             candidateAsyncWriterMaxQueued = if ($abSummary) { $abSummary.candidate.asyncWriterMaxQueued } else { $null }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
@@ -485,7 +489,8 @@ $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Enco
 
 Write-Host (((
     "CDNG-EXPORT-MATRIX verdict={0} cases={1} runs={2} pass={3} fail={4} " +
-    "candidate_payload={5} candidate_async={6} candidate_async_queue_depth={7} output={8}") -f
+    "candidate_payload={5} candidate_async={6} candidate_async_queue_depth={7} " +
+    "elapsed_delta_ms_field=True output={8}") -f
     $matrix.verdict,
     $matrix.totals.caseCount,
     $matrix.totals.runCount,
