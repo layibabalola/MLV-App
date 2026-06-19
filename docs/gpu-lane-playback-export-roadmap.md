@@ -201,27 +201,30 @@ payload copy, while retaining the small header copy, instead of widening async
 writer concurrency.
 
 Image-buffer handoff follow-up:
-`.claude-state/profiling/2026-06-19-cdng-payload-move-two-frame-v2/profile.json`
-proved the real compressed-input/uncompressed-output two-frame crash repro
-clean after the payload boundary was narrowed to a small header copy plus large
-image-buffer ownership move. The profile wrote two `M16-1210` DNGs at 8,202,254
-bytes each and reported `payload_clone_ms` averaging 0.01325 ms. The bounded
-real-footage payload-only matrix
-`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-payload-only-matrix-v2/matrix-summary.json`
-then completed without crashes, compared all six baseline/candidate run outputs
-with zero DNG SHA256 mismatches, and cut payload handoff cost to 0.01549 ms
-average (0.01306-0.01835 ms). It still failed promotion at 4/6 PASS and 2/6
-FAIL: overall wrapper elapsed averaged -42.40 ms, but failed runs remained
-`m16-1210-master` repeat 1 and `m16-1347-master` repeat 2, with frame-total
-gates dominated by per-run `llrawproc`/frame timing variance rather than
-payload handoff. The matching async-writer matrix
-`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-async-matrix/matrix-summary.json`
-also completed with zero DNG SHA256 mismatches and 0.01505 ms average payload
+`.claude-state/profiling/2026-06-19-cdng-payload-move-final-two-frame/profile.json`
+proved the real compressed-input/uncompressed-output two-frame crash repro clean
+on committed build `c5d92baf` after the payload boundary was narrowed to a small
+header copy plus large image-buffer ownership move. The profile wrote two
+`M16-1210` DNGs at 8,202,254 bytes each and reported `payload_clone_ms`
+averaging 0.0147 ms. The committed-build bounded real-footage payload-only
+matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-payload-only-matrix-final/matrix-summary.json`
+then completed without crashes on the same three clips, receipt, `maxFrames=8`,
+and `repeats=2`; all 6/6 runs passed, all six baseline/candidate run outputs
+matched with zero DNG SHA256 mismatches, payload handoff cost averaged
+0.01515 ms, wrapper elapsed averaged -182.774 ms, and frame-total average delta
+averaged -11.402 ms. This promotes the serial payload handoff as the bounded E3
+candidate slice, while preserving the scope boundary: it is still a 3-clip,
+8-frame, 2-repeat release-tree matrix with one receipt set, not a broad export
+benchmark. The matching committed-build async-writer matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-move-async-matrix-final/matrix-summary.json`
+also completed with zero DNG SHA256 mismatches and 0.01469 ms average payload
 handoff cost, but remained non-promoted at 3/6 PASS and 3/6 FAIL. Queue wait
 stayed 0.0 ms, async max queued stayed 1, and writer-completion lag averaged
-3.540 ms. Next E3 work should stop treating payload copy cost as the main
-blocker and instead tighten promotion measurement: increase repeats/frame caps
-or add an A/A control before judging scheduler or async-writer changes.
+3.291 ms. Next E3 work should keep serial payload handoff gated for broader
+promotion proof, and investigate why the async path never exceeds one queued
+payload and does not convert writer lag into stable frame-total gains before any
+async scheduler rewrite is promoted.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
