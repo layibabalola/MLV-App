@@ -39,6 +39,29 @@ if ($CandidateAsyncWriterThreadCount -lt 0) {
     throw "-CandidateAsyncWriterThreadCount must be >= 0."
 }
 
+function Normalize-CommaSeparatedArgumentList {
+    param([AllowNull()][string[]]$Values)
+
+    $normalized = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in @($Values)) {
+        if ($null -eq $value) {
+            continue
+        }
+        foreach ($part in ([string]$value).Split(',')) {
+            $trimmed = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                [void]$normalized.Add($trimmed)
+            }
+        }
+    }
+    return @($normalized)
+}
+
+$ClipNames = Normalize-CommaSeparatedArgumentList $ClipNames
+if ($ClipNames.Count -eq 0) {
+    throw "-ClipNames must contain at least one clip name."
+}
+
 function Resolve-RepoPath {
     param(
         [Parameter(Mandatory = $true)][string]$Root,

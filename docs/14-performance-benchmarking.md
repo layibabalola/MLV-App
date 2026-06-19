@@ -145,7 +145,10 @@ candidate-only async writer controls to the same remote proof path:
 `-CandidateAsyncWriterQueueDepth`, and `-CandidateAsyncWriterThreadCount`.
 The baseline remains the plain CPU export path; use these switches only for
 bounded candidate experiments that still require GPU attempt/replacement,
-trusted-frame, and DNG hash gates.
+trusted-frame, and DNG hash gates. When passing more than one clip through a
+native `pwsh.exe -File` invocation, either use a child `pwsh -Command` with an
+explicit PowerShell array or pass a comma-separated `-ClipNames` value; the
+wrapper normalizes comma-separated clip names before staging the remote job.
 The accepted 2026-06-19 proof packet is
 `.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
 with local packet
@@ -182,6 +185,26 @@ trusted, but moved from 6468.414 ms to 6775.267 ms average wall time
 (+306.853 ms, +5.113%) despite `llrawprocDualIsoAvgDeltaMs=-8.563`, so treat
 the packet as promotion for the trusted measurement gate and as the next
 lossless/compression-overlap bottleneck, not as broad E3 pipeline completion.
+The three-clip trusted GPU plus async-writer-compression packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T181722\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T181722-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `380717DC753CFD7B01DDFE1E5348DBD402F5CF259DDC00D16D27B4D72AAD2155`).
+It used commit `7367ed8bb80e5bbe7105b6ff618ac775bae5ee3c`, release SHA256
+`E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`, clips
+`M16-1210`, `M16-1327`, and `M16-1347`, `lossless`, `maxFrames=16`,
+`repeats=3`, queue depth 2, two candidate writer threads, and the trusted GPU
+gates. Result: 9/9 runs PASS, DNG hash PASS 144/144, candidate
+trusted/attempted/replaced frames 144/144/144, and writer overlap
+`candidateAsyncWriterMaxActive=2` in every run. Average wall-clock elapsed
+improved from 5706.215 ms to 4445.874 ms (-1260.341 ms, -22.048%); per-clip
+elapsed deltas were M16-1210 -1403.277 ms (-22.768%), M16-1327 -1247.415 ms
+(-22.598%), and M16-1347 -1130.333 ms (-20.779%). Keep it classified as an
+opt-in candidate, not default policy: frame-total attribution still averaged
++19.773 ms and p95 +61.750 ms because the producer-frame win (-102.715 ms) is
+paid back as writer-completion lag (+122.487 ms), with writer-side compression
++11.200 ms on average. Promotion needs an explicit async-pipeline gate that
+separates wall-clock export throughput from completion-lag attribution.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass

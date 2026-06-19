@@ -1006,6 +1006,30 @@ plus writer-side LJ92 compression changes the older non-promoted lossless
 result while still requiring baseline no-GPU, candidate GPU
 attempt/replacement, candidate trusted frames, and DNG hash match.
 
+The three-clip UltraMagnus combined packet at
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T181722/summary.json`
+with local packet
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260619T181722-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `380717DC753CFD7B01DDFE1E5348DBD402F5CF259DDC00D16D27B4D72AAD2155`)
+passed on `ULTRA-MAGNUS` for commit
+`7367ed8bb80e5bbe7105b6ff618ac775bae5ee3c`, release SHA256
+`E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`.
+It used `M16-1210`, `M16-1327`, and `M16-1347`, `lossless`,
+`maxFrames=16`, `repeats=3`, `-TrustedGpuExport`, queue depth 2, and two
+candidate writer threads. Matrix result: 9/9 PASS, DNG hash PASS 144/144, and
+candidate trusted/attempted/replaced frames 144/144/144. Average wall-clock
+elapsed improved from 5706.215 ms to 4445.874 ms (-1260.341 ms, -22.048%);
+per-clip wall-clock deltas were M16-1210 -1403.277 ms (-22.768%), M16-1327
+-1247.415 ms (-22.598%), and M16-1347 -1130.333 ms (-20.779%). The candidate
+also proved actual writer overlap (`candidateAsyncWriterMaxActive=2` in every
+run, max queue 1-2). Keep the candidate opt-in for now: frame-total attribution
+still averaged +19.773 ms and p95 +61.750 ms because producer-frame time
+improved by -102.715 ms while writer-completion lag rose +122.487 ms and
+writer-side compression averaged +11.200 ms. Next E3 work is to make the
+promotion gate distinguish export wall-clock throughput from async
+completion-lag attribution, then decide whether this lossless candidate can
+move beyond proof/experiment mode.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
