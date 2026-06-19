@@ -950,4 +950,34 @@ private:
     std::deque<double> m_window;
 };
 
+struct PlaybackQualityAutoCapabilityTracker
+{
+    bool notePresentedPipeline( bool gpuTextureNoReadbackActive )
+    {
+        if ( gpuTextureNoReadbackActive )
+        {
+            m_validatedNoReadbackObserved = true;
+        }
+        return m_validatedNoReadbackObserved;
+    }
+
+    bool sharperHeadroomScaleAllowed() const
+    {
+        return m_validatedNoReadbackObserved;
+    }
+
+    bool validatedNoReadbackObserved() const
+    {
+        return m_validatedNoReadbackObserved;
+    }
+
+    void reset()
+    {
+        m_validatedNoReadbackObserved = false;
+    }
+
+private:
+    bool m_validatedNoReadbackObserved = false;
+};
+
 #endif // PLAYBACKQUALITYPOLICY_H

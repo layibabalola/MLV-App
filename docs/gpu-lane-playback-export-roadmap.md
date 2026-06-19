@@ -95,6 +95,12 @@ tooltip, playback-profile frame JSON, and playback smoke summary expose this as
 because the scoped true no-readback texture path was actually observed or held
 back for lack of capability proof. This is evidence/control polish only; it
 does not widen the P3 no-readback scope.
+The follow-on P4 control slice latches a session-scoped
+`auto_validated_no_readback_capability_observed` flag only after an accepted
+presented frame reports the validated `GPU Tex NR` pipeline. Auto headroom
+promotion now uses that latched capability rather than the current frame alone,
+so a real no-readback proof can inform later Auto decisions in the same session
+without treating mere FPS headroom or GPU presence as proof.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

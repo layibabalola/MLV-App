@@ -834,6 +834,7 @@ private:
     double m_playbackQualityAutoDecisionBudgetMs = 1000.0 / 30.0;
     size_t m_playbackQualityAutoDecisionSampleCount = 0;
     bool m_playbackQualityAutoHeadroomCapability = false;
+    PlaybackQualityAutoCapabilityTracker m_playbackQualityAutoCapabilityTracker;
     bool m_playbackQualityIndicatorVisible = true;
     struct PlaybackQualityIndicatorCache
     {
@@ -847,6 +848,7 @@ private:
         double playbackQualityAutoDecisionBudgetMs = -1.0;
         size_t playbackQualityAutoDecisionSampleCount = static_cast<size_t>( -1 );
         bool playbackQualityAutoHeadroomCapability = false;
+        bool playbackQualityAutoValidatedNoReadbackCapability = false;
         int envScale = -2;
         bool envHq = false;
         int envPreviewOverride = -2;

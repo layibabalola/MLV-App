@@ -5037,6 +5037,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             sample.insert( QStringLiteral("latency_ms"), static_cast<double>( completionNs - requestNs ) / 1000000.0 );
             sample.insert( QStringLiteral("auto_headroom_capability_last"),
                            m_playbackQualityAutoHeadroomCapability );
+            sample.insert( QStringLiteral("auto_validated_no_readback_capability_observed"),
+                           m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() );
             sample.insert( QStringLiteral("auto_reason_last"),
                            QString::fromLatin1(
                                playbackQualityAutoDecisionReasonName(
@@ -16289,6 +16291,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         m_playbackQualityAutoDecisionBudgetMs,
         m_playbackQualityAutoDecisionSampleCount,
         m_playbackQualityAutoHeadroomCapability,
+        m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved(),
         envScale,
         envHq,
         envPreviewOverride,
@@ -16315,6 +16318,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             == m_playbackQualityIndicatorCache.playbackQualityAutoDecisionSampleCount
      && currentCache.playbackQualityAutoHeadroomCapability
             == m_playbackQualityIndicatorCache.playbackQualityAutoHeadroomCapability
+     && currentCache.playbackQualityAutoValidatedNoReadbackCapability
+            == m_playbackQualityIndicatorCache.playbackQualityAutoValidatedNoReadbackCapability
      && currentCache.envScale == m_playbackQualityIndicatorCache.envScale
      && currentCache.envHq == m_playbackQualityIndicatorCache.envHq
      && currentCache.envPreviewOverride == m_playbackQualityIndicatorCache.envPreviewOverride
@@ -16506,7 +16511,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         const QString autoDetail = tr(
             "\nAuto decision: %1; samples=%2/%3; avg=%4 ms (%5 fps-eq); "
             "budget=%6 ms (%7 fps-eq) at target %8 fps; "
-            "headroom capability=%9." )
+            "headroom capability=%9; validated no-readback observed=%10." )
             .arg( QString::fromLatin1(
                       playbackQualityAutoDecisionReasonName(
                           m_playbackQualityAutoDecisionReason ) ) )
@@ -16517,7 +16522,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
             .arg( autoBudgetFps, 0, 'f', 3 )
             .arg( m_playbackAutoTargetFps )
-            .arg( bool01( m_playbackQualityAutoHeadroomCapability ) );
+            .arg( bool01( m_playbackQualityAutoHeadroomCapability ) )
+            .arg( bool01( m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) );
         indicatorTooltip += autoDetail;
         toolButtonTooltip += autoDetail;
     }
@@ -19786,7 +19792,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "auto_target_fps=%54 auto_reason_last=%55 "
                "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58 "
                "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60 "
-               "auto_headroom_capability_last=%61" )
+               "auto_headroom_capability_last=%61 "
+               "auto_validated_no_readback_capability_observed=%62" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -19856,7 +19863,9 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                          m_playbackQualityAutoDecisionAverageMs ), 0, 'f', 3 )
                .arg( playbackQualityFpsEquivalentForFrameMs(
                          m_playbackQualityAutoDecisionBudgetMs ), 0, 'f', 3 )
-               .arg( bool01( m_playbackQualityAutoHeadroomCapability ) );
+               .arg( bool01( m_playbackQualityAutoHeadroomCapability ) )
+               .arg( bool01(
+                   m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() ) );
 
     qInfo().noquote()
         << QStringLiteral(
@@ -21451,6 +21460,25 @@ void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &read
     m_lastPresentedDualIsoPreviewRegressionMs = readyFrame.dualIsoPreviewRegressionMs;
     m_lastPresentedDualIsoPreviewRowscaleMs = readyFrame.dualIsoPreviewRowscaleMs;
     m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
+
+    const bool priorAutoValidatedNoReadback =
+        m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved();
+    const GpuPlaybackPipelineStatus gpuPlaybackPipelineStatus =
+        mainWindowGpuPlaybackPipelineStatus(
+            requestContext.gpuPreviewPolicy,
+            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                "gpu_playback_recon_used" ),
+            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                "gpu_playback_recon_texture_present_active" ),
+            telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                                "gpu_playback_recon_texture_present_no_readback_active" ) );
+    m_playbackQualityAutoCapabilityTracker.notePresentedPipeline(
+        gpuPlaybackPipelineStatus == GpuPlaybackPipelineStatus::GpuTextureNoReadback );
+    if( !priorAutoValidatedNoReadback
+     && m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() )
+    {
+        updatePlaybackQualityIndicator();
+    }
 }
 
 bool MainWindow::isFrameSettledForAnalysis( int frameIndex,
@@ -21708,18 +21736,8 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                         ( m_pMlvObject != nullptr )
                         && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
                         && ui->checkBoxRawFixEnable->isChecked();
-                    const GpuPlaybackPipelineStatus gpuPlaybackPipelineStatus =
-                        mainWindowGpuPlaybackPipelineStatus(
-                            requestContext.gpuPreviewPolicy,
-                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
-                                                "gpu_playback_recon_used" ),
-                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
-                                                "gpu_playback_recon_texture_present_active" ),
-                            telemetryBoolValue( readyFrame.stageTimingTelemetry,
-                                                "gpu_playback_recon_texture_present_no_readback_active" ) );
                     const bool sharperHeadroomScaleAllowed =
-                        gpuPlaybackPipelineStatus
-                            == GpuPlaybackPipelineStatus::GpuTextureNoReadback;
+                        m_playbackQualityAutoCapabilityTracker.sharperHeadroomScaleAllowed();
                     const PlaybackQualityAutoSampler::Decision decision =
                         m_playbackQualitySampler.decideNextSlot(
                             m_playbackAutoTargetFps,
