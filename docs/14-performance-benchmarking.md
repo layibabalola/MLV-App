@@ -456,7 +456,10 @@ wrapper also emits `visualQuality.autoDecision.capabilityConsistent` and
 `validation.autoDecisionCapabilityConsistent`; default Auto smokes fail when
 headroom sharpening is reported without an active validated no-readback latch,
 when headroom capability is true but validated capability is false, or when
-validated and demoted capability are both true in the same summary.
+validated and demoted capability are both true in the same summary. The headroom
+capability is shape-scoped: Dual ISO `GPU Tex NR` telemetry does not arm
+non-Dual-ISO `HQ x2` promotion; that promotion requires a non-Dual-ISO
+no-readback observation in the current Auto run.
 Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
 Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
 must not be cited as visual playback, Auto sampler, FPS, or color proof.

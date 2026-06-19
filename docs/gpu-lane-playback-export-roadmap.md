@@ -170,9 +170,14 @@ presenting `GPU Tex NR`, the latch is cleared and
 keeps Auto's capability-aware promotion/demotion tied to actual presentation
 truth instead of stale optimism.
 The latch is playback-run scoped: clip opens, play stop/start, quality-mode,
-preview-mode, preview-resolution, scale override, and Auto target-FPS changes
-all reset it, so a later context must present `GPU Tex NR` again before Auto
-uses no-readback capability to sharpen quality decisions.
+preview-mode, preview-resolution, scale override, Dual ISO/raw-fix context, and
+Auto target-FPS changes all reset it, so a later context must present
+`GPU Tex NR` again before Auto uses no-readback capability to sharpen quality
+decisions. The headroom permission is stricter than the general visible latch:
+a Dual ISO `GPU Tex NR` observation may keep
+`auto_validated_no_readback_capability_observed=true` for telemetry, but it does
+not arm non-Dual-ISO `HQ x2` promotion; that promotion requires a non-Dual-ISO
+no-readback observation in the current run.
 The same reset path now also reseeds the active Auto scale/HQ decision to the
 current mode's initial state, and clip open reseeds after the new object becomes
 current, so stale x2/headroom or Fast-demotion decisions cannot leak into a new

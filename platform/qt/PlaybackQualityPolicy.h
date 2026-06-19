@@ -953,17 +953,23 @@ private:
 struct PlaybackQualityAutoCapabilityTracker
 {
     bool notePresentedPipeline( bool gpuTextureNoReadbackActive,
-                                bool gpuTextureNoReadbackCandidate = false )
+                                bool gpuTextureNoReadbackCandidate = false,
+                                bool dualIsoActive = false )
     {
         m_lastObservationDemotedCapability = false;
         if ( gpuTextureNoReadbackActive )
         {
             m_validatedNoReadbackObserved = true;
+            if ( !dualIsoActive )
+            {
+                m_validatedNoReadbackObservedForHeadroom = true;
+            }
             return m_validatedNoReadbackObserved;
         }
         if ( gpuTextureNoReadbackCandidate && m_validatedNoReadbackObserved )
         {
             m_validatedNoReadbackObserved = false;
+            m_validatedNoReadbackObservedForHeadroom = false;
             m_lastObservationDemotedCapability = true;
         }
         return m_validatedNoReadbackObserved;
@@ -971,7 +977,7 @@ struct PlaybackQualityAutoCapabilityTracker
 
     bool sharperHeadroomScaleAllowed() const
     {
-        return m_validatedNoReadbackObserved;
+        return m_validatedNoReadbackObservedForHeadroom;
     }
 
     bool validatedNoReadbackObserved() const
@@ -987,11 +993,13 @@ struct PlaybackQualityAutoCapabilityTracker
     void reset()
     {
         m_validatedNoReadbackObserved = false;
+        m_validatedNoReadbackObservedForHeadroom = false;
         m_lastObservationDemotedCapability = false;
     }
 
 private:
     bool m_validatedNoReadbackObserved = false;
+    bool m_validatedNoReadbackObservedForHeadroom = false;
     bool m_lastObservationDemotedCapability = false;
 };
 

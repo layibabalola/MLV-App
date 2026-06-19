@@ -1354,7 +1354,11 @@ missing. The wrapper derives nullable boolean versions of those capability
 fields and records `visualQuality.autoDecision.capabilityConsistent` plus
 `validation.autoDecisionCapabilityConsistent`; default Auto-mode smokes also fail
 when the capability fields contradict Auto's headroom-sharpening decision or each
-other. `run-release-gui-smoke.ps1` also fails default validations when
+other. Auto's headroom-sharpening gate is narrower than the general no-readback
+telemetry latch: a Dual ISO `GPU Tex NR` observation can report validated
+no-readback observed, but non-Dual-ISO `HQ x2` promotion requires a non-Dual-ISO
+no-readback observation in the current Auto run. `run-release-gui-smoke.ps1` also
+fails default validations when
 `presented_frames` is missing or zero; `-AllowZeroPresentedFrames` is an explicit
 launch-only opt-out and does not create playback/visual proof.
 

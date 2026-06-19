@@ -371,6 +371,33 @@ TEST(PlaybackQualityAutoCapabilityTracker, ResetClearsRunScopedProof)
     ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 }
 
+TEST(PlaybackQualityAutoCapabilityTracker, DualIsoObservationDoesNotAllowNonDualIsoHeadroom)
+{
+    PlaybackQualityAutoCapabilityTracker tracker;
+    ASSERT_TRUE( tracker.notePresentedPipeline(
+        true,
+        /*gpuTextureNoReadbackCandidate*/true,
+        /*dualIsoActive*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 15.0, kWin );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/false,
+                               /*aggressivePreviewActive*/false,
+                               tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+    expect_reason( "headroom_waiting_for_validated_capability", d.reason );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline(
+        true,
+        /*gpuTextureNoReadbackCandidate*/true,
+        /*dualIsoActive*/false ) );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+}
+
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)
 {
     PlaybackQualityAutoSampler s;

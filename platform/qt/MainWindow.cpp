@@ -21220,6 +21220,7 @@ void MainWindow::toolButtonDualIsoChanged( void )
 
     if( !m_fileLoaded ) return;
 
+    resetPlaybackQualityAutoRunState();
     applyEffectiveDualIsoPlaybackSettings();
 }
 
@@ -21476,6 +21477,7 @@ void MainWindow::on_checkBoxRawFixEnable_clicked(bool checked)
     ui->label_RawWhiteVal->setEnabled( checked );
     on_horizontalSliderRawBlack_valueChanged( ui->horizontalSliderRawBlack->value() );
     on_horizontalSliderRawWhite_valueChanged( ui->horizontalSliderRawWhite->value() );
+    resetPlaybackQualityAutoRunState();
     applyEffectiveDualIsoPlaybackSettings();
 }
 
@@ -22079,10 +22081,15 @@ void MainWindow::recordPresentedFrame( const RenderFrameThread::ReadyFrame &read
                                 "gpu_playback_recon_texture_present_active" ),
             telemetryBoolValue( readyFrame.stageTimingTelemetry,
                                 "gpu_playback_recon_texture_present_no_readback_active" ) );
+    const bool dualIsoActive =
+        ( m_pMlvObject != nullptr )
+        && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
+        && ui->checkBoxRawFixEnable->isChecked();
     m_playbackQualityAutoCapabilityTracker.notePresentedPipeline(
         gpuPlaybackPipelineStatus == GpuPlaybackPipelineStatus::GpuTextureNoReadback,
         telemetryBoolValue( readyFrame.stageTimingTelemetry,
-                            "gpu_playback_recon_texture_present_no_readback_candidate" ) );
+                            "gpu_playback_recon_texture_present_no_readback_candidate" ),
+        dualIsoActive );
     if( ( !priorAutoValidatedNoReadback
        && m_playbackQualityAutoCapabilityTracker.validatedNoReadbackObserved() )
      || m_playbackQualityAutoCapabilityTracker.lastObservationDemotedCapability() )
