@@ -748,6 +748,20 @@ average was 74.98 ms (13.34 FPS-equivalent), while `frame_total_ms` averaged
 387.86 ms (2.58 FPS-equivalent). This is VM-local batch telemetry only, not an
 UltraMagnus GPU proof packet.
 
+Update 2026-06-19 Lane A E3 compression summary plumbing: the export-stage
+comparator now emits a `compression` object for the compressed-DNG root byte
+counters, input/output MiB/s, and output ratio. A/B `summary.json` copies those
+values onto `baseline`, `candidate`, and `compare`, and matrix `runs[]` rows
+carry the same compression totals and throughput deltas. Future E3 proof
+packets can now filter `matrix-summary.json` directly instead of opening every
+raw profile to compute compression throughput by hand. Headless VM-local
+tooling validation passed with DNG hash PASS 1/1 for A/B
+`.claude-state/profiling/2026-06-19-cdng-e3-compression-summary-ab-smoke/`
+and matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-compression-summary-matrix-smoke/`;
+both carried `dngCompressOutputBytesTotalDelta=0` and populated
+`dngCompressOutputMiBPerSecondDelta` in the generated summaries.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

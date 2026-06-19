@@ -75,7 +75,11 @@ substage timing remains in each run's export profile JSON. The per-run profile
 also records `dng_compress_bytes_valid_frames`,
 `dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
 per-frame compression input/output byte counts so E3 compression-placement
-experiments can compare throughput, not just elapsed milliseconds. Treat
+experiments can compare throughput, not just elapsed milliseconds. The stage
+profile comparator emits those root counters under `compression`, including
+input/output MiB/s deltas and output-ratio deltas; A/B `summary.json` and
+matrix `runs[]` rows copy the same fields forward for direct promotion review.
+Treat
 `candidateAsyncWriterMaxActive=1` on a multi-worker candidate as evidence that
 extra workers did not overlap actual writes in that run, even if the configured
 thread count is higher. A tiny

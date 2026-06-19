@@ -190,6 +190,28 @@ function Get-CompareStageDelta {
     $statProperty.Value.delta
 }
 
+function Get-CompareCompressionValue {
+    param(
+        [object]$Compare,
+        [string]$MetricName,
+        [ValidateSet("baseline", "candidate", "delta", "deltaPercent")]
+        [string]$ValueName
+    )
+
+    if ($null -eq $Compare -or $null -eq $Compare.compression) {
+        return $null
+    }
+    $metricProperty = $Compare.compression.PSObject.Properties[$MetricName]
+    if ($null -eq $metricProperty -or $null -eq $metricProperty.Value) {
+        return $null
+    }
+    $valueProperty = $metricProperty.Value.PSObject.Properties[$ValueName]
+    if ($null -eq $valueProperty) {
+        return $null
+    }
+    $valueProperty.Value
+}
+
 function Invoke-ProfileRun {
     param(
         [string]$Label,
@@ -406,6 +428,12 @@ $summary = [pscustomobject]@{
         gpuExportReplacedFrames = $baselineProfileJson.gpu_export_replaced_frames
         gpuExportAllocatedBytesValidFrames = $baselineProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $baselineProfileJson.gpu_export_max_allocated_bytes
+        dngCompressBytesValidFrames = $baselineProfileJson.dng_compress_bytes_valid_frames
+        dngCompressInputBytesTotal = $baselineProfileJson.dng_compress_input_bytes_total
+        dngCompressOutputBytesTotal = $baselineProfileJson.dng_compress_output_bytes_total
+        dngCompressInputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "baseline"
+        dngCompressOutputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "baseline"
+        dngCompressOutputRatio = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "baseline"
         elapsedMs = $baselineRun.elapsedMs
     }
     candidate = [pscustomobject]@{
@@ -430,6 +458,12 @@ $summary = [pscustomobject]@{
         gpuExportReplacedFrames = $candidateProfileJson.gpu_export_replaced_frames
         gpuExportAllocatedBytesValidFrames = $candidateProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $candidateProfileJson.gpu_export_max_allocated_bytes
+        dngCompressBytesValidFrames = $candidateProfileJson.dng_compress_bytes_valid_frames
+        dngCompressInputBytesTotal = $candidateProfileJson.dng_compress_input_bytes_total
+        dngCompressOutputBytesTotal = $candidateProfileJson.dng_compress_output_bytes_total
+        dngCompressInputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "candidate"
+        dngCompressOutputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "candidate"
+        dngCompressOutputRatio = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "candidate"
         elapsedMs = $candidateRun.elapsedMs
     }
     compare = [pscustomobject]@{
@@ -458,6 +492,13 @@ $summary = [pscustomobject]@{
         llrawprocChromaSmoothAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_chroma_smooth_ms" -Statistic "avgMs"
         llrawprocOtherAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_other_ms" -Statistic "avgMs"
         dngCompressAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "dng_compress_ms" -Statistic "avgMs"
+        dngCompressInputBytesTotalDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputBytesTotal" -ValueName "delta"
+        dngCompressOutputBytesTotalDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputBytesTotal" -ValueName "delta"
+        dngCompressInputMiBPerSecondDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "delta"
+        dngCompressInputMiBPerSecondDeltaPercent = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "deltaPercent"
+        dngCompressOutputMiBPerSecondDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "delta"
+        dngCompressOutputMiBPerSecondDeltaPercent = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "deltaPercent"
+        dngCompressOutputRatioDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "delta"
         failures = $summaryFailures
     }
     proofGates = [pscustomobject]@{
@@ -533,7 +574,8 @@ Write-Host ((
     "writer_queue_wait_avg_delta_ms={28} producer_frame_avg_delta_ms={29} " +
     "producer_queue_idle_avg_delta_ms={30} writer_completion_lag_avg_delta_ms={31} " +
     "llrawproc_total_avg_delta_ms={32} llrawproc_dual_iso_avg_delta_ms={33} " +
-    "dng_compress_avg_delta_ms={34} output={35}") -f
+    "dng_compress_avg_delta_ms={34} dng_compress_output_mibps_delta={35} " +
+    "dng_compress_output_bytes_delta={36} output={37}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -569,6 +611,8 @@ Write-Host ((
     $summary.compare.llrawprocTotalAvgDeltaMs,
     $summary.compare.llrawprocDualIsoAvgDeltaMs,
     $summary.compare.dngCompressAvgDeltaMs,
+    $summary.compare.dngCompressOutputMiBPerSecondDelta,
+    $summary.compare.dngCompressOutputBytesTotalDelta,
     $summaryJson
 )
 

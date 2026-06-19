@@ -549,6 +549,14 @@ foreach ($case in $cases) {
             error = $errorMessage
             baselineFrameCount = if ($abSummary) { $abSummary.baseline.frameCount } else { $null }
             candidateFrameCount = if ($abSummary) { $abSummary.candidate.frameCount } else { $null }
+            baselineDngCompressBytesValidFrames = if ($abSummary) { $abSummary.baseline.dngCompressBytesValidFrames } else { $null }
+            baselineDngCompressInputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressInputBytesTotal } else { $null }
+            baselineDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressOutputBytesTotal } else { $null }
+            baselineDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.baseline.dngCompressOutputMiBPerSecond } else { $null }
+            candidateDngCompressBytesValidFrames = if ($abSummary) { $abSummary.candidate.dngCompressBytesValidFrames } else { $null }
+            candidateDngCompressInputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressInputBytesTotal } else { $null }
+            candidateDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressOutputBytesTotal } else { $null }
+            candidateDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.candidate.dngCompressOutputMiBPerSecond } else { $null }
             baselineElapsedMs = if ($abSummary) { $abSummary.baseline.elapsedMs } else { $null }
             candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
             elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
@@ -582,6 +590,10 @@ foreach ($case in $cases) {
             llrawprocChromaSmoothAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocChromaSmoothAvgDeltaMs } else { $null }
             llrawprocOtherAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocOtherAvgDeltaMs } else { $null }
             dngCompressAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressAvgDeltaMs } else { $null }
+            dngCompressInputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressInputBytesTotalDelta } else { $null }
+            dngCompressOutputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputBytesTotalDelta } else { $null }
+            dngCompressOutputMiBPerSecondDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDelta } else { $null }
+            dngCompressOutputMiBPerSecondDeltaPercent = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDeltaPercent } else { $null }
             failures = @($failureList)
         }
 

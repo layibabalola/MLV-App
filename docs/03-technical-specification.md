@@ -357,7 +357,9 @@ Compressed-DNG output profiles also expose `dng_compress_bytes_valid_frames`,
 `dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
 per-frame compression input/output byte counts; these byte totals are the
 throughput denominator for deciding whether compression belongs on the producer
-side, writer side, or a later worker boundary.
+side, writer side, or a later worker boundary. The export-stage comparator
+turns those byte totals into input/output MiB/s and output-ratio deltas, and
+the A/B plus matrix wrappers preserve those fields in their summaries.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
 release-tree promotion harness for these fields: it runs paired baseline and
 candidate exports across named cases/repeats and writes

@@ -83,6 +83,71 @@ function Get-StageObject {
     $null
 }
 
+function Get-NumericProperty {
+    param(
+        [object]$Object,
+        [string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($property) {
+        return Convert-ToNullableDouble $property.Value
+    }
+    $null
+}
+
+function Get-DngCompressionMetrics {
+    param([object]$Profile)
+
+    $validFrames = Get-NumericProperty -Object $Profile -Name "dng_compress_bytes_valid_frames"
+    $inputBytes = Get-NumericProperty -Object $Profile -Name "dng_compress_input_bytes_total"
+    $outputBytes = Get-NumericProperty -Object $Profile -Name "dng_compress_output_bytes_total"
+    $stage = Get-StageObject -Profile $Profile -Name "dng_compress_ms"
+    $stageAvgMs = if ($stage) { Convert-ToNullableDouble $stage.avg_ms } else { $null }
+    $stageSamples = if ($stage) { Convert-ToNullableDouble $stage.samples } else { $null }
+
+    $throughputFrames = $validFrames
+    if (($null -eq $throughputFrames -or $throughputFrames -le 0.0) -and
+        $null -ne $stageSamples -and $stageSamples -gt 0.0) {
+        $throughputFrames = $stageSamples
+    }
+
+    $totalCompressMs = $null
+    if ($null -ne $stageAvgMs -and $stageAvgMs -gt 0.0 -and
+        $null -ne $throughputFrames -and $throughputFrames -gt 0.0) {
+        $totalCompressMs = $stageAvgMs * $throughputFrames
+    }
+
+    $inputMiBPerSecond = $null
+    if ($null -ne $inputBytes -and $inputBytes -gt 0.0 -and
+        $null -ne $totalCompressMs -and $totalCompressMs -gt 0.0) {
+        $inputMiBPerSecond = [Math]::Round(($inputBytes / 1048576.0) / ($totalCompressMs / 1000.0), 6)
+    }
+
+    $outputMiBPerSecond = $null
+    if ($null -ne $outputBytes -and $outputBytes -gt 0.0 -and
+        $null -ne $totalCompressMs -and $totalCompressMs -gt 0.0) {
+        $outputMiBPerSecond = [Math]::Round(($outputBytes / 1048576.0) / ($totalCompressMs / 1000.0), 6)
+    }
+
+    $outputRatio = $null
+    if ($null -ne $inputBytes -and $inputBytes -gt 0.0 -and $null -ne $outputBytes) {
+        $outputRatio = [Math]::Round($outputBytes / $inputBytes, 6)
+    }
+
+    [pscustomobject]@{
+        dngCompressBytesValidFrames = $validFrames
+        dngCompressInputBytesTotal = $inputBytes
+        dngCompressOutputBytesTotal = $outputBytes
+        dngCompressInputMiBPerSecond = $inputMiBPerSecond
+        dngCompressOutputMiBPerSecond = $outputMiBPerSecond
+        dngCompressOutputRatio = $outputRatio
+    }
+}
+
 $baselineProfile = Read-ProfileJson -Path $Baseline
 $candidateProfile = Read-ProfileJson -Path $Candidate
 
@@ -112,6 +177,29 @@ foreach ($stageName in $stageNames) {
             -BaselineValue $(if ($baseStage) { $baseStage.p95_ms } else { $null }) `
             -CandidateValue $(if ($candStage) { $candStage.p95_ms } else { $null })
     }
+}
+
+$baselineCompression = Get-DngCompressionMetrics -Profile $baselineProfile
+$candidateCompression = Get-DngCompressionMetrics -Profile $candidateProfile
+$compressionComparisons = [pscustomobject]@{
+    dngCompressBytesValidFrames = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressBytesValidFrames `
+        -CandidateValue $candidateCompression.dngCompressBytesValidFrames
+    dngCompressInputBytesTotal = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressInputBytesTotal `
+        -CandidateValue $candidateCompression.dngCompressInputBytesTotal
+    dngCompressOutputBytesTotal = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressOutputBytesTotal `
+        -CandidateValue $candidateCompression.dngCompressOutputBytesTotal
+    dngCompressInputMiBPerSecond = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressInputMiBPerSecond `
+        -CandidateValue $candidateCompression.dngCompressInputMiBPerSecond
+    dngCompressOutputMiBPerSecond = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressOutputMiBPerSecond `
+        -CandidateValue $candidateCompression.dngCompressOutputMiBPerSecond
+    dngCompressOutputRatio = New-Delta `
+        -BaselineValue $baselineCompression.dngCompressOutputRatio `
+        -CandidateValue $candidateCompression.dngCompressOutputRatio
 }
 
 $failures = @()
@@ -157,6 +245,7 @@ $result = [pscustomobject]@{
         maxFrameTotalP95RegressionPercent = $MaxFrameTotalP95RegressionPercent
     }
     stages = [pscustomobject]$stageComparisons
+    compression = $compressionComparisons
     failures = $failures
     verdict = if ($failures.Count -eq 0) { "PASS" } else { "FAIL" }
 }
@@ -180,7 +269,8 @@ Write-Host ((
     "payload_clone_p95_delta_ms={10} producer_frame_avg_delta_ms={11} " +
     "producer_frame_p95_delta_ms={12} producer_queue_idle_avg_delta_ms={13} " +
     "producer_queue_idle_p95_delta_ms={14} writer_completion_lag_avg_delta_ms={15} " +
-    "writer_completion_lag_p95_delta_ms={16} llrawproc_avg_delta_ms={17} output={18}") -f
+    "writer_completion_lag_p95_delta_ms={16} llrawproc_avg_delta_ms={17} " +
+    "dng_compress_output_mibps_delta={18} output={19}") -f
     $result.verdict,
     $result.stages.frame_total_ms.avgMs.delta,
     $result.stages.frame_total_ms.avgMs.deltaPercent,
@@ -199,6 +289,7 @@ Write-Host ((
     $result.stages.writer_completion_lag_ms.avgMs.delta,
     $result.stages.writer_completion_lag_ms.p95Ms.delta,
     $result.stages.llrawproc_ms.avgMs.delta,
+    $result.compression.dngCompressOutputMiBPerSecond.delta,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
 
