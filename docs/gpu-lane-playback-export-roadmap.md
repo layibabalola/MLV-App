@@ -275,6 +275,24 @@ should either use a variance-adjusted criterion, longer/stratified samples, or
 an explicit A/A companion threshold before broadening the serial payload handoff
 claim.
 
+A/A-envelope serial-payload rerun:
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-aa-calibrated-matrix/matrix-summary.json`
+then reran the feature comparison with rounded companion thresholds from the
+identity matrix (`maxFrameTotalRegressionPercent=8.5`,
+`maxFrameTotalP95RegressionPercent=15.5`). The comparison metadata correctly
+reported `comparisonMode=feature-ab`, all nine DNG output sets again matched
+with zero SHA256 mismatches, average payload handoff cost was 0.015769 ms,
+wrapper elapsed averaged -110.241 ms, frame-total average delta averaged
+-0.639 ms, frame-total p95 delta averaged -0.886 ms, writer-completion lag
+averaged 0.000178 ms, and writer queue wait stayed 0.0 ms. Verdict still
+remained FAIL at 7/9 PASS and 2/9 FAIL: `m16-1210-master` repeat 1 exceeded the
+p95 companion gate at +22.514%, and `m16-1347-master` repeat 2 exceeded both
+average (+9.638%) and p95 (+20.599%) companion gates. This does not point back
+to payload-copy cost; it shows the current short real-footage matrix is still
+order/noise sensitive enough that broad serial-payload promotion should remain
+held at the earlier bounded 8-frame claim until E3 has a stronger methodology
+such as longer samples, randomized ordering, or paired A/A-per-feature runs.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
