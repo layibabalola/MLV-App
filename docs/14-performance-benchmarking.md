@@ -138,6 +138,14 @@ DLL SHA256 `A63212BDA5C6439257D2100F9EA1A5F490A25F740FD9961325F5683552CE3D65`,
 candidate GPU attempts/replacements 4/4 for both uncompressed and lossless,
 zero candidate skips, and DNG hash PASS 8/8. Treat this as scoped export
 replacement and byte-identity proof, not as a broad throughput claim.
+The larger 2026-06-19 throughput probe is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T173809\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T173809-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `F2CF60E1B600D30551AA91B04D3972CF859B0788C4ABE1F1E514602ECCC2C56E`).
+It used `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96, but CPU baseline
+was faster in every repeat. Keep it classified as a negative throughput probe,
+not an E3 promotion packet.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass

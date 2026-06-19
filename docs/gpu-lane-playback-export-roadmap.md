@@ -819,6 +819,29 @@ delta +87.802 ms (+2.466%) and lossless elapsed delta -247.457 ms (-5.627%),
 so E3 throughput/pipeline promotion still needs the separate real-footage
 matrix and scheduler/compression bottleneck work.
 
+Update 2026-06-19 Lane A E3 UltraMagnus throughput probe: the larger follow-up
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T173809/`
+used the same 4090 proof path on committed source head
+`94f79915f62b76ef8e09b8ff9603cd7ae5379eb4`, release executable SHA256
+`4B9405DED35B15A33972AF4844B11455484F806A222F527C40ACCE44634630F2`, generated
+FastProxy proof receipt, `M16-1327.MLV`, both `uncompressed` and `lossless`
+CDNG, `maxFrames=16`, and `repeats=3`. The packet ZIP is
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260619T173809-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `F2CF60E1B600D30551AA91B04D3972CF859B0788C4ABE1F1E514602ECCC2C56E`).
+Correctness stayed green: 6/6 matrix runs passed, CPU baseline attempted 0 GPU
+frames, the GPU candidate attempted and replaced 16/16 frames in every repeat
+with zero candidate skips, and the DNG hash companion matched 96/96 pairs. The
+throughput result is a blocker, not a promotion: elapsed time regressed in every
+repeat. Uncompressed averaged +384.453 ms elapsed (+8.209%) and +18.359 ms
+frame-total average, with the added time concentrated in `llrawproc_total_ms`
+/ `llrawproc_dual_iso_ms` (+20.479 ms average). Lossless averaged +800.083 ms
+elapsed (+13.759%) and +32.465 ms frame-total average, again dominated by
+`llrawproc_total_ms` / `llrawproc_dual_iso_ms` (+28.917 ms / +28.896 ms
+average) while compression was roughly neutral. This keeps GPU export as a
+scoped replacement/parity proof, not an E3 throughput win; next E3 work should
+investigate GPU-export overhead/amortization or move to a different measured
+export bottleneck instead of promoting this path.
+
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its
 verdict into `summary.json` / `matrix-summary.json` as `dngHash`. Local VM
