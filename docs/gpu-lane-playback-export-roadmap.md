@@ -1,9 +1,13 @@
 # GPU Lane — Playback & Export Roadmap + UX (plan of record)
 
-Status: 2026-06-15. The CUDA recon lane is proven on an RTX 4090 (validated bit-exact
-+ measured), and the first production CUDA AMaZE debayer seam has landed behind
-a DLL gate with no GUI claim. This doc remains the plan of record for the
-remaining playback/export rollout.
+Status: 2026-06-19. Lane A E0-E2 export, P-pre GPU AMaZE/processing
+parity, and Lane B P1-P3 are now through their scoped proof gates. P3 is
+honest-scoped, not universal: the RTX 4090 FastProxy proof validates the
+raw-fixes-enabled HQ Dual ISO no-readback CUDA-to-GL R16 texture path with
+GL/backend/oracle parity; unsupported states still fail closed to CPU readback
+or CPU presentation. The remaining priority order is P4 adaptive-quality polish,
+then Lane A E3/E4 export pipeline/rendered export, then Lane C portable GPU
+backends.
 
 Update 2026-06-16: P-pre **processing parity** is being extended from the
 supported levels / matrix / camera-matrix WB / gamut / gamma subset to the
@@ -47,9 +51,21 @@ UI/status surface now classifies the presented pipeline as `CPU`, `GPU Preview`,
 `GPU RB`, `GPU Tex RB`, or `GPU Tex NR`. Playback smoke logs emit matching
 machine-readable tokens (`cpu`, `gpu_preview`, `gpu_recon_readback`,
 `gpu_texture_readback`, `gpu_texture_no_readback`) on per-frame GPU telemetry
-and a session summary. Current P3 work should report `GPU Tex RB` /
-`gpu_texture_readback`; only the future true no-readback producer may report
-`GPU Tex NR` / `gpu_texture_no_readback`.
+and a session summary. The 2026-06-19 scoped P3 producer may report `GPU Tex NR`
+/ `gpu_texture_no_readback` only when the validated CUDA-to-GL no-readback path
+actually presents the frame; readback or unsupported fallback remains reported
+as `GPU Tex RB`, `GPU RB`, or `CPU`.
+
+Update 2026-06-19 P3 proof: `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1`
+can now present the proven raw-fixes-enabled HQ Dual ISO shape through
+`source=cuda_gl_r16_texture` with
+`gpu_playback_recon_texture_present_no_readback_active=true`. The accepted
+UltraMagnus RTX 4090 run (`20260619T002209`, release executable SHA256
+`F70CE56F8418E4107D1AF502F31A3B94399E92253016EC4950E145AB59922CAE`) reported
+`correctnessValidated=true`, `gpu_texture_no_readback_frames=94`,
+`glParityMatchCount=10`, `glMismatchTotal=0`, and advancing GL texture hashes.
+The raw-fixes-off control receipt remains non-proof by design and must not arm
+no-readback.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
@@ -114,8 +130,8 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   before the GUI may claim "GPU Full Quality AMaZE" (see §8).
 - **P1** loader/fallback: load `igpu_recon_cuda.dll` if present + capable, else CPU. No hard dependency. Experimental playback bridge present behind `MLVAPP_GPU_PLAYBACK_RECON=1`.
 - **P2** GPU recon + CPU readback: CUDA recon → Bayer16 readback → existing CPU debayer/process/present. Integration bridge, not final UX. Implemented for the v1 proven config only; missing/unsupported backend falls back to CPU.
-- **P3** no-readback playback: CPU decode/prefetch → CUDA recon/debayer/process → CUDA→GL texture present (no `QImage`, no `glReadPixels`); `GpuDisplayViewport` gains a texture-in path. A readback-backed Bayer16 GL presenter now exists for the P2 output, but final P3 still requires the CUDA backend to fill the viewport texture directly before this can be marked no-readback active.
-- **P4** adaptive quality + polish: hardware-capability-driven auto quality/scale, visible A/B + frame diffs, status UI, telemetry. Status/telemetry now distinguishes CPU, GPU preview, GPU recon readback, readback-backed texture present, and future no-readback texture present; the adaptive GPU-quality decision policy remains future work.
+- **P3** no-readback playback: CPU decode/prefetch -> CUDA recon -> CUDA-to-GL R16 texture present (no per-frame CPU readback for the displayed Bayer frame) is implemented and RTX 4090-validated for the scoped raw-fixes-enabled HQ Dual ISO shape. Readback-backed Bayer16 GL presentation remains the fallback presenter for P2 output; unsupported or non-proof states stay CPU/readback.
+- **P4** adaptive quality + polish: hardware-capability-driven auto quality/scale, visible A/B + frame diffs, status UI, telemetry. Status/telemetry now distinguishes CPU, GPU preview, GPU recon readback, readback-backed texture present, and true no-readback texture present; the remaining adaptive work is to promote capability-aware defaults and quality decisions without exceeding the scoped P3 gate.
 - Decode (LJ92, CPU, overlapped via prefetch ~7-9 ms @ 4.1 MP) is the steady-state gate once recon is on GPU — tune the overlap.
 
 ## 5. Lane C — portable GPU (later)

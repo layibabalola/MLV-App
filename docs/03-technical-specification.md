@@ -1246,7 +1246,7 @@ Legend: **compile** = read at qmake/compile time;
 | `MLVAPP_EXPERIMENTAL_GPU_DEBAYER` | unset | runtime | `1` enables bilinear GPU debayer. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` | unset | runtime | `1` enables explicit AMaZE CUDA debayer routing when the GPU preview-processing path is active. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT` | unset | runtime | `1` requests the non-default AMaZE CUDA-to-GL texture-present path nested under GPU preview processing and GPU AMaZE; CPU-readback fallback remains available. |
-| `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT` | unset | runtime | `1` requests the Lane B P3 playback-recon texture-present path. In the narrow x1 GPU preview-processing + `Decode/Reconstruct/Process` playback shape, the GL viewport may present the P2 CPU16-readback reconstructed Bayer frame as a Bayer16 texture; telemetry reports `source=cpu16_readback_reconstructed_bayer`, `gpu_playback_recon_texture_present_no_readback_active=false`, and playback status `gpu_texture_readback` until a GUI-thread-safe CUDA-to-GL producer exists. |
+| `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT` | unset | runtime | `1` requests the Lane B P3 playback-recon texture-present path. In the narrow x1 GPU preview-processing + `Decode/Reconstruct/Process` playback shape, the GL viewport may present either the P2 CPU16-readback reconstructed Bayer frame as a Bayer16 texture (`source=cpu16_readback_reconstructed_bayer`, `gpu_texture_readback`) or, for the validated raw-fixes-enabled HQ Dual ISO shape, the CUDA-to-GL no-readback R16 texture path (`source=cuda_gl_r16_texture`, `gpu_playback_recon_texture_present_no_readback_active=true`, `gpu_texture_no_readback`). Unsupported states fail closed to readback/CPU and must not report no-readback. |
 | `MLVAPP_GPU_AMAZE_DEBAYER_DLL` | unset | runtime | Optional path to `igpu_amaze_debayer_cuda.dll`; otherwise app-dir/search-path lookup is used. |
 | `MLVAPP_STAGE_TIMING` | unset | runtime | Non-empty and not `"0"` → emit per-stage lines via `mlv_stage_timing_note` (`StageTiming.h:44`). |
 | `MLVAPP_STAGE_TIMING_FILE` | unset | runtime | Path to redirect stage-timing lines to a file. Default is stderr. |
@@ -1271,9 +1271,10 @@ Playback smoke GPU status is emitted separately from the CPU timing summary.
 Per-frame `playback_smoke.gpu_frame` uses:
 `cpu`, `gpu_preview`, `gpu_recon_readback`, `gpu_texture_readback`, or
 `gpu_texture_no_readback`. The session-level `playback_smoke.gpu_summary`
-counts those buckets. `gpu_texture_readback` is the current P3 presenter
-surface from a CPU16-readback Bayer frame; only a future producer that keeps the
-frame on the GPU may emit `gpu_texture_no_readback`.
+counts those buckets. `gpu_texture_readback` means GL texture presentation from
+a CPU16-readback Bayer frame. `gpu_texture_no_readback` means the scoped
+CUDA-to-GL R16 texture path actually presented the frame without per-frame CPU
+readback; unsupported or raw-fixes-off states must stay out of that bucket.
 Downstream baselines should treat the two texture statuses as distinct.
 
 ### 12.1 Cadence and render thread

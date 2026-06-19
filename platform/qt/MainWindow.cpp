@@ -16402,13 +16402,15 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     QString indicatorTooltip =
         tr( "Active playback quality mode and presented pipeline. "
             "GPU RB means CUDA reconstruction with CPU readback; "
-            "GPU Tex RB means GL texture presentation from a readback frame." );
+            "GPU Tex RB means GL texture presentation from a readback frame; "
+            "GPU Tex NR means CUDA-to-GL texture presentation without "
+            "per-frame CPU readback." );
     QString toolButtonTooltip =
         tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
             "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
             "sharp/aggressive preview mode, and x1/x2/x4/x8 playback scale. "
             "The status suffix reports the presented pipeline: CPU, GPU RB, "
-            "GPU Tex RB, or GPU Tex NR.\n"
+            "GPU Tex RB, or scoped GPU Tex NR.\n"
             "Keyboard shortcut: Q" );
     if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto ) )
     {
