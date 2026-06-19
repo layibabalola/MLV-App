@@ -16,6 +16,7 @@ param(
     [switch]$CandidateUseAsyncWriter,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
+    [switch]$AlternateRunOrder,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -164,6 +165,21 @@ function Convert-ToSafeName {
     $safe.ToLowerInvariant()
 }
 
+function Get-RunOrder {
+    param(
+        [object]$Case,
+        [int]$RepeatIndex
+    )
+
+    if (-not $AlternateRunOrder) {
+        return "BaselineFirst"
+    }
+    if ((($Case.index + $RepeatIndex) % 2) -eq 0) {
+        return "BaselineFirst"
+    }
+    "CandidateFirst"
+}
+
 function Read-MatrixCases {
     $rawCases = @()
 
@@ -256,7 +272,8 @@ function New-AbArgs {
         "-Input", $Case.clipPath,
         "-OutputDir", $CaseOutputDir,
         "-MaxFrameTotalRegressionPercent", "$MaxFrameTotalRegressionPercent",
-        "-MaxFrameTotalP95RegressionPercent", "$MaxFrameTotalP95RegressionPercent"
+        "-MaxFrameTotalP95RegressionPercent", "$MaxFrameTotalP95RegressionPercent",
+        "-RunOrder", (Get-RunOrder -Case $Case -RepeatIndex $RepeatIndex)
     )
 
     if (-not [string]::IsNullOrWhiteSpace($ExePath)) {
@@ -328,6 +345,7 @@ foreach ($case in $cases) {
         $caseOutputDir = Join-Path (Join-Path $casesRoot $caseDirName) $repeatDirName
         $repeatPlans += [pscustomobject]@{
             repeat = $repeat
+            runOrder = Get-RunOrder -Case $case -RepeatIndex $repeat
             outputDir = $caseOutputDir
             args = New-AbArgs -Case $case -RepeatIndex $repeat -CaseOutputDir $caseOutputDir
         }
@@ -360,6 +378,7 @@ if ($DryRun) {
             candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
             baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+            alternateRunOrder = [bool]$AlternateRunOrder
             failOnRegression = [bool]$FailOnRegression
         }
         cases = $planCases
@@ -378,6 +397,7 @@ foreach ($case in $cases) {
         $caseOutputDir = Join-Path (Join-Path $casesRoot $caseDirName) $repeatDirName
         $summaryPath = Join-Path $caseOutputDir "summary.json"
         $comparePath = Join-Path $caseOutputDir "compare.json"
+        $runOrder = Get-RunOrder -Case $case -RepeatIndex $repeat
         $args = New-AbArgs -Case $case -RepeatIndex $repeat -CaseOutputDir $caseOutputDir
 
         $errorMessage = ""
@@ -417,6 +437,7 @@ foreach ($case in $cases) {
         $failureList = @(Get-FailureList -Summary $abSummary)
         $runs += [pscustomobject]@{
             repeat = $repeat
+            runOrder = $runOrder
             outputDir = $caseOutputDir
             summary = $summaryPath
             compare = $comparePath
@@ -483,6 +504,7 @@ $matrix = [pscustomobject]@{
         candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
         baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
         candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+        alternateRunOrder = [bool]$AlternateRunOrder
         enableGpuExport = [bool]$EnableGpuExport
         buildId = $BuildId
     }
@@ -499,11 +521,12 @@ $matrix = [pscustomobject]@{
 $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
 Write-Host (((
-    "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} cases={2} runs={3} pass={4} fail={5} " +
-    "candidate_payload={6} candidate_async={7} candidate_async_queue_depth={8} " +
-    "elapsed_delta_ms_field=True output={9}") -f
+    "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} alternate_run_order={2} " +
+    "cases={3} runs={4} pass={5} fail={6} candidate_payload={7} " +
+    "candidate_async={8} candidate_async_queue_depth={9} elapsed_delta_ms_field=True output={10}") -f
     $matrix.verdict,
     $matrix.comparisonMode,
+    [bool]$AlternateRunOrder,
     $matrix.totals.caseCount,
     $matrix.totals.runCount,
     $matrix.totals.passCount,

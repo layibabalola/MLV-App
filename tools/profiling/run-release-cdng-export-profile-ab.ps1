@@ -15,6 +15,8 @@ param(
     [int]$MaxFrames = 0,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
+    [ValidateSet("BaselineFirst", "CandidateFirst")]
+    [string]$RunOrder = "BaselineFirst",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
     [double]$MaxFrameTotalP95RegressionPercent = 10.0,
     [switch]$FailOnRegression,
@@ -173,6 +175,7 @@ if ($DryRun) {
         maxFrames = $MaxFrames
         comparisonMode = $comparisonMode
         isIdentityComparison = $isIdentityComparison
+        runOrder = $RunOrder
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -192,14 +195,30 @@ if ($DryRun) {
 
 New-Item -ItemType Directory -Force -Path $baselineDir, $candidateDir | Out-Null
 
-$baselineRun = Invoke-ProfileRun -Label "baseline" -CommandArgs $baselineArgs
-if ($baselineRun.exitCode -ne 0) {
-    throw "Baseline CDNG export profile failed with exit code $($baselineRun.exitCode)"
+$baselineRun = $null
+$candidateRun = $null
+$runPlan = @(
+    [pscustomobject]@{ label = "baseline"; args = $baselineArgs },
+    [pscustomobject]@{ label = "candidate"; args = $candidateArgs }
+)
+if ($RunOrder -eq "CandidateFirst") {
+    $runPlan = @(
+        [pscustomobject]@{ label = "candidate"; args = $candidateArgs },
+        [pscustomobject]@{ label = "baseline"; args = $baselineArgs }
+    )
 }
 
-$candidateRun = Invoke-ProfileRun -Label "candidate" -CommandArgs $candidateArgs
-if ($candidateRun.exitCode -ne 0) {
-    throw "Candidate CDNG export profile failed with exit code $($candidateRun.exitCode)"
+foreach ($runStep in $runPlan) {
+    $runResult = Invoke-ProfileRun -Label $runStep.label -CommandArgs $runStep.args
+    if ($runStep.label -eq "baseline") {
+        $baselineRun = $runResult
+    }
+    else {
+        $candidateRun = $runResult
+    }
+    if ($runResult.exitCode -ne 0) {
+        throw "$($runStep.label) CDNG export profile failed with exit code $($runResult.exitCode)"
+    }
 }
 
 $compareArgs = @(
@@ -248,6 +267,7 @@ $summary = [pscustomobject]@{
     maxFrames = $MaxFrames
     comparisonMode = $comparisonMode
     isIdentityComparison = $isIdentityComparison
+    runOrder = $RunOrder
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
         useAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -305,17 +325,18 @@ $summary = [pscustomobject]@{
 $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
 Write-Host ((
-    "CDNG-EXPORT-AB verdict={0} comparison_mode={1} baseline_payload={2} " +
-    "candidate_payload={3} baseline_async={4} candidate_async={5} " +
-    "baseline_async_queue_capacity={6} candidate_async_queue_capacity={7} " +
-    "elapsed_delta_ms={8} elapsed_delta_percent={9} " +
-    "frame_total_avg_delta_ms={10} frame_total_p95_delta_ms={11} " +
-    "queue_idle_avg_delta_ms={12} payload_clone_avg_delta_ms={13} " +
-    "writer_queue_wait_avg_delta_ms={14} producer_frame_avg_delta_ms={15} " +
-    "producer_queue_idle_avg_delta_ms={16} writer_completion_lag_avg_delta_ms={17} " +
-    "output={18}") -f
+    "CDNG-EXPORT-AB verdict={0} comparison_mode={1} run_order={2} " +
+    "baseline_payload={3} candidate_payload={4} baseline_async={5} candidate_async={6} " +
+    "baseline_async_queue_capacity={7} candidate_async_queue_capacity={8} " +
+    "elapsed_delta_ms={9} elapsed_delta_percent={10} " +
+    "frame_total_avg_delta_ms={11} frame_total_p95_delta_ms={12} " +
+    "queue_idle_avg_delta_ms={13} payload_clone_avg_delta_ms={14} " +
+    "writer_queue_wait_avg_delta_ms={15} producer_frame_avg_delta_ms={16} " +
+    "producer_queue_idle_avg_delta_ms={17} writer_completion_lag_avg_delta_ms={18} " +
+    "output={19}") -f
     $summary.verdict,
     $summary.comparisonMode,
+    $summary.runOrder,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
     $summary.baseline.useAsyncWriter,
