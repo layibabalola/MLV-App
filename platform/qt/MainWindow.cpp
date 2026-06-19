@@ -6723,6 +6723,7 @@ int MainWindow::openMlvForPreview(QString fileName)
     // Invalidate any in-flight async look-assist analysis from the previous clip.
     ++m_lookAssistAsyncGeneration;
     m_fileLoaded = true;
+    resetPlaybackQualityAutoRunState();
 
     //Raw black & white level (needed for preview picture)
     initRawBlackAndWhite();
@@ -7045,6 +7046,7 @@ int MainWindow::openMlv( QString fileName )
     // Invalidate any in-flight async look-assist analysis from the previous clip.
     ++m_lookAssistAsyncGeneration;
     m_fileLoaded = true;
+    resetPlaybackQualityAutoRunState();
 
     //Audio Track
     paintAudioTrack();
@@ -16007,8 +16009,25 @@ void MainWindow::initPlaybackScaleFactorFromSettings( void )
     applyPlaybackScaleFactorOverride( rawScale, /*persist*/false );
 }
 
+void MainWindow::seedPlaybackQualityActiveStateForCurrentContext( void )
+{
+    const PlaybackQualityMode pqMode =
+        playbackQualityModeFromInt( m_playbackQualityMode );
+    const bool dualIsoActive =
+        m_fileLoaded
+        && m_pMlvObject
+        && llrpGetDualIsoMode( m_pMlvObject ) != 0;
+    m_playbackQualityActiveScale =
+        playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
+    m_playbackQualityActiveHq = playbackQualityWantsHqMean23( pqMode );
+    g_playbackQualityActiveHqMirror.store(
+        m_playbackQualityActiveHq ? 1 : 0,
+        std::memory_order_release );
+}
+
 void MainWindow::resetPlaybackQualityAutoRunState( void )
 {
+    seedPlaybackQualityActiveStateForCurrentContext();
     m_playbackQualityFrameCounter = 0;
     m_playbackQualityLastPresentedTime = 0.0;
     m_playbackQualitySampler.reset();
@@ -16121,14 +16140,6 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
         playbackQualityTierWriteToSettings(
             pqMode, PlaybackQualityTier::Dev, QDateTime::currentMSecsSinceEpoch() );
     }
-    const bool dualIsoActive =
-        m_fileLoaded
-        && m_pMlvObject
-        && llrpGetDualIsoMode( m_pMlvObject ) != 0;
-    m_playbackQualityActiveScale = playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
-    m_playbackQualityActiveHq    = playbackQualityWantsHqMean23( pqMode );
-    g_playbackQualityActiveHqMirror.store( m_playbackQualityActiveHq ? 1 : 0,
-                                            std::memory_order_release );
     resetPlaybackQualityAutoRunState();
 
     if ( persist )

@@ -116,6 +116,10 @@ The latch is playback-run scoped: clip opens, play stop/start, quality-mode,
 preview-mode, preview-resolution, scale override, and Auto target-FPS changes
 all reset it, so a later context must present `GPU Tex NR` again before Auto
 uses no-readback capability to sharpen quality decisions.
+The same reset path now also reseeds the active Auto scale/HQ decision to the
+current mode's initial state, and clip open reseeds after the new object becomes
+current, so stale x2/headroom or Fast-demotion decisions cannot leak into a new
+run before the sampler and capability gate observe that context.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,
