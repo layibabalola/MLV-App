@@ -85,7 +85,12 @@ while later frames measure the elapsed time between the previous profiled frame
 finishing and the next `saveDngFrame` call beginning. This keeps current serial
 exports byte-inert while giving future pipelined export experiments a scheduler
 starvation/overlap signal before CPU decode workers, the single GPU recon queue,
-or CPU compress/write workers are promoted.
+or CPU compress/write workers are promoted. Real release-tree baseline and
+candidate runs should use
+`tools/profiling/run-release-cdng-export-profile.ps1`, which launches the
+current `MLVApp.exe --batch` CDNG export path with
+`MLVAPP_EXPORT_STAGE_PROFILER=1` and writes the profile JSON next to the exported
+DNG output bundle.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
@@ -140,7 +145,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, and the profiler emits supported `queue_idle_ms` samples after the first frame, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap deltas, and frame-total regressions before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms` samples after the first frame, and `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap deltas, and frame-total regressions before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback
