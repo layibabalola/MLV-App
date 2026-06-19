@@ -452,6 +452,7 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("queue_idle_ms"), 0);
     assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("producer_queue_idle_ms"), 0);
     assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("producer_frame_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("writer_completion_lag_ms"), 0);
     assert_profiler_json_has_stage(stages, QStringLiteral("frame_total_ms"));
     if (raw_state == COMPRESSED_RAW) {
         assert_profiler_json_has_stage(stages, QStringLiteral("dng_compress_ms"));
@@ -1982,6 +1983,8 @@ TEST(DualIsoPipeline, DngFramePayloadSavePreservesExportStageProfiler)
                     .value(QStringLiteral("samples")).toInt(-1) >= 0);
     ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
     ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
 
@@ -2046,6 +2049,8 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
     ASSERT_TRUE(stages.value(QStringLiteral("producer_queue_idle_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt(-1) >= 0);
     ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
     ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
@@ -2120,12 +2125,15 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
                     .value(QStringLiteral("samples")).toInt() >= 2);
     ASSERT_TRUE(stages.value(QStringLiteral("producer_queue_idle_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
 
     const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
     ASSERT_TRUE(frames.size() >= 2);
     ASSERT_TRUE(frames.at(0).toObject().value(QStringLiteral("success")).toBool(false));
     ASSERT_TRUE(frames.at(1).toObject().value(QStringLiteral("success")).toBool(false));
     ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("producer_queue_idle_ms")));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("writer_completion_lag_ms")));
 
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
@@ -2179,11 +2187,14 @@ TEST(DualIsoPipeline, ExportStageProfilerRecordsQueueIdleBetweenFrameSaves)
     ASSERT_TRUE(producer_queue_idle.value(QStringLiteral("avg_ms")).toDouble(-1.0) >= 0.0);
     ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 2);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
 
     const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
     ASSERT_TRUE(frames.size() >= 2);
     ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("queue_idle_ms")));
     ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("producer_queue_idle_ms")));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("writer_completion_lag_ms")));
 
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");

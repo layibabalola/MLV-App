@@ -338,7 +338,8 @@ emits `producer_frame_ms` for caller-side save-frame occupancy and
 `producer_queue_idle_ms` for the gap between caller-side returns and the next
 save-frame entry; the older `queue_idle_ms` remains previous profiled frame
 completion to next save-frame entry, which can include async writer completion
-lag.
+lag. `writer_completion_lag_ms` is derived as `frame_total_ms -
+producer_frame_ms`, making post-producer writer completion time explicit.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

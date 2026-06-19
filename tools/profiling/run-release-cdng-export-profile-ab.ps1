@@ -241,6 +241,8 @@ $summary = [pscustomobject]@{
         producerFrameP95DeltaMs = if ($compare -and $compare.stages.producer_frame_ms) { $compare.stages.producer_frame_ms.p95Ms.delta } else { $null }
         producerQueueIdleAvgDeltaMs = if ($compare -and $compare.stages.producer_queue_idle_ms) { $compare.stages.producer_queue_idle_ms.avgMs.delta } else { $null }
         producerQueueIdleP95DeltaMs = if ($compare -and $compare.stages.producer_queue_idle_ms) { $compare.stages.producer_queue_idle_ms.p95Ms.delta } else { $null }
+        writerCompletionLagAvgDeltaMs = if ($compare -and $compare.stages.writer_completion_lag_ms) { $compare.stages.writer_completion_lag_ms.avgMs.delta } else { $null }
+        writerCompletionLagP95DeltaMs = if ($compare -and $compare.stages.writer_completion_lag_ms) { $compare.stages.writer_completion_lag_ms.p95Ms.delta } else { $null }
         failures = $compareFailures
     }
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS") { "PASS" } else { "FAIL" }
@@ -255,7 +257,8 @@ Write-Host ((
     "frame_total_avg_delta_ms={7} frame_total_p95_delta_ms={8} " +
     "queue_idle_avg_delta_ms={9} payload_clone_avg_delta_ms={10} " +
     "writer_queue_wait_avg_delta_ms={11} producer_frame_avg_delta_ms={12} " +
-    "producer_queue_idle_avg_delta_ms={13} output={14}") -f
+    "producer_queue_idle_avg_delta_ms={13} writer_completion_lag_avg_delta_ms={14} " +
+    "output={15}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
@@ -270,6 +273,7 @@ Write-Host ((
     $summary.compare.writerQueueWaitAvgDeltaMs,
     $summary.compare.producerFrameAvgDeltaMs,
     $summary.compare.producerQueueIdleAvgDeltaMs,
+    $summary.compare.writerCompletionLagAvgDeltaMs,
     $summaryJson
 )
 

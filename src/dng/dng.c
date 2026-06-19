@@ -404,6 +404,21 @@ static int export_profile_stage_value(const exportProfileFrame_t * frame,
         return 1;
     }
 
+    if(strcmp(stage_name, "writer_completion_lag_ms") == 0)
+    {
+        double frame_total_ms = 0.0;
+        double producer_frame_ms = 0.0;
+        if(!export_profile_stage_value(frame, "frame_total_ms", &frame_total_ms) ||
+           !export_profile_stage_value(frame, "producer_frame_ms", &producer_frame_ms))
+        {
+            return 0;
+        }
+        *value = frame_total_ms >= producer_frame_ms
+            ? frame_total_ms - producer_frame_ms
+            : 0.0;
+        return 1;
+    }
+
     for(int stage = 0; stage < EXPORT_PROFILE_STAGE_COUNT; stage++)
     {
         if(strcmp(stage_name, export_profile_stage_name((exportProfileStage_t)stage)) == 0)
@@ -557,6 +572,7 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "queue_idle_ms", 1);
     export_profile_write_stage_stats(file, "producer_queue_idle_ms", 1);
     export_profile_write_stage_stats(file, "producer_frame_ms", 1);
+    export_profile_write_stage_stats(file, "writer_completion_lag_ms", 1);
     export_profile_write_stage_stats(file, "frame_total_ms", 1);
     fputs("  },\n", file);
     fputs("  \"frames\":[\n", file);
@@ -590,6 +606,15 @@ static void export_profile_write_json(void)
                 fputs(",", file);
                 export_profile_write_json_string(file, "raw_read_decode_unpack_ms");
                 fprintf(file, ":%.6f", raw_total);
+            }
+        }
+        {
+            double writer_lag = 0.0;
+            if(export_profile_stage_value(frame, "writer_completion_lag_ms", &writer_lag))
+            {
+                fputs(",", file);
+                export_profile_write_json_string(file, "writer_completion_lag_ms");
+                fprintf(file, ":%.6f", writer_lag);
             }
         }
 
