@@ -66,7 +66,7 @@ The matrix summary records case/run verdicts, selected CDNG codec,
 baseline/candidate frame counts, baseline/candidate wrapper elapsed
 milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
 candidate async worker count/jobs started/jobs finished/max-active,
-baseline/candidate GPU-export intent plus attempt/replacement/allocation counters,
+baseline/candidate GPU-export intent plus attempt/replacement/trusted/allocation counters,
 frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
 writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
 (`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck
@@ -113,6 +113,15 @@ to same-mode A/A or GPU-vs-GPU profiling. When a GPU proof gate fails, inspect
 UltraMagnus wrapper also includes a compact `skip_counts=...` rollup in proof
 failure text.
 
+For a throughput-only candidate after the scoped RTX 4090 parity proof is
+accepted, add `-CandidateGpuExportTrusted` and
+`-RequireCandidateGpuExportTrusted`. That sets
+`MLVAPP_GPU_EXPORT_TRUSTED=1` only for the candidate leg, bypasses the CPU
+Dual-ISO shadow oracle, and requires `gpuExportTrustedFrames == frameCount`.
+The default GPU export path stays CPU-authoritative; trusted mode is a proof
+surface for measuring the candidate without the shadow-validation cost, not a
+default export behavior change.
+
 Use `tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1` for the
 authoritative RTX 4090 export proof path. It refuses dirty local staging,
 mirrors the clean repo to `\\ultra-magnus\G\Temp\mlvapp-cdng-export-evidence`,
@@ -127,6 +136,9 @@ raw source receipt. The packet records both `sourceReceipt` and the effective
 receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
 `receipts\FastProxy.marxml`, both `uncompressed` and `lossless` CDNG,
 `maxFrames=4`, and `repeats=1`; widen only when the proof question requires it.
+Pass `-TrustedGpuExport` only when deliberately generating the trusted
+throughput packet described above; that adds the candidate trusted gate to the
+remote matrix and records `trustedGpuExport=true` in the packet summary.
 The accepted 2026-06-19 proof packet is
 `.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
 with local packet
@@ -145,7 +157,8 @@ with local packet
 (SHA256 `F2CF60E1B600D30551AA91B04D3972CF859B0788C4ABE1F1E514602ECCC2C56E`).
 It used `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96, but CPU baseline
 was faster in every repeat. Keep it classified as a negative throughput probe,
-not an E3 promotion packet.
+not an E3 promotion packet; it measured the default shadow validator, which
+still pays the CPU Dual-ISO oracle plus the GPU run and byte comparison.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass

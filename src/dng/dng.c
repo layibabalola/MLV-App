@@ -149,6 +149,7 @@ typedef struct
     int gpu_export_attempted;
     int gpu_export_rc;
     int gpu_export_replaced;
+    int gpu_export_trusted;
     int gpu_export_allocated_bytes_valid;
     uint64_t gpu_export_allocated_bytes;
     int gpu_export_skip_code;
@@ -577,6 +578,7 @@ static void export_profile_note_gpu_export_telemetry(exportProfileFrame_t * fram
     frame->gpu_export_attempted = telemetry.attempted ? 1 : 0;
     frame->gpu_export_rc = telemetry.rc;
     frame->gpu_export_replaced = telemetry.replaced ? 1 : 0;
+    frame->gpu_export_trusted = telemetry.trusted ? 1 : 0;
     frame->gpu_export_allocated_bytes_valid =
         telemetry.allocated_bytes_valid ? 1 : 0;
     frame->gpu_export_allocated_bytes = telemetry.allocated_bytes;
@@ -790,6 +792,7 @@ static void export_profile_write_json(void)
     char generated[64] = "";
     unsigned gpu_export_attempted_frames = 0;
     unsigned gpu_export_replaced_frames = 0;
+    unsigned gpu_export_trusted_frames = 0;
     unsigned gpu_export_allocated_bytes_valid_frames = 0;
     unsigned gpu_export_skipped_frames = 0;
     unsigned gpu_export_skip_counts[LLRP_GPU_EXPORT_SKIP_COUNT] = {0};
@@ -812,6 +815,10 @@ static void export_profile_write_json(void)
         if(frame->gpu_export_replaced)
         {
             gpu_export_replaced_frames++;
+        }
+        if(frame->gpu_export_trusted)
+        {
+            gpu_export_trusted_frames++;
         }
         if(frame->gpu_export_skip_code > LLRP_GPU_EXPORT_SKIP_NONE
         && frame->gpu_export_skip_code < LLRP_GPU_EXPORT_SKIP_COUNT)
@@ -906,6 +913,9 @@ static void export_profile_write_json(void)
             "  \"gpu_export_replaced_frames\":%u,\n",
             gpu_export_replaced_frames);
     fprintf(file,
+            "  \"gpu_export_trusted_frames\":%u,\n",
+            gpu_export_trusted_frames);
+    fprintf(file,
             "  \"gpu_export_allocated_bytes_valid_frames\":%u,\n",
             gpu_export_allocated_bytes_valid_frames);
     fprintf(file,
@@ -999,6 +1009,7 @@ static void export_profile_write_json(void)
         fprintf(file,
                 ",\"gpu_export_attempted\":%s,\"gpu_export_rc\":%d"
                 ",\"gpu_export_replaced\":%s"
+                ",\"gpu_export_trusted\":%s"
                 ",\"gpu_export_allocated_bytes_valid\":%s"
                 ",\"gpu_export_allocated_bytes\":%llu"
                 ",\"gpu_export_skip_code\":%d"
@@ -1006,6 +1017,7 @@ static void export_profile_write_json(void)
                 frame->gpu_export_attempted ? "true" : "false",
                 frame->gpu_export_rc,
                 frame->gpu_export_replaced ? "true" : "false",
+                frame->gpu_export_trusted ? "true" : "false",
                 frame->gpu_export_allocated_bytes_valid ? "true" : "false",
                 (unsigned long long)frame->gpu_export_allocated_bytes,
                 frame->gpu_export_skip_code);

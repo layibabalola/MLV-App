@@ -36,6 +36,7 @@ extern "C" int llrpGpuExportBackendUnavailableForTesting(void);
 extern "C" int llrpGpuExportLastRunAttemptedForTesting(void);
 extern "C" int llrpGpuExportLastRunRcForTesting(void);
 extern "C" int llrpGpuExportLastReplacedForTesting(void);
+extern "C" int llrpGpuExportLastTrustedForTesting(void);
 extern "C" int llrpGpuExportLastMismatchForTesting(void);
 extern "C" int llrpGpuExportLastApplyDitherForTesting(void);
 extern "C" unsigned long long llrpGpuExportLastMismatchCountForTesting(void);
@@ -58,6 +59,7 @@ static void assert_gpu_export_telemetry_idle()
     ASSERT_EQ(0, telemetry.attempted);
     ASSERT_EQ(0, telemetry.rc);
     ASSERT_EQ(0, telemetry.replaced);
+    ASSERT_EQ(0, telemetry.trusted);
     ASSERT_EQ(0, telemetry.allocated_bytes_valid);
     ASSERT_EQ(static_cast<uint64_t>(0), telemetry.allocated_bytes);
     ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_NONE, telemetry.skip_code);
@@ -305,12 +307,14 @@ static QByteArray export_dng_for_gpu_export_gate_cfg(int raw_state,
                                                      const QString & clip_relative_path,
                                                      const QString & receipt_relative_path,
                                                      const GpuExportDualIsoConfig & cfg,
-                                                     const dngExportOverrides_t * overrides)
+                                                     const dngExportOverrides_t * overrides,
+                                                     bool gpu_trusted = false)
 {
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
@@ -323,6 +327,9 @@ static QByteArray export_dng_for_gpu_export_gate_cfg(int raw_state,
 
     if (gpu_enabled) {
         qputenv("MLVAPP_GPU_EXPORT", QByteArrayLiteral("1"));
+        if (gpu_trusted) {
+            qputenv("MLVAPP_GPU_EXPORT_TRUSTED", QByteArrayLiteral("1"));
+        }
         qputenv("MLVAPP_GPU_EXPORT_DLL", dll_path.toLocal8Bit());
     }
 
@@ -348,7 +355,8 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
                                                  const QString & dll_path,
                                                  const QString & dng_path,
                                                  const QString & clip_relative_path,
-                                                 const QString & receipt_relative_path)
+                                                 const QString & receipt_relative_path,
+                                                 bool gpu_trusted = false)
 {
     return export_dng_for_gpu_export_gate_cfg(raw_state,
                                               gpu_enabled,
@@ -357,7 +365,8 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
                                               clip_relative_path,
                                               receipt_relative_path,
                                               kGpuExportSupportedDualIsoConfig,
-                                              nullptr);
+                                              nullptr,
+                                              gpu_trusted);
 }
 
 // Lane A E2 (slice 4) helper: export `target_frame` of a clip and return its DNG
@@ -411,7 +420,8 @@ static QByteArray export_one_frame_for_resume_proxy(int raw_state,
 static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
                                                       bool gpu_enabled,
                                                       const QString & dll_path,
-                                                      const QString & dng_path)
+                                                      const QString & dng_path,
+                                                      bool gpu_trusted = false)
 {
     return export_dng_for_gpu_export_gate(
         raw_state,
@@ -419,7 +429,8 @@ static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
         dll_path,
         dng_path,
         QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv"),
-        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"));
+        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+        gpu_trusted);
 }
 
 static void assert_profiler_json_has_stage(const QJsonObject & stages,
@@ -452,6 +463,7 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_attempted_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_replaced_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_trusted_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_allocated_bytes_valid_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_max_allocated_bytes")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_skipped_frames")));
@@ -500,6 +512,7 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_attempted")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_rc")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_replaced")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_trusted")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes_valid")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_skip_code")));
@@ -932,15 +945,17 @@ TEST(DualIsoPipeline, GpuExportMissingDllFallbackIsByteInertForCompressedAndUnco
         ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
 
         const QByteArray fallback_bytes =
-            export_tiny_dng_for_gpu_export_gate(raw_state, true, missing_dll, fallback_dng);
+            export_tiny_dng_for_gpu_export_gate(raw_state, true, missing_dll, fallback_dng, true);
         ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
         ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
         ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastTrustedForTesting());
         ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
                   llrpGpuExportLastSkipCodeForTesting());
         {
             llrpGpuExportTelemetry_t telemetry = {};
             llrpGetLastGpuExportTelemetry(&telemetry);
+            ASSERT_EQ(0, telemetry.trusted);
             ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
                       telemetry.skip_code);
         }
@@ -950,6 +965,7 @@ TEST(DualIsoPipeline, GpuExportMissingDllFallbackIsByteInertForCompressedAndUnco
     }
 
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
@@ -1503,6 +1519,7 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
             const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
             const int run_rc = llrpGpuExportLastRunRcForTesting();
             const int replaced = llrpGpuExportLastReplacedForTesting();
+            const int trusted = llrpGpuExportLastTrustedForTesting();
             const int mismatch = llrpGpuExportLastMismatchForTesting();
             const int apply_dither = llrpGpuExportLastApplyDitherForTesting();
             const unsigned long long mismatch_count =
@@ -1550,6 +1567,7 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
             ASSERT_EQ(1, run_attempted);
             ASSERT_EQ(0, run_rc);
             ASSERT_EQ(1, replaced);
+            ASSERT_EQ(0, trusted);
             ASSERT_EQ(0, mismatch);
 
             preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
@@ -1558,6 +1576,72 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
     }
 
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuExportTrustedCudaBackendIsByteExactForCompressedAndUncompressedDng)
+{
+    const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_EXPORT_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString raw_name = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString cpu_dng = temp_dir.filePath(
+            raw_name + QStringLiteral("-cpu.dng"));
+        const QString trusted_dng = temp_dir.filePath(
+            raw_name + QStringLiteral("-gpu-trusted.dng"));
+
+        const QByteArray cpu_bytes = export_tiny_dng_for_gpu_export_gate(
+            raw_state,
+            false,
+            QString(),
+            cpu_dng);
+        ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+
+        const QByteArray trusted_bytes = export_tiny_dng_for_gpu_export_gate(
+            raw_state,
+            true,
+            dll_path,
+            trusted_dng,
+            true);
+        const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+        const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+        const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+        const int run_rc = llrpGpuExportLastRunRcForTesting();
+        const int replaced = llrpGpuExportLastReplacedForTesting();
+        const int trusted = llrpGpuExportLastTrustedForTesting();
+        const int mismatch = llrpGpuExportLastMismatchForTesting();
+
+        ASSERT_EQ(1, backend_attempted);
+        ASSERT_EQ(0, backend_unavailable);
+        ASSERT_EQ(1, run_attempted);
+        ASSERT_EQ(0, run_rc);
+        ASSERT_EQ(1, replaced);
+        ASSERT_EQ(1, trusted);
+        ASSERT_EQ(0, mismatch);
+
+        preserve_gpu_export_parity_artifacts(
+            raw_name + QStringLiteral("-trusted"), cpu_dng, trusted_dng);
+        ASSERT_TRUE(cpu_bytes == trusted_bytes);
+    }
+
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());

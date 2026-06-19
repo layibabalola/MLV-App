@@ -182,6 +182,11 @@ static int llrawproc_gpu_export_enabled(void)
     return llrawproc_env_truthy_value(getenv("MLVAPP_GPU_EXPORT"));
 }
 
+static int llrawproc_gpu_export_trusted_enabled(void)
+{
+    return llrawproc_env_truthy_value(getenv("MLVAPP_GPU_EXPORT_TRUSTED"));
+}
+
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_recon_allowed = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_texture_present_preferred = 0;
 
@@ -206,6 +211,7 @@ static int llrawproc_gpu_playback_recon_enabled(void)
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_attempted = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_replaced = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_trusted = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_mismatch = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_apply_dither = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_allocated_bytes_valid = 0;
@@ -229,6 +235,7 @@ static void llrawproc_gpu_export_reset_last_run_state(void)
     g_llrawproc_gpu_export_last_run_attempted = 0;
     g_llrawproc_gpu_export_last_run_rc = 0;
     g_llrawproc_gpu_export_last_replaced = 0;
+    g_llrawproc_gpu_export_last_trusted = 0;
     g_llrawproc_gpu_export_last_mismatch = 0;
     g_llrawproc_gpu_export_last_apply_dither = 0;
     g_llrawproc_gpu_export_last_allocated_bytes_valid = 0;
@@ -327,6 +334,12 @@ int llrpGpuExportLastReplacedForTesting(void);
 int llrpGpuExportLastReplacedForTesting(void)
 {
     return g_llrawproc_gpu_export_last_replaced;
+}
+
+int llrpGpuExportLastTrustedForTesting(void);
+int llrpGpuExportLastTrustedForTesting(void)
+{
+    return g_llrawproc_gpu_export_last_trusted;
 }
 
 int llrpGpuExportLastMismatchForTesting(void);
@@ -535,6 +548,7 @@ void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry)
     telemetry->attempted = g_llrawproc_gpu_export_last_run_attempted;
     telemetry->rc = g_llrawproc_gpu_export_last_run_rc;
     telemetry->replaced = g_llrawproc_gpu_export_last_replaced;
+    telemetry->trusted = g_llrawproc_gpu_export_last_trusted;
     telemetry->allocated_bytes_valid =
         g_llrawproc_gpu_export_last_allocated_bytes_valid;
     telemetry->allocated_bytes = g_llrawproc_gpu_export_last_allocated_bytes;
@@ -992,6 +1006,72 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
     return 0;
 }
 
+static int llrawproc_gpu_export_try_trusted(const dualiso_gpu_recon_state_t * state,
+                                            const uint16_t * gpu_input,
+                                            uint16_t * gpu_output,
+                                            size_t raw_image_size)
+{
+    int rc = 0;
+    uint64_t allocated_bytes = 0;
+    int allocated_bytes_valid = 0;
+    const size_t pixel_count = raw_image_size / sizeof(uint16_t);
+
+    llrawproc_gpu_export_reset_last_run_state();
+    if(!llrawproc_gpu_export_enabled())
+    {
+        llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_DISABLED);
+        return 0;
+    }
+    if(!llrawproc_gpu_export_trusted_enabled())
+    {
+        return 0;
+    }
+    if(!gpu_input || !gpu_output)
+    {
+        llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_MISSING_INPUT);
+        return 0;
+    }
+    if(!state)
+    {
+        llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_MISSING_RECON_STATE);
+        return 0;
+    }
+    if(!state->valid)
+    {
+        llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_INVALID_RECON_STATE);
+        return 0;
+    }
+    if(pixel_count != (size_t)state->width * (size_t)state->height)
+    {
+        llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_SIZE_MISMATCH);
+        return 0;
+    }
+    g_llrawproc_gpu_export_last_apply_dither = state->apply_dither;
+    g_llrawproc_gpu_export_last_run_attempted = 1;
+    g_llrawproc_gpu_export_last_skip_code = LLRP_GPU_EXPORT_SKIP_NONE;
+    (void)llrawproc_gpu_recon_run_cpu16(state,
+                                        gpu_input,
+                                        gpu_output,
+                                        raw_image_size,
+                                        0,
+                                        &rc,
+                                        &allocated_bytes,
+                                        &allocated_bytes_valid);
+    g_llrawproc_gpu_export_last_run_rc = rc;
+    if(allocated_bytes_valid)
+    {
+        g_llrawproc_gpu_export_last_allocated_bytes_valid = 1;
+        g_llrawproc_gpu_export_last_allocated_bytes = allocated_bytes;
+    }
+    if(rc == 0)
+    {
+        g_llrawproc_gpu_export_last_replaced = 1;
+        g_llrawproc_gpu_export_last_trusted = 1;
+        return 1;
+    }
+    return 0;
+}
+
 static int llrawproc_gpu_playback_try_reconstruct(const dualiso_gpu_recon_state_t * state,
                                                   const uint16_t * gpu_input,
                                                   uint16_t * gpu_output,
@@ -1143,6 +1223,18 @@ static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
 {
     (void)cpu_output;
     (void)gpu_input;
+    (void)raw_image_size;
+    return 0;
+}
+
+static int llrawproc_gpu_export_try_trusted(const dualiso_gpu_recon_state_t * state,
+                                            const uint16_t * gpu_input,
+                                            uint16_t * gpu_output,
+                                            size_t raw_image_size)
+{
+    (void)state;
+    (void)gpu_input;
+    (void)gpu_output;
     (void)raw_image_size;
     return 0;
 }
@@ -2279,7 +2371,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             uint16_t * gpu_export_input = NULL;
             uint16_t * gpu_playback_input = NULL;
             const int gpu_export_requested = llrawproc_gpu_export_enabled();
+            const int gpu_export_trusted_requested =
+                gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
             int gpu_playback_recon_used = 0;
+            int gpu_export_trusted_attempted = 0;
+            int gpu_export_trusted_used = 0;
             int dual_iso_recon_ok = 0;
             int capture_gpu_recon_state = 0;
             int gpu_playback_no_readback_post_recon_fix_ran = 0;
@@ -2400,10 +2496,52 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 }
             }
 
-            if (!gpu_playback_recon_used)
+            if (!gpu_playback_recon_used
+             && gpu_export_trusted_requested
+             && gpu_export_input)
+            {
+                dualiso_gpu_recon_state_t gpu_export_state;
+                memset(&gpu_export_state, 0, sizeof(gpu_export_state));
+                if (diso_prepare_gpu_recon_state(raw_info,
+                                                 gpu_export_input,
+                                                 dark_frame_mode,
+                                                 diso1,
+                                                 diso2,
+                                                 &worker->diso_pattern,
+                                                 auto_correction_ptr,
+                                                 ev_correction_ptr,
+                                                 black_delta_ptr,
+                                                 diso_averaging,
+                                                 diso_alias_map,
+                                                 diso_frblending,
+                                                 chroma_smooth_mode,
+                                                 video->cpu_cores,
+                                                 &worker->diso_full20bit_scratch,
+                                                 &gpu_export_state))
+                {
+                    gpu_export_trusted_used =
+                        llrawproc_gpu_export_try_trusted(&gpu_export_state,
+                                                         gpu_export_input,
+                                                         raw_image_buff,
+                                                         raw_image_size);
+                    gpu_export_trusted_attempted =
+                        g_llrawproc_gpu_export_last_run_attempted;
+                    if (gpu_export_trusted_used)
+                    {
+                        dual_iso_recon_ok = 1;
+                    }
+                }
+                else
+                {
+                    llrawproc_gpu_export_set_skip_code(
+                        LLRP_GPU_EXPORT_SKIP_INVALID_RECON_STATE);
+                }
+            }
+
+            if (!gpu_playback_recon_used && !gpu_export_trusted_used)
             {
                 capture_gpu_recon_state =
-                    (gpu_export_input != NULL)
+                    (gpu_export_input != NULL && !gpu_export_trusted_requested)
                     || (gpu_playback_input != NULL
                      && g_llrawproc_gpu_playback_texture_present_preferred);
                 dualiso_debug_set_gpu_recon_state_capture_enabled(capture_gpu_recon_state);
@@ -2469,7 +2607,19 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             }
             if (gpu_export_input)
             {
-                if (gpu_playback_recon_used)
+                if (gpu_export_trusted_used)
+                {
+                    /* Trusted mode already wrote the GPU recon into raw_image_buff. */
+                }
+                else if (gpu_export_trusted_requested)
+                {
+                    if (!gpu_export_trusted_attempted)
+                    {
+                        llrawproc_gpu_export_set_skip_code(
+                            LLRP_GPU_EXPORT_SKIP_INVALID_RECON_STATE);
+                    }
+                }
+                else if (gpu_playback_recon_used)
                 {
                     llrawproc_gpu_export_set_skip_code(LLRP_GPU_EXPORT_SKIP_PLAYBACK_RECON_USED);
                 }

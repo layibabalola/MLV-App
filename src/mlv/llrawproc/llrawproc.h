@@ -121,6 +121,7 @@ typedef struct
     int attempted;
     int rc;
     int replaced;
+    int trusted;
     int allocated_bytes_valid;
     uint64_t allocated_bytes;
     int skip_code;

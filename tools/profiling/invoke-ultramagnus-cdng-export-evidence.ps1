@@ -19,7 +19,8 @@ param(
     [switch]$SkipRemoteBuild,
     [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
-    [switch]$UseReceiptAsIs
+    [switch]$UseReceiptAsIs,
+    [switch]$TrustedGpuExport
 )
 
 $ErrorActionPreference = "Stop"
@@ -343,6 +344,7 @@ if ($failures.Count -eq 0) {
     $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
     $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
     $useReceiptAsIsLiteral = if ($UseReceiptAsIs) { '$true' } else { '$false' }
+    $trustedGpuExportLiteral = if ($TrustedGpuExport) { '$true' } else { '$false' }
     $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
     $codecsLiteral = Convert-ToPowerShellArrayLiteral $CdngCodecs
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
@@ -366,6 +368,7 @@ if ($failures.Count -eq 0) {
 `$skipBuild = $skipBuildLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$useReceiptAsIs = $useReceiptAsIsLiteral
+`$trustedGpuExport = $trustedGpuExportLiteral
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 
@@ -576,6 +579,12 @@ try {
             '-BuildId', ('ultramagnus-cdng-export-' + '$stamp'),
             '-OutputDir', `$matrixDir
         )
+        if (`$trustedGpuExport) {
+            `$matrixArgs += @(
+                '-CandidateGpuExportTrusted',
+                '-RequireCandidateGpuExportTrusted'
+            )
+        }
         `$matrixOutput = & `$psExe @matrixArgs 2>&1
         `$matrixExit = `$LASTEXITCODE
         `$matrixOutputTail = @(`$matrixOutput | Select-Object -Last 200 | ForEach-Object { [string]`$_ })
@@ -619,6 +628,9 @@ try {
             }
             if ([int]`$run.candidateGpuExportReplacedFrames -ne [int]`$run.candidateFrameCount) {
                 `$proofFailures.Add("Candidate replaced `$(`$run.candidateGpuExportReplacedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir); `$skipCountsText.")
+            }
+            if (`$trustedGpuExport -and [int]`$run.candidateGpuExportTrustedFrames -ne [int]`$run.candidateFrameCount) {
+                `$proofFailures.Add("Candidate trusted `$(`$run.candidateGpuExportTrustedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir); `$skipCountsText.")
             }
         }
     }
@@ -674,6 +686,7 @@ try {
             cdngCodecs = `$codecs
             maxFrames = `$maxFrames
             repeats = `$repeats
+            trustedGpuExport = [bool]`$trustedGpuExport
         }
         outputs = [ordered]@{
             runRoot = `$runRoot
@@ -688,6 +701,7 @@ try {
             gpuExportValidated = (`$status -eq 'success')
             baselineNoGpuAttemptRequired = `$true
             candidateGpuAttemptAndReplacementRequired = `$true
+            candidateGpuTrustedRequired = [bool]`$trustedGpuExport
             dngHashMatchRequired = `$true
             matrixExitCode = `$matrixExit
             matrixSummary = `$matrixSummary
@@ -825,6 +839,16 @@ $summary = [pscustomobject]@{
     remoteRepoShare = $remoteRepoShare
     remotePacketPath = $RemotePacketPath
     remotePacketShare = $remotePacketShare
+    options = [pscustomobject]@{
+        clipNames = @($ClipNames)
+        cdngCodecs = @($CdngCodecs)
+        maxFrames = $MaxFrames
+        repeats = $Repeats
+        trustedGpuExport = [bool]$TrustedGpuExport
+        useReceiptAsIs = [bool]$UseReceiptAsIs
+        skipRemoteBuild = [bool]$SkipRemoteBuild
+        skipBackendBuild = [bool]$SkipBackendBuild
+    }
     localOutputRoot = $localOutputRootResolved
     stageResult = $stageResult
     agentSubmission = $agentSubmission

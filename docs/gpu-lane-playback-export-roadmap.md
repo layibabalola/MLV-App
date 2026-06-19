@@ -21,6 +21,19 @@ realized as an off-by-default *shadow validator*
 copies it over the CPU output only when byte-identical, so the CPU path stays
 authoritative until the E2 parity gate promotes it.
 
+Update 2026-06-19 Lane A E3 throughput gate: export now has a second, explicitly
+opt-in measurement gate, `MLVAPP_GPU_EXPORT_TRUSTED=1`, exposed through
+`-CandidateGpuExportTrusted` / `-RequireCandidateGpuExportTrusted` on the
+release CDNG A/B and matrix wrappers and `-TrustedGpuExport` on the UltraMagnus
+evidence wrapper. The default `MLVAPP_GPU_EXPORT` path remains the
+CPU-authoritative shadow validator above. The trusted gate skips the CPU
+Dual-ISO oracle for the candidate only after the already-scoped CUDA parity
+shape is requested, writes GPU output into the final export buffer, and records
+`gpu_export_trusted` / `gpu_export_trusted_frames` so throughput packets cannot
+silently pass via the old shadow path. This is a profiling/proof surface, not a
+default export behavior change; E3 still needs an UltraMagnus trusted packet
+with DNG hash pass and a real throughput win before promotion.
+
 Update 2026-06-18: Lane B **P1/P2** has an experimental readback bridge behind
 `MLVAPP_GPU_PLAYBACK_RECON=1`. Playback render/recon threads opt in explicitly,
 then `llrawproc` prepares only the CPU-side Dual-ISO match/LUT state and runs
@@ -838,9 +851,12 @@ frame-total average, with the added time concentrated in `llrawproc_total_ms`
 elapsed (+13.759%) and +32.465 ms frame-total average, again dominated by
 `llrawproc_total_ms` / `llrawproc_dual_iso_ms` (+28.917 ms / +28.896 ms
 average) while compression was roughly neutral. This keeps GPU export as a
-scoped replacement/parity proof, not an E3 throughput win; next E3 work should
-investigate GPU-export overhead/amortization or move to a different measured
-export bottleneck instead of promoting this path.
+scoped replacement/parity proof, not an E3 throughput win; this packet measured
+the default shadow validator, which still pays the CPU Dual-ISO oracle plus the
+GPU run and byte comparison. Next E3 work should use the trusted GPU export
+gate above to measure the candidate without shadow-validation cost, then either
+promote only if the trusted UltraMagnus packet wins with DNG hashes green or
+move to a different measured export bottleneck.
 
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its

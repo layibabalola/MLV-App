@@ -15,6 +15,7 @@ param(
     [switch]$Resume,
     [switch]$Verbose,
     [switch]$EnableGpuExport,
+    [switch]$GpuExportTrusted,
     [switch]$UsePayloadHandoff,
     [switch]$UseAsyncWriter,
     [switch]$UseAsyncWriterCompression,
@@ -32,6 +33,9 @@ $ErrorActionPreference = "Stop"
 
 if ($UseAsyncWriterCompression -and -not $UseAsyncWriter) {
     throw "-UseAsyncWriterCompression requires -UseAsyncWriter."
+}
+if ($GpuExportTrusted -and -not $EnableGpuExport) {
+    throw "-GpuExportTrusted requires -EnableGpuExport."
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
@@ -181,12 +185,19 @@ try {
     }
     if ($EnableGpuExport) {
         $envBlock["MLVAPP_GPU_EXPORT"] = "1"
+        if ($GpuExportTrusted) {
+            $envBlock["MLVAPP_GPU_EXPORT_TRUSTED"] = "1"
+        }
+        else {
+            [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_TRUSTED")
+        }
         if (-not [string]::IsNullOrWhiteSpace($GpuExportDll)) {
             $envBlock["MLVAPP_GPU_EXPORT_DLL"] = (Resolve-Path -LiteralPath $GpuExportDll).Path
         }
     }
     else {
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT")
+        [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_TRUSTED")
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_DLL")
     }
     if ($UsePayloadHandoff) {
@@ -249,6 +260,7 @@ try {
                 MLVAPP_EXPORT_STAGE_PROFILE_FILE = $envBlock["MLVAPP_EXPORT_STAGE_PROFILE_FILE"]
                 MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID = $envBlock["MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID"]
                 MLVAPP_GPU_EXPORT = $envBlock["MLVAPP_GPU_EXPORT"]
+                MLVAPP_GPU_EXPORT_TRUSTED = $envBlock["MLVAPP_GPU_EXPORT_TRUSTED"]
                 MLVAPP_GPU_EXPORT_DLL = $envBlock["MLVAPP_GPU_EXPORT_DLL"]
                 MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF = $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"]
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER"]

@@ -22,12 +22,16 @@ param(
     [switch]$EnableGpuExport,
     [switch]$BaselineEnableGpuExport,
     [switch]$CandidateEnableGpuExport,
+    [switch]$GpuExportTrusted,
+    [switch]$BaselineGpuExportTrusted,
+    [switch]$CandidateGpuExportTrusted,
     [string]$GpuExportDll = "",
     [string]$BaselineGpuExportDll = "",
     [string]$CandidateGpuExportDll = "",
     [switch]$RequireBaselineNoGpuExportAttempt,
     [switch]$RequireCandidateGpuExportAttempt,
     [switch]$RequireCandidateGpuExportReplacement,
+    [switch]$RequireCandidateGpuExportTrusted,
     [switch]$RequireDngHashMatch,
     [ValidateSet("BaselineFirst", "CandidateFirst")]
     [string]$RunOrder = "BaselineFirst",
@@ -76,8 +80,16 @@ $candidateLog = Join-Path $candidateDir "batch.log"
 $compareJson = Join-Path $bundleDir "compare.json"
 $summaryJson = Join-Path $bundleDir "summary.json"
 
-$baselineGpuExportEnabled = [bool]$EnableGpuExport -or [bool]$BaselineEnableGpuExport
-$candidateGpuExportEnabled = [bool]$EnableGpuExport -or [bool]$CandidateEnableGpuExport
+$baselineGpuExportEnabled = ([bool]$EnableGpuExport) -or ([bool]$BaselineEnableGpuExport)
+$candidateGpuExportEnabled = ([bool]$EnableGpuExport) -or ([bool]$CandidateEnableGpuExport)
+$baselineGpuExportTrustedEffective = ([bool]$GpuExportTrusted) -or ([bool]$BaselineGpuExportTrusted)
+$candidateGpuExportTrustedEffective = ([bool]$GpuExportTrusted) -or ([bool]$CandidateGpuExportTrusted)
+if ($baselineGpuExportTrustedEffective -and -not $baselineGpuExportEnabled) {
+    throw "Baseline trusted GPU export requires baseline GPU export to be enabled."
+}
+if ($candidateGpuExportTrustedEffective -and -not $candidateGpuExportEnabled) {
+    throw "Candidate trusted GPU export requires candidate GPU export to be enabled."
+}
 $baselineGpuExportDllEffective = if (-not [string]::IsNullOrWhiteSpace($BaselineGpuExportDll)) {
     $BaselineGpuExportDll
 }
@@ -105,6 +117,7 @@ function New-ProfileArgs {
         [int]$AsyncWriterQueueDepth,
         [int]$AsyncWriterThreadCount,
         [bool]$UseGpuExport,
+        [bool]$UseGpuExportTrusted,
         [string]$GpuExportDllPath
     )
 
@@ -133,6 +146,9 @@ function New-ProfileArgs {
     }
     if ($UseGpuExport) {
         $args += "-EnableGpuExport"
+        if ($UseGpuExportTrusted) {
+            $args += "-GpuExportTrusted"
+        }
         if (-not [string]::IsNullOrWhiteSpace($GpuExportDllPath)) {
             $args += @("-GpuExportDll", $GpuExportDllPath)
         }
@@ -277,6 +293,7 @@ $baselineArgs = New-ProfileArgs `
     -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth `
     -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount `
     -UseGpuExport $baselineGpuExportEnabled `
+    -UseGpuExportTrusted $baselineGpuExportTrustedEffective `
     -GpuExportDllPath $baselineGpuExportDllEffective
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
@@ -289,6 +306,7 @@ $candidateArgs = New-ProfileArgs `
     -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth `
     -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount `
     -UseGpuExport $candidateGpuExportEnabled `
+    -UseGpuExportTrusted $candidateGpuExportTrustedEffective `
     -GpuExportDllPath $candidateGpuExportDllEffective
 
 $isIdentityComparison = (
@@ -298,6 +316,7 @@ $isIdentityComparison = (
     $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
     $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount -and
     $baselineGpuExportEnabled -eq $candidateGpuExportEnabled -and
+    $baselineGpuExportTrustedEffective -eq $candidateGpuExportTrustedEffective -and
     (
         (-not $baselineGpuExportEnabled -and -not $candidateGpuExportEnabled) -or
         $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective
@@ -319,6 +338,7 @@ if ($DryRun) {
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
             useAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
             enableGpuExport = $baselineGpuExportEnabled
+            gpuExportTrusted = $baselineGpuExportTrustedEffective
             gpuExportDll = $baselineGpuExportDllSummary
             asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             asyncWriterThreadCount = $BaselineAsyncWriterThreadCount
@@ -329,6 +349,7 @@ if ($DryRun) {
             useAsyncWriter = [bool]$CandidateUseAsyncWriter
             useAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
             enableGpuExport = $candidateGpuExportEnabled
+            gpuExportTrusted = $candidateGpuExportTrustedEffective
             gpuExportDll = $candidateGpuExportDllSummary
             asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
             asyncWriterThreadCount = $CandidateAsyncWriterThreadCount
@@ -338,6 +359,7 @@ if ($DryRun) {
             requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
             requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+            requireCandidateGpuExportTrusted = [bool]$RequireCandidateGpuExportTrusted
             requireDngHashMatch = [bool]$RequireDngHashMatch
         }
         compareOutput = $compareJson
@@ -417,6 +439,7 @@ $proofFailures = @()
 $baselineGpuExportAttemptedFrames = [int]$baselineProfileJson.gpu_export_attempted_frames
 $candidateGpuExportAttemptedFrames = [int]$candidateProfileJson.gpu_export_attempted_frames
 $candidateGpuExportReplacedFrames = [int]$candidateProfileJson.gpu_export_replaced_frames
+$candidateGpuExportTrustedFrames = [int]$candidateProfileJson.gpu_export_trusted_frames
 $candidateGpuExportSkipCounts = Format-GpuExportSkipCounts -ProfileJson $candidateProfileJson
 $candidateFrameCount = [int]$candidateProfileJson.frame_count
 if ($RequireBaselineNoGpuExportAttempt -and $baselineGpuExportAttemptedFrames -ne 0) {
@@ -438,6 +461,14 @@ if ($RequireCandidateGpuExportReplacement) {
         $proofFailures += "candidate-gpu-export-replaced-frame-count expected=$candidateFrameCount actual=$candidateGpuExportReplacedFrames $candidateGpuExportSkipCounts"
     }
 }
+if ($RequireCandidateGpuExportTrusted) {
+    if (-not $candidateGpuExportTrustedEffective) {
+        $proofFailures += "candidate-gpu-export-trusted-not-enabled"
+    }
+    if ($candidateGpuExportTrustedFrames -ne $candidateFrameCount) {
+        $proofFailures += "candidate-gpu-export-trusted-frame-count expected=$candidateFrameCount actual=$candidateGpuExportTrustedFrames $candidateGpuExportSkipCounts"
+    }
+}
 $summaryFailures = @($compareFailures + $proofFailures)
 $summary = [pscustomobject]@{
     schema = "release-cdng-export-profile-ab.v1"
@@ -453,6 +484,7 @@ $summary = [pscustomobject]@{
         useAsyncWriter = [bool]$BaselineUseAsyncWriter
         useAsyncWriterCompression = [bool]$BaselineUseAsyncWriterCompression
         enableGpuExport = $baselineGpuExportEnabled
+        gpuExportTrusted = $baselineGpuExportTrustedEffective
         gpuExportDll = $baselineGpuExportDllSummary
         profile = $baselineProfile
         log = $baselineLog
@@ -470,6 +502,7 @@ $summary = [pscustomobject]@{
         asyncWriterMaxActive = $baselineProfileJson.async_writer_max_active
         gpuExportAttemptedFrames = $baselineProfileJson.gpu_export_attempted_frames
         gpuExportReplacedFrames = $baselineProfileJson.gpu_export_replaced_frames
+        gpuExportTrustedFrames = $baselineProfileJson.gpu_export_trusted_frames
         gpuExportAllocatedBytesValidFrames = $baselineProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $baselineProfileJson.gpu_export_max_allocated_bytes
         gpuExportSkippedFrames = $baselineProfileJson.gpu_export_skipped_frames
@@ -489,6 +522,7 @@ $summary = [pscustomobject]@{
         useAsyncWriter = [bool]$CandidateUseAsyncWriter
         useAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
         enableGpuExport = $candidateGpuExportEnabled
+        gpuExportTrusted = $candidateGpuExportTrustedEffective
         gpuExportDll = $candidateGpuExportDllSummary
         profile = $candidateProfile
         log = $candidateLog
@@ -506,6 +540,7 @@ $summary = [pscustomobject]@{
         asyncWriterMaxActive = $candidateProfileJson.async_writer_max_active
         gpuExportAttemptedFrames = $candidateProfileJson.gpu_export_attempted_frames
         gpuExportReplacedFrames = $candidateProfileJson.gpu_export_replaced_frames
+        gpuExportTrustedFrames = $candidateProfileJson.gpu_export_trusted_frames
         gpuExportAllocatedBytesValidFrames = $candidateProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $candidateProfileJson.gpu_export_max_allocated_bytes
         gpuExportSkippedFrames = $candidateProfileJson.gpu_export_skipped_frames
@@ -564,6 +599,7 @@ $summary = [pscustomobject]@{
         requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
         requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
         requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+        requireCandidateGpuExportTrusted = [bool]$RequireCandidateGpuExportTrusted
         requireDngHashMatch = [bool]$RequireDngHashMatch
         failures = $proofFailures
     }
@@ -625,18 +661,19 @@ Write-Host ((
     "baseline_async_queue_capacity={12} candidate_async_queue_capacity={13} " +
     "baseline_async_max_active={14} candidate_async_max_active={15} " +
     "baseline_gpu_export_enabled={16} candidate_gpu_export_enabled={17} " +
-    "baseline_gpu_export_attempted={18} candidate_gpu_export_attempted={19} " +
-    "candidate_gpu_export_replaced={20} proof_gate_failures={21} " +
-    "dng_hash_required={22} dng_hash_verdict={23} " +
-    "elapsed_delta_ms={24} elapsed_delta_percent={25} " +
-    "frame_total_avg_delta_ms={26} frame_total_p95_delta_ms={27} " +
-    "queue_idle_avg_delta_ms={28} payload_clone_avg_delta_ms={29} " +
-    "writer_queue_wait_avg_delta_ms={30} producer_frame_avg_delta_ms={31} " +
-    "producer_queue_idle_avg_delta_ms={32} writer_completion_lag_avg_delta_ms={33} " +
-    "llrawproc_total_avg_delta_ms={34} llrawproc_dual_iso_avg_delta_ms={35} " +
-    "dng_compress_avg_delta_ms={36} dng_compress_output_mibps_delta={37} " +
-    "dng_compress_output_bytes_delta={38} dng_compress_placement_candidate={39} " +
-    "async_writer_can_overlap_dng_compress_candidate={40} output={41}") -f
+    "baseline_gpu_export_trusted={18} candidate_gpu_export_trusted={19} " +
+    "baseline_gpu_export_attempted={20} candidate_gpu_export_attempted={21} " +
+    "candidate_gpu_export_replaced={22} candidate_gpu_export_trusted_frames={23} " +
+    "proof_gate_failures={24} dng_hash_required={25} dng_hash_verdict={26} " +
+    "elapsed_delta_ms={27} elapsed_delta_percent={28} " +
+    "frame_total_avg_delta_ms={29} frame_total_p95_delta_ms={30} " +
+    "queue_idle_avg_delta_ms={31} payload_clone_avg_delta_ms={32} " +
+    "writer_queue_wait_avg_delta_ms={33} producer_frame_avg_delta_ms={34} " +
+    "producer_queue_idle_avg_delta_ms={35} writer_completion_lag_avg_delta_ms={36} " +
+    "llrawproc_total_avg_delta_ms={37} llrawproc_dual_iso_avg_delta_ms={38} " +
+    "dng_compress_avg_delta_ms={39} dng_compress_output_mibps_delta={40} " +
+    "dng_compress_output_bytes_delta={41} dng_compress_placement_candidate={42} " +
+    "async_writer_can_overlap_dng_compress_candidate={43} output={44}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -655,9 +692,12 @@ Write-Host ((
     $summary.candidate.asyncWriterMaxActive,
     $summary.baseline.enableGpuExport,
     $summary.candidate.enableGpuExport,
+    $summary.baseline.gpuExportTrusted,
+    $summary.candidate.gpuExportTrusted,
     $summary.baseline.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportReplacedFrames,
+    $summary.candidate.gpuExportTrustedFrames,
     $summary.proofGates.failures.Count,
     [bool]$RequireDngHashMatch,
     $(if ($summary.PSObject.Properties["dngHash"]) { $summary.dngHash.verdict } else { "SKIP" }),
