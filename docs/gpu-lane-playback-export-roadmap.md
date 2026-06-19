@@ -9,13 +9,13 @@ or CPU presentation. The remaining priority order is P4 adaptive-quality polish,
 then Lane A E3/E4 export pipeline/rendered export, then Lane C portable GPU
 backends.
 
-Update 2026-06-16: P-pre **processing parity** is being extended from the
-supported levels / matrix / camera-matrix WB / gamut / gamma subset to the
-`allow_creative_adjustments` family, staged as curve-first parity slices
-(see §8.1). Slice 1 (the creative contrast-curve LUT) is designed and next to
-implement; each slice is bit-aligned CPU-vs-GPU and validated by an RTX 4090
-frame diff before the `gpuPreviewProcessingIsSupported` gate relaxes. Note also
-that Lane A **E1** is currently realized as an off-by-default *shadow validator*
+Update 2026-06-19: P-pre **processing parity** has progressed beyond the
+original curve-first `allow_creative_adjustments` plan: creative slices 1-6 are
+ported, and the later scoping pass records the creative family plus tractable
+non-creative per-pixel stages as RTX 4090 validated (see §8.1-§8.2). Remaining
+P-pre work is the explicitly scoped spatial/sequential stage decision path, not
+the old Slice 1 contrast-curve start. Note also that Lane A **E1** is currently
+realized as an off-by-default *shadow validator*
 (`MLVAPP_GPU_EXPORT`): `llrawproc` runs the CUDA recon into a scratch buffer and
 copies it over the CPU output only when byte-identical, so the CPU path stays
 authoritative until the E2 parity gate promotes it.
