@@ -327,23 +327,35 @@ elseif ($failures.Count -eq 0) {
     }
 
     if ($failures.Count -eq 0) {
-        $localRepoHead = ([string](& git -C $repo rev-parse HEAD 2>$null | Select-Object -First 1)).Trim()
-        if ($LASTEXITCODE -ne 0) {
+        $localRepoHeadOutput = @(& git -C $repo rev-parse HEAD 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
             Add-Failure $failures "Unable to inspect local git HEAD before staging."
         }
-    }
-
-    if ($failures.Count -eq 0) {
-        $localRepoBranch = ([string](& git -C $repo rev-parse --abbrev-ref HEAD 2>$null | Select-Object -First 1)).Trim()
-        if ($LASTEXITCODE -ne 0) {
-            Add-Failure $failures "Unable to inspect local git branch before staging."
+        else {
+            $localRepoHead = ([string]($localRepoHeadOutput | Select-Object -First 1)).Trim()
         }
     }
 
     if ($failures.Count -eq 0) {
-        $localRepoStatus = @(& git -C $repo status --short --branch 2>$null | ForEach-Object { [string]$_ })
-        if ($LASTEXITCODE -ne 0) {
+        $localRepoBranchOutput = @(& git -C $repo rev-parse --abbrev-ref HEAD 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
+            Add-Failure $failures "Unable to inspect local git branch before staging."
+        }
+        else {
+            $localRepoBranch = ([string]($localRepoBranchOutput | Select-Object -First 1)).Trim()
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        $localRepoStatusOutput = @(& git -C $repo status --short --branch 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
             Add-Failure $failures "Unable to inspect local git status before staging."
+        }
+        else {
+            $localRepoStatus = @($localRepoStatusOutput | ForEach-Object { [string]$_ })
         }
     }
 
