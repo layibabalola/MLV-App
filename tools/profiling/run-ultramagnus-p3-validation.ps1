@@ -24,6 +24,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# The no-readback P3 validation always runs with the heavy per-frame GL-readback + CPU-replay +
+# SHA256 parity instrumentation, which perturbs PRESENT cadence (it is absent from real,
+# uninstrumented playback whose purpose is to AVOID readback). Opt the downstream playback-artifact
+# detector into CADENCE-ADVISORY mode so the JITTER/cadence component is advisory (not fatal) while
+# the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT -- stay fatal. Inherited by the
+# smoke runner and the detector subprocess. See detect-playback-artifacts.ps1.
+$env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
+
 function Resolve-RepoPath {
     param(
         [Parameter(Mandatory = $true)][string]$Root,

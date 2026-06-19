@@ -204,14 +204,26 @@ if ($maxLagAt -ge 0 -and $ts[$maxLagAt] -ge 0) {
 $realStall = ($maxLag -ge $MaxLagFramesAllowed) -and (-not $stallIsScreenshot)
 $flicker   = ($backJumps -gt 0)
 $jittery   = ($hitchFrac -gt $MaxHitchFractionAllowed) -or ($maxIv -ge $HitchFreezeMs -and -not $stallIsScreenshot) -or $interiorLongGap
-$verdict = if ($realStall -or $flicker -or $jittery -or $frozenContent) { 'FAIL' } else { 'PASS' }
+# Cadence-advisory mode (opt-in via env, default OFF). The heavy per-frame GL-readback + CPU-replay
+# + SHA256 parity instrumentation used by the no-readback P3 validator perturbs PRESENT cadence; it
+# is NOT present in real, uninstrumented playback (whose whole point is to AVOID readback). When
+# enabled, the JITTER/cadence component is downgraded to ADVISORY so it does not fail the verdict,
+# while the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT (the stuck-texture sensor)
+# -- stay fatal. Default OFF keeps jitter fatal for ordinary smoke runs.
+$cadenceAdvisory = $false
+$advEnv = $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY
+if ($advEnv -and $advEnv -ne '0' -and $advEnv -ne 'false') { $cadenceAdvisory = $true }
+$correctnessFail = $realStall -or $flicker -or $frozenContent
+$jitterFatal = $jittery -and -not $cadenceAdvisory
+$verdict = if ($correctnessFail -or $jitterFatal) { 'FAIL' } else { 'PASS' }
 $medFps = if ($median -gt 0) { [math]::Round(1000.0/$median,1) } else { 0 }
 
 Write-Host ("ARTIFACT-CHECK verdict={0} presents={1} median_fps={2} p90_ms={3} p99_ms={4} max_interval_ms={5} hitch_frac={6} flicker_back_jumps={7} max_back_jump={8} max_lag={9} long_gaps={10} max_gap_ms={11} content_events={12} distinct_hashes={13} frozen_content_runs={14} longest_frozen_run={15} sessions={16} analyzed_session={17}{18}" -f `
     $verdict, $n, $medFps, [int]$p90, [int]$p99, [int]$maxIv, $hitchFrac, $backJumps, $maxBack, $maxLag, $longGaps, [int]$maxGap, $contentEvents, $distinctHashes, $frozenRuns, $longestFrozenRun, $sessionCount, $analyzedSession, $(if($stallIsScreenshot){' (max_lag is screenshot-grab, discounted)'}else{''}))
 if ($flicker)   { Write-Host ("  FLICKER: presented frame jumped backward by up to {0} frames {1} time(s)" -f $maxBack, $backJumps) }
 if ($realStall) { Write-Host ("  STALL: image fell {0} frames behind the seek bar (~{1:N1}s freeze)" -f $maxLag, ($maxLag/24.0)) }
-if ($jittery)   { Write-Host ("  JITTER: {0:P1} of frames hitch (interval > 2.5x median); worst {1} ms - visible micro-stutter" -f $hitchFrac, [int]$maxIv) }
+Write-Host ("ARTIFACT-CADENCE cadence_advisory={0} jittery={1} jitter_fatal={2} correctness_components_fail={3}" -f [int]$cadenceAdvisory, [int]$jittery, [int]$jitterFatal, [int]$correctnessFail)
+if ($jittery)   { Write-Host ("  JITTER{0}: {1:P1} of frames hitch (interval > 2.5x median); worst {2} ms - visible micro-stutter" -f $(if($cadenceAdvisory){' (ADVISORY - instrumentation cadence, not fatal)'}else{''}), $hitchFrac, [int]$maxIv) }
 if ($frozenContent) { Write-Host ("  FROZEN-CONTENT: displayed bytes identical across {0} consecutive presents while the position advanced - the image is stuck even though cadence looks healthy (validate by pixels)" -f $longestFrozenRun) }
 if ($contentEvents -eq 0) { Write-Host "  NOTE: no draw_frame_ready.present_content or playback_smoke.gl_probe telemetry in this log - frozen-content check skipped" }
 if ($stallIsScreenshot) { Write-Host "  NOTE: max-lag spike coincides with a window-screenshot grab (harness artifact); re-run without -CaptureScreenshot for clean stall detection" }
