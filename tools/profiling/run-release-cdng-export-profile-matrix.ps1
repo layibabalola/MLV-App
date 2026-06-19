@@ -30,6 +30,7 @@ param(
     [switch]$RequireBaselineNoGpuExportAttempt,
     [switch]$RequireCandidateGpuExportAttempt,
     [switch]$RequireCandidateGpuExportReplacement,
+    [switch]$RequireDngHashMatch,
     [double]$MaxFrameTotalRegressionPercent = 5.0,
     [double]$MaxFrameTotalP95RegressionPercent = 10.0,
     [switch]$FailOnRegression,
@@ -48,8 +49,12 @@ if ($MaxFrames -lt 0) {
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 $abRunner = Join-Path $root "tools\profiling\run-release-cdng-export-profile-ab.ps1"
+$hashComparator = Join-Path $root "tools\profiling\compare-cdng-dng-output-hashes.ps1"
 if (-not (Test-Path -LiteralPath $abRunner)) {
     throw "Release CDNG export A/B profiler not found: $abRunner"
+}
+if (-not (Test-Path -LiteralPath $hashComparator)) {
+    throw "DNG hash comparator not found: $hashComparator"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -474,6 +479,7 @@ if ($DryRun) {
             requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
             requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+            requireDngHashMatch = [bool]$RequireDngHashMatch
             alternateRunOrder = [bool]$AlternateRunOrder
             failOnRegression = [bool]$FailOnRegression
         }
@@ -632,6 +638,7 @@ $matrix = [pscustomobject]@{
         requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
         requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
         requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+        requireDngHashMatch = [bool]$RequireDngHashMatch
         buildId = $BuildId
     }
     totals = [pscustomobject]@{
@@ -646,12 +653,57 @@ $matrix = [pscustomobject]@{
 
 $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
+if ($RequireDngHashMatch) {
+    $hashArgs = @(
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $hashComparator,
+        "-MatrixDir", $bundleDir,
+        "-FailOnMismatch"
+    )
+    & pwsh.exe @hashArgs
+    $hashExit = $LASTEXITCODE
+    $hashOutput = Join-Path $bundleDir "dng-hash-comparison.json"
+    $hashComparison = $null
+    if (Test-Path -LiteralPath $hashOutput) {
+        $hashComparison = Get-Content -LiteralPath $hashOutput -Raw | ConvertFrom-Json -Depth 100
+    }
+
+    $hashFailures = @()
+    if ($hashExit -ne 0) {
+        $hashFailures += "dng-hash-comparison-exit-code actual=$hashExit"
+    }
+    if ($null -eq $hashComparison) {
+        $hashFailures += "dng-hash-comparison-json-missing"
+    }
+    elseif ([string]$hashComparison.verdict -ne "PASS") {
+        $hashFailures += "dng-hash-comparison-verdict actual=$($hashComparison.verdict)"
+    }
+
+    $matrix | Add-Member -NotePropertyName dngHash -NotePropertyValue ([pscustomobject]@{
+        required = $true
+        comparison = $hashOutput
+        verdict = if ($hashComparison) { $hashComparison.verdict } else { "ERROR" }
+        pairs = if ($hashComparison) { $hashComparison.totals.pairs } else { $null }
+        matched = if ($hashComparison) { $hashComparison.totals.matched } else { $null }
+        mismatched = if ($hashComparison) { $hashComparison.totals.mismatched } else { $null }
+        missingBaseline = if ($hashComparison) { $hashComparison.totals.missingBaseline } else { $null }
+        missingCandidate = if ($hashComparison) { $hashComparison.totals.missingCandidate } else { $null }
+        failures = $hashFailures
+    }) -Force
+
+    if ($hashFailures.Count -gt 0) {
+        $matrix.verdict = "FAIL"
+    }
+    $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
+}
+
 Write-Host (((
     "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} cdng_codec={2} alternate_run_order={3} " +
     "cases={4} runs={5} pass={6} fail={7} candidate_payload={8} " +
     "candidate_async={9} candidate_async_queue_depth={10} " +
     "baseline_gpu_export_enabled={11} candidate_gpu_export_enabled={12} " +
-    "require_candidate_gpu_export_replacement={13} elapsed_delta_ms_field=True output={14}") -f
+    "require_candidate_gpu_export_replacement={13} dng_hash_required={14} " +
+    "dng_hash_verdict={15} elapsed_delta_ms_field=True output={16}") -f
     $matrix.verdict,
     $matrix.comparisonMode,
     $(if ([string]::IsNullOrWhiteSpace($matrix.options.cdngCodec)) { "default" } else { $matrix.options.cdngCodec }),
@@ -666,6 +718,8 @@ Write-Host (((
     $baselineGpuExportEnabled,
     $candidateGpuExportEnabled,
     [bool]$RequireCandidateGpuExportReplacement,
+    [bool]$RequireDngHashMatch,
+    $(if ($matrix.PSObject.Properties["dngHash"]) { $matrix.dngHash.verdict } else { "SKIP" }),
     $summaryJson
 ))
 

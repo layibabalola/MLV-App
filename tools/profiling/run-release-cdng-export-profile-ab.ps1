@@ -26,6 +26,7 @@ param(
     [switch]$RequireBaselineNoGpuExportAttempt,
     [switch]$RequireCandidateGpuExportAttempt,
     [switch]$RequireCandidateGpuExportReplacement,
+    [switch]$RequireDngHashMatch,
     [ValidateSet("BaselineFirst", "CandidateFirst")]
     [string]$RunOrder = "BaselineFirst",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -39,11 +40,15 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 $runner = Join-Path $root "tools\profiling\run-release-cdng-export-profile.ps1"
 $comparator = Join-Path $root "tools\profiling\compare-export-stage-profiles.ps1"
+$hashComparator = Join-Path $root "tools\profiling\compare-cdng-dng-output-hashes.ps1"
 if (-not (Test-Path -LiteralPath $runner)) {
     throw "Release CDNG export profiler not found: $runner"
 }
 if (-not (Test-Path -LiteralPath $comparator)) {
     throw "Export stage comparator not found: $comparator"
+}
+if (-not (Test-Path -LiteralPath $hashComparator)) {
+    throw "DNG hash comparator not found: $hashComparator"
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
@@ -270,8 +275,10 @@ if ($DryRun) {
             requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
             requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+            requireDngHashMatch = [bool]$RequireDngHashMatch
         }
         compareOutput = $compareJson
+        dngHashOutput = Join-Path $bundleDir "dng-hash-comparison.json"
     } | ConvertTo-Json -Depth 8
     return
 }
@@ -457,12 +464,58 @@ $summary = [pscustomobject]@{
         requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
         requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
         requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
+        requireDngHashMatch = [bool]$RequireDngHashMatch
         failures = $proofFailures
     }
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS" -and $proofFailures.Count -eq 0) { "PASS" } else { "FAIL" }
 }
 
 $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
+
+if ($RequireDngHashMatch) {
+    $hashArgs = @(
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $hashComparator,
+        "-AbSummary", $summaryJson,
+        "-FailOnMismatch"
+    )
+    & pwsh.exe @hashArgs
+    $hashExit = $LASTEXITCODE
+    $hashOutput = Join-Path $bundleDir "dng-hash-comparison.json"
+    $hashComparison = $null
+    if (Test-Path -LiteralPath $hashOutput) {
+        $hashComparison = Get-Content -LiteralPath $hashOutput -Raw | ConvertFrom-Json -Depth 100
+    }
+
+    $hashFailures = @()
+    if ($hashExit -ne 0) {
+        $hashFailures += "dng-hash-comparison-exit-code actual=$hashExit"
+    }
+    if ($null -eq $hashComparison) {
+        $hashFailures += "dng-hash-comparison-json-missing"
+    }
+    elseif ([string]$hashComparison.verdict -ne "PASS") {
+        $hashFailures += "dng-hash-comparison-verdict actual=$($hashComparison.verdict)"
+    }
+
+    $summary | Add-Member -NotePropertyName dngHash -NotePropertyValue ([pscustomobject]@{
+        required = $true
+        comparison = $hashOutput
+        verdict = if ($hashComparison) { $hashComparison.verdict } else { "ERROR" }
+        pairs = if ($hashComparison) { $hashComparison.totals.pairs } else { $null }
+        matched = if ($hashComparison) { $hashComparison.totals.matched } else { $null }
+        mismatched = if ($hashComparison) { $hashComparison.totals.mismatched } else { $null }
+        missingBaseline = if ($hashComparison) { $hashComparison.totals.missingBaseline } else { $null }
+        missingCandidate = if ($hashComparison) { $hashComparison.totals.missingCandidate } else { $null }
+        failures = $hashFailures
+    }) -Force
+
+    if ($hashFailures.Count -gt 0) {
+        $summary.compare.failures = @($summary.compare.failures + $hashFailures)
+        $summary.verdict = "FAIL"
+    }
+    $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
+}
 
 Write-Host ((
     "CDNG-EXPORT-AB verdict={0} comparison_mode={1} run_order={2} cdng_codec={3} " +
@@ -473,13 +526,14 @@ Write-Host ((
     "baseline_gpu_export_enabled={14} candidate_gpu_export_enabled={15} " +
     "baseline_gpu_export_attempted={16} candidate_gpu_export_attempted={17} " +
     "candidate_gpu_export_replaced={18} proof_gate_failures={19} " +
-    "elapsed_delta_ms={20} elapsed_delta_percent={21} " +
-    "frame_total_avg_delta_ms={22} frame_total_p95_delta_ms={23} " +
-    "queue_idle_avg_delta_ms={24} payload_clone_avg_delta_ms={25} " +
-    "writer_queue_wait_avg_delta_ms={26} producer_frame_avg_delta_ms={27} " +
-    "producer_queue_idle_avg_delta_ms={28} writer_completion_lag_avg_delta_ms={29} " +
-    "llrawproc_total_avg_delta_ms={30} llrawproc_dual_iso_avg_delta_ms={31} " +
-    "dng_compress_avg_delta_ms={32} output={33}") -f
+    "dng_hash_required={20} dng_hash_verdict={21} " +
+    "elapsed_delta_ms={22} elapsed_delta_percent={23} " +
+    "frame_total_avg_delta_ms={24} frame_total_p95_delta_ms={25} " +
+    "queue_idle_avg_delta_ms={26} payload_clone_avg_delta_ms={27} " +
+    "writer_queue_wait_avg_delta_ms={28} producer_frame_avg_delta_ms={29} " +
+    "producer_queue_idle_avg_delta_ms={30} writer_completion_lag_avg_delta_ms={31} " +
+    "llrawproc_total_avg_delta_ms={32} llrawproc_dual_iso_avg_delta_ms={33} " +
+    "dng_compress_avg_delta_ms={34} output={35}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -500,6 +554,8 @@ Write-Host ((
     $summary.candidate.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportReplacedFrames,
     $summary.proofGates.failures.Count,
+    [bool]$RequireDngHashMatch,
+    $(if ($summary.PSObject.Properties["dngHash"]) { $summary.dngHash.verdict } else { "SKIP" }),
     $summary.compare.elapsedDeltaMs,
     $summary.compare.elapsedDeltaPercent,
     $summary.compare.frameTotalAvgDeltaMs,

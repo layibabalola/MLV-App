@@ -720,6 +720,17 @@ failed closed because the VM candidate attempted 0/1 frames and replaced 0/1
 frames. This is the desired local behavior: a real UltraMagnus export promotion
 packet must pass those gates, then pass the DNG hash companion.
 
+Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
+`-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its
+verdict into `summary.json` / `matrix-summary.json` as `dngHash`. Local VM
+validation stayed headless and fallback-only: A/B
+`.claude-state/profiling/2026-06-19-cdng-e3-dng-hash-gate-ab-pass-local-08c15d25/`
+and matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-dng-hash-gate-matrix-pass-local-08c15d25/`
+both reported `dngHash.verdict=PASS` with 1/1 matched pairs. Promotion packets
+can now require candidate GPU replacement and DNG byte identity in one wrapper
+verdict instead of relying on a follow-up manual hash sweep.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

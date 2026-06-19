@@ -39,6 +39,7 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -RequireBaselineNoGpuExportAttempt `
   -RequireCandidateGpuExportAttempt `
   -RequireCandidateGpuExportReplacement `
+  -RequireDngHashMatch `
   -MaxFrames 16 `
   -Repeats 3 `
   -FailOnRegression
@@ -84,9 +85,11 @@ only the candidate with `-CandidateEnableGpuExport` plus
 `-RequireCandidateGpuExportAttempt`, and
 `-RequireCandidateGpuExportReplacement` when the run is meant to promote GPU
 export; those gates fail the A/B or matrix verdict if the baseline attempts GPU
-work or if the candidate does not attempt/replace every profiled frame. The
-legacy `-EnableGpuExport` switch remains valid, but it enables both sides and is
-therefore better suited to same-mode A/A or GPU-vs-GPU profiling.
+work or if the candidate does not attempt/replace every profiled frame. Add
+`-RequireDngHashMatch` to fold the DNG SHA256 companion into the wrapper verdict
+instead of relying on a separate manual step. The legacy `-EnableGpuExport`
+switch remains valid, but it enables both sides and is therefore better suited
+to same-mode A/A or GPU-vs-GPU profiling.
 
 After any matrix or standalone A/B run that claims CDNG output correctness, run
 the DNG byte-identity companion before interpreting the timing result:
