@@ -14,6 +14,7 @@ param(
     [switch]$Verbose,
     [switch]$EnableGpuExport,
     [switch]$UsePayloadHandoff,
+    [switch]$UseAsyncWriter,
     [string]$GpuExportDll = "",
     [string[]]$AdditionalArgs = @(),
     [string[]]$ExtraEnvironment = @(),
@@ -177,6 +178,12 @@ try {
     else {
         [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF")
     }
+    if ($UseAsyncWriter) {
+        $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER"] = "1"
+    }
+    else {
+        [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_ASYNC_WRITER")
+    }
     Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
     if ($DryRun) {
@@ -197,6 +204,7 @@ try {
                 MLVAPP_GPU_EXPORT = $envBlock["MLVAPP_GPU_EXPORT"]
                 MLVAPP_GPU_EXPORT_DLL = $envBlock["MLVAPP_GPU_EXPORT_DLL"]
                 MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF = $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"]
+                MLVAPP_CDNG_EXPORT_ASYNC_WRITER = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER"]
             }
         } | ConvertTo-Json -Depth 5
         return

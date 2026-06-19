@@ -127,6 +127,7 @@ static char g_export_profile_build_id[EXPORT_PROFILE_BUILD_ID_MAX] = "";
 static int g_export_profile_atexit_registered = 0;
 static int g_export_profile_write_in_progress = 0;
 static double g_export_profile_last_frame_finish_ms = 0.0;
+static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int export_profile_env_truthy(const char * value)
 {
@@ -249,7 +250,12 @@ static void export_profile_frame_begin(exportProfileFrame_t * frame,
 {
     if(frame == NULL) return;
     memset(frame, 0, sizeof(*frame));
-    if(!export_profile_configure_from_env()) return;
+    pthread_mutex_lock(&g_export_profile_mutex);
+    if(!export_profile_configure_from_env())
+    {
+        pthread_mutex_unlock(&g_export_profile_mutex);
+        return;
+    }
 
     const double frame_start_ms = export_profile_now_ms();
     frame->active = 1;
@@ -266,6 +272,7 @@ static void export_profile_frame_begin(exportProfileFrame_t * frame,
     export_profile_copy_string(frame->clip_path,
                                sizeof(frame->clip_path),
                                mlv_data ? mlv_data->path : "");
+    pthread_mutex_unlock(&g_export_profile_mutex);
 }
 
 static double export_profile_stage_begin(exportProfileFrame_t * frame)
@@ -291,6 +298,7 @@ static void export_profile_frame_finish(exportProfileFrame_t * frame, int succes
     const double finish_ms = export_profile_now_ms();
     if(frame == NULL || !frame->active) return;
 
+    pthread_mutex_lock(&g_export_profile_mutex);
     frame->success = success ? 1 : 0;
     if(g_export_profile_frame_count == g_export_profile_frame_capacity)
     {
@@ -300,6 +308,7 @@ static void export_profile_frame_finish(exportProfileFrame_t * frame, int succes
         if(grown == NULL)
         {
             g_export_profile_last_frame_finish_ms = finish_ms;
+            pthread_mutex_unlock(&g_export_profile_mutex);
             return;
         }
         g_export_profile_frames = grown;
@@ -309,6 +318,7 @@ static void export_profile_frame_finish(exportProfileFrame_t * frame, int succes
     next = &g_export_profile_frames[g_export_profile_frame_count++];
     *next = *frame;
     g_export_profile_last_frame_finish_ms = finish_ms;
+    pthread_mutex_unlock(&g_export_profile_mutex);
 }
 
 static int export_profile_double_compare(const void * lhs, const void * rhs)
@@ -457,6 +467,11 @@ static void export_profile_write_json(void)
     fprintf(file,
             "  \"payload_handoff_env_enabled\":%s,\n",
             export_profile_env_truthy(getenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"))
+                ? "true"
+                : "false");
+    fprintf(file,
+            "  \"async_writer_env_enabled\":%s,\n",
+            export_profile_env_truthy(getenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER"))
                 ? "true"
                 : "false");
     fputs("  \"generated_utc\":", file);
@@ -1760,14 +1775,23 @@ void freeDngFramePayload(dngFramePayload_t * payload)
     free(payload);
 }
 
-static void dng_print_saved_frame_status(const dngObject_t * dng_data,
-                                         uint32_t frame_index,
-                                         const char * dng_filename)
+static char * dng_strdup(const char * value)
+{
+    if(!value) return NULL;
+    const size_t bytes = strlen(value) + 1;
+    char * copy = (char*)malloc(bytes);
+    if(copy) memcpy(copy, value, bytes);
+    return copy;
+}
+
+static void dng_print_saved_frame_status_for_state(int raw_output_state,
+                                                   uint32_t frame_index,
+                                                   const char * dng_filename)
 {
 #ifndef STDOUT_SILENT
-    if (!frame_index && dng_data)
+    if (!frame_index)
     {
-        switch (dng_data->raw_output_state)
+        switch (raw_output_state)
         {
             case UNCOMPRESSED_RAW:
                 printf("\nWriting uncompressed frames...\n");
@@ -1785,10 +1809,238 @@ static void dng_print_saved_frame_status(const dngObject_t * dng_data,
     }
     printf("Current frame '%s' (frames saved: %u)\n", dng_filename, frame_index + 1);
 #else
-    (void)dng_data;
+    (void)raw_output_state;
     (void)frame_index;
     (void)dng_filename;
 #endif
+}
+
+static void dng_print_saved_frame_status(const dngObject_t * dng_data,
+                                         uint32_t frame_index,
+                                         const char * dng_filename)
+{
+    dng_print_saved_frame_status_for_state(
+        dng_data ? dng_data->raw_output_state : -1,
+        frame_index,
+        dng_filename);
+}
+
+typedef struct
+{
+    dngFramePayload_t * payload;
+    char * dng_filename;
+    exportProfileFrame_t profile_frame;
+    double profile_frame_start;
+} dngPayloadWriterJob_t;
+
+struct dngPayloadWriter
+{
+    pthread_t thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t can_produce;
+    pthread_cond_t can_consume;
+    int thread_started;
+    int stopping;
+    int has_job;
+    int first_error;
+    dngPayloadWriterJob_t job;
+};
+
+static void * dng_payload_writer_main(void * opaque)
+{
+    dngPayloadWriter_t * writer = (dngPayloadWriter_t*)opaque;
+
+    for(;;)
+    {
+        dngPayloadWriterJob_t job;
+        memset(&job, 0, sizeof(job));
+
+        pthread_mutex_lock(&writer->mutex);
+        while(!writer->has_job && !writer->stopping)
+        {
+            pthread_cond_wait(&writer->can_consume, &writer->mutex);
+        }
+        if(!writer->has_job && writer->stopping)
+        {
+            pthread_mutex_unlock(&writer->mutex);
+            break;
+        }
+        job = writer->job;
+        memset(&writer->job, 0, sizeof(writer->job));
+        writer->has_job = 0;
+        pthread_cond_signal(&writer->can_produce);
+        pthread_mutex_unlock(&writer->mutex);
+
+        const double write_start = export_profile_stage_begin(&job.profile_frame);
+        const int write_ret = writeDngFramePayload(job.payload, job.dng_filename);
+        export_profile_stage_end(&job.profile_frame, EXPORT_PROFILE_DISK_WRITE, write_start);
+        export_profile_stage_end(&job.profile_frame, EXPORT_PROFILE_FRAME_TOTAL, job.profile_frame_start);
+        export_profile_frame_finish(&job.profile_frame, write_ret == 0);
+
+        if(write_ret == 0)
+        {
+            dng_print_saved_frame_status_for_state(
+                job.payload ? job.payload->raw_output_state : -1,
+                job.payload ? job.payload->frame_index : 0,
+                job.dng_filename ? job.dng_filename : "");
+        }
+
+        freeDngFramePayload(job.payload);
+        free(job.dng_filename);
+
+        pthread_mutex_lock(&writer->mutex);
+        if(write_ret != 0 && writer->first_error == 0)
+        {
+            writer->first_error = write_ret;
+        }
+        pthread_cond_signal(&writer->can_produce);
+        pthread_mutex_unlock(&writer->mutex);
+    }
+
+    return NULL;
+}
+
+dngPayloadWriter_t * createDngPayloadWriter(void)
+{
+    dngPayloadWriter_t * writer = (dngPayloadWriter_t*)calloc(1, sizeof(dngPayloadWriter_t));
+    if(!writer) return NULL;
+
+    if(pthread_mutex_init(&writer->mutex, NULL) != 0)
+    {
+        free(writer);
+        return NULL;
+    }
+    if(pthread_cond_init(&writer->can_produce, NULL) != 0)
+    {
+        pthread_mutex_destroy(&writer->mutex);
+        free(writer);
+        return NULL;
+    }
+    if(pthread_cond_init(&writer->can_consume, NULL) != 0)
+    {
+        pthread_cond_destroy(&writer->can_produce);
+        pthread_mutex_destroy(&writer->mutex);
+        free(writer);
+        return NULL;
+    }
+    if(pthread_create(&writer->thread, NULL, dng_payload_writer_main, writer) != 0)
+    {
+        pthread_cond_destroy(&writer->can_consume);
+        pthread_cond_destroy(&writer->can_produce);
+        pthread_mutex_destroy(&writer->mutex);
+        free(writer);
+        return NULL;
+    }
+    writer->thread_started = 1;
+    return writer;
+}
+
+static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
+                                      dngFramePayload_t * payload,
+                                      const char * dng_filename,
+                                      const exportProfileFrame_t * profile_frame,
+                                      double profile_frame_start)
+{
+    if(!writer || !payload || !dng_filename || !profile_frame) return 1;
+
+    char * filename_copy = dng_strdup(dng_filename);
+    if(!filename_copy) return 1;
+
+    pthread_mutex_lock(&writer->mutex);
+    while(writer->has_job && writer->first_error == 0 && !writer->stopping)
+    {
+        pthread_cond_wait(&writer->can_produce, &writer->mutex);
+    }
+    if(writer->first_error != 0 || writer->stopping)
+    {
+        const int ret = writer->first_error ? writer->first_error : 1;
+        pthread_mutex_unlock(&writer->mutex);
+        free(filename_copy);
+        return ret;
+    }
+
+    writer->job.payload = payload;
+    writer->job.dng_filename = filename_copy;
+    writer->job.profile_frame = *profile_frame;
+    writer->job.profile_frame_start = profile_frame_start;
+    writer->has_job = 1;
+    pthread_cond_signal(&writer->can_consume);
+    pthread_mutex_unlock(&writer->mutex);
+    return 0;
+}
+
+int finishDngPayloadWriter(dngPayloadWriter_t * writer)
+{
+    if(!writer) return 0;
+
+    pthread_mutex_lock(&writer->mutex);
+    writer->stopping = 1;
+    pthread_cond_signal(&writer->can_consume);
+    pthread_mutex_unlock(&writer->mutex);
+
+    if(writer->thread_started)
+    {
+        pthread_join(writer->thread, NULL);
+    }
+
+    const int ret = writer->first_error;
+    pthread_cond_destroy(&writer->can_consume);
+    pthread_cond_destroy(&writer->can_produce);
+    pthread_mutex_destroy(&writer->mutex);
+    free(writer);
+    return ret;
+}
+
+int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
+                                      mlvObject_t * mlv_data,
+                                      dngObject_t * dng_data,
+                                      uint32_t frame_index,
+                                      char * dng_filename,
+                                      const char *prop_filename)
+{
+    exportProfileFrame_t profile_frame;
+    double profile_frame_start = 0.0;
+    dngFramePayload_t * payload = NULL;
+
+    export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
+    profile_frame_start = export_profile_stage_begin(&profile_frame);
+
+    if(!writer || !dng_filename)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    if(!payload)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    const int enqueue_ret = enqueueDngPayloadWriterJob(writer,
+                                                       payload,
+                                                       dng_filename,
+                                                       &profile_frame,
+                                                       profile_frame_start);
+    if(enqueue_ret != 0)
+    {
+        freeDngFramePayload(payload);
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    return 0;
 }
 
 int saveDngFrameViaPayload(mlvObject_t * mlv_data,

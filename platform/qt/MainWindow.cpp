@@ -79,6 +79,13 @@ static bool cdngPayloadHandoffEnabled()
     return enabled;
 }
 
+static bool cdngAsyncWriterEnabled()
+{
+    static const bool enabled =
+        environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_ASYNC_WRITER" );
+    return enabled;
+}
+
 static bool buildGpuPlaybackReconStateForTexturePresent(
     const RenderFrameThread::GpuPlaybackReconTextureState &source,
     llrpGpuPlaybackReconState_t *destination)
@@ -9034,7 +9041,21 @@ ProcessResult MainWindow::exportCdngSequence(
     uint64_t lastReportedGpuVramBytes = 0;
     bool hasReportedGpuVramBytes = false;
     const bool usePayloadHandoff = cdngPayloadHandoffEnabled();
-    for( uint32_t frame = cutIn - 1; frame < cutOut; frame++ )
+    const bool useAsyncWriter = cdngAsyncWriterEnabled();
+    dngPayloadWriter_t *payloadWriter = nullptr;
+    if( useAsyncWriter )
+    {
+        payloadWriter = createDngPayloadWriter();
+        if( !payloadWriter )
+        {
+            result.success = false;
+            result.errorMessage =
+                QStringLiteral("Could not start CDNG payload writer");
+            aborted = true;
+        }
+    }
+
+    for( uint32_t frame = cutIn - 1; frame < cutOut && !aborted; frame++ )
     {
         /* Build frame filename */
         QString dngName;
@@ -9067,13 +9088,28 @@ ProcessResult MainWindow::exportCdngSequence(
         QByteArray filePathBytes = filePathNr.toLatin1();
         QByteArray propertiesBytes = properties_fn.toLatin1();
 #endif
-        int saveErr = usePayloadHandoff
-            ? saveDngFrameViaPayload( mlvObject, cinemaDng, frame,
-                                      filePathBytes.data(),
-                                      propertiesBytes.constData() )
-            : saveDngFrame( mlvObject, cinemaDng, frame,
-                            filePathBytes.data(),
-                            propertiesBytes.constData() );
+        int saveErr = 0;
+        if( useAsyncWriter )
+        {
+            saveErr = saveDngFrameViaAsyncPayloadWriter( payloadWriter,
+                                                        mlvObject,
+                                                        cinemaDng,
+                                                        frame,
+                                                        filePathBytes.data(),
+                                                        propertiesBytes.constData() );
+        }
+        else if( usePayloadHandoff )
+        {
+            saveErr = saveDngFrameViaPayload( mlvObject, cinemaDng, frame,
+                                              filePathBytes.data(),
+                                              propertiesBytes.constData() );
+        }
+        else
+        {
+            saveErr = saveDngFrame( mlvObject, cinemaDng, frame,
+                                    filePathBytes.data(),
+                                    propertiesBytes.constData() );
+        }
         if( saveErr )
         {
             /* Frame save failed — BatchPrompts decides skip-or-abort */
@@ -9153,6 +9189,19 @@ ProcessResult MainWindow::exportCdngSequence(
 
         /* Let event loop breathe */
         qApp->processEvents();
+    }
+
+    if( payloadWriter )
+    {
+        const int writerErr = finishDngPayloadWriter( payloadWriter );
+        payloadWriter = nullptr;
+        if( writerErr )
+        {
+            result.success = false;
+            result.errorMessage =
+                QStringLiteral("CDNG payload writer failed during async flush");
+            aborted = true;
+        }
     }
 
     /* Free DNG struct */

@@ -320,8 +320,13 @@ preserve ordering and raw-mode context without rereading mutable `dngObject_t`
 state. `saveDngFrameViaPayload()` provides an opt-in serial build-payload /
 write-payload path for Lane A E3 experiments; the default GUI/batch export loop
 still uses serial `saveDngFrame()` unless `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1`
-is set. Export-stage profiler JSON records `payload_handoff_env_enabled` so
-legacy-vs-payload release profiles remain self-describing.
+is set. `createDngPayloadWriter()`, `saveDngFrameViaAsyncPayloadWriter()`, and
+`finishDngPayloadWriter()` provide an opt-in single writer-worker path behind
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1`; it keeps only one queued payload between
+producer and writer, so it is a bounded scheduler experiment rather than a
+multi-frame reorder. Export-stage profiler JSON records
+`payload_handoff_env_enabled` and `async_writer_env_enabled` so
+legacy-vs-candidate release profiles remain self-describing.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

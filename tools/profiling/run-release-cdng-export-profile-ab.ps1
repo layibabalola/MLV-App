@@ -8,6 +8,8 @@ param(
     [string]$BuildId = "",
     [switch]$BaselineUsePayloadHandoff,
     [switch]$CandidateUsePayloadHandoff,
+    [switch]$BaselineUseAsyncWriter,
+    [switch]$CandidateUseAsyncWriter,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -50,7 +52,8 @@ function New-ProfileArgs {
         [string]$DngDir,
         [string]$ProfilePath,
         [string]$LogPath,
-        [bool]$UsePayloadHandoff
+        [bool]$UsePayloadHandoff,
+        [bool]$UseAsyncWriter
     )
 
     $args = @(
@@ -82,6 +85,9 @@ function New-ProfileArgs {
     if ($UsePayloadHandoff) {
         $args += "-UsePayloadHandoff"
     }
+    if ($UseAsyncWriter) {
+        $args += "-UseAsyncWriter"
+    }
     if ($DryRun) {
         $args += "-DryRun"
     }
@@ -93,13 +99,15 @@ $baselineArgs = New-ProfileArgs `
     -DngDir $baselineDngDir `
     -ProfilePath $baselineProfile `
     -LogPath $baselineLog `
-    -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff)
+    -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff) `
+    -UseAsyncWriter ([bool]$BaselineUseAsyncWriter)
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
     -DngDir $candidateDngDir `
     -ProfilePath $candidateProfile `
     -LogPath $candidateLog `
-    -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff)
+    -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff) `
+    -UseAsyncWriter ([bool]$CandidateUseAsyncWriter)
 
 if ($DryRun) {
     [pscustomobject]@{
@@ -107,10 +115,12 @@ if ($DryRun) {
         bundleDir = $bundleDir
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
+            useAsyncWriter = [bool]$BaselineUseAsyncWriter
             args = $baselineArgs
         }
         candidate = [pscustomobject]@{
             usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
+            useAsyncWriter = [bool]$CandidateUseAsyncWriter
             args = $candidateArgs
         }
         compareOutput = $compareJson
@@ -174,21 +184,25 @@ $summary = [pscustomobject]@{
     bundleDir = $bundleDir
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
+        useAsyncWriter = [bool]$BaselineUseAsyncWriter
         profile = $baselineProfile
         log = $baselineLog
         dngOutputDir = $baselineDngDir
         buildId = $baselineProfileJson.build_id
         frameCount = $baselineProfileJson.frame_count
         payloadHandoffEnvEnabled = $baselineProfileJson.payload_handoff_env_enabled
+        asyncWriterEnvEnabled = $baselineProfileJson.async_writer_env_enabled
     }
     candidate = [pscustomobject]@{
         usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
+        useAsyncWriter = [bool]$CandidateUseAsyncWriter
         profile = $candidateProfile
         log = $candidateLog
         dngOutputDir = $candidateDngDir
         buildId = $candidateProfileJson.build_id
         frameCount = $candidateProfileJson.frame_count
         payloadHandoffEnvEnabled = $candidateProfileJson.payload_handoff_env_enabled
+        asyncWriterEnvEnabled = $candidateProfileJson.async_writer_env_enabled
     }
     compare = [pscustomobject]@{
         profile = $compareJson
@@ -208,11 +222,14 @@ $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Enc
 
 Write-Host ((
     "CDNG-EXPORT-AB verdict={0} baseline_payload={1} candidate_payload={2} " +
-    "frame_total_avg_delta_ms={3} frame_total_p95_delta_ms={4} " +
-    "queue_idle_avg_delta_ms={5} output={6}") -f
+    "baseline_async={3} candidate_async={4} " +
+    "frame_total_avg_delta_ms={5} frame_total_p95_delta_ms={6} " +
+    "queue_idle_avg_delta_ms={7} output={8}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
+    $summary.baseline.useAsyncWriter,
+    $summary.candidate.useAsyncWriter,
     $summary.compare.frameTotalAvgDeltaMs,
     $summary.compare.frameTotalP95DeltaMs,
     $summary.compare.queueIdleAvgDeltaMs,
