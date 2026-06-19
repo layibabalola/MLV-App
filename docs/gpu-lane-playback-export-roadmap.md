@@ -139,6 +139,11 @@ or zero; `-AllowZeroPresentedFrames` is reserved for deliberate launch-only
 probes. This closes a proof gap where a smoke could previously report
 `validation.ok=true` with Auto telemetry present but no rendered/presented frame
 sample.
+The visible status tooltip now defines the full P4 pipeline vocabulary,
+including `GPU Preview`, and
+`GuiSmoke.mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus` pins its
+token, label, and description so the UI text cannot silently drift from the
+telemetry enum.
 
 Update 2026-06-19 P4 Look Assist safety slice: the profile/playback harness now
 has an explicit `--exercise-look-assist-settle` path plus metadata for settled

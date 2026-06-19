@@ -862,6 +862,15 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, false, false, false ) ),
               static_cast<int>( GpuPlaybackPipelineStatus::GpuPreview ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "gpu_preview" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "GPU Preview" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "GPU preview processing or debayer" ) );
 
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, true, false, false ) ),
