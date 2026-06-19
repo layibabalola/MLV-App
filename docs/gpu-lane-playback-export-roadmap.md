@@ -319,6 +319,20 @@ This reinforces the current E3 status: serial payload handoff is correct and
 low-cost, but broad promotion still needs longer/stratified sampling or a
 statistical matrix comparator; alternating order alone is a useful control, not
 a sufficient promotion oracle.
+That comparator now exists as
+`tools/profiling/compare-cdng-export-matrices.ps1`. The first calibration packet
+at
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration/calibration.json`
+compared the alternating identity matrix against the alternating serial-payload
+matrix and reported `verdict=WITHIN_IDENTITY_ENVELOPE` while preserving
+`identityRawGateUnstable=true`. Frame-total average stayed inside the identity
+positive envelope (identity max +12.456658 ms, feature max +6.042370 ms), and
+frame-total p95 also stayed inside it (identity max +64.821900 ms, feature max
++27.284600 ms). Payload handoff and tiny writer-lag deltas are expected feature
+costs, not frame-envelope regressions. This is enough to say the serial payload
+handoff's 24-frame alternating evidence is not worse than measured A/A jitter,
+but the roadmap still does not promote it as a broad export-throughput win until
+the sampling strategy itself is stronger.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
