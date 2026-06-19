@@ -1,15 +1,16 @@
 # GPU Lane — Playback & Export Roadmap + UX (plan of record)
 
 Status: 2026-06-19. Lane A E0-E2 export, the scoped Lane A E3 GPU
-replacement proof packet plus trusted throughput gate, P-pre GPU
-AMaZE/processing parity, and Lane B P1-P3 are now through their scoped proof
-gates. P3 is honest-scoped, not universal:
+replacement proof packet plus trusted/lossless throughput gates, P-pre GPU
+AMaZE/processing parity, and Lane B P1-P3/P4 are now through their scoped proof
+gates. P3/P4 are honest-scoped, not universal:
 the RTX 4090 FastProxy proof validates the raw-fixes-enabled HQ Dual ISO
 no-readback CUDA-to-GL R16 texture path with GL/backend/oracle parity;
 unsupported states still fail closed to CPU readback or CPU presentation. The
-remaining priority order is P4 adaptive-quality polish, then Lane A E3
-lossless/compression pipeline work and E4 rendered export, then Lane C portable
-GPU backends.
+remaining priority order is Lane A E4 rendered export, then Lane C portable GPU
+backends. Future P4 default-promotion work requires a widened no-readback proof
+scope, for example a non-Dual-ISO `GPU Tex NR` proof packet, before Auto may
+sharpen beyond the current capability gate.
 
 Update 2026-06-19: P-pre **processing parity** has progressed beyond the
 original curve-first `allow_creative_adjustments` plan: creative slices 1-6 are
@@ -237,6 +238,10 @@ have QSettings default/round-trip/invalid-value guards in
 `PlaybackQualitySettings.PreviewResolutionProxyLevelMapping`; the shared
 settings cleanup helper clears those keys so P4 control-surface tests do not
 inherit stale GUI state from earlier local runs.
+This is the current scoped P4 closeout: Auto may only promote quality from
+observed presentation truth, and under the accepted P3 proof scope the app must
+not default-promote non-Dual-ISO headroom to `HQ x2` until a matching
+non-Dual-ISO no-readback proof packet exists.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,
