@@ -135,6 +135,13 @@ batch `--max-frames`, so real-footage probes can avoid unbounded DNG output
 before full benchmark matrices are intentional. `tools/profiling/compare-export-stage-profiles.ps1` now
 summarizes frame-total avg/p95 deltas plus queue-idle avg/p95 deltas in stdout,
 and `-FailOnRegression` gates both avg and p95 frame-total regressions.
+`tools/profiling/run-release-cdng-export-profile-matrix.ps1` wraps the paired
+A/B runner across named cases and repeats, writing a single
+`matrix-summary.json` with per-run frame-total, producer-frame, queue-idle,
+writer-completion-lag, payload-clone, writer-queue-wait, async queue capacity,
+and async max-queued fields. Tiny fixture matrix runs are smoke tests only; E3
+promotion still requires a bounded real-footage matrix with receipts/frame caps
+that match the export scenario under review.
 
 Update 2026-06-19 Lane A E3 payload contract: `dngFramePayload_t`,
 `buildDngFramePayload`, `writeDngFramePayload`, `saveDngFrameViaPayload`, and
@@ -215,7 +222,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` single writer-worker boundary. Async writer queue depth defaults to 1 and can be raised only by opt-in env/script parameter for bounded release-tree experiments, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload clone cost, writer queue capacity/max-queued, and avg/p95 frame-total regression gates before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, `tools/profiling/run-release-cdng-export-profile-matrix.ps1` repeats those paired profiles across named cases into one matrix summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` single writer-worker boundary. Async writer queue depth defaults to 1 and can be raised only by opt-in env/script parameter for bounded release-tree experiments, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload clone cost, writer queue capacity/max-queued, and avg/p95 frame-total regression gates across a real-footage matrix before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback

@@ -11,9 +11,55 @@ This document covers:
 1. The `perf_tests` harness — what it measures, options, and JSON output.
 2. The local no-intervention `run_runtime_profile.ps1` wrapper.
 3. The app-backed `MLVApp.exe --profile-playback` headless mode.
-4. The full telemetry key list emitted by playback-profile JSON.
-5. Baselines (`tests/perf/baselines.json`).
-6. Interpretation notes (single-thread vs multithread; cold-8bit; LJ92).
+4. Release-tree CDNG export profiling and matrix A/B bundles.
+5. The full telemetry key list emitted by playback-profile JSON.
+6. Baselines (`tests/perf/baselines.json`).
+7. Interpretation notes (single-thread vs multithread; cold-8bit; LJ92).
+
+## Release CDNG export profile matrix
+
+For Lane A E3 export pipeline work, prefer the release-tree matrix wrapper
+instead of hand-running one-off baseline/candidate pairs. It launches the
+existing paired A/B runner for each named case and repeat, then writes one
+`matrix-summary.json` under `.claude-state/profiling/<run>/`.
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\run-release-cdng-export-profile-matrix.ps1 `
+  -RepoRoot . `
+  -CasesPath .claude-state\profiling\cdng-export-cases.json `
+  -OutputDir .claude-state\profiling\2026-06-19-cdng-export-matrix `
+  -CandidateUsePayloadHandoff `
+  -CandidateUseAsyncWriter `
+  -CandidateAsyncWriterQueueDepth 2 `
+  -MaxFrames 16 `
+  -Repeats 3 `
+  -FailOnRegression
+```
+
+Cases are JSON objects with repo-relative or absolute paths:
+
+```json
+{
+  "cases": [
+    {
+      "name": "m16-1210-master",
+      "clipPath": "C:/temp/MLV/M16-1210.MLV",
+      "receipt": "C:/temp/MLV/master.marxml",
+      "maxFrames": 16,
+      "repeats": 3
+    }
+  ]
+}
+```
+
+The matrix summary records case/run verdicts, baseline/candidate frame counts,
+candidate async queue capacity/max-queued, frame-total avg/p95 deltas,
+producer-frame deltas, producer-queue-idle deltas, writer-completion-lag
+deltas, writer-queue-wait deltas, payload-clone deltas, and comparator
+failures. A tiny checked-in fixture matrix is only a schema/tooling smoke; E3
+promotion needs a bounded real-footage matrix whose clips, receipts, frame caps,
+and repeats match the export scenario being judged.
 
 ## `perf_tests` harness
 

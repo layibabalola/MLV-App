@@ -340,6 +340,13 @@ save-frame entry; the older `queue_idle_ms` remains previous profiled frame
 completion to next save-frame entry, which can include async writer completion
 lag. `writer_completion_lag_ms` is derived as `frame_total_ms -
 producer_frame_ms`, making post-producer writer completion time explicit.
+`tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
+release-tree promotion harness for these fields: it runs paired baseline and
+candidate exports across named cases/repeats and writes
+`release-cdng-export-profile-matrix.v1` with per-run frame counts, async queue
+capacity/max-queued, frame-total deltas, producer/idle deltas,
+writer-completion-lag deltas, writer-queue-wait deltas, payload-clone deltas,
+and comparator failures.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 
