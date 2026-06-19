@@ -314,9 +314,14 @@ documented mechanism for keeping the hot decode path lock-light.
 `COMPRESSED_ORIG=3`.
 
 `dngFramePayload_t` is the immutable header+image copy produced by
-`buildDngFramePayload()` and released with `freeDngFramePayload()`. It is the
-byte-stable handoff object for Lane A E3 writer-worker experiments; the current
-GUI/batch export loop still uses serial `saveDngFrame()`.
+`buildDngFramePayload()` and released with `freeDngFramePayload()`. It carries
+the frame index plus raw input/output state so writer-worker experiments can
+preserve ordering and raw-mode context without rereading mutable `dngObject_t`
+state. `saveDngFrameViaPayload()` provides an opt-in serial build-payload /
+write-payload path for Lane A E3 experiments; the default GUI/batch export loop
+still uses serial `saveDngFrame()` unless `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1`
+is set. Export-stage profiler JSON records `payload_handoff_env_enabled` so
+legacy-vs-payload release profiles remain self-describing.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

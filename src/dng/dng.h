@@ -66,6 +66,9 @@ typedef struct
 
 typedef struct
 {
+    uint32_t frame_index;
+    int raw_input_state;
+    int raw_output_state;
     size_t header_size;
     size_t image_size;
     uint8_t * header_buf;
@@ -84,6 +87,7 @@ void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * 
 dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, const char *props_filename);
 int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_filename);
 void freeDngFramePayload(dngFramePayload_t * payload);
+int saveDngFrameViaPayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 void freeDngObject(dngObject_t * dng_data);
 

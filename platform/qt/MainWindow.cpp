@@ -62,6 +62,23 @@ static bool interactiveTraceEnabled()
     return enabled;
 }
 
+static bool environmentFlagEnabled( const char *name )
+{
+    const QByteArray value = qgetenv( name ).trimmed().toLower();
+    return !value.isEmpty()
+        && value != QByteArrayLiteral("0")
+        && value != QByteArrayLiteral("false")
+        && value != QByteArrayLiteral("off")
+        && value != QByteArrayLiteral("no");
+}
+
+static bool cdngPayloadHandoffEnabled()
+{
+    static const bool enabled =
+        environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF" );
+    return enabled;
+}
+
 static bool buildGpuPlaybackReconStateForTexturePresent(
     const RenderFrameThread::GpuPlaybackReconTextureState &source,
     llrpGpuPlaybackReconState_t *destination)
@@ -9016,6 +9033,7 @@ ProcessResult MainWindow::exportCdngSequence(
     bool aborted = false;
     uint64_t lastReportedGpuVramBytes = 0;
     bool hasReportedGpuVramBytes = false;
+    const bool usePayloadHandoff = cdngPayloadHandoffEnabled();
     for( uint32_t frame = cutIn - 1; frame < cutOut; frame++ )
     {
         /* Build frame filename */
@@ -9042,15 +9060,20 @@ ProcessResult MainWindow::exportCdngSequence(
         QString properties_fn = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
 #ifdef Q_OS_UNIX
         properties_fn.append("/mlv-dng-params.txt");
-        int saveErr = saveDngFrame( mlvObject, cinemaDng, frame,
-                                    filePathNr.toUtf8().data(),
-                                    properties_fn.toUtf8().data() );
+        QByteArray filePathBytes = filePathNr.toUtf8();
+        QByteArray propertiesBytes = properties_fn.toUtf8();
 #else
         properties_fn.append("\\mlv-dng-params.txt");
-        int saveErr = saveDngFrame( mlvObject, cinemaDng, frame,
-                                    filePathNr.toLatin1().data(),
-                                    properties_fn.toLatin1().data() );
+        QByteArray filePathBytes = filePathNr.toLatin1();
+        QByteArray propertiesBytes = properties_fn.toLatin1();
 #endif
+        int saveErr = usePayloadHandoff
+            ? saveDngFrameViaPayload( mlvObject, cinemaDng, frame,
+                                      filePathBytes.data(),
+                                      propertiesBytes.constData() )
+            : saveDngFrame( mlvObject, cinemaDng, frame,
+                            filePathBytes.data(),
+                            propertiesBytes.constData() );
         if( saveErr )
         {
             /* Frame save failed — BatchPrompts decides skip-or-abort */

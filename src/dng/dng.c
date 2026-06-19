@@ -454,6 +454,11 @@ static void export_profile_write_json(void)
     fputs("  \"build_id\":", file);
     export_profile_write_json_string(file, g_export_profile_build_id);
     fputs(",\n", file);
+    fprintf(file,
+            "  \"payload_handoff_env_enabled\":%s,\n",
+            export_profile_env_truthy(getenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"))
+                ? "true"
+                : "false");
     fputs("  \"generated_utc\":", file);
     export_profile_write_json_string(file, generated);
     fputs(",\n", file);
@@ -1690,21 +1695,17 @@ static int dng_write_buffers(FILE * dngf,
     return 0;
 }
 
-dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
-                                         dngObject_t * dng_data,
-                                         uint32_t frame_index,
-                                         const char *prop_filename)
+static dngFramePayload_t * dng_clone_ready_frame_payload(const dngObject_t * dng_data,
+                                                         uint32_t frame_index)
 {
-    if(!mlv_data || !dng_data) return NULL;
-
-    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL) != 0)
-    {
-        return NULL;
-    }
+    if(!dng_data) return NULL;
 
     dngFramePayload_t * payload = calloc(1, sizeof(dngFramePayload_t));
     if(!payload) return NULL;
 
+    payload->frame_index = frame_index;
+    payload->raw_input_state = dng_data->raw_input_state;
+    payload->raw_output_state = dng_data->raw_output_state;
     payload->header_size = dng_data->header_size;
     payload->image_size = dng_data->image_size;
     payload->header_buf = malloc(payload->header_size);
@@ -1718,6 +1719,21 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
     memcpy(payload->header_buf, dng_data->header_buf, payload->header_size);
     memcpy(payload->image_buf, dng_data->image_buf, payload->image_size);
     return payload;
+}
+
+dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
+                                         dngObject_t * dng_data,
+                                         uint32_t frame_index,
+                                         const char *prop_filename)
+{
+    if(!mlv_data || !dng_data) return NULL;
+
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL) != 0)
+    {
+        return NULL;
+    }
+
+    return dng_clone_ready_frame_payload(dng_data, frame_index);
 }
 
 int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_filename)
@@ -1742,6 +1758,89 @@ void freeDngFramePayload(dngFramePayload_t * payload)
     if(payload->header_buf) free(payload->header_buf);
     if(payload->image_buf) free(payload->image_buf);
     free(payload);
+}
+
+static void dng_print_saved_frame_status(const dngObject_t * dng_data,
+                                         uint32_t frame_index,
+                                         const char * dng_filename)
+{
+#ifndef STDOUT_SILENT
+    if (!frame_index && dng_data)
+    {
+        switch (dng_data->raw_output_state)
+        {
+            case UNCOMPRESSED_RAW:
+                printf("\nWriting uncompressed frames...\n");
+                break;
+            case COMPRESSED_RAW:
+                printf("\nWriting losless frames...\n");
+                break;
+            case UNCOMPRESSED_ORIG:
+                printf("\nPassing through original uncompressed raw...\n");
+                break;
+            case COMPRESSED_ORIG:
+                printf("\nPassing through original lossless raw...\n");
+                break;
+        }
+    }
+    printf("Current frame '%s' (frames saved: %u)\n", dng_filename, frame_index + 1);
+#else
+    (void)dng_data;
+    (void)frame_index;
+    (void)dng_filename;
+#endif
+}
+
+int saveDngFrameViaPayload(mlvObject_t * mlv_data,
+                           dngObject_t * dng_data,
+                           uint32_t frame_index,
+                           char * dng_filename,
+                           const char *prop_filename)
+{
+    exportProfileFrame_t profile_frame;
+    double profile_frame_start = 0.0;
+    double profile_stage_start = 0.0;
+    dngFramePayload_t * payload = NULL;
+
+    export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
+    profile_frame_start = export_profile_stage_begin(&profile_frame);
+
+    if(!dng_filename)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    payload = dng_clone_ready_frame_payload(dng_data, frame_index);
+    if(!payload)
+    {
+        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+        export_profile_frame_finish(&profile_frame, 0);
+        return 1;
+    }
+
+    profile_stage_start = export_profile_stage_begin(&profile_frame);
+    const int write_ret = writeDngFramePayload(payload, dng_filename);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+    export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
+    export_profile_frame_finish(&profile_frame, write_ret == 0);
+    freeDngFramePayload(payload);
+
+    if(write_ret != 0)
+    {
+        return 1;
+    }
+
+    dng_print_saved_frame_status(dng_data, frame_index, dng_filename);
+    return 0;
 }
 
 /* save DNG file */
@@ -1790,27 +1889,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
     export_profile_frame_finish(&profile_frame, 1);
-#ifndef STDOUT_SILENT
-    if (!frame_index)
-    {
-        switch (dng_data->raw_output_state)
-        {
-            case UNCOMPRESSED_RAW:
-                printf("\nWriting uncompressed frames...\n");
-                break;
-            case COMPRESSED_RAW:
-                printf("\nWriting losless frames...\n");
-                break;
-            case UNCOMPRESSED_ORIG:
-                printf("\nPassing through original uncompressed raw...\n");
-                break;
-            case COMPRESSED_ORIG:
-                printf("\nPassing through original lossless raw...\n");
-                break;
-        }
-    }
-    printf("Current frame '%s' (frames saved: %u)\n", dng_filename, frame_index + 1);
-#endif
+    dng_print_saved_frame_status(dng_data, frame_index, dng_filename);
     return 0;
 }
 

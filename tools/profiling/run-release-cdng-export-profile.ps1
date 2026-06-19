@@ -13,6 +13,7 @@ param(
     [switch]$Resume,
     [switch]$Verbose,
     [switch]$EnableGpuExport,
+    [switch]$UsePayloadHandoff,
     [string]$GpuExportDll = "",
     [string[]]$AdditionalArgs = @(),
     [string[]]$ExtraEnvironment = @(),
@@ -170,6 +171,12 @@ try {
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT")
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_DLL")
     }
+    if ($UsePayloadHandoff) {
+        $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"] = "1"
+    }
+    else {
+        [void]$envBlock.Remove("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF")
+    }
     Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
     if ($DryRun) {
@@ -189,6 +196,7 @@ try {
                 MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID = $envBlock["MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID"]
                 MLVAPP_GPU_EXPORT = $envBlock["MLVAPP_GPU_EXPORT"]
                 MLVAPP_GPU_EXPORT_DLL = $envBlock["MLVAPP_GPU_EXPORT_DLL"]
+                MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF = $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"]
             }
         } | ConvertTo-Json -Depth 5
         return
