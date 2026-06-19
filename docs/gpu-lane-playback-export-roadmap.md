@@ -82,6 +82,10 @@ The Auto tooltip and playback smoke summary now report both milliseconds and
 FPS-equivalent cadence for the latest Auto decision (`auto_avg_fps_equivalent`
 and `auto_budget_fps_equivalent`), so adaptive decisions can be read without
 manual conversion.
+The visible playback quality menu/status now uses the roadmap vocabulary:
+`Auto`, `Prioritize Quality`, and `Prioritize Smoothness`. The underlying mode
+ids and legacy `fast`/`hq` automation names remain supported; the parser also
+accepts `prioritize-smoothness` and `prioritize_quality`.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

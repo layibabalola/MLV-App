@@ -13,10 +13,10 @@
  * this layer only kicks in when those env vars are unset.
  *
  * Decisions:
- * - Fast: non-Dual ISO uses scale=4. Dual ISO uses the color-correct
+ * - Prioritize Smoothness (Fast): non-Dual ISO uses scale=4. Dual ISO uses the color-correct
  *   HQ+mean23 path and may start at scale=8 so it does not fall into the
  *   legacy preview-rowscale magenta-cast path.
- * - HighQuality: HQ + mean23 + scale=4, cast closed, slower cadence.
+ * - Prioritize Quality (HighQuality): HQ + mean23 + scale=4, cast closed, slower cadence.
  * - Auto: Sharp/Smooth starts at HQ scale=4; if measured cadence misses
  *   target, fall back to Fast for the next slot in Sharp/Smooth. Aggressive
  *   Dual ISO starts at HQ scale=8 so the preview keeps early Bayer-domain
@@ -144,7 +144,11 @@ inline bool playbackQualityModeParseOverride( const char * raw, int * outMode )
     if ( !raw || !*raw || !outMode ) return false;
 
     if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
-      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smoothness" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize_smoothness" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize-smoothness" ) )
     {
         *outMode = static_cast<int>( PlaybackQualityMode::Fast );
         return true;
@@ -154,7 +158,9 @@ inline bool playbackQualityModeParseOverride( const char * raw, int * outMode )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high" )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high_quality" )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high-quality" )
-      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize_quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize-quality" ) )
     {
         *outMode = static_cast<int>( PlaybackQualityMode::HighQuality );
         return true;

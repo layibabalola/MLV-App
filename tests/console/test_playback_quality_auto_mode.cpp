@@ -40,7 +40,13 @@ TEST(PlaybackQualityModeOverride, ParsesNumbersAndNames)
     ASSERT_TRUE( playbackQualityModeParseOverride( "0", &mode ) );
     ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Fast ), mode );
 
+    ASSERT_TRUE( playbackQualityModeParseOverride( "prioritize-smoothness", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Fast ), mode );
+
     ASSERT_TRUE( playbackQualityModeParseOverride( "HQ", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::HighQuality ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "prioritize_quality", &mode ) );
     ASSERT_EQ( static_cast<int>( PlaybackQualityMode::HighQuality ), mode );
 
     ASSERT_TRUE( playbackQualityModeParseOverride( "auto", &mode ) );

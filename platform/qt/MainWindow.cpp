@@ -7260,7 +7260,7 @@ void MainWindow::initGui( void )
     m_playbackAutoTargetFpsGroup->addAction( ui->actionPlaybackAutoTarget30 );
     m_playbackAutoTargetFpsGroup->addAction( ui->actionPlaybackAutoTarget60 );
 
-    //Keyboard shortcut Q cycles Fast -> HQ -> Auto -> Fast.
+    //Keyboard shortcut Q cycles Smoothness -> Quality -> Auto -> Smoothness.
     QShortcut * pQualityCycle = new QShortcut( QKeySequence( Qt::Key_Q ), this );
     pQualityCycle->setContext( Qt::ApplicationShortcut );
     connect( pQualityCycle, &QShortcut::activated,
@@ -7412,7 +7412,7 @@ void MainWindow::initGui( void )
     m_pPlaybackQualityIndicator = new QLabel( statusBar() );
     m_pPlaybackQualityIndicator->setMaximumWidth( 360 );
     m_pPlaybackQualityIndicator->setMinimumWidth( 160 );
-    m_pPlaybackQualityIndicator->setText( tr( "Quality: Fast" ) );
+    m_pPlaybackQualityIndicator->setText( tr( "Playback: Smooth" ) );
     m_pPlaybackQualityIndicator->setToolTip(
         tr( "Active playback quality mode and presented pipeline. "
             "GPU RB means CUDA reconstruction with CPU readback; "
@@ -7473,10 +7473,9 @@ void MainWindow::initGui( void )
         /* Append a downward triangle glyph to the text so users see at a
          * glance that this is a dropdown control, not a static label. The
          * glyph is preserved across mode changes by updatePlaybackQualityIndicator. */
-        m_pPlaybackQualityToolButton->setText( tr( "Quality: Fast ▾" ) );
+        m_pPlaybackQualityToolButton->setText( tr( "Playback: Smooth ▾" ) );
         m_pPlaybackQualityToolButton->setToolTip(
-            tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
-                "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
+            tr( "Playback Mode: choose Auto, Prioritize Quality, Prioritize Smoothness, "
                 "sharp/aggressive preview mode, and x1/x2/x4/x8 playback scale. "
                 "The status suffix reports the presented pipeline: CPU, GPU RB, "
                 "GPU Tex RB, or GPU Tex NR.\n"
@@ -16289,29 +16288,29 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         switch ( m_playbackQualityMode )
         {
             case 0:
-                text = tr( "Quality: Fast %1 [ui]" ).arg( scaleLabel );
+                text = tr( "Playback: Smooth %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
             case 1:
-                text = tr( "Quality: HQ %1 [ui]" ).arg( scaleLabel );
+                text = tr( "Playback: Quality %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#7CCB6E" );
                 break;
             case 2:
                 text = m_playbackQualityActiveHq
-                    ? tr( "Quality: Auto (HQ %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
-                    : tr( "Quality: Auto (Fast %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel );
+                    ? tr( "Playback: Auto (Quality %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
+                    : tr( "Playback: Auto (Smooth %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
-                text = tr( "Quality: Fast* %1 [ui]" ).arg( scaleLabel );
+                text = tr( "Playback: Smooth* %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             case 4:
-                text = tr( "Quality: HQ* %1 [ui]" ).arg( scaleLabel );
+                text = tr( "Playback: Quality* %1 [ui]" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             default:
-                text = tr( "Quality: ? [ui]" );
+                text = tr( "Playback: ? [ui]" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
         }
@@ -16324,17 +16323,17 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         const QString scaleLabel = playbackScaleLabel( effScale );
         if ( envHq )
         {
-            text = tr( "Quality: HQ %1 [env]" ).arg( scaleLabel );
+            text = tr( "Playback: Quality %1 [env]" ).arg( scaleLabel );
             color = QStringLiteral( "#7CCB6E" );
         }
         else if ( effScale > 1 )
         {
-            text = tr( "Quality: Fast %1 [env]" ).arg( scaleLabel );
+            text = tr( "Playback: Smooth %1 [env]" ).arg( scaleLabel );
             color = QStringLiteral( "#A0A0A0" );
         }
         else
         {
-            text = tr( "Quality: Fast [env]" );
+            text = tr( "Playback: Smooth [env]" );
             color = QStringLiteral( "#A0A0A0" );
         }
     }
@@ -16347,35 +16346,35 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         switch ( m_playbackQualityMode )
         {
             case 0:
-                text = guiScaleOverrideActive ? tr( "Quality: Fast %1 [ui]" ).arg( scaleLabel )
-                                              : tr( "Quality: Fast" );
+                text = guiScaleOverrideActive ? tr( "Playback: Smooth %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Playback: Smooth" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
             case 1:
-                text = guiScaleOverrideActive ? tr( "Quality: HQ %1 [ui]" ).arg( scaleLabel )
-                                              : tr( "Quality: HQ %1" ).arg( scaleLabel );
+                text = guiScaleOverrideActive ? tr( "Playback: Quality %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Playback: Quality %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#7CCB6E" );
                 break;
             case 2:
                 text = guiScaleOverrideActive
-                           ? ( hq ? tr( "Quality: Auto (HQ %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
-                                  : tr( "Quality: Auto (Fast %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel ) )
-                           : ( hq ? tr( "Quality: Auto (HQ %1) %2" ).arg( scaleLabel, autoReasonLabel )
-                                  : tr( "Quality: Auto (Fast) %1" ).arg( autoReasonLabel ) );
+                           ? ( hq ? tr( "Playback: Auto (Quality %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel )
+                                  : tr( "Playback: Auto (Smooth %1) %2 [ui]" ).arg( scaleLabel, autoReasonLabel ) )
+                           : ( hq ? tr( "Playback: Auto (Quality %1) %2" ).arg( scaleLabel, autoReasonLabel )
+                                  : tr( "Playback: Auto (Smooth) %1" ).arg( autoReasonLabel ) );
                 color = QStringLiteral( "#5DADE2" );
                 break;
             case 3:
-                text = guiScaleOverrideActive ? tr( "Quality: Fast* %1 [ui]" ).arg( scaleLabel )
-                                              : tr( "Quality: Fast* %1" ).arg( scaleLabel );
+                text = guiScaleOverrideActive ? tr( "Playback: Smooth* %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Playback: Smooth* %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             case 4:
-                text = guiScaleOverrideActive ? tr( "Quality: HQ* %1 [ui]" ).arg( scaleLabel )
-                                              : tr( "Quality: HQ* %1" ).arg( scaleLabel );
+                text = guiScaleOverrideActive ? tr( "Playback: Quality* %1 [ui]" ).arg( scaleLabel )
+                                              : tr( "Playback: Quality* %1" ).arg( scaleLabel );
                 color = QStringLiteral( "#F1C40F" );
                 break;
             default:
-                text = tr( "Quality: ?" );
+                text = tr( "Playback: ?" );
                 color = QStringLiteral( "#A0A0A0" );
                 break;
         }
@@ -16408,8 +16407,7 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             "GPU Tex NR means CUDA-to-GL texture presentation without "
             "per-frame CPU readback." );
     QString toolButtonTooltip =
-        tr( "Playback Quality: choose Fast (preview, with cast), High Quality "
-            "(HQ matched-pair, cast-closed), Auto (adapts to target fps), "
+        tr( "Playback Mode: choose Auto, Prioritize Quality, Prioritize Smoothness, "
             "sharp/aggressive preview mode, and x1/x2/x4/x8 playback scale. "
             "The status suffix reports the presented pipeline: CPU, GPU RB, "
             "GPU Tex RB, or scoped GPU Tex NR.\n"
