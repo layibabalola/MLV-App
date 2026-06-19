@@ -2298,11 +2298,27 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && m_imageWidth > 0
             && m_imageHeight > 0
             && slot.rawImage16.size() >= fullResPixelCount;
+        /* The no-readback GL R16 texture is the RECON-ONLY Dual ISO bayer; the
+         * CUDA backend has no focus/bad-pixel code. The post-recon focus-pixel
+         * and bad-pixel interpolation mutate the CPU display frame in place
+         * after recon (llrawproc.c ~2438-2491), so when either is active the GL
+         * texture would present uncorrected focus dots / hot pixels. Gate the
+         * no-readback path fail-closed on those flags (the C worker already
+         * withholds the no-readback input bayer in this case; this is the
+         * authoritative belt-and-suspenders check with a precise reason). The
+         * readback bayer fallback below uses slot.rawImage16, which DOES include
+         * the fixes, so display stays correct. */
+        const bool postReconRawFixActive =
+            m_pMlvObject
+            && m_pMlvObject->llrawproc
+            && ( m_pMlvObject->llrawproc->focus_pixels != 0
+              || m_pMlvObject->llrawproc->bad_pixels != 0 );
         const bool noReadbackCandidate =
             m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
             && playbackScaleFactor == 1
             && m_imageWidth > 0
             && m_imageHeight > 0
+            && !postReconRawFixActive
             && slot.gpuPlaybackReconTextureNoReadbackCandidate
             && slot.gpuPlaybackReconTextureInputBayerFrame.size() >= fullResPixelCount
             && slot.gpuPlaybackReconTextureBayerFrame.size() >= fullResPixelCount
@@ -2322,6 +2338,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_candidate"),
             noReadbackCandidate );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_post_recon_raw_fix_active"),
+            postReconRawFixActive );
         if( slot.gpuPlaybackReconTexturePresentCandidate )
         {
             slot.stageTimingTelemetry.insert(

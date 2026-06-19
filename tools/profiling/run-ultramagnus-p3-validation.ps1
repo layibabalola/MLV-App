@@ -11,6 +11,7 @@ param(
     [int]$SettleMs = 1000,
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
+    [int]$ValidationSampleEvery = 10,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -609,11 +610,18 @@ if ($failures.Count -eq 0) {
         $clipOutput = Join-Path $runRoot ($clipStem + "-p3-texture-present.json")
         $screenshots = Join-Path $runRoot ($clipStem + "-screenshots")
         $invokeScript = Join-Path $runRoot ("invoke-" + $clipStem + ".ps1")
-        # wb-523ca500 P3 diagnostic: MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE=1 admits the
-        # real (non-base, auto-corrected) live Dual ISO state into the no-readback path so the
-        # backend-vs-CPU-oracle parity can be measured end-to-end on the 4090. The in-app guard
-        # stays fail-closed by default (env-gated); only this validation run enables it.
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE=1','QT_OPENGL=desktop')"
+        # wb-523ca500 P3: the in-app eligibility guard now ADMITS the proven HQ
+        # Dual ISO config class (interp==1, alias==1, fullres==1, chroma==0) by
+        # DEFAULT for arbitrary is_bright/ev/black_delta, so the real (non-base,
+        # auto-corrected) live state enters the no-readback path WITHOUT the legacy
+        # MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE diagnostic env (that env is
+        # now a no-op superset and is intentionally NOT set here).
+        #
+        # MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=N samples the heavy
+        # GL-vs-CPU-oracle parity check on every Nth presented no-readback frame so
+        # the temporal artifact/cadence detector sees real (un-instrumented)
+        # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
+        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -934,6 +942,7 @@ $summary = [pscustomobject]@{
         settleMs = $SettleMs
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
+        validationSampleEvery = $ValidationSampleEvery
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot

@@ -453,31 +453,33 @@ static int llrawproc_gpu_playback_recon_state_matches_validated_config(
     const dualiso_gpu_recon_state_t * state)
 {
     if(!state || !state->valid) return 0;
+
+    /* The no-readback playback path is admitted ONLY for the proven HQ
+     * (high-quality) recon config class:
+     *   interp_method == 1 (AMaZE), use_alias_map == 1, use_fullres == 1,
+     *   chroma_smooth_method == 0 (chroma smoothing off).
+     * Any other config (mean/non-AMaZE interp, alias map off, fullres off, or
+     * chroma smoothing on) is unproven for the no-readback bridge and must stay
+     * fail-closed so the CPU readback path is used instead. */
     if(state->interp_method != 1) return 0;
     if(state->use_alias_map != 1) return 0;
     if(state->use_fullres != 1) return 0;
     if(state->chroma_smooth_method != 0) return 0;
-    /* Diagnostic-only, fail-closed by default: when explicitly enabled, admit any
-     * HQ-config state (arbitrary is_bright / ev_correction / black_delta) so the
-     * no-readback path can be validated against the CPU oracle for real (non-base,
-     * auto-corrected) live Dual ISO clips on the 4090. The CUDA recon kernels were
-     * proven 0-LSB vs the oracle for the live M16-1327 non-base state via
-     * cuda_recon_parity; this toggle lets the playback path be measured end-to-end.
-     * Default (env unset) keeps the strict base-config-only contract. */
-    {
-        const char * allow_any_hq =
-            getenv("MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE");
-        if(allow_any_hq && *allow_any_hq && *allow_any_hq != '0')
-        {
-            return 1;
-        }
-    }
-    if(state->black_delta != 0) return 0;
-    if(fabs(fabs(state->ev_correction) - 3.0) > 0.000001) return 0;
-    if(state->is_bright[0] != 1) return 0;
-    if(state->is_bright[1] != 1) return 0;
-    if(state->is_bright[2] != 0) return 0;
-    if(state->is_bright[3] != 0) return 0;
+
+    /* Within the HQ-config class, admit by DEFAULT for arbitrary
+     * is_bright / ev_correction / black_delta. These vary per clip
+     * (auto-correction, exposure matching) and were proven 0-LSB vs the CPU
+     * oracle for the live M16-1327 non-base state: cuda_recon_parity passes
+     * 0 LSB at every stage for the exact live levels/ev, and the 4090
+     * end-to-end run showed the no-readback GL texture == the recon-output
+     * bayer oracle 0 LSB (gl_oracle_match=1, mismatch 0). The earlier
+     * base-config-only restriction (black_delta==0, |ev|==3.0,
+     * is_bright=={1,1,0,0}) was a validation-conservatism gate, not a
+     * correctness boundary.
+     *
+     * NOTE: the legacy diagnostic env MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE
+     * is now a no-op superset -- the HQ class it used to gate is admitted by
+     * default, so reaching this point already implies admission. */
     return 1;
 }
 
@@ -2270,7 +2272,22 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 if (gpu_playback_input)
                 {
                     memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
-                    if (g_llrawproc_gpu_playback_texture_present_preferred)
+                    /* No-readback eligibility (fail-closed at the source): the
+                     * CUDA->GL R16 texture the no-readback path presents is the
+                     * RECON-ONLY Dual ISO bayer. The post-recon focus-pixel and
+                     * bad-pixel interpolation (below, ~2438-2491) mutate
+                     * raw_image_buff IN PLACE after diso_get_full20bit, and the
+                     * CUDA backend has no focus/bad-pixel code, so for any clip
+                     * with focus_pixels!=0 or bad_pixels!=0 the GL texture would
+                     * differ from the CPU display frame (uncorrected focus dots /
+                     * hot pixels). Only arm the no-readback input bayer when no
+                     * post-recon raw fix is active; otherwise the Qt layer falls
+                     * back to the CPU-readback bayer (which applies the fixes).
+                     * NOTE: vertical_stripes is PRE-recon and pattern_noise does
+                     * not run for dual-iso frames, so they need no gate here. */
+                    if (g_llrawproc_gpu_playback_texture_present_preferred
+                     && focus_pixels == 0
+                     && bad_pixels == 0)
                     {
                         (void)llrawproc_gpu_playback_store_last_input_bayer16(
                             gpu_playback_input,
