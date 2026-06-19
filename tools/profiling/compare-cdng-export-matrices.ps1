@@ -115,8 +115,22 @@ function Get-MatrixRuns {
                 diskWriteAvgDeltaMs =
                     Get-CompareStageDelta -Run $run -StageName "disk_write_ms" -Statistic "avgMs"
                 payloadCloneAvgDeltaMs = $run.payloadCloneAvgDeltaMs
+                payloadCloneP95DeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "payload_clone_ms" -Statistic "p95Ms"
+                producerFrameAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "producer_frame_ms" -Statistic "avgMs"
+                producerFrameP95DeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "producer_frame_ms" -Statistic "p95Ms"
+                producerQueueIdleAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "producer_queue_idle_ms" -Statistic "avgMs"
+                producerQueueIdleP95DeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "producer_queue_idle_ms" -Statistic "p95Ms"
                 writerCompletionLagAvgDeltaMs = $run.writerCompletionLagAvgDeltaMs
+                writerCompletionLagP95DeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "writer_completion_lag_ms" -Statistic "p95Ms"
                 writerQueueWaitAvgDeltaMs = $run.writerQueueWaitAvgDeltaMs
+                writerQueueWaitP95DeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "writer_queue_wait_ms" -Statistic "p95Ms"
                 failures = @($run.failures)
             }
         }
@@ -325,8 +339,15 @@ $metricNames = @(
     "dngCompressAvgDeltaMs",
     "diskWriteAvgDeltaMs",
     "payloadCloneAvgDeltaMs",
+    "payloadCloneP95DeltaMs",
+    "producerFrameAvgDeltaMs",
+    "producerFrameP95DeltaMs",
+    "producerQueueIdleAvgDeltaMs",
+    "producerQueueIdleP95DeltaMs",
     "writerCompletionLagAvgDeltaMs",
-    "writerQueueWaitAvgDeltaMs"
+    "writerCompletionLagP95DeltaMs",
+    "writerQueueWaitAvgDeltaMs",
+    "writerQueueWaitP95DeltaMs"
 )
 $metrics = @()
 foreach ($metricName in $metricNames) {
@@ -344,11 +365,26 @@ $stageAttributionMetricNames = @(
     "dngCompressAvgDeltaMs",
     "diskWriteAvgDeltaMs",
     "payloadCloneAvgDeltaMs",
+    "producerFrameAvgDeltaMs",
+    "producerQueueIdleAvgDeltaMs",
     "writerCompletionLagAvgDeltaMs",
     "writerQueueWaitAvgDeltaMs"
 )
 $stageAttributionMetrics = @(
     $metrics | Where-Object { $_.metric -in $stageAttributionMetricNames }
+)
+$schedulerAttributionMetricNames = @(
+    "producerFrameAvgDeltaMs",
+    "producerFrameP95DeltaMs",
+    "producerQueueIdleAvgDeltaMs",
+    "producerQueueIdleP95DeltaMs",
+    "writerCompletionLagAvgDeltaMs",
+    "writerCompletionLagP95DeltaMs",
+    "writerQueueWaitAvgDeltaMs",
+    "writerQueueWaitP95DeltaMs"
+)
+$schedulerAttributionMetrics = @(
+    $metrics | Where-Object { $_.metric -in $schedulerAttributionMetricNames }
 )
 $dominantPositiveFeatureAverageMetric = @(
     $stageAttributionMetrics |
@@ -357,6 +393,23 @@ $dominantPositiveFeatureAverageMetric = @(
 )[0]
 $dominantPositiveMaxExcessMetric = @(
     $stageAttributionMetrics |
+        Where-Object {
+            $null -ne $_.featurePositiveMax -and
+            $null -ne $_.identityPositiveMax -and
+            [double]$_.featurePositiveMax -gt [double]$_.identityPositiveMax
+        } |
+        Sort-Object -Property @{
+            Expression = { [double]$_.featurePositiveMax - [double]$_.identityPositiveMax }
+            Descending = $true
+        }
+)[0]
+$dominantSchedulerPositiveFeatureAverageMetric = @(
+    $schedulerAttributionMetrics |
+        Where-Object { $null -ne $_.featureAverage -and [double]$_.featureAverage -gt 0.0 } |
+        Sort-Object -Property @{ Expression = { [double]$_.featureAverage }; Descending = $true }
+)[0]
+$dominantSchedulerPositiveMaxExcessMetric = @(
+    $schedulerAttributionMetrics |
         Where-Object {
             $null -ne $_.featurePositiveMax -and
             $null -ne $_.identityPositiveMax -and
@@ -448,7 +501,7 @@ $identityFailures = @($identityRuns | Where-Object { $_.verdict -ne "PASS" })
 $featureFailures = @($featureRuns | Where-Object { $_.verdict -ne "PASS" })
 
 $result = [pscustomobject]@{
-    schema = "release-cdng-export-matrix-calibration.v3"
+    schema = "release-cdng-export-matrix-calibration.v4"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     identity = [pscustomobject]@{
         path = $identity.path
@@ -481,6 +534,13 @@ $result = [pscustomobject]@{
         dominantPositiveMaxExcess =
             New-MetricDiagnosticRow -Metric $dominantPositiveMaxExcessMetric
     }
+    schedulerAttribution = [pscustomobject]@{
+        metricNames = $schedulerAttributionMetricNames
+        dominantPositiveFeatureAverage =
+            New-MetricDiagnosticRow -Metric $dominantSchedulerPositiveFeatureAverageMetric
+        dominantPositiveMaxExcess =
+            New-MetricDiagnosticRow -Metric $dominantSchedulerPositiveMaxExcessMetric
+    }
     exceededFrameMetrics = @(
         $exceededFrameMetrics |
             Select-Object metric, identityPositiveMax, featurePositiveMax, positiveMaxMarginMs
@@ -503,7 +563,7 @@ Write-Host (((
     "CDNG-EXPORT-MATRIX-CALIBRATION verdict={0} identity_unstable={1} " +
     "identity_fail={2} feature_fail={3} compatible_keys={4} modes_ok={5} " +
     "frame_avg_within={6} frame_p95_within={7} dominant_avg_stage={8} " +
-    "dominant_excess_stage={9} output={10}") -f
+    "dominant_excess_stage={9} dominant_scheduler_stage={10} output={11}") -f
     $result.verdict,
     $result.identityRawGateUnstable,
     $result.identity.failCount,
@@ -518,6 +578,9 @@ Write-Host (((
       } else { "<none>" }),
     $(if ($result.stageAttribution.dominantPositiveMaxExcess) {
           $result.stageAttribution.dominantPositiveMaxExcess.metric
+      } else { "<none>" }),
+    $(if ($result.schedulerAttribution.dominantPositiveFeatureAverage) {
+          $result.schedulerAttribution.dominantPositiveFeatureAverage.metric
       } else { "<none>" }),
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 ))

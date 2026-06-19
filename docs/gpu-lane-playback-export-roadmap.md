@@ -356,23 +356,26 @@ handoff's 24-frame alternating evidence is not worse than measured A/A jitter,
 but the roadmap still does not promote it as a broad export-throughput win until
 the sampling strategy itself is stronger.
 The comparator now writes
-`release-cdng-export-matrix-calibration.v3`, fails closed on non-identity
+`release-cdng-export-matrix-calibration.v4`, fails closed on non-identity
 calibration inputs, non-feature candidate inputs, alternate-run-order mismatch,
 or case/repeat/run-order key mismatch, and includes per-case envelopes plus
 median/p95/positive-max summaries and stage-attribution metrics from each
 run's `compare.json`. Its `stageAttribution` object also names the dominant
 positive feature-average stage and the dominant positive-max identity-envelope
 excess stage, so E3 promotion/blocker packets can cite the leading stage driver
-without hand-parsing the metrics array. Validation against the same alternating A/A and
-serial-payload matrices produced
-`.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration-v2/calibration.json`
-with `verdict=WITHIN_IDENTITY_ENVELOPE`, `compatible_keys=True`, and
-`modes_ok=True`; negative smokes under
-`.claude-state/profiling/2026-06-19-cdng-e3-calibration-negative-smoke/`
-blocked an identity-as-feature input and a mismatched lossless feature matrix as
-`INCOMPATIBLE_MATRICES`. This upgrades the E3 methodology guardrail: future
-promotion packets must compare matching identity and feature matrices before a
-noisy raw gate is interpreted as either a blocker or a throughput win.
+without hand-parsing the metrics array. Its `schedulerAttribution` block also
+separates producer-frame / producer-idle deltas from writer-completion-lag /
+writer-queue-wait deltas, including p95 metrics, so async evidence can
+distinguish caller-side overlap from completion backlog. Validation against the
+same alternating A/A and serial-payload matrices produced
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration-v4/calibration.json`
+with `verdict=WITHIN_IDENTITY_ENVELOPE`, `compatible_keys=True`, `modes_ok=True`,
+and `dominant_scheduler_stage=producerQueueIdleAvgDeltaMs`; the v4
+identity-as-feature negative smoke at
+`.claude-state/profiling/2026-06-19-cdng-e3-calibration-negative-smoke-v4/identity-as-feature.json`
+exited 1 as `INCOMPATIBLE_MATRICES`. This upgrades the E3 methodology guardrail:
+future promotion packets must compare matching identity and feature matrices
+before a noisy raw gate is interpreted as either a blocker or a throughput win.
 
 Async-writer queue-depth investigation:
 the current real-footage matrices exercise the batch CDNG receipt/default path,
@@ -489,8 +492,8 @@ clips/receipt, 16 frames, and 3 repeats. Its hash sweep at
 `.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-matrix-16x3-current/dng-hash-comparison.json`
 reported 144/144 baseline-vs-candidate DNG pairs matched by length and SHA256,
 with 0 mismatches and 0 missing files, and all cases reached
-`async_writer_max_queued=2`. The calibrated identity-vs-async packet at
-`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-calibration-16x3-current/calibration.json`
+`async_writer_max_queued=2`. The v4 calibrated identity-vs-async packet at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-calibration-16x3-current-v4/calibration.json`
 reported `verdict=EXCEEDS_IDENTITY_ENVELOPE` with
 `blockingReasons=feature_exceeds_identity_frameTotalAvgDeltaMs,feature_exceeds_identity_frameTotalP95DeltaMs`.
 Wrapper elapsed improved strongly (`elapsedDeltaMs` feature average
@@ -501,12 +504,17 @@ feature average +1612.453544 ms, feature positive max +6837.739600 ms). Stage
 attribution names `writerCompletionLagAvgDeltaMs` as both the dominant positive
 feature-average stage (+1565.818632 ms) and dominant positive-max excess stage
 (+4281.253201 ms), with `writerQueueWaitAvgDeltaMs` also high (+876.454149 ms
-feature average). This is a useful async result but still a HOLD, not a
-promotion: the bytes are stable and the writer can overlap enough to improve
-wrapper elapsed, but the current completion gate says backlog/lag is part of
-the frame cost. Next E3 async work should either reduce queue wait/completion
-lag with scheduler policy or define a separately justified async-aware
-promotion gate; it should not claim success from elapsed-only improvement.
+feature average). The new scheduler attribution makes the split explicit:
+`producerFrameAvgDeltaMs` improved by -522.507122 ms on average and
+`producerQueueIdleAvgDeltaMs` stayed inside the identity envelope, while
+`writerCompletionLagP95DeltaMs` was the dominant scheduler hotspot
+(+3077.546722 ms feature average, +9118.773400 ms positive-max excess). This is
+a useful async result but still a HOLD, not a promotion: the bytes are stable
+and the writer can overlap enough to improve wrapper elapsed, but the current
+completion gate says backlog/lag is part of the frame cost. Next E3 async work
+should reduce queue wait/completion lag with scheduler policy before considering
+any separately justified async-aware promotion gate; it should not claim success
+from elapsed-only improvement.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
