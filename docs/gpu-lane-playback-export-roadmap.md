@@ -106,6 +106,10 @@ presenting `GPU Tex NR`, the latch is cleared and
 `auto_validated_no_readback_capability_demoted_last` reports the demotion. That
 keeps Auto's capability-aware promotion/demotion tied to actual presentation
 truth instead of stale optimism.
+The latch is playback-run scoped: clip opens, play stop/start, quality-mode,
+preview-mode, preview-resolution, scale override, and Auto target-FPS changes
+all reset it, so a later context must present `GPU Tex NR` again before Auto
+uses no-readback capability to sharpen quality decisions.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

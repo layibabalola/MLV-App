@@ -6682,6 +6682,7 @@ int MainWindow::openMlvForPreview(QString fileName)
     m_fileLoaded = false;
     m_dontDraw = true;
     clearPresentationForClipOpen( "clip-open-preview" );
+    resetPlaybackQualityAutoRunState();
 
     //Waiting for thread being idle for not freeing used memory
     while( !m_pRenderThread->isIdle() ) {}
@@ -6862,6 +6863,7 @@ int MainWindow::openMlv( QString fileName )
     killTimer( m_timerId );
     m_dontDraw = true;
     clearPresentationForClipOpen( "clip-open" );
+    resetPlaybackQualityAutoRunState();
 
     //Waiting for thread being idle for not freeing used memory
     while( !m_pRenderThread->isIdle() ) {}
@@ -15863,6 +15865,7 @@ void MainWindow::applyPlaybackPreviewMode( int mode, bool persist, bool forceRef
 
     if( changed )
     {
+        resetPlaybackQualityAutoRunState();
         logInteractionEvent(
             QStringLiteral("playback_preview_mode.change"),
             QStringLiteral("mode=%1->%2 effective_aggressive=%3 file_loaded=%4 still_drawing=%5 latest_serial=%6 next_serial=%7 generation_before=%8")
@@ -15950,6 +15953,7 @@ void MainWindow::applyPlaybackPreviewResolution( int res, bool persist, bool for
 
     if( changed )
     {
+        resetPlaybackQualityAutoRunState();
         logInteractionEvent(
             QStringLiteral("playback_preview_resolution.change"),
             QStringLiteral("res=%1->%2 proxy_level=%3 file_loaded=%4 still_drawing=%5 latest_serial=%6 next_serial=%7 generation_before=%8")
@@ -16003,6 +16007,23 @@ void MainWindow::initPlaybackScaleFactorFromSettings( void )
     applyPlaybackScaleFactorOverride( rawScale, /*persist*/false );
 }
 
+void MainWindow::resetPlaybackQualityAutoRunState( void )
+{
+    m_playbackQualityFrameCounter = 0;
+    m_playbackQualityLastPresentedTime = 0.0;
+    m_playbackQualitySampler.reset();
+    m_playbackQualityAutoCapabilityTracker.reset();
+    m_playbackQualityAutoDecisionReason =
+        PlaybackQualityAutoDecisionReason::WarmupHq;
+    m_playbackQualityAutoDecisionAverageMs = 0.0;
+    m_playbackQualityAutoDecisionBudgetMs =
+        1000.0 / static_cast<double>( m_playbackAutoTargetFps > 0
+                                      ? m_playbackAutoTargetFps
+                                      : 30 );
+    m_playbackQualityAutoDecisionSampleCount = 0;
+    m_playbackQualityAutoHeadroomCapability = false;
+}
+
 void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist )
 {
     if ( scaleFactor != 0 && scaleFactor != 1 && scaleFactor != 2 && scaleFactor != 4 && scaleFactor != 8 )
@@ -16052,6 +16073,7 @@ void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist
 
     if ( changed )
     {
+        resetPlaybackQualityAutoRunState();
         const int newEffectiveScale = effectivePlaybackScaleFactorForRequest();
         logInteractionEvent(
             QStringLiteral("playback_scale.change"),
@@ -16107,18 +16129,7 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
     m_playbackQualityActiveHq    = playbackQualityWantsHqMean23( pqMode );
     g_playbackQualityActiveHqMirror.store( m_playbackQualityActiveHq ? 1 : 0,
                                             std::memory_order_release );
-    m_playbackQualityFrameCounter = 0;
-    m_playbackQualityLastPresentedTime = 0.0;
-    m_playbackQualitySampler.reset();
-    m_playbackQualityAutoDecisionReason =
-        PlaybackQualityAutoDecisionReason::WarmupHq;
-    m_playbackQualityAutoDecisionAverageMs = 0.0;
-    m_playbackQualityAutoDecisionBudgetMs =
-        1000.0 / static_cast<double>( m_playbackAutoTargetFps > 0
-                                      ? m_playbackAutoTargetFps
-                                      : 30 );
-    m_playbackQualityAutoDecisionSampleCount = 0;
-    m_playbackQualityAutoHeadroomCapability = false;
+    resetPlaybackQualityAutoRunState();
 
     if ( persist )
     {
@@ -16178,16 +16189,7 @@ void MainWindow::applyPlaybackAutoTargetFps( int targetFps, bool persist )
 {
     if ( targetFps != 24 && targetFps != 30 && targetFps != 60 ) targetFps = 30;
     m_playbackAutoTargetFps = targetFps;
-    m_playbackQualityFrameCounter = 0;
-    m_playbackQualityLastPresentedTime = 0.0;
-    m_playbackQualitySampler.reset();
-    m_playbackQualityAutoDecisionReason =
-        PlaybackQualityAutoDecisionReason::WarmupHq;
-    m_playbackQualityAutoDecisionAverageMs = 0.0;
-    m_playbackQualityAutoDecisionBudgetMs =
-        1000.0 / static_cast<double>( m_playbackAutoTargetFps );
-    m_playbackQualityAutoDecisionSampleCount = 0;
-    m_playbackQualityAutoHeadroomCapability = false;
+    resetPlaybackQualityAutoRunState();
     if ( ui->actionPlaybackAutoTarget24 )
         ui->actionPlaybackAutoTarget24->setChecked( targetFps == 24 );
     if ( ui->actionPlaybackAutoTarget30 )
@@ -20404,19 +20406,13 @@ void MainWindow::on_actionPlay_toggled(bool checked)
         m_playbackScopeLastUpdateTime = 0.0;
         m_lastPlaybackAudioSyncFrame = -1;
         m_lastPlaybackAudioSyncTime = 0.0;
-        m_playbackQualityLastPresentedTime = 0.0;
-        m_playbackQualityFrameCounter = 0;
-        m_playbackQualitySampler.reset();
-        m_playbackQualityAutoHeadroomCapability = false;
+        resetPlaybackQualityAutoRunState();
     }
     selectDebayerAlgorithm();
     applyEffectiveDualIsoPlaybackSettings();
     if( checked )
     {
-        m_playbackQualityLastPresentedTime = 0.0;
-        m_playbackQualityFrameCounter = 0;
-        m_playbackQualitySampler.reset();
-        m_playbackQualityAutoHeadroomCapability = false;
+        resetPlaybackQualityAutoRunState();
         beginPlaybackSmokeTelemetry();
         beginPlayToFirstFrameMeasurement();
         m_playbackScopeLastUpdateTime = 0.0;

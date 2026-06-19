@@ -1367,6 +1367,7 @@ private:
     void initPlaybackPreviewResolutionFromSettings( void );
     void drainLookAssistWorkers( const char *reason );
     void initPlaybackScaleFactorFromSettings( void );
+    void resetPlaybackQualityAutoRunState( void );
     void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackPreviewMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackPreviewResolution( int res, bool persist, bool forceRefresh );

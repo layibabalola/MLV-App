@@ -287,6 +287,24 @@ TEST(PlaybackQualityAutoCapabilityTracker, LatchesOnlyAfterValidatedNoReadback)
     ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
 }
 
+TEST(PlaybackQualityAutoCapabilityTracker, ResetClearsRunScopedProof)
+{
+    PlaybackQualityAutoCapabilityTracker tracker;
+    ASSERT_TRUE( tracker.notePresentedPipeline( true,
+                                                /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline(
+        false, /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.lastObservationDemotedCapability() );
+
+    tracker.reset();
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+}
+
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)
 {
     PlaybackQualityAutoSampler s;
