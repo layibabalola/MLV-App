@@ -28,6 +28,59 @@ function Read-MatrixSummary {
     }
 }
 
+$script:CompareJsonCache = @{}
+
+function Get-CompareJson {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        return $null
+    }
+
+    if (-not $script:CompareJsonCache.ContainsKey($resolved)) {
+        $script:CompareJsonCache[$resolved] =
+            Get-Content -LiteralPath $resolved -Raw | ConvertFrom-Json -Depth 100
+    }
+
+    $script:CompareJsonCache[$resolved]
+}
+
+function Get-CompareStageDelta {
+    param(
+        [object]$Run,
+        [string]$StageName,
+        [ValidateSet("avgMs", "p95Ms")]
+        [string]$Statistic
+    )
+
+    $compare = Get-CompareJson -Path ([string]$Run.compare)
+    if ($null -eq $compare -or $null -eq $compare.stages) {
+        return $null
+    }
+
+    $stageProperty = $compare.stages.PSObject.Properties[$StageName]
+    if (-not $stageProperty) {
+        return $null
+    }
+
+    $statProperty = $stageProperty.Value.PSObject.Properties[$Statistic]
+    if (-not $statProperty) {
+        return $null
+    }
+
+    $deltaProperty = $statProperty.Value.PSObject.Properties["delta"]
+    if (-not $deltaProperty) {
+        return $null
+    }
+
+    $deltaProperty.Value
+}
+
 function Get-MatrixRuns {
     param([object]$Matrix)
 
@@ -38,10 +91,29 @@ function Get-MatrixRuns {
                 caseName = [string]$case.name
                 repeat = $run.repeat
                 runOrder = [string]$run.runOrder
+                compare = [string]$run.compare
                 verdict = [string]$run.verdict
                 elapsedDeltaMs = $run.elapsedDeltaMs
                 frameTotalAvgDeltaMs = $run.frameTotalAvgDeltaMs
                 frameTotalP95DeltaMs = $run.frameTotalP95DeltaMs
+                rawReadDecodeUnpackAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "raw_read_decode_unpack_ms" -Statistic "avgMs"
+                rawReadAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "raw_read_ms" -Statistic "avgMs"
+                rawDecodeAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "raw_decode_ms" -Statistic "avgMs"
+                rawUnpackAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "raw_unpack_ms" -Statistic "avgMs"
+                llrawprocAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "llrawproc_ms" -Statistic "avgMs"
+                dngHeaderAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_header_ms" -Statistic "avgMs"
+                dngPackAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_pack_ms" -Statistic "avgMs"
+                dngCompressAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "dng_compress_ms" -Statistic "avgMs"
+                diskWriteAvgDeltaMs =
+                    Get-CompareStageDelta -Run $run -StageName "disk_write_ms" -Statistic "avgMs"
                 payloadCloneAvgDeltaMs = $run.payloadCloneAvgDeltaMs
                 writerCompletionLagAvgDeltaMs = $run.writerCompletionLagAvgDeltaMs
                 writerQueueWaitAvgDeltaMs = $run.writerQueueWaitAvgDeltaMs
@@ -212,6 +284,15 @@ $metricNames = @(
     "elapsedDeltaMs",
     "frameTotalAvgDeltaMs",
     "frameTotalP95DeltaMs",
+    "rawReadDecodeUnpackAvgDeltaMs",
+    "rawReadAvgDeltaMs",
+    "rawDecodeAvgDeltaMs",
+    "rawUnpackAvgDeltaMs",
+    "llrawprocAvgDeltaMs",
+    "dngHeaderAvgDeltaMs",
+    "dngPackAvgDeltaMs",
+    "dngCompressAvgDeltaMs",
+    "diskWriteAvgDeltaMs",
     "payloadCloneAvgDeltaMs",
     "writerCompletionLagAvgDeltaMs",
     "writerQueueWaitAvgDeltaMs"

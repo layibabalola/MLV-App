@@ -341,8 +341,9 @@ The comparator now writes
 `release-cdng-export-matrix-calibration.v2`, fails closed on non-identity
 calibration inputs, non-feature candidate inputs, alternate-run-order mismatch,
 or case/repeat/run-order key mismatch, and includes per-case envelopes plus
-median/p95/positive-max summaries. Validation against the same alternating A/A
-and serial-payload matrices produced
+median/p95/positive-max summaries and stage-attribution metrics from each
+run's `compare.json`. Validation against the same alternating A/A and
+serial-payload matrices produced
 `.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration-v2/calibration.json`
 with `verdict=WITHIN_IDENTITY_ENVELOPE`, `compatible_keys=True`, and
 `modes_ok=True`; negative smokes under
@@ -443,6 +444,22 @@ Payload handoff cost averaged 0.01451 ms. This keeps the lossless payload result
 strictly in the correctness/tooling bucket: byte output is stable and the
 handoff itself is tiny, but the current short lossless timing envelope still
 blocks throughput promotion for that path.
+The broader lossless 16-frame x 3-repeat matrices at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-identity-matrix-16x3-e41e7de1/matrix-summary.json`
+and
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-payload-matrix-16x3-e41e7de1/matrix-summary.json`
+both passed 9/9; their hash sweeps each reported 144/144 matched DNG pairs with
+0 mismatches. The v2 calibration with stage attribution at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-calibration-16x3-e41e7de1/calibration-with-stage-attribution.json`
+still reported `verdict=EXCEEDS_IDENTITY_ENVELOPE`: frame-total p95 positive
+max was inside identity (81.4423 ms feature versus 95.7494 ms identity), but
+frame-total average positive max exceeded it (43.329938 ms feature versus
+23.927175 ms identity). Stage attribution puts the feature average miss mostly
+in `llrawproc_ms` (+8.180042 ms average), while `dng_compress_ms` and
+`disk_write_ms` stayed inside identity and payload handoff averaged 0.016103 ms.
+This strengthens the hold without pointing at payload-copy cost: the lossless
+payload boundary is byte-correct, but current timing evidence still needs either
+a stronger same-stage/noise model or a real scheduler win before promotion.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

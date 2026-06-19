@@ -83,7 +83,10 @@ input is `comparisonMode=identity-aa`, the feature input is
 `comparisonMode=feature-ab`, both matrices use matching alternate-run-order
 settings, and case/repeat/run-order keys match exactly. The JSON records global
 and per-case metric envelopes, median/p95/positive-max summaries, and
-`blockingReasons`; only global frame-total average and p95 envelopes decide
+stage-attribution metrics from each run's `compare.json` when available. Use
+those stage fields to explain a frame-total miss before assigning blame to a
+candidate scheduler or handoff. `blockingReasons` records the decisive gate;
+only global frame-total average and p95 envelopes decide
 `WITHIN_IDENTITY_ENVELOPE` versus `EXCEEDS_IDENTITY_ENVELOPE`.
 
 ## `perf_tests` harness
