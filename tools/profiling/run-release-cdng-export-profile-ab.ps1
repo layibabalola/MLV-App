@@ -137,6 +137,28 @@ function New-ElapsedDelta {
     }
 }
 
+function Get-CompareStageDelta {
+    param(
+        [object]$Compare,
+        [string]$StageName,
+        [ValidateSet("avgMs", "p50Ms", "p95Ms")]
+        [string]$Statistic
+    )
+
+    if ($null -eq $Compare -or $null -eq $Compare.stages) {
+        return $null
+    }
+    $stageProperty = $Compare.stages.PSObject.Properties[$StageName]
+    if ($null -eq $stageProperty -or $null -eq $stageProperty.Value) {
+        return $null
+    }
+    $statProperty = $stageProperty.Value.PSObject.Properties[$Statistic]
+    if ($null -eq $statProperty -or $null -eq $statProperty.Value) {
+        return $null
+    }
+    $statProperty.Value.delta
+}
+
 function Invoke-ProfileRun {
     param(
         [string]$Label,
@@ -343,6 +365,11 @@ $summary = [pscustomobject]@{
         producerQueueIdleP95DeltaMs = if ($compare -and $compare.stages.producer_queue_idle_ms) { $compare.stages.producer_queue_idle_ms.p95Ms.delta } else { $null }
         writerCompletionLagAvgDeltaMs = if ($compare -and $compare.stages.writer_completion_lag_ms) { $compare.stages.writer_completion_lag_ms.avgMs.delta } else { $null }
         writerCompletionLagP95DeltaMs = if ($compare -and $compare.stages.writer_completion_lag_ms) { $compare.stages.writer_completion_lag_ms.p95Ms.delta } else { $null }
+        llrawprocTotalAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_total_ms" -Statistic "avgMs"
+        llrawprocDualIsoAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_dual_iso_ms" -Statistic "avgMs"
+        llrawprocChromaSmoothAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_chroma_smooth_ms" -Statistic "avgMs"
+        llrawprocOtherAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "llrawproc_other_ms" -Statistic "avgMs"
+        dngCompressAvgDeltaMs = Get-CompareStageDelta -Compare $compare -StageName "dng_compress_ms" -Statistic "avgMs"
         failures = $compareFailures
     }
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS") { "PASS" } else { "FAIL" }
@@ -361,7 +388,8 @@ Write-Host ((
     "queue_idle_avg_delta_ms={18} payload_clone_avg_delta_ms={19} " +
     "writer_queue_wait_avg_delta_ms={20} producer_frame_avg_delta_ms={21} " +
     "producer_queue_idle_avg_delta_ms={22} writer_completion_lag_avg_delta_ms={23} " +
-    "output={24}") -f
+    "llrawproc_total_avg_delta_ms={24} llrawproc_dual_iso_avg_delta_ms={25} " +
+    "dng_compress_avg_delta_ms={26} output={27}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -386,6 +414,9 @@ Write-Host ((
     $summary.compare.producerFrameAvgDeltaMs,
     $summary.compare.producerQueueIdleAvgDeltaMs,
     $summary.compare.writerCompletionLagAvgDeltaMs,
+    $summary.compare.llrawprocTotalAvgDeltaMs,
+    $summary.compare.llrawprocDualIsoAvgDeltaMs,
+    $summary.compare.dngCompressAvgDeltaMs,
     $summaryJson
 )
 

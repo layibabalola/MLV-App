@@ -511,6 +511,11 @@ foreach ($case in $cases) {
             writerCompletionLagP95DeltaMs = if ($abSummary) { $abSummary.compare.writerCompletionLagP95DeltaMs } else { $null }
             writerQueueWaitAvgDeltaMs = if ($abSummary) { $abSummary.compare.writerQueueWaitAvgDeltaMs } else { $null }
             payloadCloneAvgDeltaMs = if ($abSummary) { $abSummary.compare.payloadCloneAvgDeltaMs } else { $null }
+            llrawprocTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocTotalAvgDeltaMs } else { $null }
+            llrawprocDualIsoAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocDualIsoAvgDeltaMs } else { $null }
+            llrawprocChromaSmoothAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocChromaSmoothAvgDeltaMs } else { $null }
+            llrawprocOtherAvgDeltaMs = if ($abSummary) { $abSummary.compare.llrawprocOtherAvgDeltaMs } else { $null }
+            dngCompressAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressAvgDeltaMs } else { $null }
             failures = @($failureList)
         }
 

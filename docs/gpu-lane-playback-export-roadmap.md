@@ -663,6 +663,23 @@ workload needed to justify scheduler-policy work. Next E3 work should either
 find or construct a true writer-dominant export scenario, or move to the next
 measured export bottleneck rather than widening async writer count again.
 
+Update 2026-06-19 Lane A E3 bottleneck breakdown: export stage profiles now
+include the same `llrawproc_*` substage split used by playback telemetry,
+including `llrawproc_total_ms`, dark-frame/stripe/focus/bad/pattern fixes,
+pre-dual-ISO fix, dual-ISO, chroma smoothing, shared/refine/publish lock time,
+and `llrawproc_other_ms`. A rebuilt release-tree smoke on
+`platform/qt/build-release/release/MLVApp.exe` at commit `5e0c92ae` wrote
+`.claude-state/profiling/2026-06-19-cdng-e3-llrawproc-breakdown-smoke-5e0c92ae/profile.json`
+from `C:\temp\MLV\M29-1756.MLV` with four lossless-output frames. The measured
+`frame_total_ms` average was 206.18 ms (4.85 FPS-equivalent). The dominant
+local bottlenecks were `llrawproc_total_ms` at 93.00 ms (10.75
+FPS-equivalent), entirely `llrawproc_dual_iso_ms` on this clip, and
+`dng_compress_ms` at 94.98 ms (10.53 FPS-equivalent). `disk_write_ms` stayed
+small at 2.04 ms (490.53 FPS-equivalent). This reinforces the async-writer HOLD
+decision on available local footage: the next E3 implementation should target
+dual-ISO/recon scheduling and/or compression placement/parallelism, not disk
+write overlap alone.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

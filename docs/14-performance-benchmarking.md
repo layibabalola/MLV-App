@@ -62,7 +62,9 @@ milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
 candidate async worker count/jobs started/jobs finished/max-active,
 frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
 writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
-(`payload_clone_ms`) deltas, and comparator failures. Treat
+(`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck
+deltas, and comparator failures. Full `llrawproc_*` substage timing remains in
+each run's export profile JSON. Treat
 `candidateAsyncWriterMaxActive=1` on a multi-worker candidate as evidence that
 extra workers did not overlap actual writes in that run, even if the configured
 thread count is higher. A tiny

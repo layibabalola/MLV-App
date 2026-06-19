@@ -101,6 +101,19 @@ typedef enum
     EXPORT_PROFILE_RAW_DECODE,
     EXPORT_PROFILE_RAW_UNPACK,
     EXPORT_PROFILE_LLRAWPROC,
+    EXPORT_PROFILE_LLRAWPROC_TOTAL,
+    EXPORT_PROFILE_LLRAWPROC_DARK_FRAME,
+    EXPORT_PROFILE_LLRAWPROC_VERTICAL_STRIPES,
+    EXPORT_PROFILE_LLRAWPROC_FOCUS_PIXELS,
+    EXPORT_PROFILE_LLRAWPROC_BAD_PIXELS,
+    EXPORT_PROFILE_LLRAWPROC_PATTERN_NOISE,
+    EXPORT_PROFILE_LLRAWPROC_PRE_DUALISO_FIX,
+    EXPORT_PROFILE_LLRAWPROC_DUAL_ISO,
+    EXPORT_PROFILE_LLRAWPROC_CHROMA_SMOOTH,
+    EXPORT_PROFILE_LLRAWPROC_SHARED_LOCK,
+    EXPORT_PROFILE_LLRAWPROC_DUALISO_REFINE_LOCK,
+    EXPORT_PROFILE_LLRAWPROC_PUBLISH_LOCK,
+    EXPORT_PROFILE_LLRAWPROC_OTHER,
     EXPORT_PROFILE_DNG_HEADER,
     EXPORT_PROFILE_DNG_PACK,
     EXPORT_PROFILE_DNG_COMPRESS,
@@ -176,6 +189,32 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_RAW_DECODE:   return "raw_decode_ms";
         case EXPORT_PROFILE_RAW_UNPACK:   return "raw_unpack_ms";
         case EXPORT_PROFILE_LLRAWPROC:    return "llrawproc_ms";
+        case EXPORT_PROFILE_LLRAWPROC_TOTAL:
+                                          return "llrawproc_total_ms";
+        case EXPORT_PROFILE_LLRAWPROC_DARK_FRAME:
+                                          return "llrawproc_dark_frame_ms";
+        case EXPORT_PROFILE_LLRAWPROC_VERTICAL_STRIPES:
+                                          return "llrawproc_vertical_stripes_ms";
+        case EXPORT_PROFILE_LLRAWPROC_FOCUS_PIXELS:
+                                          return "llrawproc_focus_pixels_ms";
+        case EXPORT_PROFILE_LLRAWPROC_BAD_PIXELS:
+                                          return "llrawproc_bad_pixels_ms";
+        case EXPORT_PROFILE_LLRAWPROC_PATTERN_NOISE:
+                                          return "llrawproc_pattern_noise_ms";
+        case EXPORT_PROFILE_LLRAWPROC_PRE_DUALISO_FIX:
+                                          return "llrawproc_pre_dualiso_fix_ms";
+        case EXPORT_PROFILE_LLRAWPROC_DUAL_ISO:
+                                          return "llrawproc_dual_iso_ms";
+        case EXPORT_PROFILE_LLRAWPROC_CHROMA_SMOOTH:
+                                          return "llrawproc_chroma_smooth_ms";
+        case EXPORT_PROFILE_LLRAWPROC_SHARED_LOCK:
+                                          return "llrawproc_shared_lock_ms";
+        case EXPORT_PROFILE_LLRAWPROC_DUALISO_REFINE_LOCK:
+                                          return "llrawproc_dualiso_refine_lock_ms";
+        case EXPORT_PROFILE_LLRAWPROC_PUBLISH_LOCK:
+                                          return "llrawproc_publish_lock_ms";
+        case EXPORT_PROFILE_LLRAWPROC_OTHER:
+                                          return "llrawproc_other_ms";
         case EXPORT_PROFILE_DNG_HEADER:   return "dng_header_ms";
         case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
         case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
@@ -417,6 +456,56 @@ static void export_profile_stage_end(exportProfileFrame_t * frame,
     }
     frame->stages_ms[stage] += export_profile_now_ms() - start_ms;
     frame->stage_mask |= (1u << stage);
+}
+
+static void export_profile_stage_set(exportProfileFrame_t * frame,
+                                     exportProfileStage_t stage,
+                                     double value_ms)
+{
+    if(frame == NULL || !frame->active || stage < 0 || stage >= EXPORT_PROFILE_STAGE_COUNT)
+    {
+        return;
+    }
+    frame->stages_ms[stage] = value_ms > 0.0 ? value_ms : 0.0;
+    frame->stage_mask |= (1u << stage);
+}
+
+static void export_profile_note_llrawproc_breakdown(exportProfileFrame_t * frame)
+{
+    const double dark_frame_ms = llrpGetLastDarkFrameMilliseconds();
+    const double vertical_stripes_ms = llrpGetLastVerticalStripesMilliseconds();
+    const double focus_pixels_ms = llrpGetLastFocusPixelsMilliseconds();
+    const double bad_pixels_ms = llrpGetLastBadPixelsMilliseconds();
+    const double pattern_noise_ms = llrpGetLastPatternNoiseMilliseconds();
+    const double dual_iso_ms = llrpGetLastDualIsoMilliseconds();
+    const double chroma_smooth_ms = llrpGetLastChromaSmoothMilliseconds();
+    const double total_ms = llrpGetLastTotalMilliseconds();
+    const double known_ms =
+        dark_frame_ms +
+        vertical_stripes_ms +
+        focus_pixels_ms +
+        bad_pixels_ms +
+        pattern_noise_ms +
+        dual_iso_ms +
+        chroma_smooth_ms;
+
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_TOTAL, total_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_DARK_FRAME, dark_frame_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_VERTICAL_STRIPES, vertical_stripes_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_FOCUS_PIXELS, focus_pixels_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_BAD_PIXELS, bad_pixels_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_PATTERN_NOISE, pattern_noise_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_PRE_DUALISO_FIX, llrpGetLastPreDualIsoFixMilliseconds());
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_DUAL_ISO, dual_iso_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_CHROMA_SMOOTH, chroma_smooth_ms);
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_SHARED_LOCK, llrpGetLastSharedLockMilliseconds());
+    export_profile_stage_set(frame,
+                             EXPORT_PROFILE_LLRAWPROC_DUALISO_REFINE_LOCK,
+                             llrpGetLastDualIsoRefineLockMilliseconds());
+    export_profile_stage_set(frame, EXPORT_PROFILE_LLRAWPROC_PUBLISH_LOCK, llrpGetLastPublishLockMilliseconds());
+    export_profile_stage_set(frame,
+                             EXPORT_PROFILE_LLRAWPROC_OTHER,
+                             total_ms > known_ms ? total_ms - known_ms : 0.0);
 }
 
 static void export_profile_note_producer_finish(exportProfileFrame_t * frame)
@@ -665,6 +754,19 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "raw_decode_ms", 1);
     export_profile_write_stage_stats(file, "raw_unpack_ms", 1);
     export_profile_write_stage_stats(file, "llrawproc_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_total_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_dark_frame_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_vertical_stripes_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_focus_pixels_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_bad_pixels_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_pattern_noise_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_pre_dualiso_fix_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_dual_iso_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_chroma_smooth_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_shared_lock_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_dualiso_refine_lock_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_publish_lock_ms", 1);
+    export_profile_write_stage_stats(file, "llrawproc_other_ms", 1);
     export_profile_write_stage_stats(file, "dng_header_ms", 1);
     export_profile_write_stage_stats(file, "dng_pack_ms", 1);
     export_profile_write_stage_stats(file, "dng_compress_ms", 1);
@@ -1673,6 +1775,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         profile_stage_start = export_profile_stage_begin(profile_frame);
         apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
+        export_profile_note_llrawproc_breakdown(profile_frame);
 
         if (dng_data->raw_output_state == COMPRESSED_RAW || dng_data->raw_output_state == COMPRESSED_ORIG)
         {
@@ -1737,6 +1840,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 profile_stage_start = export_profile_stage_begin(profile_frame);
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
+                export_profile_note_llrawproc_breakdown(profile_frame);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
@@ -1806,6 +1910,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 profile_stage_start = export_profile_stage_begin(profile_frame);
                 apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked, dng_data->image_size_unpacked);
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC, profile_stage_start);
+                export_profile_note_llrawproc_breakdown(profile_frame);
 
                 if(dng_data->raw_output_state == COMPRESSED_RAW)
                 {
