@@ -376,6 +376,19 @@ wrappers carry the same selector into single, A/B, and matrix runs. This is
 tooling for the next E3 proof: it makes a representative lossless-output,
 writer/heavier-compress matrix possible without broadening the production
 default or changing GUI export behavior.
+The committed-build lossless smoke at
+`.claude-state/profiling/2026-06-19-cdng-codec-lossless-smoke-037d3d59/profile.json`
+ran build `037d3d5940e4989eac5ba6f3d74b289225819af0`, logged
+`cdng-codec=lossless`, exported two `compressed_raw` frames, and recorded two
+`dng_compress_ms` samples (average 58.84905 ms). The matching lossless
+payload-handoff A/B smoke at
+`.claude-state/profiling/2026-06-19-cdng-codec-lossless-payload-ab-037d3d59/summary.json`
+reported `cdngCodec=lossless`, `verdict=PASS`, and the two baseline/candidate
+DNG pairs matched byte-for-byte
+(`A4356D40D811982CF08D0900F5AC68B5C7A76B0918B614AA71E63DAD9F9838A1` and
+`7D6D00C078EAE41326F1801DFBCD3A5872D7DFDADE962CBC90E71616EF758D51`). This
+proves the lossless profiling surface and serial payload boundary work together
+on a two-frame smoke; it is not a throughput promotion or scheduler claim.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
