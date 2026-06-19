@@ -774,6 +774,11 @@ inline const char * playbackQualityAutoDecisionReasonName(
     return "unknown";
 }
 
+inline double playbackQualityFpsEquivalentForFrameMs( double frameMs )
+{
+    return frameMs > 0.0 ? 1000.0 / frameMs : 0.0;
+}
+
 struct PlaybackQualityAutoSampler
 {
     static constexpr size_t kSlidingWindow = 16;

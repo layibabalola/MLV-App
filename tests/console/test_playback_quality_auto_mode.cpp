@@ -66,6 +66,14 @@ TEST(PlaybackQualityModeOverride, RejectsInvalidValues)
     ASSERT_EQ( 123, mode );
 }
 
+TEST(PlaybackQualityAutoTelemetry, ConvertsMillisecondsToFpsEquivalent)
+{
+    ASSERT_NEAR( 62.5, playbackQualityFpsEquivalentForFrameMs( 16.0 ), 0.001 );
+    ASSERT_NEAR( 30.0, playbackQualityFpsEquivalentForFrameMs( 1000.0 / 30.0 ), 0.001 );
+    ASSERT_NEAR( 0.0, playbackQualityFpsEquivalentForFrameMs( 0.0 ), 0.001 );
+    ASSERT_NEAR( 0.0, playbackQualityFpsEquivalentForFrameMs( -5.0 ), 0.001 );
+}
+
 TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
 {
     PlaybackQualityAutoSampler s;

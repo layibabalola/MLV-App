@@ -16416,15 +16416,24 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             "Keyboard shortcut: Q" );
     if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto ) )
     {
+        const double autoAverageFps =
+            playbackQualityFpsEquivalentForFrameMs(
+                m_playbackQualityAutoDecisionAverageMs );
+        const double autoBudgetFps =
+            playbackQualityFpsEquivalentForFrameMs(
+                m_playbackQualityAutoDecisionBudgetMs );
         const QString autoDetail = tr(
-            "\nAuto decision: %1; samples=%2/%3; avg=%4 ms; budget=%5 ms at %6 fps." )
+            "\nAuto decision: %1; samples=%2/%3; avg=%4 ms (%5 fps-eq); "
+            "budget=%6 ms (%7 fps-eq) at target %8 fps." )
             .arg( QString::fromLatin1(
                       playbackQualityAutoDecisionReasonName(
                           m_playbackQualityAutoDecisionReason ) ) )
             .arg( static_cast<qulonglong>( m_playbackQualityAutoDecisionSampleCount ) )
             .arg( static_cast<qulonglong>( PlaybackQualityAutoSampler::kSlidingWindow ) )
             .arg( m_playbackQualityAutoDecisionAverageMs, 0, 'f', 3 )
+            .arg( autoAverageFps, 0, 'f', 3 )
             .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
+            .arg( autoBudgetFps, 0, 'f', 3 )
             .arg( m_playbackAutoTargetFps );
         indicatorTooltip += autoDetail;
         toolButtonTooltip += autoDetail;
@@ -19692,7 +19701,8 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                "avg_playback_prep_total_before_finish_ms=%52 "
                "playback_prep_inline_present_frames=%53 "
                "auto_target_fps=%54 auto_reason_last=%55 "
-               "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58" )
+               "auto_avg_ms=%56 auto_budget_ms=%57 auto_sample_count=%58 "
+               "auto_avg_fps_equivalent=%59 auto_budget_fps_equivalent=%60" )
                .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                .arg( QString::fromLatin1( reason ? reason : "unknown" ) )
                .arg( elapsedMs, 0, 'f', 3 )
@@ -19757,7 +19767,11 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( m_playbackQualityAutoDecisionAverageMs, 0, 'f', 3 )
                .arg( m_playbackQualityAutoDecisionBudgetMs, 0, 'f', 3 )
                .arg( static_cast<qulonglong>(
-                   m_playbackQualityAutoDecisionSampleCount ) );
+                   m_playbackQualityAutoDecisionSampleCount ) )
+               .arg( playbackQualityFpsEquivalentForFrameMs(
+                         m_playbackQualityAutoDecisionAverageMs ), 0, 'f', 3 )
+               .arg( playbackQualityFpsEquivalentForFrameMs(
+                         m_playbackQualityAutoDecisionBudgetMs ), 0, 'f', 3 );
 
     qInfo().noquote()
         << QStringLiteral(

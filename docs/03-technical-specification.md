@@ -1287,6 +1287,9 @@ a CPU16-readback Bayer frame. `gpu_texture_no_readback` means the scoped
 CUDA-to-GL R16 texture path actually presented the frame without per-frame CPU
 readback; unsupported or raw-fixes-off states must stay out of that bucket.
 Downstream baselines should treat the two texture statuses as distinct.
+`playback_smoke.summary` also reports Auto-mode cadence in both milliseconds and
+FPS-equivalent form: `auto_avg_ms`, `auto_avg_fps_equivalent`,
+`auto_budget_ms`, and `auto_budget_fps_equivalent`.
 
 ### 12.1 Cadence and render thread
 
