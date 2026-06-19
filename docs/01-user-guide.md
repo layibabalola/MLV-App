@@ -695,6 +695,15 @@ the sharpest paused view, **x4** for the smoothest preview, and **Auto**
 to follow the current quality mode and sampler. The scale control is a
 UI equivalent of the old `MLVAPP_PLAYBACK_SCALE_FACTOR` override.
 
+**Playback → Playback Quality → Mode** defaults to **Auto**. Auto starts
+from a quality-preserving preview choice, watches the measured playback
+cadence, and only sharpens beyond the conservative default after the app has
+observed a validated no-readback GPU presentation path in the current playback
+run. **Prioritize Quality** keeps the high-quality path and falls back to
+software when the scoped GPU path cannot satisfy it. **Prioritize Smoothness**
+allows preview-oriented reductions to keep editing responsive, while paused
+inspection and export remain full quality unless explicitly changed elsewhere.
+
 ---
 
 ## 9. Analysis tools
