@@ -120,6 +120,10 @@ The same reset path now also reseeds the active Auto scale/HQ decision to the
 current mode's initial state, and clip open reseeds after the new object becomes
 current, so stale x2/headroom or Fast-demotion decisions cannot leak into a new
 run before the sampler and capability gate observe that context.
+The default/fallback path now uses the same configured `Auto` default for
+missing, invalid, corrupt, or unavailable hidden Phase3 quality settings instead
+of silently falling back to legacy `Fast`, with console coverage in
+`PlaybackQualitySettings.RoundTripQualityMode`.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,
