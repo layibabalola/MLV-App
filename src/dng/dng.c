@@ -99,6 +99,7 @@ typedef enum
     EXPORT_PROFILE_DNG_PACK,
     EXPORT_PROFILE_DNG_COMPRESS,
     EXPORT_PROFILE_DISK_WRITE,
+    EXPORT_PROFILE_QUEUE_IDLE,
     EXPORT_PROFILE_FRAME_TOTAL,
     EXPORT_PROFILE_STAGE_COUNT
 } exportProfileStage_t;
@@ -125,6 +126,7 @@ static char g_export_profile_path[EXPORT_PROFILE_PATH_MAX] = "";
 static char g_export_profile_build_id[EXPORT_PROFILE_BUILD_ID_MAX] = "";
 static int g_export_profile_atexit_registered = 0;
 static int g_export_profile_write_in_progress = 0;
+static double g_export_profile_last_frame_finish_ms = 0.0;
 
 static int export_profile_env_truthy(const char * value)
 {
@@ -160,6 +162,7 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
         case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
         case EXPORT_PROFILE_DISK_WRITE:   return "disk_write_ms";
+        case EXPORT_PROFILE_QUEUE_IDLE:   return "queue_idle_ms";
         case EXPORT_PROFILE_FRAME_TOTAL:  return "frame_total_ms";
         default:                          return "unknown_ms";
     }
@@ -198,6 +201,7 @@ static void export_profile_reset_frames(void)
     g_export_profile_frames = NULL;
     g_export_profile_frame_count = 0;
     g_export_profile_frame_capacity = 0;
+    g_export_profile_last_frame_finish_ms = 0.0;
 }
 
 static int export_profile_configure_from_env(void)
@@ -247,11 +251,18 @@ static void export_profile_frame_begin(exportProfileFrame_t * frame,
     memset(frame, 0, sizeof(*frame));
     if(!export_profile_configure_from_env()) return;
 
+    const double frame_start_ms = export_profile_now_ms();
     frame->active = 1;
     frame->frame_index = frame_index;
     frame->raw_input_state = dng_data ? dng_data->raw_input_state : -1;
     frame->raw_output_state = dng_data ? dng_data->raw_output_state : -1;
     frame->success = 0;
+    if(g_export_profile_last_frame_finish_ms > 0.0)
+    {
+        const double idle_ms = frame_start_ms - g_export_profile_last_frame_finish_ms;
+        frame->stages_ms[EXPORT_PROFILE_QUEUE_IDLE] = idle_ms > 0.0 ? idle_ms : 0.0;
+        frame->stage_mask |= (1u << EXPORT_PROFILE_QUEUE_IDLE);
+    }
     export_profile_copy_string(frame->clip_path,
                                sizeof(frame->clip_path),
                                mlv_data ? mlv_data->path : "");
@@ -277,6 +288,7 @@ static void export_profile_stage_end(exportProfileFrame_t * frame,
 static void export_profile_frame_finish(exportProfileFrame_t * frame, int success)
 {
     exportProfileFrame_t * next = NULL;
+    const double finish_ms = export_profile_now_ms();
     if(frame == NULL || !frame->active) return;
 
     frame->success = success ? 1 : 0;
@@ -285,13 +297,18 @@ static void export_profile_frame_finish(exportProfileFrame_t * frame, int succes
         size_t new_capacity = g_export_profile_frame_capacity ? g_export_profile_frame_capacity * 2 : 64;
         exportProfileFrame_t * grown = (exportProfileFrame_t*)realloc(g_export_profile_frames,
             new_capacity * sizeof(exportProfileFrame_t));
-        if(grown == NULL) return;
+        if(grown == NULL)
+        {
+            g_export_profile_last_frame_finish_ms = finish_ms;
+            return;
+        }
         g_export_profile_frames = grown;
         g_export_profile_frame_capacity = new_capacity;
     }
 
     next = &g_export_profile_frames[g_export_profile_frame_count++];
     *next = *frame;
+    g_export_profile_last_frame_finish_ms = finish_ms;
 }
 
 static int export_profile_double_compare(const void * lhs, const void * rhs)
@@ -441,7 +458,7 @@ static void export_profile_write_json(void)
     export_profile_write_json_string(file, generated);
     fputs(",\n", file);
     fprintf(file, "  \"frame_count\":%u,\n", (unsigned)g_export_profile_frame_count);
-    fputs("  \"queue_idle_supported\":false,\n", file);
+    fputs("  \"queue_idle_supported\":true,\n", file);
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);
@@ -452,8 +469,8 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "dng_pack_ms", 1);
     export_profile_write_stage_stats(file, "dng_compress_ms", 1);
     export_profile_write_stage_stats(file, "disk_write_ms", 1);
+    export_profile_write_stage_stats(file, "queue_idle_ms", 1);
     export_profile_write_stage_stats(file, "frame_total_ms", 1);
-    fputs(",\n    \"queue_idle_ms\":{\"supported\":false,\"samples\":0,\"avg_ms\":0,\"p50_ms\":0,\"p95_ms\":0}\n", file);
     fputs("  },\n", file);
     fputs("  \"frames\":[\n", file);
     for(size_t i = 0; i < g_export_profile_frame_count; i++)

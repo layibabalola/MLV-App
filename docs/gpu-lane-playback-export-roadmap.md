@@ -79,6 +79,14 @@ that reports screenshot pixel deltas, GUI/presented/timeline FPS deltas, and an
 optional screenshot-drift failure verdict from two `run-release-gui-smoke.ps1`
 JSON outputs.
 
+Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
+`queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,
+while later frames measure the elapsed time between the previous profiled frame
+finishing and the next `saveDngFrame` call beginning. This keeps current serial
+exports byte-inert while giving future pipelined export experiments a scheduler
+starvation/overlap signal before CPU decode workers, the single GPU recon queue,
+or CPU compress/write workers are promoted.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -132,7 +140,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas and fail on frame-total regressions before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, and the profiler emits supported `queue_idle_ms` samples after the first frame, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap deltas, and frame-total regressions before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback

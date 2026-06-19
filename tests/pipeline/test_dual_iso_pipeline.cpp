@@ -23,6 +23,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
@@ -315,6 +316,15 @@ static void assert_profiler_json_has_stage(const QJsonObject & stages,
     ASSERT_TRUE(stage.value(QStringLiteral("samples")).toInt() >= 1);
 }
 
+static void assert_profiler_json_has_stage_with_min_samples(const QJsonObject & stages,
+                                                           const QString & stage_name,
+                                                           int min_samples)
+{
+    ASSERT_TRUE(stages.contains(stage_name));
+    const QJsonObject stage = stages.value(stage_name).toObject();
+    ASSERT_TRUE(stage.value(QStringLiteral("samples")).toInt(-1) >= min_samples);
+}
+
 static void assert_profiler_json_valid_for_raw_state(const QString & profile_path,
                                                      int raw_state)
 {
@@ -325,12 +335,13 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.value(QStringLiteral("schema")).toString()
                 == QStringLiteral("mlvapp.export_stage_profile.v1"));
     ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 1);
-    ASSERT_FALSE(root.value(QStringLiteral("queue_idle_supported")).toBool(true));
+    ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("disk_write_ms"));
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("queue_idle_ms"), 0);
     assert_profiler_json_has_stage(stages, QStringLiteral("frame_total_ms"));
     if (raw_state == COMPRESSED_RAW) {
         assert_profiler_json_has_stage(stages, QStringLiteral("dng_compress_ms"));
@@ -1778,6 +1789,55 @@ TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressed
         ASSERT_TRUE(QFile::exists(on_profile));
         assert_profiler_json_valid_for_raw_state(on_profile, raw_state);
     }
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+}
+
+TEST(DualIsoPipeline, ExportStageProfilerRecordsQueueIdleBetweenFrameSaves)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString profile_path = temp_dir.filePath(QStringLiteral("queue-idle.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("queue-idle-test"));
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> warm = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!warm.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    const QString first_path = temp_dir.filePath(QStringLiteral("first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("second.dng"));
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(), dng, 0, first_path_bytes.data(), nullptr));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(0, saveDngFrame(fixture.video(), dng, 0, second_path_bytes.data(), nullptr));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
+    ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 2);
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    const QJsonObject queue_idle = stages.value(QStringLiteral("queue_idle_ms")).toObject();
+    ASSERT_TRUE(queue_idle.value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(queue_idle.value(QStringLiteral("avg_ms")).toDouble(-1.0) >= 0.0);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 2);
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("queue_idle_ms")));
 
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
