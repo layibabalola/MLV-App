@@ -283,6 +283,33 @@ static GpuAmazeDebayerBackendRequest parsePlaybackProfileGpuAmazeDebayerBackend(
     return GpuAmazeDebayerBackendRequest::Auto;
 }
 
+static int parseBatchCdngCodecOffset(const QString & value, bool * ok)
+{
+    if (ok) *ok = true;
+
+    const QString normalized = value.trimmed().toLower();
+    if (normalized.isEmpty()
+     || normalized == QStringLiteral("uncompressed")
+     || normalized == QStringLiteral("default"))
+    {
+        return 0;
+    }
+    if (normalized == QStringLiteral("lossless")
+     || normalized == QStringLiteral("compressed"))
+    {
+        return 1;
+    }
+    if (normalized == QStringLiteral("fast")
+     || normalized == QStringLiteral("fast-pass")
+     || normalized == QStringLiteral("fastpass"))
+    {
+        return 2;
+    }
+
+    if (ok) *ok = false;
+    return 0;
+}
+
 static int runBatch(QCoreApplication &app)
 {
     QCommandLineParser parser;
@@ -353,6 +380,12 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("count"));
     parser.addOption(maxFramesOpt);
 
+    QCommandLineOption cdngCodecOpt(
+        QStringLiteral("cdng-codec"),
+        QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
+        QStringLiteral("mode"));
+    parser.addOption(cdngCodecOpt);
+
     parser.process(app);
 
     /* Init log file mirror as early as possible so that --help and
@@ -386,6 +419,7 @@ static int runBatch(QCoreApplication &app)
 
     bool resume         = parser.isSet(resumeOpt);
     uint maxFrames      = 0;
+    int cdngCodecOffset = 0;
     if( parser.isSet(maxFramesOpt) )
     {
         bool ok = false;
@@ -393,6 +427,18 @@ static int runBatch(QCoreApplication &app)
         if( !ok || maxFrames == 0 )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: --max-frames must be a positive integer.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( parser.isSet(cdngCodecOpt) )
+    {
+        bool ok = false;
+        cdngCodecOffset = parseBatchCdngCodecOffset(parser.value(cdngCodecOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --cdng-codec must be one of: uncompressed, lossless, fast-pass.\n\n"));
             BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
             BatchLogger::shutdown();
             return 2;
@@ -408,6 +454,7 @@ static int runBatch(QCoreApplication &app)
     BatchContext::setUseDefaultReceipt(useDefaultReceipt);
     BatchContext::setResumeEnabled(resume);
     BatchContext::setMaxFrames(static_cast<uint32_t>(maxFrames));
+    BatchContext::setCdngCodecOffset(cdngCodecOffset);
 
     int exitCode = BatchRunner::run(inputPath, outputPath);
     BatchLogger::shutdown();

@@ -29,6 +29,7 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -RepoRoot . `
   -CasesPath .claude-state\profiling\cdng-export-cases.json `
   -OutputDir .claude-state\profiling\2026-06-19-cdng-export-matrix `
+  -CdngCodec lossless `
   -CandidateUsePayloadHandoff `
   -CandidateUseAsyncWriter `
   -CandidateAsyncWriterQueueDepth 2 `
@@ -46,6 +47,7 @@ Cases are JSON objects with repo-relative or absolute paths:
       "name": "m16-1210-master",
       "clipPath": "C:/temp/MLV/M16-1210.MLV",
       "receipt": "C:/temp/MLV/master.marxml",
+      "cdngCodec": "lossless",
       "maxFrames": 16,
       "repeats": 3
     }
@@ -53,12 +55,12 @@ Cases are JSON objects with repo-relative or absolute paths:
 }
 ```
 
-The matrix summary records case/run verdicts, baseline/candidate frame counts,
-baseline/candidate wrapper elapsed milliseconds, elapsed deltas, candidate
-async queue capacity/max-queued, frame-total avg/p95 deltas, producer-frame
-deltas, producer-queue-idle deltas, writer-completion-lag deltas,
-writer-queue-wait deltas, payload handoff (`payload_clone_ms`) deltas, and
-comparator failures. A tiny
+The matrix summary records case/run verdicts, selected CDNG codec,
+baseline/candidate frame counts, baseline/candidate wrapper elapsed
+milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
+frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
+writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
+(`payload_clone_ms`) deltas, and comparator failures. A tiny
 checked-in fixture matrix is only a schema/tooling smoke; E3 promotion needs a
 bounded real-footage matrix whose clips, receipts, frame caps, and repeats match
 the export scenario being judged.

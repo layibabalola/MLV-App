@@ -639,7 +639,7 @@ and dispatches to one of three headless modes if the relevant flag is present.
 Drives a full session through `BatchRunner::run()` in `src/batch/`:
 
 ```bash
-MLVApp --batch --input <file-or-folder> --output <dir> [--receipt <file.marxml>] [--default-receipt] [--skip-errors] [--resume] [--max-frames <count>] [--log <file>] [--verbose]
+MLVApp --batch --input <file-or-folder> --output <dir> [--receipt <file.marxml>] [--default-receipt] [--cdng-codec <uncompressed|lossless|fast-pass>] [--skip-errors] [--resume] [--max-frames <count>] [--log <file>] [--verbose]
 ```
 
 `--input`/`-i` is a single `.mlv` or a folder (recursed for MLVs);
@@ -647,8 +647,10 @@ MLVApp --batch --input <file-or-folder> --output <dir> [--receipt <file.marxml>]
 `.marxml` to every clip; `--default-receipt` uses the GUI-configured default;
 `--skip-errors` continues past corrupt frames; `--resume` skips clips whose
 DNG output already matches the expected frame count; `--max-frames` clamps each
-clip to a bounded export window after receipt cut-in/cut-out resolution. Exit
-codes: `0` success, `2` missing/invalid arguments, non-zero on runtime errors.
+clip to a bounded export window after receipt cut-in/cut-out resolution.
+`--cdng-codec` selects the existing CDNG output mode for headless export:
+`uncompressed` (default), `lossless`, or `fast-pass`. Exit codes: `0` success,
+`2` missing/invalid arguments, non-zero on runtime errors.
 
 When the effective receipt has `lookAssistEnabled`, batch export copies the
 receipt per input clip and runs headless Look Assist before writing the DNG

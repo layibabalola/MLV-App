@@ -7,6 +7,8 @@ param(
     [Alias("Output")]
     [string]$ProfileOutput = "",
     [string]$Receipt = "",
+    [ValidateSet("", "uncompressed", "lossless", "fast-pass")]
+    [string]$CdngCodec = "",
     [string]$Log = "",
     [string]$BuildId = "",
     [switch]$SkipErrors,
@@ -147,6 +149,9 @@ try {
     if ($MaxFrames -gt 0) {
         $arguments += @("--max-frames", "$MaxFrames")
     }
+    if (-not [string]::IsNullOrWhiteSpace($CdngCodec)) {
+        $arguments += @("--cdng-codec", $CdngCodec)
+    }
     if ($AdditionalArgs.Count -gt 0) {
         $arguments += $AdditionalArgs
     }
@@ -214,6 +219,7 @@ try {
             dngOutputDir = $dngDir
             buildId = $effectiveBuildId
             maxFrames = $MaxFrames
+            cdngCodec = $CdngCodec
             qwindowsExists = $true
             environment = [pscustomobject]@{
                 QT_QPA_PLATFORM = $envBlock["QT_QPA_PLATFORM"]

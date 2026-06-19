@@ -7,6 +7,7 @@ bool BatchContext::s_verbose = false;
 bool BatchContext::s_useDefaultReceipt = false;
 bool BatchContext::s_resumeEnabled = false;
 uint32_t BatchContext::s_maxFrames = 0;
+int BatchContext::s_cdngCodecOffset = 0;
 QString BatchContext::s_logPath;
 QString BatchContext::s_receiptPath;
 
@@ -33,3 +34,6 @@ bool BatchContext::resumeEnabled() { return s_resumeEnabled; }
 
 void BatchContext::setMaxFrames(uint32_t frames) { s_maxFrames = frames; }
 uint32_t BatchContext::maxFrames() { return s_maxFrames; }
+
+void BatchContext::setCdngCodecOffset(int offset) { s_cdngCodecOffset = offset; }
+int BatchContext::cdngCodecOffset() { return s_cdngCodecOffset; }

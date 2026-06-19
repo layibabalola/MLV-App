@@ -142,7 +142,11 @@ current `MLVApp.exe --batch` CDNG export path with
 `MLVAPP_EXPORT_STAGE_PROFILER=1` and writes the profile JSON next to the exported
 DNG output bundle. The runner can pass a bounded `-MaxFrames` cap through to
 batch `--max-frames`, so real-footage probes can avoid unbounded DNG output
-before full benchmark matrices are intentional. `tools/profiling/compare-export-stage-profiles.ps1` now
+before full benchmark matrices are intentional. Headless batch export now also
+accepts `--cdng-codec uncompressed|lossless|fast-pass`, and the profiling
+wrappers expose that as `-CdngCodec` / per-case `cdngCodec`, so E3 can run a
+representative lossless-DNG writer-heavy matrix without changing the default
+uncompressed batch path. `tools/profiling/compare-export-stage-profiles.ps1` now
 summarizes frame-total avg/p95 deltas plus queue-idle avg/p95 deltas in stdout,
 and `-FailOnRegression` gates both avg and p95 frame-total regressions.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` wraps the paired
@@ -363,6 +367,15 @@ validates queue-capacity mechanics under synthetic writer backpressure, not a
 real throughput win; async writer promotion still needs a representative
 writer-heavy workload or scheduler result that beats the serial payload boundary
 without DNG mismatches.
+
+Batch CDNG codec selector:
+`MLVApp --batch` still defaults to uncompressed CDNG, but `--cdng-codec
+lossless` now selects the existing lossless-JPEG DNG path and `--cdng-codec
+fast-pass` selects the existing pass-through mode. The release profiling
+wrappers carry the same selector into single, A/B, and matrix runs. This is
+tooling for the next E3 proof: it makes a representative lossless-output,
+writer/heavier-compress matrix possible without broadening the production
+default or changing GUI export behavior.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

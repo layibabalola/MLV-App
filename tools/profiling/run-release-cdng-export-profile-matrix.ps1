@@ -5,6 +5,8 @@ param(
     [Alias("Input")]
     [string]$ClipPath = "",
     [string]$Receipt = "",
+    [ValidateSet("", "uncompressed", "lossless", "fast-pass")]
+    [string]$CdngCodec = "",
     [string]$CaseName = "",
     [string]$OutputDir = "",
     [string]$BuildId = "",
@@ -113,6 +115,28 @@ function Convert-ToIntOrDefault {
     $parsed
 }
 
+function Convert-ToCdngCodecOrDefault {
+    param(
+        [object]$Value,
+        [string]$DefaultValue
+    )
+
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $DefaultValue
+    }
+    $normalized = ([string]$Value).Trim().ToLowerInvariant()
+    switch ($normalized) {
+        "default" { return "uncompressed" }
+        "uncompressed" { return "uncompressed" }
+        "lossless" { return "lossless" }
+        "compressed" { return "lossless" }
+        "fast" { return "fast-pass" }
+        "fastpass" { return "fast-pass" }
+        "fast-pass" { return "fast-pass" }
+        default { throw "Invalid CDNG codec '$Value'. Use uncompressed, lossless, or fast-pass." }
+    }
+}
+
 function Convert-ToPathForCase {
     param(
         [string]$Path,
@@ -204,6 +228,7 @@ function Read-MatrixCases {
                 name = $(if ([string]::IsNullOrWhiteSpace($CaseName)) { "case-1" } else { $CaseName })
                 clipPath = $ClipPath
                 receipt = $Receipt
+                cdngCodec = $CdngCodec
                 maxFrames = $MaxFrames
                 repeats = $Repeats
             })
@@ -227,6 +252,9 @@ function Read-MatrixCases {
 
         $caseClip = [string](Get-ObjectProperty -Object $rawCase -Names @("clipPath", "clip", "input", "inputPath"))
         $caseReceipt = [string](Get-ObjectProperty -Object $rawCase -Names @("receipt", "receiptPath"))
+        $caseCdngCodec = Convert-ToCdngCodecOrDefault `
+            -Value (Get-ObjectProperty -Object $rawCase -Names @("cdngCodec", "cdng_codec", "codec")) `
+            -DefaultValue $CdngCodec
         $caseMaxFrames = Convert-ToIntOrDefault `
             -Value (Get-ObjectProperty -Object $rawCase -Names @("maxFrames", "max_frames")) `
             -DefaultValue $MaxFrames
@@ -247,6 +275,7 @@ function Read-MatrixCases {
             safeName = Convert-ToSafeName -Name $rawName
             clipPath = Convert-ToPathForCase -Path $caseClip -Label "clip" -Required $true
             receipt = Convert-ToPathForCase -Path $caseReceipt -Label "receipt" -Required $false
+            cdngCodec = $caseCdngCodec
             maxFrames = $caseMaxFrames
             repeats = $caseRepeats
         }
@@ -281,6 +310,9 @@ function New-AbArgs {
     }
     if (-not [string]::IsNullOrWhiteSpace($Case.receipt)) {
         $args += @("-Receipt", $Case.receipt)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Case.cdngCodec)) {
+        $args += @("-CdngCodec", $Case.cdngCodec)
     }
     if (-not [string]::IsNullOrWhiteSpace($BuildId)) {
         $args += @("-BuildId", "$BuildId-$($Case.safeName)-r$RepeatIndex")
@@ -356,6 +388,7 @@ foreach ($case in $cases) {
         name = $case.name
         clipPath = $case.clipPath
         receipt = $case.receipt
+        cdngCodec = $case.cdngCodec
         maxFrames = $case.maxFrames
         repeats = $case.repeats
         runs = $repeatPlans
@@ -370,6 +403,7 @@ if ($DryRun) {
         defaults = [pscustomobject]@{
             repeats = $Repeats
             maxFrames = $MaxFrames
+            cdngCodec = $CdngCodec
             comparisonMode = $comparisonMode
             isIdentityComparison = $isIdentityComparison
             baselineUsePayloadHandoff = [bool]$BaselineUsePayloadHandoff
@@ -443,6 +477,7 @@ foreach ($case in $cases) {
             compare = $comparePath
             exitCode = $exitCode
             verdict = $verdict
+            cdngCodec = if ($abSummary) { $abSummary.cdngCodec } else { $case.cdngCodec }
             error = $errorMessage
             baselineFrameCount = if ($abSummary) { $abSummary.baseline.frameCount } else { $null }
             candidateFrameCount = if ($abSummary) { $abSummary.candidate.frameCount } else { $null }
@@ -475,6 +510,7 @@ foreach ($case in $cases) {
         name = $case.name
         clipPath = $case.clipPath
         receipt = $case.receipt
+        cdngCodec = $case.cdngCodec
         maxFrames = $case.maxFrames
         repeats = $case.repeats
         verdict = $caseVerdict
@@ -504,6 +540,7 @@ $matrix = [pscustomobject]@{
         candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
         baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
         candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+        cdngCodec = $CdngCodec
         alternateRunOrder = [bool]$AlternateRunOrder
         enableGpuExport = [bool]$EnableGpuExport
         buildId = $BuildId
@@ -521,11 +558,12 @@ $matrix = [pscustomobject]@{
 $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
 Write-Host (((
-    "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} alternate_run_order={2} " +
-    "cases={3} runs={4} pass={5} fail={6} candidate_payload={7} " +
-    "candidate_async={8} candidate_async_queue_depth={9} elapsed_delta_ms_field=True output={10}") -f
+    "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} cdng_codec={2} alternate_run_order={3} " +
+    "cases={4} runs={5} pass={6} fail={7} candidate_payload={8} " +
+    "candidate_async={9} candidate_async_queue_depth={10} elapsed_delta_ms_field=True output={11}") -f
     $matrix.verdict,
     $matrix.comparisonMode,
+    $(if ([string]::IsNullOrWhiteSpace($matrix.options.cdngCodec)) { "default" } else { $matrix.options.cdngCodec }),
     [bool]$AlternateRunOrder,
     $matrix.totals.caseCount,
     $matrix.totals.runCount,

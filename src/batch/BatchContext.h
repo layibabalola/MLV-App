@@ -35,6 +35,9 @@ public:
     static void setMaxFrames(uint32_t frames);
     static uint32_t maxFrames();
 
+    static void setCdngCodecOffset(int offset);
+    static int cdngCodecOffset();
+
 private:
     BatchContext() = delete; /* Pure static — no instances */
 
@@ -44,6 +47,7 @@ private:
     static bool s_useDefaultReceipt;
     static bool s_resumeEnabled;
     static uint32_t s_maxFrames;
+    static int s_cdngCodecOffset;
     static QString s_logPath;
     static QString s_receiptPath;
 };

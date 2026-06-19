@@ -1252,7 +1252,7 @@ happen pre-Qt because `--batch` and `--trim-mlv` must not bring up a
 
 | Flag | Entry point | Description |
 |---|---|---|
-| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`, `--max-frames`. |
+| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`, `--max-frames`, `--cdng-codec {uncompressed\|lossless\|fast-pass}`. |
 | `--trim-mlv` | `MlvTrim::run(QCoreApplication &)` | MLV segment trim / reconstruction. Stand-alone utility. |
 | `--profile-playback` | `runPlaybackProfile(QApplication)` (`main.cpp:346+`) | Headless playback profiler. Emits JSON to `--output`. Stacks arbitrary other `--*` options; see §5.8 `PlaybackProfileOptions`. |
 | `--gpu-viewport` | Passed through to `MainWindow` ctor | Forces experimental GL viewport for this run. |
@@ -1548,6 +1548,9 @@ Controlled by `raw_state` on `dngObject_t`:
 
 ExportSettingsDialog surfaces "Default / Resolve / Fast" flavours which
 are presets over these plus per-frame sidecar generation (`.dng.xmp`).
+Headless `--batch` defaults to `UNCOMPRESSED_RAW`; `--cdng-codec lossless`
+selects `COMPRESSED_RAW`, and `--cdng-codec fast-pass` selects the existing
+pass-through mode.
 
 ---
 

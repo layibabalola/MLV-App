@@ -18,6 +18,21 @@
 #include "../../platform/qt/StretchFactors.h"
 #include "../../platform/qt/ReceiptSettings.h"
 
+static QString batchCdngCodecName(int offset)
+{
+    switch(offset)
+    {
+        case 1:  return QStringLiteral("lossless");
+        case 2:  return QStringLiteral("fast-pass");
+        default: return QStringLiteral("uncompressed");
+    }
+}
+
+static int normalizedBatchCdngCodecOffset(int offset)
+{
+    return (offset >= 0 && offset <= 2) ? offset : 0;
+}
+
 int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 {
     QElapsedTimer totalTimer;
@@ -159,7 +174,9 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
     }
 
     const uint32_t maxFrames = BatchContext::maxFrames();
-    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5\n")
+    const int cdngCodecOffset =
+        normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
+    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5 cdng-codec=%6\n")
                .arg( inputPath )
                .arg( outputPath )
                .arg( BatchContext::skipErrors() ? QStringLiteral("true")
@@ -167,7 +184,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                .arg( BatchContext::resumeEnabled() ? QStringLiteral("true")
                                                     : QStringLiteral("false") )
                .arg( maxFrames > 0 ? QString::number( maxFrames )
-                                    : QStringLiteral("all") ));
+                                    : QStringLiteral("all") )
+               .arg( batchCdngCodecName( cdngCodecOffset ) ));
 
     int succeeded = 0;
     int failed = 0;
@@ -417,12 +435,15 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     /* Print runtime FINGERPRINT — proves settings reached the pipeline */
     ReceiptApplier::printFingerprint( mlvObject, processingObject );
 
+    const int cdngCodecProfile =
+        CODEC_CDNG + normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
+
     /* Export CDNG sequence */
     result = MainWindow::exportCdngSequence(
         mlvObject,
         outputRoot,
         baseName,
-        CODEC_CDNG,           /* uncompressed CDNG */
+        cdngCodecProfile,     /* selected headless CDNG codec */
         CODEC_CNDG_DEFAULT,   /* standard folder/file naming */
         effectiveCutIn,       /* from receipt, possibly advanced by --resume */
         cutOut,               /* from receipt or totalFrames */
