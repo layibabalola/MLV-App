@@ -738,6 +738,15 @@ compressed-DNG byte counts alongside `dng_compress_ms`: root
 `dng_compress_bytes_valid`, `dng_compress_input_bytes`, and
 `dng_compress_output_bytes`. This keeps the next compression-placement or
 parallelism experiment tied to byte throughput rather than timing alone.
+Release-tree headless validation at commit `b3cabaf6` wrote
+`.claude-state/profiling/2026-06-19-cdng-e3-compress-byte-telemetry-b3cabaf6/profile.json`
+from `C:\temp\MLV\M29-1756.MLV` with two lossless-output frames:
+`dng_compress_bytes_valid_frames=2`,
+`dng_compress_input_bytes_total=16402176`, and
+`dng_compress_output_bytes_total=7996908`. The measured `dng_compress_ms`
+average was 74.98 ms (13.34 FPS-equivalent), while `frame_total_ms` averaged
+387.86 ms (2.58 FPS-equivalent). This is VM-local batch telemetry only, not an
+UltraMagnus GPU proof packet.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
