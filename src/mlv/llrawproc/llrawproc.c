@@ -576,6 +576,7 @@ typedef struct
     HMODULE dll;
     int attempted;
     int unavailable;
+    char backend_name[128];
     char dll_path[1024];
     char dll_resolved_path[1024];
     igpu_recon_backend * backend;
@@ -605,6 +606,10 @@ int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
     info->available = (g->backend && !g->unavailable) ? 1 : 0;
     info->attempted = g->attempted;
     info->unavailable = g->unavailable;
+    snprintf(info->requested_backend,
+             sizeof(info->requested_backend),
+             "%s",
+             g->backend_name);
     snprintf(info->requested_path,
              sizeof(info->requested_path),
              "%s",
@@ -644,6 +649,25 @@ static const char * llrawproc_gpu_recon_backend_dll_path(int prefer_playback_dll
     return (dll_path && *dll_path) ? dll_path : "igpu_recon_cuda.dll";
 }
 
+static const char * llrawproc_gpu_recon_backend_name(int prefer_playback_dll)
+{
+    const char * backend_name = NULL;
+
+    if(prefer_playback_dll)
+    {
+        backend_name = getenv("MLVAPP_GPU_PLAYBACK_RECON_BACKEND");
+        if(!backend_name || !*backend_name) backend_name = getenv("MLVAPP_GPU_RECON_BACKEND");
+        if(!backend_name || !*backend_name) backend_name = getenv("MLVAPP_GPU_EXPORT_BACKEND");
+    }
+    else
+    {
+        backend_name = getenv("MLVAPP_GPU_EXPORT_BACKEND");
+        if(!backend_name || !*backend_name) backend_name = getenv("MLVAPP_GPU_RECON_BACKEND");
+    }
+
+    return (backend_name && *backend_name) ? backend_name : "cuda";
+}
+
 static void llrawproc_gpu_export_backend_release(llrawprocGpuExportBackend_t * g)
 {
     if(g->backend && g->destroy)
@@ -658,11 +682,16 @@ static void llrawproc_gpu_export_backend_release(llrawprocGpuExportBackend_t * g
 }
 
 static void llrawproc_gpu_export_backend_mark_unavailable(llrawprocGpuExportBackend_t * g,
-                                                          const char * dll_path)
+                                                          const char * dll_path,
+                                                          const char * backend_name)
 {
     llrawproc_gpu_export_backend_release(g);
     g->attempted = 1;
     g->unavailable = 1;
+    snprintf(g->backend_name,
+             sizeof(g->backend_name),
+             "%s",
+             backend_name ? backend_name : "");
     snprintf(g->dll_path, sizeof(g->dll_path), "%s", dll_path ? dll_path : "");
 }
 
@@ -704,25 +733,29 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
 {
     llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
     const char * dll_path = llrawproc_gpu_recon_backend_dll_path(prefer_playback_dll);
+    const char * backend_name = llrawproc_gpu_recon_backend_name(prefer_playback_dll);
 
     if(g->backend)
     {
-        if(strcmp(g->dll_path, dll_path) == 0) return 1;
+        if(strcmp(g->dll_path, dll_path) == 0
+        && strcmp(g->backend_name, backend_name) == 0) return 1;
         llrawproc_gpu_export_backend_release(g);
     }
     if(g->unavailable)
     {
-        if(strcmp(g->dll_path, dll_path) == 0) return 0;
+        if(strcmp(g->dll_path, dll_path) == 0
+        && strcmp(g->backend_name, backend_name) == 0) return 0;
         llrawproc_gpu_export_backend_release(g);
     }
 
     g->attempted = 1;
+    snprintf(g->backend_name, sizeof(g->backend_name), "%s", backend_name);
     snprintf(g->dll_path, sizeof(g->dll_path), "%s", dll_path);
 
     g->dll = LoadLibraryA(dll_path);
     if(!g->dll)
     {
-        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path);
+        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path, backend_name);
         return 0;
     }
     if(!GetModuleFileNameA(g->dll, g->dll_resolved_path, sizeof(g->dll_resolved_path)))
@@ -759,11 +792,11 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
     if(!g->create || !g->destroy || !g->abi_version || !g->describe ||
        !g->set_clip || !g->set_luts || !g->run || !g->last_timing)
     {
-        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path);
+        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path, backend_name);
         return 0;
     }
 
-    g->backend = g->create("cuda");
+    g->backend = g->create(backend_name);
     if(!g->backend || g->abi_version(g->backend) != IGPU_RECON_ABI_VERSION)
     {
         if(g->backend)
@@ -771,7 +804,7 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
             g->destroy(g->backend);
         }
         g->backend = NULL;
-        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path);
+        llrawproc_gpu_export_backend_mark_unavailable(g, dll_path, backend_name);
         return 0;
     }
 
@@ -1304,6 +1337,10 @@ int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
     if(!info) return 0;
     memset(info, 0, sizeof(*info));
     info->unavailable = 1;
+    snprintf(info->requested_backend,
+             sizeof(info->requested_backend),
+             "%s",
+             "cuda");
     return 1;
 }
 #endif

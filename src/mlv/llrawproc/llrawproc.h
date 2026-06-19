@@ -94,6 +94,7 @@ typedef struct
     int available;
     int attempted;
     int unavailable;
+    char requested_backend[128];
     char requested_path[1024];
     char resolved_path[1024];
     char description[1024];

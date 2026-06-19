@@ -1107,6 +1107,69 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAttemptsValidatedStateBacke
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
 
+TEST(DualIsoPipeline, GpuPlaybackReconBackendNameEnvIsReportedWhenUnavailable)
+{
+    static int dummy_int_lut[1] = { 0 };
+    static double dummy_double_lut[1] = { 0.0 };
+    uint16_t rawInput[4] = { 1024, 2048, 3072, 4096 };
+    llrpGpuPlaybackReconState_t state = {};
+    llrpGpuPlaybackReconTiming_t timing = {};
+    llrpGpuPlaybackReconBackendInfo_t backend_info = {};
+    int rc = 123;
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_BACKEND");
+    qunsetenv("MLVAPP_GPU_EXPORT_BACKEND");
+    qputenv("MLVAPP_GPU_RECON_DLL",
+            QByteArrayLiteral("definitely-missing-portable-recon.dll"));
+    qputenv("MLVAPP_GPU_RECON_BACKEND", QByteArrayLiteral("vulkan"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+
+    state.valid = 1;
+    state.width = 2;
+    state.height = 2;
+    state.black_level = 131008;
+    state.white_level = 960000;
+    state.white_darkened = 174632;
+    state.black_delta = 0;
+    state.ev_correction = 3.0;
+    state.dark_noise = 512.0;
+    state.interp_method = 1;
+    state.use_alias_map = 1;
+    state.use_fullres = 1;
+    state.chroma_smooth_method = 0;
+    state.is_bright[0] = 1;
+    state.is_bright[1] = 1;
+    state.is_bright[2] = 0;
+    state.is_bright[3] = 0;
+    state.raw2ev = dummy_int_lut;
+    state.ev2raw = dummy_int_lut;
+    state.mix_curve = dummy_double_lut;
+    state.fullres_curve = dummy_double_lut;
+
+    timing.available = 1;
+    ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                  rawInput,
+                                                  sizeof(rawInput),
+                                                  7,
+                                                  &rc,
+                                                  &timing));
+    ASSERT_EQ(-1, rc);
+    ASSERT_EQ(0, timing.available);
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconGetBackendInfo(&backend_info));
+    ASSERT_EQ(std::string("vulkan"),
+              std::string(backend_info.requested_backend));
+    ASSERT_EQ(std::string("definitely-missing-portable-recon.dll"),
+              std::string(backend_info.requested_path));
+
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_BACKEND");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+}
+
 TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAdmitsHqNonBaseLiveState)
 {
     /* The live M16-1327 non-base HQ Dual ISO state (auto-corrected:

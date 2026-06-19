@@ -3869,6 +3869,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             llrpGpuPlaybackReconBackendInfo_t backendInfo;
             memset( &backendInfo, 0, sizeof( backendInfo ) );
             llrpGpuPlaybackReconGetBackendInfo( &backendInfo );
+            const QString backendRequestedName =
+                sanitizeLogValue( QString::fromLocal8Bit( backendInfo.requested_backend ) );
             const QString backendRequestedPath =
                 sanitizeLogValue( QString::fromLocal8Bit( backendInfo.requested_path ) );
             const QString backendResolvedPath =
@@ -3922,11 +3924,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                        "texture_hash=%11 oracle=cpu_dual_iso_recon_frame "
                        "oracle_available=%12 oracle_words=%13 oracle_hash=%14 "
                        "parity_checked=%15 parity_match=%16 mismatch_count=%17 "
-                       "mismatch_first_index=%18 mismatch_first_gl=%19 "
-                       "mismatch_first_oracle=%20 mismatch_max_abs=%21 "
-                       "backend_available=%22 backend_requested_path=\"%23\" "
-                       "backend_resolved_path=\"%24\" backend_description=\"%25\" "
-                       "reason=\"%26\"" )
+                        "mismatch_first_index=%18 mismatch_first_gl=%19 "
+                        "mismatch_first_oracle=%20 mismatch_max_abs=%21 "
+                        "backend_available=%22 backend_requested_name=\"%23\" "
+                        "backend_requested_path=\"%24\" backend_resolved_path=\"%25\" "
+                        "backend_description=\"%26\" reason=\"%27\"" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames + 1 )
                        .arg( static_cast<qulonglong>( display_frame ) )
@@ -3949,11 +3951,12 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                            parity.firstMismatchIndex ) )
                        .arg( parity.firstGl )
                        .arg( parity.firstOracle )
-                       .arg( parity.maxAbsDiff )
-                       .arg( bool01( backendInfo.available != 0 ) )
-                       .arg( backendRequestedPath )
-                       .arg( backendResolvedPath )
-                       .arg( backendDescription )
+                        .arg( parity.maxAbsDiff )
+                        .arg( bool01( backendInfo.available != 0 ) )
+                        .arg( backendRequestedName )
+                        .arg( backendRequestedPath )
+                        .arg( backendResolvedPath )
+                        .arg( backendDescription )
                        .arg( reason );
 
             if( liveVectorDump.attempted )
