@@ -337,6 +337,20 @@ costs, not frame-envelope regressions. This is enough to say the serial payload
 handoff's 24-frame alternating evidence is not worse than measured A/A jitter,
 but the roadmap still does not promote it as a broad export-throughput win until
 the sampling strategy itself is stronger.
+The comparator now writes
+`release-cdng-export-matrix-calibration.v2`, fails closed on non-identity
+calibration inputs, non-feature candidate inputs, alternate-run-order mismatch,
+or case/repeat/run-order key mismatch, and includes per-case envelopes plus
+median/p95/positive-max summaries. Validation against the same alternating A/A
+and serial-payload matrices produced
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration-v2/calibration.json`
+with `verdict=WITHIN_IDENTITY_ENVELOPE`, `compatible_keys=True`, and
+`modes_ok=True`; negative smokes under
+`.claude-state/profiling/2026-06-19-cdng-e3-calibration-negative-smoke/`
+blocked an identity-as-feature input and a mismatched lossless feature matrix as
+`INCOMPATIBLE_MATRICES`. This upgrades the E3 methodology guardrail: future
+promotion packets must compare matching identity and feature matrices before a
+noisy raw gate is interpreted as either a blocker or a throughput win.
 
 Async-writer queue-depth investigation:
 the current real-footage matrices exercise the batch CDNG receipt/default path,

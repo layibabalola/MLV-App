@@ -65,6 +65,27 @@ checked-in fixture matrix is only a schema/tooling smoke; E3 promotion needs a
 bounded real-footage matrix whose clips, receipts, frame caps, and repeats match
 the export scenario being judged.
 
+When raw frame-total gates are noisy, compare a matching identity A/A matrix
+against the feature A/B matrix instead of reading the feature matrix in
+isolation:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\compare-cdng-export-matrices.ps1 `
+  -IdentityMatrix .claude-state\profiling\<identity-run>\matrix-summary.json `
+  -FeatureMatrix .claude-state\profiling\<feature-run>\matrix-summary.json `
+  -Output .claude-state\profiling\<calibration-run>\calibration.json
+```
+
+The calibration output uses
+`release-cdng-export-matrix-calibration.v2`. It fails closed unless the identity
+input is `comparisonMode=identity-aa`, the feature input is
+`comparisonMode=feature-ab`, both matrices use matching alternate-run-order
+settings, and case/repeat/run-order keys match exactly. The JSON records global
+and per-case metric envelopes, median/p95/positive-max summaries, and
+`blockingReasons`; only global frame-total average and p95 envelopes decide
+`WITHIN_IDENTITY_ENVELOPE` versus `EXCEEDS_IDENTITY_ENVELOPE`.
+
 ## `perf_tests` harness
 
 `perf_tests` is a lightweight benchmark harness built on the same tiny Dual
