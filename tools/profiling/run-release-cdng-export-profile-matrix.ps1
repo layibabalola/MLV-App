@@ -552,12 +552,16 @@ foreach ($case in $cases) {
             baselineDngCompressBytesValidFrames = if ($abSummary) { $abSummary.baseline.dngCompressBytesValidFrames } else { $null }
             baselineDngCompressInputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressInputBytesTotal } else { $null }
             baselineDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressOutputBytesTotal } else { $null }
+            baselineDngCompressPlacement = if ($abSummary) { $abSummary.baseline.dngCompressPlacement } else { $null }
+            baselineAsyncWriterCanOverlapDngCompress = if ($abSummary) { $abSummary.baseline.asyncWriterCanOverlapDngCompress } else { $null }
             baselineDngCompressInputMiBPerSecond = if ($abSummary) { $abSummary.baseline.dngCompressInputMiBPerSecond } else { $null }
             baselineDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.baseline.dngCompressOutputMiBPerSecond } else { $null }
             baselineDngCompressOutputRatio = if ($abSummary) { $abSummary.baseline.dngCompressOutputRatio } else { $null }
             candidateDngCompressBytesValidFrames = if ($abSummary) { $abSummary.candidate.dngCompressBytesValidFrames } else { $null }
             candidateDngCompressInputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressInputBytesTotal } else { $null }
             candidateDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressOutputBytesTotal } else { $null }
+            candidateDngCompressPlacement = if ($abSummary) { $abSummary.candidate.dngCompressPlacement } else { $null }
+            candidateAsyncWriterCanOverlapDngCompress = if ($abSummary) { $abSummary.candidate.asyncWriterCanOverlapDngCompress } else { $null }
             candidateDngCompressInputMiBPerSecond = if ($abSummary) { $abSummary.candidate.dngCompressInputMiBPerSecond } else { $null }
             candidateDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.candidate.dngCompressOutputMiBPerSecond } else { $null }
             candidateDngCompressOutputRatio = if ($abSummary) { $abSummary.candidate.dngCompressOutputRatio } else { $null }
@@ -604,6 +608,8 @@ foreach ($case in $cases) {
             dngCompressOutputMiBPerSecondDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDelta } else { $null }
             dngCompressOutputMiBPerSecondDeltaPercent = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDeltaPercent } else { $null }
             dngCompressOutputRatioDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputRatioDelta } else { $null }
+            dngCompressPlacement = if ($abSummary) { $abSummary.compare.dngCompressPlacement } else { $null }
+            asyncWriterCanOverlapDngCompress = if ($abSummary) { $abSummary.compare.asyncWriterCanOverlapDngCompress } else { $null }
             failures = @($failureList)
         }
 

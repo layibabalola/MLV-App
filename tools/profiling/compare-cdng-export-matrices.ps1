@@ -120,6 +120,10 @@ function Get-MatrixRuns {
                     Get-CompareStageDelta -Run $run -StageName "dng_compress_cleanup_ms" -Statistic "avgMs"
                 dngCompressInputBytesTotalDelta = $run.dngCompressInputBytesTotalDelta
                 dngCompressOutputBytesTotalDelta = $run.dngCompressOutputBytesTotalDelta
+                baselineDngCompressPlacement = $run.baselineDngCompressPlacement
+                candidateDngCompressPlacement = $run.candidateDngCompressPlacement
+                baselineAsyncWriterCanOverlapDngCompress = $run.baselineAsyncWriterCanOverlapDngCompress
+                candidateAsyncWriterCanOverlapDngCompress = $run.candidateAsyncWriterCanOverlapDngCompress
                 dngCompressInputMiBPerSecondDelta = $run.dngCompressInputMiBPerSecondDelta
                 dngCompressOutputMiBPerSecondDelta = $run.dngCompressOutputMiBPerSecondDelta
                 dngCompressOutputRatioDelta = $run.dngCompressOutputRatioDelta

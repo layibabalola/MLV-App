@@ -67,6 +67,19 @@ function New-Delta {
     }
 }
 
+function New-ValueChange {
+    param(
+        [object]$BaselineValue,
+        [object]$CandidateValue
+    )
+
+    [pscustomobject]@{
+        baseline = $BaselineValue
+        candidate = $CandidateValue
+        changed = ([string]$BaselineValue) -ne ([string]$CandidateValue)
+    }
+}
+
 function Get-StageObject {
     param(
         [object]$Profile,
@@ -145,6 +158,8 @@ function Get-DngCompressionMetrics {
         dngCompressInputMiBPerSecond = $inputMiBPerSecond
         dngCompressOutputMiBPerSecond = $outputMiBPerSecond
         dngCompressOutputRatio = $outputRatio
+        dngCompressPlacement = $Profile.dng_compress_placement
+        asyncWriterCanOverlapDngCompress = $Profile.async_writer_can_overlap_dng_compress
     }
 }
 
@@ -200,6 +215,12 @@ $compressionComparisons = [pscustomobject]@{
     dngCompressOutputRatio = New-Delta `
         -BaselineValue $baselineCompression.dngCompressOutputRatio `
         -CandidateValue $candidateCompression.dngCompressOutputRatio
+    dngCompressPlacement = New-ValueChange `
+        -BaselineValue $baselineCompression.dngCompressPlacement `
+        -CandidateValue $candidateCompression.dngCompressPlacement
+    asyncWriterCanOverlapDngCompress = New-ValueChange `
+        -BaselineValue $baselineCompression.asyncWriterCanOverlapDngCompress `
+        -CandidateValue $candidateCompression.asyncWriterCanOverlapDngCompress
 }
 
 $failures = @()
@@ -270,7 +291,8 @@ Write-Host ((
     "producer_frame_p95_delta_ms={12} producer_queue_idle_avg_delta_ms={13} " +
     "producer_queue_idle_p95_delta_ms={14} writer_completion_lag_avg_delta_ms={15} " +
     "writer_completion_lag_p95_delta_ms={16} llrawproc_avg_delta_ms={17} " +
-    "dng_compress_output_mibps_delta={18} output={19}") -f
+    "dng_compress_output_mibps_delta={18} dng_compress_placement_candidate={19} " +
+    "async_writer_can_overlap_dng_compress_candidate={20} output={21}") -f
     $result.verdict,
     $result.stages.frame_total_ms.avgMs.delta,
     $result.stages.frame_total_ms.avgMs.deltaPercent,
@@ -290,6 +312,8 @@ Write-Host ((
     $result.stages.writer_completion_lag_ms.p95Ms.delta,
     $result.stages.llrawproc_ms.avgMs.delta,
     $result.compression.dngCompressOutputMiBPerSecond.delta,
+    $result.compression.dngCompressPlacement.candidate,
+    $result.compression.asyncWriterCanOverlapDngCompress.candidate,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
 

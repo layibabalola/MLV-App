@@ -363,7 +363,12 @@ split into `dng_compress_encode_ms`, `dng_compress_copy_ms`, and
 LJ92 encode time from compressed-buffer copy and cleanup overhead. The
 export-stage comparator turns the byte totals into input/output MiB/s and
 output-ratio deltas, and the A/B plus matrix wrappers preserve those fields and
-the compression substage deltas in their summaries.
+the compression substage deltas in their summaries. Current profiles also mark
+`dng_compress_placement=producer_before_payload` and
+`async_writer_can_overlap_dng_compress=false`, making explicit that the existing
+async writer receives already-compressed DNG image bytes. Async export evidence
+therefore must not claim writer-side compression overlap until those fields
+change under a separately proven implementation.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
 release-tree promotion harness for these fields: it runs paired baseline and
 candidate exports across named cases/repeats and writes

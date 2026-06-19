@@ -76,6 +76,8 @@
 #define DNG_PAYLOAD_WRITER_DEFAULT_THREAD_COUNT 1
 #define DNG_PAYLOAD_WRITER_MAX_THREAD_COUNT 4
 #define DNG_PAYLOAD_WRITER_MAX_DEBUG_DELAY_MS 60000
+#define DNG_COMPRESS_PLACEMENT "producer_before_payload"
+#define DNG_COMPRESS_ASYNC_WRITER_OVERLAP_SUPPORTED 0
 
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
@@ -864,6 +866,12 @@ static void export_profile_write_json(void)
     fprintf(file,
             "  \"dng_compress_output_bytes_total\":%llu,\n",
             (unsigned long long)dng_compress_output_bytes_total);
+    fputs("  \"dng_compress_placement\":", file);
+    export_profile_write_json_string(file, DNG_COMPRESS_PLACEMENT);
+    fputs(",\n", file);
+    fprintf(file,
+            "  \"async_writer_can_overlap_dng_compress\":%s,\n",
+            DNG_COMPRESS_ASYNC_WRITER_OVERLAP_SUPPORTED ? "true" : "false");
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);

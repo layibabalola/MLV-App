@@ -431,6 +431,8 @@ $summary = [pscustomobject]@{
         dngCompressBytesValidFrames = $baselineProfileJson.dng_compress_bytes_valid_frames
         dngCompressInputBytesTotal = $baselineProfileJson.dng_compress_input_bytes_total
         dngCompressOutputBytesTotal = $baselineProfileJson.dng_compress_output_bytes_total
+        dngCompressPlacement = $baselineProfileJson.dng_compress_placement
+        asyncWriterCanOverlapDngCompress = $baselineProfileJson.async_writer_can_overlap_dng_compress
         dngCompressInputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "baseline"
         dngCompressOutputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "baseline"
         dngCompressOutputRatio = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "baseline"
@@ -461,6 +463,8 @@ $summary = [pscustomobject]@{
         dngCompressBytesValidFrames = $candidateProfileJson.dng_compress_bytes_valid_frames
         dngCompressInputBytesTotal = $candidateProfileJson.dng_compress_input_bytes_total
         dngCompressOutputBytesTotal = $candidateProfileJson.dng_compress_output_bytes_total
+        dngCompressPlacement = $candidateProfileJson.dng_compress_placement
+        asyncWriterCanOverlapDngCompress = $candidateProfileJson.async_writer_can_overlap_dng_compress
         dngCompressInputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressInputMiBPerSecond" -ValueName "candidate"
         dngCompressOutputMiBPerSecond = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "candidate"
         dngCompressOutputRatio = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "candidate"
@@ -502,6 +506,8 @@ $summary = [pscustomobject]@{
         dngCompressOutputMiBPerSecondDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "delta"
         dngCompressOutputMiBPerSecondDeltaPercent = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputMiBPerSecond" -ValueName "deltaPercent"
         dngCompressOutputRatioDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "delta"
+        dngCompressPlacement = if ($compare -and $compare.compression) { $compare.compression.dngCompressPlacement } else { $null }
+        asyncWriterCanOverlapDngCompress = if ($compare -and $compare.compression) { $compare.compression.asyncWriterCanOverlapDngCompress } else { $null }
         failures = $summaryFailures
     }
     proofGates = [pscustomobject]@{
@@ -578,7 +584,8 @@ Write-Host ((
     "producer_queue_idle_avg_delta_ms={30} writer_completion_lag_avg_delta_ms={31} " +
     "llrawproc_total_avg_delta_ms={32} llrawproc_dual_iso_avg_delta_ms={33} " +
     "dng_compress_avg_delta_ms={34} dng_compress_output_mibps_delta={35} " +
-    "dng_compress_output_bytes_delta={36} output={37}") -f
+    "dng_compress_output_bytes_delta={36} dng_compress_placement_candidate={37} " +
+    "async_writer_can_overlap_dng_compress_candidate={38} output={39}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -616,6 +623,8 @@ Write-Host ((
     $summary.compare.dngCompressAvgDeltaMs,
     $summary.compare.dngCompressOutputMiBPerSecondDelta,
     $summary.compare.dngCompressOutputBytesTotalDelta,
+    $summary.candidate.dngCompressPlacement,
+    $summary.candidate.asyncWriterCanOverlapDngCompress,
     $summaryJson
 )
 

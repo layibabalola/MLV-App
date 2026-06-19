@@ -452,6 +452,10 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_bytes_valid_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_input_bytes_total")));
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_output_bytes_total")));
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_placement")).toString()
+                == QStringLiteral("producer_before_payload"));
+    ASSERT_TRUE(root.contains(QStringLiteral("async_writer_can_overlap_dng_compress")));
+    ASSERT_FALSE(root.value(QStringLiteral("async_writer_can_overlap_dng_compress")).toBool(true));
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));

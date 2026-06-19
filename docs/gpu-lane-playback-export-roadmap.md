@@ -828,6 +828,16 @@ and
 `.claude-state/profiling/2026-06-19-cdng-compress-substage-calibration-smoke/calibration.json`
 with `verdict=WITHIN_IDENTITY_ENVELOPE`.
 
+Update 2026-06-19 Lane A E3 compression placement guard: export profiles now
+make the current scheduler boundary explicit with
+`dng_compress_placement=producer_before_payload` and
+`async_writer_can_overlap_dng_compress=false`. The export-stage comparator,
+A/B summaries, and matrix rows carry those fields forward, so future async
+writer packets cannot infer writer-side compression overlap from elapsed-time
+improvements while LJ92 encode still runs before payload enqueue. This is a
+guardrail and methodology improvement only; it does not move compression to a
+worker thread or claim throughput promotion.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
