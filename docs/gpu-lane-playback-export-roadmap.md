@@ -154,7 +154,11 @@ fixture matrix runs are smoke tests only; E3 promotion still requires a bounded
 real-footage matrix with receipts/frame caps that match the export scenario
 under review. A/B and matrix summaries now also label the comparison as
 `feature-ab` or `identity-aa`, so baseline-vs-baseline calibration runs cannot
-be mistaken for feature promotion or regression evidence.
+be mistaken for feature promotion or regression evidence. The A/B runner also
+supports explicit `BaselineFirst` or `CandidateFirst` execution, and the matrix
+runner can alternate run order across repeats with `-AlternateRunOrder`, so
+future promotion packets can reduce warm-cache/order bias without changing the
+baseline/candidate output locations or comparator contract.
 
 Update 2026-06-19 Lane A E3 payload contract: `dngFramePayload_t`,
 `buildDngFramePayload`, `writeDngFramePayload`, `saveDngFrameViaPayload`, and
@@ -292,6 +296,29 @@ to payload-copy cost; it shows the current short real-footage matrix is still
 order/noise sensitive enough that broad serial-payload promotion should remain
 held at the earlier bounded 8-frame claim until E3 has a stronger methodology
 such as longer samples, randomized ordering, or paired A/A-per-feature runs.
+
+Alternating-order methodology follow-up:
+`tools/profiling/run-release-cdng-export-profile-ab.ps1` and
+`tools/profiling/run-release-cdng-export-profile-matrix.ps1` now record
+`runOrder` and can alternate baseline/candidate execution across matrix repeats.
+The committed-tooling A/A alternating matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-aa-alternating-matrix/matrix-summary.json`
+reported `comparisonMode=identity-aa`, `alternateRunOrder=true`, zero DNG
+SHA256 mismatches, and Verdict: FAIL at 5/9 PASS and 4/9 FAIL. Aggregate elapsed
+delta averaged +58.827 ms, frame-total average delta averaged -0.033 ms, and
+frame-total p95 delta averaged +7.724 ms; strict-gate failures still reached
+avg +10.638%, p95 +11.543%, avg +10.308% plus p95 +14.586%, and avg +7.841%
+plus p95 +48.743%. The matching serial-payload alternating matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-matrix/matrix-summary.json`
+reported `comparisonMode=feature-ab`, `alternateRunOrder=true`, zero DNG SHA256
+mismatches, and Verdict: FAIL at 7/9 PASS and 2/9 FAIL. Aggregate elapsed
+averaged -64.279 ms, frame-total average delta averaged -1.700 ms, frame-total
+p95 delta averaged -0.284 ms, and payload handoff averaged 0.016170 ms, but two
+candidate-first repeats still exceeded the p95 gate (+14.454% and +18.477%).
+This reinforces the current E3 status: serial payload handoff is correct and
+low-cost, but broad promotion still needs longer/stratified sampling or a
+statistical matrix comparator; alternating order alone is a useful control, not
+a sufficient promotion oracle.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
