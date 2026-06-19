@@ -658,7 +658,7 @@ try {
     Copy-Item -LiteralPath `$casesPath -Destination (Join-Path `$packetRoot 'cases.json') -Force
     Copy-EvidenceFiles -SourceRoot `$matrixDir -DestinationRoot (Join-Path `$packetRoot 'matrix')
     if (Test-Path -LiteralPath `$packet) { Remove-Item -LiteralPath `$packet -Force }
-    Compress-Archive -LiteralPath (Join-Path `$packetRoot '*') -DestinationPath `$packet -Force
+    Compress-Archive -Path (Join-Path `$packetRoot '*') -DestinationPath `$packet -Force
     `$summary | ConvertTo-Json -Depth 8
     if (`$status -eq 'success') { exit 0 }
     exit 2
