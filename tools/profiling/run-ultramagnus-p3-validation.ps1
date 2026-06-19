@@ -609,7 +609,11 @@ if ($failures.Count -eq 0) {
         $clipOutput = Join-Path $runRoot ($clipStem + "-p3-texture-present.json")
         $screenshots = Join-Path $runRoot ($clipStem + "-screenshots")
         $invokeScript = Join-Path $runRoot ("invoke-" + $clipStem + ".ps1")
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','QT_OPENGL=desktop')"
+        # wb-523ca500 P3 diagnostic: MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE=1 admits the
+        # real (non-base, auto-corrected) live Dual ISO state into the no-readback path so the
+        # backend-vs-CPU-oracle parity can be measured end-to-end on the 4090. The in-app guard
+        # stays fail-closed by default (env-gated); only this validation run enables it.
+        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE=1','QT_OPENGL=desktop')"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral

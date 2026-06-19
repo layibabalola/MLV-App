@@ -457,6 +457,21 @@ static int llrawproc_gpu_playback_recon_state_matches_validated_config(
     if(state->use_alias_map != 1) return 0;
     if(state->use_fullres != 1) return 0;
     if(state->chroma_smooth_method != 0) return 0;
+    /* Diagnostic-only, fail-closed by default: when explicitly enabled, admit any
+     * HQ-config state (arbitrary is_bright / ev_correction / black_delta) so the
+     * no-readback path can be validated against the CPU oracle for real (non-base,
+     * auto-corrected) live Dual ISO clips on the 4090. The CUDA recon kernels were
+     * proven 0-LSB vs the oracle for the live M16-1327 non-base state via
+     * cuda_recon_parity; this toggle lets the playback path be measured end-to-end.
+     * Default (env unset) keeps the strict base-config-only contract. */
+    {
+        const char * allow_any_hq =
+            getenv("MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE");
+        if(allow_any_hq && *allow_any_hq && *allow_any_hq != '0')
+        {
+            return 1;
+        }
+    }
     if(state->black_delta != 0) return 0;
     if(fabs(fabs(state->ev_correction) - 3.0) > 0.000001) return 0;
     if(state->is_bright[0] != 1) return 0;
