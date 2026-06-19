@@ -14,11 +14,12 @@ param(
     [int]$SystemSettleCpuStableMs = 2000,
     [int]$SystemSettleCpuMaxMs = 60000,
     [string]$Threads = "auto",
-    [string]$QualityMode = "",
-    [string]$ScaleFactor = "",
-    [int]$ExpectedScaleRequest = 1,
+    [string]$QualityMode = "auto",
+    [string]$ScaleFactor = "4",
+    [int]$ExpectedScaleRequest = 4,
     [int]$ExpectedVisualScaleRequest = -2,
-    [int]$ExpectedQualityMode = 1,
+    [int]$ExpectedQualityMode = 2,
+    [switch]$UsePersistedPlaybackSettings,
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
@@ -59,6 +60,21 @@ param(
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+
+if ($UsePersistedPlaybackSettings) {
+    if (-not $PSBoundParameters.ContainsKey("QualityMode")) {
+        $QualityMode = ""
+    }
+    if (-not $PSBoundParameters.ContainsKey("ScaleFactor")) {
+        $ScaleFactor = ""
+    }
+    if (-not $PSBoundParameters.ContainsKey("ExpectedQualityMode")) {
+        $ExpectedQualityMode = -1
+    }
+    if (-not $PSBoundParameters.ContainsKey("ExpectedScaleRequest")) {
+        $ExpectedScaleRequest = -1
+    }
+}
 
 # Opt-in temporal-artifact gate: turn on the interactive trace so the post-run detector can measure
 # flicker / stalls / cadence jitter from per-present events. Auto-discounts the screenshot grab.
@@ -924,6 +940,8 @@ if ($DryRun) {
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
             qualityModeOverride = $QualityMode
+            scaleFactorOverride = $ScaleFactor
+            usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         output = $outputPath
     } | ConvertTo-Json -Depth 5
@@ -1403,6 +1421,7 @@ $result = [pscustomobject]@{
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
+            usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         matchedUserShellDefaults = [pscustomobject]@{
             frameTelemetry = [bool]$FrameTelemetry

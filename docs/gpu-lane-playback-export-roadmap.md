@@ -86,6 +86,12 @@ The visible playback quality menu/status now uses the roadmap vocabulary:
 `Auto`, `Prioritize Quality`, and `Prioritize Smoothness`. The underlying mode
 ids and legacy `fast`/`hq` automation names remain supported; the parser also
 accepts `prioritize-smoothness` and `prioritize_quality`.
+The GUI smoke wrapper now defaults its validation gate to deterministic Auto
+mode (`quality_mode=2`) and x4 scale request by forcing those env selectors,
+so persisted GUI settings cannot create stale false failures. Smokes that
+intentionally exercise saved GUI state can pass `-UsePersistedPlaybackSettings`,
+and explicit forced-mode probes can still pass `-QualityMode`, `-ScaleFactor`,
+and `-Expected*` overrides.
 
 Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
 carry the exact `sharperHeadroomScaleAllowed` gate that decides whether
