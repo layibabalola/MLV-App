@@ -230,6 +230,13 @@ case-insensitive forms for `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW` and
 `Sharp-Smooth`, `ON`, `Off`, etc.) while preserving the existing
 `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW` precedence and invalid-value fallback, with
 console coverage in `PlaybackPreviewModeOverride.ParsesCaseInsensitiveEnvNames`.
+The advanced preview-mode and preview-resolution persisted controls now also
+have QSettings default/round-trip/invalid-value guards in
+`PlaybackQualitySettings.RoundTripPreviewMode`,
+`PlaybackQualitySettings.RoundTripPreviewResolution`, and
+`PlaybackQualitySettings.PreviewResolutionProxyLevelMapping`; the shared
+settings cleanup helper clears those keys so P4 control-surface tests do not
+inherit stale GUI state from earlier local runs.
 
 Update 2026-06-19 Lane A E3 prep: the export-stage profiler now records
 `queue_idle_ms` as a supported stage. The first frame has no prior handoff gap,

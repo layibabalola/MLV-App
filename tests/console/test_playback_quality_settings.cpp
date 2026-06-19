@@ -34,7 +34,9 @@ void clearAllPlaybackQualityKeys()
                    PlaybackQualitySettings::kOrganization(),
                    PlaybackQualitySettings::kApplication() );
     set.remove( PlaybackQualitySettings::kKeyQualityMode() );
+    set.remove( PlaybackQualitySettings::kKeyPreviewMode() );
     set.remove( PlaybackQualitySettings::kKeyScaleFactorOverride() );
+    set.remove( PlaybackQualitySettings::kKeyPreviewResolution() );
     set.remove( PlaybackQualitySettings::kKeyAutoTargetFps() );
     set.remove( PlaybackQualitySettings::kKeyShowQualityIndicator() );
     set.remove( PlaybackQualitySettings::kKeyShowExperimentalPhase3Modes() );
@@ -135,6 +137,84 @@ TEST(PlaybackQualitySettings, RoundTripAutoTargetFps)
     ASSERT_EQ( 30, playbackQualityAutoTargetFpsFromSettings() );
 
     clearAllPlaybackQualityKeys();
+}
+
+TEST(PlaybackQualitySettings, RoundTripPreviewMode)
+{
+    if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
+
+    clearAllPlaybackQualityKeys();
+
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewMode::SharpSmooth),
+               static_cast<int>(playbackPreviewModeFromSettings()) );
+
+    playbackPreviewModeWriteToSettings( PlaybackPreviewMode::AggressivePerformance );
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewMode::AggressivePerformance),
+               static_cast<int>(playbackPreviewModeFromSettings()) );
+
+    playbackPreviewModeWriteToSettings( PlaybackPreviewMode::SharpSmooth );
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewMode::SharpSmooth),
+               static_cast<int>(playbackPreviewModeFromSettings()) );
+
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyPreviewMode(), -1 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewMode::SharpSmooth),
+               static_cast<int>(playbackPreviewModeFromSettings()) );
+
+    set.setValue( PlaybackQualitySettings::kKeyPreviewMode(), 999 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewMode::SharpSmooth),
+               static_cast<int>(playbackPreviewModeFromSettings()) );
+
+    clearAllPlaybackQualityKeys();
+}
+
+TEST(PlaybackQualitySettings, RoundTripPreviewResolution)
+{
+    if ( !QCoreApplication::instance() ) SKIP_TEST( "Requires QCoreApplication" );
+
+    clearAllPlaybackQualityKeys();
+
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Auto),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    playbackPreviewResolutionWriteToSettings( PlaybackPreviewResolution::Full );
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Full),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    playbackPreviewResolutionWriteToSettings( PlaybackPreviewResolution::Half );
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Half),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    playbackPreviewResolutionWriteToSettings( PlaybackPreviewResolution::Quarter );
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Quarter),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    QSettings set( QSettings::UserScope,
+                   PlaybackQualitySettings::kOrganization(),
+                   PlaybackQualitySettings::kApplication() );
+    set.setValue( PlaybackQualitySettings::kKeyPreviewResolution(), -1 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Auto),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    set.setValue( PlaybackQualitySettings::kKeyPreviewResolution(), 999 );
+    set.sync();
+    ASSERT_EQ( static_cast<int>(PlaybackPreviewResolution::Auto),
+               static_cast<int>(playbackPreviewResolutionFromSettings()) );
+
+    clearAllPlaybackQualityKeys();
+}
+
+TEST(PlaybackQualitySettings, PreviewResolutionProxyLevelMapping)
+{
+    ASSERT_EQ( -1, playbackPreviewResolutionToProxyLevel( PlaybackPreviewResolution::Auto ) );
+    ASSERT_EQ( 0, playbackPreviewResolutionToProxyLevel( PlaybackPreviewResolution::Full ) );
+    ASSERT_EQ( 1, playbackPreviewResolutionToProxyLevel( PlaybackPreviewResolution::Half ) );
+    ASSERT_EQ( 2, playbackPreviewResolutionToProxyLevel( PlaybackPreviewResolution::Quarter ) );
 }
 
 TEST(PlaybackQualitySettings, RoundTripShowIndicator)
