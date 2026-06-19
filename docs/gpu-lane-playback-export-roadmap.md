@@ -996,6 +996,16 @@ should either find a workload that actually fills the writer queue, or move to
 the next export bottleneck instead of treating producer-time improvement alone
 as throughput proof.
 
+Update 2026-06-19 Lane A E3 combined proof surface: now that the trusted GPU
+export measurement gate removes the CPU shadow-oracle cost, the UltraMagnus
+CDNG export evidence wrapper can run candidate-only async-writer compression
+through the same remote proof path using `-CandidateUseAsyncWriter`,
+`-CandidateUseAsyncWriterCompression`, `-CandidateAsyncWriterQueueDepth`, and
+`-CandidateAsyncWriterThreadCount`. Use this to test whether trusted GPU recon
+plus writer-side LJ92 compression changes the older non-promoted lossless
+result while still requiring baseline no-GPU, candidate GPU
+attempt/replacement, candidate trusted frames, and DNG hash match.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

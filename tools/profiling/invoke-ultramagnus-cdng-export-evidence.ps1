@@ -20,10 +20,24 @@ param(
     [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
     [switch]$UseReceiptAsIs,
-    [switch]$TrustedGpuExport
+    [switch]$TrustedGpuExport,
+    [switch]$CandidateUseAsyncWriter,
+    [switch]$CandidateUseAsyncWriterCompression,
+    [int]$CandidateAsyncWriterQueueDepth = 0,
+    [int]$CandidateAsyncWriterThreadCount = 0
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
+    throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
+}
+if ($CandidateAsyncWriterQueueDepth -lt 0) {
+    throw "-CandidateAsyncWriterQueueDepth must be >= 0."
+}
+if ($CandidateAsyncWriterThreadCount -lt 0) {
+    throw "-CandidateAsyncWriterThreadCount must be >= 0."
+}
 
 function Resolve-RepoPath {
     param(
@@ -345,6 +359,8 @@ if ($failures.Count -eq 0) {
     $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
     $useReceiptAsIsLiteral = if ($UseReceiptAsIs) { '$true' } else { '$false' }
     $trustedGpuExportLiteral = if ($TrustedGpuExport) { '$true' } else { '$false' }
+    $candidateUseAsyncWriterLiteral = if ($CandidateUseAsyncWriter) { '$true' } else { '$false' }
+    $candidateUseAsyncWriterCompressionLiteral = if ($CandidateUseAsyncWriterCompression) { '$true' } else { '$false' }
     $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
     $codecsLiteral = Convert-ToPowerShellArrayLiteral $CdngCodecs
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
@@ -369,6 +385,10 @@ if ($failures.Count -eq 0) {
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$useReceiptAsIs = $useReceiptAsIsLiteral
 `$trustedGpuExport = $trustedGpuExportLiteral
+`$candidateUseAsyncWriter = $candidateUseAsyncWriterLiteral
+`$candidateUseAsyncWriterCompression = $candidateUseAsyncWriterCompressionLiteral
+`$candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+`$candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 
@@ -585,6 +605,18 @@ try {
                 '-RequireCandidateGpuExportTrusted'
             )
         }
+        if (`$candidateUseAsyncWriter) {
+            `$matrixArgs += '-CandidateUseAsyncWriter'
+        }
+        if (`$candidateUseAsyncWriterCompression) {
+            `$matrixArgs += '-CandidateUseAsyncWriterCompression'
+        }
+        if (`$candidateAsyncWriterQueueDepth -gt 0) {
+            `$matrixArgs += @('-CandidateAsyncWriterQueueDepth', [string]`$candidateAsyncWriterQueueDepth)
+        }
+        if (`$candidateAsyncWriterThreadCount -gt 0) {
+            `$matrixArgs += @('-CandidateAsyncWriterThreadCount', [string]`$candidateAsyncWriterThreadCount)
+        }
         `$matrixOutput = & `$psExe @matrixArgs 2>&1
         `$matrixExit = `$LASTEXITCODE
         `$matrixOutputTail = @(`$matrixOutput | Select-Object -Last 200 | ForEach-Object { [string]`$_ })
@@ -687,6 +719,10 @@ try {
             maxFrames = `$maxFrames
             repeats = `$repeats
             trustedGpuExport = [bool]`$trustedGpuExport
+            candidateUseAsyncWriter = [bool]`$candidateUseAsyncWriter
+            candidateUseAsyncWriterCompression = [bool]`$candidateUseAsyncWriterCompression
+            candidateAsyncWriterQueueDepth = `$candidateAsyncWriterQueueDepth
+            candidateAsyncWriterThreadCount = `$candidateAsyncWriterThreadCount
         }
         outputs = [ordered]@{
             runRoot = `$runRoot
@@ -845,6 +881,10 @@ $summary = [pscustomobject]@{
         maxFrames = $MaxFrames
         repeats = $Repeats
         trustedGpuExport = [bool]$TrustedGpuExport
+        candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
+        candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
+        candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+        candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
         useReceiptAsIs = [bool]$UseReceiptAsIs
         skipRemoteBuild = [bool]$SkipRemoteBuild
         skipBackendBuild = [bool]$SkipBackendBuild

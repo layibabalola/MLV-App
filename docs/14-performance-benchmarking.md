@@ -139,6 +139,13 @@ receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
 Pass `-TrustedGpuExport` only when deliberately generating the trusted
 throughput packet described above; that adds the candidate trusted gate to the
 remote matrix and records `trustedGpuExport=true` in the packet summary.
+For the E3 lossless/compression-overlap follow-up, the wrapper can also pass
+candidate-only async writer controls to the same remote proof path:
+`-CandidateUseAsyncWriter`, `-CandidateUseAsyncWriterCompression`,
+`-CandidateAsyncWriterQueueDepth`, and `-CandidateAsyncWriterThreadCount`.
+The baseline remains the plain CPU export path; use these switches only for
+bounded candidate experiments that still require GPU attempt/replacement,
+trusted-frame, and DNG hash gates.
 The accepted 2026-06-19 proof packet is
 `.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
 with local packet
