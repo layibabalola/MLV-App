@@ -151,6 +151,7 @@ typedef struct
     int gpu_export_replaced;
     int gpu_export_allocated_bytes_valid;
     uint64_t gpu_export_allocated_bytes;
+    int gpu_export_skip_code;
     int dng_compress_bytes_valid;
     uint64_t dng_compress_input_bytes;
     uint64_t dng_compress_output_bytes;
@@ -193,6 +194,28 @@ static const char * export_profile_raw_state_name(int state)
         case UNCOMPRESSED_ORIG: return "uncompressed_original";
         case COMPRESSED_ORIG:   return "compressed_original";
         default:                return "unknown";
+    }
+}
+
+static const char * export_profile_gpu_export_skip_reason(int skip_code)
+{
+    switch(skip_code)
+    {
+        case LLRP_GPU_EXPORT_SKIP_NONE:                 return "none";
+        case LLRP_GPU_EXPORT_SKIP_DISABLED:             return "disabled";
+        case LLRP_GPU_EXPORT_SKIP_NOT_DUAL_ISO:         return "not_dual_iso";
+        case LLRP_GPU_EXPORT_SKIP_EMPTY_RAW_IMAGE:      return "empty_raw_image";
+        case LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE:  return "backend_unavailable";
+        case LLRP_GPU_EXPORT_SKIP_INPUT_ALLOC_FAILED:   return "input_alloc_failed";
+        case LLRP_GPU_EXPORT_SKIP_PLAYBACK_RECON_USED:  return "playback_recon_used";
+        case LLRP_GPU_EXPORT_SKIP_DUAL_ISO_RECON_FAILED:
+                                                            return "dual_iso_recon_failed";
+        case LLRP_GPU_EXPORT_SKIP_MISSING_INPUT:        return "missing_input";
+        case LLRP_GPU_EXPORT_SKIP_MISSING_RECON_STATE:  return "missing_recon_state";
+        case LLRP_GPU_EXPORT_SKIP_INVALID_RECON_STATE:  return "invalid_recon_state";
+        case LLRP_GPU_EXPORT_SKIP_SIZE_MISMATCH:        return "size_mismatch";
+        case LLRP_GPU_EXPORT_SKIP_OUTPUT_ALLOC_FAILED:  return "output_alloc_failed";
+        default:                                        return "unknown";
     }
 }
 
@@ -557,6 +580,7 @@ static void export_profile_note_gpu_export_telemetry(exportProfileFrame_t * fram
     frame->gpu_export_allocated_bytes_valid =
         telemetry.allocated_bytes_valid ? 1 : 0;
     frame->gpu_export_allocated_bytes = telemetry.allocated_bytes;
+    frame->gpu_export_skip_code = telemetry.skip_code;
 }
 
 static void export_profile_note_dng_compress_bytes(exportProfileFrame_t * frame,
@@ -767,6 +791,8 @@ static void export_profile_write_json(void)
     unsigned gpu_export_attempted_frames = 0;
     unsigned gpu_export_replaced_frames = 0;
     unsigned gpu_export_allocated_bytes_valid_frames = 0;
+    unsigned gpu_export_skipped_frames = 0;
+    unsigned gpu_export_skip_counts[LLRP_GPU_EXPORT_SKIP_COUNT] = {0};
     uint64_t gpu_export_max_allocated_bytes = 0;
     unsigned dng_compress_bytes_valid_frames = 0;
     uint64_t dng_compress_input_bytes_total = 0;
@@ -786,6 +812,12 @@ static void export_profile_write_json(void)
         if(frame->gpu_export_replaced)
         {
             gpu_export_replaced_frames++;
+        }
+        if(frame->gpu_export_skip_code > LLRP_GPU_EXPORT_SKIP_NONE
+        && frame->gpu_export_skip_code < LLRP_GPU_EXPORT_SKIP_COUNT)
+        {
+            gpu_export_skipped_frames++;
+            gpu_export_skip_counts[frame->gpu_export_skip_code]++;
         }
         if(frame->gpu_export_allocated_bytes_valid)
         {
@@ -880,6 +912,23 @@ static void export_profile_write_json(void)
             "  \"gpu_export_max_allocated_bytes\":%llu,\n",
             (unsigned long long)gpu_export_max_allocated_bytes);
     fprintf(file,
+            "  \"gpu_export_skipped_frames\":%u,\n",
+            gpu_export_skipped_frames);
+    fputs("  \"gpu_export_skip_reason_counts\":{", file);
+    for(int skip_code = LLRP_GPU_EXPORT_SKIP_DISABLED;
+        skip_code < LLRP_GPU_EXPORT_SKIP_COUNT;
+        skip_code++)
+    {
+        if(skip_code > LLRP_GPU_EXPORT_SKIP_DISABLED)
+        {
+            fputs(",", file);
+        }
+        export_profile_write_json_string(file,
+            export_profile_gpu_export_skip_reason(skip_code));
+        fprintf(file, ":%u", gpu_export_skip_counts[skip_code]);
+    }
+    fputs("},\n", file);
+    fprintf(file,
             "  \"dng_compress_bytes_valid_frames\":%u,\n",
             dng_compress_bytes_valid_frames);
     fprintf(file,
@@ -952,14 +1001,20 @@ static void export_profile_write_json(void)
                 ",\"gpu_export_replaced\":%s"
                 ",\"gpu_export_allocated_bytes_valid\":%s"
                 ",\"gpu_export_allocated_bytes\":%llu"
-                ",\"dng_compress_bytes_valid\":%s"
-                ",\"dng_compress_input_bytes\":%llu"
-                ",\"dng_compress_output_bytes\":%llu",
+                ",\"gpu_export_skip_code\":%d"
+                ",\"gpu_export_skip_reason\":",
                 frame->gpu_export_attempted ? "true" : "false",
                 frame->gpu_export_rc,
                 frame->gpu_export_replaced ? "true" : "false",
                 frame->gpu_export_allocated_bytes_valid ? "true" : "false",
                 (unsigned long long)frame->gpu_export_allocated_bytes,
+                frame->gpu_export_skip_code);
+        export_profile_write_json_string(file,
+            export_profile_gpu_export_skip_reason(frame->gpu_export_skip_code));
+        fprintf(file,
+                ",\"dng_compress_bytes_valid\":%s"
+                ",\"dng_compress_input_bytes\":%llu"
+                ",\"dng_compress_output_bytes\":%llu",
                 frame->dng_compress_bytes_valid ? "true" : "false",
                 (unsigned long long)frame->dng_compress_input_bytes,
                 (unsigned long long)frame->dng_compress_output_bytes);

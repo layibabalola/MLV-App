@@ -225,6 +225,29 @@ function Get-CompareCompressionValue {
     $valueProperty.Value
 }
 
+function Format-GpuExportSkipCounts {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$ProfileJson
+    )
+
+    $counts = $ProfileJson.gpu_export_skip_reason_counts
+    if ($null -eq $counts) {
+        return "skip_counts=missing"
+    }
+
+    $parts = @()
+    foreach ($property in $counts.PSObject.Properties) {
+        if ($null -ne $property.Value -and [int]$property.Value -ne 0) {
+            $parts += "$($property.Name)=$($property.Value)"
+        }
+    }
+    if ($parts.Count -eq 0) {
+        return "skip_counts=none"
+    }
+    return "skip_counts=$($parts -join ',')"
+}
+
 function Invoke-ProfileRun {
     param(
         [string]$Label,
@@ -394,6 +417,7 @@ $proofFailures = @()
 $baselineGpuExportAttemptedFrames = [int]$baselineProfileJson.gpu_export_attempted_frames
 $candidateGpuExportAttemptedFrames = [int]$candidateProfileJson.gpu_export_attempted_frames
 $candidateGpuExportReplacedFrames = [int]$candidateProfileJson.gpu_export_replaced_frames
+$candidateGpuExportSkipCounts = Format-GpuExportSkipCounts -ProfileJson $candidateProfileJson
 $candidateFrameCount = [int]$candidateProfileJson.frame_count
 if ($RequireBaselineNoGpuExportAttempt -and $baselineGpuExportAttemptedFrames -ne 0) {
     $proofFailures += "baseline-gpu-export-attempted-frames expected=0 actual=$baselineGpuExportAttemptedFrames"
@@ -403,7 +427,7 @@ if ($RequireCandidateGpuExportAttempt) {
         $proofFailures += "candidate-gpu-export-not-enabled"
     }
     if ($candidateGpuExportAttemptedFrames -ne $candidateFrameCount) {
-        $proofFailures += "candidate-gpu-export-attempted-frame-count expected=$candidateFrameCount actual=$candidateGpuExportAttemptedFrames"
+        $proofFailures += "candidate-gpu-export-attempted-frame-count expected=$candidateFrameCount actual=$candidateGpuExportAttemptedFrames $candidateGpuExportSkipCounts"
     }
 }
 if ($RequireCandidateGpuExportReplacement) {
@@ -411,7 +435,7 @@ if ($RequireCandidateGpuExportReplacement) {
         $proofFailures += "candidate-gpu-export-not-enabled"
     }
     if ($candidateGpuExportReplacedFrames -ne $candidateFrameCount) {
-        $proofFailures += "candidate-gpu-export-replaced-frame-count expected=$candidateFrameCount actual=$candidateGpuExportReplacedFrames"
+        $proofFailures += "candidate-gpu-export-replaced-frame-count expected=$candidateFrameCount actual=$candidateGpuExportReplacedFrames $candidateGpuExportSkipCounts"
     }
 }
 $summaryFailures = @($compareFailures + $proofFailures)
@@ -448,6 +472,8 @@ $summary = [pscustomobject]@{
         gpuExportReplacedFrames = $baselineProfileJson.gpu_export_replaced_frames
         gpuExportAllocatedBytesValidFrames = $baselineProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $baselineProfileJson.gpu_export_max_allocated_bytes
+        gpuExportSkippedFrames = $baselineProfileJson.gpu_export_skipped_frames
+        gpuExportSkipReasonCounts = $baselineProfileJson.gpu_export_skip_reason_counts
         dngCompressBytesValidFrames = $baselineProfileJson.dng_compress_bytes_valid_frames
         dngCompressInputBytesTotal = $baselineProfileJson.dng_compress_input_bytes_total
         dngCompressOutputBytesTotal = $baselineProfileJson.dng_compress_output_bytes_total
@@ -482,6 +508,8 @@ $summary = [pscustomobject]@{
         gpuExportReplacedFrames = $candidateProfileJson.gpu_export_replaced_frames
         gpuExportAllocatedBytesValidFrames = $candidateProfileJson.gpu_export_allocated_bytes_valid_frames
         gpuExportMaxAllocatedBytes = $candidateProfileJson.gpu_export_max_allocated_bytes
+        gpuExportSkippedFrames = $candidateProfileJson.gpu_export_skipped_frames
+        gpuExportSkipReasonCounts = $candidateProfileJson.gpu_export_skip_reason_counts
         dngCompressBytesValidFrames = $candidateProfileJson.dng_compress_bytes_valid_frames
         dngCompressInputBytesTotal = $candidateProfileJson.dng_compress_input_bytes_total
         dngCompressOutputBytesTotal = $candidateProfileJson.dng_compress_output_bytes_total

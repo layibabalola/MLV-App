@@ -43,6 +43,7 @@ extern "C" unsigned long long llrpGpuExportLastMismatchFirstIndexForTesting(void
 extern "C" int llrpGpuExportLastMismatchFirstCpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchFirstGpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchMaxAbsForTesting(void);
+extern "C" int llrpGpuExportLastSkipCodeForTesting(void);
 extern "C" void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 extern "C" int llrpResetGpuPlaybackReconRunForTesting(void);
 extern "C" int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
@@ -59,6 +60,7 @@ static void assert_gpu_export_telemetry_idle()
     ASSERT_EQ(0, telemetry.replaced);
     ASSERT_EQ(0, telemetry.allocated_bytes_valid);
     ASSERT_EQ(static_cast<uint64_t>(0), telemetry.allocated_bytes);
+    ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_NONE, telemetry.skip_code);
 }
 
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
@@ -452,6 +454,8 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_replaced_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_allocated_bytes_valid_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_max_allocated_bytes")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_skipped_frames")));
+    ASSERT_TRUE(root.value(QStringLiteral("gpu_export_skip_reason_counts")).isObject());
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_bytes_valid_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_input_bytes_total")));
     ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_output_bytes_total")));
@@ -498,6 +502,8 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_replaced")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes_valid")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_skip_code")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_skip_reason")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_bytes_valid")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_input_bytes")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_output_bytes")));
@@ -929,6 +935,15 @@ TEST(DualIsoPipeline, GpuExportMissingDllFallbackIsByteInertForCompressedAndUnco
             export_tiny_dng_for_gpu_export_gate(raw_state, true, missing_dll, fallback_dng);
         ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
         ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+        ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                  llrpGpuExportLastSkipCodeForTesting());
+        {
+            llrpGpuExportTelemetry_t telemetry = {};
+            llrpGetLastGpuExportTelemetry(&telemetry);
+            ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                      telemetry.skip_code);
+        }
 
         preserve_gpu_export_gate_artifacts(suffix, cpu_dng, fallback_dng);
         ASSERT_TRUE(cpu_bytes == fallback_bytes);
@@ -1600,6 +1615,8 @@ TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossCo
                     cfg, overrides);
                 ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
                 ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+                ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                          llrpGpuExportLastSkipCodeForTesting());
 
                 ASSERT_TRUE(cpu_bytes == fallback_bytes);
             }

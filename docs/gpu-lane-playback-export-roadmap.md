@@ -767,6 +767,21 @@ rebuild the release tree locally, stage it, and rerun with `-SkipRemoteBuild`
 while still building/deploying the CUDA backend and running proof gates on the
 4090 host.
 
+Update 2026-06-19 Lane A E3 GPU export skip diagnostics: export profiles now
+distinguish "candidate did not attempt GPU export" from why it did not attempt.
+The root profile has `gpu_export_skipped_frames` and
+`gpu_export_skip_reason_counts`, and each frame records
+`gpu_export_skip_code` / `gpu_export_skip_reason`. A/B summaries copy those
+counts to baseline/candidate, matrix rows preserve them, and UltraMagnus proof
+failures include a compact `skip_counts=...` rollup. Release-tree local smoke
+`.claude-state/profiling/2026-06-19-gpu-export-skip-telemetry-smoke/` used an
+existing non-DLL file as `-CandidateGpuExportDll`; the candidate stayed
+byte-inert with `gpuExportAttemptedFrames=0`, `gpuExportSkippedFrames=1`, and
+`backend_unavailable=1`, while the CPU baseline reported `disabled=1`. This is
+still VM-local tooling proof. The next UltraMagnus packet must use the same
+fields to explain any candidate 0/N attempt gate before changing receipts or
+promotion criteria.
+
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its
 verdict into `summary.json` / `matrix-summary.json` as `dngHash`. Local VM

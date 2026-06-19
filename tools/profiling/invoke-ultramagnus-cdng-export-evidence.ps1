@@ -564,6 +564,20 @@ try {
             `$proofFailures.Add("Matrix summary contained zero runs.")
         }
         foreach (`$run in `$runs) {
+            `$skipCountsText = 'skip_counts=missing'
+            if (`$run.PSObject.Properties['candidateGpuExportSkipReasonCounts']) {
+                `$skipParts = @()
+                foreach (`$property in `$run.candidateGpuExportSkipReasonCounts.PSObject.Properties) {
+                    if (`$null -ne `$property.Value -and [int]`$property.Value -ne 0) {
+                        `$skipParts += "`$(`$property.Name)=`$(`$property.Value)"
+                    }
+                }
+                `$skipCountsText = if (`$skipParts.Count -gt 0) {
+                    "skip_counts=`$(`$skipParts -join ',')"
+                } else {
+                    'skip_counts=none'
+                }
+            }
             if ([string]`$run.verdict -ne 'PASS') {
                 `$proofFailures.Add("Run `$(`$run.outputDir) verdict was `$(`$run.verdict).")
             }
@@ -571,10 +585,10 @@ try {
                 `$proofFailures.Add("Baseline attempted GPU export in `$(`$run.outputDir).")
             }
             if ([int]`$run.candidateGpuExportAttemptedFrames -ne [int]`$run.candidateFrameCount) {
-                `$proofFailures.Add("Candidate attempted `$(`$run.candidateGpuExportAttemptedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir).")
+                `$proofFailures.Add("Candidate attempted `$(`$run.candidateGpuExportAttemptedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir); `$skipCountsText.")
             }
             if ([int]`$run.candidateGpuExportReplacedFrames -ne [int]`$run.candidateFrameCount) {
-                `$proofFailures.Add("Candidate replaced `$(`$run.candidateGpuExportReplacedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir).")
+                `$proofFailures.Add("Candidate replaced `$(`$run.candidateGpuExportReplacedFrames)/`$(`$run.candidateFrameCount) GPU export frames in `$(`$run.outputDir); `$skipCountsText.")
             }
         }
     }

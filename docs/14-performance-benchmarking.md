@@ -108,7 +108,10 @@ work or if the candidate does not attempt/replace every profiled frame. Add
 `-RequireDngHashMatch` to fold the DNG SHA256 companion into the wrapper verdict
 instead of relying on a separate manual step. The legacy `-EnableGpuExport`
 switch remains valid, but it enables both sides and is therefore better suited
-to same-mode A/A or GPU-vs-GPU profiling.
+to same-mode A/A or GPU-vs-GPU profiling. When a GPU proof gate fails, inspect
+`gpuExportSkipReasonCounts` in `summary.json` / `matrix-summary.json`; the
+UltraMagnus wrapper also includes a compact `skip_counts=...` rollup in proof
+failure text.
 
 Use `tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1` for the
 authoritative RTX 4090 export proof path. It refuses dirty local staging,

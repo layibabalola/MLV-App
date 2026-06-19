@@ -598,10 +598,14 @@ foreach ($case in $cases) {
             baselineGpuExportAttemptedFrames = if ($abSummary) { $abSummary.baseline.gpuExportAttemptedFrames } else { $null }
             baselineGpuExportReplacedFrames = if ($abSummary) { $abSummary.baseline.gpuExportReplacedFrames } else { $null }
             baselineGpuExportMaxAllocatedBytes = if ($abSummary) { $abSummary.baseline.gpuExportMaxAllocatedBytes } else { $null }
+            baselineGpuExportSkippedFrames = if ($abSummary) { $abSummary.baseline.gpuExportSkippedFrames } else { $null }
+            baselineGpuExportSkipReasonCounts = if ($abSummary) { $abSummary.baseline.gpuExportSkipReasonCounts } else { $null }
             candidateGpuExportEnabled = if ($abSummary) { $abSummary.candidate.enableGpuExport } else { $null }
             candidateGpuExportAttemptedFrames = if ($abSummary) { $abSummary.candidate.gpuExportAttemptedFrames } else { $null }
             candidateGpuExportReplacedFrames = if ($abSummary) { $abSummary.candidate.gpuExportReplacedFrames } else { $null }
             candidateGpuExportMaxAllocatedBytes = if ($abSummary) { $abSummary.candidate.gpuExportMaxAllocatedBytes } else { $null }
+            candidateGpuExportSkippedFrames = if ($abSummary) { $abSummary.candidate.gpuExportSkippedFrames } else { $null }
+            candidateGpuExportSkipReasonCounts = if ($abSummary) { $abSummary.candidate.gpuExportSkipReasonCounts } else { $null }
             proofGateFailures = if ($abSummary -and $abSummary.proofGates) { @($abSummary.proofGates.failures) } else { @() }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }
             frameTotalP95DeltaMs = if ($abSummary) { $abSummary.compare.frameTotalP95DeltaMs } else { $null }
