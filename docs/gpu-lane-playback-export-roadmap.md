@@ -1,12 +1,13 @@
 # GPU Lane — Playback & Export Roadmap + UX (plan of record)
 
-Status: 2026-06-19. Lane A E0-E2 export, P-pre GPU AMaZE/processing
-parity, and Lane B P1-P3 are now through their scoped proof gates. P3 is
-honest-scoped, not universal: the RTX 4090 FastProxy proof validates the
-raw-fixes-enabled HQ Dual ISO no-readback CUDA-to-GL R16 texture path with
-GL/backend/oracle parity; unsupported states still fail closed to CPU readback
-or CPU presentation. The remaining priority order is P4 adaptive-quality polish,
-then Lane A E3/E4 export pipeline/rendered export, then Lane C portable GPU
+Status: 2026-06-19. Lane A E0-E2 export, the scoped Lane A E3 GPU
+replacement proof packet, P-pre GPU AMaZE/processing parity, and Lane B P1-P3
+are now through their scoped proof gates. P3 is honest-scoped, not universal:
+the RTX 4090 FastProxy proof validates the raw-fixes-enabled HQ Dual ISO
+no-readback CUDA-to-GL R16 texture path with GL/backend/oracle parity;
+unsupported states still fail closed to CPU readback or CPU presentation. The
+remaining priority order is P4 adaptive-quality polish, then Lane A E3
+throughput/pipeline work and E4 rendered export, then Lane C portable GPU
 backends.
 
 Update 2026-06-19: P-pre **processing parity** has progressed beyond the
@@ -792,6 +793,26 @@ GPU state publisher's supported gate. The UltraMagnus wrapper now generates an
 effective proof receipt from the source receipt by forcing
 `dualIsoInterpolation=1`, alias-map on, full-res blending on, and chroma-smooth
 off; `-UseReceiptAsIs` preserves the old raw-receipt behavior for debugging.
+
+Update 2026-06-19 Lane A E3 UltraMagnus export proof packet: rerun
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T172721/`
+passed with status `success` and `gpuExportValidated=true`. The packet ZIP is
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260619T172721-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `68260EFC52BFDF6D372866D0E1119BBD9FEAA1C4271764315E248A82F82243D2`).
+It records host `ULTRA-MAGNUS`, `NVIDIA GeForce RTX 4090, 596.36, 24564 MiB`,
+source head `538f0fe5b2268d02e801e420d752acd8503b4a40`, release executable
+SHA256 `FA8B20D51113B50AA77331E77604852375B5061357017F29CC0669349E4DB8FD`,
+and deployed backend DLL SHA256
+`A63212BDA5C6439257D2100F9EA1A5F490A25F740FD9961325F5683552CE3D65`. Both
+`uncompressed` and `lossless` cases passed: the CPU baseline attempted 0 GPU
+frames and reported four `disabled` skips, the GPU candidate attempted and
+replaced 4/4 frames with zero candidate skips, and the DNG hash companion passed
+8/8 matched pairs. This closes the scoped 4090 export replacement/byte-identity
+proof for the generated FastProxy proof receipt; it does not claim a general
+throughput win. The 4-frame, single-repeat packet reported uncompressed elapsed
+delta +87.802 ms (+2.466%) and lossless elapsed delta -247.457 ms (-5.627%),
+so E3 throughput/pipeline promotion still needs the separate real-footage
+matrix and scheduler/compression bottleneck work.
 
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its

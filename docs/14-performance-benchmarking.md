@@ -127,6 +127,17 @@ raw source receipt. The packet records both `sourceReceipt` and the effective
 receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
 `receipts\FastProxy.marxml`, both `uncompressed` and `lossless` CDNG,
 `maxFrames=4`, and `repeats=1`; widen only when the proof question requires it.
+The accepted 2026-06-19 proof packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T172721-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `68260EFC52BFDF6D372866D0E1119BBD9FEAA1C4271764315E248A82F82243D2`).
+It records `ULTRA-MAGNUS`, RTX 4090, release SHA256
+`FA8B20D51113B50AA77331E77604852375B5061357017F29CC0669349E4DB8FD`, backend
+DLL SHA256 `A63212BDA5C6439257D2100F9EA1A5F490A25F740FD9961325F5683552CE3D65`,
+candidate GPU attempts/replacements 4/4 for both uncompressed and lossless,
+zero candidate skips, and DNG hash PASS 8/8. Treat this as scoped export
+replacement and byte-identity proof, not as a broad throughput claim.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass
