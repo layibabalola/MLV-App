@@ -1033,6 +1033,24 @@ move beyond proof/experiment mode. The first gate now exists as
 matrix, and UltraMagnus wrappers; frame-total avg/p95 regression remains a
 separate attribution gate via `-FailOnRegression`.
 
+Gate-enforced refresh: the UltraMagnus packet at
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T182703/summary.json`
+with local packet
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260619T182703-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `28A5E842F6CB277D0900317DF8B7E1FD5754912C80FE4E06CE0E54906EC32D4A`)
+reran the same three clips on commit
+`b88fb04b465a4bb8af34471afae1130f74031491` with
+`-RequireElapsedImprovement -MinElapsedImprovementPercent 10`. Result: 9/9
+PASS, DNG hash PASS 144/144, candidate trusted/attempted/replaced frames
+144/144/144, and every row cleared the 10% elapsed-improvement gate (minimum
+row improvement 14.925%). Average wall-clock elapsed improved from 6570.353 ms
+to 4934.366 ms (-1635.987 ms, -24.687%). Per-clip elapsed deltas were
+M16-1210 -1426.806 ms (-21.689%), M16-1327 -1499.537 ms (-23.121%), and
+M16-1347 -1981.617 ms (-29.251%). Frame-total attribution is now mixed but
+bounded for review (overall avg +4.316 ms, p95 +12.605 ms; M16-1347 improved
+frame-total while M16-1327 still carried positive completion lag), so default
+promotion remains a separate policy decision.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

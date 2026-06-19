@@ -211,6 +211,20 @@ paid back as writer-completion lag (+122.487 ms), with writer-side compression
 separates wall-clock export throughput from completion-lag attribution.
 That gate is now available as `-RequireElapsedImprovement` /
 `-MinElapsedImprovementPercent` on the A/B, matrix, and UltraMagnus wrappers.
+The gate-enforced refresh is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T182703\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T182703-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `28A5E842F6CB277D0900317DF8B7E1FD5754912C80FE4E06CE0E54906EC32D4A`).
+It used commit `b88fb04b465a4bb8af34471afae1130f74031491`, the same release
+SHA256 `E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`,
+the same three lossless clips, and `-RequireElapsedImprovement
+-MinElapsedImprovementPercent 10`. Result: 9/9 PASS, DNG hash PASS 144/144,
+candidate trusted/attempted/replaced frames 144/144/144, minimum row elapsed
+improvement 14.925%, and average wall-clock elapsed improved from 6570.353 ms
+to 4934.366 ms (-1635.987 ms, -24.687%). Frame-total attribution remained a
+separate review signal (overall avg +4.316 ms, p95 +12.605 ms), so this packet
+proves the elapsed gate and candidate throughput, not default-policy promotion.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass
