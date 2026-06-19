@@ -565,6 +565,50 @@ this default/lossless M16 set unless a representative writer-heavy workload
 actually fills the queue; prioritize either writer-utilization instrumentation
 or the next higher-roadmap export bottleneck.
 
+Update 2026-06-19 Lane A E3 writer-utilization rerun: the committed release
+build `40b096942f1017b7ed4d0e80e0a2adea385fb301` first passed a one-frame
+release smoke at
+`.claude-state/profiling/2026-06-19-cdng-async-util-release-smoke-40b09694/profile.json`
+with `async_writer_thread_count=2`, `async_writer_queue_capacity=2`,
+`async_writer_jobs_started=1`, `async_writer_jobs_finished=1`, and
+`async_writer_max_active=1`. The follow-on lossless M16 16-frame x 3-repeat
+matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-util-matrix-16x3-40b09694/matrix-summary.json`
+used serial baseline versus payload-handoff plus async writer, queue depth 2,
+writer threads 2, alternating run order, and frame-total regression gates.
+The DNG hash comparison at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-util-matrix-16x3-40b09694/dng-hash-comparison.json`
+passed with 144/144 matched pairs and zero missing or mismatched DNGs. The raw
+feature gate still failed (6 pass / 3 fail): candidate jobs started/finished
+were 144/144, but `candidateAsyncWriterMaxActive=1` and
+`candidateAsyncWriterMaxQueued=1` in every run, writer queue wait stayed
+0.000 ms (no finite FPS-equivalent), average frame total regressed
++5.039792 ms (198.421 FPS-equivalent), p95 frame total regressed
++16.953133 ms (58.986 FPS-equivalent), writer-completion lag averaged
++2.333110 ms (428.612 FPS-equivalent), writer-completion p95 averaged
++2.750689 ms (363.545 FPS-equivalent), and payload clone averaged
++0.011989 ms (83,410.565 FPS-equivalent). A same-build identity matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-identity-matrix-16x3-40b09694/matrix-summary.json`
+was itself strict-gate noisy (5 pass / 4 fail) but byte-identical
+(`.claude-state/profiling/2026-06-19-cdng-e3-lossless-identity-matrix-16x3-40b09694/dng-hash-comparison.json`
+also passed 144/144). Calibration at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-threads2-util-calibration-16x3-40b09694/calibration.json`
+reported `verdict=EXCEEDS_IDENTITY_ENVELOPE`, `identityRawGateUnstable=True`,
+and blocking reasons `feature_exceeds_identity_frameTotalAvgDeltaMs` plus
+`feature_exceeds_identity_frameTotalP95DeltaMs`: frame-total average positive
+max was 30.980219 ms (32.279 FPS-equivalent) versus identity 20.566243 ms
+(48.624 FPS-equivalent), and frame-total p95 positive max was 100.972900 ms
+(9.904 FPS-equivalent) versus identity 85.160000 ms (11.743 FPS-equivalent).
+The dominant positive feature-average stage was `llrawprocAvgDeltaMs` at
++4.108379 ms (243.405 FPS-equivalent), and the dominant scheduler positive-max
+excess was `producerFrameAvgDeltaMs` at +8.041832 ms (124.350
+FPS-equivalent). This supersedes the earlier "add utilization counters" next
+step: two-worker async remains HOLD, not a promoted throughput policy, and the
+M16 lossless/default workload does not keep a second writer active. Next E3
+work should stop widening writer count on this set and either use a genuinely
+writer-heavy representative output scenario or move to the next export
+bottleneck.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
