@@ -751,6 +751,18 @@ failed closed because the VM candidate attempted 0/1 frames and replaced 0/1
 frames. This is the desired local behavior: a real UltraMagnus export promotion
 packet must pass those gates, then pass the DNG hash companion.
 
+Update 2026-06-19 Lane A E3 UltraMagnus export wrapper:
+`tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1` now stages a clean
+repo over the existing SMB agent channel, builds/deploys `igpu_recon_cuda.dll`
+on UltraMagnus, rebuilds the release tree there, runs the CDNG matrix wrapper as
+CPU baseline versus GPU candidate, and requires baseline no-attempt, candidate
+attempt/replacement, and DNG hash identity before `gpuExportValidated=true`.
+The compact imported evidence packet lives under
+`.claude-state\profiling\ultramagnus-cdng-export\` and carries matrix summaries,
+hash comparison, release/backend hashes, and remote host/GPU context without
+zipping bulky DNG payloads. This is the correct proof path for export GPU
+promotion; VM-local runs remain fallback/tooling checks.
+
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its
 verdict into `summary.json` / `matrix-summary.json` as `dngHash`. Local VM

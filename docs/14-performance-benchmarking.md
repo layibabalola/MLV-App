@@ -110,6 +110,17 @@ instead of relying on a separate manual step. The legacy `-EnableGpuExport`
 switch remains valid, but it enables both sides and is therefore better suited
 to same-mode A/A or GPU-vs-GPU profiling.
 
+Use `tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1` for the
+authoritative RTX 4090 export proof path. It refuses dirty local staging,
+mirrors the clean repo to `\\ultra-magnus\G\Temp\mlvapp-cdng-export-evidence`,
+builds/deploys `igpu_recon_cuda.dll` on UltraMagnus, rebuilds the release tree,
+runs the matrix wrapper with the GPU replacement and DNG hash gates above, and
+imports a compact JSON/log evidence packet under
+`.claude-state\profiling\ultramagnus-cdng-export\`. The default proof uses
+`G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`, `receipts\FastProxy.marxml`, both
+`uncompressed` and `lossless` CDNG, `maxFrames=4`, and `repeats=1`; widen only
+when the proof question requires it.
+
 After any matrix or standalone A/B run that claims CDNG output correctness, run
 the DNG byte-identity companion before interpreting the timing result:
 
