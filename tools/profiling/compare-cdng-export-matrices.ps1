@@ -274,6 +274,37 @@ function New-MetricEnvelope {
     }
 }
 
+function New-MetricDiagnosticRow {
+    param([object]$Metric)
+
+    if ($null -eq $Metric) {
+        return $null
+    }
+
+    $featureMinusIdentityAverage = $null
+    if ($null -ne $Metric.featureAverage -and $null -ne $Metric.identityAverage) {
+        $featureMinusIdentityAverage =
+            [Math]::Round(([double]$Metric.featureAverage - [double]$Metric.identityAverage), 6)
+    }
+
+    $positiveMaxExcessOverIdentity = $null
+    if ($null -ne $Metric.featurePositiveMax -and $null -ne $Metric.identityPositiveMax) {
+        $positiveMaxExcessOverIdentity =
+            [Math]::Round(([double]$Metric.featurePositiveMax - [double]$Metric.identityPositiveMax), 6)
+    }
+
+    [pscustomobject]@{
+        metric = $Metric.metric
+        identityAverage = $Metric.identityAverage
+        featureAverage = $Metric.featureAverage
+        featureMinusIdentityAverage = $featureMinusIdentityAverage
+        identityPositiveMax = $Metric.identityPositiveMax
+        featurePositiveMax = $Metric.featurePositiveMax
+        positiveMaxExcessOverIdentity = $positiveMaxExcessOverIdentity
+        withinIdentityEnvelope = $Metric.withinIdentityEnvelope
+    }
+}
+
 $identity = Read-MatrixSummary -Path $IdentityMatrix -Label "Identity"
 $feature = Read-MatrixSummary -Path $FeatureMatrix -Label "Feature"
 
@@ -301,6 +332,41 @@ $metrics = @()
 foreach ($metricName in $metricNames) {
     $metrics += New-MetricEnvelope -Name $metricName -IdentityRuns $identityRuns -FeatureRuns $featureRuns
 }
+
+$stageAttributionMetricNames = @(
+    "rawReadDecodeUnpackAvgDeltaMs",
+    "rawReadAvgDeltaMs",
+    "rawDecodeAvgDeltaMs",
+    "rawUnpackAvgDeltaMs",
+    "llrawprocAvgDeltaMs",
+    "dngHeaderAvgDeltaMs",
+    "dngPackAvgDeltaMs",
+    "dngCompressAvgDeltaMs",
+    "diskWriteAvgDeltaMs",
+    "payloadCloneAvgDeltaMs",
+    "writerCompletionLagAvgDeltaMs",
+    "writerQueueWaitAvgDeltaMs"
+)
+$stageAttributionMetrics = @(
+    $metrics | Where-Object { $_.metric -in $stageAttributionMetricNames }
+)
+$dominantPositiveFeatureAverageMetric = @(
+    $stageAttributionMetrics |
+        Where-Object { $null -ne $_.featureAverage -and [double]$_.featureAverage -gt 0.0 } |
+        Sort-Object -Property @{ Expression = { [double]$_.featureAverage }; Descending = $true }
+)[0]
+$dominantPositiveMaxExcessMetric = @(
+    $stageAttributionMetrics |
+        Where-Object {
+            $null -ne $_.featurePositiveMax -and
+            $null -ne $_.identityPositiveMax -and
+            [double]$_.featurePositiveMax -gt [double]$_.identityPositiveMax
+        } |
+        Sort-Object -Property @{
+            Expression = { [double]$_.featurePositiveMax - [double]$_.identityPositiveMax }
+            Descending = $true
+        }
+)[0]
 
 $runKeyCompatibility = Compare-RunKeys -IdentityRuns $identityRuns -FeatureRuns $featureRuns
 $modeChecks = [pscustomobject]@{
@@ -382,7 +448,7 @@ $identityFailures = @($identityRuns | Where-Object { $_.verdict -ne "PASS" })
 $featureFailures = @($featureRuns | Where-Object { $_.verdict -ne "PASS" })
 
 $result = [pscustomobject]@{
-    schema = "release-cdng-export-matrix-calibration.v2"
+    schema = "release-cdng-export-matrix-calibration.v3"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     identity = [pscustomobject]@{
         path = $identity.path
@@ -408,6 +474,13 @@ $result = [pscustomobject]@{
     runKeyCompatibility = $runKeyCompatibility
     metrics = $metrics
     perCaseMetrics = $caseMetrics
+    stageAttribution = [pscustomobject]@{
+        metricNames = $stageAttributionMetricNames
+        dominantPositiveFeatureAverage =
+            New-MetricDiagnosticRow -Metric $dominantPositiveFeatureAverageMetric
+        dominantPositiveMaxExcess =
+            New-MetricDiagnosticRow -Metric $dominantPositiveMaxExcessMetric
+    }
     exceededFrameMetrics = @(
         $exceededFrameMetrics |
             Select-Object metric, identityPositiveMax, featurePositiveMax, positiveMaxMarginMs
@@ -429,7 +502,8 @@ if (-not [string]::IsNullOrWhiteSpace($Output)) {
 Write-Host (((
     "CDNG-EXPORT-MATRIX-CALIBRATION verdict={0} identity_unstable={1} " +
     "identity_fail={2} feature_fail={3} compatible_keys={4} modes_ok={5} " +
-    "frame_avg_within={6} frame_p95_within={7} output={8}") -f
+    "frame_avg_within={6} frame_p95_within={7} dominant_avg_stage={8} " +
+    "dominant_excess_stage={9} output={10}") -f
     $result.verdict,
     $result.identityRawGateUnstable,
     $result.identity.failCount,
@@ -439,6 +513,12 @@ Write-Host (((
         $result.modeChecks.alternateRunOrderMatches),
     ($metrics | Where-Object { $_.metric -eq "frameTotalAvgDeltaMs" }).withinIdentityEnvelope,
     ($metrics | Where-Object { $_.metric -eq "frameTotalP95DeltaMs" }).withinIdentityEnvelope,
+    $(if ($result.stageAttribution.dominantPositiveFeatureAverage) {
+          $result.stageAttribution.dominantPositiveFeatureAverage.metric
+      } else { "<none>" }),
+    $(if ($result.stageAttribution.dominantPositiveMaxExcess) {
+          $result.stageAttribution.dominantPositiveMaxExcess.metric
+      } else { "<none>" }),
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 ))
 

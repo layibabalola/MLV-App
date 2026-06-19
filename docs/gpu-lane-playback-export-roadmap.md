@@ -342,11 +342,14 @@ handoff's 24-frame alternating evidence is not worse than measured A/A jitter,
 but the roadmap still does not promote it as a broad export-throughput win until
 the sampling strategy itself is stronger.
 The comparator now writes
-`release-cdng-export-matrix-calibration.v2`, fails closed on non-identity
+`release-cdng-export-matrix-calibration.v3`, fails closed on non-identity
 calibration inputs, non-feature candidate inputs, alternate-run-order mismatch,
 or case/repeat/run-order key mismatch, and includes per-case envelopes plus
 median/p95/positive-max summaries and stage-attribution metrics from each
-run's `compare.json`. Validation against the same alternating A/A and
+run's `compare.json`. Its `stageAttribution` object also names the dominant
+positive feature-average stage and the dominant positive-max identity-envelope
+excess stage, so E3 promotion/blocker packets can cite the leading stage driver
+without hand-parsing the metrics array. Validation against the same alternating A/A and
 serial-payload matrices produced
 `.claude-state/profiling/2026-06-19-cdng-e3-payload-alternating-calibration-v2/calibration.json`
 with `verdict=WITHIN_IDENTITY_ENVELOPE`, `compatible_keys=True`, and
@@ -453,7 +456,7 @@ The broader lossless 16-frame x 3-repeat matrices at
 and
 `.claude-state/profiling/2026-06-19-cdng-e3-lossless-payload-matrix-16x3-e41e7de1/matrix-summary.json`
 both passed 9/9; their hash sweeps each reported 144/144 matched DNG pairs with
-0 mismatches. The v2 calibration with stage attribution at
+0 mismatches. The v3 calibration with stage attribution at
 `.claude-state/profiling/2026-06-19-cdng-e3-lossless-calibration-16x3-e41e7de1/calibration-with-stage-attribution.json`
 still reported `verdict=EXCEEDS_IDENTITY_ENVELOPE`: frame-total p95 positive
 max was inside identity (81.4423 ms feature versus 95.7494 ms identity), but
