@@ -639,6 +639,26 @@ work should stop widening writer count on this set and either use a genuinely
 writer-heavy representative output scenario or move to the next export
 bottleneck.
 
+Update 2026-06-19 Lane A E3 larger-clip async probe: the largest local MLV,
+`C:\temp\MLV\M29-1756.MLV`, was used as a bounded four-frame lossless-output
+probe on committed release build `54787f8f` to see whether a bigger local source
+creates real writer pressure. Baseline-first output lives at
+`.claude-state/profiling/2026-06-19-cdng-e3-m29-lossless-async-probe-54787f8f/`;
+candidate-first output lives at
+`.claude-state/profiling/2026-06-19-cdng-e3-m29-lossless-async-probe-candidatefirst-54787f8f/`.
+Both bundles produced byte-identical baseline/candidate DNGs for all 4/4
+frames. The async candidate used payload handoff, queue depth 2, and writer
+threads 2, but both run orders still reported `async_writer_max_active=1` and
+`async_writer_max_queued=1`. Elapsed deltas were order-sensitive
+(`-1454.373 ms` baseline-first versus `-102.329 ms` candidate-first), while
+frame-total averages regressed (`+10.4989 ms` and `+19.045225 ms`) and
+writer-completion lag remained small (`+2.278675 ms` and `+1.9589 ms`). This
+keeps async writer at HOLD on available local footage: M29 is useful coverage,
+but it still does not supply the representative writer-heavy workload needed to
+justify scheduler-policy work. Next E3 work should either find or construct a
+true writer-dominant export scenario, or move to the next measured export
+bottleneck rather than widening async writer count again.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
