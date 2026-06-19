@@ -98,7 +98,9 @@ candidate runs should use
 `tools/profiling/run-release-cdng-export-profile.ps1`, which launches the
 current `MLVApp.exe --batch` CDNG export path with
 `MLVAPP_EXPORT_STAGE_PROFILER=1` and writes the profile JSON next to the exported
-DNG output bundle.
+DNG output bundle. `tools/profiling/compare-export-stage-profiles.ps1` now
+summarizes frame-total avg/p95 deltas plus queue-idle avg/p95 deltas in stdout,
+and `-FailOnRegression` gates both avg and p95 frame-total regressions.
 
 Update 2026-06-19 Lane A E3 payload contract: `dngFramePayload_t`,
 `buildDngFramePayload`, `writeDngFramePayload`, and `freeDngFramePayload` now
@@ -161,7 +163,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms` samples after the first frame, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, and `dngFramePayload_t` provides a byte-parity-checked immutable DNG handoff for future writer workers, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap deltas, and frame-total regressions before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms` samples after the first frame, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, and `dngFramePayload_t` provides a byte-parity-checked immutable DNG handoff for future writer workers, so candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, and avg/p95 frame-total regression gates before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback

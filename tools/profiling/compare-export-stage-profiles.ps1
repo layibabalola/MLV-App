@@ -5,6 +5,7 @@ param(
     [string]$Candidate,
     [string]$Output = "",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
+    [double]$MaxFrameTotalP95RegressionPercent = 10.0,
     [switch]$FailOnRegression
 )
 
@@ -123,6 +124,14 @@ if ($FailOnRegression -and $null -ne $frameTotal) {
             "$MaxFrameTotalRegressionPercent%."
         )
     }
+
+    $p95DeltaPercent = $frameTotal.p95Ms.deltaPercent
+    if ($null -ne $p95DeltaPercent -and $p95DeltaPercent -gt $MaxFrameTotalP95RegressionPercent) {
+        $failures += (
+            "frame_total_ms p95 regression $p95DeltaPercent% exceeded " +
+            "$MaxFrameTotalP95RegressionPercent%."
+        )
+    }
 }
 
 $result = [pscustomobject]@{
@@ -145,6 +154,7 @@ $result = [pscustomobject]@{
     thresholds = [pscustomobject]@{
         failOnRegression = [bool]$FailOnRegression
         maxFrameTotalRegressionPercent = $MaxFrameTotalRegressionPercent
+        maxFrameTotalP95RegressionPercent = $MaxFrameTotalP95RegressionPercent
     }
     stages = [pscustomobject]$stageComparisons
     failures = $failures
@@ -163,10 +173,16 @@ if (-not [string]::IsNullOrWhiteSpace($Output)) {
 
 Write-Host ((
     "EXPORT-STAGE-COMPARE verdict={0} frame_total_avg_delta_ms={1} " +
-    "frame_total_avg_delta_percent={2} llrawproc_avg_delta_ms={3} output={4}") -f
+    "frame_total_avg_delta_percent={2} frame_total_p95_delta_ms={3} " +
+    "frame_total_p95_delta_percent={4} queue_idle_avg_delta_ms={5} " +
+    "queue_idle_p95_delta_ms={6} llrawproc_avg_delta_ms={7} output={8}") -f
     $result.verdict,
     $result.stages.frame_total_ms.avgMs.delta,
     $result.stages.frame_total_ms.avgMs.deltaPercent,
+    $result.stages.frame_total_ms.p95Ms.delta,
+    $result.stages.frame_total_ms.p95Ms.deltaPercent,
+    $result.stages.queue_idle_ms.avgMs.delta,
+    $result.stages.queue_idle_ms.p95Ms.delta,
     $result.stages.llrawproc_ms.avgMs.delta,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
