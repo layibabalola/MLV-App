@@ -71,6 +71,9 @@
 #define FMT_SIZE "%zu"
 #endif
 
+#define DNG_PAYLOAD_WRITER_DEFAULT_QUEUE_DEPTH 1
+#define DNG_PAYLOAD_WRITER_MAX_QUEUE_DEPTH 8
+
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
 #if defined(__WIN32)
@@ -128,6 +131,8 @@ static char g_export_profile_build_id[EXPORT_PROFILE_BUILD_ID_MAX] = "";
 static int g_export_profile_atexit_registered = 0;
 static int g_export_profile_write_in_progress = 0;
 static double g_export_profile_last_frame_finish_ms = 0.0;
+static unsigned g_export_profile_async_writer_queue_capacity = 0;
+static unsigned g_export_profile_async_writer_max_queued = 0;
 static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int export_profile_env_truthy(const char * value)
@@ -206,6 +211,22 @@ static void export_profile_reset_frames(void)
     g_export_profile_frame_count = 0;
     g_export_profile_frame_capacity = 0;
     g_export_profile_last_frame_finish_ms = 0.0;
+    g_export_profile_async_writer_queue_capacity = 0;
+    g_export_profile_async_writer_max_queued = 0;
+}
+
+static void export_profile_note_async_writer_queue(size_t capacity, size_t queued)
+{
+    pthread_mutex_lock(&g_export_profile_mutex);
+    if(capacity > (size_t)g_export_profile_async_writer_queue_capacity)
+    {
+        g_export_profile_async_writer_queue_capacity = (unsigned)capacity;
+    }
+    if(queued > (size_t)g_export_profile_async_writer_max_queued)
+    {
+        g_export_profile_async_writer_max_queued = (unsigned)queued;
+    }
+    pthread_mutex_unlock(&g_export_profile_mutex);
 }
 
 static int export_profile_configure_from_env(void)
@@ -482,6 +503,12 @@ static void export_profile_write_json(void)
     fputs(",\n", file);
     fprintf(file, "  \"frame_count\":%u,\n", (unsigned)g_export_profile_frame_count);
     fputs("  \"queue_idle_supported\":true,\n", file);
+    fprintf(file,
+            "  \"async_writer_queue_capacity\":%u,\n",
+            g_export_profile_async_writer_queue_capacity);
+    fprintf(file,
+            "  \"async_writer_max_queued\":%u,\n",
+            g_export_profile_async_writer_max_queued);
     fputs("  \"stages\":{\n", file);
     export_profile_write_stage_stats(file, "raw_read_decode_unpack_ms", 0);
     export_profile_write_stage_stats(file, "raw_read_ms", 1);
@@ -1845,10 +1872,35 @@ struct dngPayloadWriter
     pthread_cond_t can_consume;
     int thread_started;
     int stopping;
-    int has_job;
     int first_error;
-    dngPayloadWriterJob_t job;
+    size_t queue_capacity;
+    size_t queue_count;
+    size_t queue_head;
+    size_t queue_tail;
+    dngPayloadWriterJob_t * jobs;
 };
+
+static size_t dng_payload_writer_queue_depth_from_env(void)
+{
+    const char * value = getenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    char * end = NULL;
+    long parsed = 0;
+    if(value == NULL || value[0] == '\0')
+    {
+        return DNG_PAYLOAD_WRITER_DEFAULT_QUEUE_DEPTH;
+    }
+
+    parsed = strtol(value, &end, 10);
+    if(end == value || parsed < DNG_PAYLOAD_WRITER_DEFAULT_QUEUE_DEPTH)
+    {
+        return DNG_PAYLOAD_WRITER_DEFAULT_QUEUE_DEPTH;
+    }
+    if(parsed > DNG_PAYLOAD_WRITER_MAX_QUEUE_DEPTH)
+    {
+        return DNG_PAYLOAD_WRITER_MAX_QUEUE_DEPTH;
+    }
+    return (size_t)parsed;
+}
 
 static void * dng_payload_writer_main(void * opaque)
 {
@@ -1860,18 +1912,19 @@ static void * dng_payload_writer_main(void * opaque)
         memset(&job, 0, sizeof(job));
 
         pthread_mutex_lock(&writer->mutex);
-        while(!writer->has_job && !writer->stopping)
+        while(writer->queue_count == 0 && !writer->stopping)
         {
             pthread_cond_wait(&writer->can_consume, &writer->mutex);
         }
-        if(!writer->has_job && writer->stopping)
+        if(writer->queue_count == 0 && writer->stopping)
         {
             pthread_mutex_unlock(&writer->mutex);
             break;
         }
-        job = writer->job;
-        memset(&writer->job, 0, sizeof(writer->job));
-        writer->has_job = 0;
+        job = writer->jobs[writer->queue_head];
+        memset(&writer->jobs[writer->queue_head], 0, sizeof(writer->jobs[writer->queue_head]));
+        writer->queue_head = (writer->queue_head + 1) % writer->queue_capacity;
+        writer->queue_count--;
         pthread_cond_signal(&writer->can_produce);
         pthread_mutex_unlock(&writer->mutex);
 
@@ -1909,14 +1962,24 @@ dngPayloadWriter_t * createDngPayloadWriter(void)
     dngPayloadWriter_t * writer = (dngPayloadWriter_t*)calloc(1, sizeof(dngPayloadWriter_t));
     if(!writer) return NULL;
 
+    writer->queue_capacity = dng_payload_writer_queue_depth_from_env();
+    writer->jobs = (dngPayloadWriterJob_t*)calloc(writer->queue_capacity, sizeof(dngPayloadWriterJob_t));
+    if(!writer->jobs)
+    {
+        free(writer);
+        return NULL;
+    }
+
     if(pthread_mutex_init(&writer->mutex, NULL) != 0)
     {
+        free(writer->jobs);
         free(writer);
         return NULL;
     }
     if(pthread_cond_init(&writer->can_produce, NULL) != 0)
     {
         pthread_mutex_destroy(&writer->mutex);
+        free(writer->jobs);
         free(writer);
         return NULL;
     }
@@ -1924,6 +1987,7 @@ dngPayloadWriter_t * createDngPayloadWriter(void)
     {
         pthread_cond_destroy(&writer->can_produce);
         pthread_mutex_destroy(&writer->mutex);
+        free(writer->jobs);
         free(writer);
         return NULL;
     }
@@ -1932,10 +1996,12 @@ dngPayloadWriter_t * createDngPayloadWriter(void)
         pthread_cond_destroy(&writer->can_consume);
         pthread_cond_destroy(&writer->can_produce);
         pthread_mutex_destroy(&writer->mutex);
+        free(writer->jobs);
         free(writer);
         return NULL;
     }
     writer->thread_started = 1;
+    export_profile_note_async_writer_queue(writer->queue_capacity, 0);
     return writer;
 }
 
@@ -1952,8 +2018,10 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
 
     double wait_start = 0.0;
     int waited_for_writer = 0;
+    size_t queued_after_enqueue = 0;
+    size_t queue_capacity = 0;
     pthread_mutex_lock(&writer->mutex);
-    while(writer->has_job && writer->first_error == 0 && !writer->stopping)
+    while(writer->queue_count >= writer->queue_capacity && writer->first_error == 0 && !writer->stopping)
     {
         if(!waited_for_writer)
         {
@@ -1976,13 +2044,17 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
         return ret;
     }
 
-    writer->job.payload = payload;
-    writer->job.dng_filename = filename_copy;
-    writer->job.profile_frame = *profile_frame;
-    writer->job.profile_frame_start = profile_frame_start;
-    writer->has_job = 1;
+    writer->jobs[writer->queue_tail].payload = payload;
+    writer->jobs[writer->queue_tail].dng_filename = filename_copy;
+    writer->jobs[writer->queue_tail].profile_frame = *profile_frame;
+    writer->jobs[writer->queue_tail].profile_frame_start = profile_frame_start;
+    writer->queue_tail = (writer->queue_tail + 1) % writer->queue_capacity;
+    writer->queue_count++;
+    queued_after_enqueue = writer->queue_count;
+    queue_capacity = writer->queue_capacity;
     pthread_cond_signal(&writer->can_consume);
     pthread_mutex_unlock(&writer->mutex);
+    export_profile_note_async_writer_queue(queue_capacity, queued_after_enqueue);
     return 0;
 }
 
@@ -2004,6 +2076,7 @@ int finishDngPayloadWriter(dngPayloadWriter_t * writer)
     pthread_cond_destroy(&writer->can_consume);
     pthread_cond_destroy(&writer->can_produce);
     pthread_mutex_destroy(&writer->mutex);
+    free(writer->jobs);
     free(writer);
     return ret;
 }

@@ -10,6 +10,8 @@ param(
     [switch]$CandidateUsePayloadHandoff,
     [switch]$BaselineUseAsyncWriter,
     [switch]$CandidateUseAsyncWriter,
+    [int]$BaselineAsyncWriterQueueDepth = 0,
+    [int]$CandidateAsyncWriterQueueDepth = 0,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -53,7 +55,8 @@ function New-ProfileArgs {
         [string]$ProfilePath,
         [string]$LogPath,
         [bool]$UsePayloadHandoff,
-        [bool]$UseAsyncWriter
+        [bool]$UseAsyncWriter,
+        [int]$AsyncWriterQueueDepth
     )
 
     $args = @(
@@ -87,6 +90,9 @@ function New-ProfileArgs {
     }
     if ($UseAsyncWriter) {
         $args += "-UseAsyncWriter"
+        if ($AsyncWriterQueueDepth -gt 0) {
+            $args += @("-AsyncWriterQueueDepth", "$AsyncWriterQueueDepth")
+        }
     }
     if ($DryRun) {
         $args += "-DryRun"
@@ -100,14 +106,16 @@ $baselineArgs = New-ProfileArgs `
     -ProfilePath $baselineProfile `
     -LogPath $baselineLog `
     -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff) `
-    -UseAsyncWriter ([bool]$BaselineUseAsyncWriter)
+    -UseAsyncWriter ([bool]$BaselineUseAsyncWriter) `
+    -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
     -DngDir $candidateDngDir `
     -ProfilePath $candidateProfile `
     -LogPath $candidateLog `
     -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff) `
-    -UseAsyncWriter ([bool]$CandidateUseAsyncWriter)
+    -UseAsyncWriter ([bool]$CandidateUseAsyncWriter) `
+    -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth
 
 if ($DryRun) {
     [pscustomobject]@{
@@ -116,11 +124,13 @@ if ($DryRun) {
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
+            asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             args = $baselineArgs
         }
         candidate = [pscustomobject]@{
             usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             useAsyncWriter = [bool]$CandidateUseAsyncWriter
+            asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
             args = $candidateArgs
         }
         compareOutput = $compareJson
@@ -192,6 +202,8 @@ $summary = [pscustomobject]@{
         frameCount = $baselineProfileJson.frame_count
         payloadHandoffEnvEnabled = $baselineProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $baselineProfileJson.async_writer_env_enabled
+        asyncWriterQueueCapacity = $baselineProfileJson.async_writer_queue_capacity
+        asyncWriterMaxQueued = $baselineProfileJson.async_writer_max_queued
     }
     candidate = [pscustomobject]@{
         usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
@@ -203,6 +215,8 @@ $summary = [pscustomobject]@{
         frameCount = $candidateProfileJson.frame_count
         payloadHandoffEnvEnabled = $candidateProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $candidateProfileJson.async_writer_env_enabled
+        asyncWriterQueueCapacity = $candidateProfileJson.async_writer_queue_capacity
+        asyncWriterMaxQueued = $candidateProfileJson.async_writer_max_queued
     }
     compare = [pscustomobject]@{
         profile = $compareJson
@@ -225,13 +239,16 @@ $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Enc
 Write-Host ((
     "CDNG-EXPORT-AB verdict={0} baseline_payload={1} candidate_payload={2} " +
     "baseline_async={3} candidate_async={4} " +
-    "frame_total_avg_delta_ms={5} frame_total_p95_delta_ms={6} " +
-    "queue_idle_avg_delta_ms={7} writer_queue_wait_avg_delta_ms={8} output={9}") -f
+    "baseline_async_queue_capacity={5} candidate_async_queue_capacity={6} " +
+    "frame_total_avg_delta_ms={7} frame_total_p95_delta_ms={8} " +
+    "queue_idle_avg_delta_ms={9} writer_queue_wait_avg_delta_ms={10} output={11}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
     $summary.baseline.useAsyncWriter,
     $summary.candidate.useAsyncWriter,
+    $summary.baseline.asyncWriterQueueCapacity,
+    $summary.candidate.asyncWriterQueueCapacity,
     $summary.compare.frameTotalAvgDeltaMs,
     $summary.compare.frameTotalP95DeltaMs,
     $summary.compare.queueIdleAvgDeltaMs,
