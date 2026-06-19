@@ -467,6 +467,32 @@ in `llrawproc_ms` (+8.180042 ms average), while `dng_compress_ms` and
 This strengthens the hold without pointing at payload-copy cost: the lossless
 payload boundary is byte-correct, but current timing evidence still needs either
 a stronger same-stage/noise model or a real scheduler win before promotion.
+The matching current-release async-writer lossless matrix at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-matrix-16x3-current/matrix-summary.json`
+used serial payload handoff plus `-CandidateUseAsyncWriter`,
+`-CandidateAsyncWriterQueueDepth 2`, `--cdng-codec lossless`, the same three
+clips/receipt, 16 frames, and 3 repeats. Its hash sweep at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-matrix-16x3-current/dng-hash-comparison.json`
+reported 144/144 baseline-vs-candidate DNG pairs matched by length and SHA256,
+with 0 mismatches and 0 missing files, and all cases reached
+`async_writer_max_queued=2`. The calibrated identity-vs-async packet at
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-calibration-16x3-current/calibration.json`
+reported `verdict=EXCEEDS_IDENTITY_ENVELOPE` with
+`blockingReasons=feature_exceeds_identity_frameTotalAvgDeltaMs,feature_exceeds_identity_frameTotalP95DeltaMs`.
+Wrapper elapsed improved strongly (`elapsedDeltaMs` feature average
+-7214.264222 ms, inside the identity envelope), but frame-total average and p95
+deltas failed the envelope (`frameTotalAvgDeltaMs` feature average
++1043.311510 ms, feature positive max +3852.859176 ms; `frameTotalP95DeltaMs`
+feature average +1612.453544 ms, feature positive max +6837.739600 ms). Stage
+attribution names `writerCompletionLagAvgDeltaMs` as both the dominant positive
+feature-average stage (+1565.818632 ms) and dominant positive-max excess stage
+(+4281.253201 ms), with `writerQueueWaitAvgDeltaMs` also high (+876.454149 ms
+feature average). This is a useful async result but still a HOLD, not a
+promotion: the bytes are stable and the writer can overlap enough to improve
+wrapper elapsed, but the current completion gate says backlog/lag is part of
+the frame cost. Next E3 async work should either reduce queue wait/completion
+lag with scheduler policy or define a separately justified async-aware
+promotion gate; it should not claim success from elapsed-only improvement.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
