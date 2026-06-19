@@ -159,6 +159,22 @@ It used `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96, but CPU baseline
 was faster in every repeat. Keep it classified as a negative throughput probe,
 not an E3 promotion packet; it measured the default shadow validator, which
 still pays the CPU Dual-ISO oracle plus the GPU run and byte comparison.
+The trusted E3 measurement packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T180606\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T180606-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `8B4A455CC4AB2434A9D4B7C37309C516A719183037A746F8D7E6283CF82FB971`).
+It used commit `2ba1c2e596fd1b8cda2a8add44d397f3792aafaf`, release SHA256
+`E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`,
+`-TrustedGpuExport`, `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96.
+Candidate trusted/attempted/replaced frames were 96/96/96. Uncompressed
+`M16-1327` improved from 5682.102 ms to 4602.206 ms average wall time
+(-1079.896 ms, -15.705%), with average `frameTotalAvgDeltaMs=-31.004` and
+`llrawprocDualIsoAvgDeltaMs=-22.625`. Lossless stayed byte-identical and
+trusted, but moved from 6468.414 ms to 6775.267 ms average wall time
+(+306.853 ms, +5.113%) despite `llrawprocDualIsoAvgDeltaMs=-8.563`, so treat
+the packet as promotion for the trusted measurement gate and as the next
+lossless/compression-overlap bottleneck, not as broad E3 pipeline completion.
 If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass

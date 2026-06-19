@@ -1,14 +1,15 @@
 # GPU Lane — Playback & Export Roadmap + UX (plan of record)
 
 Status: 2026-06-19. Lane A E0-E2 export, the scoped Lane A E3 GPU
-replacement proof packet, P-pre GPU AMaZE/processing parity, and Lane B P1-P3
-are now through their scoped proof gates. P3 is honest-scoped, not universal:
+replacement proof packet plus trusted throughput gate, P-pre GPU
+AMaZE/processing parity, and Lane B P1-P3 are now through their scoped proof
+gates. P3 is honest-scoped, not universal:
 the RTX 4090 FastProxy proof validates the raw-fixes-enabled HQ Dual ISO
 no-readback CUDA-to-GL R16 texture path with GL/backend/oracle parity;
 unsupported states still fail closed to CPU readback or CPU presentation. The
 remaining priority order is P4 adaptive-quality polish, then Lane A E3
-throughput/pipeline work and E4 rendered export, then Lane C portable GPU
-backends.
+lossless/compression pipeline work and E4 rendered export, then Lane C portable
+GPU backends.
 
 Update 2026-06-19: P-pre **processing parity** has progressed beyond the
 original curve-first `allow_creative_adjustments` plan: creative slices 1-6 are
@@ -31,8 +32,21 @@ Dual-ISO oracle for the candidate only after the already-scoped CUDA parity
 shape is requested, writes GPU output into the final export buffer, and records
 `gpu_export_trusted` / `gpu_export_trusted_frames` so throughput packets cannot
 silently pass via the old shadow path. This is a profiling/proof surface, not a
-default export behavior change; E3 still needs an UltraMagnus trusted packet
-with DNG hash pass and a real throughput win before promotion.
+default export behavior change. The first trusted UltraMagnus packet for commit
+`2ba1c2e596fd1b8cda2a8add44d397f3792aafaf` passed on RTX 4090 with release
+SHA256 `E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`,
+DNG hash PASS 96/96, and candidate trusted/attempted/replaced frames 96/96/96:
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T180606/summary.json`
+with packet SHA256 `8B4A455CC4AB2434A9D4B7C37309C516A719183037A746F8D7E6283CF82FB971`.
+It promotes the trusted measurement gate for the scoped Dual ISO shape, while
+leaving default export CPU-authoritative. Throughput outcome: uncompressed
+`M16-1327` improved from 5682.102 ms to 4602.206 ms average wall time
+(-1079.896 ms, -15.705%), with average frame-total -31.004 ms/frame and
+Dual-ISO -22.625 ms/frame. Lossless stayed byte-identical and used the trusted
+GPU path, but overall wall time regressed from 6468.414 ms to 6775.267 ms
+(+306.853 ms, +5.113%) despite average Dual-ISO -8.563 ms/frame, so the next E3
+work is lossless/compression pipeline overlap rather than more shadow-validator
+tuning.
 
 Update 2026-06-18: Lane B **P1/P2** has an experimental readback bridge behind
 `MLVAPP_GPU_PLAYBACK_RECON=1`. Playback render/recon threads opt in explicitly,
