@@ -334,6 +334,19 @@ handoff's 24-frame alternating evidence is not worse than measured A/A jitter,
 but the roadmap still does not promote it as a broad export-throughput win until
 the sampling strategy itself is stronger.
 
+Async-writer queue-depth investigation:
+the current real-footage matrices exercise the batch CDNG receipt/default path,
+where producer-frame work is dominated by decode/recon/pack at roughly
+hundred-millisecond scale while `disk_write_ms` is only a few milliseconds. The
+single writer worker therefore drains each payload before the next payload is
+usually ready, so `async_writer_max_queued=1` is expected even when the configured
+queue capacity is 2. That makes the async writer non-promotable for this
+workload, but it is not by itself a queue-capacity bug. Next async E3 proof
+should use a deliberately writer-heavy/compressed-output scenario or a targeted
+stress harness before changing scheduler policy; the current matrices mainly
+show that serial payload handoff is cheap and that write overlap is not the
+bottleneck for the measured default path.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
