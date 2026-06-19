@@ -4834,6 +4834,36 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
             raw_set_pixel_20to16_rand(x, y, raw_buffer_32[x + y*w]);
 }
 
+/* P3 diagnostic (gated): FNV-1a-style checksum over a curve, so the recon's
+ * actual-used curve at point-of-use can be byte-compared against the published
+ * (re-derived) curve without dumping the full 8 MiB array. Sampled stride keeps
+ * it cheap on the hot path while still being sensitive to any divergence. */
+static uint64_t dualiso_p3_curve_checksum_f64(const double * curve, size_t count)
+{
+    uint64_t hash = 1469598103934665603ULL; /* FNV offset basis */
+    if(!curve) return 0;
+    for(size_t i = 0; i < count; i += 257)
+    {
+        uint64_t bits;
+        memcpy(&bits, &curve[i], sizeof(bits));
+        hash ^= bits;
+        hash *= 1099511628211ULL; /* FNV prime */
+    }
+    return hash;
+}
+
+static uint64_t dualiso_p3_curve_checksum_i32(const int * curve, size_t count)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    if(!curve) return 0;
+    for(size_t i = 0; i < count; i += 257)
+    {
+        hash ^= (uint64_t)(uint32_t)curve[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
 static const double * dualiso_select_gpu_mix_curve(const dualiso_full20bit_scratch_t * scratch,
                                                    uint32_t black,
                                                    uint32_t white,
@@ -5450,6 +5480,72 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         ret = 1;
     }
 
+    /* P3 diagnostic (gated, one-shot per process): dump the EXACT scalars and
+     * curve checksums diso_get_full20bit used at point-of-use. Compared offline
+     * against the published scalars.txt + mix_curve.f64/fullres_curve.f64 that
+     * the backend reconstructs from, this pins any recon state-capture desync to
+     * a specific field instead of guessing. Gated on the same env var as the
+     * live-vector dump so it only fires in the P3 validator. */
+    if(g_dualiso_gpu_recon_state_capture_enabled && ret)
+    {
+        static int recon_pou_dumped = 0;
+        const char * pou_dir = getenv("MLVAPP_GPU_PLAYBACK_RECON_DUMP_LIVE_VECTOR_DIR");
+        if(!recon_pou_dumped && pou_dir && *pou_dir && strcmp(pou_dir, "0") != 0)
+        {
+            const double overlap_at_use = g_dualiso_full20bit_timing.mix_curve_overlap;
+            const double * mix_curve_at_use =
+                dualiso_select_gpu_mix_curve(scratch,
+                                             (uint32_t)black,
+                                             (uint32_t)white,
+                                             corr_ev,
+                                             overlap_at_use);
+            const double * fullres_curve_at_use =
+                build_fullres_curve_float_as_double(black);
+            char pou_path[1200];
+            snprintf(pou_path, sizeof(pou_path), "%s/recon_pou.txt", pou_dir);
+            FILE * pou_f = fopen(pou_path, "wb");
+            if(pou_f)
+            {
+                fprintf(pou_f, "expo_matched=%d\n", expo_matched);
+                fprintf(pou_f, "black=%d\n", black);
+                fprintf(pou_f, "white=%d\n", white);
+                fprintf(pou_f, "white_darkened=%d\n", white_darkened);
+                fprintf(pou_f, "corr_ev=%.17g\n", corr_ev);
+                fprintf(pou_f, "ev_correction_ptr=%.17g\n", *ev_correction);
+                fprintf(pou_f, "black_delta_ptr=%d\n", *black_delta);
+                fprintf(pou_f, "black_delta20_published=%d\n", (*black_delta) * 64);
+                fprintf(pou_f, "dark_noise=%.17g\n", dark_noise);
+                fprintf(pou_f, "dark_noise_int_round=%d\n", (int)(dark_noise + 0.5));
+                fprintf(pou_f, "dark_noise_int_trunc=%d\n", (int)dark_noise);
+                fprintf(pou_f, "final_blend_fused_to_16bit=%d\n", final_blend_fused_to_16bit);
+                fprintf(pou_f, "interp_method=%d\n", interp_method);
+                fprintf(pou_f, "use_alias_map=%d\n", use_alias_map);
+                fprintf(pou_f, "use_fullres=%d\n", use_fullres);
+                fprintf(pou_f, "effective_chroma_smooth_method=%d\n", effective_chroma_smooth_method);
+                fprintf(pou_f, "mix_curve_overlap_at_use=%.17g\n", overlap_at_use);
+                fprintf(pou_f, "mix_curve_corr_ev_at_use=%.17g\n", g_dualiso_full20bit_timing.mix_curve_corr_ev);
+                fprintf(pou_f, "mix_curve_rebuilt=%d\n", g_dualiso_full20bit_timing.mix_curve_rebuilt);
+                fprintf(pou_f, "mix_curve_ptr_nonnull=%d\n", mix_curve_at_use != NULL);
+                fprintf(pou_f, "is_bright=%d%d%d%d\n",
+                        is_bright[0], is_bright[1], is_bright[2], is_bright[3]);
+                fprintf(pou_f, "mix_curve_checksum=%llu\n",
+                        (unsigned long long)dualiso_p3_curve_checksum_f64(
+                            mix_curve_at_use, (size_t)(1u << 20)));
+                fprintf(pou_f, "fullres_curve_checksum=%llu\n",
+                        (unsigned long long)dualiso_p3_curve_checksum_f64(
+                            fullres_curve_at_use, (size_t)(1u << 20)));
+                fprintf(pou_f, "raw2ev_checksum=%llu\n",
+                        (unsigned long long)dualiso_p3_curve_checksum_i32(
+                            scratch ? scratch->ev_raw2ev : NULL, (size_t)(1u << 20)));
+                fprintf(pou_f, "ev2raw_checksum=%llu\n",
+                        (unsigned long long)dualiso_p3_curve_checksum_i32(
+                            scratch ? scratch->ev2raw_0 : NULL, (size_t)(24u * EV_RESOLUTION)));
+                fclose(pou_f);
+                recon_pou_dumped = 1;
+            }
+        }
+    }
+
     dualiso_debug_publish_gpu_recon_state(ret,
                                           rggb,
                                           raw_info,
@@ -5466,7 +5562,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                           effective_chroma_smooth_method,
                                           final_blend_fused_to_16bit,
                                           scratch);
-    
+
     if (!rggb) /* back to GBRG */
     {
         raw_info.active_area.y1--;
