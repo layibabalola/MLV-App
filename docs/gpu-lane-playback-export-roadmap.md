@@ -142,7 +142,10 @@ parity for uncompressed and compressed tiny Dual-ISO DNG exports, including the
 async writer path. `tools/profiling/run-release-cdng-export-profile-ab.ps1` runs
 paired release-tree baseline/candidate exports and writes both profiles plus
 `compare.json`/`summary.json`, so E3 experiments have one repeatable promotion
-packet. This is scheduler prep, not a throughput claim.
+packet. Async writer profiles now also expose `writer_queue_wait_ms`, which
+separates bounded writer-queue backpressure from real `disk_write_ms` before
+larger decode/GPU/write scheduler work is promoted. This is scheduler prep, not
+a throughput claim.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

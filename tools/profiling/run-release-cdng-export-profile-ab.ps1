@@ -213,6 +213,8 @@ $summary = [pscustomobject]@{
         frameTotalP95DeltaPercent = if ($compare) { $compare.stages.frame_total_ms.p95Ms.deltaPercent } else { $null }
         queueIdleAvgDeltaMs = if ($compare) { $compare.stages.queue_idle_ms.avgMs.delta } else { $null }
         queueIdleP95DeltaMs = if ($compare) { $compare.stages.queue_idle_ms.p95Ms.delta } else { $null }
+        writerQueueWaitAvgDeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.avgMs.delta } else { $null }
+        writerQueueWaitP95DeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.p95Ms.delta } else { $null }
         failures = $compareFailures
     }
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS") { "PASS" } else { "FAIL" }
@@ -224,7 +226,7 @@ Write-Host ((
     "CDNG-EXPORT-AB verdict={0} baseline_payload={1} candidate_payload={2} " +
     "baseline_async={3} candidate_async={4} " +
     "frame_total_avg_delta_ms={5} frame_total_p95_delta_ms={6} " +
-    "queue_idle_avg_delta_ms={7} output={8}") -f
+    "queue_idle_avg_delta_ms={7} writer_queue_wait_avg_delta_ms={8} output={9}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
@@ -233,6 +235,7 @@ Write-Host ((
     $summary.compare.frameTotalAvgDeltaMs,
     $summary.compare.frameTotalP95DeltaMs,
     $summary.compare.queueIdleAvgDeltaMs,
+    $summary.compare.writerQueueWaitAvgDeltaMs,
     $summaryJson
 )
 

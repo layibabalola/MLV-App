@@ -444,6 +444,7 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("disk_write_ms"));
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("writer_queue_wait_ms"), 0);
     assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("queue_idle_ms"), 0);
     assert_profiler_json_has_stage(stages, QStringLiteral("frame_total_ms"));
     if (raw_state == COMPRESSED_RAW) {
@@ -1967,6 +1968,8 @@ TEST(DualIsoPipeline, DngFramePayloadSavePreservesExportStageProfiler)
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     ASSERT_TRUE(stages.value(QStringLiteral("disk_write_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_queue_wait_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
     ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
 
@@ -2024,6 +2027,8 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     ASSERT_TRUE(stages.value(QStringLiteral("disk_write_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_queue_wait_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
     ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
                     .value(QStringLiteral("samples")).toInt() >= 1);
 

@@ -99,6 +99,7 @@ typedef enum
     EXPORT_PROFILE_DNG_PACK,
     EXPORT_PROFILE_DNG_COMPRESS,
     EXPORT_PROFILE_DISK_WRITE,
+    EXPORT_PROFILE_WRITER_QUEUE_WAIT,
     EXPORT_PROFILE_QUEUE_IDLE,
     EXPORT_PROFILE_FRAME_TOTAL,
     EXPORT_PROFILE_STAGE_COUNT
@@ -163,6 +164,8 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_DNG_PACK:     return "dng_pack_ms";
         case EXPORT_PROFILE_DNG_COMPRESS: return "dng_compress_ms";
         case EXPORT_PROFILE_DISK_WRITE:   return "disk_write_ms";
+        case EXPORT_PROFILE_WRITER_QUEUE_WAIT:
+                                          return "writer_queue_wait_ms";
         case EXPORT_PROFILE_QUEUE_IDLE:   return "queue_idle_ms";
         case EXPORT_PROFILE_FRAME_TOTAL:  return "frame_total_ms";
         default:                          return "unknown_ms";
@@ -489,6 +492,7 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "dng_pack_ms", 1);
     export_profile_write_stage_stats(file, "dng_compress_ms", 1);
     export_profile_write_stage_stats(file, "disk_write_ms", 1);
+    export_profile_write_stage_stats(file, "writer_queue_wait_ms", 1);
     export_profile_write_stage_stats(file, "queue_idle_ms", 1);
     export_profile_write_stage_stats(file, "frame_total_ms", 1);
     fputs("  },\n", file);
@@ -1938,7 +1942,7 @@ dngPayloadWriter_t * createDngPayloadWriter(void)
 static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
                                       dngFramePayload_t * payload,
                                       const char * dng_filename,
-                                      const exportProfileFrame_t * profile_frame,
+                                      exportProfileFrame_t * profile_frame,
                                       double profile_frame_start)
 {
     if(!writer || !payload || !dng_filename || !profile_frame) return 1;
@@ -1946,10 +1950,23 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
     char * filename_copy = dng_strdup(dng_filename);
     if(!filename_copy) return 1;
 
+    double wait_start = 0.0;
+    int waited_for_writer = 0;
     pthread_mutex_lock(&writer->mutex);
     while(writer->has_job && writer->first_error == 0 && !writer->stopping)
     {
+        if(!waited_for_writer)
+        {
+            wait_start = export_profile_stage_begin(profile_frame);
+            waited_for_writer = 1;
+        }
         pthread_cond_wait(&writer->can_produce, &writer->mutex);
+    }
+    if(waited_for_writer)
+    {
+        export_profile_stage_end(profile_frame,
+                                 EXPORT_PROFILE_WRITER_QUEUE_WAIT,
+                                 wait_start);
     }
     if(writer->first_error != 0 || writer->stopping)
     {

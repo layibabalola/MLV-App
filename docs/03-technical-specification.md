@@ -326,7 +326,10 @@ is set. `createDngPayloadWriter()`, `saveDngFrameViaAsyncPayloadWriter()`, and
 producer and writer, so it is a bounded scheduler experiment rather than a
 multi-frame reorder. Export-stage profiler JSON records
 `payload_handoff_env_enabled` and `async_writer_env_enabled` so
-legacy-vs-candidate release profiles remain self-describing.
+legacy-vs-candidate release profiles remain self-describing. Async-writer
+profiles also expose `writer_queue_wait_ms`: time the producer spends waiting
+for the bounded writer queue to accept a payload, distinct from the writer
+thread's `disk_write_ms`.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 
