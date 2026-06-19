@@ -471,6 +471,23 @@ if (!(Test-Path -LiteralPath $receiptPath)) {
     Add-Failure $failures "Missing receipt: $receiptPath"
 }
 
+# The no-readback path REQUIRES raw-fix processing (and hence Dual ISO recon) to be enabled:
+# rawFixesEnabled=0 sets fix_raw=0, which early-returns the entire LLRawProc apply BEFORE the Dual
+# ISO recon block (src/mlv/llrawproc/llrawproc.c:1776), so there is no recon-only bayer to present
+# and no-readback CORRECTLY does not arm. Parse the receipt so the per-clip assertions expect arming
+# ONLY when raw fixes are on; with raw fixes off they assert the correct "not-armed" outcome instead
+# of false-failing. (Default receipt FastProxy.marxml has rawFixesEnabled=1.)
+$receiptRawFixesEnabled = $true
+if (Test-Path -LiteralPath $receiptPath) {
+    try {
+        [xml]$receiptXml = Get-Content -LiteralPath $receiptPath -Raw
+        $rfeNode = $receiptXml.SelectSingleNode('//rawFixesEnabled')
+        if ($rfeNode -and ([string]$rfeNode.InnerText).Trim() -eq '0') { $receiptRawFixesEnabled = $false }
+    } catch {
+        [void]$warnings.Add("Could not parse rawFixesEnabled from receipt '$receiptPath'; assuming enabled.")
+    }
+}
+
 $hostName = [Environment]::MachineName
 $sessionInfo = [pscustomobject]@{
     sessionName = $env:SESSIONNAME
@@ -794,20 +811,31 @@ exit `$LASTEXITCODE
             Add-Failure $clipFailures "Smoke result did not report a log path."
         }
 
-        if ($noReadbackFrames -le 0) {
-            Add-Failure $clipFailures "gpu_texture_no_readback_frames was $noReadbackFrames; expected > 0."
+        if ($receiptRawFixesEnabled) {
+            if ($noReadbackFrames -le 0) {
+                Add-Failure $clipFailures "gpu_texture_no_readback_frames was $noReadbackFrames; expected > 0."
+            }
+            if ($noReadbackCandidateFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_candidate=1."
+            }
+            if ($activeNoReadbackFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_active=1."
+            }
+            if ($cudaTextureSourceFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_r16_texture."
+            }
+            if ($fallbackFrameCount -gt 0) {
+                Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
+            }
         }
-        if ($noReadbackCandidateFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_candidate=1."
-        }
-        if ($activeNoReadbackFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_active=1."
-        }
-        if ($cudaTextureSourceFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_r16_texture."
-        }
-        if ($fallbackFrameCount -gt 0) {
-            Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
+        else {
+            # rawFixesEnabled=0 -> fix_raw=0 -> the LLRawProc apply early-returns BEFORE the Dual ISO
+            # recon block (src/mlv/llrawproc/llrawproc.c:1776), so there is no recon-only bayer and the
+            # no-readback path CORRECTLY does not arm. Assert that correct outcome instead of failing.
+            if ($noReadbackFrames -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but gpu_texture_no_readback_frames=$noReadbackFrames; no-readback must NOT arm without raw-fix recon."
+            }
+            [void]$warnings.Add("rawFixesEnabled=0: no-readback correctly not armed (Dual ISO recon disabled); no-readback arming assertions skipped. Use a raw-fixes-on receipt (e.g. FastProxy.marxml) to validate the no-readback path.")
         }
         if ($null -eq $glOutputProof) {
             Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
