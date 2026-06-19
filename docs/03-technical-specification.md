@@ -313,6 +313,11 @@ documented mechanism for keeping the hot decode path lock-light.
 `UNCOMPRESSED_RAW=0`, `COMPRESSED_RAW=1`, `UNCOMPRESSED_ORIG=2`,
 `COMPRESSED_ORIG=3`.
 
+`dngFramePayload_t` is the immutable header+image copy produced by
+`buildDngFramePayload()` and released with `freeDngFramePayload()`. It is the
+byte-stable handoff object for Lane A E3 writer-worker experiments; the current
+GUI/batch export loop still uses serial `saveDngFrame()`.
+
 ### 4.6 Audio (`mlvAudioObject_t`)
 
 MLV App does not define a dedicated `mlvAudioObject_t`. Audio state lives
@@ -717,6 +722,12 @@ double llrpGetLastDualIsoPreviewRowscaleMilliseconds(void);
 ```c
 dngObject_t * initDngObject(mlvObject_t *mlv_data, int raw_state,
                             double fps, int32_t par[4]);
+dngFramePayload_t * buildDngFramePayload(mlvObject_t *mlv_data,
+                            dngObject_t *dng_data, uint32_t frame_index,
+                            const char *props_filename);
+int           writeDngFramePayload(const dngFramePayload_t *payload,
+                            const char *dng_filename);
+void          freeDngFramePayload(dngFramePayload_t *payload);
 int           saveDngFrame (mlvObject_t *mlv_data, dngObject_t *dng_data,
                             uint32_t frame_index, char *dng_filename,
                             const char *props_filename);
@@ -1508,6 +1519,7 @@ are presets over these plus per-frame sidecar generation (`.dng.xmp`).
 | `processingObject_t` | `initProcessingObject` | `freeProcessingObject` | Caller owns; link via `setMlvProcessing` does **not** transfer ownership. `freeMlvObject` does not free the linked processing. |
 | `llrawprocObject_t` | `initLLRawProcObject` | `freeLLRawProcObject(mlvObject_t *)` | Allocated inside `initMlvObject` and freed by `freeMlvObject`. **Never** call `freeLLRawProcObject` independently. |
 | `dngObject_t` | `initDngObject` | `freeDngObject` | Per-export; short-lived. |
+| `dngFramePayload_t` | `buildDngFramePayload` | `freeDngFramePayload` | Immutable DNG header+image copy for future writer handoff; write with `writeDngFramePayload`. |
 | Prefetch slots | Heap inside `mlvObject_t::raw_uint16_prefetch_cache` | `freeMlvObject` | Owned by the clip; not caller-visible. |
 | `FrameSlot` / `std::vector<uint8_t>` row storage | `RenderFrameThread` | `RenderFrameThread` destructor | Slot ownership tracked by `presenting` flag; consumer must call `releasePresentedFrameForRequestSerial` when done. |
 | Worker-thread copies (llrawproc) | `llrawproc_workers[]` on `mlvObject_t` | `freeMlvObject` | Copy-on-claim, version-tagged; protects the main-thread maps. |

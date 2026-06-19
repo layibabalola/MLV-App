@@ -1669,6 +1669,81 @@ void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * 
     }
 }
 
+static int dng_write_buffers(FILE * dngf,
+                             const uint8_t * header_buf,
+                             size_t header_size,
+                             const uint8_t * image_buf,
+                             size_t image_size)
+{
+    if(!dngf || !header_buf || !image_buf) return 1;
+
+    if(fwrite(header_buf, header_size, 1, dngf) != 1)
+    {
+        return 1;
+    }
+
+    if(fwrite(image_buf, image_size, 1, dngf) != 1)
+    {
+        return 1;
+    }
+
+    return 0;
+}
+
+dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
+                                         dngObject_t * dng_data,
+                                         uint32_t frame_index,
+                                         const char *prop_filename)
+{
+    if(!mlv_data || !dng_data) return NULL;
+
+    if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL) != 0)
+    {
+        return NULL;
+    }
+
+    dngFramePayload_t * payload = calloc(1, sizeof(dngFramePayload_t));
+    if(!payload) return NULL;
+
+    payload->header_size = dng_data->header_size;
+    payload->image_size = dng_data->image_size;
+    payload->header_buf = malloc(payload->header_size);
+    payload->image_buf = malloc(payload->image_size);
+    if(!payload->header_buf || !payload->image_buf)
+    {
+        freeDngFramePayload(payload);
+        return NULL;
+    }
+
+    memcpy(payload->header_buf, dng_data->header_buf, payload->header_size);
+    memcpy(payload->image_buf, dng_data->image_buf, payload->image_size);
+    return payload;
+}
+
+int writeDngFramePayload(const dngFramePayload_t * payload, const char * dng_filename)
+{
+    if(!payload || !dng_filename) return 1;
+
+    FILE * dngf = fopen(dng_filename, "wb");
+    if(!dngf) return 1;
+
+    const int ret = dng_write_buffers(dngf,
+                                      payload->header_buf,
+                                      payload->header_size,
+                                      payload->image_buf,
+                                      payload->image_size);
+    fclose(dngf);
+    return ret;
+}
+
+void freeDngFramePayload(dngFramePayload_t * payload)
+{
+    if(!payload) return;
+    if(payload->header_buf) free(payload->header_buf);
+    if(payload->image_buf) free(payload->image_buf);
+    free(payload);
+}
+
 /* save DNG file */
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *prop_filename)
 {
@@ -1698,18 +1773,11 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
 
     profile_stage_start = export_profile_stage_begin(&profile_frame);
 
-    /* write DNG header */
-    if (fwrite(dng_data->header_buf, dng_data->header_size, 1, dngf) != 1)
-    {
-        fclose(dngf);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
-        export_profile_frame_finish(&profile_frame, 0);
-        return 1;
-    }
-    
-    /* write DNG image data */
-    if (fwrite(dng_data->image_buf, dng_data->image_size, 1, dngf) != 1)
+    if(dng_write_buffers(dngf,
+                         dng_data->header_buf,
+                         dng_data->header_size,
+                         (const uint8_t *)dng_data->image_buf,
+                         dng_data->image_size) != 0)
     {
         fclose(dngf);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);

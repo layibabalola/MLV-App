@@ -108,6 +108,36 @@ static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
     return read_all_bytes(dng_path);
 }
 
+static QByteArray export_tiny_dng_via_payload_for_pipeline_prep(int raw_state,
+                                                                const QString & dng_path)
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngFramePayload_t * payload =
+        buildDngFramePayload(fixture.video(), dng, 0, nullptr);
+    ASSERT_TRUE(payload != nullptr);
+
+    const QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, writeDngFramePayload(payload, dng_path_bytes.constData()));
+
+    freeDngFramePayload(payload);
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
 struct GpuExportDualIsoConfig {
     int interp;   // DISOI_MEAN23 (GPU-eligible) or DISOI_AMAZE (ineligible)
     int alias;    // FR_OFF / FR_ON
@@ -1793,6 +1823,29 @@ TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressed
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+}
+
+TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString saved_path = temp_dir.filePath(suffix + QStringLiteral("-save.dng"));
+        const QString payload_path = temp_dir.filePath(suffix + QStringLiteral("-payload.dng"));
+        const QString profile_path = temp_dir.filePath(suffix + QStringLiteral("-profile.json"));
+
+        const QByteArray saved_bytes =
+            export_tiny_dng_for_profiler_gate(raw_state, false, saved_path, profile_path);
+        const QByteArray payload_bytes =
+            export_tiny_dng_via_payload_for_pipeline_prep(raw_state, payload_path);
+
+        ASSERT_TRUE(saved_bytes == payload_bytes);
+    }
 }
 
 TEST(DualIsoPipeline, ExportStageProfilerRecordsQueueIdleBetweenFrameSaves)
