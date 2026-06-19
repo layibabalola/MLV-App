@@ -203,10 +203,12 @@ elapsed-time deltas, async queue capacity, and async max-queued fields. Tiny
 fixture matrix runs are smoke tests only; E3 promotion still requires a bounded
 real-footage matrix with receipts/frame caps that match the export scenario
 under review. `tools/profiling/compare-cdng-dng-output-hashes.ps1` now turns
-the repeated baseline-vs-candidate DNG SHA256 sweep into a reusable matrix
-companion: it follows each run's A/B `summary.json`, compares DNG files by
-relative path, length, and SHA256, writes `dng-hash-comparison.json`, and fails
-closed under `-FailOnMismatch`. Validation reran it against
+the baseline-vs-candidate DNG SHA256 sweep into a reusable companion for both
+matrix summaries and standalone A/B summaries: it follows each run's A/B
+`summary.json` in matrix mode or reads a single A/B `summary.json` with
+`-AbSummary`/`-SummaryJson`, compares DNG files by relative path, length, and
+SHA256, writes `dng-hash-comparison.json`, and fails closed under
+`-FailOnMismatch`. Validation reran matrix mode against
 `.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-matrix-16x3-current/matrix-summary.json`
 for 144/144 matched pairs, and the deliberate mismatch smoke under
 `.claude-state/profiling/2026-06-19-cdng-hash-tool-negative-smoke/` exited 1.
@@ -646,18 +648,20 @@ creates real writer pressure. Baseline-first output lives at
 `.claude-state/profiling/2026-06-19-cdng-e3-m29-lossless-async-probe-54787f8f/`;
 candidate-first output lives at
 `.claude-state/profiling/2026-06-19-cdng-e3-m29-lossless-async-probe-candidatefirst-54787f8f/`.
-Both bundles produced byte-identical baseline/candidate DNGs for all 4/4
-frames. The async candidate used payload handoff, queue depth 2, and writer
-threads 2, but both run orders still reported `async_writer_max_active=1` and
-`async_writer_max_queued=1`. Elapsed deltas were order-sensitive
-(`-1454.373 ms` baseline-first versus `-102.329 ms` candidate-first), while
-frame-total averages regressed (`+10.4989 ms` and `+19.045225 ms`) and
-writer-completion lag remained small (`+2.278675 ms` and `+1.9589 ms`). This
-keeps async writer at HOLD on available local footage: M29 is useful coverage,
-but it still does not supply the representative writer-heavy workload needed to
-justify scheduler-policy work. Next E3 work should either find or construct a
-true writer-dominant export scenario, or move to the next measured export
-bottleneck rather than widening async writer count again.
+`tools/profiling/compare-cdng-dng-output-hashes.ps1 -AbSummary` and its
+`-SummaryJson` alias validated both bundles as byte-identical baseline/candidate
+DNGs for all 4/4 frames, writing `dng-hash-comparison.json` beside each
+standalone summary. The async candidate used payload handoff, queue depth 2, and
+writer threads 2, but both run orders still reported
+`async_writer_max_active=1` and `async_writer_max_queued=1`. Elapsed deltas were
+order-sensitive (`-1454.373 ms` baseline-first versus `-102.329 ms`
+candidate-first), while frame-total averages regressed (`+10.4989 ms` and
+`+19.045225 ms`) and writer-completion lag remained small (`+2.278675 ms` and
+`+1.9589 ms`). This keeps async writer at HOLD on available local footage: M29
+is useful coverage, but it still does not supply the representative writer-heavy
+workload needed to justify scheduler-policy work. Next E3 work should either
+find or construct a true writer-dominant export scenario, or move to the next
+measured export bottleneck rather than widening async writer count again.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

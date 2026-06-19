@@ -1,21 +1,42 @@
 param(
     [string]$MatrixDir = "",
     [string]$MatrixSummary = "",
+    [Alias("SummaryJson")]
+    [string]$AbSummary = "",
     [string]$Output = "",
     [switch]$FailOnMismatch
 )
 
 $ErrorActionPreference = "Stop"
 
-function Resolve-MatrixSummaryPath {
-    if (-not [string]::IsNullOrWhiteSpace($MatrixSummary)) {
-        return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MatrixSummary)
+function Resolve-InputSummary {
+    $hasMatrixSummary = -not [string]::IsNullOrWhiteSpace($MatrixSummary)
+    $hasMatrixDir = -not [string]::IsNullOrWhiteSpace($MatrixDir)
+    $hasAbSummary = -not [string]::IsNullOrWhiteSpace($AbSummary)
+
+    if (($hasMatrixSummary -or $hasMatrixDir) -and $hasAbSummary) {
+        throw "Pass either -MatrixSummary/-MatrixDir or -AbSummary, not both."
     }
-    if (-not [string]::IsNullOrWhiteSpace($MatrixDir)) {
+    if ($hasMatrixSummary) {
+        return [pscustomobject]@{
+            Kind = "matrix"
+            Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MatrixSummary)
+        }
+    }
+    if ($hasMatrixDir) {
         $resolvedDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($MatrixDir)
-        return (Join-Path $resolvedDir "matrix-summary.json")
+        return [pscustomobject]@{
+            Kind = "matrix"
+            Path = (Join-Path $resolvedDir "matrix-summary.json")
+        }
     }
-    throw "Pass -MatrixSummary or -MatrixDir."
+    if ($hasAbSummary) {
+        return [pscustomobject]@{
+            Kind = "ab"
+            Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AbSummary)
+        }
+    }
+    throw "Pass -MatrixSummary, -MatrixDir, or -AbSummary."
 }
 
 function Read-JsonFile {
@@ -144,11 +165,46 @@ function Compare-DngDirectories {
     }
 }
 
-$matrixSummaryPath = Resolve-MatrixSummaryPath
-$matrixSummaryPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($matrixSummaryPath)
-$matrixDirResolved = Split-Path -Parent $matrixSummaryPath
+function Compare-AbRunSummary {
+    param(
+        [string]$RunSummaryPath,
+        [string]$CaseName,
+        [object]$Repeat,
+        [string]$RunOrderOverride = ""
+    )
+
+    $runSummary = Read-JsonFile -Path $RunSummaryPath -Label "A/B run summary"
+    if ([string]$runSummary.schema -ne "release-cdng-export-profile-ab.v1") {
+        throw "Unexpected A/B run summary schema in ${RunSummaryPath}: $($runSummary.schema)"
+    }
+
+    $baselineDir = [string]$runSummary.baseline.dngOutputDir
+    $candidateDir = [string]$runSummary.candidate.dngOutputDir
+    $runOrder = [string]$runSummary.runOrder
+    if ([string]::IsNullOrWhiteSpace($runOrder)) {
+        $runOrder = $RunOrderOverride
+    }
+    $runComparison = Compare-DngDirectories `
+        -BaselineDir $baselineDir `
+        -CandidateDir $candidateDir `
+        -CaseName $CaseName `
+        -Repeat $Repeat `
+        -RunOrder $runOrder
+
+    [pscustomobject]@{
+        summary = $runSummary
+        baselineDir = $baselineDir
+        candidateDir = $candidateDir
+        runOrder = $runOrder
+        comparison = $runComparison
+    }
+}
+
+$inputSummary = Resolve-InputSummary
+$inputSummaryPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($inputSummary.Path)
+$summaryDirResolved = Split-Path -Parent $inputSummaryPath
 if ([string]::IsNullOrWhiteSpace($Output)) {
-    $Output = Join-Path $matrixDirResolved "dng-hash-comparison.json"
+    $Output = Join-Path $summaryDirResolved "dng-hash-comparison.json"
 }
 $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $outputDir = Split-Path -Parent $outputPath
@@ -156,52 +212,86 @@ if (-not (Test-Path -LiteralPath $outputDir -PathType Container)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
 
-$matrix = Read-JsonFile -Path $matrixSummaryPath -Label "Matrix summary"
-if ([string]$matrix.schema -ne "release-cdng-export-profile-matrix.v1") {
-    throw "Unexpected matrix summary schema in ${matrixSummaryPath}: $($matrix.schema)"
-}
-
 $caseRows = @()
 $mismatches = @()
 $totals = New-EmptyTotals
+$comparisonMode = ""
+$isIdentityComparison = $false
+$matrixSummaryPath = $null
+$abSummaryPath = $null
 
-foreach ($case in @($matrix.cases)) {
-    $caseTotals = New-EmptyTotals
-    $runRows = @()
-    foreach ($run in @($case.runs)) {
-        $runSummaryPath = [string]$run.summary
-        $runSummary = Read-JsonFile -Path $runSummaryPath -Label "A/B run summary"
-        if ([string]$runSummary.schema -ne "release-cdng-export-profile-ab.v1") {
-            throw "Unexpected A/B run summary schema in ${runSummaryPath}: $($runSummary.schema)"
+if ($inputSummary.Kind -eq "matrix") {
+    $matrixSummaryPath = $inputSummaryPath
+    $matrix = Read-JsonFile -Path $matrixSummaryPath -Label "Matrix summary"
+    if ([string]$matrix.schema -ne "release-cdng-export-profile-matrix.v1") {
+        throw "Unexpected matrix summary schema in ${matrixSummaryPath}: $($matrix.schema)"
+    }
+    $comparisonMode = [string]$matrix.comparisonMode
+    $isIdentityComparison = [bool]$matrix.isIdentityComparison
+
+    foreach ($case in @($matrix.cases)) {
+        $caseTotals = New-EmptyTotals
+        $runRows = @()
+        foreach ($run in @($case.runs)) {
+            $runSummaryPath = [string]$run.summary
+            $abRun = Compare-AbRunSummary `
+                -RunSummaryPath $runSummaryPath `
+                -CaseName ([string]$case.name) `
+                -Repeat $run.repeat `
+                -RunOrderOverride ([string]$run.runOrder)
+
+            Add-Totals -Target $totals -Source $abRun.comparison.totals
+            Add-Totals -Target $caseTotals -Source $abRun.comparison.totals
+            $mismatches += @($abRun.comparison.mismatches)
+            $runRows += [pscustomobject]@{
+                repeat = $run.repeat
+                runOrder = $abRun.runOrder
+                summary = $runSummaryPath
+                baselineDngDir = $abRun.baselineDir
+                candidateDngDir = $abRun.candidateDir
+                totals = $abRun.comparison.totals
+            }
         }
 
-        $baselineDir = [string]$runSummary.baseline.dngOutputDir
-        $candidateDir = [string]$runSummary.candidate.dngOutputDir
-        $runComparison = Compare-DngDirectories `
-            -BaselineDir $baselineDir `
-            -CandidateDir $candidateDir `
-            -CaseName ([string]$case.name) `
-            -Repeat $run.repeat `
-            -RunOrder ([string]$run.runOrder)
-
-        Add-Totals -Target $totals -Source $runComparison.totals
-        Add-Totals -Target $caseTotals -Source $runComparison.totals
-        $mismatches += @($runComparison.mismatches)
-        $runRows += [pscustomobject]@{
-            repeat = $run.repeat
-            runOrder = [string]$run.runOrder
-            summary = $runSummaryPath
-            baselineDngDir = $baselineDir
-            candidateDngDir = $candidateDir
-            totals = $runComparison.totals
+        $caseRows += [pscustomobject]@{
+            name = [string]$case.name
+            totals = $caseTotals
+            runs = $runRows
         }
     }
+}
+elseif ($inputSummary.Kind -eq "ab") {
+    $abSummaryPath = $inputSummaryPath
+    $caseName = Split-Path -Leaf (Split-Path -Parent $abSummaryPath)
+    if ([string]::IsNullOrWhiteSpace($caseName)) {
+        $caseName = "single-ab"
+    }
+    $abRun = Compare-AbRunSummary `
+        -RunSummaryPath $abSummaryPath `
+        -CaseName $caseName `
+        -Repeat 1
 
+    Add-Totals -Target $totals -Source $abRun.comparison.totals
+    $mismatches += @($abRun.comparison.mismatches)
+    $comparisonMode = [string]$abRun.summary.comparisonMode
+    $isIdentityComparison = [bool]$abRun.summary.isIdentityComparison
     $caseRows += [pscustomobject]@{
-        name = [string]$case.name
-        totals = $caseTotals
-        runs = $runRows
+        name = $caseName
+        totals = $abRun.comparison.totals
+        runs = @(
+            [pscustomobject]@{
+                repeat = 1
+                runOrder = $abRun.runOrder
+                summary = $abSummaryPath
+                baselineDngDir = $abRun.baselineDir
+                candidateDngDir = $abRun.candidateDir
+                totals = $abRun.comparison.totals
+            }
+        )
     }
+}
+else {
+    throw "Unsupported input summary kind: $($inputSummary.Kind)"
 }
 
 $verdict = if ($totals.mismatched -eq 0 -and
@@ -216,8 +306,11 @@ else {
 $result = [pscustomobject]@{
     schema = "release-cdng-dng-hash-comparison.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    sourceKind = [string]$inputSummary.Kind
     matrixSummary = $matrixSummaryPath
-    comparisonMode = [string]$matrix.comparisonMode
+    abSummary = $abSummaryPath
+    comparisonMode = $comparisonMode
+    isIdentityComparison = $isIdentityComparison
     verdict = $verdict
     totals = $totals
     cases = $caseRows
@@ -227,8 +320,9 @@ $result = [pscustomobject]@{
 $result | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $outputPath -Encoding UTF8
 
 Write-Host ((
-    "CDNG-DNG-HASH-COMPARE verdict={0} pairs={1} matched={2} mismatched={3} " +
-    "missing_baseline={4} missing_candidate={5} output={6}") -f
+    "CDNG-DNG-HASH-COMPARE source={0} verdict={1} pairs={2} matched={3} mismatched={4} " +
+    "missing_baseline={5} missing_candidate={6} output={7}") -f
+    $result.sourceKind,
     $result.verdict,
     $result.totals.pairs,
     $result.totals.matched,

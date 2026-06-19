@@ -70,8 +70,8 @@ checked-in fixture matrix is only a schema/tooling smoke; E3 promotion needs a
 bounded real-footage matrix whose clips, receipts, frame caps, and repeats match
 the export scenario being judged.
 
-After any matrix that claims CDNG output correctness, run the DNG byte-identity
-companion before interpreting the timing result:
+After any matrix or standalone A/B run that claims CDNG output correctness, run
+the DNG byte-identity companion before interpreting the timing result:
 
 ```powershell
 pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
@@ -80,9 +80,19 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -FailOnMismatch
 ```
 
-It reads the matrix `summary.json` links, compares every baseline/candidate DNG
-pair by relative path, length, and SHA256, and writes
-`dng-hash-comparison.json` beside `matrix-summary.json`.
+For a single A/B bundle, use the bundle summary directly:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\compare-cdng-dng-output-hashes.ps1 `
+  -AbSummary .claude-state\profiling\<ab-run>\summary.json `
+  -FailOnMismatch
+```
+
+`-SummaryJson` is an alias for `-AbSummary`. Matrix mode follows each run's
+A/B `summary.json`; standalone A/B mode reads that file directly. Both modes
+compare every baseline/candidate DNG pair by relative path, length, and SHA256,
+then write `dng-hash-comparison.json` beside the selected summary file.
 
 When raw frame-total gates are noisy, compare a matching identity A/A matrix
 against the feature A/B matrix instead of reading the feature matrix in
