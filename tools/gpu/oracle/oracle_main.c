@@ -187,6 +187,32 @@ static int ORACLE_IS_BRIGHT[4] = {1, 1, 0, 0};
 static int    g_oracle_apply_dither = 0;
 static int    g_oracle_black_delta  = 0;   /* 14-bit units, default 0 */
 
+/* ---- auto_correction (match-by) diagnostic axis (env-controlled) ----------- *
+ * ORACLE_AUTO_CORRECTION selects which match_exposures branch diso_get_full20bit
+ * takes (dualiso.c:2499-2522):
+ *   unset / -1  -> ISO-ratio path (the historical oracle default; corr_ev =
+ *                  log2(iso2/iso1), black_delta from the ISO pair). BYTE-IDENTICAL
+ *                  to before when unset, so every existing vector regenerates
+ *                  unchanged.
+ *   -2          -> match_by_histogram path (dualiso.c:2329). This is the EXACT
+ *                  runtime configuration the GUI uses for a DISO_FORCED clip
+ *                  (MainWindow.cpp:11015-11021): diso_auto_correction=-2,
+ *                  diso_ev_correction=1 (sentinel), diso_black_delta=-1 (sentinel).
+ *                  Those two sentinels are what make match_exposures KEEP the
+ *                  histogram-derived _ev_correction/_black_delta instead of
+ *                  overwriting them with caller values (the override at
+ *                  dualiso.c:2524 / :2529 only fires for ev!=1 / bd!=-1).
+ *
+ * When -2 is selected the oracle therefore passes ev_correction=1 and
+ * black_delta=-1 as the in/out sentinels (overriding the LOAD-mode bd=-1 default,
+ * which already coincides), so diso_get_full20bit runs match_by_histogram and the
+ * APPLIED a/b20 reach the pixels. The captured ev_correction/black_delta read
+ * back the histogram values (dualiso.c:2537-2538). Default (-1) leaves the whole
+ * param block untouched -> base/iso1600/clipped/live(ISO-ratio) vectors are
+ * byte-identical. */
+static int    g_oracle_auto_correction      = -1;  /* -1 = ISO-ratio (default), -2 = histogram */
+static int    g_oracle_auto_correction_set  = 0;   /* 1 if ORACLE_AUTO_CORRECTION was set */
+
 /* Parse an env var "0110"/"1100" (exactly 4 chars, each '0' or '1') into the
  * mutable ORACLE_IS_BRIGHT[4]. Leaves it untouched (default {1,1,0,0}) when the
  * var is unset or malformed, so unset == base. Returns 1 if an override was
@@ -221,6 +247,17 @@ static void oracle_parse_scalar_env(void)
     if (bd && *bd) g_oracle_black_delta = atoi(bd);
     const char * dt = getenv("ORACLE_APPLY_DITHER");
     if (dt && *dt) g_oracle_apply_dither = (atoi(dt) != 0);
+    const char * ac = getenv("ORACLE_AUTO_CORRECTION");
+    if (ac && *ac) {
+        int v = atoi(ac);
+        if (v == -1 || v == -2) {
+            g_oracle_auto_correction     = v;
+            g_oracle_auto_correction_set = 1;
+        } else {
+            fprintf(stderr, "[oracle] ignoring ORACLE_AUTO_CORRECTION='%s' "
+                            "(only -1 or -2 supported)\n", ac);
+        }
+    }
 }
 
 /* ---- LOAD-EXTERNAL-INPUT mode (env-controlled, default OFF) ---------------- *
@@ -490,6 +527,11 @@ int main(int argc, char ** argv)
     int isbright_overridden = oracle_parse_is_bright_env();
     oracle_parse_scalar_env();
     oracle_parse_load_env();   /* ORACLE_LOAD_INPUT + geometry/levels/iso overrides */
+    if (g_oracle_auto_correction_set) {
+        fprintf(stderr, "[oracle] NON-BASE axis: auto_correction=%d (%s)\n",
+                g_oracle_auto_correction,
+                g_oracle_auto_correction == -2 ? "match_by_histogram" : "ISO-ratio");
+    }
     if (isbright_overridden || g_oracle_black_delta != 0 || g_oracle_apply_dither) {
         fprintf(stderr, "[oracle] NON-BASE axes: is_bright={%d,%d,%d,%d}%s "
                         "black_delta=%d(14b) apply_dither=%d\n",
@@ -655,7 +697,7 @@ int main(int argc, char ** argv)
                     ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3]);
         }
     }
-    int    diso_auto_correction = -1;    /* ISO-ratio                                */
+    int    diso_auto_correction = g_oracle_auto_correction;  /* -1 ISO-ratio (default), -2 histogram */
     double diso_ev_correction   = 1.0;   /* sentinel: use ISO-ratio (see above)      */
     /* black_delta param semantics (match_exposures, dualiso.c:2529-2538):
      *   diso_black_delta != -1 -> _black_delta OVERWRITTEN with diso_black_delta*64
@@ -672,6 +714,23 @@ int main(int argc, char ** argv)
         diso_black_delta = -1;   /* keep ISO-ratio black_delta (live reproduction) */
         fprintf(stderr, "[oracle] LOAD mode: diso_black_delta=-1 (keep ISO-ratio "
                         "black_delta from match_exposures)\n");
+    }
+    /* AUTO=-2 (match_by_histogram) diagnostic mode. Mirror the GUI DISO_FORCED
+     * runtime exactly (MainWindow.cpp:11015-11021): auto_correction=-2 selects
+     * the histogram branch in match_exposures (dualiso.c:2519-2522), and the
+     * ev=1 / bd=-1 SENTINELS are what stop the override at dualiso.c:2524/:2529
+     * from clobbering the histogram-derived _ev_correction/_black_delta. Without
+     * those sentinels match_exposures would discard the histogram result and
+     * re-apply the iso-ratio (the desync this diagnostic is meant to reproduce).
+     * Forcing bd=-1 here also overrides any non-LOAD g_oracle_black_delta so the
+     * histogram value is the one APPLIED. */
+    if (g_oracle_auto_correction_set && g_oracle_auto_correction == -2) {
+        diso_auto_correction = -2;
+        diso_ev_correction   = 1.0;   /* sentinel: keep histogram ev_correction  */
+        diso_black_delta     = -1;    /* sentinel: keep histogram black_delta     */
+        fprintf(stderr, "[oracle] AUTO=-2 mode: match_by_histogram "
+                        "(auto_correction=-2, ev_correction=1 sentinel, "
+                        "black_delta=-1 sentinel) -- mirrors GUI DISO_FORCED\n");
     }
     int    interp_method        = sel_interp; /* 0=AMaZE (production default), 1=mean23 */
     int    use_alias_map        = 1;     /* exercise the 3-pass alias map            */
@@ -950,6 +1009,13 @@ int main(int argc, char ** argv)
             fprintf(f, "is_bright=%d,%d,%d,%d\n",
                     ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1], ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3]);
             fprintf(f, "# --- captured out-params (post-recon) ---\n");
+            /* auto_correction line emitted ONLY in the diagnostic mode so base/
+             * iso1600/clipped/live(ISO-ratio) scalars.txt stay byte-identical. */
+            if (g_oracle_auto_correction_set) {
+                fprintf(f, "auto_correction=%d        # %s (match_exposures branch)\n",
+                        diso_auto_correction,
+                        diso_auto_correction == -2 ? "match_by_histogram" : "ISO-ratio");
+            }
             fprintf(f, "ev_correction=%.17g\n", diso_ev_correction);   /* negative as stored */
             fprintf(f, "corr_ev=%.17g\n", corr_ev);                    /* ABS(ev_correction) */
             fprintf(f, "black_delta=%d\n", black_delta_out);
