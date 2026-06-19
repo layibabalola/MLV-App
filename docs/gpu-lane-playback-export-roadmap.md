@@ -731,6 +731,14 @@ both reported `dngHash.verdict=PASS` with 1/1 matched pairs. Promotion packets
 can now require candidate GPU replacement and DNG byte identity in one wrapper
 verdict instead of relying on a follow-up manual hash sweep.
 
+Update 2026-06-19 Lane A E3 compression telemetry: export profiles now record
+compressed-DNG byte counts alongside `dng_compress_ms`: root
+`dng_compress_bytes_valid_frames`, `dng_compress_input_bytes_total`, and
+`dng_compress_output_bytes_total`, plus per-frame
+`dng_compress_bytes_valid`, `dng_compress_input_bytes`, and
+`dng_compress_output_bytes`. This keeps the next compression-placement or
+parallelism experiment tied to byte throughput rather than timing alone.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

@@ -353,6 +353,11 @@ save-frame entry; the older `queue_idle_ms` remains previous profiled frame
 completion to next save-frame entry, which can include async writer completion
 lag. `writer_completion_lag_ms` is derived as `frame_total_ms -
 producer_frame_ms`, making post-producer writer completion time explicit.
+Compressed-DNG output profiles also expose `dng_compress_bytes_valid_frames`,
+`dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
+per-frame compression input/output byte counts; these byte totals are the
+throughput denominator for deciding whether compression belongs on the producer
+side, writer side, or a later worker boundary.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
 release-tree promotion harness for these fields: it runs paired baseline and
 candidate exports across named cases/repeats and writes

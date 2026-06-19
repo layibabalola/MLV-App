@@ -449,6 +449,9 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_replaced_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_allocated_bytes_valid_frames")));
     ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_max_allocated_bytes")));
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_bytes_valid_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_input_bytes_total")));
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_output_bytes_total")));
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
@@ -488,6 +491,17 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_replaced")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes_valid")));
     ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_bytes_valid")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_input_bytes")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_output_bytes")));
+    if (raw_state == COMPRESSED_RAW) {
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_bytes_valid")).toBool(false));
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_input_bytes")).toDouble() > 0.0);
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_output_bytes")).toDouble() > 0.0);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_bytes_valid_frames")).toInt() >= 1);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_input_bytes_total")).toDouble() > 0.0);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_output_bytes_total")).toDouble() > 0.0);
+    }
 }
 
 static void preserve_profiler_gate_artifacts(const QString & suffix,
