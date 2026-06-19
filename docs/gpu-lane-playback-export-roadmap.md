@@ -189,13 +189,17 @@ DNG frame. The default GUI/batch export path remains serial through
 `saveDngFrame`, but setting `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` or passing
 `-UsePayloadHandoff` to `tools/profiling/run-release-cdng-export-profile.ps1`
 routes CDNG export through a serial build-payload/write-payload boundary. The
-same payload contract now also has an opt-in single writer-worker path behind
-`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` / `-UseAsyncWriter`; the queue defaults to
-one in-flight payload so current behavior remains bounded, but
+same payload contract now also has an opt-in writer-worker path behind
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` / `-UseAsyncWriter`; it defaults to one
+worker and one in-flight payload so current behavior remains bounded, but
 `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH` / `-AsyncWriterQueueDepth` can
-raise that bounded depth for release-tree experiments. The profiler JSON
+raise that bounded depth and `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS` /
+`-AsyncWriterThreadCount` can raise the worker count for release-tree
+experiments. Multi-worker runs may complete files out of frame order and remain
+experimental until byte identity plus scheduler benefit are proven. The profiler JSON
 records `payload_handoff_env_enabled`, `async_writer_env_enabled`,
-`async_writer_queue_capacity`, and `async_writer_max_queued`, and the pipeline
+`async_writer_thread_count`, `async_writer_queue_capacity`, and
+`async_writer_max_queued`, and the pipeline
 test suite verifies byte-for-byte parity for uncompressed and compressed tiny
 Dual-ISO DNG exports, including the async writer path. `tools/profiling/run-release-cdng-export-profile-ab.ps1` runs
 paired release-tree baseline/candidate exports and writes both profiles plus
@@ -516,6 +520,15 @@ should reduce queue wait/completion lag with scheduler policy before considering
 any separately justified async-aware promotion gate; it should not claim success
 from elapsed-only improvement.
 
+Update 2026-06-19 Lane A E3 writer-parallel experiment: the async writer now has
+a bounded opt-in worker-count knob, `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS`
+(`-AsyncWriterThreadCount`, surfaced through the A/B and matrix runners). The
+default remains one worker. Profiler JSON records the effective
+`async_writer_thread_count`, and the pipeline suite includes a two-worker tiny
+DNG byte-identity test before any real-footage matrix can use the knob. This is
+the next measurement step for the `writerCompletionLagP95DeltaMs` blocker above,
+not a promoted scheduler policy.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
@@ -569,7 +582,7 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
   `[BATCH] GPU ... vramAllocatedMB=...` once per clip/resolution. The value is a
   backend working-set budget (tracked CUDA buffers plus the measured context
   reserve), not a WDDM per-PID reading; CPU-only and old-DLL runs stay silent.
-- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, `tools/profiling/run-release-cdng-export-profile-matrix.ps1` repeats those paired profiles across named cases into one matrix summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` single writer-worker boundary. Async writer queue depth defaults to 1 and can be raised only by opt-in env/script parameter for bounded release-tree experiments, while the profiling-only async-writer debug delay can prove queue-capacity mechanics under synthetic writer backpressure. Candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload handoff cost, wrapper wall-clock elapsed-time deltas, writer queue capacity/max-queued/debug-delay, and avg/p95 frame-total regression gates across a real-footage matrix before any scheduler rewrite is promoted.
+- **E3** pipelined export: CPU decode workers → one GPU recon queue → CPU compress/write workers (never N processes fighting one GPU). A comparator for E0 export-stage profile JSONs now exists at `tools/profiling/compare-export-stage-profiles.ps1`, the profiler emits supported `queue_idle_ms`, `producer_queue_idle_ms`, `producer_frame_ms`, and `writer_completion_lag_ms` samples, `tools/profiling/run-release-cdng-export-profile.ps1` produces release-tree batch export profiles, `tools/profiling/run-release-cdng-export-profile-ab.ps1` bundles paired baseline/candidate profiles with a compare summary, `tools/profiling/run-release-cdng-export-profile-matrix.ps1` repeats those paired profiles across named cases into one matrix summary, and `dngFramePayload_t` now backs both the opt-in `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1` serial boundary and the opt-in `MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1` writer-worker boundary. Async writer queue depth and worker count both default to 1 and can be raised only by opt-in env/script parameters for bounded release-tree experiments, while the profiling-only async-writer debug delay can prove queue-capacity mechanics under synthetic writer backpressure. Candidate pipeline experiments can report per-stage avg/p50/p95 deltas, scheduler idle/gap avg/p95 deltas, caller-side producer occupancy, post-producer writer lag, payload handoff cost, wrapper wall-clock elapsed-time deltas, writer thread count, queue capacity/max-queued/debug-delay, and avg/p95 frame-total regression gates across a real-footage matrix before any scheduler rewrite is promoted.
 - **E4** rendered-video export: later, only after processing parity; hardware encoders (NVENC/AMF/QSV) a separate lane.
 
 ## 4. Lane B — CUDA playback

@@ -18,6 +18,8 @@ param(
     [switch]$CandidateUseAsyncWriter,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
+    [int]$BaselineAsyncWriterThreadCount = 0,
+    [int]$CandidateAsyncWriterThreadCount = 0,
     [switch]$AlternateRunOrder,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
@@ -338,6 +340,12 @@ function New-AbArgs {
     if ($CandidateAsyncWriterQueueDepth -gt 0) {
         $args += @("-CandidateAsyncWriterQueueDepth", "$CandidateAsyncWriterQueueDepth")
     }
+    if ($BaselineAsyncWriterThreadCount -gt 0) {
+        $args += @("-BaselineAsyncWriterThreadCount", "$BaselineAsyncWriterThreadCount")
+    }
+    if ($CandidateAsyncWriterThreadCount -gt 0) {
+        $args += @("-CandidateAsyncWriterThreadCount", "$CandidateAsyncWriterThreadCount")
+    }
     if ($EnableGpuExport) {
         $args += "-EnableGpuExport"
         if (-not [string]::IsNullOrWhiteSpace($GpuExportDll)) {
@@ -357,7 +365,8 @@ function New-AbArgs {
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
     [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
-    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth
+    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
+    $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount
 )
 $comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
 
@@ -412,6 +421,8 @@ if ($DryRun) {
             candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
             baselineAsyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+            baselineAsyncWriterThreadCount = $BaselineAsyncWriterThreadCount
+            candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
             alternateRunOrder = [bool]$AlternateRunOrder
             failOnRegression = [bool]$FailOnRegression
         }
@@ -485,6 +496,7 @@ foreach ($case in $cases) {
             candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
             elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
             elapsedDeltaPercent = if ($abSummary) { $abSummary.compare.elapsedDeltaPercent } else { $null }
+            candidateAsyncWriterThreadCount = if ($abSummary) { $abSummary.candidate.asyncWriterThreadCount } else { $null }
             candidateAsyncWriterQueueCapacity = if ($abSummary) { $abSummary.candidate.asyncWriterQueueCapacity } else { $null }
             candidateAsyncWriterMaxQueued = if ($abSummary) { $abSummary.candidate.asyncWriterMaxQueued } else { $null }
             frameTotalAvgDeltaMs = if ($abSummary) { $abSummary.compare.frameTotalAvgDeltaMs } else { $null }

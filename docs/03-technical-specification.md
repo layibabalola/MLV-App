@@ -325,14 +325,18 @@ build-payload /
 write-payload path for Lane A E3 experiments; the default GUI/batch export loop
 still uses serial `saveDngFrame()` unless `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1`
 is set. `createDngPayloadWriter()`, `saveDngFrameViaAsyncPayloadWriter()`, and
-`finishDngPayloadWriter()` provide an opt-in single writer-worker path behind
-`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1`; it defaults to one queued payload between
-producer and writer, so it is a bounded scheduler experiment rather than a
-multi-frame reorder. `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH` may raise the
-bounded queue depth for opt-in experiments, clamped by the DNG writer
-implementation. Export-stage profiler JSON records
+`finishDngPayloadWriter()` provide an opt-in writer-worker path behind
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1`; it defaults to one worker and one queued
+payload, preserving the original bounded single-writer experiment. For E3
+release-tree experiments only, `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH`
+may raise the bounded queue depth and
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS` may raise the worker count, both
+clamped by the DNG writer implementation. Multi-worker runs can complete files
+out of frame order and therefore remain opt-in until a real-footage promotion
+packet proves byte identity and scheduler benefit. Export-stage profiler JSON records
 `payload_handoff_env_enabled`, `async_writer_env_enabled`,
-`async_writer_queue_capacity`, and `async_writer_max_queued` so
+`async_writer_thread_count`, `async_writer_queue_capacity`, and
+`async_writer_max_queued` so
 legacy-vs-candidate release profiles remain self-describing. Async-writer
 profiles also expose `payload_clone_ms`, the historical field name for the
 small header copy plus image-buffer ownership handoff/replacement cost before a
@@ -348,8 +352,8 @@ producer_frame_ms`, making post-producer writer completion time explicit.
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
 release-tree promotion harness for these fields: it runs paired baseline and
 candidate exports across named cases/repeats and writes
-`release-cdng-export-profile-matrix.v1` with per-run frame counts, async queue
-capacity/max-queued, wrapper wall-clock elapsed deltas, frame-total deltas,
+`release-cdng-export-profile-matrix.v1` with per-run frame counts, async worker
+count, async queue capacity/max-queued, wrapper wall-clock elapsed deltas, frame-total deltas,
 producer/idle deltas, writer-completion-lag deltas, writer-queue-wait deltas,
 payload-clone deltas, and comparator failures.
 

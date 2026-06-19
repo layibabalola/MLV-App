@@ -14,6 +14,8 @@ param(
     [switch]$CandidateUseAsyncWriter,
     [int]$BaselineAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterQueueDepth = 0,
+    [int]$BaselineAsyncWriterThreadCount = 0,
+    [int]$CandidateAsyncWriterThreadCount = 0,
     [int]$MaxFrames = 0,
     [switch]$EnableGpuExport,
     [string]$GpuExportDll = "",
@@ -61,7 +63,8 @@ function New-ProfileArgs {
         [string]$LogPath,
         [bool]$UsePayloadHandoff,
         [bool]$UseAsyncWriter,
-        [int]$AsyncWriterQueueDepth
+        [int]$AsyncWriterQueueDepth,
+        [int]$AsyncWriterThreadCount
     )
 
     $args = @(
@@ -103,6 +106,9 @@ function New-ProfileArgs {
         $args += "-UseAsyncWriter"
         if ($AsyncWriterQueueDepth -gt 0) {
             $args += @("-AsyncWriterQueueDepth", "$AsyncWriterQueueDepth")
+        }
+        if ($AsyncWriterThreadCount -gt 0) {
+            $args += @("-AsyncWriterThreadCount", "$AsyncWriterThreadCount")
         }
     }
     if ($DryRun) {
@@ -156,7 +162,8 @@ $baselineArgs = New-ProfileArgs `
     -LogPath $baselineLog `
     -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$BaselineUseAsyncWriter) `
-    -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth
+    -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth `
+    -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
     -DngDir $candidateDngDir `
@@ -164,12 +171,14 @@ $candidateArgs = New-ProfileArgs `
     -LogPath $candidateLog `
     -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$CandidateUseAsyncWriter) `
-    -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth
+    -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth `
+    -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount
 
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
     [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
-    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth
+    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
+    $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount
 )
 $comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
 
@@ -186,12 +195,14 @@ if ($DryRun) {
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
             asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
+            asyncWriterThreadCount = $BaselineAsyncWriterThreadCount
             args = $baselineArgs
         }
         candidate = [pscustomobject]@{
             usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             useAsyncWriter = [bool]$CandidateUseAsyncWriter
             asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+            asyncWriterThreadCount = $CandidateAsyncWriterThreadCount
             args = $candidateArgs
         }
         compareOutput = $compareJson
@@ -285,6 +296,7 @@ $summary = [pscustomobject]@{
         frameCount = $baselineProfileJson.frame_count
         payloadHandoffEnvEnabled = $baselineProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $baselineProfileJson.async_writer_env_enabled
+        asyncWriterThreadCount = $baselineProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $baselineProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $baselineProfileJson.async_writer_max_queued
         elapsedMs = $baselineRun.elapsedMs
@@ -299,6 +311,7 @@ $summary = [pscustomobject]@{
         frameCount = $candidateProfileJson.frame_count
         payloadHandoffEnvEnabled = $candidateProfileJson.payload_handoff_env_enabled
         asyncWriterEnvEnabled = $candidateProfileJson.async_writer_env_enabled
+        asyncWriterThreadCount = $candidateProfileJson.async_writer_thread_count
         asyncWriterQueueCapacity = $candidateProfileJson.async_writer_queue_capacity
         asyncWriterMaxQueued = $candidateProfileJson.async_writer_max_queued
         elapsedMs = $candidateRun.elapsedMs
@@ -334,13 +347,14 @@ $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Enc
 Write-Host ((
     "CDNG-EXPORT-AB verdict={0} comparison_mode={1} run_order={2} cdng_codec={3} " +
     "baseline_payload={4} candidate_payload={5} baseline_async={6} candidate_async={7} " +
-    "baseline_async_queue_capacity={8} candidate_async_queue_capacity={9} " +
-    "elapsed_delta_ms={10} elapsed_delta_percent={11} " +
-    "frame_total_avg_delta_ms={12} frame_total_p95_delta_ms={13} " +
-    "queue_idle_avg_delta_ms={14} payload_clone_avg_delta_ms={15} " +
-    "writer_queue_wait_avg_delta_ms={16} producer_frame_avg_delta_ms={17} " +
-    "producer_queue_idle_avg_delta_ms={18} writer_completion_lag_avg_delta_ms={19} " +
-    "output={20}") -f
+    "baseline_async_threads={8} candidate_async_threads={9} " +
+    "baseline_async_queue_capacity={10} candidate_async_queue_capacity={11} " +
+    "elapsed_delta_ms={12} elapsed_delta_percent={13} " +
+    "frame_total_avg_delta_ms={14} frame_total_p95_delta_ms={15} " +
+    "queue_idle_avg_delta_ms={16} payload_clone_avg_delta_ms={17} " +
+    "writer_queue_wait_avg_delta_ms={18} producer_frame_avg_delta_ms={19} " +
+    "producer_queue_idle_avg_delta_ms={20} writer_completion_lag_avg_delta_ms={21} " +
+    "output={22}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -349,6 +363,8 @@ Write-Host ((
     $summary.candidate.usePayloadHandoff,
     $summary.baseline.useAsyncWriter,
     $summary.candidate.useAsyncWriter,
+    $summary.baseline.asyncWriterThreadCount,
+    $summary.candidate.asyncWriterThreadCount,
     $summary.baseline.asyncWriterQueueCapacity,
     $summary.candidate.asyncWriterQueueCapacity,
     $summary.compare.elapsedDeltaMs,
