@@ -119,10 +119,15 @@ mirrors the clean repo to `\\ultra-magnus\G\Temp\mlvapp-cdng-export-evidence`,
 builds/deploys `igpu_recon_cuda.dll` on UltraMagnus, rebuilds the release tree,
 runs the matrix wrapper with the GPU replacement and DNG hash gates above, and
 imports a compact JSON/log evidence packet under
-`.claude-state\profiling\ultramagnus-cdng-export\`. The default proof uses
-`G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`, `receipts\FastProxy.marxml`, both
-`uncompressed` and `lossless` CDNG, `maxFrames=4`, and `repeats=1`; widen only
-when the proof question requires it. If UltraMagnus is acting as a runner
+`.claude-state\profiling\ultramagnus-cdng-export\`. The wrapper generates an
+effective proof receipt from `-Receipt` by forcing the GPU-supported Dual ISO
+export gate (`dualIsoInterpolation=1`, alias-map on, full-res blending on, and
+chroma-smooth off); use `-UseReceiptAsIs` only when intentionally debugging the
+raw source receipt. The packet records both `sourceReceipt` and the effective
+receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
+`receipts\FastProxy.marxml`, both `uncompressed` and `lossless` CDNG,
+`maxFrames=4`, and `repeats=1`; widen only when the proof question requires it.
+If UltraMagnus is acting as a runner
 without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
 locally first, let the wrapper stage that release tree, and pass
 `-SkipRemoteBuild`; the summary records that the remote build was skipped.

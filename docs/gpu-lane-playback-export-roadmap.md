@@ -782,6 +782,17 @@ still VM-local tooling proof. The next UltraMagnus packet must use the same
 fields to explain any candidate 0/N attempt gate before changing receipts or
 promotion criteria.
 
+Update 2026-06-19 Lane A E3 UltraMagnus proof receipt gate: the first
+skip-diagnostic UltraMagnus rerun at
+`.claude-state/profiling/ultramagnus-cdng-export/imported/packet-20260619T171930/`
+proved the host/backend/hash sides but failed the GPU replacement gate with
+`skip_counts=missing_recon_state=4` for both uncompressed and lossless runs.
+The source receipt had `dualIsoInterpolation=0`, which is outside the exporter
+GPU state publisher's supported gate. The UltraMagnus wrapper now generates an
+effective proof receipt from the source receipt by forcing
+`dualIsoInterpolation=1`, alias-map on, full-res blending on, and chroma-smooth
+off; `-UseReceiptAsIs` preserves the old raw-receipt behavior for debugging.
+
 Update 2026-06-19 Lane A E3 DNG hash gate: A/B and matrix wrappers now accept
 `-RequireDngHashMatch`, run the existing DNG SHA256 companion, and fold its
 verdict into `summary.json` / `matrix-summary.json` as `dngHash`. Local VM

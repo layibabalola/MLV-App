@@ -18,7 +18,8 @@ param(
     [int]$AgentTimeoutSec = 2700,
     [switch]$SkipRemoteBuild,
     [switch]$SkipBackendBuild,
-    [switch]$SkipStageRepo
+    [switch]$SkipStageRepo,
+    [switch]$UseReceiptAsIs
 )
 
 $ErrorActionPreference = "Stop"
@@ -341,6 +342,7 @@ if ($failures.Count -eq 0) {
     $jobId = "mlvapp-cdng-export-$stamp"
     $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
     $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
+    $useReceiptAsIsLiteral = if ($UseReceiptAsIs) { '$true' } else { '$false' }
     $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
     $codecsLiteral = Convert-ToPowerShellArrayLiteral $CdngCodecs
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
@@ -363,6 +365,7 @@ if ($failures.Count -eq 0) {
 `$evidenceGitStatus = $localRepoStatusLiteral
 `$skipBuild = $skipBuildLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
+`$useReceiptAsIs = $useReceiptAsIsLiteral
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 
@@ -509,6 +512,33 @@ try {
     if (!(Test-Path -LiteralPath `$resolvedReceipt)) {
         `$failures.Add("Missing receipt: `$resolvedReceipt")
     }
+    `$sourceReceipt = `$resolvedReceipt
+    `$proofReceipt = `$null
+    if (`$failures.Count -eq 0 -and -not `$useReceiptAsIs) {
+        `$proofReceipt = Join-Path `$runRoot 'gpu-export-proof-receipt.marxml'
+        [xml]`$receiptXml = Get-Content -LiteralPath `$sourceReceipt -Raw
+        `$proofReceiptOverrides = [ordered]@{
+            dualIsoInterpolation = '1'
+            dualIsoAliasMap = '1'
+            dualIsoFrBlending = '1'
+            chromaSmooth = '0'
+        }
+        foreach (`$entry in `$proofReceiptOverrides.GetEnumerator()) {
+            `$node = `$receiptXml.SelectSingleNode("//`$(`$entry.Key)")
+            if (`$null -eq `$node) {
+                `$failures.Add("Proof receipt source missing tag `$(`$entry.Key): `$sourceReceipt")
+            }
+            else {
+                `$node.InnerText = [string]`$entry.Value
+            }
+        }
+        if (`$failures.Count -eq 0) {
+            `$proofReceiptDir = Split-Path -Parent `$proofReceipt
+            New-Item -ItemType Directory -Force -Path `$proofReceiptDir | Out-Null
+            `$receiptXml.Save(`$proofReceipt)
+            `$resolvedReceipt = `$proofReceipt
+        }
+    }
     `$caseRows = @()
     foreach (`$clipName in `$clipNames) {
         `$clipPath = if ([System.IO.Path]::IsPathRooted(`$clipName)) { `$clipName } else { Join-Path `$clipRoot `$clipName }
@@ -637,7 +667,10 @@ try {
         inputs = [ordered]@{
             clipRoot = `$clipRoot
             clipNames = `$clipNames
+            sourceReceipt = `$sourceReceipt
             receipt = `$resolvedReceipt
+            proofReceiptGenerated = -not `$useReceiptAsIs
+            proofReceipt = `$proofReceipt
             cdngCodecs = `$codecs
             maxFrames = `$maxFrames
             repeats = `$repeats
@@ -670,6 +703,9 @@ try {
     New-Item -ItemType Directory -Force -Path `$packetRoot | Out-Null
     Copy-Item -LiteralPath `$summaryPath -Destination (Join-Path `$packetRoot 'summary.json') -Force
     Copy-Item -LiteralPath `$casesPath -Destination (Join-Path `$packetRoot 'cases.json') -Force
+    if (`$proofReceipt -and (Test-Path -LiteralPath `$proofReceipt)) {
+        Copy-Item -LiteralPath `$proofReceipt -Destination (Join-Path `$packetRoot 'gpu-export-proof-receipt.marxml') -Force
+    }
     Copy-EvidenceFiles -SourceRoot `$matrixDir -DestinationRoot (Join-Path `$packetRoot 'matrix')
     if (Test-Path -LiteralPath `$packet) { Remove-Item -LiteralPath `$packet -Force }
     Compress-Archive -Path (Join-Path `$packetRoot '*') -DestinationPath `$packet -Force
