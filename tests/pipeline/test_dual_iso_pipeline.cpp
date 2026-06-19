@@ -1132,20 +1132,25 @@ TEST(DualIsoPipeline, GpuPlaybackReconAdmittedHqStateFallsBackByteInertWithoutBa
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 }
 
-TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackInputGatedByPostReconRawFix)
+TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackArmsOnEffectivenessNotRawFixMode)
 {
-    /* Fail-closed C-source gate for the no-readback (texture-present) path
-     * (llrawproc.c ~2288). The CUDA->GL R16 texture the no-readback path presents
-     * is the RECON-ONLY Dual ISO bayer; the post-recon focus-pixel / bad-pixel
-     * interpolation mutates the CPU display frame in place AFTER recon, and the
-     * CUDA backend has no focus/bad-pixel code. So the no-readback input bayer
-     * (which arms the Qt no-readback candidate via
-     * llrpGpuPlaybackReconGetLastInputBayer16) must be stored ONLY when both
-     * fixes are off; with either active the worker withholds it so the Qt layer
-     * falls back to the CPU-readback bayer (which DOES apply the fixes). */
+    /* Regression guard for the over-conservative mode-flag gate. The no-readback
+     * (texture-present) path presents the RECON-ONLY Dual ISO bayer; the CUDA
+     * backend has no focus/bad-pixel code, and the post-recon focus/bad-pixel
+     * interpolation mutates the CPU display frame in place AFTER recon. Eligibility
+     * keys on whether that interpolation ACTUALLY runs (map ready + applied), NOT
+     * on the focus_pixels/bad_pixels MODE flags (bad_pixels defaults to 1). The C
+     * worker stores the no-readback input bayer, then retracts it only if the
+     * interpolation mutated the recon output (llrawproc.c ~2553). The tiny test
+     * fixture has no actual focus/bad pixels, so interpolation never runs for ANY
+     * mode combo -> the input must be ARMED in all of them. (The fail-closed
+     * retract when interpolation DOES mutate is covered by code review + the 4090
+     * validator, which needs a clip with real bad/focus pixels.) An earlier build
+     * keyed the gate on the mode flags, which -- because bad_pixels defaults to 1
+     * -- blocked the no-readback path on every normal clip; this pins that fix. */
     qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
 
-    /* Case A: no post-recon raw fix -> no-readback input IS armed. */
+    /* Baseline: no raw fix possible (both modes off) -> input armed. */
     {
         MlvPipelineFixture fixture;
         assert_fixture_ready(fixture);
@@ -1165,27 +1170,11 @@ TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackInputGatedByPostReconRawFix)
                     > static_cast<size_t>(0));
     }
 
-    /* Case B: bad_pixels active -> no-readback input WITHHELD (fail-closed). */
-    {
-        MlvPipelineFixture fixture;
-        assert_fixture_ready(fixture);
-        configure_gpu_export_supported_dual_iso(fixture);
-        fixture.video()->llrawproc->focus_pixels = 0;
-        fixture.video()->llrawproc->bad_pixels = 1;
-        ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
-        std::vector<uint16_t> frame;
-        {
-            const GpuPlaybackReconThreadOptIn opt_in(true);
-            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(1);
-            frame = fixture.renderFrame16(0, 1);
-            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(0);
-        }
-        ASSERT_TRUE(!frame.empty());
-        ASSERT_EQ(static_cast<size_t>(0),
-                  llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0));
-    }
-
-    /* Case C: focus_pixels active -> no-readback input WITHHELD (fail-closed). */
+    /* Regression pin: focus_pixels MODE On, but the tiny fixture's camera has no
+     * focus-pixel map (fpm_status < 2) so the post-recon focus interpolation does
+     * NOT run -> the recon-only texture equals the CPU frame -> input must STILL be
+     * armed. An earlier build keyed the gate on the mode flag and would have
+     * (wrongly) withheld here. */
     {
         MlvPipelineFixture fixture;
         assert_fixture_ready(fixture);
@@ -1201,8 +1190,8 @@ TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackInputGatedByPostReconRawFix)
             llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(0);
         }
         ASSERT_TRUE(!frame.empty());
-        ASSERT_EQ(static_cast<size_t>(0),
-                  llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0));
+        ASSERT_TRUE(llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0)
+                    > static_cast<size_t>(0));
     }
 
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");

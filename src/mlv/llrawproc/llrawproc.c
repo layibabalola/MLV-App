@@ -2234,6 +2234,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             int gpu_playback_recon_used = 0;
             int dual_iso_recon_ok = 0;
             int capture_gpu_recon_state = 0;
+            int gpu_playback_no_readback_post_recon_fix_ran = 0;
             int explicit_auto_correction = 0;
             double explicit_ev_correction = worker->diso_ev_correction;
             int explicit_black_delta = worker->diso_black_delta;
@@ -2272,22 +2273,23 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 if (gpu_playback_input)
                 {
                     memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
-                    /* No-readback eligibility (fail-closed at the source): the
-                     * CUDA->GL R16 texture the no-readback path presents is the
-                     * RECON-ONLY Dual ISO bayer. The post-recon focus-pixel and
-                     * bad-pixel interpolation (below, ~2438-2491) mutate
+                    /* No-readback eligibility (effectiveness-based, fail-closed):
+                     * the CUDA->GL R16 texture the no-readback path presents is
+                     * the RECON-ONLY Dual ISO bayer. The post-recon focus-pixel /
+                     * bad-pixel interpolation (below, ~2509-2553) mutates
                      * raw_image_buff IN PLACE after diso_get_full20bit, and the
-                     * CUDA backend has no focus/bad-pixel code, so for any clip
-                     * with focus_pixels!=0 or bad_pixels!=0 the GL texture would
-                     * differ from the CPU display frame (uncorrected focus dots /
-                     * hot pixels). Only arm the no-readback input bayer when no
-                     * post-recon raw fix is active; otherwise the Qt layer falls
-                     * back to the CPU-readback bayer (which applies the fixes).
-                     * NOTE: vertical_stripes is PRE-recon and pattern_noise does
-                     * not run for dual-iso frames, so they need no gate here. */
-                    if (g_llrawproc_gpu_playback_texture_present_preferred
-                     && focus_pixels == 0
-                     && bad_pixels == 0)
+                     * CUDA backend has no focus/bad-pixel code. Store the input
+                     * bayer now; if that interpolation ACTUALLY runs for this frame
+                     * (map ready and applied), the stored input is RETRACTED right
+                     * after that block so the Qt layer falls back to the
+                     * CPU-readback bayer (which includes the fixes). Gating on the
+                     * actual fix-effect -- NOT the focus_pixels/bad_pixels mode
+                     * flags (bad_pixels defaults to 1) -- lets the no-readback path
+                     * engage for the common case where the fix is a no-op, while
+                     * staying fail-closed when it would change pixels. NOTE:
+                     * vertical_stripes is PRE-recon and pattern_noise does not run
+                     * for dual-iso frames, so they need no gate here. */
+                    if (g_llrawproc_gpu_playback_texture_present_preferred)
                     {
                         (void)llrawproc_gpu_playback_store_last_input_bayer16(
                             gpu_playback_input,
@@ -2549,6 +2551,28 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
                 }
                 bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+            }
+
+            /* No-readback retract: if the post-recon focus/bad-pixel interpolation
+             * actually ran for this frame (mirrors the exact apply conditions at
+             * ~2508 / ~2529 above), the recon-only no-readback texture would differ
+             * from the CPU display frame. Drop the stored no-readback input so the
+             * Qt layer falls back to the CPU-readback bayer (which has the fixes).
+             * These predicates are unchanged since the interpolation ran. */
+            gpu_playback_no_readback_post_recon_fix_ran =
+                (focus_pixels && focus_interpolate_outside_lock
+                 && focus_status_snapshot == 2 && focus_map_for_interpolation)
+             || (bad_pixels && bad_interpolate_outside_lock
+                 && bad_status_snapshot == 2 && bad_map_for_interpolation);
+            if (gpu_playback_no_readback_post_recon_fix_ran
+             && g_llrawproc_gpu_playback_texture_present_preferred)
+            {
+                if (g_llrawproc_gpu_playback_last_input_bayer16)
+                {
+                    free(g_llrawproc_gpu_playback_last_input_bayer16);
+                    g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
+                }
+                g_llrawproc_gpu_playback_last_input_words = 0;
             }
 
             if (post_recon_luts_active)

@@ -2299,15 +2299,16 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && m_imageHeight > 0
             && slot.rawImage16.size() >= fullResPixelCount;
         /* The no-readback GL R16 texture is the RECON-ONLY Dual ISO bayer; the
-         * CUDA backend has no focus/bad-pixel code. The post-recon focus-pixel
-         * and bad-pixel interpolation mutate the CPU display frame in place
-         * after recon (llrawproc.c ~2438-2491), so when either is active the GL
-         * texture would present uncorrected focus dots / hot pixels. Gate the
-         * no-readback path fail-closed on those flags (the C worker already
-         * withholds the no-readback input bayer in this case; this is the
-         * authoritative belt-and-suspenders check with a precise reason). The
-         * readback bayer fallback below uses slot.rawImage16, which DOES include
-         * the fixes, so display stays correct. */
+         * CUDA backend has no focus/bad-pixel code. Eligibility is decided
+         * AUTHORITATIVELY in the C worker on an EFFECTIVENESS basis: it stores the
+         * no-readback input bayer, then RETRACTS it if the post-recon focus/bad-pixel
+         * interpolation actually mutated the recon output (llrawproc.c ~2553). When
+         * retracted, slot.gpuPlaybackReconTextureInputBayerFrame is empty below, so
+         * noReadbackCandidate becomes false and we fall back to the readback bayer
+         * (slot.rawImage16, which DOES include the fixes -> display stays correct).
+         * postReconRawFixActive here is a DIAGNOSTIC of the mode flags only
+         * (bad_pixels defaults to 1); it is NOT the gate, because a mode that is On
+         * but fixes no pixels is still no-readback-eligible. */
         const bool postReconRawFixActive =
             m_pMlvObject
             && m_pMlvObject->llrawproc
@@ -2318,7 +2319,6 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && playbackScaleFactor == 1
             && m_imageWidth > 0
             && m_imageHeight > 0
-            && !postReconRawFixActive
             && slot.gpuPlaybackReconTextureNoReadbackCandidate
             && slot.gpuPlaybackReconTextureInputBayerFrame.size() >= fullResPixelCount
             && slot.gpuPlaybackReconTextureBayerFrame.size() >= fullResPixelCount
