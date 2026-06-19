@@ -74,6 +74,20 @@ deploys the DLL plus CUDA runtime beside the staged release executable. Use
 backend; a staged release tree without `igpu_recon_cuda.dll` is expected to fall
 back before GL no-readback proof can occur.
 
+Update 2026-06-19 P3 proof refresh: the current UltraMagnus packet for source
+head `1010ed4542f5cabbd8cc30165b1fa80f2fc15dad` on branch
+`codex/work-block/wb-2904e97a363e4da7` imported successfully from
+`.claude-state/profiling/ultramagnus-p3-texture-present/remote-packets/ultra-magnus-20260619T153332-mlvapp-p3-evidence-latest.zip`
+(SHA256 `517914A1A1F26860A5843CA40F5FCEFA3BF2B08A3B758C12E6A4B6A76573BFF0`).
+The packet records release executable SHA256
+`B976D96B1F7A61931A1C84202A51685AF99ADC8998E3BDD73BC7B46409B4C7AC`,
+renderer `NVIDIA GeForce RTX 4090/PCIe/SSE2`, backend DLL SHA256
+`AE2983C3D3BAE069C4B094366F83DDA08DFD037C5F0B64844D1A56EA03282C9F`,
+`correctnessValidated=true`, `gpu_texture_no_readback_frames=136`,
+`fallbackFrameCount=0`, `glParityCheckedCount=14`, `glMismatchTotal=0`, and
+`glScreenshotMethod=app_internal_gl_viewport_grab`. VM-local playback remains
+tooling/fallback smoke only; P3 no-readback proof is UltraMagnus-backed.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
