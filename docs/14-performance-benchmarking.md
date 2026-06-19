@@ -34,6 +34,8 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -CandidateUseAsyncWriter `
   -CandidateAsyncWriterQueueDepth 2 `
   -CandidateAsyncWriterThreadCount 2 `
+  -CandidateEnableGpuExport `
+  -CandidateGpuExportDll C:\path\to\igpu_recon_cuda.dll `
   -MaxFrames 16 `
   -Repeats 3 `
   -FailOnRegression
@@ -60,7 +62,7 @@ The matrix summary records case/run verdicts, selected CDNG codec,
 baseline/candidate frame counts, baseline/candidate wrapper elapsed
 milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
 candidate async worker count/jobs started/jobs finished/max-active,
-candidate GPU-export attempt/replacement/allocation counters,
+baseline/candidate GPU-export intent plus attempt/replacement/allocation counters,
 frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
 writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
 (`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck
@@ -72,6 +74,12 @@ thread count is higher. A tiny
 checked-in fixture matrix is only a schema/tooling smoke; E3 promotion needs a
 bounded real-footage matrix whose clips, receipts, frame caps, and repeats match
 the export scenario being judged.
+
+For UltraMagnus CPU-vs-GPU export proof, leave the baseline on CPU and enable
+only the candidate with `-CandidateEnableGpuExport` plus
+`-CandidateGpuExportDll`. The legacy `-EnableGpuExport` switch remains valid,
+but it enables both sides and is therefore better suited to same-mode A/A or
+GPU-vs-GPU profiling.
 
 After any matrix or standalone A/B run that claims CDNG output correctness, run
 the DNG byte-identity companion before interpreting the timing result:

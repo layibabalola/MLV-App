@@ -18,7 +18,11 @@ param(
     [int]$CandidateAsyncWriterThreadCount = 0,
     [int]$MaxFrames = 0,
     [switch]$EnableGpuExport,
+    [switch]$BaselineEnableGpuExport,
+    [switch]$CandidateEnableGpuExport,
     [string]$GpuExportDll = "",
+    [string]$BaselineGpuExportDll = "",
+    [string]$CandidateGpuExportDll = "",
     [ValidateSet("BaselineFirst", "CandidateFirst")]
     [string]$RunOrder = "BaselineFirst",
     [double]$MaxFrameTotalRegressionPercent = 5.0,
@@ -55,6 +59,23 @@ $candidateLog = Join-Path $candidateDir "batch.log"
 $compareJson = Join-Path $bundleDir "compare.json"
 $summaryJson = Join-Path $bundleDir "summary.json"
 
+$baselineGpuExportEnabled = [bool]$EnableGpuExport -or [bool]$BaselineEnableGpuExport
+$candidateGpuExportEnabled = [bool]$EnableGpuExport -or [bool]$CandidateEnableGpuExport
+$baselineGpuExportDllEffective = if (-not [string]::IsNullOrWhiteSpace($BaselineGpuExportDll)) {
+    $BaselineGpuExportDll
+}
+else {
+    $GpuExportDll
+}
+$candidateGpuExportDllEffective = if (-not [string]::IsNullOrWhiteSpace($CandidateGpuExportDll)) {
+    $CandidateGpuExportDll
+}
+else {
+    $GpuExportDll
+}
+$baselineGpuExportDllSummary = if ($baselineGpuExportEnabled) { $baselineGpuExportDllEffective } else { "" }
+$candidateGpuExportDllSummary = if ($candidateGpuExportEnabled) { $candidateGpuExportDllEffective } else { "" }
+
 function New-ProfileArgs {
     param(
         [string]$Label,
@@ -64,7 +85,9 @@ function New-ProfileArgs {
         [bool]$UsePayloadHandoff,
         [bool]$UseAsyncWriter,
         [int]$AsyncWriterQueueDepth,
-        [int]$AsyncWriterThreadCount
+        [int]$AsyncWriterThreadCount,
+        [bool]$UseGpuExport,
+        [string]$GpuExportDllPath
     )
 
     $args = @(
@@ -90,10 +113,10 @@ function New-ProfileArgs {
     if (-not [string]::IsNullOrWhiteSpace($BuildId)) {
         $args += @("-BuildId", "$BuildId-$Label")
     }
-    if ($EnableGpuExport) {
+    if ($UseGpuExport) {
         $args += "-EnableGpuExport"
-        if (-not [string]::IsNullOrWhiteSpace($GpuExportDll)) {
-            $args += @("-GpuExportDll", $GpuExportDll)
+        if (-not [string]::IsNullOrWhiteSpace($GpuExportDllPath)) {
+            $args += @("-GpuExportDll", $GpuExportDllPath)
         }
     }
     if ($MaxFrames -gt 0) {
@@ -185,7 +208,9 @@ $baselineArgs = New-ProfileArgs `
     -UsePayloadHandoff ([bool]$BaselineUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$BaselineUseAsyncWriter) `
     -AsyncWriterQueueDepth $BaselineAsyncWriterQueueDepth `
-    -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount
+    -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount `
+    -UseGpuExport $baselineGpuExportEnabled `
+    -GpuExportDllPath $baselineGpuExportDllEffective
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
     -DngDir $candidateDngDir `
@@ -194,13 +219,20 @@ $candidateArgs = New-ProfileArgs `
     -UsePayloadHandoff ([bool]$CandidateUsePayloadHandoff) `
     -UseAsyncWriter ([bool]$CandidateUseAsyncWriter) `
     -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth `
-    -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount
+    -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount `
+    -UseGpuExport $candidateGpuExportEnabled `
+    -GpuExportDllPath $candidateGpuExportDllEffective
 
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
     [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
     $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth -and
-    $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount
+    $BaselineAsyncWriterThreadCount -eq $CandidateAsyncWriterThreadCount -and
+    $baselineGpuExportEnabled -eq $candidateGpuExportEnabled -and
+    (
+        (-not $baselineGpuExportEnabled -and -not $candidateGpuExportEnabled) -or
+        $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective
+    )
 )
 $comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
 
@@ -216,6 +248,8 @@ if ($DryRun) {
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
+            enableGpuExport = $baselineGpuExportEnabled
+            gpuExportDll = $baselineGpuExportDllSummary
             asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             asyncWriterThreadCount = $BaselineAsyncWriterThreadCount
             args = $baselineArgs
@@ -223,6 +257,8 @@ if ($DryRun) {
         candidate = [pscustomobject]@{
             usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             useAsyncWriter = [bool]$CandidateUseAsyncWriter
+            enableGpuExport = $candidateGpuExportEnabled
+            gpuExportDll = $candidateGpuExportDllSummary
             asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
             asyncWriterThreadCount = $CandidateAsyncWriterThreadCount
             args = $candidateArgs
@@ -311,6 +347,8 @@ $summary = [pscustomobject]@{
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
         useAsyncWriter = [bool]$BaselineUseAsyncWriter
+        enableGpuExport = $baselineGpuExportEnabled
+        gpuExportDll = $baselineGpuExportDllSummary
         profile = $baselineProfile
         log = $baselineLog
         dngOutputDir = $baselineDngDir
@@ -333,6 +371,8 @@ $summary = [pscustomobject]@{
     candidate = [pscustomobject]@{
         usePayloadHandoff = [bool]$CandidateUsePayloadHandoff
         useAsyncWriter = [bool]$CandidateUseAsyncWriter
+        enableGpuExport = $candidateGpuExportEnabled
+        gpuExportDll = $candidateGpuExportDllSummary
         profile = $candidateProfile
         log = $candidateLog
         dngOutputDir = $candidateDngDir
@@ -391,15 +431,16 @@ Write-Host ((
     "baseline_async_threads={8} candidate_async_threads={9} " +
     "baseline_async_queue_capacity={10} candidate_async_queue_capacity={11} " +
     "baseline_async_max_active={12} candidate_async_max_active={13} " +
-    "baseline_gpu_export_attempted={14} candidate_gpu_export_attempted={15} " +
-    "candidate_gpu_export_replaced={16} elapsed_delta_ms={17} " +
-    "elapsed_delta_percent={18} frame_total_avg_delta_ms={19} " +
-    "frame_total_p95_delta_ms={20} queue_idle_avg_delta_ms={21} " +
-    "payload_clone_avg_delta_ms={22} writer_queue_wait_avg_delta_ms={23} " +
-    "producer_frame_avg_delta_ms={24} producer_queue_idle_avg_delta_ms={25} " +
-    "writer_completion_lag_avg_delta_ms={26} llrawproc_total_avg_delta_ms={27} " +
-    "llrawproc_dual_iso_avg_delta_ms={28} dng_compress_avg_delta_ms={29} " +
-    "output={30}") -f
+    "baseline_gpu_export_enabled={14} candidate_gpu_export_enabled={15} " +
+    "baseline_gpu_export_attempted={16} candidate_gpu_export_attempted={17} " +
+    "candidate_gpu_export_replaced={18} elapsed_delta_ms={19} " +
+    "elapsed_delta_percent={20} frame_total_avg_delta_ms={21} " +
+    "frame_total_p95_delta_ms={22} queue_idle_avg_delta_ms={23} " +
+    "payload_clone_avg_delta_ms={24} writer_queue_wait_avg_delta_ms={25} " +
+    "producer_frame_avg_delta_ms={26} producer_queue_idle_avg_delta_ms={27} " +
+    "writer_completion_lag_avg_delta_ms={28} llrawproc_total_avg_delta_ms={29} " +
+    "llrawproc_dual_iso_avg_delta_ms={30} dng_compress_avg_delta_ms={31} " +
+    "output={32}") -f
     $summary.verdict,
     $summary.comparisonMode,
     $summary.runOrder,
@@ -414,6 +455,8 @@ Write-Host ((
     $summary.candidate.asyncWriterQueueCapacity,
     $summary.baseline.asyncWriterMaxActive,
     $summary.candidate.asyncWriterMaxActive,
+    $summary.baseline.enableGpuExport,
+    $summary.candidate.enableGpuExport,
     $summary.baseline.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportAttemptedFrames,
     $summary.candidate.gpuExportReplacedFrames,

@@ -690,6 +690,22 @@ the async-writer HOLD decision on available local footage: the next E3
 implementation should target dual-ISO/recon scheduling and/or compression
 placement/parallelism, not disk write overlap alone.
 
+Update 2026-06-19 Lane A E3 GPU-candidate proof packet: the A/B and matrix
+profiling wrappers now support per-side GPU export controls. The legacy
+`-EnableGpuExport` switch still enables both baseline and candidate for
+same-mode runs, while `-BaselineEnableGpuExport` and
+`-CandidateEnableGpuExport` allow a clean CPU-baseline versus GPU-candidate
+UltraMagnus proof packet. The local VM validation used the existing release
+tree and working-tree wrapper changes only: A/B
+`.claude-state/profiling/2026-06-19-cdng-e3-candidate-gpu-switch-local-2f0cade8/`
+and matrix
+`.claude-state/profiling/2026-06-19-cdng-e3-candidate-gpu-switch-matrix-local-2f0cade8/`
+both recorded `baseline.enableGpuExport=false`,
+`candidate.enableGpuExport=true`, zero local GPU attempts/replacements, and
+DNG hash PASS 1/1. This is VM-local fallback/tooling proof only; real export GPU
+promotion still needs an UltraMagnus run whose candidate attempts and replaces
+the expected frames with matching DNG hashes.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
