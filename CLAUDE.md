@@ -7,6 +7,24 @@ repository root — Claude Code reads it automatically every session.
 
 ---
 
+## Memory Policy (project-level content, machine-level pointers)
+
+Durable memory CONTENT lives at the PROJECT level. Write findings, methodologies,
+and cross-session continuity notes to `.claude-state/project-memory/<slug>.md` and
+index them in `.claude-state/project-memory/README.md`. The machine-level memory
+store (`~/.claude/projects/<proj>/memory/`, indexed by `MEMORY.md`) holds ONLY
+pointer entries: a strong `description:` line for description-based recall plus a
+short body that links to the canonical `.claude-state/project-memory/...` file. Do
+NOT write bulky content into the machine store — it is the recall index, not the
+system of record; duplicating content there causes drift. Exceptions that may stay
+machine-only: cross-project `user`/`feedback` working preferences and
+machine-specific facts (host access, local paths). When saving something new:
+(1) write full content to `.claude-state/project-memory/`, update that README;
+(2) create/keep a slim machine-level pointer and index it under the right
+`index-*.md`.
+
+---
+
 ## Agent Bridge — Session Startup (Hook-Driven)
 
 This repo uses an agent-bridge to coordinate with a peer Codex session. The

@@ -904,14 +904,32 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAttemptsValidatedStateBacke
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
 
-TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsUnsupportedLiveState)
+TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAdmitsHqNonBaseLiveState)
 {
+    /* The live M16-1327 non-base HQ Dual ISO state (auto-corrected:
+     * black_delta=960, ev_correction=4.0, is_bright={0,1,1,0}) is admitted by
+     * the widened eligibility guard because it is still the proven HQ-config
+     * class (interp==1, alias==1, fullres==1, chroma==0). Admission means the
+     * bridge ATTEMPTS the backend rather than short-circuiting with
+     * UNSUPPORTED_STATE. With the playback DLL pointed at a missing path the
+     * backend is unavailable, so the call returns 0 with rc=-1 (generic
+     * failure) -- NOT LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE -- and the
+     * export backend is recorded as attempted + unavailable. This is the
+     * admit-side pin for the widened guard (the diagnostic env is no longer
+     * needed). */
     static int dummy_int_lut[1] = { 0 };
     static double dummy_double_lut[1] = { 0.0 };
     uint16_t rawInput[4] = { 1024, 2048, 3072, 4096 };
     llrpGpuPlaybackReconState_t state = {};
     llrpGpuPlaybackReconTiming_t timing = {};
     int rc = 123;
+
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE");
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON_DLL",
+            QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 
     state.valid = 1;
     state.width = 2;
@@ -942,8 +960,77 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsUnsupportedLiveState
                                                   7,
                                                   &rc,
                                                   &timing));
-    ASSERT_EQ(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE, rc);
+    ASSERT_EQ(-1, rc);
+    ASSERT_NE(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE, rc);
     ASSERT_EQ(0, timing.available);
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsNonHqConfig)
+{
+    /* Reject side of the widened guard: a genuinely non-HQ config must stay
+     * fail-closed (UNSUPPORTED_STATE) even when all the level/ev scalars look
+     * like a valid HQ clip. Each of the four HQ-class flags is exercised: a
+     * non-AMaZE interp, alias map off, fullres off, and chroma smoothing on.
+     * None of these reaches the backend -- the guard short-circuits with
+     * UNSUPPORTED_STATE so the CPU readback path is used. */
+    static int dummy_int_lut[1] = { 0 };
+    static double dummy_double_lut[1] = { 0.0 };
+    uint16_t rawInput[4] = { 1024, 2048, 3072, 4096 };
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE");
+
+    /* Each entry mutates exactly one HQ-class flag away from the proven class.
+     * The .mark field selects which flag is non-HQ (0=interp, 1=alias,
+     * 2=fullres, 3=chroma). */
+    const int non_hq_cases[4][4] = {
+        /* interp, alias, fullres, chroma */
+        { 0, 1, 1, 0 }, /* non-AMaZE interp */
+        { 1, 0, 1, 0 }, /* alias map off    */
+        { 1, 1, 0, 0 }, /* fullres off      */
+        { 1, 1, 1, 1 }, /* chroma smoothing on */
+    };
+
+    for(int ci = 0; ci < 4; ++ci) {
+        llrpGpuPlaybackReconState_t state = {};
+        state.valid = 1;
+        state.width = 2;
+        state.height = 2;
+        state.black_level = 131008;
+        state.white_level = 1011968;
+        state.white_darkened = 154504;
+        state.black_delta = 960;
+        state.ev_correction = 4.0;
+        state.dark_noise = 512.0;
+        state.interp_method = non_hq_cases[ci][0];
+        state.use_alias_map = non_hq_cases[ci][1];
+        state.use_fullres = non_hq_cases[ci][2];
+        state.chroma_smooth_method = non_hq_cases[ci][3];
+        state.is_bright[0] = 0;
+        state.is_bright[1] = 1;
+        state.is_bright[2] = 1;
+        state.is_bright[3] = 0;
+        state.raw2ev = dummy_int_lut;
+        state.ev2raw = dummy_int_lut;
+        state.mix_curve = dummy_double_lut;
+        state.fullres_curve = dummy_double_lut;
+
+        llrpGpuPlaybackReconTiming_t timing = {};
+        timing.available = 1;
+        int rc = 123;
+        ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                      rawInput,
+                                                      sizeof(rawInput),
+                                                      7,
+                                                      &rc,
+                                                      &timing));
+        ASSERT_EQ(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE, rc);
+        ASSERT_EQ(0, timing.available);
+    }
 }
 
 TEST(DualIsoPipeline, GpuPlaybackReconIneligibleConfigDoesNotTouchBackendWhenOptedIn)
@@ -990,11 +1077,21 @@ TEST(DualIsoPipeline, GpuPlaybackReconIneligibleConfigDoesNotTouchBackendWhenOpt
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 }
 
-TEST(DualIsoPipeline, GpuPlaybackReconUnsupportedLiveStateFallsBackByteInert)
+TEST(DualIsoPipeline, GpuPlaybackReconAdmittedHqStateFallsBackByteInertWithoutBackend)
 {
+    /* End-to-end (fixture pipeline) admit pin for the widened guard. The
+     * supported HQ-config fixture ({MEAN23, FR_ON, FR_ON, CS_OFF}) produces a
+     * live recon state that the widened guard now ADMITS regardless of its
+     * per-clip is_bright/ev/black_delta. Admission means the bridge ATTEMPTS the
+     * backend; with the playback recon DLL pointed at a missing path the backend
+     * is unavailable, so the run returns the generic failure rc (NOT
+     * UNSUPPORTED_STATE) and the frame falls back BYTE-INERT to the CPU result.
+     * The byte-inert safety property -- a missing/failed backend must never
+     * change the displayed pixels -- is the critical invariant here. */
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
     qunsetenv("MLVAPP_GPU_RECON_DLL");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 
@@ -1004,7 +1101,8 @@ TEST(DualIsoPipeline, GpuPlaybackReconUnsupportedLiveStateFallsBackByteInert)
     const std::vector<uint16_t> cpu_frame = cpu_fixture.renderFrame16(0, 1);
 
     qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
-    qputenv("MLVAPP_GPU_RECON_DLL", QByteArrayLiteral("definitely-missing-playback-recon.dll"));
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON_DLL",
+            QByteArrayLiteral("definitely-missing-playback-recon.dll"));
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 
@@ -1021,14 +1119,82 @@ TEST(DualIsoPipeline, GpuPlaybackReconUnsupportedLiveStateFallsBackByteInert)
     ASSERT_EQ(1, llrpGpuPlaybackReconLastRunAttemptedForTesting());
     ASSERT_EQ(0, llrpGpuPlaybackReconLastUsedForTesting());
     ASSERT_EQ(1, llrpGpuPlaybackReconLastStateValidForTesting());
-    ASSERT_EQ(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE,
+    /* Admitted state -> backend attempt -> missing DLL: generic failure rc,
+     * explicitly NOT the unsupported-state short-circuit. */
+    ASSERT_NE(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE,
               llrpGpuPlaybackReconLastRunRcForTesting());
-    ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
-    ASSERT_EQ(0, llrpGpuExportBackendUnavailableForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
 
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
-    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackArmsOnEffectivenessNotRawFixMode)
+{
+    /* Regression guard for the over-conservative mode-flag gate. The no-readback
+     * (texture-present) path presents the RECON-ONLY Dual ISO bayer; the CUDA
+     * backend has no focus/bad-pixel code, and the post-recon focus/bad-pixel
+     * interpolation mutates the CPU display frame in place AFTER recon. Eligibility
+     * keys on whether that interpolation ACTUALLY runs (map ready + applied), NOT
+     * on the focus_pixels/bad_pixels MODE flags (bad_pixels defaults to 1). The C
+     * worker stores the no-readback input bayer, then retracts it only if the
+     * interpolation mutated the recon output (llrawproc.c ~2553). The tiny test
+     * fixture has no actual focus/bad pixels, so interpolation never runs for ANY
+     * mode combo -> the input must be ARMED in all of them. (The fail-closed
+     * retract when interpolation DOES mutate is covered by code review + the 4090
+     * validator, which needs a clip with real bad/focus pixels.) An earlier build
+     * keyed the gate on the mode flags, which -- because bad_pixels defaults to 1
+     * -- blocked the no-readback path on every normal clip; this pins that fix. */
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+
+    /* Baseline: no raw fix possible (both modes off) -> input armed. */
+    {
+        MlvPipelineFixture fixture;
+        assert_fixture_ready(fixture);
+        configure_gpu_export_supported_dual_iso(fixture);
+        fixture.video()->llrawproc->focus_pixels = 0;
+        fixture.video()->llrawproc->bad_pixels = 0;
+        ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+        std::vector<uint16_t> frame;
+        {
+            const GpuPlaybackReconThreadOptIn opt_in(true);
+            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(1);
+            frame = fixture.renderFrame16(0, 1);
+            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(0);
+        }
+        ASSERT_TRUE(!frame.empty());
+        ASSERT_TRUE(llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0)
+                    > static_cast<size_t>(0));
+    }
+
+    /* Regression pin: focus_pixels MODE On, but the tiny fixture's camera has no
+     * focus-pixel map (fpm_status < 2) so the post-recon focus interpolation does
+     * NOT run -> the recon-only texture equals the CPU frame -> input must STILL be
+     * armed. An earlier build keyed the gate on the mode flag and would have
+     * (wrongly) withheld here. */
+    {
+        MlvPipelineFixture fixture;
+        assert_fixture_ready(fixture);
+        configure_gpu_export_supported_dual_iso(fixture);
+        fixture.video()->llrawproc->focus_pixels = 1;
+        fixture.video()->llrawproc->bad_pixels = 0;
+        ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+        std::vector<uint16_t> frame;
+        {
+            const GpuPlaybackReconThreadOptIn opt_in(true);
+            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(1);
+            frame = fixture.renderFrame16(0, 1);
+            llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(0);
+        }
+        ASSERT_TRUE(!frame.empty());
+        ASSERT_TRUE(llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0)
+                    > static_cast<size_t>(0));
+    }
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 }
 

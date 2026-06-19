@@ -70,6 +70,9 @@
 #include <stdint.h>
 #include <math.h>
 #include <sys/stat.h>
+#if defined(_OPENMP)
+#include <omp.h>   /* omp_set_num_threads: force scalar dither single-thread */
+#endif
 #if defined(_WIN32)
 #include <direct.h>
 #define ORACLE_MKDIR(p) _mkdir(p)
@@ -146,12 +149,229 @@ demosaic(amazeinfo_t * inputdata)
 #define ORACLE_BLACK_14   2047    /* raw_info.black_level (14-bit)            */
 #define ORACLE_WHITE_14   15000   /* raw_info.white_level (14-bit)            */
 
-/* Bright-field pattern per (y & 3): {1,1,0,0}. Bright rows (is_bright==1)
- * simulate the LOW-iso-100 exposure that holds ~3 EV more highlight signal;
- * dark rows (is_bright==0) simulate iso-800 (darker, noisier conceptually).
- * NB this matches iso_patterns[0] in dualiso.c:4762 so auto-detect resolves
- * to pattern index 0.                                                        */
-static const int ORACLE_IS_BRIGHT[4] = {1, 1, 0, 0};
+/* Bright-field pattern per (y & 3): default {1,1,0,0}. Bright rows
+ * (is_bright==1) simulate the LOW-iso-100 exposure that holds ~3 EV more
+ * highlight signal; dark rows (is_bright==0) simulate iso-800 (darker, noisier
+ * conceptually). The default {1,1,0,0} matches iso_patterns[0] in dualiso.c so
+ * auto-detect resolves to pattern index 0.
+ *
+ * NON-BASE PARAMETERIZATION (added for the stage-diff localization work):
+ *   This array is NO LONGER const. It is seeded to {1,1,0,0} at startup so the
+ *   DEFAULT (env unset) behavior is byte-identical to before, and may be
+ *   overridden by ORACLE_IS_BRIGHT="abcd" (four 0/1 chars) to generate non-base
+ *   diagnostic vectors. See oracle_apply_env_overrides() in main().            */
+static int ORACLE_IS_BRIGHT[4] = {1, 1, 0, 0};
+
+/* ---- non-base diagnostic axes (env-controlled, default == base) ----------- *
+ * All three default to the current base values so existing base/iso1600/clipped
+ * vectors regenerate byte-identically when the env vars are unset.
+ *
+ *   ORACLE_IS_BRIGHT   four 0/1 chars, e.g. "0110" or "1100" (default 1100)
+ *   ORACLE_BLACK_DELTA integer in 14-bit units, default 0. This is the value
+ *                      passed to diso_get_full20bit's *black_delta in/out param.
+ *                      match_exposures (dualiso.c:2529-2538) does:
+ *                          if (*black_delta != -1) _black_delta = *black_delta*64;
+ *                          _black_delta = COERCE(_black_delta, 0, 100*64);
+ *                          *black_delta = _black_delta / 64;   // 14-bit readback
+ *                      so the APPLY value used internally (and recorded as
+ *                      black_delta20 in scalars.txt) is (ORACLE_BLACK_DELTA*64),
+ *                      clamped to [0, 6400]. The 14-bit value is what the API
+ *                      exposes; the 20-bit value in scalars is x64.
+ *   ORACLE_APPLY_DITHER 0/1, default 0. When 1, the randn05 LUT is initialized
+ *                      deterministically (see oracle_build_randn05) and the
+ *                      scalar convert_20_to_16bit path's fast_randn05() applies
+ *                      it, exercising the anti-posterization dither the base
+ *                      vectors never touch. The LUT is dumped to randn05.f32 so
+ *                      a consumer can load the EXACT table used. See the dither
+ *                      fidelity caveat in README.txt.                          */
+static int    g_oracle_apply_dither = 0;
+static int    g_oracle_black_delta  = 0;   /* 14-bit units, default 0 */
+
+/* ---- auto_correction (match-by) diagnostic axis (env-controlled) ----------- *
+ * ORACLE_AUTO_CORRECTION selects which match_exposures branch diso_get_full20bit
+ * takes (dualiso.c:2499-2522):
+ *   unset / -1  -> ISO-ratio path (the historical oracle default; corr_ev =
+ *                  log2(iso2/iso1), black_delta from the ISO pair). BYTE-IDENTICAL
+ *                  to before when unset, so every existing vector regenerates
+ *                  unchanged.
+ *   -2          -> match_by_histogram path (dualiso.c:2329). This is the EXACT
+ *                  runtime configuration the GUI uses for a DISO_FORCED clip
+ *                  (MainWindow.cpp:11015-11021): diso_auto_correction=-2,
+ *                  diso_ev_correction=1 (sentinel), diso_black_delta=-1 (sentinel).
+ *                  Those two sentinels are what make match_exposures KEEP the
+ *                  histogram-derived _ev_correction/_black_delta instead of
+ *                  overwriting them with caller values (the override at
+ *                  dualiso.c:2524 / :2529 only fires for ev!=1 / bd!=-1).
+ *
+ * When -2 is selected the oracle therefore passes ev_correction=1 and
+ * black_delta=-1 as the in/out sentinels (overriding the LOAD-mode bd=-1 default,
+ * which already coincides), so diso_get_full20bit runs match_by_histogram and the
+ * APPLIED a/b20 reach the pixels. The captured ev_correction/black_delta read
+ * back the histogram values (dualiso.c:2537-2538). Default (-1) leaves the whole
+ * param block untouched -> base/iso1600/clipped/live(ISO-ratio) vectors are
+ * byte-identical. */
+static int    g_oracle_auto_correction      = -1;  /* -1 = ISO-ratio (default), -2 = histogram */
+static int    g_oracle_auto_correction_set  = 0;   /* 1 if ORACLE_AUTO_CORRECTION was set */
+
+/* Parse an env var "0110"/"1100" (exactly 4 chars, each '0' or '1') into the
+ * mutable ORACLE_IS_BRIGHT[4]. Leaves it untouched (default {1,1,0,0}) when the
+ * var is unset or malformed, so unset == base. Returns 1 if an override was
+ * applied, 0 otherwise. */
+static int oracle_parse_is_bright_env(void)
+{
+    const char * s = getenv("ORACLE_IS_BRIGHT");
+    if (!s || !*s) return 0;
+    /* accept exactly 4 binary digits */
+    int v[4];
+    for (int i = 0; i < 4; i++) {
+        if (s[i] != '0' && s[i] != '1') {
+            fprintf(stderr, "[oracle] ignoring malformed ORACLE_IS_BRIGHT='%s' "
+                            "(need 4 chars of 0/1, e.g. 0110)\n", s);
+            return 0;
+        }
+        v[i] = s[i] - '0';
+    }
+    if (s[4] != '\0') {
+        fprintf(stderr, "[oracle] ignoring malformed ORACLE_IS_BRIGHT='%s' "
+                        "(need exactly 4 chars)\n", s);
+        return 0;
+    }
+    for (int i = 0; i < 4; i++) ORACLE_IS_BRIGHT[i] = v[i];
+    return 1;
+}
+
+/* Read ORACLE_BLACK_DELTA / ORACLE_APPLY_DITHER. Unset -> defaults (0/0). */
+static void oracle_parse_scalar_env(void)
+{
+    const char * bd = getenv("ORACLE_BLACK_DELTA");
+    if (bd && *bd) g_oracle_black_delta = atoi(bd);
+    const char * dt = getenv("ORACLE_APPLY_DITHER");
+    if (dt && *dt) g_oracle_apply_dither = (atoi(dt) != 0);
+    const char * ac = getenv("ORACLE_AUTO_CORRECTION");
+    if (ac && *ac) {
+        int v = atoi(ac);
+        if (v == -1 || v == -2) {
+            g_oracle_auto_correction     = v;
+            g_oracle_auto_correction_set = 1;
+        } else {
+            fprintf(stderr, "[oracle] ignoring ORACLE_AUTO_CORRECTION='%s' "
+                            "(only -1 or -2 supported)\n", ac);
+        }
+    }
+}
+
+/* ---- LOAD-EXTERNAL-INPUT mode (env-controlled, default OFF) ---------------- *
+ * When ORACLE_LOAD_INPUT names an existing raw 14-bit Bayer file (uint16 LE,
+ * exactly W*H elements), oracle_main loads THAT buffer as image_data instead of
+ * synthesizing the deterministic test frame. This lets the oracle reproduce a
+ * REAL live capture's Dual ISO state (e.g. M16-1327) so the parity harness can
+ * localize which backend stage first diverges from the CPU oracle.
+ *
+ * Geometry/levels/iso come from companion env vars (defaults preserve the base
+ * synthetic-case behavior when ORACLE_LOAD_INPUT is unset):
+ *   ORACLE_LOAD_INPUT       path to in.u16 (raw 14-bit Bayer uint16 LE, W*H)
+ *   ORACLE_WIDTH/HEIGHT     geometry (must match the file element count)
+ *   ORACLE_BLACK_LEVEL_14   raw_info.black_level (14-bit; diso_get_full20bit
+ *                           *64's it internally, see dualiso.c:5249-5250)
+ *   ORACLE_WHITE_LEVEL_14   raw_info.white_level (14-bit; *64'd internally)
+ *   ORACLE_ISO1/ORACLE_ISO2 iso pair driving match_exposures' ISO-ratio path
+ *                           (corr_ev = log2(iso2/iso1); for the live M16 state
+ *                           100/1600 -> corr_ev 4.0, black_delta20 960)
+ *   ORACLE_IS_BRIGHT        four 0/1 chars (already parsed above); ALSO forces
+ *                           *iso_pattern so diso_get_full20bit uses that exact
+ *                           pattern instead of auto-detecting (see main()).
+ *
+ * All vars default to unset; with ORACLE_LOAD_INPUT unset every existing code
+ * path (synthetic generation, base/iso1600/clipped/amaze cases) is untouched
+ * and byte-identical to before. */
+static const char * g_oracle_load_input = NULL;  /* NULL -> synthesize (default) */
+static int          g_oracle_iso1_ovr   = -1;    /* <0 -> use case default */
+static int          g_oracle_iso2_ovr   = -1;
+static int          g_oracle_black14_ovr = -1;   /* <0 -> use ORACLE_BLACK_14 */
+static int          g_oracle_white14_ovr = -1;   /* <0 -> use ORACLE_WHITE_14 */
+
+static void oracle_parse_load_env(void)
+{
+    const char * p = getenv("ORACLE_LOAD_INPUT");
+    if (p && *p) g_oracle_load_input = p;
+    const char * i1 = getenv("ORACLE_ISO1");
+    if (i1 && *i1) g_oracle_iso1_ovr = atoi(i1);
+    const char * i2 = getenv("ORACLE_ISO2");
+    if (i2 && *i2) g_oracle_iso2_ovr = atoi(i2);
+    const char * b = getenv("ORACLE_BLACK_LEVEL_14");
+    if (b && *b) g_oracle_black14_ovr = atoi(b);
+    const char * w = getenv("ORACLE_WHITE_LEVEL_14");
+    if (w && *w) g_oracle_white14_ovr = atoi(w);
+}
+
+/* Map an ORACLE_IS_BRIGHT pattern to the FORCED *iso_pattern value (1..4) that
+ * makes diso_get_full20bit pick iso_patterns[idx] verbatim (dualiso.c:5187,
+ * 5215-5218):
+ *   iso_patterns[4][4] = {{1,1,0,0},{1,0,0,1},{0,0,1,1},{0,1,1,0}}
+ * so pattern value v in 1..4 selects iso_patterns[v-1]. For the live M16 state
+ * is_bright={0,1,1,0} == iso_patterns[3] -> forced *iso_pattern = 4. Returns the
+ * 1-based forced value, or 0 if the current ORACLE_IS_BRIGHT does not match any
+ * known pattern (caller then falls back to auto-detect, *iso_pattern=0). */
+static int oracle_forced_iso_pattern(void)
+{
+    static const int iso_patterns[4][4] =
+        {{1,1,0,0}, {1,0,0,1}, {0,0,1,1}, {0,1,1,0}};
+    for (int i = 0; i < 4; i++) {
+        if (ORACLE_IS_BRIGHT[0] == iso_patterns[i][0] &&
+            ORACLE_IS_BRIGHT[1] == iso_patterns[i][1] &&
+            ORACLE_IS_BRIGHT[2] == iso_patterns[i][2] &&
+            ORACLE_IS_BRIGHT[3] == iso_patterns[i][3])
+            return i + 1;
+    }
+    return 0;
+}
+
+/* Load a raw uint16-LE file of exactly `count` elements into `dst`. Host is LE
+ * x86-64 so the on-disk bytes ARE the in-memory layout (matches dump_blob). */
+static int oracle_load_u16(const char * path, uint16_t * dst, size_t count)
+{
+    FILE * f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "[oracle] cannot open ORACLE_LOAD_INPUT '%s'\n", path); return 0; }
+    /* size check so a width/height mismatch is caught loudly, not silently mis-strided */
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && (size_t)sz != count * sizeof(uint16_t)) {
+            fprintf(stderr, "[oracle] ORACLE_LOAD_INPUT '%s' is %ld bytes, expected %zu "
+                            "(W*H*2). Check ORACLE_WIDTH/ORACLE_HEIGHT.\n",
+                    path, sz, count * sizeof(uint16_t));
+            fclose(f); return 0;
+        }
+        rewind(f);
+    }
+    size_t r = fread(dst, sizeof(uint16_t), count, f);
+    fclose(f);
+    if (r != count) {
+        fprintf(stderr, "[oracle] short read from '%s' (%zu/%zu elements)\n", path, r, count);
+        return 0;
+    }
+    fprintf(stderr, "[oracle] loaded external input '%s' (%zu elements)\n", path, count);
+    return 1;
+}
+
+/* Build the randn05 anti-posterization LUT EXACTLY as the engine's
+ * fast_randn_init() does (dualiso.c:1912-1919):
+ *     for i in [0,1024): randn05_cache[i] = RANDN / 2;
+ *     RANDN = sqrt(-2*log(RAND)) * cos(TWOPI*RAND);  RAND = rand()/RAND_MAX
+ * fast_randn_init() consumes rand() in pairs (two RAND draws per entry) in the
+ * SAME loop order, so seeding the CRT PRNG identically and replaying the same
+ * call sequence reproduces the table byte-for-byte. We seed with srand(0) for a
+ * fixed, reproducible table (the engine never seeds, and never calls
+ * fast_randn_init at all, so there is no "true" engine seed to match -- see the
+ * dither fidelity caveat). We call the engine's own fast_randn_init() so the
+ * arithmetic is literally the engine code, not a re-derivation, then copy the
+ * resulting randn05_cache out. TWOPI/RANDN/RAND are dualiso.c macros, in scope
+ * here because dualiso.c is #included into this TU. */
+static void oracle_build_randn05(float out[1024])
+{
+    srand(0);                 /* fixed, reproducible draw sequence */
+    fast_randn_init();        /* engine code path -> fills randn05_cache[1024] */
+    memcpy(out, randn05_cache, 1024 * sizeof(float));
+}
 
 /* ---------------------------------------------------------------------------
  * CASE SELECTOR
@@ -301,6 +521,26 @@ int main(int argc, char ** argv)
     const char * case_name = "base";
     const char * outdir = ".";
 
+    /* Non-base diagnostic overrides. All three default to the base values, so
+     * with the env vars UNSET this produces byte-identical output to before.
+     * Parsed up front so the startup banner reflects the active axes.          */
+    int isbright_overridden = oracle_parse_is_bright_env();
+    oracle_parse_scalar_env();
+    oracle_parse_load_env();   /* ORACLE_LOAD_INPUT + geometry/levels/iso overrides */
+    if (g_oracle_auto_correction_set) {
+        fprintf(stderr, "[oracle] NON-BASE axis: auto_correction=%d (%s)\n",
+                g_oracle_auto_correction,
+                g_oracle_auto_correction == -2 ? "match_by_histogram" : "ISO-ratio");
+    }
+    if (isbright_overridden || g_oracle_black_delta != 0 || g_oracle_apply_dither) {
+        fprintf(stderr, "[oracle] NON-BASE axes: is_bright={%d,%d,%d,%d}%s "
+                        "black_delta=%d(14b) apply_dither=%d\n",
+                ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1],
+                ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3],
+                isbright_overridden ? " (overridden)" : "",
+                g_oracle_black_delta, g_oracle_apply_dither);
+    }
+
     if (argc >= 2 && strcmp(argv[1], "--list") == 0) {
         printf("oracle cases:\n");
         for (int i = 0; i < ORACLE_NUM_CASES; i++) {
@@ -338,6 +578,19 @@ int main(int argc, char ** argv)
         if (argc >= 3) { W = atoi(argv[1]); H = atoi(argv[2]); }
         if (argc >= 4) outdir = argv[3];
     }
+    /* LOAD-EXTERNAL-INPUT geometry/level/iso overrides (env, default OFF).
+     * Applied AFTER case/positional resolution so they win, but ONLY when set.
+     * When ORACLE_LOAD_INPUT is unset every override below is a no-op (the
+     * *_ovr defaults are <0) so synthetic-case behavior is byte-identical. */
+    {
+        const char * we = getenv("ORACLE_WIDTH");
+        const char * he = getenv("ORACLE_HEIGHT");
+        if (we && *we) W = atoi(we);
+        if (he && *he) H = atoi(he);
+        if (g_oracle_iso1_ovr > 0) sel_iso1 = g_oracle_iso1_ovr;
+        if (g_oracle_iso2_ovr > 0) sel_iso2 = g_oracle_iso2_ovr;
+        if (g_oracle_load_input) case_name = "live";  /* label for scalars/README */
+    }
     if (W <= 16 || H <= 16) { fprintf(stderr, "[oracle] bad geometry %dx%d\n", W, H); return 2; }
 
     /* the resolved case used by the synthetic generator + scalars sidecar */
@@ -364,12 +617,21 @@ int main(int argc, char ** argv)
 
     size_t n = (size_t)W * (size_t)H;
 
-    /* 1) generate the deterministic synthetic 14-bit Bayer frame */
+    /* 1) obtain the 14-bit Bayer input.
+     *    DEFAULT (ORACLE_LOAD_INPUT unset): synthesize the deterministic frame
+     *    exactly as before. LOAD mode: read the live capture's in.u16 verbatim
+     *    instead of synthesizing -- the oracle then reproduces the REAL Dual ISO
+     *    state. The loaded buffer is used as image_data; in_copy preserves it for
+     *    the in.u16 dump (the recon overwrites img in place). */
     uint16_t * img = (uint16_t *)malloc(n * sizeof(uint16_t));
     if (!img) { fprintf(stderr, "[oracle] OOM input\n"); return 4; }
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++)
-            img[(size_t)x + (size_t)y * W] = oracle_pixel(x, y, &the_case);
+    if (g_oracle_load_input) {
+        if (!oracle_load_u16(g_oracle_load_input, img, n)) { free(img); return 3; }
+    } else {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+                img[(size_t)x + (size_t)y * W] = oracle_pixel(x, y, &the_case);
+    }
 
     /* keep a pristine copy of the input for the in.u16 dump (recon overwrites
      * img in place with the 16-bit output). */
@@ -388,8 +650,13 @@ int main(int argc, char ** argv)
     memset(&ri, 0, sizeof ri);
     ri.width = W; ri.height = H; ri.pitch = W;
     ri.bits_per_pixel = 14;
-    ri.black_level = ORACLE_BLACK_14;
-    ri.white_level = ORACLE_WHITE_14;
+    /* 14-bit levels. ORACLE_BLACK_LEVEL_14 / ORACLE_WHITE_LEVEL_14 override for
+     * LOAD mode (default <0 -> the synthetic constants, byte-identical when
+     * unset). diso_get_full20bit multiplies these by 64 internally (dualiso.c:
+     * 5249-5250), so pass the 14-bit values (live M16: black14=2047, white14=
+     * 15812 -> 131008 / 1011968 in 20-bit). */
+    ri.black_level = (g_oracle_black14_ovr > 0) ? g_oracle_black14_ovr : ORACLE_BLACK_14;
+    ri.white_level = (g_oracle_white14_ovr > 0) ? g_oracle_white14_ovr : ORACLE_WHITE_14;
     ri.cfa_pattern = 0x02010100;            /* RGGB -> no 1-line skip */
     ri.active_area.x1 = 0; ri.active_area.y1 = 0;
     ri.active_area.x2 = W; ri.active_area.y2 = H;
@@ -408,16 +675,102 @@ int main(int argc, char ** argv)
     dualiso_full20bit_scratch_t sc;
     memset(&sc, 0, sizeof sc);
 
+    /* iso_pattern: 0 = auto-detect (resolves to {1,1,0,0} on synthetic frames).
+     * When ORACLE_IS_BRIGHT was overridden we FORCE the matching pattern value
+     * so diso_get_full20bit uses iso_patterns[value-1] verbatim (dualiso.c:5215-
+     * 5218) instead of auto-detecting -- essential in LOAD mode where the real
+     * frame's field parity must be honored exactly (live M16 is_bright={0,1,1,0}
+     * == iso_patterns[3] -> forced value 4). Unset/base -> stays 0 (auto). */
     int    diso_pattern         = 0;     /* 0 = auto-detect (resolves to {1,1,0,0}) */
-    int    diso_auto_correction = -1;    /* ISO-ratio                                */
+    if (isbright_overridden) {
+        int fp = oracle_forced_iso_pattern();
+        if (fp) {
+            diso_pattern = fp;
+            fprintf(stderr, "[oracle] forcing iso_pattern=%d for is_bright={%d,%d,%d,%d} "
+                            "(iso_patterns[%d])\n", fp,
+                    ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1],
+                    ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3], fp - 1);
+        } else {
+            fprintf(stderr, "[oracle] WARNING: is_bright={%d,%d,%d,%d} matches no "
+                            "iso_patterns[] entry; leaving auto-detect (pattern=0)\n",
+                    ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1],
+                    ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3]);
+        }
+    }
+    int    diso_auto_correction = g_oracle_auto_correction;  /* -1 ISO-ratio (default), -2 histogram */
     double diso_ev_correction   = 1.0;   /* sentinel: use ISO-ratio (see above)      */
-    int    diso_black_delta     = 0;
+    /* black_delta param semantics (match_exposures, dualiso.c:2529-2538):
+     *   diso_black_delta != -1 -> _black_delta OVERWRITTEN with diso_black_delta*64
+     *   diso_black_delta == -1 -> KEEP the ISO-ratio-derived _black_delta
+     *                             (= (high/100)*64 - (low/100)*64; dualiso.c:2516)
+     * SYNTHETIC default stays g_oracle_black_delta (0 base / ORACLE_BLACK_DELTA),
+     * so existing base/iso1600/clipped vectors are byte-identical.
+     * LOAD mode defaults to -1 (sentinel) so the ISO-ratio black_delta survives:
+     * this is what reproduces the live M16 state (iso 100/1600 -> black_delta20
+     * = 16*64 - 1*64 = 960, matching the live dump). ORACLE_BLACK_DELTA still
+     * overrides if the caller explicitly wants a fixed value. */
+    int    diso_black_delta     = g_oracle_black_delta;
+    if (g_oracle_load_input && getenv("ORACLE_BLACK_DELTA") == NULL) {
+        diso_black_delta = -1;   /* keep ISO-ratio black_delta (live reproduction) */
+        fprintf(stderr, "[oracle] LOAD mode: diso_black_delta=-1 (keep ISO-ratio "
+                        "black_delta from match_exposures)\n");
+    }
+    /* AUTO=-2 (match_by_histogram) diagnostic mode. Mirror the GUI DISO_FORCED
+     * runtime exactly (MainWindow.cpp:11015-11021): auto_correction=-2 selects
+     * the histogram branch in match_exposures (dualiso.c:2519-2522), and the
+     * ev=1 / bd=-1 SENTINELS are what stop the override at dualiso.c:2524/:2529
+     * from clobbering the histogram-derived _ev_correction/_black_delta. Without
+     * those sentinels match_exposures would discard the histogram result and
+     * re-apply the iso-ratio (the desync this diagnostic is meant to reproduce).
+     * Forcing bd=-1 here also overrides any non-LOAD g_oracle_black_delta so the
+     * histogram value is the one APPLIED. */
+    if (g_oracle_auto_correction_set && g_oracle_auto_correction == -2) {
+        diso_auto_correction = -2;
+        diso_ev_correction   = 1.0;   /* sentinel: keep histogram ev_correction  */
+        diso_black_delta     = -1;    /* sentinel: keep histogram black_delta     */
+        fprintf(stderr, "[oracle] AUTO=-2 mode: match_by_histogram "
+                        "(auto_correction=-2, ev_correction=1 sentinel, "
+                        "black_delta=-1 sentinel) -- mirrors GUI DISO_FORCED\n");
+    }
     int    interp_method        = sel_interp; /* 0=AMaZE (production default), 1=mean23 */
     int    use_alias_map        = 1;     /* exercise the 3-pass alias map            */
     int    use_fullres          = 1;     /* fullres reconstruction on                */
     int    chroma_smooth_method = 0;     /* off                                       */
     int    threads              = 1;     /* single-thread for determinism            */
     int    dark_frame           = 0;
+
+    /* DITHER: initialize the randn05 LUT BEFORE the recon so the SCALAR
+     * convert_20_to_16bit path (raw_set_pixel_20to16_rand -> fast_randn05())
+     * applies it. When apply_dither is OFF (default) we leave randn05_cache
+     * untouched: the engine never calls fast_randn_init(), so the cache stays
+     * all-zero and fast_randn05() returns 0.0 -- byte-identical to base.
+     *
+     * The table we build is captured for the randn05.f32 dump below; we build it
+     * here (not after the run) because fast_randn_init() writes the same global
+     * randn05_cache the recon reads, so the dumped table is exactly what the
+     * recon used. */
+    float oracle_randn05[1024];
+    memset(oracle_randn05, 0, sizeof oracle_randn05);
+    if (g_oracle_apply_dither) {
+        /* fast_randn05() advances a PROCESS-WIDE static counter once per pixel.
+         * convert_20_to_16bit's scalar loop is `#pragma omp parallel for
+         * collapse(2)` and is NOT gated by the `threads` API param, so under
+         * default OMP it would draw table entries in a schedule-dependent order
+         * -> non-deterministic out.u16. Force OMP to 1 thread so the scalar
+         * dither order is exactly index (x + y*W) & 1023, making the dithered
+         * out.u16 reproducible. (Base/dither-off runs leave OMP at its default;
+         * the recon is bit-exact regardless of thread count when dither is off,
+         * since no per-pixel global counter is consumed.) */
+#if defined(_OPENMP)
+        omp_set_num_threads(1);
+        fprintf(stderr, "[oracle] dither ON: forcing omp_set_num_threads(1) "
+                        "for deterministic scalar fast_randn05() order\n");
+#endif
+        oracle_build_randn05(oracle_randn05);   /* seeds + fills randn05_cache */
+        fprintf(stderr, "[oracle] dither ON: randn05 LUT initialized "
+                        "(randn05_cache[0]=%.9g [1]=%.9g [1023]=%.9g)\n",
+                randn05_cache[0], randn05_cache[1], randn05_cache[1023]);
+    }
 
     fprintf(stderr, "[oracle] running diso_get_full20bit (%s scalar)...\n",
             interp_method == 0 ? "AMaZE" : "mean23");
@@ -455,11 +808,23 @@ int main(int argc, char ** argv)
      *     int *white_darkened target via int arithmetic on a double expression).
      * Driver level math: black20 = 2047*64, white20 = 15000*64,
      * white_bright20 = (15000/2)*64. Result here: 174632 (matches stage_bright). */
-    int black20 = ORACLE_BLACK_14 * 64;
-    int white20 = ORACLE_WHITE_14 * 64;
-    int white_bright20 = (ORACLE_WHITE_14 / 2) * 64;
-    int wd_white = (white20 < white_bright20) ? white20 : white_bright20; /* MIN -> 480000 */
-    int _black_delta_20 = 0; /* apply value: diso_black_delta=0 != -1 forces 0 */
+    /* Effective 14-bit levels (overridden in LOAD mode, else synthetic consts). */
+    int eff_black14 = (g_oracle_black14_ovr > 0) ? g_oracle_black14_ovr : ORACLE_BLACK_14;
+    int eff_white14 = (g_oracle_white14_ovr > 0) ? g_oracle_white14_ovr : ORACLE_WHITE_14;
+    int black20 = eff_black14 * 64;
+    int white20 = eff_white14 * 64;
+    int white_bright20 = (eff_white14 / 2) * 64;
+    int wd_white = (white20 < white_bright20) ? white20 : white_bright20; /* MIN */
+    /* black_delta APPLY value (20-bit). The recon reads back the APPLIED value/64
+     * into diso_black_delta (dualiso.c:2538), so the faithful APPLY 20-bit value
+     * is the readback * 64 regardless of how it was derived:
+     *   SYNTHETIC: g_oracle_black_delta (passed != -1) -> readback == that value
+     *   LOAD/live: diso_black_delta passed -1 -> match_exposures keeps the ISO-
+     *              ratio value, reads it back (e.g. 15 for iso 100/1600 -> *64=960)
+     * Using the readback keeps base vectors byte-identical (readback == passed). */
+    int _black_delta_20 = diso_black_delta * 64;
+    if (_black_delta_20 < 0)        _black_delta_20 = 0;
+    if (_black_delta_20 > 100 * 64) _black_delta_20 = 100 * 64;
     double wd_factor = pow(2.0, -corr_ev);
     int white_darkened = (int)((double)(wd_white - black20 + _black_delta_20) * wd_factor + (double)black20);
 
@@ -535,6 +900,15 @@ int main(int argc, char ** argv)
     all_ok &= dump_blob(outdir, "mix_curve.f64", mix_curve, lut20 * sizeof(double));
     all_ok &= dump_blob(outdir, "fullres_curve.f64", fullres_curve, lut20 * sizeof(double));
     all_ok &= dump_blob(outdir, "fullres_curve_double.f64", fullres_curve_double, lut20 * sizeof(double));
+
+    /* randn05 anti-posterization LUT: dumped ONLY when dither was applied, so
+     * base/iso1600/clipped vectors are unchanged (no new file appears). The 1024
+     * float32 LE entries are the EXACT table fast_randn05() drew from this run.
+     * A consumer that wants to reproduce the dithered out.u16 must load this and
+     * mirror the engine's draw order (see README.txt dither caveat).           */
+    if (g_oracle_apply_dither) {
+        all_ok &= dump_blob(outdir, "randn05.f32", oracle_randn05, 1024 * sizeof(float));
+    }
 
     /* ---- PER-STAGE INTERMEDIATE DUMPS (for CUDA stage-by-stage parity) ----
      * Read back the recon's scratch planes AFTER diso_get_full20bit returned.
@@ -621,8 +995,8 @@ int main(int argc, char ** argv)
             fprintf(f, "pattern_variant=%d\n", sel_variant);
             fprintf(f, "width=%d\n", W);
             fprintf(f, "height=%d\n", H);
-            fprintf(f, "black_level_14=%d\n", ORACLE_BLACK_14);
-            fprintf(f, "white_level_14=%d\n", ORACLE_WHITE_14);
+            fprintf(f, "black_level_14=%d\n", eff_black14);
+            fprintf(f, "white_level_14=%d\n", eff_white14);
             fprintf(f, "iso1=%d\n", sel_iso1);
             fprintf(f, "iso2=%d\n", sel_iso2);
             fprintf(f, "cfa_pattern=0x02010100\n");
@@ -635,6 +1009,13 @@ int main(int argc, char ** argv)
             fprintf(f, "is_bright=%d,%d,%d,%d\n",
                     ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1], ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3]);
             fprintf(f, "# --- captured out-params (post-recon) ---\n");
+            /* auto_correction line emitted ONLY in the diagnostic mode so base/
+             * iso1600/clipped/live(ISO-ratio) scalars.txt stay byte-identical. */
+            if (g_oracle_auto_correction_set) {
+                fprintf(f, "auto_correction=%d        # %s (match_exposures branch)\n",
+                        diso_auto_correction,
+                        diso_auto_correction == -2 ? "match_by_histogram" : "ISO-ratio");
+            }
             fprintf(f, "ev_correction=%.17g\n", diso_ev_correction);   /* negative as stored */
             fprintf(f, "corr_ev=%.17g\n", corr_ev);                    /* ABS(ev_correction) */
             fprintf(f, "black_delta=%d\n", black_delta_out);
@@ -645,9 +1026,28 @@ int main(int argc, char ** argv)
             fprintf(f, "white_bright20=%d\n", white_bright20);
             fprintf(f, "white_darkened=%d\n", white_darkened);
             fprintf(f, "factor=%.17g            # pow(2,-corr_ev), the match-exposures darken factor\n", wd_factor);
-            fprintf(f, "black_delta20=%d        # APPLY value (diso_black_delta=0 != -1 -> 0)\n", _black_delta_20);
+            /* Preserve the EXACT base-case line (byte-identity) when black_delta
+             * is 0; emit the non-base APPLY value with a clarifying comment when
+             * overridden. The 20-bit APPLY value is the 14-bit ORACLE_BLACK_DELTA
+             * times 64, clamped to [0,6400]. */
+            if (_black_delta_20 == 0) {
+                fprintf(f, "black_delta20=%d        # APPLY value (diso_black_delta=0 != -1 -> 0)\n", _black_delta_20);
+            } else if (g_oracle_load_input && getenv("ORACLE_BLACK_DELTA") == NULL) {
+                /* LOAD mode kept the ISO-ratio black_delta (sentinel -1 passed);
+                 * the APPLY value is the readback*64 (e.g. iso 100/1600 -> 960). */
+                fprintf(f, "black_delta20=%d        # APPLY value (LOAD: sentinel -1 -> ISO-ratio readback %d *64)\n",
+                        _black_delta_20, black_delta_out);
+            } else {
+                fprintf(f, "black_delta20=%d        # APPLY value (ORACLE_BLACK_DELTA=%d 14b -> *64 clamped[0,6400])\n",
+                        _black_delta_20, g_oracle_black_delta);
+            }
             fprintf(f, "dark_noise20=512        # default-8 (14-bit) fallback *64 for active_area={0,0,W,H}\n");
             fprintf(f, "dark_noise_20bit=512   # legacy alias of dark_noise20\n");
+            /* apply_dither line appended ONLY when dither is on, so base/iso1600/
+             * clipped scalars.txt stay byte-identical (the line never appears). */
+            if (g_oracle_apply_dither) {
+                fprintf(f, "apply_dither=1          # randn05.f32 dumped; scalar fast_randn05() applied in convert_20_to_16bit\n");
+            }
             fclose(f);
             fprintf(stderr, "[oracle] wrote scalars.txt\n");
         } else {
@@ -759,6 +1159,46 @@ int main(int argc, char ** argv)
                 ORACLE_BLACK_14, ORACLE_WHITE_14, (ORACLE_WHITE_14 - ORACLE_BLACK_14),
                 diso_ev_correction, corr_ev, black_delta_out, diso_pattern,
                 black20, white20, white_bright20, white_darkened);
+            /* NON-BASE addendum: appended ONLY when a diagnostic axis is active,
+             * so base/iso1600/clipped README.txt stay byte-identical. */
+            if (g_oracle_apply_dither || g_oracle_black_delta != 0 || isbright_overridden) {
+                fprintf(f,
+"\n"
+"NON-BASE DIAGNOSTIC AXES (this vector)\n"
+"--------------------------------------\n"
+"  is_bright      = {%d,%d,%d,%d}%s\n"
+"  black_delta    = %d (14-bit) -> %d (20-bit APPLY, *64 clamped [0,6400])\n"
+"  apply_dither   = %d\n",
+                    ORACLE_IS_BRIGHT[0], ORACLE_IS_BRIGHT[1],
+                    ORACLE_IS_BRIGHT[2], ORACLE_IS_BRIGHT[3],
+                    isbright_overridden ? " (ORACLE_IS_BRIGHT override)" : "",
+                    g_oracle_black_delta, _black_delta_20, g_oracle_apply_dither);
+                if (g_oracle_apply_dither) {
+                    fprintf(f,
+"\n"
+"  DITHER FIDELITY CAVEAT\n"
+"  ----------------------\n"
+"  randn05.f32 (1024 float32 LE) is the EXACT anti-posterization LUT this run\n"
+"  used. It is built by the engine's own fast_randn_init() (dualiso.c:1912)\n"
+"  after srand(0), so the table is reproducible. HOWEVER two distinct, NOT\n"
+"  bit-identical dither application orders exist in the engine:\n"
+"    1. SCALAR path (this oracle, MLVAPP_DISABLE_AVX2=1): convert_20_to_16bit\n"
+"       calls fast_randn05(), which uses a PROCESS-WIDE static counter k that\n"
+"       increments once per pixel in row-major collapse(2) order. So pixel\n"
+"       (x,y) draws randn05_cache[(x + y*W) & 1023] under single-thread; with\n"
+"       OMP threads the global counter order is schedule-dependent (this oracle\n"
+"       runs threads=1, so it is deterministic = index (x+y*W)&1023).\n"
+"    2. AVX2 fused path (the SHIPPING default when DUALISO_AVX2_AVAILABLE) and\n"
+"       the CUDA backend (igpu_recon_cuda.cu:550) index randn05[(y*7+x)&1023].\n"
+"  These two orderings select DIFFERENT table entries per pixel, so the SCALAR\n"
+"  out.u16 here is NOT bit-identical to an AVX2/CUDA dithered output even with\n"
+"  the same LUT. For stage-localization this is fine: the dither only enters at\n"
+"  the FINAL convert_20_to_16bit step, so stage_final20.u32 (pre-dither 20-bit)\n"
+"  is order-independent and remains the bit-exact handoff to compare. The\n"
+"  out.u16 dither diff should be read as ~|N(0,0.5)| LSB noise, not a bug,\n"
+"  UNLESS the consumer mirrors THIS oracle's (x+y*W)&1023 scalar order.\n");
+                }
+            }
             fclose(f);
             fprintf(stderr, "[oracle] wrote README.txt\n");
         } else {

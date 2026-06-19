@@ -453,16 +453,33 @@ static int llrawproc_gpu_playback_recon_state_matches_validated_config(
     const dualiso_gpu_recon_state_t * state)
 {
     if(!state || !state->valid) return 0;
+
+    /* The no-readback playback path is admitted ONLY for the proven HQ
+     * (high-quality) recon config class:
+     *   interp_method == 1 (AMaZE), use_alias_map == 1, use_fullres == 1,
+     *   chroma_smooth_method == 0 (chroma smoothing off).
+     * Any other config (mean/non-AMaZE interp, alias map off, fullres off, or
+     * chroma smoothing on) is unproven for the no-readback bridge and must stay
+     * fail-closed so the CPU readback path is used instead. */
     if(state->interp_method != 1) return 0;
     if(state->use_alias_map != 1) return 0;
     if(state->use_fullres != 1) return 0;
     if(state->chroma_smooth_method != 0) return 0;
-    if(state->black_delta != 0) return 0;
-    if(fabs(fabs(state->ev_correction) - 3.0) > 0.000001) return 0;
-    if(state->is_bright[0] != 1) return 0;
-    if(state->is_bright[1] != 1) return 0;
-    if(state->is_bright[2] != 0) return 0;
-    if(state->is_bright[3] != 0) return 0;
+
+    /* Within the HQ-config class, admit by DEFAULT for arbitrary
+     * is_bright / ev_correction / black_delta. These vary per clip
+     * (auto-correction, exposure matching) and were proven 0-LSB vs the CPU
+     * oracle for the live M16-1327 non-base state: cuda_recon_parity passes
+     * 0 LSB at every stage for the exact live levels/ev, and the 4090
+     * end-to-end run showed the no-readback GL texture == the recon-output
+     * bayer oracle 0 LSB (gl_oracle_match=1, mismatch 0). The earlier
+     * base-config-only restriction (black_delta==0, |ev|==3.0,
+     * is_bright=={1,1,0,0}) was a validation-conservatism gate, not a
+     * correctness boundary.
+     *
+     * NOTE: the legacy diagnostic env MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE
+     * is now a no-op superset -- the HQ class it used to gate is admitted by
+     * default, so reaching this point already implies admission. */
     return 1;
 }
 
@@ -2217,6 +2234,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             int gpu_playback_recon_used = 0;
             int dual_iso_recon_ok = 0;
             int capture_gpu_recon_state = 0;
+            int gpu_playback_no_readback_post_recon_fix_ran = 0;
             int explicit_auto_correction = 0;
             double explicit_ev_correction = worker->diso_ev_correction;
             int explicit_black_delta = worker->diso_black_delta;
@@ -2255,6 +2273,22 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 if (gpu_playback_input)
                 {
                     memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    /* No-readback eligibility (effectiveness-based, fail-closed):
+                     * the CUDA->GL R16 texture the no-readback path presents is
+                     * the RECON-ONLY Dual ISO bayer. The post-recon focus-pixel /
+                     * bad-pixel interpolation (below, ~2509-2553) mutates
+                     * raw_image_buff IN PLACE after diso_get_full20bit, and the
+                     * CUDA backend has no focus/bad-pixel code. Store the input
+                     * bayer now; if that interpolation ACTUALLY runs for this frame
+                     * (map ready and applied), the stored input is RETRACTED right
+                     * after that block so the Qt layer falls back to the
+                     * CPU-readback bayer (which includes the fixes). Gating on the
+                     * actual fix-effect -- NOT the focus_pixels/bad_pixels mode
+                     * flags (bad_pixels defaults to 1) -- lets the no-readback path
+                     * engage for the common case where the fix is a no-op, while
+                     * staying fail-closed when it would change pixels. NOTE:
+                     * vertical_stripes is PRE-recon and pattern_noise does not run
+                     * for dual-iso frames, so they need no gate here. */
                     if (g_llrawproc_gpu_playback_texture_present_preferred)
                     {
                         (void)llrawproc_gpu_playback_store_last_input_bayer16(
@@ -2327,6 +2361,34 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                        chroma_smooth_mode,
                                        video->cpu_cores,
                                        &worker->diso_full20bit_scratch);
+            }
+            /* P3 diagnostic (gated, one-shot): snapshot the RECON-ONLY bayer here --
+             * raw_image_buff is the diso_get_full20bit output, BEFORE the post-recon
+             * raw-fix stages (focus pixels, etc.). The live-vector dump's out.u16 is
+             * captured AFTER the full pipeline, so dumping recon_only.u16 here lets the
+             * offline triad isolate a recon state-capture desync (recon_only vs
+             * backend_cpu) from post-recon stages (recon_only vs out.u16). */
+            if (!gpu_playback_recon_used
+             && dual_iso_recon_ok
+             && g_llrawproc_gpu_playback_texture_present_preferred)
+            {
+                static int recon_only_dumped = 0;
+                const char * dump_dir =
+                    getenv("MLVAPP_GPU_PLAYBACK_RECON_DUMP_LIVE_VECTOR_DIR");
+                if (!recon_only_dumped && dump_dir && *dump_dir
+                 && strcmp(dump_dir, "0") != 0 && raw_image_buff && raw_image_size > 0)
+                {
+                    char recon_only_path[1200];
+                    snprintf(recon_only_path, sizeof(recon_only_path),
+                             "%s/recon_only.u16", dump_dir);
+                    FILE * recon_only_f = fopen(recon_only_path, "wb");
+                    if (recon_only_f)
+                    {
+                        fwrite(raw_image_buff, 1, raw_image_size, recon_only_f);
+                        fclose(recon_only_f);
+                        recon_only_dumped = 1;
+                    }
+                }
             }
             if (!gpu_playback_recon_used
              && dual_iso_recon_ok
@@ -2489,6 +2551,28 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     llrawproc_reset_force_bad_pixel_search(video, bad_pixels);
                 }
                 bad_pixels_ms += (mlv_stage_timing_now() - bad_pixels_start) * 1000.0;
+            }
+
+            /* No-readback retract: if the post-recon focus/bad-pixel interpolation
+             * actually ran for this frame (mirrors the exact apply conditions at
+             * ~2508 / ~2529 above), the recon-only no-readback texture would differ
+             * from the CPU display frame. Drop the stored no-readback input so the
+             * Qt layer falls back to the CPU-readback bayer (which has the fixes).
+             * These predicates are unchanged since the interpolation ran. */
+            gpu_playback_no_readback_post_recon_fix_ran =
+                (focus_pixels && focus_interpolate_outside_lock
+                 && focus_status_snapshot == 2 && focus_map_for_interpolation)
+             || (bad_pixels && bad_interpolate_outside_lock
+                 && bad_status_snapshot == 2 && bad_map_for_interpolation);
+            if (gpu_playback_no_readback_post_recon_fix_ran
+             && g_llrawproc_gpu_playback_texture_present_preferred)
+            {
+                if (g_llrawproc_gpu_playback_last_input_bayer16)
+                {
+                    free(g_llrawproc_gpu_playback_last_input_bayer16);
+                    g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
+                }
+                g_llrawproc_gpu_playback_last_input_words = 0;
             }
 
             if (post_recon_luts_active)

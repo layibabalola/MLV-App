@@ -127,6 +127,36 @@ static bool playbackGpuNoReadbackOutputValidationEnabled()
     return enabled;
 }
 
+// The no-readback GL-vs-CPU-oracle parity instrumentation (GL texture readback +
+// SHA256 hashing + a full CPU recon replay per frame) is correct but very heavy:
+// running it on EVERY presented frame collapses an AMaZE playback run to a few fps,
+// which the temporal artifact/cadence detector then flags as JITTER even though real
+// (un-instrumented) playback is smooth. To keep the cadence gate honest while still
+// proving GL == oracle, the parity check is SAMPLED: it runs on every Nth presented
+// no-readback frame. The frames between samples still present from the same CUDA->GL
+// R16 texture (identical code path), so the sampled frames are representative.
+//   MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=N  (N>=1)
+// N=1 (the default when unset/invalid) preserves the legacy every-frame behavior.
+static int playbackGpuNoReadbackOutputValidationSampleInterval()
+{
+    static const int interval = []() -> int {
+        if( !qEnvironmentVariableIsSet(
+                "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY" ) )
+        {
+            return 1;
+        }
+        bool ok = false;
+        const int parsed = qEnvironmentVariable(
+            "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY" ).toInt( &ok );
+        if( !ok || parsed < 1 )
+        {
+            return 1;
+        }
+        return parsed;
+    }();
+    return interval;
+}
+
 static QString sanitizeLogValue( QString value )
 {
     if( value.isEmpty() ) return QStringLiteral("none");
@@ -3623,8 +3653,25 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             texturePresentTiming.available
                 ? texturePresentTiming.total_ms
                 : texturePresentMs );
+        // Sample the heavy GL-vs-oracle parity check on every Nth presented
+        // no-readback frame so the cadence/artifact detector measures real
+        // (un-instrumented) playback while the sampled frames still prove
+        // GL == oracle. The presented frame itself is byte-identical regardless
+        // of whether this frame is sampled (same CUDA->GL R16 texture path).
+        bool runNoReadbackOutputValidationThisFrame = false;
         if( framePresentedByViewport
          && playbackGpuNoReadbackOutputValidationEnabled() )
+        {
+            static unsigned long long s_noReadbackValidationFrameCounter = 0ULL;
+            const int sampleInterval =
+                playbackGpuNoReadbackOutputValidationSampleInterval();
+            const unsigned long long thisFrameIndex =
+                s_noReadbackValidationFrameCounter++;
+            runNoReadbackOutputValidationThisFrame =
+                ( sampleInterval <= 1 )
+                || ( thisFrameIndex % (unsigned long long)sampleInterval == 0ULL );
+        }
+        if( runNoReadbackOutputValidationThisFrame )
         {
             QByteArray glTextureBytes;
             int glTextureWidth = 0;

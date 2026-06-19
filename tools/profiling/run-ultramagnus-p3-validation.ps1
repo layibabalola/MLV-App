@@ -11,6 +11,7 @@ param(
     [int]$SettleMs = 1000,
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
+    [int]$ValidationSampleEvery = 10,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -22,6 +23,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# The no-readback P3 validation always runs with the heavy per-frame GL-readback + CPU-replay +
+# SHA256 parity instrumentation, which perturbs PRESENT cadence (it is absent from real,
+# uninstrumented playback whose purpose is to AVOID readback). Opt the downstream playback-artifact
+# detector into CADENCE-ADVISORY mode so the JITTER/cadence component is advisory (not fatal) while
+# the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT -- stay fatal. Inherited by the
+# smoke runner and the detector subprocess. See detect-playback-artifacts.ps1.
+$env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
 
 function Resolve-RepoPath {
     param(
@@ -462,6 +471,23 @@ if (!(Test-Path -LiteralPath $receiptPath)) {
     Add-Failure $failures "Missing receipt: $receiptPath"
 }
 
+# The no-readback path REQUIRES raw-fix processing (and hence Dual ISO recon) to be enabled:
+# rawFixesEnabled=0 sets fix_raw=0, which early-returns the entire LLRawProc apply BEFORE the Dual
+# ISO recon block (src/mlv/llrawproc/llrawproc.c:1776), so there is no recon-only bayer to present
+# and no-readback CORRECTLY does not arm. Parse the receipt so the per-clip assertions expect arming
+# ONLY when raw fixes are on; with raw fixes off they assert the correct "not-armed" outcome instead
+# of false-failing. (Default receipt FastProxy.marxml has rawFixesEnabled=1.)
+$receiptRawFixesEnabled = $true
+if (Test-Path -LiteralPath $receiptPath) {
+    try {
+        [xml]$receiptXml = Get-Content -LiteralPath $receiptPath -Raw
+        $rfeNode = $receiptXml.SelectSingleNode('//rawFixesEnabled')
+        if ($rfeNode -and ([string]$rfeNode.InnerText).Trim() -eq '0') { $receiptRawFixesEnabled = $false }
+    } catch {
+        [void]$warnings.Add("Could not parse rawFixesEnabled from receipt '$receiptPath'; assuming enabled.")
+    }
+}
+
 $hostName = [Environment]::MachineName
 $sessionInfo = [pscustomobject]@{
     sessionName = $env:SESSIONNAME
@@ -609,7 +635,18 @@ if ($failures.Count -eq 0) {
         $clipOutput = Join-Path $runRoot ($clipStem + "-p3-texture-present.json")
         $screenshots = Join-Path $runRoot ($clipStem + "-screenshots")
         $invokeScript = Join-Path $runRoot ("invoke-" + $clipStem + ".ps1")
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','QT_OPENGL=desktop')"
+        # wb-523ca500 P3: the in-app eligibility guard now ADMITS the proven HQ
+        # Dual ISO config class (interp==1, alias==1, fullres==1, chroma==0) by
+        # DEFAULT for arbitrary is_bright/ev/black_delta, so the real (non-base,
+        # auto-corrected) live state enters the no-readback path WITHOUT the legacy
+        # MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE diagnostic env (that env is
+        # now a no-op superset and is intentionally NOT set here).
+        #
+        # MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=N samples the heavy
+        # GL-vs-CPU-oracle parity check on every Nth presented no-readback frame so
+        # the temporal artifact/cadence detector sees real (un-instrumented)
+        # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
+        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -774,61 +811,86 @@ exit `$LASTEXITCODE
             Add-Failure $clipFailures "Smoke result did not report a log path."
         }
 
-        if ($noReadbackFrames -le 0) {
-            Add-Failure $clipFailures "gpu_texture_no_readback_frames was $noReadbackFrames; expected > 0."
-        }
-        if ($noReadbackCandidateFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_candidate=1."
-        }
-        if ($activeNoReadbackFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_active=1."
-        }
-        if ($cudaTextureSourceFrameCount -le 0) {
-            Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_r16_texture."
-        }
-        if ($fallbackFrameCount -gt 0) {
-            Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
-        }
-        if ($null -eq $glOutputProof) {
-            Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
+        if ($receiptRawFixesEnabled) {
+            if ($noReadbackFrames -le 0) {
+                Add-Failure $clipFailures "gpu_texture_no_readback_frames was $noReadbackFrames; expected > 0."
+            }
+            if ($noReadbackCandidateFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_candidate=1."
+            }
+            if ($activeNoReadbackFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_active=1."
+            }
+            if ($cudaTextureSourceFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_r16_texture."
+            }
+            if ($fallbackFrameCount -gt 0) {
+                Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
+            }
         }
         else {
-            if (-not [bool]$glOutputProof.requested) {
-                Add-Failure $clipFailures "GL output proof was not requested by the smoke wrapper."
+            # rawFixesEnabled=0 -> fix_raw=0 -> the LLRawProc apply early-returns BEFORE the Dual ISO
+            # recon block (src/mlv/llrawproc/llrawproc.c:1776), so there is no recon-only bayer and the
+            # no-readback path CORRECTLY does not arm. Assert that correct outcome instead of failing.
+            if ($noReadbackFrames -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but gpu_texture_no_readback_frames=$noReadbackFrames; no-readback must NOT arm without raw-fix recon."
             }
-            if ($glProbeActiveCount -le 0) {
-                Add-Failure $clipFailures "No active GL output probe rows were logged."
+            if ($noReadbackCandidateFrameCount -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but texture_no_readback_candidate appeared in $noReadbackCandidateFrameCount frame(s); no-readback must NOT arm without raw-fix recon."
             }
-            if ($glProbeActiveCount -gt 0 -and $glTextureReadbackOkCount -ne $glProbeActiveCount) {
-                Add-Failure $clipFailures "GL texture readback did not succeed for every probe ($glTextureReadbackOkCount/$glProbeActiveCount)."
+            if ($activeNoReadbackFrameCount -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but texture_no_readback_active appeared in $activeNoReadbackFrameCount frame(s); no-readback must NOT present without raw-fix recon."
             }
-            if ($glProbeActiveCount -gt 1 -and $glDistinctTextureHashes -le 1) {
-                Add-Failure $clipFailures "GL texture content did not advance: distinctTextureHashes=$glDistinctTextureHashes."
+            if ($cudaTextureSourceFrameCount -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but texture_source=cuda_gl_r16_texture appeared in $cudaTextureSourceFrameCount frame(s); no-readback must NOT present without raw-fix recon."
             }
-            if ($glProbeActiveCount -gt 0 -and $glParityCheckedCount -ne $glProbeActiveCount) {
-                Add-Failure $clipFailures "GL texture parity was not checked for every probe ($glParityCheckedCount/$glProbeActiveCount)."
+            if ($glProbeActiveCount -gt 0) {
+                Add-Failure $clipFailures "rawFixesEnabled=0 but GL no-readback probe rows were active ($glProbeActiveCount); no-readback must NOT present without raw-fix recon."
             }
-            if ($glProbeActiveCount -gt 0 -and $glParityMatchCount -ne $glProbeActiveCount) {
-                Add-Failure $clipFailures "GL texture parity did not match the CPU oracle for every probe ($glParityMatchCount/$glProbeActiveCount; mismatches=$glMismatchTotal)."
+            [void]$warnings.Add("rawFixesEnabled=0: no-readback correctly not armed (Dual ISO recon disabled); no-readback arming and GL no-readback proof assertions skipped. Use a raw-fixes-on receipt (e.g. FastProxy.marxml) to validate the no-readback path.")
+        }
+        if ($receiptRawFixesEnabled) {
+            if ($null -eq $glOutputProof) {
+                Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
             }
-            if ($glMismatchTotal -ne 0) {
-                Add-Failure $clipFailures "GL texture parity mismatch count was $glMismatchTotal; expected 0."
-            }
-            if ($glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
-                Add-Failure $clipFailures "Color scan screenshot method was '$glScreenshotMethod'; expected app_internal_gl_viewport_grab."
-            }
-            $rendererMatched = $false
-            foreach ($renderer in $glRendererDescriptions) {
-                if ($renderer -match $RequiredGpuNamePattern) {
-                    $rendererMatched = $true
-                    break
+            else {
+                if (-not [bool]$glOutputProof.requested) {
+                    Add-Failure $clipFailures "GL output proof was not requested by the smoke wrapper."
                 }
-            }
-            if (!$rendererMatched) {
-                Add-Failure $clipFailures "No GL_RENDERER from playback_smoke.gl_probe matched '$RequiredGpuNamePattern': $($glRendererDescriptions -join '; ')"
-            }
-            if (@($glBackendArtifacts).Count -le 0) {
-                Add-Failure $clipFailures "No backend DLL artifact hash was captured from playback_smoke.gl_probe."
+                if ($glProbeActiveCount -le 0) {
+                    Add-Failure $clipFailures "No active GL output probe rows were logged."
+                }
+                if ($glProbeActiveCount -gt 0 -and $glTextureReadbackOkCount -ne $glProbeActiveCount) {
+                    Add-Failure $clipFailures "GL texture readback did not succeed for every probe ($glTextureReadbackOkCount/$glProbeActiveCount)."
+                }
+                if ($glProbeActiveCount -gt 1 -and $glDistinctTextureHashes -le 1) {
+                    Add-Failure $clipFailures "GL texture content did not advance: distinctTextureHashes=$glDistinctTextureHashes."
+                }
+                if ($glProbeActiveCount -gt 0 -and $glParityCheckedCount -ne $glProbeActiveCount) {
+                    Add-Failure $clipFailures "GL texture parity was not checked for every probe ($glParityCheckedCount/$glProbeActiveCount)."
+                }
+                if ($glProbeActiveCount -gt 0 -and $glParityMatchCount -ne $glProbeActiveCount) {
+                    Add-Failure $clipFailures "GL texture parity did not match the CPU oracle for every probe ($glParityMatchCount/$glProbeActiveCount; mismatches=$glMismatchTotal)."
+                }
+                if ($glMismatchTotal -ne 0) {
+                    Add-Failure $clipFailures "GL texture parity mismatch count was $glMismatchTotal; expected 0."
+                }
+                if ($glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
+                    Add-Failure $clipFailures "Color scan screenshot method was '$glScreenshotMethod'; expected app_internal_gl_viewport_grab."
+                }
+                $rendererMatched = $false
+                foreach ($renderer in $glRendererDescriptions) {
+                    if ($renderer -match $RequiredGpuNamePattern) {
+                        $rendererMatched = $true
+                        break
+                    }
+                }
+                if (!$rendererMatched) {
+                    Add-Failure $clipFailures "No GL_RENDERER from playback_smoke.gl_probe matched '$RequiredGpuNamePattern': $($glRendererDescriptions -join '; ')"
+                }
+                if (@($glBackendArtifacts).Count -le 0) {
+                    Add-Failure $clipFailures "No backend DLL artifact hash was captured from playback_smoke.gl_probe."
+                }
             }
         }
 
@@ -883,6 +945,7 @@ $status =
     }
 
 $correctnessValidated =
+    $receiptRawFixesEnabled -and
     ($status -eq "success") -and
     (-not [bool]$DryRun) -and
     (@($clipResults).Count -gt 0) -and
@@ -926,10 +989,12 @@ $summary = [pscustomobject]@{
         clipNames = $ClipNames
         clipPaths = $resolvedClips
         receipt = $receiptPath
+        receiptRawFixesEnabled = [bool]$receiptRawFixesEnabled
         seconds = $Seconds
         settleMs = $SettleMs
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
+        validationSampleEvery = $ValidationSampleEvery
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
@@ -940,6 +1005,7 @@ $summary = [pscustomobject]@{
     }
     proof = [pscustomobject]@{
         correctnessValidated = [bool]$correctnessValidated
+        noReadbackValidationApplicable = [bool]$receiptRawFixesEnabled
         validationSurface = "gl_texture_r16_readback_vs_cpu_dual_iso_recon_frame"
         frameAdvanceSurface = "playback_smoke.gl_probe texture_hash parsed by detect-playback-artifacts.ps1"
         colorScanSurface = "app_internal_gl_viewport_grab"

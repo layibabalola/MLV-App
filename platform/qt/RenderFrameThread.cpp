@@ -480,12 +480,19 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         frame->gpuPlaybackReconTexturePresentCandidate = slot.gpuPlaybackReconTexturePresentCandidate;
         frame->gpuPlaybackReconTextureNoReadbackCandidate =
             slot.gpuPlaybackReconTextureNoReadbackCandidate;
+        /* The recon-output bayer oracle must come from the dedicated snapshot
+         * taken right after the recon stage (slot.rawImage16 has since been
+         * overwritten by the process stage with the processed display frame).
+         * Falls back to nullptr when no snapshot was captured. */
         frame->gpuPlaybackReconTextureBayerFrame =
-            slot.gpuPlaybackReconTexturePresentCandidate && !slot.rawImage16.empty()
-                ? slot.rawImage16.data()
+            slot.gpuPlaybackReconTexturePresentCandidate
+            && !slot.gpuPlaybackReconTextureBayerFrame.empty()
+                ? slot.gpuPlaybackReconTextureBayerFrame.data()
                 : nullptr;
         frame->gpuPlaybackReconTextureBayerFrameSize =
-            frame->gpuPlaybackReconTextureBayerFrame ? slot.rawImage16.size() : 0;
+            frame->gpuPlaybackReconTextureBayerFrame
+                ? slot.gpuPlaybackReconTextureBayerFrame.size()
+                : 0;
         frame->gpuPlaybackReconTextureInputBayerFrame =
             slot.gpuPlaybackReconTextureNoReadbackCandidate
             && !slot.gpuPlaybackReconTextureInputBayerFrame.empty()
@@ -911,8 +918,27 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                                     rawPixelCount * sizeof(uint16_t),
                                     workerState,
                                     0 );
+        bool gpuPlaybackReconTextureBayerSnapshotCopied = false;
         if( wantsGpuPlaybackReconTextureNoReadback )
         {
+            /* Snapshot the recon-output Dual ISO bayer NOW, before the process
+             * stage (getMlvProcessedFrame16Scaled) overwrites slot.rawImage16
+             * with the fully-processed display frame. This recon bayer is exactly
+             * what the no-readback CUDA->GL R16 texture represents, so it is the
+             * correct GL-vs-CPU parity oracle. */
+            try
+            {
+                slot.gpuPlaybackReconTextureBayerFrame.assign(
+                    slot.rawImage16.begin(),
+                    slot.rawImage16.begin() + static_cast<std::ptrdiff_t>( rawPixelCount ) );
+                gpuPlaybackReconTextureBayerSnapshotCopied =
+                    slot.gpuPlaybackReconTextureBayerFrame.size() == rawPixelCount;
+            }
+            catch( const std::bad_alloc & )
+            {
+                slot.gpuPlaybackReconTextureBayerFrame.clear();
+                gpuPlaybackReconTextureBayerSnapshotCopied = false;
+            }
             const size_t preparedInputWords =
                 llrpGpuPlaybackReconGetLastInputBayer16( nullptr, 0 );
             if( preparedInputWords == rawPixelCount )
@@ -955,7 +981,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 && assignGpuPlaybackReconTextureState( slot.gpuPlaybackReconTextureState,
                                                        preparedState );
             if( gpuPlaybackReconTextureInputSnapshotCopied
-             && gpuPlaybackReconTextureStateSnapshotOk )
+             && gpuPlaybackReconTextureStateSnapshotOk
+             && gpuPlaybackReconTextureBayerSnapshotCopied )
             {
                 slot.gpuPlaybackReconTextureNoReadbackCandidate = true;
             }
@@ -963,13 +990,16 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             {
                 slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
                 slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                slot.gpuPlaybackReconTextureBayerFrame.clear();
                 slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
                 if( gpuPlaybackReconTextureNoReadbackFallbackReason.isEmpty() )
                 {
                     gpuPlaybackReconTextureNoReadbackFallbackReason =
                         !preparedStateAvailable
                             ? QStringLiteral("GPU playback recon prepared state was unavailable")
-                            : QStringLiteral("GPU playback recon state snapshot was rejected");
+                            : ( !gpuPlaybackReconTextureBayerSnapshotCopied
+                                ? QStringLiteral("GPU playback recon output bayer snapshot was unavailable")
+                                : QStringLiteral("GPU playback recon state snapshot was rejected") );
                 }
             }
         }
@@ -1788,6 +1818,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         decodedRawFrameAlreadyReconned
         && slot.gpuPlaybackReconTextureNoReadbackCandidate;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureInputBayerFrame;
+    std::vector<uint16_t> preservedGpuPlaybackReconTextureBayerFrame;
     GpuPlaybackReconTextureState preservedGpuPlaybackReconTextureState;
     QJsonObject preservedGpuPlaybackReconTextureTelemetry;
     const auto preserveGpuPlaybackReconTextureTelemetry =
@@ -1818,6 +1849,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
     {
         preservedGpuPlaybackReconTextureInputBayerFrame =
             std::move( slot.gpuPlaybackReconTextureInputBayerFrame );
+        preservedGpuPlaybackReconTextureBayerFrame =
+            std::move( slot.gpuPlaybackReconTextureBayerFrame );
         preservedGpuPlaybackReconTextureState =
             slot.gpuPlaybackReconTextureState;
     }
@@ -1831,6 +1864,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuPlaybackReconTextureNoReadbackCandidate = true;
         slot.gpuPlaybackReconTextureInputBayerFrame =
             std::move( preservedGpuPlaybackReconTextureInputBayerFrame );
+        slot.gpuPlaybackReconTextureBayerFrame =
+            std::move( preservedGpuPlaybackReconTextureBayerFrame );
         slot.gpuPlaybackReconTextureState =
             preservedGpuPlaybackReconTextureState;
     }
@@ -2263,6 +2298,22 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && m_imageWidth > 0
             && m_imageHeight > 0
             && slot.rawImage16.size() >= fullResPixelCount;
+        /* The no-readback GL R16 texture is the RECON-ONLY Dual ISO bayer; the
+         * CUDA backend has no focus/bad-pixel code. Eligibility is decided
+         * AUTHORITATIVELY in the C worker on an EFFECTIVENESS basis: it stores the
+         * no-readback input bayer, then RETRACTS it if the post-recon focus/bad-pixel
+         * interpolation actually mutated the recon output (llrawproc.c ~2553). When
+         * retracted, slot.gpuPlaybackReconTextureInputBayerFrame is empty below, so
+         * noReadbackCandidate becomes false and we fall back to the readback bayer
+         * (slot.rawImage16, which DOES include the fixes -> display stays correct).
+         * postReconRawFixActive here is a DIAGNOSTIC of the mode flags only
+         * (bad_pixels defaults to 1); it is NOT the gate, because a mode that is On
+         * but fixes no pixels is still no-readback-eligible. */
+        const bool postReconRawFixActive =
+            m_pMlvObject
+            && m_pMlvObject->llrawproc
+            && ( m_pMlvObject->llrawproc->focus_pixels != 0
+              || m_pMlvObject->llrawproc->bad_pixels != 0 );
         const bool noReadbackCandidate =
             m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
             && playbackScaleFactor == 1
@@ -2270,6 +2321,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && m_imageHeight > 0
             && slot.gpuPlaybackReconTextureNoReadbackCandidate
             && slot.gpuPlaybackReconTextureInputBayerFrame.size() >= fullResPixelCount
+            && slot.gpuPlaybackReconTextureBayerFrame.size() >= fullResPixelCount
             && slot.gpuPlaybackReconTextureState.valid
             && slot.gpuPlaybackReconTextureState.width == m_imageWidth
             && slot.gpuPlaybackReconTextureState.height == m_imageHeight;
@@ -2286,6 +2338,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_candidate"),
             noReadbackCandidate );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_post_recon_raw_fix_active"),
+            postReconRawFixActive );
         if( slot.gpuPlaybackReconTexturePresentCandidate )
         {
             slot.stageTimingTelemetry.insert(
