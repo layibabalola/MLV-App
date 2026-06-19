@@ -1818,6 +1818,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         decodedRawFrameAlreadyReconned
         && slot.gpuPlaybackReconTextureNoReadbackCandidate;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureInputBayerFrame;
+    std::vector<uint16_t> preservedGpuPlaybackReconTextureBayerFrame;
     GpuPlaybackReconTextureState preservedGpuPlaybackReconTextureState;
     QJsonObject preservedGpuPlaybackReconTextureTelemetry;
     const auto preserveGpuPlaybackReconTextureTelemetry =
@@ -1848,6 +1849,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
     {
         preservedGpuPlaybackReconTextureInputBayerFrame =
             std::move( slot.gpuPlaybackReconTextureInputBayerFrame );
+        preservedGpuPlaybackReconTextureBayerFrame =
+            std::move( slot.gpuPlaybackReconTextureBayerFrame );
         preservedGpuPlaybackReconTextureState =
             slot.gpuPlaybackReconTextureState;
     }
@@ -1861,6 +1864,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuPlaybackReconTextureNoReadbackCandidate = true;
         slot.gpuPlaybackReconTextureInputBayerFrame =
             std::move( preservedGpuPlaybackReconTextureInputBayerFrame );
+        slot.gpuPlaybackReconTextureBayerFrame =
+            std::move( preservedGpuPlaybackReconTextureBayerFrame );
         slot.gpuPlaybackReconTextureState =
             preservedGpuPlaybackReconTextureState;
     }
