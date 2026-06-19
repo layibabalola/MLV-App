@@ -2343,6 +2343,34 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                        video->cpu_cores,
                                        &worker->diso_full20bit_scratch);
             }
+            /* P3 diagnostic (gated, one-shot): snapshot the RECON-ONLY bayer here --
+             * raw_image_buff is the diso_get_full20bit output, BEFORE the post-recon
+             * raw-fix stages (focus pixels, etc.). The live-vector dump's out.u16 is
+             * captured AFTER the full pipeline, so dumping recon_only.u16 here lets the
+             * offline triad isolate a recon state-capture desync (recon_only vs
+             * backend_cpu) from post-recon stages (recon_only vs out.u16). */
+            if (!gpu_playback_recon_used
+             && dual_iso_recon_ok
+             && g_llrawproc_gpu_playback_texture_present_preferred)
+            {
+                static int recon_only_dumped = 0;
+                const char * dump_dir =
+                    getenv("MLVAPP_GPU_PLAYBACK_RECON_DUMP_LIVE_VECTOR_DIR");
+                if (!recon_only_dumped && dump_dir && *dump_dir
+                 && strcmp(dump_dir, "0") != 0 && raw_image_buff && raw_image_size > 0)
+                {
+                    char recon_only_path[1200];
+                    snprintf(recon_only_path, sizeof(recon_only_path),
+                             "%s/recon_only.u16", dump_dir);
+                    FILE * recon_only_f = fopen(recon_only_path, "wb");
+                    if (recon_only_f)
+                    {
+                        fwrite(raw_image_buff, 1, raw_image_size, recon_only_f);
+                        fclose(recon_only_f);
+                        recon_only_dumped = 1;
+                    }
+                }
+            }
             if (!gpu_playback_recon_used
              && dual_iso_recon_ok
              && gpu_playback_input
