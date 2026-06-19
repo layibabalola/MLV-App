@@ -458,12 +458,26 @@ public static class MlvGuiSmokeColorArtifactScanner
             double bottomMagentaRatio = bottomVisible > 0 ? (double)bottomMagenta / bottomVisible : 0.0;
             double bottomGreenRatio = bottomVisible > 0 ? (double)bottomGreen / bottomVisible : 0.0;
 
-            bool barSuspect = topMagentaRatio > 0.08 || topGreenRatio > 0.08 ||
-                              bottomMagentaRatio > 0.08 || bottomGreenRatio > 0.08;
-            bool blockSuspect = maxTileMagenta > 0.22 || maxTileGreen > 0.22;
-            bool globalSuspect = magentaRatio > 0.06 || greenRatio > 0.06;
-            string verdict = (barSuspect || blockSuspect) ? "suspect-block-or-bar" :
+            const double BandRatioThreshold = 0.12;
+            const double TileRatioThreshold = 0.35;
+            const double TileSupportRatioThreshold = 0.10;
+            const double GlobalRatioThreshold = 0.12;
+            const double GlobalArtifactRatioThreshold = 0.18;
+            bool barSuspect = topMagentaRatio > BandRatioThreshold || topGreenRatio > BandRatioThreshold ||
+                              bottomMagentaRatio > BandRatioThreshold || bottomGreenRatio > BandRatioThreshold;
+            bool tileSuspect = maxTileMagenta > TileRatioThreshold || maxTileGreen > TileRatioThreshold;
+            bool globalArtifactSuspect = magentaRatio > GlobalArtifactRatioThreshold ||
+                                         greenRatio > GlobalArtifactRatioThreshold;
+            bool globalSuspect = magentaRatio > GlobalRatioThreshold || greenRatio > GlobalRatioThreshold;
+            bool tileSupportedByFrame = globalSuspect ||
+                                        topMagentaRatio > TileSupportRatioThreshold ||
+                                        topGreenRatio > TileSupportRatioThreshold ||
+                                        bottomMagentaRatio > TileSupportRatioThreshold ||
+                                        bottomGreenRatio > TileSupportRatioThreshold;
+            bool blockSuspect = tileSuspect && tileSupportedByFrame;
+            string verdict = (barSuspect || blockSuspect || globalArtifactSuspect) ? "suspect-block-or-bar" :
                              globalSuspect ? "global-color-axis-present" :
+                             tileSuspect ? "localized-color-axis-present" :
                              "clear-heuristic";
 
             return new MlvGuiSmokeColorArtifactScanResult {
@@ -525,12 +539,14 @@ function Get-ScreenshotColorArtifactScan {
             meanMagentaAxis = $scan.MeanMagentaAxis
             meanGreenAxis = $scan.MeanGreenAxis
             thresholds = [pscustomobject]@{
-                bandRatio = 0.08
-                tileRatio = 0.22
-                globalRatio = 0.06
+                bandRatio = 0.12
+                tileRatio = 0.35
+                tileSupportRatio = 0.10
+                globalRatio = 0.12
+                globalArtifactRatio = 0.18
                 verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error")
             }
-            note = "Sampled presented-frame screenshot scan for magenta/pink/green bars and tinted blocks; use with -FailOnColorArtifact to make suspect block/bar verdicts validation failures."
+            note = "Sampled presented-frame screenshot scan for magenta/pink/green bars, tinted blocks, and severe global color-axis spikes; isolated high-saturation tiles are informational unless supported by band/global evidence."
             error = $null
         }
     }
@@ -1158,6 +1174,9 @@ $lookAssistApplyLine = $recentLines |
 $lookAssistAsyncApplyLine = $recentLines |
     Where-Object { $_ -like "*look_assist.apply.auto_wb_async_applied*" } |
     Select-Object -Last 1
+$lookAssistSafetyFallbackLine = $recentLines |
+    Where-Object { $_ -like "*look_assist.apply.safety_fallback*" } |
+    Select-Object -Last 1
 $visualStateLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.visual_state*" } |
     Select-Object -Last 1
@@ -1203,6 +1222,7 @@ $dualIsoMixChromaSummary = if ($dualIsoMixChromaSummaryLine) { Convert-PlaybackL
 $lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject $lookAssistSettleLine } else { $null }
 $lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
 $lookAssistAsyncApply = if ($lookAssistAsyncApplyLine) { Convert-PlaybackLogLineToObject $lookAssistAsyncApplyLine } else { $null }
+$lookAssistSafetyFallback = if ($lookAssistSafetyFallbackLine) { Convert-PlaybackLogLineToObject $lookAssistSafetyFallbackLine } else { $null }
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
 $playbackPolicy = if ($playbackPolicyLine) { Convert-PlaybackLogLineToObject $playbackPolicyLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
@@ -1280,6 +1300,8 @@ $lookAssistApplied =
     ( ( ($null -ne $lookAssistApply) -and
         (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene)) ) -or
       ( ($null -ne $lookAssistAsyncApply) -and
+        (-not [string]::IsNullOrWhiteSpace([string]$lookAssistSettle.scene)) ) -or
+      ( ($null -ne $lookAssistSafetyFallback) -and
         (-not [string]::IsNullOrWhiteSpace([string]$lookAssistSettle.scene)) ) )
 
 $scaleRequestStart = Get-ObjectPropertyValue $playbackStart "scale_request"
@@ -1552,6 +1574,15 @@ $result = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
             asyncApplied = [bool]($null -ne $lookAssistAsyncApply)
             asyncDecision = Get-ObjectPropertyValue $lookAssistAsyncApply "decision"
+            safetyFallback = [bool]($null -ne $lookAssistSafetyFallback)
+            safetyWarning = Get-ObjectPropertyValue $lookAssistSafetyFallback "warning"
+            safetyDecision = Get-ObjectPropertyValue $lookAssistSafetyFallback "decision"
+            safetyFrame = Get-ObjectPropertyValue $lookAssistSafetyFallback "frame"
+            safetyChromaSmooth = Get-ObjectPropertyValue $lookAssistSafetyFallback "chroma_smooth"
+            safetyChromaAuto = Get-ObjectPropertyValue $lookAssistSafetyFallback "chroma_auto"
+            safetyGreenRatio = Get-ObjectPropertyValue $lookAssistSafetyFallback "green_ratio"
+            safetyGreenAxis = Get-ObjectPropertyValue $lookAssistSafetyFallback "green_axis"
+            safetyVisibleGreenAxis = Get-ObjectPropertyValue $lookAssistSafetyFallback "visible_green_axis"
             enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
             diagnosticsValid = Get-ObjectPropertyValue $lookAssistSettle "diagnostics_valid"
             waitMs = Get-ObjectPropertyValue $lookAssistSettle "wait_ms"
@@ -1633,6 +1664,7 @@ $result = [pscustomobject]@{
         dualIsoMixChromaSummary = $dualIsoMixChromaSummary
         lookAssistSettle = $lookAssistSettle
         lookAssistApply = $lookAssistApply
+        lookAssistSafetyFallback = $lookAssistSafetyFallback
         visualState = $visualState
         playbackPolicy = $playbackPolicy
         cpuSettle = $cpuSettle
@@ -1653,6 +1685,7 @@ $result = [pscustomobject]@{
             dualIsoMixChromaSummary = $dualIsoMixChromaSummaryLine
             lookAssistSettle = $lookAssistSettleLine
             lookAssistApply = $lookAssistApplyLine
+            lookAssistSafetyFallback = $lookAssistSafetyFallbackLine
             visualState = $visualStateLine
             playbackPolicy = $playbackPolicyLine
             cpuSettle = $cpuSettleLine

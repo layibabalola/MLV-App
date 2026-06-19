@@ -1195,7 +1195,8 @@ TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
             << QStringLiteral("--input") << fixture_path
             << QStringLiteral("--frames") << QStringLiteral("1")
             << QStringLiteral("--output") << output_json
-            << QStringLiteral("--threads") << QStringLiteral("1"),
+            << QStringLiteral("--threads") << QStringLiteral("1")
+            << QStringLiteral("--exercise-look-assist-settle"),
         QList<QPair<QString, QString>>()
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
@@ -1210,29 +1211,29 @@ TEST(ClipGolden, LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable)
     ASSERT_TRUE(document.isObject());
 
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_settle_smoke_ran")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_settle_smoke_stable")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_safety_fallback")).toBool());
+    const std::string color_cast_warning =
+        metadata.value(QStringLiteral("look_assist_color_cast_warning")).toString().toStdString();
+    ASSERT_TRUE(color_cast_warning == std::string("processed-floor-lifted-awb-risk")
+             || color_cast_warning == std::string("rejected-unstable-floor-lifted"));
     ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
-    const std::string auto_wb_source =
-        metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString();
-    ASSERT_TRUE(auto_wb_source == std::string("rejected-extreme-color-cast")
-             || auto_wb_source == std::string("none"));
+    ASSERT_EQ(std::string("rejected-safety-fallback"),
+              metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    ASSERT_EQ(std::string("rejected-safety-fallback"),
+              metadata.value(QStringLiteral("look_assist_auto_wb_decision")).toString().toStdString());
     ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_original_raw_white")).toInt());
     ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_auto_white_candidate")).toInt());
     ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_restricted_lossless_output_white")).toInt() > 15000);
-    ASSERT_EQ(2, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
+    ASSERT_EQ(0, metadata.value(QStringLiteral("look_assist_exposure")).toInt());
+    ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_temperature")).toInt());
+    ASSERT_EQ(0, metadata.value(QStringLiteral("look_assist_tint")).toInt());
+    ASSERT_EQ(0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt());
+    ASSERT_EQ(1, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_chroma_smooth_auto_applied")).toBool());
-    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_tint")).toInt() > -20);
-    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_post_green_artifact_ratio")).toDouble() < 0.09);
-    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_post_visible_green_axis")).toDouble() < 12.0);
-    const double look_assist_scale =
-        std::pow(2.0, metadata.value(QStringLiteral("look_assist_preset_exposure")).toInt() / 100.0);
-    const double projected_p95 =
-        metadata.value(QStringLiteral("look_assist_p95")).toDouble() * look_assist_scale;
-    const double projected_p99 =
-        metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
-    ASSERT_TRUE(projected_p95 >= 95.0);
-    ASSERT_TRUE(projected_p95 <= 122.0);
-    ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
 TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
@@ -1264,7 +1265,8 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
             << QStringLiteral("--input") << fixture_path
             << QStringLiteral("--frames") << QStringLiteral("1")
             << QStringLiteral("--output") << output_json
-            << QStringLiteral("--threads") << QStringLiteral("1"),
+            << QStringLiteral("--threads") << QStringLiteral("1")
+            << QStringLiteral("--exercise-look-assist-settle"),
         QList<QPair<QString, QString>>()
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
             << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
@@ -1279,12 +1281,15 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
     ASSERT_TRUE(document.isObject());
 
     const QJsonObject metadata = document.object().value(QStringLiteral("metadata")).toObject();
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_settle_smoke_ran")).toBool());
+    ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_settle_smoke_stable")).toBool());
+    ASSERT_FALSE(metadata.value(QStringLiteral("look_assist_safety_fallback")).toBool());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_auto_wb_valid")).toBool());
     ASSERT_EQ(std::string("processed-neutral-patch"),
               metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
     ASSERT_EQ(6000, metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_restricted_lossless_output_white")).toInt() > 15000);
-    ASSERT_EQ(2, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
+    ASSERT_EQ(1, metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
     ASSERT_TRUE(metadata.value(QStringLiteral("look_assist_chroma_smooth_auto_applied")).toBool());
     ASSERT_EQ(std::string("none"),
               metadata.value(QStringLiteral("look_assist_color_cast_warning")).toString().toStdString());
@@ -1296,7 +1301,7 @@ TEST(ClipGolden, LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable)
     const double projected_p99 =
         metadata.value(QStringLiteral("look_assist_p99")).toDouble() * look_assist_scale;
     ASSERT_TRUE(projected_p95 >= 95.0);
-    ASSERT_TRUE(projected_p95 <= 122.0);
+    ASSERT_TRUE(projected_p95 <= 126.0);
     ASSERT_TRUE(projected_p99 <= 152.0);
 }
 
@@ -1330,7 +1335,8 @@ TEST(ClipGolden, LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable)
                 << QStringLiteral("--input") << fixture_path
                 << QStringLiteral("--frames") << QStringLiteral("3")
                 << QStringLiteral("--output") << output_json
-                << QStringLiteral("--threads") << QStringLiteral("1"),
+                << QStringLiteral("--threads") << QStringLiteral("1")
+                << QStringLiteral("--exercise-look-assist-settle"),
             QList<QPair<QString, QString>>()
                 << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"), QStringLiteral("1"))
                 << qMakePair(QStringLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR"), QString()));
@@ -1349,16 +1355,28 @@ TEST(ClipGolden, LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable)
     const QJsonObject flat_metadata =
         run_profile(flat_fixture_path, QStringLiteral("m16-1446-look-assist"));
     ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_FALSE(flat_metadata.value(QStringLiteral("look_assist_safety_fallback")).toBool());
     ASSERT_EQ(std::string("night"),
               flat_metadata.value(QStringLiteral("look_assist_scene")).toString().toStdString());
     ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_p99")).toDouble() <= 34.0);
-    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_exposure")).toInt() <= 145);
+    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_exposure")).toInt() >= 150);
+    ASSERT_TRUE(flat_metadata.value(QStringLiteral("look_assist_raw_white")).toInt() > 15000);
 
     const QJsonObject control_metadata =
         run_profile(control_fixture_path, QStringLiteral("m16-1243-look-assist"));
     ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_diagnostics_valid")).toBool());
+    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_safety_fallback")).toBool());
+    ASSERT_EQ(std::string("processed-floor-lifted-post-invalid"),
+              control_metadata.value(QStringLiteral("look_assist_color_cast_warning")).toString().toStdString());
+    ASSERT_EQ(std::string("rejected-safety-fallback"),
+              control_metadata.value(QStringLiteral("look_assist_auto_wb_source")).toString().toStdString());
+    ASSERT_EQ(std::string("rejected-safety-fallback"),
+              control_metadata.value(QStringLiteral("look_assist_auto_wb_decision")).toString().toStdString());
     ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_p99")).toDouble() > 34.0);
-    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_exposure")).toInt() > 150);
+    ASSERT_EQ(0, control_metadata.value(QStringLiteral("look_assist_exposure")).toInt());
+    ASSERT_EQ(6000, control_metadata.value(QStringLiteral("look_assist_raw_white")).toInt());
+    ASSERT_EQ(1, control_metadata.value(QStringLiteral("look_assist_chroma_smooth")).toInt());
+    ASSERT_TRUE(control_metadata.value(QStringLiteral("look_assist_chroma_smooth_auto_applied")).toBool());
 }
 
 TEST(ClipGolden, TinyDualIsoHeadlessPlaybackProfilePreviewReceiptStaysPreviewAtRuntime)

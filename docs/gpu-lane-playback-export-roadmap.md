@@ -113,6 +113,22 @@ probes. This closes a proof gap where a smoke could previously report
 `validation.ok=true` with Auto telemetry present but no rendered/presented frame
 sample.
 
+Update 2026-06-19 P4 Look Assist safety slice: the profile/playback harness now
+has an explicit `--exercise-look-assist-settle` path plus metadata for settled
+diagnostics and safety fallback state. Floor-lifted Look Assist now fails closed
+when the post-applied processed-color oracle is invalid under an original-raw-
+white, auto-chroma-smoothed state, covering the `M16-1243` control without
+over-falling back on the flatter `M16-1446` night clip. Rebuilt console guards
+cover the standard M16 Look Assist set plus the optional 1243 control:
+`ClipGolden.LocalM16LookAssistRejectsExtremeGreenAutoWbWhenAvailable`,
+`ClipGolden.LocalM16LookAssistRejectsBrightNeutralGreenClampWhenAvailable`, and
+`ClipGolden.LocalM16LookAssistCapsOnlyFlatNoiseFloorNightWhenAvailable`.
+Headless release-tree profile evidence is under
+`.claude-state/profiling/2026-06-19-p4-lookassist-headless-final/`: `M16-1327`
+and `M16-1243` fall back, while `M16-1347` and `M16-1446` remain enabled. This
+is local VM build/profile proof only; CUDA/GL, no-readback, and UltraMagnus RTX
+4090 claims remain governed by the UltraMagnus proof gate.
+
 Update 2026-06-19 P4 capability-telemetry slice: Auto sampler decisions now
 carry the exact `sharperHeadroomScaleAllowed` gate that decides whether
 headroom may promote a non-Dual-ISO clip from `HQ x4` to `HQ x2`. The status

@@ -40,6 +40,7 @@ extern "C" {
 #include <QStorageInfo>
 #include <QColorDialog>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <unistd.h>
@@ -1004,6 +1005,79 @@ static QString lookAssistColorCastWarning(
         }
     }
     return QStringLiteral("none");
+}
+
+static bool lookAssistColorCastShouldFailClosed( const QString &warning,
+                                                 double greenArtifactRatio,
+                                                 double greenArtifactMeanAxis,
+                                                 double visibleGreenAxis,
+                                                 bool postAppliedStats )
+{
+    if( warning == QStringLiteral("rejected-unstable-floor-lifted") )
+    {
+        return true;
+    }
+    if( warning == QStringLiteral("processed-floor-lifted-awb-risk") )
+    {
+        return true;
+    }
+    if( warning == QStringLiteral("processed-floor-lifted-post-invalid") )
+    {
+        return true;
+    }
+    if( warning == QStringLiteral("global-green-cast")
+     || warning == QStringLiteral("global-magenta-cast") )
+    {
+        return postAppliedStats;
+    }
+    if( warning == QStringLiteral("localized-green-artifact") )
+    {
+        if( !postAppliedStats )
+        {
+            return false;
+        }
+        return visibleGreenAxis >= 14.0
+            || ( greenArtifactRatio >= 0.28 && greenArtifactMeanAxis >= 42.0 );
+    }
+    return false;
+}
+
+static bool lookAssistProcessedFloorLiftedAutoWhiteBalanceShouldFailClosed(
+        bool floorLifted,
+        bool useProcessedColorStats,
+        bool autoWhiteBalanceValid,
+        int baseTemperature,
+        int baseTint,
+        int finalTemperature,
+        int finalTint )
+{
+    if( !floorLifted || !useProcessedColorStats || !autoWhiteBalanceValid )
+    {
+        return false;
+    }
+
+    const int temperatureDelta = finalTemperature - baseTemperature;
+    const int tintDelta = finalTint - baseTint;
+    return temperatureDelta <= -900
+        || tintDelta <= -24
+        || finalTint <= -24;
+}
+
+static bool lookAssistProcessedFloorLiftedPostInvalidShouldFailClosed(
+        bool floorLifted,
+        bool canAnalyzeProcessedColor,
+        bool postColorStatsValid,
+        bool chromaSmoothAutoApplied,
+        int rawWhite,
+        int originalRawWhite )
+{
+    return floorLifted
+        && canAnalyzeProcessedColor
+        && !postColorStatsValid
+        && chromaSmoothAutoApplied
+        && originalRawWhite > 0
+        && rawWhite > 0
+        && rawWhite <= originalRawWhite;
 }
 
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
@@ -4823,6 +4897,9 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     int playActionSmokeFrameReadyCount = 0;
     qint64 playActionSmokeElapsedMs = -1;
     QString playActionSmokeFailure;
+    bool lookAssistSettleSmokeRan = false;
+    bool lookAssistSettleSmokeStable = true;
+    QString lookAssistSettleSmokeFailure;
     bool lookAssistToggleSmokeRan = false;
     bool lookAssistToggleSmokeStable = true;
     QString lookAssistToggleSmokeFailure;
@@ -5247,6 +5324,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             state.insert( QStringLiteral("post_visible_green_axis"), m_lastLookAssistPostVisibleGreenAxis );
             state.insert( QStringLiteral("post_temperature_delta"), m_lastLookAssistPostTemperatureDelta );
             state.insert( QStringLiteral("post_tint_delta"), m_lastLookAssistPostTintDelta );
+            state.insert( QStringLiteral("safety_fallback"), m_lastLookAssistSafetyFallback );
         }
         return state;
     };
@@ -5370,6 +5448,62 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         if( failure ) *failure = mismatches.join( QStringLiteral(",") );
         return mismatches.isEmpty();
     };
+
+    auto settleLookAssistForProfile = [&]( const QString &label ) -> bool
+    {
+        if( !ui->checkBoxLookAssistEnable->isChecked() )
+        {
+            return true;
+        }
+
+        lookAssistSettleSmokeRan = true;
+        QString settleFailure;
+        trace(label + QStringLiteral("-render-begin"));
+        if( !renderFrameIndex( startFrame, -1, true, &settleFailure ) )
+        {
+            lookAssistSettleSmokeStable = false;
+            lookAssistSettleSmokeFailure = settleFailure;
+            trace(label + QStringLiteral("-render-failed: ") + settleFailure);
+            return false;
+        }
+
+        QElapsedTimer lookAssistClock;
+        lookAssistClock.start();
+        while( lookAssistClock.elapsed() < 8000
+            && ui->checkBoxLookAssistEnable->isChecked()
+            && !m_lastLookAssistDiagnosticsValid )
+        {
+            qApp->processEvents( QEventLoop::AllEvents );
+            QThread::msleep( 10 );
+        }
+
+        qApp->processEvents( QEventLoop::AllEvents );
+        lookAssistSettleSmokeStable =
+            !ui->checkBoxLookAssistEnable->isChecked()
+            || m_lastLookAssistDiagnosticsValid;
+        if( !lookAssistSettleSmokeStable )
+        {
+            lookAssistSettleSmokeFailure =
+                QStringLiteral("Look Assist diagnostics did not settle within 8000 ms.");
+            trace(label + QStringLiteral("-failed: ") + lookAssistSettleSmokeFailure);
+            return false;
+        }
+
+        trace(label + QStringLiteral("-complete diagnostics_valid=%1 safety_fallback=%2")
+              .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+              .arg( bool01( m_lastLookAssistSafetyFallback ) ));
+        return true;
+    };
+
+    if( options.exerciseLookAssistSettle )
+    {
+        trace(QStringLiteral("look-assist-settle-smoke-begin"));
+        if( !settleLookAssistForProfile( QStringLiteral("look-assist-settle-smoke") ) )
+        {
+            err << "[PROFILE] ERROR: " << lookAssistSettleSmokeFailure << "\n";
+            return 7;
+        }
+    }
 
     if( options.exerciseLookAssistToggle )
     {
@@ -5807,6 +5941,10 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("play_action_smoke_frame_ready_count"), playActionSmokeFrameReadyCount );
     metadata.insert( QStringLiteral("play_action_smoke_elapsed_ms"), static_cast<double>( playActionSmokeElapsedMs ) );
     metadata.insert( QStringLiteral("play_action_smoke_failure"), playActionSmokeFailure );
+    metadata.insert( QStringLiteral("look_assist_settle_smoke_requested"), options.exerciseLookAssistSettle );
+    metadata.insert( QStringLiteral("look_assist_settle_smoke_ran"), lookAssistSettleSmokeRan );
+    metadata.insert( QStringLiteral("look_assist_settle_smoke_stable"), lookAssistSettleSmokeStable );
+    metadata.insert( QStringLiteral("look_assist_settle_smoke_failure"), lookAssistSettleSmokeFailure );
     metadata.insert( QStringLiteral("look_assist_toggle_smoke_requested"), options.exerciseLookAssistToggle );
     metadata.insert( QStringLiteral("look_assist_toggle_smoke_ran"), lookAssistToggleSmokeRan );
     metadata.insert( QStringLiteral("look_assist_toggle_smoke_stable"), lookAssistToggleSmokeStable );
@@ -6034,6 +6172,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                          m_lastLookAssistPostTintDelta );
         metadata.insert( QStringLiteral("look_assist_color_cast_warning"),
                          m_lastLookAssistColorCastWarning );
+        metadata.insert( QStringLiteral("look_assist_safety_fallback"),
+                         m_lastLookAssistSafetyFallback );
     }
     metadata.insert( QStringLiteral("qt_opengl_environment"),
                     qEnvironmentVariable("QT_OPENGL") );
@@ -6302,6 +6442,67 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             .arg( m_lastLookAssistDiagnosticsValid
                   ? m_lastLookAssistScene
                   : QStringLiteral("none") ) );
+
+    if( lookAssistEnabledForSmoke
+     && m_lastLookAssistDiagnosticsValid
+     && m_lastLookAssistSafetyFallback )
+    {
+        const int fallbackFrame = ui->horizontalSliderPosition->value();
+        const uint64_t fallbackRequestFloor = m_nextRenderRequestSerial;
+        const uint64_t fallbackSerialBefore = m_lastPresentedRequestSerial;
+        QElapsedTimer fallbackSettleClock;
+        fallbackSettleClock.start();
+        qint64 nextRetryMs = 50;
+
+        requestFrameRefresh( true, "gui-smoke-look-assist-safety-fallback-settle" );
+        while( fallbackSettleClock.elapsed() < 8000
+            && !isFrameSettledForAnalysis( fallbackFrame, fallbackRequestFloor ) )
+        {
+            qApp->processEvents( QEventLoop::AllEvents );
+            if( m_pRenderThread
+             && m_pRenderThread->isIdle()
+             && fallbackSettleClock.elapsed() >= nextRetryMs
+             && !isFrameSettledForAnalysis( fallbackFrame, fallbackRequestFloor ) )
+            {
+                requestFrameRefresh(
+                    true,
+                    "gui-smoke-look-assist-safety-fallback-settle-retry" );
+                nextRetryMs = fallbackSettleClock.elapsed() + 50;
+            }
+            QThread::msleep( 10 );
+        }
+        qApp->processEvents( QEventLoop::AllEvents );
+
+        const bool fallbackSettled =
+            isFrameSettledForAnalysis( fallbackFrame, fallbackRequestFloor );
+        const int lastPresentedFrame = m_lastPresentedRequestContextValid
+            ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+            : -1;
+        logInteractionEvent(
+            QStringLiteral("gui_smoke.look_assist_safety_fallback_settle"),
+            QStringLiteral("settled=%1 wait_ms=%2 frame=%3 request_floor=%4 serial_before=%5 last_serial=%6 last_frame=%7 render_idle=%8 frame_changed=%9 still_drawing=%10")
+                .arg( bool01( fallbackSettled ) )
+                .arg( fallbackSettleClock.elapsed() )
+                .arg( fallbackFrame )
+                .arg( static_cast<qulonglong>( fallbackRequestFloor ) )
+                .arg( static_cast<qulonglong>( fallbackSerialBefore ) )
+                .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                .arg( lastPresentedFrame )
+                .arg( bool01( m_pRenderThread && m_pRenderThread->isIdle() ) )
+                .arg( bool01( m_frameChanged ) )
+                .arg( bool01( m_frameStillDrawing ) ) );
+        if( !fallbackSettled )
+        {
+            err << "[GUI-SMOKE] ERROR: Look Assist safety fallback frame did not settle; "
+                << "frame=" << fallbackFrame
+                << " request_floor=" << fallbackRequestFloor
+                << " last_serial=" << m_lastPresentedRequestSerial
+                << " last_frame=" << lastPresentedFrame
+                << " still_drawing=" << ( m_frameStillDrawing ? 1 : 0 )
+                << ".\n";
+            return 7;
+        }
+    }
 
     QString gpuPreviewProcessingRejectReason;
     const bool gpuPreviewProcessingCompatible =
@@ -11590,9 +11791,14 @@ struct LookAssistAsyncResult
     LookAssistStats balanceStats;
     LookAssistStats processedColorStats;
     LookAssistStats postColorStats;
+    bool   floorLifted              = false;
     bool   useProcessedColorStats    = false;
     bool   postColorStatsValid       = false;
     QString scene;
+    double postGreenArtifactRatio    = 0.0;
+    double postGreenArtifactMeanAxis = 0.0;
+    double postVisibleGreenAxis      = 0.0;
+    double postBlueAmberAxis         = 0.0;
     int    postTemperatureDelta      = 0;
     int    postTintDelta             = 0;
     // Geometry used
@@ -11672,6 +11878,48 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     // Kill switch: MLVAPP_LOOK_ASSIST_SYNC=1 restores the original synchronous path so the
     // async benefit can be measured by A/B. Read once per process (static).
     static const bool s_syncMode = qEnvironmentVariableIntValue( "MLVAPP_LOOK_ASSIST_SYNC" ) != 0;
+    auto restoreLookAssistSafetyBaseline =
+        [this]( ReceiptSettings *targetReceipt, int safeChromaSmooth, bool keepSafeChromaSmooth )
+    {
+        if( !targetReceipt || !targetReceipt->lookAssistBaselineValid() ) return;
+
+        targetReceipt->setExposure( targetReceipt->lookAssistBaselineExposure() );
+        targetReceipt->setContrast( targetReceipt->lookAssistBaselineContrast() );
+        targetReceipt->setPivot( targetReceipt->lookAssistBaselinePivot() );
+        targetReceipt->setTemperature( targetReceipt->lookAssistBaselineTemperature() );
+        targetReceipt->setTint( targetReceipt->lookAssistBaselineTint() );
+        targetReceipt->setVibrance( targetReceipt->lookAssistBaselineVibrance() );
+        targetReceipt->setShadows( targetReceipt->lookAssistBaselineShadows() );
+        targetReceipt->setHighlights( targetReceipt->lookAssistBaselineHighlights() );
+        targetReceipt->setRawBlack( targetReceipt->lookAssistBaselineRawBlack() );
+        targetReceipt->setRawWhite( targetReceipt->lookAssistBaselineRawWhite() );
+
+        ui->horizontalSliderExposure->setValue( targetReceipt->exposure() );
+        ui->horizontalSliderContrast->setValue( targetReceipt->contrast() );
+        ui->horizontalSliderPivot->setValue( targetReceipt->pivot() );
+        ui->horizontalSliderTemperature->setValue( targetReceipt->temperature() );
+        ui->horizontalSliderTint->setValue( targetReceipt->tint() );
+        ui->horizontalSliderVibrance->setValue( targetReceipt->vibrance() );
+        ui->horizontalSliderShadows->setValue( targetReceipt->shadows() );
+        ui->horizontalSliderHighlights->setValue( targetReceipt->highlights() );
+        if( targetReceipt->rawBlack() != -1 )
+            ui->horizontalSliderRawBlack->setValue( targetReceipt->rawBlack() );
+        if( targetReceipt->rawWhite() != -1 )
+            ui->horizontalSliderRawWhite->setValue( targetReceipt->rawWhite() );
+
+        const int targetChromaSmooth = qBound(
+            0,
+            keepSafeChromaSmooth
+                ? safeChromaSmooth
+                : targetReceipt->lookAssistBaselineChromaSmooth(),
+            3 );
+        targetReceipt->setChromaSmooth( targetChromaSmooth );
+        if( toolButtonChromaSmoothCurrentIndex() != targetChromaSmooth )
+        {
+            setToolButtonChromaSmooth( targetChromaSmooth );
+            toolButtonChromaSmoothChanged();
+        }
+    };
     if( s_noLookAssist || !m_fileLoaded || !m_pMlvObject || !receipt || !receipt->lookAssistEnabled() )
     {
         logInteractionEvent(
@@ -11914,7 +12162,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                      chromaSmoothVal,
                      chromaSmoothAutoApplied,
                      dispatchGeneration,
-                     receipt]() mutable
+                     receipt,
+                     restoreLookAssistSafetyBaseline]() mutable
         {
             /* RAII: the drain in the freeMlvObject paths waits on this. */
             struct WorkerScopeGuard
@@ -11935,6 +12184,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             LookAssistAsyncResult r;
             r.stats                = statsCopy;
             r.processedColorStats  = processedColorStatsCopy;
+            r.floorLifted          = floorLiftedCopy;
             r.useProcessedColorStats = useProcessedColorStatsCopy;
             r.scene                = lookAssistSceneName( sceneCopy );
             r.width                = widthCopy;
@@ -12084,12 +12334,41 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     + processedColorStatsCopy.visibleMeanB ) * 0.5 );
             const double postBlueAmberAxis =
                 processedColorStatsCopy.balanceB - processedColorStatsCopy.balanceR;
+            r.postGreenArtifactRatio = useProcessedColorStatsCopy
+                                     ? processedColorStatsCopy.greenArtifactRatio
+                                     : 0.0;
+            r.postGreenArtifactMeanAxis = useProcessedColorStatsCopy
+                                         ? processedColorStatsCopy.greenArtifactMeanAxis
+                                         : 0.0;
+            r.postVisibleGreenAxis = useProcessedColorStatsCopy
+                                   ? postVisibleGreenAxis
+                                   : 0.0;
+            r.postBlueAmberAxis = useProcessedColorStatsCopy
+                                ? postBlueAmberAxis
+                                : 0.0;
             r.colorCastWarning = lookAssistColorCastWarning(
                 useProcessedColorStatsCopy,
                 processedColorStatsCopy,
                 postVisibleGreenAxis,
                 temperature,
                 postBlueAmberAxis );
+            if( lookAssistProcessedFloorLiftedAutoWhiteBalanceShouldFailClosed(
+                    floorLiftedCopy,
+                    useProcessedColorStatsCopy,
+                    autoWhiteBalanceValid,
+                    baseTemperature,
+                    baseTint,
+                    temperature,
+                    tint ) )
+            {
+                r.colorCastWarning = QStringLiteral("processed-floor-lifted-awb-risk");
+            }
+            else if( floorLiftedCopy
+             && !autoWhiteBalanceValid
+             && autoWhiteBalanceDecision == QStringLiteral("rejected-unstable") )
+            {
+                r.colorCastWarning = QStringLiteral("rejected-unstable-floor-lifted");
+            }
 
             // Fill result
             r.preset                            = preset;
@@ -12105,7 +12384,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             r.autoWhiteBalanceCandidateTint        = autoWbPatch.valid ? autoWhiteBalanceCandidateTint        : 0;
 
             // Marshal results back to the UI thread.
-            QMetaObject::invokeMethod( this, [this, r, dispatchGeneration, receipt]() mutable
+            QMetaObject::invokeMethod( this, [this, r, dispatchGeneration, receipt, restoreLookAssistSafetyBaseline]() mutable
             {
                 // Re-check: clip must not have changed since dispatch.
                 if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
@@ -12180,12 +12459,55 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 m_lastLookAssistChromaSmooth            = r.chromaSmoothValue;
                 m_lastLookAssistChromaSmoothAutoApplied = r.chromaSmoothAutoApplied;
                 m_lastLookAssistColorCastWarning        = r.colorCastWarning;
+                m_lastLookAssistSafetyFallback          = false;
 
                 // Apply preset values to the active receipt and sliders (UI-thread only).
                 // Guard: only apply to the receipt that was active at dispatch time.
                 ReceiptSettings *activeReceipt = ( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 )
                                                ? ACTIVE_RECEIPT : nullptr;
                 if( !activeReceipt ) return;
+
+                // Async has only pre-apply proxy color stats; reserve hard
+                // fallback for semantic floor-lifted guards on this path.
+                if( lookAssistColorCastShouldFailClosed( r.colorCastWarning,
+                                                         r.postGreenArtifactRatio,
+                                                         r.postGreenArtifactMeanAxis,
+                                                         r.postVisibleGreenAxis,
+                                                         false ) )
+                {
+                    restoreLookAssistSafetyBaseline(
+                        activeReceipt,
+                        r.chromaSmoothValue,
+                        r.chromaSmoothAutoApplied );
+                    m_lastLookAssistSafetyFallback = true;
+                    m_lastLookAssistExposure = activeReceipt->exposure();
+                    m_lastLookAssistContrast = activeReceipt->contrast();
+                    m_lastLookAssistPivot = activeReceipt->pivot();
+                    m_lastLookAssistShadows = activeReceipt->shadows();
+                    m_lastLookAssistHighlights = activeReceipt->highlights();
+                    m_lastLookAssistVibrance = activeReceipt->vibrance();
+                    m_lastLookAssistTemperatureDelta = activeReceipt->temperature() - r.baseTemperature;
+                    m_lastLookAssistTintDelta = activeReceipt->tint() - r.baseTint;
+                    m_lastLookAssistAutoWhiteBalanceValid = false;
+                    m_lastLookAssistAutoWhiteBalanceSource = QStringLiteral("rejected-safety-fallback");
+                    m_lastLookAssistAutoWhiteBalanceDecision = QStringLiteral("rejected-safety-fallback");
+                    m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
+                    logInteractionEvent(
+                        QStringLiteral("look_assist.apply.safety_fallback"),
+                        QStringLiteral("generation=%1 warning=%2 decision=%3 frame=%4 chroma_smooth=%5 chroma_auto=%6 green_ratio=%7 green_axis=%8 visible_green_axis=%9")
+                            .arg( dispatchGeneration )
+                            .arg( r.colorCastWarning )
+                            .arg( r.autoWhiteBalanceDecision )
+                            .arg( r.analysisFrame )
+                            .arg( r.chromaSmoothAutoApplied ? r.chromaSmoothValue : toolButtonChromaSmoothCurrentIndex() )
+                            .arg( bool01( r.chromaSmoothAutoApplied ) )
+                            .arg( r.postGreenArtifactRatio, 0, 'f', 6 )
+                            .arg( r.postGreenArtifactMeanAxis, 0, 'f', 3 )
+                            .arg( r.postVisibleGreenAxis, 0, 'f', 3 ) );
+                    syncLookAssistDerivedUiToReceipt( activeReceipt );
+                    requestFrameRefresh( true, "look-assist-safety-fallback" );
+                    return;
+                }
 
                 activeReceipt->setExposure   ( r.preset.exposure );
                 activeReceipt->setContrast   ( r.preset.contrast );
@@ -12204,6 +12526,171 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 ui->horizontalSliderVibrance    ->setValue( r.preset.vibrance );
                 ui->horizontalSliderShadows     ->setValue( r.preset.shadows );
                 ui->horizontalSliderHighlights  ->setValue( r.preset.highlights );
+
+                LookAssistStats asyncPostColorStats;
+                bool asyncPostColorStatsValid = false;
+                double asyncPostVisibleGreenAxis = r.postVisibleGreenAxis;
+                double asyncPostBlueAmberAxis = r.postBlueAmberAxis;
+                double asyncPostGreenArtifactRatio = r.postGreenArtifactRatio;
+                double asyncPostGreenArtifactMeanAxis = r.postGreenArtifactMeanAxis;
+                QString asyncSafetyWarning = r.colorCastWarning;
+                if( r.useProcessedColorStats && r.colorWidth > 0 && r.colorHeight > 0 )
+                {
+                    QByteArray asyncPostProcessedThumbnail;
+                    asyncPostProcessedThumbnail.resize( r.colorWidth * r.colorHeight * 3 );
+                    get_area_average_downscale_thumnail(
+                        m_pMlvObject,
+                        r.analysisFrame,
+                        r.colorDownscaleFactor,
+                        qMax( 1, mlvappEffectiveWorkerThreadCount() ),
+                        reinterpret_cast<unsigned char *>(
+                            asyncPostProcessedThumbnail.data() ) );
+                    asyncPostColorStats = analyzeLookAssistThumbnail(
+                        reinterpret_cast<const unsigned char *>(
+                            asyncPostProcessedThumbnail.constData() ),
+                        r.colorWidth,
+                        r.colorHeight );
+                    const int minColorBalanceSamples =
+                        qMax( 32, ( r.colorWidth * r.colorHeight ) / 100 );
+                    asyncPostColorStatsValid =
+                        asyncPostColorStats.median > 0.0
+                        && asyncPostColorStats.balanceSamples >= minColorBalanceSamples;
+                    if( asyncPostColorStatsValid )
+                    {
+                        asyncPostVisibleGreenAxis =
+                            asyncPostColorStats.visibleMeanG
+                            - ( ( asyncPostColorStats.visibleMeanR
+                                + asyncPostColorStats.visibleMeanB ) * 0.5 );
+                        asyncPostBlueAmberAxis =
+                            asyncPostColorStats.balanceB - asyncPostColorStats.balanceR;
+                        asyncPostGreenArtifactRatio =
+                            asyncPostColorStats.greenArtifactRatio;
+                        asyncPostGreenArtifactMeanAxis =
+                            asyncPostColorStats.greenArtifactMeanAxis;
+                        const QString asyncPostWarning =
+                            lookAssistColorCastWarning(
+                                true,
+                                asyncPostColorStats,
+                                asyncPostVisibleGreenAxis,
+                                r.temperature,
+                                asyncPostBlueAmberAxis );
+                        const bool semanticAsyncWarning =
+                            r.colorCastWarning
+                                == QStringLiteral("rejected-unstable-floor-lifted")
+                            || r.colorCastWarning
+                                == QStringLiteral("processed-floor-lifted-awb-risk");
+                        if( !semanticAsyncWarning )
+                        {
+                            asyncSafetyWarning = asyncPostWarning;
+                        }
+
+                        m_lastLookAssistPostBalanceValid = true;
+                        m_lastLookAssistPostBalanceR = asyncPostColorStats.balanceR;
+                        m_lastLookAssistPostBalanceG = asyncPostColorStats.balanceG;
+                        m_lastLookAssistPostBalanceB = asyncPostColorStats.balanceB;
+                        m_lastLookAssistPostBalanceSamples =
+                            asyncPostColorStats.balanceSamples;
+                        m_lastLookAssistPostGreenArtifactRatio =
+                            asyncPostGreenArtifactRatio;
+                        m_lastLookAssistPostGreenArtifactMeanAxis =
+                            asyncPostGreenArtifactMeanAxis;
+                        m_lastLookAssistPostVisibleGreenAxis =
+                            asyncPostVisibleGreenAxis;
+                        m_lastLookAssistColorCastWarning = asyncSafetyWarning;
+                    }
+                }
+                const int asyncRawWhite =
+                    activeReceipt->rawWhite() != -1
+                    ? activeReceipt->rawWhite()
+                    : ui->horizontalSliderRawWhite->value();
+                const int asyncOriginalRawWhite =
+                    m_pMlvObject ? (int)getMlvOriginalWhiteLevel( m_pMlvObject ) : -1;
+                const bool asyncCanAnalyzeProcessedColor =
+                    r.floorLifted && r.colorWidth > 0 && r.colorHeight > 0;
+                if( lookAssistProcessedFloorLiftedPostInvalidShouldFailClosed(
+                        r.floorLifted,
+                        asyncCanAnalyzeProcessedColor,
+                        asyncPostColorStatsValid,
+                        r.chromaSmoothAutoApplied,
+                        asyncRawWhite,
+                        asyncOriginalRawWhite ) )
+                {
+                    asyncSafetyWarning =
+                        QStringLiteral("processed-floor-lifted-post-invalid");
+                    m_lastLookAssistColorCastWarning = asyncSafetyWarning;
+                }
+
+                logInteractionEvent(
+                    QStringLiteral("look_assist.apply.async_post_balance"),
+                    QStringLiteral("valid=%1 warning=%2 proxy_warning=%3 balance_r=%4 balance_g=%5 balance_b=%6 balance_samples=%7 green_axis=%8 blue_amber_axis=%9 visible_green_axis=%10 green_artifact_ratio=%11 green_artifact_axis=%12 raw_white=%13 original_raw_white=%14 chroma_auto=%15 floor_lifted=%16 processed_color_stats=%17 can_analyze_processed_color=%18")
+                        .arg( bool01( asyncPostColorStatsValid ) )
+                        .arg( asyncSafetyWarning )
+                        .arg( r.colorCastWarning )
+                        .arg( asyncPostColorStatsValid ? asyncPostColorStats.balanceR : 0.0, 0, 'f', 3 )
+                        .arg( asyncPostColorStatsValid ? asyncPostColorStats.balanceG : 0.0, 0, 'f', 3 )
+                        .arg( asyncPostColorStatsValid ? asyncPostColorStats.balanceB : 0.0, 0, 'f', 3 )
+                        .arg( asyncPostColorStatsValid ? asyncPostColorStats.balanceSamples : 0 )
+                        .arg( asyncPostColorStatsValid
+                              ? asyncPostColorStats.balanceG
+                                - ( ( asyncPostColorStats.balanceR
+                                    + asyncPostColorStats.balanceB ) * 0.5 )
+                              : 0.0, 0, 'f', 3 )
+                        .arg( asyncPostBlueAmberAxis, 0, 'f', 3 )
+                        .arg( asyncPostVisibleGreenAxis, 0, 'f', 3 )
+                        .arg( asyncPostGreenArtifactRatio, 0, 'f', 6 )
+                        .arg( asyncPostGreenArtifactMeanAxis, 0, 'f', 3 )
+                        .arg( asyncRawWhite )
+                        .arg( asyncOriginalRawWhite )
+                        .arg( bool01( r.chromaSmoothAutoApplied ) )
+                        .arg( bool01( r.floorLifted ) )
+                        .arg( bool01( r.useProcessedColorStats ) )
+                        .arg( bool01( asyncCanAnalyzeProcessedColor ) ) );
+
+                if( lookAssistColorCastShouldFailClosed(
+                        asyncSafetyWarning,
+                        asyncPostGreenArtifactRatio,
+                        asyncPostGreenArtifactMeanAxis,
+                        asyncPostVisibleGreenAxis,
+                        asyncPostColorStatsValid ) )
+                {
+                    restoreLookAssistSafetyBaseline(
+                        activeReceipt,
+                        r.chromaSmoothValue,
+                        r.chromaSmoothAutoApplied );
+                    m_lastLookAssistSafetyFallback = true;
+                    m_lastLookAssistExposure = activeReceipt->exposure();
+                    m_lastLookAssistContrast = activeReceipt->contrast();
+                    m_lastLookAssistPivot = activeReceipt->pivot();
+                    m_lastLookAssistShadows = activeReceipt->shadows();
+                    m_lastLookAssistHighlights = activeReceipt->highlights();
+                    m_lastLookAssistVibrance = activeReceipt->vibrance();
+                    m_lastLookAssistTemperatureDelta =
+                        activeReceipt->temperature() - r.baseTemperature;
+                    m_lastLookAssistTintDelta =
+                        activeReceipt->tint() - r.baseTint;
+                    m_lastLookAssistAutoWhiteBalanceValid = false;
+                    m_lastLookAssistAutoWhiteBalanceSource =
+                        QStringLiteral("rejected-safety-fallback");
+                    m_lastLookAssistAutoWhiteBalanceDecision =
+                        QStringLiteral("rejected-safety-fallback");
+                    m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
+                    m_lastLookAssistColorCastWarning = asyncSafetyWarning;
+                    logInteractionEvent(
+                        QStringLiteral("look_assist.apply.safety_fallback"),
+                        QStringLiteral("generation=%1 warning=%2 decision=%3 frame=%4 chroma_smooth=%5 chroma_auto=%6 green_ratio=%7 green_axis=%8 visible_green_axis=%9")
+                            .arg( dispatchGeneration )
+                            .arg( asyncSafetyWarning )
+                            .arg( r.autoWhiteBalanceDecision )
+                            .arg( r.analysisFrame )
+                            .arg( r.chromaSmoothAutoApplied ? r.chromaSmoothValue : toolButtonChromaSmoothCurrentIndex() )
+                            .arg( bool01( r.chromaSmoothAutoApplied ) )
+                            .arg( asyncPostGreenArtifactRatio, 0, 'f', 6 )
+                            .arg( asyncPostGreenArtifactMeanAxis, 0, 'f', 3 )
+                            .arg( asyncPostVisibleGreenAxis, 0, 'f', 3 ) );
+                    syncLookAssistDerivedUiToReceipt( activeReceipt );
+                    requestFrameRefresh( true, "look-assist-safety-fallback" );
+                    return;
+                }
 
                 logInteractionEvent(
                     QStringLiteral("look_assist.apply.auto_wb_async_applied"),
@@ -12737,6 +13224,33 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                     m_lastLookAssistPostVisibleGreenAxis,
                                     temperature,
                                     postBlueAmberAxis );
+    if( m_lastLookAssistColorCastWarning == QStringLiteral("none")
+     && lookAssistProcessedFloorLiftedAutoWhiteBalanceShouldFailClosed(
+            floorLiftedNightThumbnail,
+            useProcessedColorStats,
+            autoWhiteBalanceValid,
+            baseTemperature,
+            baseTint,
+            temperature,
+            tint ) )
+    {
+        m_lastLookAssistColorCastWarning = QStringLiteral("processed-floor-lifted-awb-risk");
+    }
+    else if( m_lastLookAssistColorCastWarning == QStringLiteral("none")
+     && lookAssistProcessedFloorLiftedPostInvalidShouldFailClosed(
+            floorLiftedNightThumbnail,
+            canAnalyzeProcessedColor,
+            postColorStatsValid,
+            m_lastLookAssistChromaSmoothAutoApplied,
+            receipt->rawWhite() != -1
+                ? receipt->rawWhite()
+                : ui->horizontalSliderRawWhite->value(),
+            m_pMlvObject ? (int)getMlvOriginalWhiteLevel( m_pMlvObject ) : -1 ) )
+    {
+        m_lastLookAssistColorCastWarning =
+            QStringLiteral("processed-floor-lifted-post-invalid");
+    }
+    m_lastLookAssistSafetyFallback = false;
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.auto_wb"),
@@ -12802,6 +13316,44 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             .arg( preset.tintDelta )
             .arg( m_lastLookAssistChromaSmooth )
             .arg( bool01( m_lastLookAssistChromaSmoothAutoApplied ) ) );
+
+    if( lookAssistColorCastShouldFailClosed( m_lastLookAssistColorCastWarning,
+                                             m_lastLookAssistPostGreenArtifactRatio,
+                                             m_lastLookAssistPostGreenArtifactMeanAxis,
+                                             m_lastLookAssistPostVisibleGreenAxis,
+                                             m_lastLookAssistPostBalanceValid ) )
+    {
+        const int safeChromaSmooth = m_lastLookAssistChromaSmooth;
+        const bool safeChromaSmoothAuto = m_lastLookAssistChromaSmoothAutoApplied;
+        restoreLookAssistSafetyBaseline( receipt, safeChromaSmooth, safeChromaSmoothAuto );
+        logInteractionEvent(
+            QStringLiteral("look_assist.apply.safety_fallback"),
+            QStringLiteral("warning=%1 decision=%2 frame=%3 chroma_smooth=%4 chroma_auto=%5 green_ratio=%6 green_axis=%7 visible_green_axis=%8")
+                .arg( m_lastLookAssistColorCastWarning )
+                .arg( m_lastLookAssistAutoWhiteBalanceDecision )
+                .arg( analysisFrame )
+                .arg( safeChromaSmoothAuto ? safeChromaSmooth : toolButtonChromaSmoothCurrentIndex() )
+                .arg( bool01( safeChromaSmoothAuto ) )
+                .arg( m_lastLookAssistPostGreenArtifactRatio, 0, 'f', 6 )
+                .arg( m_lastLookAssistPostGreenArtifactMeanAxis, 0, 'f', 3 )
+                .arg( m_lastLookAssistPostVisibleGreenAxis, 0, 'f', 3 ) );
+        m_lastLookAssistSafetyFallback = true;
+        m_lastLookAssistExposure = receipt->exposure();
+        m_lastLookAssistContrast = receipt->contrast();
+        m_lastLookAssistPivot = receipt->pivot();
+        m_lastLookAssistShadows = receipt->shadows();
+        m_lastLookAssistHighlights = receipt->highlights();
+        m_lastLookAssistVibrance = receipt->vibrance();
+        m_lastLookAssistTemperatureDelta = receipt->temperature() - baseTemperature;
+        m_lastLookAssistTintDelta = receipt->tint() - baseTint;
+        m_lastLookAssistAutoWhiteBalanceValid = false;
+        m_lastLookAssistAutoWhiteBalanceSource = QStringLiteral("rejected-safety-fallback");
+        m_lastLookAssistAutoWhiteBalanceDecision = QStringLiteral("rejected-safety-fallback");
+        m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
+        syncLookAssistDerivedUiToReceipt( receipt );
+        requestFrameRefresh( true, "look-assist-safety-fallback" );
+        return;
+    }
 
     logInteractionEvent(
         QStringLiteral("look_assist.apply.result"),
@@ -13623,10 +14175,12 @@ void MainWindow::clearPresentationForClipOpen( const char *reason )
 
 void MainWindow::requestFrameRefresh( bool resetCurrentFrameCache, const char *reason )
 {
+    const QString refreshReason =
+        reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified");
     logInteractionEvent(
         QStringLiteral("frame_refresh.request"),
         QStringLiteral("reason=%1 reset_current=%2 file_loaded=%3 frame_changed_before=%4 still_drawing=%5 play_checked=%6 position=%7")
-            .arg( reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified") )
+            .arg( refreshReason )
             .arg( bool01( resetCurrentFrameCache ) )
             .arg( bool01( m_fileLoaded ) )
             .arg( bool01( m_frameChanged ) )
@@ -13644,12 +14198,41 @@ void MainWindow::requestFrameRefresh( bool resetCurrentFrameCache, const char *r
 
     if( !m_fileLoaded ) return;
 
-    QTimer::singleShot( 0, this, [this]()
+    const auto attempts = std::make_shared<int>( 0 );
+    const auto retry = std::make_shared<std::function<void()>>();
+    const std::weak_ptr<std::function<void()>> weakRetry( retry );
+    *retry = [this, attempts, weakRetry, refreshReason]()
     {
-        if( m_fileLoaded && m_frameChanged && !m_frameStillDrawing )
+        if( !m_fileLoaded || !m_frameChanged )
+        {
+            return;
+        }
+        if( !m_frameStillDrawing )
         {
             timerFrameEvent();
+            return;
         }
+        if( ++(*attempts) > 1600 )
+        {
+            logInteractionEvent(
+                QStringLiteral("frame_refresh.defer_timeout"),
+                QStringLiteral("reason=%1 still_drawing=%2 position=%3")
+                    .arg( refreshReason )
+                    .arg( bool01( m_frameStillDrawing ) )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            return;
+        }
+        if( auto lockedRetry = weakRetry.lock() )
+        {
+            QTimer::singleShot( 5, this, [lockedRetry]()
+            {
+                (*lockedRetry)();
+            } );
+        }
+    };
+    QTimer::singleShot( 0, this, [retry]()
+    {
+        (*retry)();
     } );
 }
 

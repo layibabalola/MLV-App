@@ -613,6 +613,11 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("When Look Assist is enabled, click it off/on and verify the re-applied look matches the load-time look."));
     parser.addOption(exerciseLookAssistToggleOpt);
 
+    const QCommandLineOption exerciseLookAssistSettleOpt(
+        QStringLiteral("exercise-look-assist-settle"),
+        QStringLiteral("When Look Assist is enabled, render the start frame and wait for Look Assist diagnostics before writing the profile JSON."));
+    parser.addOption(exerciseLookAssistSettleOpt);
+
     const QCommandLineOption exerciseScaleFactorToggleOpt(
         QStringLiteral("exercise-scale-toggle"),
         QStringLiteral("Render at a playback scale, switch to x1 on the loaded clip, and verify the settled frame updates safely."));
@@ -832,6 +837,7 @@ static int runPlaybackProfile(QApplication &app)
     options.showWindow = parser.isSet(showWindowOpt) || parser.isSet(waitForPaintOpt);
     options.waitForPaint = parser.isSet(waitForPaintOpt);
     options.exercisePlayAction = parser.isSet(exercisePlayActionOpt);
+    options.exerciseLookAssistSettle = parser.isSet(exerciseLookAssistSettleOpt);
     options.exerciseLookAssistToggle = parser.isSet(exerciseLookAssistToggleOpt);
     options.exerciseScaleFactorToggle = parser.isSet(exerciseScaleFactorToggleOpt);
     options.exerciseScaleFactorToggleFrom = exerciseScaleToggleFrom;

@@ -115,6 +115,7 @@ public:
         bool showWindow = false;
         bool waitForPaint = false;
         bool exercisePlayAction = false;
+        bool exerciseLookAssistSettle = false;
         bool exerciseLookAssistToggle = false;
         bool exerciseScaleFactorToggle = false;
         int exerciseScaleFactorToggleFrom = 2;
@@ -910,6 +911,7 @@ private:
     double m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
     double m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
     QString m_lastLookAssistColorCastWarning;
+    bool m_lastLookAssistSafetyFallback = false;
     bool m_lastLookAssistPostBalanceValid = false;
     double m_lastLookAssistPostBalanceR = 0.0;
     double m_lastLookAssistPostBalanceG = 0.0;
