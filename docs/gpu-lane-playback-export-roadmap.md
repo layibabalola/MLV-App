@@ -850,6 +850,31 @@ DNG `StripByteCounts` header field, and profiles the run as
 candidate surface, not a promoted throughput policy; promotion still requires
 release-tree byte identity plus a bounded calibrated real-footage matrix.
 
+The bounded calibrated matrix at
+`.claude-state/profiling/2026-06-19-cdng-async-writer-compress-master-matrix-8x2-calibration/calibration.json`
+used the established three M16 cases (`M16-1210`, `M16-1327`, `M16-1347`),
+`C:\temp\MLV\master.marxml`, `--cdng-codec lossless`, `maxFrames=8`,
+`repeats=2`, alternating order, serial baseline, and async-writer-compression
+candidate with queue depth 2. The feature matrix raw wrapper passed 6/6 runs,
+and both identity/feature DNG hash sweeps passed 48/48 matched pairs with zero
+missing or mismatched DNGs. The candidate correctly reported
+`dng_compress_placement=async_writer_after_payload`,
+`async_writer_can_overlap_dng_compress=true`, and
+`async_writer_compress_env_enabled=true`, but calibration still reported
+`verdict=EXCEEDS_IDENTITY_ENVELOPE` with
+`feature_exceeds_identity_frameTotalAvgDeltaMs` and
+`feature_exceeds_identity_frameTotalP95DeltaMs`. The candidate improved average
+producer-frame time by 77.433 ms, but shifted compression to the completion
+gate: `writerCompletionLagAvgDeltaMs` averaged +90.833 ms and
+`writerCompletionLagP95DeltaMs` averaged +103.722 ms, while feature positive
+max frame-total deltas exceeded identity (`avg` +70.217 ms vs +27.914 ms;
+`p95` +179.314 ms vs +23.339 ms). Async queue depth stayed effectively unused
+(`candidateAsyncWriterMaxQueued=1`, `candidateAsyncWriterMaxActive=1`). This
+keeps async-writer compression byte-correct but non-promoted; next E3 work
+should either find a workload that actually fills the writer queue, or move to
+the next export bottleneck instead of treating producer-time improvement alone
+as throughput proof.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and
