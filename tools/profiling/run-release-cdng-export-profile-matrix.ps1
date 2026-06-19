@@ -552,11 +552,15 @@ foreach ($case in $cases) {
             baselineDngCompressBytesValidFrames = if ($abSummary) { $abSummary.baseline.dngCompressBytesValidFrames } else { $null }
             baselineDngCompressInputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressInputBytesTotal } else { $null }
             baselineDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressOutputBytesTotal } else { $null }
+            baselineDngCompressInputMiBPerSecond = if ($abSummary) { $abSummary.baseline.dngCompressInputMiBPerSecond } else { $null }
             baselineDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.baseline.dngCompressOutputMiBPerSecond } else { $null }
+            baselineDngCompressOutputRatio = if ($abSummary) { $abSummary.baseline.dngCompressOutputRatio } else { $null }
             candidateDngCompressBytesValidFrames = if ($abSummary) { $abSummary.candidate.dngCompressBytesValidFrames } else { $null }
             candidateDngCompressInputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressInputBytesTotal } else { $null }
             candidateDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.candidate.dngCompressOutputBytesTotal } else { $null }
+            candidateDngCompressInputMiBPerSecond = if ($abSummary) { $abSummary.candidate.dngCompressInputMiBPerSecond } else { $null }
             candidateDngCompressOutputMiBPerSecond = if ($abSummary) { $abSummary.candidate.dngCompressOutputMiBPerSecond } else { $null }
+            candidateDngCompressOutputRatio = if ($abSummary) { $abSummary.candidate.dngCompressOutputRatio } else { $null }
             baselineElapsedMs = if ($abSummary) { $abSummary.baseline.elapsedMs } else { $null }
             candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
             elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
@@ -592,8 +596,11 @@ foreach ($case in $cases) {
             dngCompressAvgDeltaMs = if ($abSummary) { $abSummary.compare.dngCompressAvgDeltaMs } else { $null }
             dngCompressInputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressInputBytesTotalDelta } else { $null }
             dngCompressOutputBytesTotalDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputBytesTotalDelta } else { $null }
+            dngCompressInputMiBPerSecondDelta = if ($abSummary) { $abSummary.compare.dngCompressInputMiBPerSecondDelta } else { $null }
+            dngCompressInputMiBPerSecondDeltaPercent = if ($abSummary) { $abSummary.compare.dngCompressInputMiBPerSecondDeltaPercent } else { $null }
             dngCompressOutputMiBPerSecondDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDelta } else { $null }
             dngCompressOutputMiBPerSecondDeltaPercent = if ($abSummary) { $abSummary.compare.dngCompressOutputMiBPerSecondDeltaPercent } else { $null }
+            dngCompressOutputRatioDelta = if ($abSummary) { $abSummary.compare.dngCompressOutputRatioDelta } else { $null }
             failures = @($failureList)
         }
 

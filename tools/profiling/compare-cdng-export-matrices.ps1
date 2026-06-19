@@ -112,6 +112,11 @@ function Get-MatrixRuns {
                     Get-CompareStageDelta -Run $run -StageName "dng_pack_ms" -Statistic "avgMs"
                 dngCompressAvgDeltaMs =
                     Get-CompareStageDelta -Run $run -StageName "dng_compress_ms" -Statistic "avgMs"
+                dngCompressInputBytesTotalDelta = $run.dngCompressInputBytesTotalDelta
+                dngCompressOutputBytesTotalDelta = $run.dngCompressOutputBytesTotalDelta
+                dngCompressInputMiBPerSecondDelta = $run.dngCompressInputMiBPerSecondDelta
+                dngCompressOutputMiBPerSecondDelta = $run.dngCompressOutputMiBPerSecondDelta
+                dngCompressOutputRatioDelta = $run.dngCompressOutputRatioDelta
                 diskWriteAvgDeltaMs =
                     Get-CompareStageDelta -Run $run -StageName "disk_write_ms" -Statistic "avgMs"
                 payloadCloneAvgDeltaMs = $run.payloadCloneAvgDeltaMs
@@ -354,6 +359,18 @@ foreach ($metricName in $metricNames) {
     $metrics += New-MetricEnvelope -Name $metricName -IdentityRuns $identityRuns -FeatureRuns $featureRuns
 }
 
+$compressionMetricNames = @(
+    "dngCompressInputBytesTotalDelta",
+    "dngCompressOutputBytesTotalDelta",
+    "dngCompressInputMiBPerSecondDelta",
+    "dngCompressOutputMiBPerSecondDelta",
+    "dngCompressOutputRatioDelta"
+)
+$compressionMetrics = @()
+foreach ($metricName in $compressionMetricNames) {
+    $compressionMetrics += New-MetricEnvelope -Name $metricName -IdentityRuns $identityRuns -FeatureRuns $featureRuns
+}
+
 $stageAttributionMetricNames = @(
     "rawReadDecodeUnpackAvgDeltaMs",
     "rawReadAvgDeltaMs",
@@ -527,6 +544,12 @@ $result = [pscustomobject]@{
     runKeyCompatibility = $runKeyCompatibility
     metrics = $metrics
     perCaseMetrics = $caseMetrics
+    compressionThroughput = [pscustomobject]@{
+        metricNames = $compressionMetricNames
+        positiveThroughputDeltasAreBeneficial = $true
+        participatesInFrameRegressionVerdict = $false
+        metrics = $compressionMetrics
+    }
     stageAttribution = [pscustomobject]@{
         metricNames = $stageAttributionMetricNames
         dominantPositiveFeatureAverage =

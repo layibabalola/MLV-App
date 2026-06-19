@@ -762,6 +762,22 @@ and matrix
 both carried `dngCompressOutputBytesTotalDelta=0` and populated
 `dngCompressOutputMiBPerSecondDelta` in the generated summaries.
 
+Update 2026-06-19 Lane A E3 compression calibration: the matrix calibration
+tool now carries compression byte, output-ratio, and input/output MiB/s deltas
+under a non-blocking `compressionThroughput` section. These metrics are
+positive-good when throughput improves and are intentionally kept out of the
+frame-regression verdict path; frame timing remains governed by the identity
+envelope gates. Headless validation used one-frame identity and feature
+matrices with DNG hash PASS 1/1:
+`.claude-state/profiling/2026-06-19-cdng-e3-compression-calibration-identity-smoke/`
+and
+`.claude-state/profiling/2026-06-19-cdng-e3-compression-calibration-feature-smoke/`.
+The final calibration artifact
+`.claude-state/profiling/2026-06-19-cdng-e3-compression-calibration-smoke-final/calibration.json`
+reported `verdict=WITHIN_IDENTITY_ENVELOPE`,
+`compressionThroughput.participatesInFrameRegressionVerdict=false`, and no
+blocking reasons.
+
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /
 glinterop / optimization / full-pipeline results, integration-blueprint) and

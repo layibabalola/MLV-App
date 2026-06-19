@@ -149,9 +149,11 @@ assigned to a candidate scheduler or handoff. The `schedulerAttribution` object
 separates producer-frame / producer-idle deltas from writer-completion-lag /
 writer-queue-wait deltas, including p95 metrics, so async-writer runs can show
 whether the producer returned faster while completion backlog still failed the
-gate. `blockingReasons` records the decisive gate; only global frame-total
-average and p95 envelopes decide `WITHIN_IDENTITY_ENVELOPE` versus
-`EXCEEDS_IDENTITY_ENVELOPE`.
+gate. Compression byte and MiB/s deltas are reported separately under
+`compressionThroughput`; throughput deltas are positive-good when they improve
+and do not participate in the frame-regression verdict. `blockingReasons`
+records the decisive gate; only global frame-total average and p95 envelopes
+decide `WITHIN_IDENTITY_ENVELOPE` versus `EXCEEDS_IDENTITY_ENVELOPE`.
 
 ## `perf_tests` harness
 
