@@ -237,6 +237,10 @@ $summary = [pscustomobject]@{
         payloadCloneP95DeltaMs = if ($compare -and $compare.stages.payload_clone_ms) { $compare.stages.payload_clone_ms.p95Ms.delta } else { $null }
         writerQueueWaitAvgDeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.avgMs.delta } else { $null }
         writerQueueWaitP95DeltaMs = if ($compare -and $compare.stages.writer_queue_wait_ms) { $compare.stages.writer_queue_wait_ms.p95Ms.delta } else { $null }
+        producerFrameAvgDeltaMs = if ($compare -and $compare.stages.producer_frame_ms) { $compare.stages.producer_frame_ms.avgMs.delta } else { $null }
+        producerFrameP95DeltaMs = if ($compare -and $compare.stages.producer_frame_ms) { $compare.stages.producer_frame_ms.p95Ms.delta } else { $null }
+        producerQueueIdleAvgDeltaMs = if ($compare -and $compare.stages.producer_queue_idle_ms) { $compare.stages.producer_queue_idle_ms.avgMs.delta } else { $null }
+        producerQueueIdleP95DeltaMs = if ($compare -and $compare.stages.producer_queue_idle_ms) { $compare.stages.producer_queue_idle_ms.p95Ms.delta } else { $null }
         failures = $compareFailures
     }
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS") { "PASS" } else { "FAIL" }
@@ -250,7 +254,8 @@ Write-Host ((
     "baseline_async_queue_capacity={5} candidate_async_queue_capacity={6} " +
     "frame_total_avg_delta_ms={7} frame_total_p95_delta_ms={8} " +
     "queue_idle_avg_delta_ms={9} payload_clone_avg_delta_ms={10} " +
-    "writer_queue_wait_avg_delta_ms={11} output={12}") -f
+    "writer_queue_wait_avg_delta_ms={11} producer_frame_avg_delta_ms={12} " +
+    "producer_queue_idle_avg_delta_ms={13} output={14}") -f
     $summary.verdict,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
@@ -263,6 +268,8 @@ Write-Host ((
     $summary.compare.queueIdleAvgDeltaMs,
     $summary.compare.payloadCloneAvgDeltaMs,
     $summary.compare.writerQueueWaitAvgDeltaMs,
+    $summary.compare.producerFrameAvgDeltaMs,
+    $summary.compare.producerQueueIdleAvgDeltaMs,
     $summaryJson
 )
 

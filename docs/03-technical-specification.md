@@ -333,7 +333,12 @@ legacy-vs-candidate release profiles remain self-describing. Async-writer
 profiles also expose `payload_clone_ms`, the header+image copy cost before a
 payload is handed to the serial or async writer, and `writer_queue_wait_ms`,
 the producer time spent waiting for the bounded writer queue to accept a
-payload, distinct from the writer thread's `disk_write_ms`.
+payload, distinct from the writer thread's `disk_write_ms`. The profiler also
+emits `producer_frame_ms` for caller-side save-frame occupancy and
+`producer_queue_idle_ms` for the gap between caller-side returns and the next
+save-frame entry; the older `queue_idle_ms` remains previous profiled frame
+completion to next save-frame entry, which can include async writer completion
+lag.
 
 ### 4.6 Audio (`mlvAudioObject_t`)
 

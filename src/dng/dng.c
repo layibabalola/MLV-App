@@ -105,6 +105,8 @@ typedef enum
     EXPORT_PROFILE_DISK_WRITE,
     EXPORT_PROFILE_WRITER_QUEUE_WAIT,
     EXPORT_PROFILE_QUEUE_IDLE,
+    EXPORT_PROFILE_PRODUCER_QUEUE_IDLE,
+    EXPORT_PROFILE_PRODUCER_FRAME,
     EXPORT_PROFILE_FRAME_TOTAL,
     EXPORT_PROFILE_STAGE_COUNT
 } exportProfileStage_t;
@@ -132,6 +134,7 @@ static char g_export_profile_build_id[EXPORT_PROFILE_BUILD_ID_MAX] = "";
 static int g_export_profile_atexit_registered = 0;
 static int g_export_profile_write_in_progress = 0;
 static double g_export_profile_last_frame_finish_ms = 0.0;
+static double g_export_profile_last_producer_finish_ms = 0.0;
 static unsigned g_export_profile_async_writer_queue_capacity = 0;
 static unsigned g_export_profile_async_writer_max_queued = 0;
 static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -174,6 +177,10 @@ static const char * export_profile_stage_name(exportProfileStage_t stage)
         case EXPORT_PROFILE_WRITER_QUEUE_WAIT:
                                           return "writer_queue_wait_ms";
         case EXPORT_PROFILE_QUEUE_IDLE:   return "queue_idle_ms";
+        case EXPORT_PROFILE_PRODUCER_QUEUE_IDLE:
+                                          return "producer_queue_idle_ms";
+        case EXPORT_PROFILE_PRODUCER_FRAME:
+                                          return "producer_frame_ms";
         case EXPORT_PROFILE_FRAME_TOTAL:  return "frame_total_ms";
         default:                          return "unknown_ms";
     }
@@ -213,6 +220,7 @@ static void export_profile_reset_frames(void)
     g_export_profile_frame_count = 0;
     g_export_profile_frame_capacity = 0;
     g_export_profile_last_frame_finish_ms = 0.0;
+    g_export_profile_last_producer_finish_ms = 0.0;
     g_export_profile_async_writer_queue_capacity = 0;
     g_export_profile_async_writer_max_queued = 0;
 }
@@ -295,6 +303,12 @@ static void export_profile_frame_begin(exportProfileFrame_t * frame,
         frame->stages_ms[EXPORT_PROFILE_QUEUE_IDLE] = idle_ms > 0.0 ? idle_ms : 0.0;
         frame->stage_mask |= (1u << EXPORT_PROFILE_QUEUE_IDLE);
     }
+    if(g_export_profile_last_producer_finish_ms > 0.0)
+    {
+        const double idle_ms = frame_start_ms - g_export_profile_last_producer_finish_ms;
+        frame->stages_ms[EXPORT_PROFILE_PRODUCER_QUEUE_IDLE] = idle_ms > 0.0 ? idle_ms : 0.0;
+        frame->stage_mask |= (1u << EXPORT_PROFILE_PRODUCER_QUEUE_IDLE);
+    }
     export_profile_copy_string(frame->clip_path,
                                sizeof(frame->clip_path),
                                mlv_data ? mlv_data->path : "");
@@ -316,6 +330,23 @@ static void export_profile_stage_end(exportProfileFrame_t * frame,
     }
     frame->stages_ms[stage] += export_profile_now_ms() - start_ms;
     frame->stage_mask |= (1u << stage);
+}
+
+static void export_profile_note_producer_finish(exportProfileFrame_t * frame)
+{
+    if(frame == NULL || !frame->active) return;
+    const double finish_ms = export_profile_now_ms();
+    pthread_mutex_lock(&g_export_profile_mutex);
+    g_export_profile_last_producer_finish_ms = finish_ms;
+    pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
+static void export_profile_producer_finish(exportProfileFrame_t * frame,
+                                           double profile_frame_start)
+{
+    if(frame == NULL || !frame->active) return;
+    export_profile_stage_end(frame, EXPORT_PROFILE_PRODUCER_FRAME, profile_frame_start);
+    export_profile_note_producer_finish(frame);
 }
 
 static void export_profile_frame_finish(exportProfileFrame_t * frame, int success)
@@ -524,6 +555,8 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "disk_write_ms", 1);
     export_profile_write_stage_stats(file, "writer_queue_wait_ms", 1);
     export_profile_write_stage_stats(file, "queue_idle_ms", 1);
+    export_profile_write_stage_stats(file, "producer_queue_idle_ms", 1);
+    export_profile_write_stage_stats(file, "producer_frame_ms", 1);
     export_profile_write_stage_stats(file, "frame_total_ms", 1);
     fputs("  },\n", file);
     fputs("  \"frames\":[\n", file);
@@ -2049,6 +2082,7 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
 
     writer->jobs[writer->queue_tail].payload = payload;
     writer->jobs[writer->queue_tail].dng_filename = filename_copy;
+    export_profile_stage_end(profile_frame, EXPORT_PROFILE_PRODUCER_FRAME, profile_frame_start);
     writer->jobs[writer->queue_tail].profile_frame = *profile_frame;
     writer->jobs[writer->queue_tail].profile_frame_start = profile_frame_start;
     writer->queue_tail = (writer->queue_tail + 1) % writer->queue_capacity;
@@ -2058,6 +2092,7 @@ static int enqueueDngPayloadWriterJob(dngPayloadWriter_t * writer,
     pthread_cond_signal(&writer->can_consume);
     pthread_mutex_unlock(&writer->mutex);
     export_profile_note_async_writer_queue(queue_capacity, queued_after_enqueue);
+    export_profile_note_producer_finish(profile_frame);
     return 0;
 }
 
@@ -2101,6 +2136,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
 
     if(!writer || !dng_filename)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2108,6 +2144,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2118,6 +2155,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2131,6 +2169,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
     if(enqueue_ret != 0)
     {
         freeDngFramePayload(payload);
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2155,6 +2194,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 
     if(!dng_filename)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2162,6 +2202,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2172,6 +2213,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_PAYLOAD_CLONE, profile_stage_start);
     if(!payload)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2180,6 +2222,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
     profile_stage_start = export_profile_stage_begin(&profile_frame);
     const int write_ret = writeDngFramePayload(payload, dng_filename);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+    export_profile_producer_finish(&profile_frame, profile_frame_start);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
     export_profile_frame_finish(&profile_frame, write_ret == 0);
     freeDngFramePayload(payload);
@@ -2206,6 +2249,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     FILE* dngf = fopen(dng_filename, "wb");
     if (!dngf)
     {
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2215,6 +2259,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame) != 0)
     {
         fclose(dngf);
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2230,6 +2275,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
     {
         fclose(dngf);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+        export_profile_producer_finish(&profile_frame, profile_frame_start);
         export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
         export_profile_frame_finish(&profile_frame, 0);
         return 1;
@@ -2237,6 +2283,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
 
     fclose(dngf);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_DISK_WRITE, profile_stage_start);
+    export_profile_producer_finish(&profile_frame, profile_frame_start);
     export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
     export_profile_frame_finish(&profile_frame, 1);
     dng_print_saved_frame_status(dng_data, frame_index, dng_filename);

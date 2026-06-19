@@ -177,7 +177,9 @@ Write-Host ((
     "frame_total_p95_delta_percent={4} queue_idle_avg_delta_ms={5} " +
     "queue_idle_p95_delta_ms={6} writer_queue_wait_avg_delta_ms={7} " +
     "writer_queue_wait_p95_delta_ms={8} payload_clone_avg_delta_ms={9} " +
-    "payload_clone_p95_delta_ms={10} llrawproc_avg_delta_ms={11} output={12}") -f
+    "payload_clone_p95_delta_ms={10} producer_frame_avg_delta_ms={11} " +
+    "producer_frame_p95_delta_ms={12} producer_queue_idle_avg_delta_ms={13} " +
+    "producer_queue_idle_p95_delta_ms={14} llrawproc_avg_delta_ms={15} output={16}") -f
     $result.verdict,
     $result.stages.frame_total_ms.avgMs.delta,
     $result.stages.frame_total_ms.avgMs.deltaPercent,
@@ -189,6 +191,10 @@ Write-Host ((
     $result.stages.writer_queue_wait_ms.p95Ms.delta,
     $result.stages.payload_clone_ms.avgMs.delta,
     $result.stages.payload_clone_ms.p95Ms.delta,
+    $result.stages.producer_frame_ms.avgMs.delta,
+    $result.stages.producer_frame_ms.p95Ms.delta,
+    $result.stages.producer_queue_idle_ms.avgMs.delta,
+    $result.stages.producer_queue_idle_ms.p95Ms.delta,
     $result.stages.llrawproc_ms.avgMs.delta,
     $(if ([string]::IsNullOrWhiteSpace($Output)) { "<stdout-json>" } else { $resolvedOutput })
 )
