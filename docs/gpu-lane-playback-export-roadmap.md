@@ -166,7 +166,15 @@ writer-completion-lag, payload handoff (`payload_clone_ms`), writer-queue-wait, 
 elapsed-time deltas, async queue capacity, and async max-queued fields. Tiny
 fixture matrix runs are smoke tests only; E3 promotion still requires a bounded
 real-footage matrix with receipts/frame caps that match the export scenario
-under review. A/B and matrix summaries now also label the comparison as
+under review. `tools/profiling/compare-cdng-dng-output-hashes.ps1` now turns
+the repeated baseline-vs-candidate DNG SHA256 sweep into a reusable matrix
+companion: it follows each run's A/B `summary.json`, compares DNG files by
+relative path, length, and SHA256, writes `dng-hash-comparison.json`, and fails
+closed under `-FailOnMismatch`. Validation reran it against
+`.claude-state/profiling/2026-06-19-cdng-e3-lossless-async-matrix-16x3-current/matrix-summary.json`
+for 144/144 matched pairs, and the deliberate mismatch smoke under
+`.claude-state/profiling/2026-06-19-cdng-hash-tool-negative-smoke/` exited 1.
+A/B and matrix summaries now also label the comparison as
 `feature-ab` or `identity-aa`, so baseline-vs-baseline calibration runs cannot
 be mistaken for feature promotion or regression evidence. The A/B runner also
 supports explicit `BaselineFirst` or `CandidateFirst` execution, and the matrix
