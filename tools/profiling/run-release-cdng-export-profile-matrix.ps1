@@ -305,6 +305,13 @@ function New-AbArgs {
     $args
 }
 
+$isIdentityComparison = (
+    [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
+    [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
+    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth
+)
+$comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
+
 $cases = Read-MatrixCases
 
 $planCases = @()
@@ -345,6 +352,8 @@ if ($DryRun) {
         defaults = [pscustomobject]@{
             repeats = $Repeats
             maxFrames = $MaxFrames
+            comparisonMode = $comparisonMode
+            isIdentityComparison = $isIdentityComparison
             baselineUsePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             candidateUsePayloadHandoff = [bool]$CandidateUsePayloadHandoff
             baselineUseAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -460,6 +469,8 @@ $matrix = [pscustomobject]@{
     schema = "release-cdng-export-profile-matrix.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     bundleDir = $bundleDir
+    comparisonMode = $comparisonMode
+    isIdentityComparison = $isIdentityComparison
     thresholds = [pscustomobject]@{
         failOnRegression = [bool]$FailOnRegression
         maxFrameTotalRegressionPercent = $MaxFrameTotalRegressionPercent
@@ -488,10 +499,11 @@ $matrix = [pscustomobject]@{
 $matrix | ConvertTo-Json -Depth 32 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
 Write-Host (((
-    "CDNG-EXPORT-MATRIX verdict={0} cases={1} runs={2} pass={3} fail={4} " +
-    "candidate_payload={5} candidate_async={6} candidate_async_queue_depth={7} " +
-    "elapsed_delta_ms_field=True output={8}") -f
+    "CDNG-EXPORT-MATRIX verdict={0} comparison_mode={1} cases={2} runs={3} pass={4} fail={5} " +
+    "candidate_payload={6} candidate_async={7} candidate_async_queue_depth={8} " +
+    "elapsed_delta_ms_field=True output={9}") -f
     $matrix.verdict,
+    $matrix.comparisonMode,
     $matrix.totals.caseCount,
     $matrix.totals.runCount,
     $matrix.totals.passCount,

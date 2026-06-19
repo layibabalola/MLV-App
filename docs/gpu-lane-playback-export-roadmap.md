@@ -152,7 +152,9 @@ writer-completion-lag, payload handoff (`payload_clone_ms`), writer-queue-wait, 
 elapsed-time deltas, async queue capacity, and async max-queued fields. Tiny
 fixture matrix runs are smoke tests only; E3 promotion still requires a bounded
 real-footage matrix with receipts/frame caps that match the export scenario
-under review.
+under review. A/B and matrix summaries now also label the comparison as
+`feature-ab` or `identity-aa`, so baseline-vs-baseline calibration runs cannot
+be mistaken for feature promotion or regression evidence.
 
 Update 2026-06-19 Lane A E3 payload contract: `dngFramePayload_t`,
 `buildDngFramePayload`, `writeDngFramePayload`, `saveDngFrameViaPayload`, and
@@ -235,6 +237,43 @@ stayed 0.0 ms, async max queued stayed 1, and writer-completion lag averaged
 promotion proof, and investigate why the async path never exceeds one queued
 payload and does not convert writer lag into stable frame-total gains before any
 async scheduler rewrite is promoted.
+
+Broader serial-payload promotion-gate follow-up:
+`.claude-state/profiling/2026-06-19-cdng-e3-payload-promotion-matrix/matrix-summary.json`
+reran the committed serial payload handoff on the same three clips and receipt
+with `maxFrames=24` and `repeats=3`. The matrix completed byte-correctly: all
+nine baseline/candidate DNG output sets matched with zero SHA256 mismatches, the
+average payload handoff cost stayed at 0.015337 ms, wrapper elapsed averaged
+-120.410 ms, writer-completion lag averaged 0.000141 ms, and writer queue wait
+stayed 0.0 ms. Verdict: FAIL, with 7/9 runs passing and two narrow timing-gate
+misses: `m16-1210-master` repeat 3 tripped the frame-total p95 gate by 10.371%
+despite -269.677 ms elapsed improvement, and `m16-1327-master` repeat 3 tripped
+the frame-total average gate by 5.402% despite -107.357 ms elapsed improvement.
+This keeps the serial payload handoff as a correct, low-cost E3 candidate, but
+does not promote it beyond the earlier bounded 8-frame gate. Next E3 work should
+calibrate the promotion gate with an A/A timing-variance matrix or equivalent
+methodology proof before treating marginal 24-frame frame-total deltas as a
+feature blocker or broad promotion signal.
+
+A/A gate-calibration follow-up:
+`.claude-state/profiling/2026-06-19-cdng-e3-aa-promotion-matrix/matrix-summary.json`
+reran the same 24-frame, 3-repeat, 3-clip matrix with identical serial export
+settings on both sides (`comparisonMode=identity-aa`, no payload handoff, no
+async writer). The outputs again matched with zero DNG SHA256 mismatches, but
+the strict 5% average / 10% p95 frame-total gates still reported Verdict: FAIL,
+with 5/9 runs passing and 4/9 runs failing. Overall elapsed averaged -82.335 ms,
+frame-total average delta averaged +0.897 ms, frame-total p95 delta averaged
++8.060 ms, writer-completion lag averaged 0.000070 ms, and writer queue wait
+stayed 0.0 ms. The identity failures were
+`m16-1210-master` repeat 1 p95 +10.952%,
+`m16-1327-master` repeat 1 p95 +15.254%,
+`m16-1347-master` repeat 1 average +5.827%, and
+`m16-1347-master` repeat 2 average +8.389% plus p95 +13.915%. This confirms the
+24-frame gate is currently a timing-variance detector, not a reliable standalone
+promotion/blocker oracle for the serial payload handoff. Future E3 promotion
+should either use a variance-adjusted criterion, longer/stratified samples, or
+an explicit A/A companion threshold before broadening the serial payload handoff
+claim.
 
 Evidence (detail): `.claude-state/profiling/20260614-tier2-cuda/` (SUMMARY, tier2-findings,
 recon-algorithm-map, recon-exact-constants, parity / parity-breadth / amaze-parity /

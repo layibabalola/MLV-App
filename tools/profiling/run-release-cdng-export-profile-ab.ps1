@@ -159,11 +159,20 @@ $candidateArgs = New-ProfileArgs `
     -UseAsyncWriter ([bool]$CandidateUseAsyncWriter) `
     -AsyncWriterQueueDepth $CandidateAsyncWriterQueueDepth
 
+$isIdentityComparison = (
+    [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
+    [bool]$BaselineUseAsyncWriter -eq [bool]$CandidateUseAsyncWriter -and
+    $BaselineAsyncWriterQueueDepth -eq $CandidateAsyncWriterQueueDepth
+)
+$comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
+
 if ($DryRun) {
     [pscustomobject]@{
         schema = "release-cdng-export-profile-ab-plan.v1"
         bundleDir = $bundleDir
         maxFrames = $MaxFrames
+        comparisonMode = $comparisonMode
+        isIdentityComparison = $isIdentityComparison
         baseline = [pscustomobject]@{
             usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
             useAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -237,6 +246,8 @@ $summary = [pscustomobject]@{
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     bundleDir = $bundleDir
     maxFrames = $MaxFrames
+    comparisonMode = $comparisonMode
+    isIdentityComparison = $isIdentityComparison
     baseline = [pscustomobject]@{
         usePayloadHandoff = [bool]$BaselineUsePayloadHandoff
         useAsyncWriter = [bool]$BaselineUseAsyncWriter
@@ -294,16 +305,17 @@ $summary = [pscustomobject]@{
 $summary | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $summaryJson -Encoding UTF8
 
 Write-Host ((
-    "CDNG-EXPORT-AB verdict={0} baseline_payload={1} candidate_payload={2} " +
-    "baseline_async={3} candidate_async={4} " +
-    "baseline_async_queue_capacity={5} candidate_async_queue_capacity={6} " +
-    "elapsed_delta_ms={7} elapsed_delta_percent={8} " +
-    "frame_total_avg_delta_ms={9} frame_total_p95_delta_ms={10} " +
-    "queue_idle_avg_delta_ms={11} payload_clone_avg_delta_ms={12} " +
-    "writer_queue_wait_avg_delta_ms={13} producer_frame_avg_delta_ms={14} " +
-    "producer_queue_idle_avg_delta_ms={15} writer_completion_lag_avg_delta_ms={16} " +
-    "output={17}") -f
+    "CDNG-EXPORT-AB verdict={0} comparison_mode={1} baseline_payload={2} " +
+    "candidate_payload={3} baseline_async={4} candidate_async={5} " +
+    "baseline_async_queue_capacity={6} candidate_async_queue_capacity={7} " +
+    "elapsed_delta_ms={8} elapsed_delta_percent={9} " +
+    "frame_total_avg_delta_ms={10} frame_total_p95_delta_ms={11} " +
+    "queue_idle_avg_delta_ms={12} payload_clone_avg_delta_ms={13} " +
+    "writer_queue_wait_avg_delta_ms={14} producer_frame_avg_delta_ms={15} " +
+    "producer_queue_idle_avg_delta_ms={16} writer_completion_lag_avg_delta_ms={17} " +
+    "output={18}") -f
     $summary.verdict,
+    $summary.comparisonMode,
     $summary.baseline.usePayloadHandoff,
     $summary.candidate.usePayloadHandoff,
     $summary.baseline.useAsyncWriter,
