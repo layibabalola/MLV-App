@@ -138,6 +138,17 @@ entrypoint; a passing UltraMagnus packet still proves RTX 4090 only, and a
 passing Dell packet is required before claiming realtime CUDA support on that
 machine.
 
+Update 2026-06-20 ASAP DNG export runner:
+`tools/profiling/run-release-cuda-dng-export.ps1` now provides a direct
+release-tree front door for user-facing CUDA DNG export trials. It runs
+`MLVApp.exe --batch --input <clip> --output <dir> --cdng-codec <codec>` with
+`MLVAPP_EXPORT_STAGE_PROFILER=1`, the deployed CUDA backend, and either trusted
+or shadow GPU export mode, then writes a manifest, stdout/stderr, export stage
+profile, release/backend/cudart hashes, and DNG output summary under
+`.claude-state/profiling/*-cuda-dng-export/`. This is an operator convenience
+surface for UltraMagnus/Dell trials; DNG hash parity and CPU-vs-GPU proof still
+come from `run-local-cuda-playback-dng-smoke.ps1` or the CDNG matrix wrappers.
+
 Update 2026-06-20 ASAP interactive launcher:
 `tools/profiling/start-release-cuda-playback.ps1` now starts the user-facing
 release executable with the scoped CUDA playback environment requested:
@@ -152,6 +163,31 @@ an ASAP usability surface, not a proof surface: a started process does not prove
 realtime playback, no-readback presentation, or Dell support. Use the local
 smoke wrapper above for backend load, `GPU Tex NR`/fallback counts, FPS, and DNG
 hash evidence.
+
+Update 2026-06-20 playback speed A/B wrapper:
+`tools/profiling/run-release-cuda-playback-ab.ps1` now runs a paired
+same-release-executable CPU baseline versus scoped CUDA candidate GUI-smoke
+comparison. The baseline uses the same FastProxy/scoped AMaZE/subset/x1/HQ
+recipe with CPU preview processing; the candidate adds GPU preview processing,
+CUDA playback recon, CUDA-to-GL texture presentation, GL parity sampling, and
+the deployed `igpu_recon_cuda.dll`. The wrapper writes
+`.claude-state/profiling/*-cuda-playback-ab/summary.json` plus
+`.claude-state/profiling/cuda-playback-ab-latest.json` with presented FPS,
+GUI/status FPS, timeline FPS, render/draw/recon timing deltas, validation
+failures, and candidate GL proof fields. This is the correct surface for
+answering "GPU playback speed gain versus legacy CPU" on UltraMagnus or the Dell
+laptop; prior P3 proof packets prove no-readback correctness, not a speedup.
+
+Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
+identifies the laptop as Windows 11 Pro with driver `591.74`, Intel
+i9-12900HK, 64 GB RAM, and an `NVIDIA GeForce RTX 3060 Laptop GPU`. That is an
+Ampere laptop target, so the portable CUDA backend's `sm_86` slice is the right
+binary path to test. The screenshot also reports "No display connected" under
+the NVIDIA GPU while the internal Dell XPS 17 SHP1517 display is listed as an
+other adapter at 3840 x 2400 / 59 Hz. Treat Dell playback proof as hybrid-GPU
+proof, not just CUDA proof: the run must show backend load, the GL renderer, no
+readback/fallback counts, and FPS on that machine before claiming laptop
+realtime support.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
