@@ -704,6 +704,53 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
                std::string(plan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request);
+
+    ASSERT_TRUE( plan.requestValid );
+    ASSERT_TRUE( plan.targetReady );
+    ASSERT_TRUE( plan.encoderReady );
+    ASSERT_TRUE( plan.outputReady );
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.headlessRunnerReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.ready );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.outputPlan.outputPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+    ASSERT_EQ( std::string("runner-processing-parity-ready=false runner-headless-export-ready=false runner-ready=false runner-reason=rendered processing parity and headless rendered-export runner are not implemented"),
+               std::string(batchRenderedVideoRunnerPrerequisitesSummary(
+                   plan.runnerPrerequisites).toUtf8().constData()) );
+
+    const std::string summary =
+        std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
+    ASSERT_TRUE( summary.find("request=rendered-video codec=h264 container=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    plan = batchRenderedVideoJobPlanFromRequest(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders"),
+        request);
+
+    ASSERT_TRUE( plan.requestValid );
+    ASSERT_FALSE( plan.targetReady );
+    ASSERT_FALSE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_EQ( std::string("rendered target incomplete"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

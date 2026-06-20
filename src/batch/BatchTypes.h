@@ -88,6 +88,29 @@ struct BatchRenderedVideoOutputPlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoRunnerPrerequisites
+{
+    bool processingParityReady = false;
+    bool headlessRunnerReady = false;
+    QString reason = QStringLiteral("rendered processing parity and headless rendered-export runner are not implemented");
+    bool ready = false;
+};
+
+struct BatchRenderedVideoJobPlan
+{
+    BatchExportFormatRequest request;
+    BatchRenderedVideoTarget target;
+    BatchRenderedVideoEncoderPreset encoderPreset;
+    BatchRenderedVideoOutputPlan outputPlan;
+    BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
+    bool requestValid = false;
+    bool targetReady = false;
+    bool encoderReady = false;
+    bool outputReady = false;
+    bool preflightReady = false;
+    bool runnable = false;
+};
+
 inline BatchRenderedVideoCodec batchRenderedVideoCodecFromString(const QString & value, bool * ok = nullptr)
 {
     const QString normalized = value.trimmed().toLower();
@@ -575,10 +598,77 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     return plan;
 }
 
-inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & request)
+inline BatchRenderedVideoRunnerPrerequisites
+batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
-    const BatchRenderedVideoTarget target =
-        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoRunnerPrerequisites prerequisites;
+    prerequisites.processingParityReady = false;
+    prerequisites.headlessRunnerReady = false;
+    prerequisites.reason = QStringLiteral("rendered processing parity and headless rendered-export runner are not implemented");
+    prerequisites.ready = false;
+    return prerequisites;
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request)
+{
+    BatchRenderedVideoJobPlan plan;
+    plan.request = request;
+    plan.requestValid = request.format == BatchExportFormat::RenderedVideo
+                     && batchRenderedVideoRequestShapeValid(request);
+
+    if( request.format == BatchExportFormat::RenderedVideo )
+    {
+        plan.target = batchRenderedVideoTargetFromRequest(request);
+        plan.encoderPreset =
+            batchRenderedVideoEncoderPresetFromTarget(plan.target);
+        plan.outputPlan =
+            batchRenderedVideoOutputPlanFromPaths(inputPath, outputPath, plan.target);
+    }
+    else
+    {
+        plan.outputPlan.reason = QStringLiteral("not a rendered-video request");
+    }
+
+    plan.runnerPrerequisites =
+        batchRenderedVideoRunnerPrerequisitesForCurrentBuild();
+    plan.targetReady = plan.target.complete;
+    plan.encoderReady = plan.encoderPreset.ready;
+    plan.outputReady = plan.outputPlan.ready;
+    plan.preflightReady = plan.requestValid
+                       && plan.targetReady
+                       && plan.encoderReady
+                       && plan.outputReady;
+    plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
+    return plan;
+}
+
+inline QString batchRenderedVideoJobPlanFirstBlocker(
+    const BatchRenderedVideoJobPlan & plan)
+{
+    if( plan.request.format != BatchExportFormat::RenderedVideo )
+        return QStringLiteral("not a rendered-video request");
+    if( !plan.requestValid )
+        return batchRenderedVideoRequestShapeError(plan.request);
+    if( !plan.targetReady )
+        return QStringLiteral("rendered target incomplete");
+    if( !plan.encoderReady )
+        return QStringLiteral("rendered encoder preset unavailable");
+    if( !plan.outputReady )
+    {
+        return plan.outputPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output path invalid")
+            : plan.outputPlan.reason;
+    }
+    if( !plan.runnerPrerequisites.ready )
+        return plan.runnerPrerequisites.reason;
+    return QString();
+}
+
+inline QString batchRenderedVideoTargetSummary(const BatchRenderedVideoTarget & target)
+{
     return QStringLiteral("target-codec=%1 target-container=%2 target-extension=%3 target-complete=%4")
         .arg(batchRenderedVideoCodecName(target.codec))
         .arg(batchRenderedVideoContainerName(target.container))
@@ -586,11 +676,15 @@ inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & 
         .arg(target.complete ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
-inline QString batchRenderedVideoEncoderPresetSummary(
-    const BatchExportFormatRequest & request)
+inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & request)
 {
-    const BatchRenderedVideoEncoderPreset preset =
-        batchRenderedVideoEncoderPresetFromRequest(request);
+    return batchRenderedVideoTargetSummary(
+        batchRenderedVideoTargetFromRequest(request));
+}
+
+inline QString batchRenderedVideoEncoderPresetSummary(
+    const BatchRenderedVideoEncoderPreset & preset)
+{
     return QStringLiteral("encoder-profile=%1 encoder-option=%2 gui-codec-profile=%3 gui-codec-option=%4 encoder-extension=%5 encoder-ready=%6")
         .arg(batchRenderedVideoEncoderProfileName(preset.profile))
         .arg(batchRenderedVideoEncoderOptionName(preset.option))
@@ -600,20 +694,59 @@ inline QString batchRenderedVideoEncoderPresetSummary(
         .arg(preset.ready ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
+inline QString batchRenderedVideoEncoderPresetSummary(
+    const BatchExportFormatRequest & request)
+{
+    return batchRenderedVideoEncoderPresetSummary(
+        batchRenderedVideoEncoderPresetFromRequest(request));
+}
+
+inline QString batchRenderedVideoOutputPlanSummary(
+    const BatchRenderedVideoOutputPlan & plan)
+{
+    return QStringLiteral("rendered-output=%1 rendered-output-ready=%2 rendered-output-reason=%3")
+        .arg(plan.outputPath.isEmpty() ? QStringLiteral("unspecified") : plan.outputPath)
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const QString & inputPath,
     const QString & outputPath,
     const BatchExportFormatRequest & request)
 {
-    const BatchRenderedVideoOutputPlan plan =
+    return batchRenderedVideoOutputPlanSummary(
         batchRenderedVideoOutputPlanFromPaths(
             inputPath,
             outputPath,
-            batchRenderedVideoTargetFromRequest(request));
-    return QStringLiteral("rendered-output=%1 rendered-output-ready=%2 rendered-output-reason=%3")
-        .arg(plan.outputPath.isEmpty() ? QStringLiteral("unspecified") : plan.outputPath)
-        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+            batchRenderedVideoTargetFromRequest(request)));
+}
+
+inline QString batchRenderedVideoRunnerPrerequisitesSummary(
+    const BatchRenderedVideoRunnerPrerequisites & prerequisites)
+{
+    return QStringLiteral("runner-processing-parity-ready=%1 runner-headless-export-ready=%2 runner-ready=%3 runner-reason=%4")
+        .arg(prerequisites.processingParityReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.headlessRunnerReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.reason.isEmpty() ? QStringLiteral("none") : prerequisites.reason);
+}
+
+inline QString batchRenderedVideoJobPlanSummary(
+    const BatchRenderedVideoJobPlan & plan)
+{
+    const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
+    return QStringLiteral("%1 %2 %3 %4 %5 preflight-ready=%6 runnable=%7 first-blocker=%8")
+        .arg(batchExportFormatRequestSummary(plan.request))
+        .arg(batchRenderedVideoTargetSummary(plan.target))
+        .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
+        .arg(batchRenderedVideoOutputPlanSummary(plan.outputPlan))
+        .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
+        .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.runnable ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(blocker.isEmpty()
+            ? QStringLiteral("none")
+            : blocker);
 }
 
 /* Processing profile for batch export.

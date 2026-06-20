@@ -491,47 +491,52 @@ static int runBatch(QCoreApplication &app)
         BatchLogger::shutdown();
         return 2;
     }
-    if( exportFormat == BatchExportFormat::RenderedVideo
-     && !batchRenderedVideoRequestShapeValid(exportRequest) )
-    {
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
-            .arg(batchExportFormatRequestSummary(exportRequest))
-            .arg(batchRenderedVideoRequestShapeError(exportRequest)));
-        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
-        BatchLogger::shutdown();
-        return 2;
-    }
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
-        const BatchRenderedVideoTarget renderedTarget =
-            batchRenderedVideoTargetFromRequest(exportRequest);
-        if( !renderedTarget.complete )
+        const BatchRenderedVideoJobPlan renderedPlan =
+            batchRenderedVideoJobPlanFromRequest(inputPath, outputPath, exportRequest);
+        if( !renderedPlan.requestValid )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoRequestShapeError(renderedPlan.request)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        if( !renderedPlan.targetReady )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video target is incomplete. %1. %2. Choose a rendered codec or container, for example --export-format h264, --export-format mp4, or --export-format prores.\n\n")
-                .arg(batchExportFormatRequestSummary(exportRequest))
-                .arg(batchRenderedVideoTargetSummary(exportRequest)));
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target)));
             BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
             BatchLogger::shutdown();
             return 2;
         }
-        const BatchRenderedVideoOutputPlan outputPlan =
-            batchRenderedVideoOutputPlanFromPaths(inputPath, outputPath, renderedTarget);
-        if( !outputPlan.ready )
+        if( !renderedPlan.encoderReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video encoder preset is unavailable. %1. %2. %3.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoEncoderPresetSummary(renderedPlan.encoderPreset)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        if( !renderedPlan.outputReady )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video output path is invalid. %1. %2. %3. Choose an output directory or an explicit rendered file path ending in %4.\n\n")
-                .arg(batchExportFormatRequestSummary(exportRequest))
-                .arg(batchRenderedVideoTargetSummary(exportRequest))
-                .arg(batchRenderedVideoOutputPlanSummary(inputPath, outputPath, exportRequest))
-                .arg(renderedTarget.extension));
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoOutputPlanSummary(renderedPlan.outputPlan))
+                .arg(renderedPlan.target.extension));
             BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
             BatchLogger::shutdown();
             return 2;
         }
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. %2. %3. %4. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n")
-            .arg(batchExportFormatRequestSummary(exportRequest))
-            .arg(batchRenderedVideoTargetSummary(exportRequest))
-            .arg(batchRenderedVideoEncoderPresetSummary(exportRequest))
-            .arg(batchRenderedVideoOutputPlanSummary(inputPath, outputPath, exportRequest)));
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. Lane A E4 remains blocked until %2; use --export-format cdng.\n\n")
+            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
+            .arg(renderedPlan.runnerPrerequisites.reason));
         BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
         BatchLogger::shutdown();
         return 2;
