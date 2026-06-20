@@ -534,12 +534,9 @@ static int runBatch(QCoreApplication &app)
             BatchLogger::shutdown();
             return 2;
         }
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. Lane A E4 remains blocked until %2; use --export-format cdng.\n\n")
-            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
-            .arg(renderedPlan.runnerPrerequisites.reason));
-        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
-        BatchLogger::shutdown();
-        return 2;
+        /* Statically complete rendered-video requests continue into
+         * BatchRunner, which can inspect clip metadata and then fail closed
+         * before any rendered frames or output directories are produced. */
     }
     if( parser.isSet(maxFramesOpt) )
     {
@@ -553,7 +550,7 @@ static int runBatch(QCoreApplication &app)
             return 2;
         }
     }
-    if( parser.isSet(cdngCodecOpt) )
+    if( parser.isSet(cdngCodecOpt) && exportFormat == BatchExportFormat::Cdng )
     {
         bool ok = false;
         cdngCodecOffset = parseBatchCdngCodecOffset(parser.value(cdngCodecOpt), &ok);

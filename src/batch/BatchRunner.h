@@ -57,6 +57,26 @@ public:
         return cutOut;
     }
 
+    static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromClipState(
+        int width,
+        int height,
+        double frameRate,
+        double receiptStretchX,
+        double receiptStretchY )
+    {
+        if( receiptStretchX <= 0.0 )
+            receiptStretchX = STRETCH_H_100;
+        if( receiptStretchY <= 0.0 )
+            receiptStretchY = STRETCH_V_100;
+
+        return batchRenderedVideoSourceMetadata(
+            width,
+            height,
+            frameRate,
+            receiptStretchX,
+            receiptStretchY );
+    }
+
 private:
     BatchRunner() = delete; /* Pure static */
 

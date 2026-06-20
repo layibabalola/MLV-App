@@ -886,6 +886,49 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 }
 
+TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
+{
+    BatchRenderedVideoSourceMetadata metadata =
+        BatchRunner::renderedVideoSourceMetadataFromClipState(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            -1.0,
+            0.0);
+    ASSERT_TRUE( metadata.ready );
+    ASSERT_EQ( 5792, metadata.width );
+    ASSERT_EQ( 3872, metadata.height );
+    ASSERT_EQ( STRETCH_H_100, metadata.stretchFactorX );
+    ASSERT_EQ( STRETCH_V_100, metadata.stretchFactorY );
+
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(
+            batchRenderedVideoJobPlanFromRequest(
+                QStringLiteral("C:/clips/M16-1327.MLV"),
+                QStringLiteral("C:/renders"),
+                request),
+            metadata);
+    ASSERT_TRUE( plan.metadataAttempted );
+    ASSERT_TRUE( plan.metadataReady );
+    ASSERT_TRUE( plan.ffmpegFrameReady );
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+
+    metadata = BatchRunner::renderedVideoSourceMetadataFromClipState(
+        5792,
+        3872,
+        0.0,
+        STRETCH_H_100,
+        STRETCH_V_100);
+    ASSERT_FALSE( metadata.ready );
+    ASSERT_EQ( std::string("rendered frame rate invalid"),
+               std::string(metadata.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
 {
     BatchExportFormatRequest request =

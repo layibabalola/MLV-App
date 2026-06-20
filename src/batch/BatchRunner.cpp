@@ -33,6 +33,18 @@ static int normalizedBatchCdngCodecOffset(int offset)
     return (offset >= 0 && offset <= 2) ? offset : 0;
 }
 
+static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromOpenMlv(
+    mlvObject_t *mlvObject,
+    ReceiptSettings &receipt)
+{
+    return BatchRunner::renderedVideoSourceMetadataFromClipState(
+        static_cast<int>(getMlvWidth( mlvObject )),
+        static_cast<int>(getMlvHeight( mlvObject )),
+        getMlvFramerate( mlvObject ),
+        receipt.stretchFactorX(),
+        receipt.stretchFactorY());
+}
+
 int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 {
     QElapsedTimer totalTimer;
@@ -40,6 +52,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 
     const BatchExportFormatRequest exportRequest =
         BatchContext::exportFormatRequest();
+    const bool renderedVideoRequested =
+        exportRequest.format == BatchExportFormat::RenderedVideo;
     if( exportRequest.format == BatchExportFormat::RenderedVideo )
     {
         const BatchRenderedVideoJobPlan renderedPlan =
@@ -75,12 +89,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 .arg(renderedPlan.target.extension));
             return 2;
         }
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. %1. Lane A E4 remains blocked until %2; use --export-format cdng.\n")
-            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
-            .arg(renderedPlan.runnerPrerequisites.reason));
-        return 2;
     }
-    if( exportRequest.format != BatchExportFormat::Cdng )
+    if( !renderedVideoRequested && exportRequest.format != BatchExportFormat::Cdng )
     {
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner unsupported export format. %1. Supported now: cdng.\n")
             .arg(batchExportFormatRequestSummary(exportRequest)));
@@ -209,6 +219,54 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
     {
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: Input path does not exist: %1\n").arg(inputPath));
         return 3;
+    }
+
+    if( renderedVideoRequested )
+    {
+        const QString mlvPath = mlvFiles.first();
+        const QString baseName = QFileInfo(mlvPath).completeBaseName();
+        int mlvErr = MLV_ERR_NONE;
+        char mlvErrMsg[256] = { 0 };
+
+#ifdef Q_OS_UNIX
+        mlvObject_t *mlvObject = initMlvObjectWithClip(
+            mlvPath.toUtf8().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#else
+        mlvObject_t *mlvObject = initMlvObjectWithClip(
+            mlvPath.toLatin1().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#endif
+
+        if( mlvErr )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner cannot open rendered-video metadata source: %1. %2\n")
+                .arg(mlvPath, QString(mlvErrMsg)));
+            if( mlvObject ) freeMlvObject( mlvObject );
+            return 3;
+        }
+
+        const BatchRenderedVideoSourceMetadata metadata =
+            renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
+        const BatchRenderedVideoJobPlan basePlan =
+            batchRenderedVideoJobPlanFromRequest(mlvPath, outputPath, exportRequest);
+        const BatchRenderedVideoJobPlan renderedPlan =
+            batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
+        freeMlvObject( mlvObject );
+
+        if( !renderedPlan.preflightReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video metadata preflight failed. clip=%1 planned-clips=%2 %3.\n")
+                .arg(baseName)
+                .arg(mlvFiles.size())
+                .arg(batchRenderedVideoJobPlanSummary(renderedPlan)));
+            return 2;
+        }
+
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. clip=%1 planned-clips=%2 %3. Lane A E4 remains blocked until %4; use --export-format cdng.\n")
+            .arg(baseName)
+            .arg(mlvFiles.size())
+            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
+            .arg(renderedPlan.runnerPrerequisites.reason));
+        return 2;
     }
 
     /* Ensure output directory exists */
