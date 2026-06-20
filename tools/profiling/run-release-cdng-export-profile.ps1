@@ -24,6 +24,7 @@ param(
     [int]$AsyncWriterDebugDelayMs = 0,
     [int]$MaxFrames = 0,
     [string]$GpuExportDll = "",
+    [string]$GpuExportBackend = "",
     [string[]]$AdditionalArgs = @(),
     [string[]]$ExtraEnvironment = @(),
     [switch]$DryRun
@@ -194,11 +195,18 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($GpuExportDll)) {
             $envBlock["MLVAPP_GPU_EXPORT_DLL"] = (Resolve-Path -LiteralPath $GpuExportDll).Path
         }
+        if (-not [string]::IsNullOrWhiteSpace($GpuExportBackend)) {
+            $envBlock["MLVAPP_GPU_EXPORT_BACKEND"] = $GpuExportBackend
+        }
+        else {
+            [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_BACKEND")
+        }
     }
     else {
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT")
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_TRUSTED")
         [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_DLL")
+        [void]$envBlock.Remove("MLVAPP_GPU_EXPORT_BACKEND")
     }
     if ($UsePayloadHandoff) {
         $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"] = "1"
@@ -262,6 +270,7 @@ try {
                 MLVAPP_GPU_EXPORT = $envBlock["MLVAPP_GPU_EXPORT"]
                 MLVAPP_GPU_EXPORT_TRUSTED = $envBlock["MLVAPP_GPU_EXPORT_TRUSTED"]
                 MLVAPP_GPU_EXPORT_DLL = $envBlock["MLVAPP_GPU_EXPORT_DLL"]
+                MLVAPP_GPU_EXPORT_BACKEND = $envBlock["MLVAPP_GPU_EXPORT_BACKEND"]
                 MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF = $envBlock["MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF"]
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER"]
                 MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH = $envBlock["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH"]

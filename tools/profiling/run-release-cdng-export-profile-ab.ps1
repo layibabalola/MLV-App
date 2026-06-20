@@ -28,6 +28,9 @@ param(
     [string]$GpuExportDll = "",
     [string]$BaselineGpuExportDll = "",
     [string]$CandidateGpuExportDll = "",
+    [string]$GpuExportBackend = "",
+    [string]$BaselineGpuExportBackend = "",
+    [string]$CandidateGpuExportBackend = "",
     [switch]$RequireBaselineNoGpuExportAttempt,
     [switch]$RequireCandidateGpuExportAttempt,
     [switch]$RequireCandidateGpuExportReplacement,
@@ -107,8 +110,22 @@ $candidateGpuExportDllEffective = if (-not [string]::IsNullOrWhiteSpace($Candida
 else {
     $GpuExportDll
 }
+$baselineGpuExportBackendEffective = if (-not [string]::IsNullOrWhiteSpace($BaselineGpuExportBackend)) {
+    $BaselineGpuExportBackend
+}
+else {
+    $GpuExportBackend
+}
+$candidateGpuExportBackendEffective = if (-not [string]::IsNullOrWhiteSpace($CandidateGpuExportBackend)) {
+    $CandidateGpuExportBackend
+}
+else {
+    $GpuExportBackend
+}
 $baselineGpuExportDllSummary = if ($baselineGpuExportEnabled) { $baselineGpuExportDllEffective } else { "" }
 $candidateGpuExportDllSummary = if ($candidateGpuExportEnabled) { $candidateGpuExportDllEffective } else { "" }
+$baselineGpuExportBackendSummary = if ($baselineGpuExportEnabled) { $baselineGpuExportBackendEffective } else { "" }
+$candidateGpuExportBackendSummary = if ($candidateGpuExportEnabled) { $candidateGpuExportBackendEffective } else { "" }
 
 function New-ProfileArgs {
     param(
@@ -123,7 +140,8 @@ function New-ProfileArgs {
         [int]$AsyncWriterThreadCount,
         [bool]$UseGpuExport,
         [bool]$UseGpuExportTrusted,
-        [string]$GpuExportDllPath
+        [string]$GpuExportDllPath,
+        [string]$GpuExportBackendName
     )
 
     $args = @(
@@ -156,6 +174,9 @@ function New-ProfileArgs {
         }
         if (-not [string]::IsNullOrWhiteSpace($GpuExportDllPath)) {
             $args += @("-GpuExportDll", $GpuExportDllPath)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($GpuExportBackendName)) {
+            $args += @("-GpuExportBackend", $GpuExportBackendName)
         }
     }
     if ($MaxFrames -gt 0) {
@@ -299,7 +320,8 @@ $baselineArgs = New-ProfileArgs `
     -AsyncWriterThreadCount $BaselineAsyncWriterThreadCount `
     -UseGpuExport $baselineGpuExportEnabled `
     -UseGpuExportTrusted $baselineGpuExportTrustedEffective `
-    -GpuExportDllPath $baselineGpuExportDllEffective
+    -GpuExportDllPath $baselineGpuExportDllEffective `
+    -GpuExportBackendName $baselineGpuExportBackendEffective
 $candidateArgs = New-ProfileArgs `
     -Label "candidate" `
     -DngDir $candidateDngDir `
@@ -312,7 +334,8 @@ $candidateArgs = New-ProfileArgs `
     -AsyncWriterThreadCount $CandidateAsyncWriterThreadCount `
     -UseGpuExport $candidateGpuExportEnabled `
     -UseGpuExportTrusted $candidateGpuExportTrustedEffective `
-    -GpuExportDllPath $candidateGpuExportDllEffective
+    -GpuExportDllPath $candidateGpuExportDllEffective `
+    -GpuExportBackendName $candidateGpuExportBackendEffective
 
 $isIdentityComparison = (
     [bool]$BaselineUsePayloadHandoff -eq [bool]$CandidateUsePayloadHandoff -and
@@ -324,7 +347,10 @@ $isIdentityComparison = (
     $baselineGpuExportTrustedEffective -eq $candidateGpuExportTrustedEffective -and
     (
         (-not $baselineGpuExportEnabled -and -not $candidateGpuExportEnabled) -or
-        $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective
+        (
+            $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective -and
+            $baselineGpuExportBackendEffective -eq $candidateGpuExportBackendEffective
+        )
     )
 )
 $comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
@@ -345,6 +371,7 @@ if ($DryRun) {
             enableGpuExport = $baselineGpuExportEnabled
             gpuExportTrusted = $baselineGpuExportTrustedEffective
             gpuExportDll = $baselineGpuExportDllSummary
+            gpuExportBackend = $baselineGpuExportBackendSummary
             asyncWriterQueueDepth = $BaselineAsyncWriterQueueDepth
             asyncWriterThreadCount = $BaselineAsyncWriterThreadCount
             args = $baselineArgs
@@ -356,6 +383,7 @@ if ($DryRun) {
             enableGpuExport = $candidateGpuExportEnabled
             gpuExportTrusted = $candidateGpuExportTrustedEffective
             gpuExportDll = $candidateGpuExportDllSummary
+            gpuExportBackend = $candidateGpuExportBackendSummary
             asyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
             asyncWriterThreadCount = $CandidateAsyncWriterThreadCount
             args = $candidateArgs
@@ -512,6 +540,7 @@ $summary = [pscustomobject]@{
         enableGpuExport = $baselineGpuExportEnabled
         gpuExportTrusted = $baselineGpuExportTrustedEffective
         gpuExportDll = $baselineGpuExportDllSummary
+        gpuExportBackend = $baselineGpuExportBackendSummary
         profile = $baselineProfile
         log = $baselineLog
         dngOutputDir = $baselineDngDir
@@ -550,6 +579,7 @@ $summary = [pscustomobject]@{
         enableGpuExport = $candidateGpuExportEnabled
         gpuExportTrusted = $candidateGpuExportTrustedEffective
         gpuExportDll = $candidateGpuExportDllSummary
+        gpuExportBackend = $candidateGpuExportBackendSummary
         profile = $candidateProfile
         log = $candidateLog
         dngOutputDir = $candidateDngDir

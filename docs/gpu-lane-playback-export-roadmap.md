@@ -1133,6 +1133,12 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 ## 5. Lane C — portable GPU (later)
 
 CUDA stays the reference. Add backends behind the same ABI: **Vulkan** (strategic Win/Linux all-vendors + Mac via MoltenVK), **Metal** (strategic macOS). **OpenGL** = presentation (the viewport is GL; CUDA→GL present proven) + optional *tactical* Win/Linux compute bridge — not the strategic compute target. Sequenced after Lanes A/B so effort isn't fragmented; the CPU oracle validates every new backend identically (0-LSB). The runtime loader now requests a named backend instead of hardcoding `"cuda"` at the ABI call site: `MLVAPP_GPU_PLAYBACK_RECON_BACKEND`, `MLVAPP_GPU_RECON_BACKEND`, and `MLVAPP_GPU_EXPORT_BACKEND` can select a future backend name, while the default remains `cuda` and missing/unsupported names fail closed to the CPU fallback path with telemetry reporting the requested name.
+The CDNG export profiling stack now carries that request through proof tooling:
+`tools/profiling/run-release-cdng-export-profile.ps1`,
+`tools/profiling/run-release-cdng-export-profile-ab.ps1`,
+`tools/profiling/run-release-cdng-export-profile-matrix.ps1`, and the
+UltraMagnus CDNG evidence wrapper accept candidate/backend-name parameters and
+record the selected export backend in plan/summary JSON.
 
 ## 6. Quality modes and Expert controls
 

@@ -32,6 +32,9 @@ param(
     [string]$GpuExportDll = "",
     [string]$BaselineGpuExportDll = "",
     [string]$CandidateGpuExportDll = "",
+    [string]$GpuExportBackend = "",
+    [string]$BaselineGpuExportBackend = "",
+    [string]$CandidateGpuExportBackend = "",
     [switch]$RequireBaselineNoGpuExportAttempt,
     [switch]$RequireCandidateGpuExportAttempt,
     [switch]$RequireCandidateGpuExportReplacement,
@@ -104,8 +107,22 @@ $candidateGpuExportDllEffective = if (-not [string]::IsNullOrWhiteSpace($Candida
 else {
     $GpuExportDll
 }
+$baselineGpuExportBackendEffective = if (-not [string]::IsNullOrWhiteSpace($BaselineGpuExportBackend)) {
+    $BaselineGpuExportBackend
+}
+else {
+    $GpuExportBackend
+}
+$candidateGpuExportBackendEffective = if (-not [string]::IsNullOrWhiteSpace($CandidateGpuExportBackend)) {
+    $CandidateGpuExportBackend
+}
+else {
+    $GpuExportBackend
+}
 $baselineGpuExportDllSummary = if ($baselineGpuExportEnabled) { $baselineGpuExportDllEffective } else { "" }
 $candidateGpuExportDllSummary = if ($candidateGpuExportEnabled) { $candidateGpuExportDllEffective } else { "" }
+$baselineGpuExportBackendSummary = if ($baselineGpuExportEnabled) { $baselineGpuExportBackendEffective } else { "" }
+$candidateGpuExportBackendSummary = if ($candidateGpuExportEnabled) { $candidateGpuExportBackendEffective } else { "" }
 
 function Convert-ToBool {
     param(
@@ -414,6 +431,9 @@ function New-AbArgs {
         if (-not [string]::IsNullOrWhiteSpace($baselineGpuExportDllEffective)) {
             $args += @("-BaselineGpuExportDll", $baselineGpuExportDllEffective)
         }
+        if (-not [string]::IsNullOrWhiteSpace($baselineGpuExportBackendEffective)) {
+            $args += @("-BaselineGpuExportBackend", $baselineGpuExportBackendEffective)
+        }
     }
     if ($candidateGpuExportEnabled) {
         $args += "-CandidateEnableGpuExport"
@@ -422,6 +442,9 @@ function New-AbArgs {
         }
         if (-not [string]::IsNullOrWhiteSpace($candidateGpuExportDllEffective)) {
             $args += @("-CandidateGpuExportDll", $candidateGpuExportDllEffective)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($candidateGpuExportBackendEffective)) {
+            $args += @("-CandidateGpuExportBackend", $candidateGpuExportBackendEffective)
         }
     }
     if ($RequireBaselineNoGpuExportAttempt) {
@@ -462,7 +485,10 @@ $isIdentityComparison = (
     $baselineGpuExportTrustedEffective -eq $candidateGpuExportTrustedEffective -and
     (
         (-not $baselineGpuExportEnabled -and -not $candidateGpuExportEnabled) -or
-        $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective
+        (
+            $baselineGpuExportDllEffective -eq $candidateGpuExportDllEffective -and
+            $baselineGpuExportBackendEffective -eq $candidateGpuExportBackendEffective
+        )
     )
 )
 $comparisonMode = if ($isIdentityComparison) { "identity-aa" } else { "feature-ab" }
@@ -528,6 +554,8 @@ if ($DryRun) {
             candidateGpuExportTrusted = $candidateGpuExportTrustedEffective
             baselineGpuExportDll = $baselineGpuExportDllSummary
             candidateGpuExportDll = $candidateGpuExportDllSummary
+            baselineGpuExportBackend = $baselineGpuExportBackendSummary
+            candidateGpuExportBackend = $candidateGpuExportBackendSummary
             requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
             requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
             requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement
@@ -634,6 +662,7 @@ foreach ($case in $cases) {
             candidateAsyncWriterMaxActive = if ($abSummary) { $abSummary.candidate.asyncWriterMaxActive } else { $null }
             baselineGpuExportEnabled = if ($abSummary) { $abSummary.baseline.enableGpuExport } else { $null }
             baselineGpuExportTrusted = if ($abSummary) { $abSummary.baseline.gpuExportTrusted } else { $null }
+            baselineGpuExportBackend = if ($abSummary) { $abSummary.baseline.gpuExportBackend } else { $null }
             baselineGpuExportAttemptedFrames = if ($abSummary) { $abSummary.baseline.gpuExportAttemptedFrames } else { $null }
             baselineGpuExportReplacedFrames = if ($abSummary) { $abSummary.baseline.gpuExportReplacedFrames } else { $null }
             baselineGpuExportTrustedFrames = if ($abSummary) { $abSummary.baseline.gpuExportTrustedFrames } else { $null }
@@ -642,6 +671,7 @@ foreach ($case in $cases) {
             baselineGpuExportSkipReasonCounts = if ($abSummary) { $abSummary.baseline.gpuExportSkipReasonCounts } else { $null }
             candidateGpuExportEnabled = if ($abSummary) { $abSummary.candidate.enableGpuExport } else { $null }
             candidateGpuExportTrusted = if ($abSummary) { $abSummary.candidate.gpuExportTrusted } else { $null }
+            candidateGpuExportBackend = if ($abSummary) { $abSummary.candidate.gpuExportBackend } else { $null }
             candidateGpuExportAttemptedFrames = if ($abSummary) { $abSummary.candidate.gpuExportAttemptedFrames } else { $null }
             candidateGpuExportReplacedFrames = if ($abSummary) { $abSummary.candidate.gpuExportReplacedFrames } else { $null }
             candidateGpuExportTrustedFrames = if ($abSummary) { $abSummary.candidate.gpuExportTrustedFrames } else { $null }
@@ -736,6 +766,8 @@ $matrix = [pscustomobject]@{
         candidateGpuExportTrusted = $candidateGpuExportTrustedEffective
         baselineGpuExportDll = $baselineGpuExportDllSummary
         candidateGpuExportDll = $candidateGpuExportDllSummary
+        baselineGpuExportBackend = $baselineGpuExportBackendSummary
+        candidateGpuExportBackend = $candidateGpuExportBackendSummary
         requireBaselineNoGpuExportAttempt = [bool]$RequireBaselineNoGpuExportAttempt
         requireCandidateGpuExportAttempt = [bool]$RequireCandidateGpuExportAttempt
         requireCandidateGpuExportReplacement = [bool]$RequireCandidateGpuExportReplacement

@@ -36,6 +36,7 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -CandidateAsyncWriterThreadCount 2 `
   -CandidateEnableGpuExport `
   -CandidateGpuExportDll C:\path\to\igpu_recon_cuda.dll `
+  -CandidateGpuExportBackend cuda `
   -RequireBaselineNoGpuExportAttempt `
   -RequireCandidateGpuExportAttempt `
   -RequireCandidateGpuExportReplacement `
@@ -100,7 +101,9 @@ the export scenario being judged.
 
 For UltraMagnus CPU-vs-GPU export proof, leave the baseline on CPU and enable
 only the candidate with `-CandidateEnableGpuExport` plus
-`-CandidateGpuExportDll`. Add `-RequireBaselineNoGpuExportAttempt`,
+`-CandidateGpuExportDll`. `-CandidateGpuExportBackend <name>` can pin the
+loader's requested backend name for candidate proof packets; leaving it unset
+preserves the loader default of `cuda`. Add `-RequireBaselineNoGpuExportAttempt`,
 `-RequireCandidateGpuExportAttempt`, and
 `-RequireCandidateGpuExportReplacement` when the run is meant to promote GPU
 export; those gates fail the A/B or matrix verdict if the baseline attempts GPU
@@ -139,6 +142,9 @@ receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
 Pass `-TrustedGpuExport` only when deliberately generating the trusted
 throughput packet described above; that adds the candidate trusted gate to the
 remote matrix and records `trustedGpuExport=true` in the packet summary.
+Use `-CandidateGpuExportBackend <name>` when the packet must prove a non-default
+or explicitly pinned backend request; the remote summary records the value and
+passes it through to the matrix as `MLVAPP_GPU_EXPORT_BACKEND`.
 For the E3 lossless/compression-overlap follow-up, the wrapper can also pass
 candidate-only async writer controls to the same remote proof path:
 `-CandidateUseAsyncWriter`, `-CandidateUseAsyncWriterCompression`,

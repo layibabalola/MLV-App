@@ -25,6 +25,7 @@ param(
     [switch]$CandidateUseAsyncWriterCompression,
     [int]$CandidateAsyncWriterQueueDepth = 0,
     [int]$CandidateAsyncWriterThreadCount = 0,
+    [string]$CandidateGpuExportBackend = "",
     [switch]$RequireElapsedImprovement,
     [double]$MinElapsedImprovementPercent = 0.0
 )
@@ -395,6 +396,7 @@ if ($failures.Count -eq 0) {
     $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
     $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
     $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+    $candidateGpuExportBackendLiteral = Convert-ToPowerShellSingleQuotedString $CandidateGpuExportBackend
     $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -418,6 +420,7 @@ if ($failures.Count -eq 0) {
 `$candidateUseAsyncWriterCompression = $candidateUseAsyncWriterCompressionLiteral
 `$candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
 `$candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
+`$candidateGpuExportBackend = $candidateGpuExportBackendLiteral
 `$requireElapsedImprovement = $requireElapsedImprovementLiteral
 `$minElapsedImprovementPercent = $MinElapsedImprovementPercent
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
@@ -630,6 +633,9 @@ try {
             '-BuildId', ('ultramagnus-cdng-export-' + '$stamp'),
             '-OutputDir', `$matrixDir
         )
+        if (-not [string]::IsNullOrWhiteSpace(`$candidateGpuExportBackend)) {
+            `$matrixArgs += @('-CandidateGpuExportBackend', `$candidateGpuExportBackend)
+        }
         if (`$trustedGpuExport) {
             `$matrixArgs += @(
                 '-CandidateGpuExportTrusted',
@@ -756,6 +762,7 @@ try {
             maxFrames = `$maxFrames
             repeats = `$repeats
             trustedGpuExport = [bool]`$trustedGpuExport
+            candidateGpuExportBackend = `$candidateGpuExportBackend
             candidateUseAsyncWriter = [bool]`$candidateUseAsyncWriter
             candidateUseAsyncWriterCompression = [bool]`$candidateUseAsyncWriterCompression
             candidateAsyncWriterQueueDepth = `$candidateAsyncWriterQueueDepth
@@ -920,6 +927,7 @@ $summary = [pscustomobject]@{
         maxFrames = $MaxFrames
         repeats = $Repeats
         trustedGpuExport = [bool]$TrustedGpuExport
+        candidateGpuExportBackend = $CandidateGpuExportBackend
         candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
         candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
         candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
