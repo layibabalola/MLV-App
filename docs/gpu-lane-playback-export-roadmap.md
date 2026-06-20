@@ -128,6 +128,16 @@ smoke runs without weakening the proof rules: Dell playback/export still has to
 show backend load, GPU frame/output telemetry, and fallback-free behavior on the
 actual laptop before claiming realtime CUDA support there.
 
+Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-playback-dng-smoke.ps1`
+now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
+gate into one host-local smoke. It checks the release exe, deployed CUDA backend,
+and CUDA runtime, records `nvidia-smi`, runs the forced AMaZE/subset no-readback
+playback proof, and runs candidate GPU CDNG export against CPU baseline DNG
+hashes for the requested codecs. This is the preferred Dell laptop proof
+entrypoint; a passing UltraMagnus packet still proves RTX 4090 only, and a
+passing Dell packet is required before claiming realtime CUDA support on that
+machine.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
