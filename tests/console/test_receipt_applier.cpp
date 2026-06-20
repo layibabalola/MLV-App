@@ -2208,6 +2208,23 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.contractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.outputVerificationContractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.ffmpegExecutionContractReady );
+    ASSERT_EQ( std::string("-an"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .ffmpegAudioArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("video-only-to-mux-transition-contract"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .ffmpegAudioTransitionSource.toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan
+        .ffmpegAudioTransitionArguments.isEmpty() );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.ffmpegAudioContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.ffmpegAudioMuxExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegAudioMuxPlanned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegAudioMuxArgumentHandoffPlanned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegAudioSyncValidationPlanned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegAudioMuxExecutionReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegMuxedAudioCommandPlanned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegMuxedAudioCommandReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.ffmpegAudioInputOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.verificationExecutionReady );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.fileExistenceCheckOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.nonEmptyCheckOwned );
@@ -2412,6 +2429,18 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("output-verification-exec-source=post-ffmpeg-output-verification-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-args=-an") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-transition-args=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-sync-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-command-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-command-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-file-exists-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
@@ -2739,7 +2768,22 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-execution-audio-mux-command-planned=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-execution-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-execution-audio-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-args=-an") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-transition-args=deferred-until-audio-mux-execution-owned") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-sync-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-command-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-command-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-execution-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-file-exists-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("runner-audio-mux-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=false") != std::string::npos );
 
@@ -3068,6 +3112,20 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_TRUE( executionPlan.contractReady );
     ASSERT_TRUE( executionPlan.outputVerificationContractReady );
     ASSERT_TRUE( executionPlan.ffmpegExecutionContractReady );
+    ASSERT_EQ( std::string("-an"),
+               std::string(executionPlan.ffmpegAudioArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("video-only-to-mux-transition-contract"),
+               std::string(executionPlan.ffmpegAudioTransitionSource.toUtf8().constData()) );
+    ASSERT_TRUE( executionPlan.ffmpegAudioTransitionArguments.isEmpty() );
+    ASSERT_TRUE( executionPlan.ffmpegAudioContractReady );
+    ASSERT_TRUE( executionPlan.ffmpegAudioMuxExecutionContractReady );
+    ASSERT_FALSE( executionPlan.ffmpegAudioMuxPlanned );
+    ASSERT_FALSE( executionPlan.ffmpegAudioMuxArgumentHandoffPlanned );
+    ASSERT_FALSE( executionPlan.ffmpegAudioSyncValidationPlanned );
+    ASSERT_FALSE( executionPlan.ffmpegAudioMuxExecutionReady );
+    ASSERT_FALSE( executionPlan.ffmpegMuxedAudioCommandPlanned );
+    ASSERT_FALSE( executionPlan.ffmpegMuxedAudioCommandReady );
+    ASSERT_FALSE( executionPlan.ffmpegAudioInputOwned );
     ASSERT_FALSE( executionPlan.fileExistenceCheckOwned );
     ASSERT_FALSE( executionPlan.nonEmptyCheckOwned );
     ASSERT_FALSE( executionPlan.mediaProbeExecutionOwned );
@@ -3077,7 +3135,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.verificationExecutionReady );
     ASSERT_EQ( std::string("ffprobe"),
                std::string(executionPlan.mediaProbeExecutable.toUtf8().constData()) );
-    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-reason=none"),
+    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-ffmpeg-audio-args=-an output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract output-verification-exec-ffmpeg-audio-transition-args=unspecified output-verification-exec-ffmpeg-audio-contract-ready=true output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true output-verification-exec-ffmpeg-audio-mux-planned=false output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=false output-verification-exec-ffmpeg-audio-sync-planned=false output-verification-exec-ffmpeg-audio-mux-exec-ready=false output-verification-exec-ffmpeg-audio-mux-command-planned=false output-verification-exec-ffmpeg-audio-mux-command-ready=false output-verification-exec-ffmpeg-audio-owned=false output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-reason=none"),
                std::string(batchRenderedVideoOutputVerificationExecutionPlanSummary(
                    executionPlan).toUtf8().constData()) );
 

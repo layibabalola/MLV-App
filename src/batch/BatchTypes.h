@@ -519,6 +519,18 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     QString reason;
     bool outputVerificationContractReady = false;
     bool ffmpegExecutionContractReady = false;
+    QString ffmpegAudioArguments;
+    QString ffmpegAudioTransitionSource;
+    QString ffmpegAudioTransitionArguments;
+    bool ffmpegAudioContractReady = false;
+    bool ffmpegAudioMuxExecutionContractReady = false;
+    bool ffmpegAudioMuxPlanned = false;
+    bool ffmpegAudioMuxArgumentHandoffPlanned = false;
+    bool ffmpegAudioSyncValidationPlanned = false;
+    bool ffmpegAudioMuxExecutionReady = false;
+    bool ffmpegMuxedAudioCommandPlanned = false;
+    bool ffmpegMuxedAudioCommandReady = false;
+    bool ffmpegAudioInputOwned = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeExecutionOwned = false;
@@ -2453,6 +2465,27 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.outputVerificationContractReady =
         outputVerificationPlan.contractReady;
     plan.ffmpegExecutionContractReady = ffmpegExecutionPlan.contractReady;
+    plan.ffmpegAudioArguments = ffmpegExecutionPlan.audioArguments;
+    plan.ffmpegAudioTransitionSource =
+        ffmpegExecutionPlan.audioTransitionSource;
+    plan.ffmpegAudioTransitionArguments =
+        ffmpegExecutionPlan.audioTransitionArguments;
+    plan.ffmpegAudioContractReady =
+        ffmpegExecutionPlan.audioContractReady;
+    plan.ffmpegAudioMuxExecutionContractReady =
+        ffmpegExecutionPlan.audioMuxExecutionContractReady;
+    plan.ffmpegAudioMuxPlanned = ffmpegExecutionPlan.audioMuxPlanned;
+    plan.ffmpegAudioMuxArgumentHandoffPlanned =
+        ffmpegExecutionPlan.audioMuxArgumentHandoffPlanned;
+    plan.ffmpegAudioSyncValidationPlanned =
+        ffmpegExecutionPlan.audioSyncValidationPlanned;
+    plan.ffmpegAudioMuxExecutionReady =
+        ffmpegExecutionPlan.audioMuxExecutionReady;
+    plan.ffmpegMuxedAudioCommandPlanned =
+        ffmpegExecutionPlan.muxedAudioCommandPlanned;
+    plan.ffmpegMuxedAudioCommandReady =
+        ffmpegExecutionPlan.muxedAudioCommandReady;
+    plan.ffmpegAudioInputOwned = ffmpegExecutionPlan.audioInputOwned;
 
     if( !outputVerificationPlan.contractReady )
     {
@@ -3626,13 +3659,31 @@ inline QString batchRenderedVideoOutputVerificationPlanSummary(
 inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
     const BatchRenderedVideoOutputVerificationExecutionPlan & plan)
 {
-    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-output-contract-ready=%5 output-verification-exec-ffmpeg-contract-ready=%6 output-verification-exec-file-exists-owned=%7 output-verification-exec-nonempty-owned=%8 output-verification-exec-probe-owned=%9 output-verification-exec-codec-container-owned=%10 output-verification-exec-frame-count-owned=%11 output-verification-exec-receipt-hash-owned=%12 output-verification-exec-ready=%13 output-verification-exec-contract-ready=%14 output-verification-exec-reason=%15")
+    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-output-contract-ready=%5 output-verification-exec-ffmpeg-contract-ready=%6 output-verification-exec-ffmpeg-audio-args=%7 output-verification-exec-ffmpeg-audio-transition-source=%8 output-verification-exec-ffmpeg-audio-transition-args=%9 output-verification-exec-ffmpeg-audio-contract-ready=%10 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%11 output-verification-exec-ffmpeg-audio-mux-planned=%12 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%13 output-verification-exec-ffmpeg-audio-sync-planned=%14 output-verification-exec-ffmpeg-audio-mux-exec-ready=%15 output-verification-exec-ffmpeg-audio-mux-command-planned=%16 output-verification-exec-ffmpeg-audio-mux-command-ready=%17 output-verification-exec-ffmpeg-audio-owned=%18 output-verification-exec-file-exists-owned=%19 output-verification-exec-nonempty-owned=%20 output-verification-exec-probe-owned=%21 output-verification-exec-codec-container-owned=%22 output-verification-exec-frame-count-owned=%23 output-verification-exec-receipt-hash-owned=%24 output-verification-exec-ready=%25 output-verification-exec-contract-ready=%26 output-verification-exec-reason=%27")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
         .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
         .arg(plan.mediaProbeExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeExecutable)
         .arg(plan.outputVerificationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ffmpegExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioArguments.isEmpty()
+            ? QStringLiteral("unspecified")
+            : plan.ffmpegAudioArguments)
+        .arg(plan.ffmpegAudioTransitionSource.isEmpty()
+            ? QStringLiteral("unspecified")
+            : plan.ffmpegAudioTransitionSource)
+        .arg(plan.ffmpegAudioTransitionArguments.isEmpty()
+            ? QStringLiteral("unspecified")
+            : plan.ffmpegAudioTransitionArguments)
+        .arg(plan.ffmpegAudioContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioMuxExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioMuxPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioMuxArgumentHandoffPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioSyncValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioMuxExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegMuxedAudioCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegMuxedAudioCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegAudioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
