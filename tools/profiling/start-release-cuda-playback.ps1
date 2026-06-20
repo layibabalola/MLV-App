@@ -92,8 +92,29 @@ function Set-GpuPreferenceHighPerformance {
         -Force | Out-Null
 }
 
-function Get-NvidiaSmiSnapshot {
+function Resolve-NvidiaSmiCommand {
     $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        "C:\Windows\System32\nvidia-smi.exe",
+        (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe"),
+        (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+    )
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+            (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    $null
+}
+
+function Get-NvidiaSmiSnapshot {
+    $cmd = Resolve-NvidiaSmiCommand
     if (-not $cmd) {
         return [pscustomobject]@{
             found = $false
@@ -104,10 +125,10 @@ function Get-NvidiaSmiSnapshot {
     }
 
     try {
-        $output = & $cmd.Source --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1
+        $output = & $cmd --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1
         return [pscustomobject]@{
             found = $true
-            path = $cmd.Source
+            path = $cmd
             output = @($output | ForEach-Object { [string]$_ })
             error = $null
         }
@@ -115,7 +136,7 @@ function Get-NvidiaSmiSnapshot {
     catch {
         return [pscustomobject]@{
             found = $true
-            path = $cmd.Source
+            path = $cmd
             output = @()
             error = $_.Exception.Message
         }

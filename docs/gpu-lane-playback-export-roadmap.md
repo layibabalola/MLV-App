@@ -207,6 +207,15 @@ proof, not just CUDA proof: the run must show backend load, the GL renderer, no
 readback/fallback counts, and FPS on that machine before claiming laptop
 realtime support.
 
+Update 2026-06-20 CUDA dogfood kit: `tools/profiling/export-release-cuda-dogfood-kit.ps1`
+can now package the exact release tree, deployed CUDA backend/runtime, receipts,
+and profiling wrappers into a repo-shaped dogfood kit with a manifest and
+`RUN-CUDA-DOGFOOD.ps1` helper. This is the practical "copy this ready build to a
+NVIDIA host" surface for Dell/UltraMagnus trials: it preserves the paths the
+proof scripts expect and records release/backend hashes up front. The kit is
+packaging evidence only; Dell or UltraMagnus support and speed claims still come
+only from a passing host-local proof summary produced by the bundled scripts.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
