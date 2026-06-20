@@ -387,6 +387,18 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("cdng"));
     parser.addOption(exportFormatOpt);
 
+    QCommandLineOption renderedCodecOpt(
+        QStringLiteral("rendered-codec"),
+        QStringLiteral("Rendered-video codec request for the future E4 runner: h264, h265/hevc, or prores. Fails closed until rendered export lands."),
+        QStringLiteral("codec"));
+    parser.addOption(renderedCodecOpt);
+
+    QCommandLineOption renderedContainerOpt(
+        QStringLiteral("rendered-container"),
+        QStringLiteral("Rendered-video container request for the future E4 runner: mov, mp4, or mkv. Fails closed until rendered export lands."),
+        QStringLiteral("container"));
+    parser.addOption(renderedContainerOpt);
+
     QCommandLineOption cdngCodecOpt(
         QStringLiteral("cdng-codec"),
         QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
@@ -428,8 +440,48 @@ static int runBatch(QCoreApplication &app)
     uint maxFrames      = 0;
     int cdngCodecOffset = 0;
     const QString exportFormatRaw = parser.value(exportFormatOpt);
-    const BatchExportFormatRequest exportRequest =
+    BatchExportFormatRequest exportRequest =
         batchExportFormatRequestFromString(exportFormatRaw);
+    const bool renderedCodecSet = parser.isSet(renderedCodecOpt);
+    const bool renderedContainerSet = parser.isSet(renderedContainerOpt);
+    const bool renderedOptionSet = renderedCodecSet || renderedContainerSet;
+    if( renderedOptionSet
+     && parser.isSet(exportFormatOpt)
+     && exportRequest.format == BatchExportFormat::Cdng )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-codec and --rendered-container require --export-format rendered-video or a rendered-video alias; omit them for cdng.\n\n"));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
+    if( renderedOptionSet && exportRequest.format == BatchExportFormat::Cdng )
+        exportRequest.format = BatchExportFormat::RenderedVideo;
+    if( renderedCodecSet )
+    {
+        bool ok = false;
+        exportRequest.renderedCodec =
+            batchRenderedVideoCodecFromString(parser.value(renderedCodecOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-codec must be one of: h264, h265, hevc, prores.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( renderedContainerSet )
+    {
+        bool ok = false;
+        exportRequest.renderedContainer =
+            batchRenderedVideoContainerFromString(parser.value(renderedContainerOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-container must be one of: mov, mp4, mkv.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
     const BatchExportFormat exportFormat =
         exportRequest.format;
     if( exportFormat == BatchExportFormat::Unknown )

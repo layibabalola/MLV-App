@@ -445,6 +445,44 @@ TEST(BatchExportFormat, PreservesRenderedVideoRequestIntent)
                static_cast<int>(request.renderedContainer) );
 }
 
+TEST(BatchExportFormat, ParsesRenderedVideoOptionAliases)
+{
+    bool ok = false;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H264),
+               static_cast<int>(batchRenderedVideoCodecFromString(QStringLiteral("avc"), &ok)) );
+    ASSERT_TRUE( ok );
+
+    ok = false;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H265),
+               static_cast<int>(batchRenderedVideoCodecFromString(QStringLiteral("h.265"), &ok)) );
+    ASSERT_TRUE( ok );
+
+    ok = false;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::ProRes),
+               static_cast<int>(batchRenderedVideoCodecFromString(QStringLiteral("pro-res"), &ok)) );
+    ASSERT_TRUE( ok );
+
+    ok = true;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::Unspecified),
+               static_cast<int>(batchRenderedVideoCodecFromString(QStringLiteral("dnxhr"), &ok)) );
+    ASSERT_FALSE( ok );
+
+    ok = false;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mov),
+               static_cast<int>(batchRenderedVideoContainerFromString(QStringLiteral("quicktime"), &ok)) );
+    ASSERT_TRUE( ok );
+
+    ok = false;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mkv),
+               static_cast<int>(batchRenderedVideoContainerFromString(QStringLiteral("matroska"), &ok)) );
+    ASSERT_TRUE( ok );
+
+    ok = true;
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Unspecified),
+               static_cast<int>(batchRenderedVideoContainerFromString(QStringLiteral("avi"), &ok)) );
+    ASSERT_FALSE( ok );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

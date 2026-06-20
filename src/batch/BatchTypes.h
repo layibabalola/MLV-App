@@ -37,6 +37,75 @@ struct BatchExportFormatRequest
     BatchRenderedVideoContainer renderedContainer = BatchRenderedVideoContainer::Unspecified;
 };
 
+inline BatchRenderedVideoCodec batchRenderedVideoCodecFromString(const QString & value, bool * ok = nullptr)
+{
+    const QString normalized = value.trimmed().toLower();
+    if( normalized.isEmpty()
+     || normalized == QStringLiteral("unspecified")
+     || normalized == QStringLiteral("default")
+     || normalized == QStringLiteral("auto") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoCodec::Unspecified;
+    }
+    if( normalized == QStringLiteral("h264")
+     || normalized == QStringLiteral("h.264")
+     || normalized == QStringLiteral("avc") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoCodec::H264;
+    }
+    if( normalized == QStringLiteral("h265")
+     || normalized == QStringLiteral("h.265")
+     || normalized == QStringLiteral("hevc") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoCodec::H265;
+    }
+    if( normalized == QStringLiteral("prores")
+     || normalized == QStringLiteral("pro-res") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoCodec::ProRes;
+    }
+
+    if( ok ) *ok = false;
+    return BatchRenderedVideoCodec::Unspecified;
+}
+
+inline BatchRenderedVideoContainer batchRenderedVideoContainerFromString(const QString & value, bool * ok = nullptr)
+{
+    const QString normalized = value.trimmed().toLower();
+    if( normalized.isEmpty()
+     || normalized == QStringLiteral("unspecified")
+     || normalized == QStringLiteral("default")
+     || normalized == QStringLiteral("auto") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoContainer::Unspecified;
+    }
+    if( normalized == QStringLiteral("mov")
+     || normalized == QStringLiteral("quicktime") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoContainer::Mov;
+    }
+    if( normalized == QStringLiteral("mp4") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoContainer::Mp4;
+    }
+    if( normalized == QStringLiteral("mkv")
+     || normalized == QStringLiteral("matroska") )
+    {
+        if( ok ) *ok = true;
+        return BatchRenderedVideoContainer::Mkv;
+    }
+
+    if( ok ) *ok = false;
+    return BatchRenderedVideoContainer::Unspecified;
+}
+
 inline BatchExportFormatRequest batchExportFormatRequestFromString(const QString & value)
 {
     BatchExportFormatRequest request;
