@@ -177,6 +177,26 @@ struct BatchRenderedVideoFfmpegFramePlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoReceiptApplicationPlan
+{
+    QString source = QStringLiteral("receipt-application-input-output-contract");
+    QString inputState = QStringLiteral("open-mlv-runtime-plus-batch-receipt");
+    QString outputState = QStringLiteral("receipt-applied-mlv-processing-state");
+    QString reason;
+    bool sourceMetadataReady = false;
+    bool frameGeometryReady = false;
+    bool inputContractReady = false;
+    bool outputContractReady = false;
+    bool applyToMlvOwned = false;
+    bool processingObjectMutationOwned = false;
+    bool cacheInvalidationOwned = false;
+    bool cutStretchStateOwned = false;
+    bool lookAssistApplicationOwned = false;
+    bool receiptValidationOwned = false;
+    bool applicationReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoFrameProcessingPlan
 {
     QString source = QStringLiteral("headless-rendered-frame-contract");
@@ -348,6 +368,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
     BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
+    BatchRenderedVideoReceiptApplicationPlan receiptApplicationPlan;
     BatchRenderedVideoFrameProcessingPlan frameProcessingPlan;
     BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan;
     BatchRenderedVideoFfmpegCommandPlan ffmpegCommandPlan;
@@ -367,6 +388,7 @@ struct BatchRenderedVideoJobPlan
     bool metadataAttempted = false;
     bool metadataReady = false;
     bool ffmpegFrameReady = false;
+    bool receiptApplicationContractReady = false;
     bool frameProcessingContractReady = false;
     bool ffmpegBinaryCommandReady = false;
     bool ffmpegCommandReady = false;
@@ -1207,10 +1229,56 @@ batchRenderedVideoFfmpegFramePlanFromMetadata(
         encoderProfile);
 }
 
+inline BatchRenderedVideoReceiptApplicationPlan
+batchRenderedVideoReceiptApplicationPlanFromContracts(
+    const BatchRenderedVideoSourceMetadata & metadata,
+    const BatchRenderedVideoFfmpegFramePlan & framePlan)
+{
+    BatchRenderedVideoReceiptApplicationPlan plan;
+    plan.sourceMetadataReady = metadata.ready;
+    plan.frameGeometryReady = framePlan.ready;
+
+    if( !metadata.ready )
+    {
+        plan.reason = metadata.reason.isEmpty()
+            ? QStringLiteral("rendered source metadata unavailable")
+            : metadata.reason;
+        return plan;
+    }
+    if( !framePlan.ready )
+    {
+        plan.reason = framePlan.reason.isEmpty()
+            ? QStringLiteral("rendered frame geometry unavailable")
+            : framePlan.reason;
+        return plan;
+    }
+
+    plan.inputContractReady = !plan.inputState.isEmpty()
+                           && plan.sourceMetadataReady
+                           && plan.frameGeometryReady;
+    plan.outputContractReady = !plan.outputState.isEmpty()
+                            && plan.inputContractReady;
+    plan.contractReady = plan.inputContractReady
+                      && plan.outputContractReady;
+    plan.applicationReady = plan.applyToMlvOwned
+                         && plan.processingObjectMutationOwned
+                         && plan.cacheInvalidationOwned
+                         && plan.cutStretchStateOwned
+                         && plan.lookAssistApplicationOwned
+                         && plan.receiptValidationOwned;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered receipt application contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoFrameProcessingPlan
 batchRenderedVideoFrameProcessingPlanFromFramePlan(
     const BatchRenderedVideoSourceMetadata & metadata,
-    const BatchRenderedVideoFfmpegFramePlan & framePlan)
+    const BatchRenderedVideoFfmpegFramePlan & framePlan,
+    const BatchRenderedVideoReceiptApplicationPlan & receiptPlan)
 {
     BatchRenderedVideoFrameProcessingPlan plan;
     plan.sourceMetadataReady = metadata.ready;
@@ -1235,16 +1303,18 @@ batchRenderedVideoFrameProcessingPlanFromFramePlan(
     plan.contractReady = !plan.rawFramePixelFormat.isEmpty()
                       && !plan.outputSize.isEmpty()
                       && plan.sourceMetadataReady
-                      && plan.frameGeometryReady;
+                      && plan.frameGeometryReady
+                      && receiptPlan.contractReady;
     if( plan.contractReady )
     {
-        plan.receiptApplicationContractReady = true;
+        plan.receiptApplicationContractReady = receiptPlan.contractReady;
         plan.debayerContractReady = true;
         plan.previewProcessingContractReady = true;
         plan.resizeProcessingContractReady = true;
         plan.rgb48FrameBufferContractReady = true;
         plan.frameIterationContractReady = true;
     }
+    plan.receiptApplicationOwned = receiptPlan.applicationReady;
     plan.processingParityReady = plan.receiptApplicationOwned
                               && plan.debayerOwned
                               && plan.previewProcessingOwned
@@ -1259,6 +1329,19 @@ batchRenderedVideoFrameProcessingPlanFromFramePlan(
             QStringLiteral("rendered frame-processing contract unavailable");
     }
     return plan;
+}
+
+inline BatchRenderedVideoFrameProcessingPlan
+batchRenderedVideoFrameProcessingPlanFromFramePlan(
+    const BatchRenderedVideoSourceMetadata & metadata,
+    const BatchRenderedVideoFfmpegFramePlan & framePlan)
+{
+    return batchRenderedVideoFrameProcessingPlanFromFramePlan(
+        metadata,
+        framePlan,
+        batchRenderedVideoReceiptApplicationPlanFromContracts(
+            metadata,
+            framePlan));
 }
 
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
@@ -1719,6 +1802,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                 plan.outputVerificationPlan,
                 plan.ffmpegExecutionPlan);
+        plan.receiptApplicationPlan.reason =
+            QStringLiteral("rendered source metadata unavailable");
     }
     else
     {
@@ -1728,6 +1813,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.ffmpegAudioPlan.reason =
             QStringLiteral("not a rendered-video request");
         plan.optionalFilterPlan.reason =
+            QStringLiteral("not a rendered-video request");
+        plan.receiptApplicationPlan.reason =
             QStringLiteral("not a rendered-video request");
         plan.frameProcessingPlan.reason =
             QStringLiteral("not a rendered-video request");
@@ -1871,10 +1958,17 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             QStringLiteral("rendered encoder preset incomplete");
     }
     plan.ffmpegFrameReady = plan.ffmpegFramePlan.ready;
+    plan.receiptApplicationPlan =
+        batchRenderedVideoReceiptApplicationPlanFromContracts(
+            metadata,
+            plan.ffmpegFramePlan);
+    plan.receiptApplicationContractReady =
+        plan.receiptApplicationPlan.contractReady;
     plan.frameProcessingPlan =
         batchRenderedVideoFrameProcessingPlanFromFramePlan(
             metadata,
-            plan.ffmpegFramePlan);
+            plan.ffmpegFramePlan,
+            plan.receiptApplicationPlan);
     plan.frameProcessingContractReady =
         plan.frameProcessingPlan.contractReady;
     plan.optionalFilterPlan =
@@ -1914,6 +2008,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
+                       && plan.receiptApplicationContractReady
                        && plan.frameProcessingContractReady
                        && plan.ffmpegCommandReady
                        && plan.ffmpegExecutionContractReady
@@ -2010,6 +2105,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegFramePlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg frame plan unavailable")
             : plan.ffmpegFramePlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.receiptApplicationContractReady )
+    {
+        return plan.receiptApplicationPlan.reason.isEmpty()
+            ? QStringLiteral("rendered receipt application contract unavailable")
+            : plan.receiptApplicationPlan.reason;
     }
     if( plan.metadataAttempted && !plan.frameProcessingContractReady )
     {
@@ -2180,6 +2281,28 @@ inline QString batchRenderedVideoFfmpegFramePlanSummary(
         .arg(plan.codecDimensionAdjusted ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.scaled ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
+inline QString batchRenderedVideoReceiptApplicationPlanSummary(
+    const BatchRenderedVideoReceiptApplicationPlan & plan)
+{
+    return QStringLiteral("receipt-application-source=%1 receipt-application-input=%2 receipt-application-output=%3 receipt-application-metadata-ready=%4 receipt-application-frame-geometry-ready=%5 receipt-application-input-contract-ready=%6 receipt-application-output-contract-ready=%7 receipt-application-apply-owned=%8 receipt-application-processing-object-owned=%9 receipt-application-cache-invalidation-owned=%10 receipt-application-cut-stretch-owned=%11 receipt-application-look-assist-owned=%12 receipt-application-validation-owned=%13 receipt-application-ready=%14 receipt-application-contract-ready=%15 receipt-application-reason=%16")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.inputState.isEmpty() ? QStringLiteral("unspecified") : plan.inputState)
+        .arg(plan.outputState.isEmpty() ? QStringLiteral("unspecified") : plan.outputState)
+        .arg(plan.sourceMetadataReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameGeometryReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.inputContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.outputContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.applyToMlvOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.processingObjectMutationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.cacheInvalidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.cutStretchStateOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.lookAssistApplicationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.receiptValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.applicationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
@@ -2382,7 +2505,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 preflight-ready=%20 runnable=%21 first-blocker=%22")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 preflight-ready=%21 runnable=%22 first-blocker=%23")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -2396,6 +2519,8 @@ inline QString batchRenderedVideoJobPlanSummary(
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
+        .arg(batchRenderedVideoReceiptApplicationPlanSummary(
+            plan.receiptApplicationPlan))
         .arg(batchRenderedVideoFrameProcessingPlanSummary(
             plan.frameProcessingPlan))
         .arg(batchRenderedVideoFfmpegCommandPlanSummary(plan.ffmpegCommandPlan))

@@ -953,10 +953,36 @@ TEST(BatchExportFormat, PlansRenderedVideoFrameProcessingContract)
             metadata,
             batchRenderedVideoDefaultRenderSettings(),
             BatchRenderedVideoEncoderProfile::H264);
+    BatchRenderedVideoReceiptApplicationPlan receiptPlan =
+        batchRenderedVideoReceiptApplicationPlanFromContracts(
+            metadata,
+            framePlan);
+    ASSERT_TRUE( receiptPlan.contractReady );
+    ASSERT_TRUE( receiptPlan.sourceMetadataReady );
+    ASSERT_TRUE( receiptPlan.frameGeometryReady );
+    ASSERT_TRUE( receiptPlan.inputContractReady );
+    ASSERT_TRUE( receiptPlan.outputContractReady );
+    ASSERT_FALSE( receiptPlan.applyToMlvOwned );
+    ASSERT_FALSE( receiptPlan.processingObjectMutationOwned );
+    ASSERT_FALSE( receiptPlan.cacheInvalidationOwned );
+    ASSERT_FALSE( receiptPlan.cutStretchStateOwned );
+    ASSERT_FALSE( receiptPlan.lookAssistApplicationOwned );
+    ASSERT_FALSE( receiptPlan.receiptValidationOwned );
+    ASSERT_FALSE( receiptPlan.applicationReady );
+    ASSERT_EQ( std::string("receipt-application-input-output-contract"),
+               std::string(receiptPlan.source.toUtf8().constData()) );
+    ASSERT_EQ( std::string("open-mlv-runtime-plus-batch-receipt"),
+               std::string(receiptPlan.inputState.toUtf8().constData()) );
+    ASSERT_EQ( std::string("receipt-applied-mlv-processing-state"),
+               std::string(receiptPlan.outputState.toUtf8().constData()) );
+    ASSERT_EQ( std::string("receipt-application-source=receipt-application-input-output-contract receipt-application-input=open-mlv-runtime-plus-batch-receipt receipt-application-output=receipt-applied-mlv-processing-state receipt-application-metadata-ready=true receipt-application-frame-geometry-ready=true receipt-application-input-contract-ready=true receipt-application-output-contract-ready=true receipt-application-apply-owned=false receipt-application-processing-object-owned=false receipt-application-cache-invalidation-owned=false receipt-application-cut-stretch-owned=false receipt-application-look-assist-owned=false receipt-application-validation-owned=false receipt-application-ready=false receipt-application-contract-ready=true receipt-application-reason=none"),
+               std::string(batchRenderedVideoReceiptApplicationPlanSummary(
+                   receiptPlan).toUtf8().constData()) );
     BatchRenderedVideoFrameProcessingPlan processingPlan =
         batchRenderedVideoFrameProcessingPlanFromFramePlan(
             metadata,
-            framePlan);
+            framePlan,
+            receiptPlan);
 
     ASSERT_TRUE( processingPlan.contractReady );
     ASSERT_TRUE( processingPlan.sourceMetadataReady );
@@ -990,9 +1016,17 @@ TEST(BatchExportFormat, PlansRenderedVideoFrameProcessingContract)
         24000.0 / 1001.0,
         STRETCH_H_100,
         STRETCH_V_100);
-    processingPlan = batchRenderedVideoFrameProcessingPlanFromFramePlan(
+    receiptPlan = batchRenderedVideoReceiptApplicationPlanFromContracts(
         metadata,
         framePlan);
+    processingPlan = batchRenderedVideoFrameProcessingPlanFromFramePlan(
+        metadata,
+        framePlan,
+        receiptPlan);
+    ASSERT_FALSE( receiptPlan.contractReady );
+    ASSERT_FALSE( receiptPlan.sourceMetadataReady );
+    ASSERT_EQ( std::string("rendered source dimensions invalid"),
+               std::string(receiptPlan.reason.toUtf8().constData()) );
     ASSERT_FALSE( processingPlan.contractReady );
     ASSERT_FALSE( processingPlan.sourceMetadataReady );
     ASSERT_FALSE( processingPlan.receiptApplicationContractReady );
@@ -1215,6 +1249,8 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.metadataAttempted );
     ASSERT_FALSE( basePlan.metadataReady );
     ASSERT_FALSE( basePlan.ffmpegFrameReady );
+    ASSERT_FALSE( basePlan.receiptApplicationContractReady );
+    ASSERT_FALSE( basePlan.receiptApplicationPlan.contractReady );
     ASSERT_TRUE( basePlan.ffmpegFilterReady );
     ASSERT_TRUE( basePlan.optionalFilterContractReady );
     ASSERT_TRUE( basePlan.optionalFilterPlan.contractReady );
@@ -1270,6 +1306,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.metadataAttempted );
     ASSERT_TRUE( plan.metadataReady );
     ASSERT_TRUE( plan.ffmpegFrameReady );
+    ASSERT_TRUE( plan.receiptApplicationContractReady );
+    ASSERT_TRUE( plan.receiptApplicationPlan.contractReady );
+    ASSERT_TRUE( plan.receiptApplicationPlan.inputContractReady );
+    ASSERT_TRUE( plan.receiptApplicationPlan.outputContractReady );
+    ASSERT_FALSE( plan.receiptApplicationPlan.applyToMlvOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.processingObjectMutationOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.cacheInvalidationOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.cutStretchStateOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.lookAssistApplicationOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.receiptValidationOwned );
+    ASSERT_FALSE( plan.receiptApplicationPlan.applicationReady );
     ASSERT_TRUE( plan.frameProcessingContractReady );
     ASSERT_TRUE( plan.frameProcessingPlan.contractReady );
     ASSERT_TRUE( plan.frameProcessingPlan.sourceMetadataReady );
@@ -1343,6 +1390,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("render-settings-resize=true render-settings-resize-width=1920") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-frame-size=1920x1284") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-frame-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-source=receipt-application-input-output-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-input-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-output-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-apply-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-processing-object-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-cache-invalidation-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-cut-stretch-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-look-assist-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-validation-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-output-size=1920x1284") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-receipt-contract-ready=true") != std::string::npos );
@@ -1390,6 +1448,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( implicitSettingsPlan.metadataAttempted );
     ASSERT_TRUE( implicitSettingsPlan.metadataReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegFrameReady );
+    ASSERT_TRUE( implicitSettingsPlan.receiptApplicationContractReady );
     ASSERT_TRUE( implicitSettingsPlan.frameProcessingContractReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegCommandReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegExecutionContractReady );
@@ -1737,6 +1796,8 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.optionalFilterPlan.optionalFiltersRequested );
     ASSERT_FALSE( plan.optionalFilterPlan.optionalFilterExecutionReady );
     ASSERT_TRUE( plan.ffmpegAudioContractReady );
+    ASSERT_FALSE( plan.receiptApplicationContractReady );
+    ASSERT_FALSE( plan.receiptApplicationPlan.contractReady );
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
@@ -1777,6 +1838,8 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-audio-source-discovery-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-extraction-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("receipt-application-reason=rendered source metadata unavailable") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=false") != std::string::npos );
