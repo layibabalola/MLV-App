@@ -1183,6 +1183,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.ffmpegAudioPlan.audioMuxOwned );
     ASSERT_FALSE( basePlan.frameProcessingContractReady );
     ASSERT_FALSE( basePlan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( basePlan.outputVerificationExecutionContractReady );
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
@@ -1231,6 +1232,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.frameProcessingPlan.frameIterationOwned );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_TRUE( plan.ffmpegExecutionContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.contractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.outputVerificationContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.verificationExecutionReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.fileExistenceCheckOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.nonEmptyCheckOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeExecutionOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.codecContainerValidationOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.frameCountValidationOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.receiptHashValidationOwned );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
     ASSERT_EQ( 1920, plan.ffmpegFramePlan.outputWidth );
@@ -1278,6 +1290,13 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-execution-raw-frame-feed-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-source=post-ffmpeg-output-verification-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-file-exists-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
     BatchRenderedVideoJobPlan settingsBasePlan =
@@ -1297,6 +1316,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( implicitSettingsPlan.frameProcessingContractReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegCommandReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegExecutionContractReady );
+    ASSERT_TRUE( implicitSettingsPlan.outputVerificationExecutionContractReady );
     ASSERT_TRUE( implicitSettingsPlan.preflightReady );
     ASSERT_FALSE( implicitSettingsPlan.runnable );
     ASSERT_EQ( 1920, implicitSettingsPlan.ffmpegFramePlan.outputWidth );
@@ -1325,6 +1345,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionContractReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_EQ( std::string("rendered resize dimensions invalid"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
@@ -1342,6 +1363,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionContractReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_EQ( std::string("rendered source dimensions invalid"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
@@ -1389,6 +1411,7 @@ TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
     ASSERT_TRUE( plan.frameProcessingContractReady );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_TRUE( plan.ffmpegExecutionContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionContractReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
     ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
@@ -1547,6 +1570,75 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
                std::string(verificationPlan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoOutputPlan outputPlan =
+        batchRenderedVideoOutputPlanFromPaths(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            target);
+    BatchRenderedVideoOutputVerificationPlan verificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            outputPlan,
+            target);
+    BatchRenderedVideoSourceMetadata metadata =
+        batchRenderedVideoSourceMetadata(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            STRETCH_H_100,
+            STRETCH_V_100);
+    BatchRenderedVideoFfmpegFramePlan framePlan =
+        batchRenderedVideoFfmpegFramePlanFromMetadata(
+            metadata,
+            batchRenderedVideoDefaultRenderSettings(),
+            BatchRenderedVideoEncoderProfile::H264);
+    BatchRenderedVideoFfmpegCommandPlan commandPlan =
+        batchRenderedVideoFfmpegCommandPlanFromParts(
+            framePlan,
+            batchRenderedVideoFfmpegFilterPlanForCurrentBuild(),
+            batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(
+                batchRenderedVideoEncoderPresetFromTarget(target)),
+            outputPlan);
+    BatchRenderedVideoFfmpegExecutionPlan ffmpegExecutionPlan =
+        batchRenderedVideoFfmpegExecutionPlanFromCommand(commandPlan);
+
+    BatchRenderedVideoOutputVerificationExecutionPlan executionPlan =
+        batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
+            verificationPlan,
+            ffmpegExecutionPlan);
+    ASSERT_TRUE( executionPlan.contractReady );
+    ASSERT_TRUE( executionPlan.outputVerificationContractReady );
+    ASSERT_TRUE( executionPlan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( executionPlan.fileExistenceCheckOwned );
+    ASSERT_FALSE( executionPlan.nonEmptyCheckOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeExecutionOwned );
+    ASSERT_FALSE( executionPlan.codecContainerValidationOwned );
+    ASSERT_FALSE( executionPlan.frameCountValidationOwned );
+    ASSERT_FALSE( executionPlan.receiptHashValidationOwned );
+    ASSERT_FALSE( executionPlan.verificationExecutionReady );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(executionPlan.mediaProbeExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-reason=none"),
+               std::string(batchRenderedVideoOutputVerificationExecutionPlanSummary(
+                   executionPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoFfmpegExecutionPlan invalidFfmpegExecutionPlan;
+    executionPlan =
+        batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
+            verificationPlan,
+            invalidFfmpegExecutionPlan);
+    ASSERT_FALSE( executionPlan.contractReady );
+    ASSERT_TRUE( executionPlan.outputVerificationContractReady );
+    ASSERT_FALSE( executionPlan.ffmpegExecutionContractReady );
+    ASSERT_EQ( std::string("rendered ffmpeg execution contract unavailable"),
+               std::string(executionPlan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
 {
     BatchExportFormatRequest request =
@@ -1566,6 +1658,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionContractReady );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
@@ -1603,6 +1696,11 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-output-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
     BatchRenderedVideoRenderSettings invalidSettings =
@@ -1626,6 +1724,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionContractReady );
     ASSERT_FALSE( plan.renderSettings.ready );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_FALSE( plan.preflightReady );
@@ -1649,6 +1748,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionContractReady );
     ASSERT_FALSE( plan.outputReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
