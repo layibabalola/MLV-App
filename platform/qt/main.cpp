@@ -424,6 +424,12 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("Derive planned rendered-video resize height from source geometry, stretch, and --rendered-resize-width."));
     parser.addOption(renderedResizeHeightLockedOpt);
 
+    QCommandLineOption renderedFfmpegOpt(
+        QStringLiteral("rendered-ffmpeg"),
+        QStringLiteral("Planned ffmpeg executable path or command name for the future E4 runner. Fails closed before rendered export."),
+        QStringLiteral("path-or-name"));
+    parser.addOption(renderedFfmpegOpt);
+
     QCommandLineOption cdngCodecOpt(
         QStringLiteral("cdng-codec"),
         QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
@@ -473,14 +479,17 @@ static int runBatch(QCoreApplication &app)
     const bool renderedResizeHeightSet = parser.isSet(renderedResizeHeightOpt);
     const bool renderedResizeHeightLockedSet =
         parser.isSet(renderedResizeHeightLockedOpt);
+    const bool renderedFfmpegSet = parser.isSet(renderedFfmpegOpt);
     const bool renderedResizeOptionSet = renderedResizeWidthSet
                                       || renderedResizeHeightSet
                                       || renderedResizeHeightLockedSet;
     const bool renderedOptionSet = renderedCodecSet
                                 || renderedContainerSet
-                                || renderedResizeOptionSet;
+                                || renderedResizeOptionSet
+                                || renderedFfmpegSet;
     BatchRenderedVideoRenderSettings renderedSettings =
         batchRenderedVideoDefaultRenderSettings();
+    QString renderedFfmpegExecutable;
     if( renderedOptionSet
      && parser.isSet(exportFormatOpt)
      && exportRequest.format == BatchExportFormat::Cdng )
@@ -574,6 +583,17 @@ static int runBatch(QCoreApplication &app)
             return 2;
         }
     }
+    if( renderedFfmpegSet )
+    {
+        renderedFfmpegExecutable = parser.value(renderedFfmpegOpt).trimmed();
+        if( renderedFfmpegExecutable.isEmpty() )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-ffmpeg must not be empty.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
     const BatchExportFormat exportFormat =
         exportRequest.format;
     if( exportFormat == BatchExportFormat::Unknown )
@@ -585,12 +605,16 @@ static int runBatch(QCoreApplication &app)
     }
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
+        const BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan =
+            batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
+                renderedFfmpegExecutable);
         const BatchRenderedVideoJobPlan renderedPlan =
             batchRenderedVideoJobPlanFromRequest(
                 inputPath,
                 outputPath,
                 exportRequest,
-                renderedSettings);
+                renderedSettings,
+                ffmpegBinaryPlan);
         if( !renderedPlan.requestValid )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
@@ -671,6 +695,7 @@ static int runBatch(QCoreApplication &app)
     BatchContext::setCdngCodecOffset(cdngCodecOffset);
     BatchContext::setExportFormatRequest(exportRequest);
     BatchContext::setRenderedVideoRenderSettings(renderedSettings);
+    BatchContext::setRenderedVideoFfmpegExecutable(renderedFfmpegExecutable);
 
     int exitCode = BatchRunner::run(inputPath, outputPath);
     BatchLogger::shutdown();

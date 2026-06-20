@@ -10,6 +10,7 @@ uint32_t BatchContext::s_maxFrames = 0;
 int BatchContext::s_cdngCodecOffset = 0;
 BatchExportFormatRequest BatchContext::s_exportFormatRequest;
 BatchRenderedVideoRenderSettings BatchContext::s_renderedVideoRenderSettings;
+QString BatchContext::s_renderedVideoFfmpegExecutable;
 QString BatchContext::s_logPath;
 QString BatchContext::s_receiptPath;
 
@@ -59,4 +60,14 @@ void BatchContext::setRenderedVideoRenderSettings(
 BatchRenderedVideoRenderSettings BatchContext::renderedVideoRenderSettings()
 {
     return s_renderedVideoRenderSettings;
+}
+
+void BatchContext::setRenderedVideoFfmpegExecutable(const QString &executable)
+{
+    s_renderedVideoFfmpegExecutable = executable.trimmed();
+}
+
+QString BatchContext::renderedVideoFfmpegExecutable()
+{
+    return s_renderedVideoFfmpegExecutable;
 }

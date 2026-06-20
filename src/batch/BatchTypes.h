@@ -1165,6 +1165,8 @@ batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
     plan.requestedExecutable = requested.isEmpty()
         ? QStringLiteral("ffmpeg")
         : requested;
+    if( !requested.isEmpty() && requested != QStringLiteral("ffmpeg") )
+        plan.source = QStringLiteral("requested-executable");
     plan.resolvedExecutable = plan.requestedExecutable;
     plan.commandExecutableReady = !plan.resolvedExecutable.isEmpty();
     if( !plan.commandExecutableReady )

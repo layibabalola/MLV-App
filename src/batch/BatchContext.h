@@ -46,6 +46,9 @@ public:
         const BatchRenderedVideoRenderSettings &settings);
     static BatchRenderedVideoRenderSettings renderedVideoRenderSettings();
 
+    static void setRenderedVideoFfmpegExecutable(const QString &executable);
+    static QString renderedVideoFfmpegExecutable();
+
 private:
     BatchContext() = delete; /* Pure static — no instances */
 
@@ -58,6 +61,7 @@ private:
     static int s_cdngCodecOffset;
     static BatchExportFormatRequest s_exportFormatRequest;
     static BatchRenderedVideoRenderSettings s_renderedVideoRenderSettings;
+    static QString s_renderedVideoFfmpegExecutable;
     static QString s_logPath;
     static QString s_receiptPath;
 };

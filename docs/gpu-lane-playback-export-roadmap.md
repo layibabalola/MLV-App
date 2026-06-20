@@ -1135,6 +1135,8 @@ _Current E4 implementation note (2026-06-20 output-verification contract slice):
 
 _Current E4 implementation note (2026-06-20 audio-contract slice): the central job plan now carries a `BatchRenderedVideoFfmpegAudioPlan` for the future rendered ffmpeg command. The current contract is deliberately video-only (`-an`) and reports source-audio discovery, extraction, ffmpeg audio input, muxing, and sync ownership as false while `runner-audio-mux-ready=false` remains a blocking runner prerequisite. This is audio proof-boundary scaffolding only: it does not discover source audio, extract audio, mux audio, validate sync, execute ffmpeg, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 ffmpeg override slice): the batch CLI now accepts a plan-only `--rendered-ffmpeg <path-or-name>` option and stores the trimmed request in `BatchContext`. Static rendered-plan validation preserves the requested executable, while the runner uses it for the existing ffmpeg discovery/reporting preflight so failure logs can distinguish the future command's requested binary from the default `ffmpeg` name. This remains fail-closed scaffolding: the option does not execute ffmpeg, create output directories, process frames, mux audio, verify media, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the

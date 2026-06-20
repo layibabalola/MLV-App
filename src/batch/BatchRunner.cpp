@@ -54,11 +54,14 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         BatchContext::exportFormatRequest();
     const BatchRenderedVideoRenderSettings renderSettings =
         BatchContext::renderedVideoRenderSettings();
+    const QString requestedFfmpegExecutable =
+        BatchContext::renderedVideoFfmpegExecutable();
     const bool renderedVideoRequested =
         exportRequest.format == BatchExportFormat::RenderedVideo;
     const BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan =
         renderedVideoRequested
-            ? batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment()
+            ? batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment(
+                requestedFfmpegExecutable)
             : BatchRenderedVideoFfmpegBinaryPlan();
     if( exportRequest.format == BatchExportFormat::RenderedVideo )
     {
