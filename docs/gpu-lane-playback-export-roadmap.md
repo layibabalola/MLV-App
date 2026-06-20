@@ -133,10 +133,13 @@ now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
 gate into one host-local smoke. It checks the release exe, deployed CUDA backend,
 and CUDA runtime, records `nvidia-smi`, runs the forced AMaZE/subset no-readback
 playback proof, and runs candidate GPU CDNG export against CPU baseline DNG
-hashes for the requested codecs. This is the preferred Dell laptop proof
-entrypoint; a passing UltraMagnus packet still proves RTX 4090 only, and a
-passing Dell packet is required before claiming realtime CUDA support on that
-machine.
+hashes for the requested codecs. The wrapper now also sets the Windows per-app
+high-performance GPU preference for `MLVApp.exe` unless disabled and searches
+the usual Windows NVSMI locations when `nvidia-smi.exe` is not on `PATH`, so the
+same entrypoint is suitable for the supplied hybrid Dell RTX 3060 Laptop target.
+This is the preferred Dell laptop proof entrypoint; a passing UltraMagnus packet
+still proves RTX 4090 only, and a passing Dell packet is required before
+claiming realtime CUDA support on that machine.
 
 Update 2026-06-20 ASAP DNG export runner:
 `tools/profiling/run-release-cuda-dng-export.ps1` now provides a direct

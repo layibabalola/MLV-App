@@ -17,6 +17,7 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [string]$GpuExportBackend = "",
     [bool]$TrustedGpuExport = $true,
+    [switch]$NoHighPerformancePreference,
     [switch]$SkipPlayback,
     [switch]$SkipCdng,
     [switch]$DryRun
@@ -96,6 +97,31 @@ function Get-FileArtifact {
     }
 }
 
+function Get-GpuPreferenceValue {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    if (!(Test-Path -LiteralPath $prefKey)) {
+        return $null
+    }
+    $item = Get-ItemProperty -LiteralPath $prefKey -Name $Executable -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        return $null
+    }
+    return [string]$item.$Executable
+}
+
+function Set-GpuPreferenceHighPerformance {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    New-Item -Path $prefKey -Force | Out-Null
+    New-ItemProperty `
+        -Path $prefKey `
+        -Name $Executable `
+        -Value "GpuPreference=2;" `
+        -PropertyType String `
+        -Force | Out-Null
+}
+
 function Normalize-CdngCodecs {
     param([AllowNull()][string[]]$Values)
 
@@ -138,19 +164,54 @@ function Invoke-ChildPowerShell {
     }
 }
 
+function Resolve-NvidiaSmiCommand {
+    $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        "C:\Windows\System32\nvidia-smi.exe",
+        (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe"),
+        (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+    )
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+            (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    $null
+}
+
 function Get-NvidiaSmiRows {
+    $cmd = Resolve-NvidiaSmiCommand
+    if (-not $cmd) {
+        return [pscustomobject]@{
+            ok = $false
+            found = $false
+            path = $null
+            rows = @()
+            error = "nvidia-smi not found"
+        }
+    }
+
     try {
-        $rows = @(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 |
+        $rows = @(& $cmd --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 |
             ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) {
             return [pscustomobject]@{
                 ok = $false
+                found = $true
+                path = $cmd
                 rows = $rows
                 error = "nvidia-smi exited with code $LASTEXITCODE."
             }
         }
         return [pscustomobject]@{
             ok = ($rows.Count -gt 0)
+            found = $true
+            path = $cmd
             rows = $rows
             error = if ($rows.Count -gt 0) { $null } else { "nvidia-smi returned no GPU rows." }
         }
@@ -158,6 +219,8 @@ function Get-NvidiaSmiRows {
     catch {
         [pscustomobject]@{
             ok = $false
+            found = $true
+            path = $cmd
             rows = @()
             error = $_.Exception.Message
         }
@@ -329,7 +392,13 @@ New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 $failures = [System.Collections.Generic.List[string]]::new()
 $warnings = [System.Collections.Generic.List[string]]::new()
 $nvidia = if ($DryRun) {
-    [pscustomobject]@{ ok = $null; rows = @(); error = "dry run: nvidia-smi not executed" }
+    [pscustomobject]@{
+        ok = $null
+        found = $null
+        path = $null
+        rows = @()
+        error = "dry run: nvidia-smi not executed"
+    }
 }
 else {
     Get-NvidiaSmiRows
@@ -346,6 +415,21 @@ $artifacts = [pscustomobject]@{
 foreach ($artifactName in @("exe", "backend", "cudart")) {
     if (-not [bool]$artifacts.$artifactName.exists) {
         Add-Failure $failures "Missing release artifact '$artifactName': $($artifacts.$artifactName.path)"
+    }
+}
+
+$gpuPreferenceBefore = $null
+$gpuPreferenceAfter = $null
+$expectedGpuPreference = "GpuPreference=2;"
+if ([bool]$artifacts.exe.exists) {
+    $gpuPreferenceBefore = Get-GpuPreferenceValue -Executable $artifacts.exe.path
+    $gpuPreferenceAfter = $gpuPreferenceBefore
+    if (!$DryRun -and !$NoHighPerformancePreference) {
+        Set-GpuPreferenceHighPerformance -Executable $artifacts.exe.path
+        $gpuPreferenceAfter = Get-GpuPreferenceValue -Executable $artifacts.exe.path
+        if ($gpuPreferenceAfter -ne $expectedGpuPreference) {
+            Add-Failure $failures "Windows per-app GPU preference for '$($artifacts.exe.path)' was '$gpuPreferenceAfter'; expected '$expectedGpuPreference'."
+        }
     }
 }
 
@@ -479,6 +563,13 @@ $summary = [pscustomobject]@{
         name = $env:COMPUTERNAME
         requiredGpuNamePattern = $RequiredGpuNamePattern
         nvidiaSmi = $nvidia
+        gpuPreference = [pscustomobject]@{
+            attemptedHighPerformance = [bool](!$NoHighPerformancePreference)
+            mutated = [bool](!$DryRun -and !$NoHighPerformancePreference -and [bool]$artifacts.exe.exists)
+            before = $gpuPreferenceBefore
+            after = $gpuPreferenceAfter
+            expected = $expectedGpuPreference
+        }
     }
     artifacts = $artifacts
     inputs = [pscustomobject]@{
