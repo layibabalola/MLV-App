@@ -276,6 +276,26 @@ return-packet import, expected artifacts, Dell hybrid-GPU proof requirements,
 and the same non-claim boundaries. This makes the copied kit self-describing on
 the NVIDIA host without changing the hardware proof gate.
 
+Update 2026-06-20 per-machine perf telemetry: playback/export telemetry now
+emits a shared `machine-fingerprint.v1` block with build SHA, GPU, CPU, RAM,
+and OS identity so Dell RTX 3060 Laptop and UltraMagnus RTX 4090 results can be
+compared only when their provenance is visible. Playback profile frames carry
+canonical `playback_pipeline` tokens, fallback reasons, first-class stage timing
+fields, and a bottleneck/suggested-optimization rollup; export profiles carry
+the same fingerprint and bottleneck rollup. The opt-in field log
+(`mlvapp.perf-field-log.v1`) appends compact playback/export summaries for
+normal dogfooding, and the GUI exposes that through
+`Playback -> Performance Profiling...` rather than requiring users to set env
+vars by hand. `tools/profiling/compare-machine-perf.ps1` now accepts playback
+profile JSON, GUI field-log JSONL, and dogfood proof `summary.json` files, then
+prints side-by-side presented FPS, no-readback percentage, fallback percentage,
+fallback count, bottleneck, and suggested-optimization rows. This is still a
+measurement surface only: Dell/UltraMagnus support and speed claims require
+real same-clip host packets with fallback/no-readback/DNG hash/timing evidence.
+The dogfood kit README advertises both the GUI profiling path and the
+cross-machine comparator so returned proof packets and ad-hoc interactive
+field logs can be reviewed with the same table.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive

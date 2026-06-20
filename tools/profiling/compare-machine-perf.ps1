@@ -76,6 +76,86 @@ function Get-TotalPipelineFrames {
     $total
 }
 
+function Convert-ToNullableDouble {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+
+function Convert-ToNullableInt64 {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $parsed = 0L
+    if ([long]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Integer,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+
+function Get-MachineLabel {
+    param([object]$Fingerprint)
+
+    if ($Fingerprint.gpu_name) {
+        return [string]$Fingerprint.gpu_name
+    }
+    [string]$Fingerprint.cpu_model
+}
+
+function Get-ClipPresentedFrames {
+    param([object[]]$Clips)
+
+    $total = 0L
+    foreach ($clip in @($Clips)) {
+        $value = Convert-ToNullableInt64 $clip.presentedFrames
+        if ($null -ne $value) {
+            $total += $value
+        }
+    }
+    $total
+}
+
+function Get-ProofSummarySuggestion {
+    param([object]$Record)
+
+    $playback = $Record.proof.playback
+    $playbackAb = $Record.proof.playbackAb
+    if ($null -eq $playback) {
+        return "run_playback_no_readback_proof"
+    }
+    if ((Convert-ToNullableInt64 $playback.totalFallbackFrames) -gt 0) {
+        return "fix_playback_fallback_reason"
+    }
+    if ((Convert-ToNullableInt64 $playback.totalGpuTextureNoReadbackFrames) -le 0) {
+        return "enable_gpu_texture_no_readback_or_fix_adapter"
+    }
+    if ($null -eq $playbackAb -or $null -eq $playbackAb.compare) {
+        return "run_playback_ab_speed_probe"
+    }
+    $fpsDelta = Convert-ToNullableDouble $playbackAb.compare.presentedFps.delta
+    if ($null -ne $fpsDelta -and $fpsDelta -lt 0) {
+        return "optimize_playback_cuda_candidate"
+    }
+    return "quote_with_host_clip_boundaries"
+}
+
 function New-ProfileRow {
     param(
         [object]$Record,
@@ -100,7 +180,7 @@ function New-ProfileRow {
     $presentedFps = if ($avgCadenceMs -gt 0.000001) { 1000.0 / $avgCadenceMs } else { $null }
 
     [pscustomobject]@{
-        machine = if ($Record.machineFingerprint.gpu_name) { $Record.machineFingerprint.gpu_name } else { $Record.machineFingerprint.cpu_model }
+        machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
         presented_fps = if ($null -ne $presentedFps) { [math]::Round($presentedFps, 3) } else { $null }
         no_readback_pct = if ($total -gt 0) { [math]::Round(($noReadback * 100.0) / $total, 3) } else { $null }
@@ -129,7 +209,7 @@ function New-FieldLogRow {
     $total = Get-TotalPipelineFrames -Counts $Record.pipeline_counts
     $fallback = [int]$Record.fallback_count
     [pscustomobject]@{
-        machine = if ($Record.machineFingerprint.gpu_name) { $Record.machineFingerprint.gpu_name } else { $Record.machineFingerprint.cpu_model }
+        machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
         presented_fps = if ($null -ne $Record.presented_fps) { [math]::Round([double]$Record.presented_fps, 3) } else { $null }
         no_readback_pct = if ($null -ne $Record.no_readback_percent) { [math]::Round([double]$Record.no_readback_percent, 3) } else { $null }
@@ -137,6 +217,45 @@ function New-FieldLogRow {
         fallback_count = $fallback
         dominant_bottleneck = $Record.bottleneck.limiting_stage
         suggested_optimization = $Record.suggested_optimization
+        source = $Source
+    }
+}
+
+function New-LocalProofSummaryRow {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    if ([string]$Record.schema -ne "mlvapp-local-cuda-playback-dng-smoke.v1") {
+        throw "Unexpected local proof summary schema in ${Source}: $($Record.schema)"
+    }
+    Assert-MachineFingerprint -Fingerprint $Record.machineFingerprint -Source $Source
+
+    $playback = $Record.proof.playback
+    $playbackAb = $Record.proof.playbackAb
+    $clips = if ($playback) { @($playback.clips) } else { @() }
+    $presentedFrames = Get-ClipPresentedFrames -Clips $clips
+    $noReadback = if ($playback) {
+        Convert-ToNullableInt64 $playback.totalGpuTextureNoReadbackFrames
+    } else { $null }
+    $fallback = if ($playback) {
+        Convert-ToNullableInt64 $playback.totalFallbackFrames
+    } else { $null }
+    $candidatePresentedFps = if ($playbackAb -and $playbackAb.compare) {
+        Convert-ToNullableDouble $playbackAb.compare.presentedFps.candidate
+    } else { $null }
+
+    [pscustomobject]@{
+        machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
+        build_sha = $Record.machineFingerprint.build_sha
+        presented_fps = if ($null -ne $candidatePresentedFps) { [math]::Round($candidatePresentedFps, 3) } else { $null }
+        no_readback_pct = if ($presentedFrames -gt 0 -and $null -ne $noReadback) { [math]::Round(($noReadback * 100.0) / $presentedFrames, 3) } else { $null }
+        fallback_pct = if ($presentedFrames -gt 0 -and $null -ne $fallback) { [math]::Round(($fallback * 100.0) / $presentedFrames, 3) } else { $null }
+        fallback_count = if ($null -ne $fallback) { $fallback } else { $null }
+        dominant_bottleneck = "unknown"
+        suggested_optimization = Get-ProofSummarySuggestion -Record $Record
+        build_status = $Record.status
         source = $Source
     }
 }
@@ -150,6 +269,9 @@ foreach ($path in $InputPath) {
         }
         elseif ($schema -eq "mlvapp.perf-field-log.v1") {
             $rows += New-FieldLogRow -Record $record.json -Source $record.source
+        }
+        elseif ($schema -eq "mlvapp-local-cuda-playback-dng-smoke.v1") {
+            $rows += New-LocalProofSummaryRow -Record $record.json -Source $record.source
         }
         else {
             throw "Unsupported perf input schema in $($record.source): $schema"

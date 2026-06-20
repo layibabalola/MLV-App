@@ -151,7 +151,19 @@ function Write-DogfoodReadme {
     [void]$lines.Add("- Launch only: ``$($commands.launchOnly)``")
     [void]$lines.Add("- DNG trial only: ``$($commands.dngOnly)``")
     [void]$lines.Add("- Read an existing summary: ``$($commands.summaryOnly)``")
+    [void]$lines.Add("- Compare machine perf JSON/profile outputs: ``$($commands.compareMachinePerf)``")
     [void]$lines.Add("- Repackage a proof run: ``$($commands.proofPacket)``")
+    [void]$lines.Add("")
+    [void]$lines.Add("## GUI Performance Profiling")
+    [void]$lines.Add("For normal interactive dogfooding, launch `platform\qt\build-release\release\MLVApp.exe`, then use `Playback -> Performance Profiling...` and enable `Record performance summaries`.")
+    [void]$lines.Add("This writes compact playback/export JSONL summaries under the app logs folder; use the dialog's `Open Logs Folder` button to find them.")
+    [void]$lines.Add("Compare Dell and UltraMagnus playback/profile/field-log/proof-summary JSON with:")
+    [void]$lines.Add("")
+    [void]$lines.Add('```powershell')
+    [void]$lines.Add([string]$commands.compareMachinePerf)
+    [void]$lines.Add('```')
+    [void]$lines.Add("")
+    [void]$lines.Add("This comparison is measurement evidence only. Keep host, clip, settings, release hash, fallback count, and no-readback percentage attached to any speed claim.")
     [void]$lines.Add("")
     [void]$lines.Add("## Return Packet Import")
     [void]$lines.Add('Copy the generated `mlvapp-local-cuda-proof-*.zip` back to the repo machine and run:')
@@ -175,6 +187,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add('- `.claude-state\profiling\*-cuda-dogfood\proof\summary.json`: raw local proof summary.')
     [void]$lines.Add('- `.claude-state\profiling\*-cuda-dogfood\proof\proof-report.md`: readable proof report.')
     [void]$lines.Add('- `.claude-state\profiling\*-cuda-dogfood\proof\proof-report.json`: machine-readable status, diagnostics, and action plan.')
+    [void]$lines.Add('- AppData logs `mlvapp-perf-field-YYYYMMDD.jsonl`: optional GUI-enabled field log for interactive playback/export sessions.')
     [void]$lines.Add('- `mlvapp-local-cuda-proof-<host>-<stamp>.zip`: return packet for import.')
 
     $dir = Split-Path -Parent $Path
@@ -361,6 +374,7 @@ $manifest = [ordered]@{
         summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
         proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         importProofPacket = ".\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"
+        compareMachinePerf = ".\tools\profiling\compare-machine-perf.ps1 <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-profile-or-jsonl>"
         directProof = ".\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input <clip.mlv>"
         directSummary = ".\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     }
