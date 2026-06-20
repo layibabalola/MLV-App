@@ -588,6 +588,62 @@ TEST(BatchExportFormat, ResolvesRenderedVideoTargets)
     ASSERT_TRUE( target.extension.isEmpty() );
 }
 
+TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoEncoderPreset preset =
+        batchRenderedVideoEncoderPresetFromRequest(request);
+    ASSERT_TRUE( preset.ready );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderProfile::H264),
+               static_cast<int>(preset.profile) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H264HighMp4),
+               static_cast<int>(preset.option) );
+    ASSERT_EQ( std::string(".mp4"),
+               std::string(preset.extension.toUtf8().constData()) );
+    ASSERT_EQ( std::string("encoder-profile=h264 encoder-option=ffmpeg-mp4-high encoder-extension=.mp4 encoder-ready=true"),
+               std::string(batchRenderedVideoEncoderPresetSummary(request).toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mkv"));
+    preset = batchRenderedVideoEncoderPresetFromRequest(request);
+    ASSERT_TRUE( preset.ready );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderProfile::H264),
+               static_cast<int>(preset.profile) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H264HighMkv),
+               static_cast<int>(preset.option) );
+    ASSERT_EQ( std::string(".mkv"),
+               std::string(preset.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("h265"));
+    preset = batchRenderedVideoEncoderPresetFromRequest(request);
+    ASSERT_TRUE( preset.ready );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderProfile::H265_8),
+               static_cast<int>(preset.profile) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H265HighMp4),
+               static_cast<int>(preset.option) );
+    ASSERT_EQ( std::string(".mp4"),
+               std::string(preset.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mov"));
+    preset = batchRenderedVideoEncoderPresetFromRequest(request);
+    ASSERT_TRUE( preset.ready );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderProfile::ProRes422HQ),
+               static_cast<int>(preset.profile) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::ProResFfmpegKostya),
+               static_cast<int>(preset.option) );
+    ASSERT_EQ( std::string(".mov"),
+               std::string(preset.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    preset = batchRenderedVideoEncoderPresetFromRequest(request);
+    ASSERT_FALSE( preset.ready );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderProfile::Unspecified),
+               static_cast<int>(preset.profile) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::Unspecified),
+               static_cast<int>(preset.option) );
+    ASSERT_TRUE( preset.extension.isEmpty() );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

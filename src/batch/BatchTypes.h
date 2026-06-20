@@ -45,6 +45,36 @@ struct BatchRenderedVideoTarget
     bool complete = false;
 };
 
+enum class BatchRenderedVideoEncoderProfile : int
+{
+    Unspecified = 0,
+    H264 = 1,
+    H265_8 = 2,
+    ProRes422HQ = 3
+};
+
+enum class BatchRenderedVideoEncoderOption : int
+{
+    Unspecified = 0,
+    H264HighMov = 1,
+    H264HighMp4 = 2,
+    H264HighMkv = 3,
+    H265HighMov = 4,
+    H265HighMp4 = 5,
+    H265HighMkv = 6,
+    ProResFfmpegKostya = 7
+};
+
+struct BatchRenderedVideoEncoderPreset
+{
+    BatchRenderedVideoEncoderProfile profile =
+        BatchRenderedVideoEncoderProfile::Unspecified;
+    BatchRenderedVideoEncoderOption option =
+        BatchRenderedVideoEncoderOption::Unspecified;
+    QString extension;
+    bool ready = false;
+};
+
 inline BatchRenderedVideoCodec batchRenderedVideoCodecFromString(const QString & value, bool * ok = nullptr)
 {
     const QString normalized = value.trimmed().toLower();
@@ -254,6 +284,48 @@ inline const char * batchRenderedVideoContainerExtension(BatchRenderedVideoConta
     return "";
 }
 
+inline const char * batchRenderedVideoEncoderProfileName(
+    BatchRenderedVideoEncoderProfile profile)
+{
+    switch( profile )
+    {
+        case BatchRenderedVideoEncoderProfile::Unspecified:
+            return "unspecified";
+        case BatchRenderedVideoEncoderProfile::H264:
+            return "h264";
+        case BatchRenderedVideoEncoderProfile::H265_8:
+            return "h265-8";
+        case BatchRenderedVideoEncoderProfile::ProRes422HQ:
+            return "prores422hq";
+    }
+    return "unspecified";
+}
+
+inline const char * batchRenderedVideoEncoderOptionName(
+    BatchRenderedVideoEncoderOption option)
+{
+    switch( option )
+    {
+        case BatchRenderedVideoEncoderOption::Unspecified:
+            return "unspecified";
+        case BatchRenderedVideoEncoderOption::H264HighMov:
+            return "ffmpeg-mov-high";
+        case BatchRenderedVideoEncoderOption::H264HighMp4:
+            return "ffmpeg-mp4-high";
+        case BatchRenderedVideoEncoderOption::H264HighMkv:
+            return "ffmpeg-mkv-high";
+        case BatchRenderedVideoEncoderOption::H265HighMov:
+            return "ffmpeg-mov-high";
+        case BatchRenderedVideoEncoderOption::H265HighMp4:
+            return "ffmpeg-mp4-high";
+        case BatchRenderedVideoEncoderOption::H265HighMkv:
+            return "ffmpeg-mkv-high";
+        case BatchRenderedVideoEncoderOption::ProResFfmpegKostya:
+            return "ffmpeg-kostya";
+    }
+    return "unspecified";
+}
+
 inline QString batchExportFormatRequestSummary(const BatchExportFormatRequest & request)
 {
     return QStringLiteral("request=%1 codec=%2 container=%3")
@@ -341,6 +413,78 @@ inline BatchRenderedVideoTarget batchRenderedVideoTargetFromRequest(
     return target;
 }
 
+inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromTarget(
+    const BatchRenderedVideoTarget & target)
+{
+    BatchRenderedVideoEncoderPreset preset;
+    if( !target.complete )
+        return preset;
+
+    preset.extension = target.extension;
+    switch( target.codec )
+    {
+        case BatchRenderedVideoCodec::H264:
+            preset.profile = BatchRenderedVideoEncoderProfile::H264;
+            switch( target.container )
+            {
+                case BatchRenderedVideoContainer::Mov:
+                    preset.option = BatchRenderedVideoEncoderOption::H264HighMov;
+                    break;
+                case BatchRenderedVideoContainer::Mp4:
+                    preset.option = BatchRenderedVideoEncoderOption::H264HighMp4;
+                    break;
+                case BatchRenderedVideoContainer::Mkv:
+                    preset.option = BatchRenderedVideoEncoderOption::H264HighMkv;
+                    break;
+                case BatchRenderedVideoContainer::Unspecified:
+                    break;
+            }
+            break;
+        case BatchRenderedVideoCodec::H265:
+            preset.profile = BatchRenderedVideoEncoderProfile::H265_8;
+            switch( target.container )
+            {
+                case BatchRenderedVideoContainer::Mov:
+                    preset.option = BatchRenderedVideoEncoderOption::H265HighMov;
+                    break;
+                case BatchRenderedVideoContainer::Mp4:
+                    preset.option = BatchRenderedVideoEncoderOption::H265HighMp4;
+                    break;
+                case BatchRenderedVideoContainer::Mkv:
+                    preset.option = BatchRenderedVideoEncoderOption::H265HighMkv;
+                    break;
+                case BatchRenderedVideoContainer::Unspecified:
+                    break;
+            }
+            break;
+        case BatchRenderedVideoCodec::ProRes:
+            if( target.container == BatchRenderedVideoContainer::Mov )
+            {
+                preset.profile = BatchRenderedVideoEncoderProfile::ProRes422HQ;
+                preset.option =
+                    BatchRenderedVideoEncoderOption::ProResFfmpegKostya;
+            }
+            break;
+        case BatchRenderedVideoCodec::Unspecified:
+            break;
+    }
+
+    preset.ready =
+        preset.profile != BatchRenderedVideoEncoderProfile::Unspecified
+     && preset.option != BatchRenderedVideoEncoderOption::Unspecified
+     && !preset.extension.isEmpty();
+    if( !preset.ready )
+        preset.extension.clear();
+    return preset;
+}
+
+inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromRequest(
+    const BatchExportFormatRequest & request)
+{
+    return batchRenderedVideoEncoderPresetFromTarget(
+        batchRenderedVideoTargetFromRequest(request));
+}
+
 inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & request)
 {
     const BatchRenderedVideoTarget target =
@@ -350,6 +494,18 @@ inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & 
         .arg(batchRenderedVideoContainerName(target.container))
         .arg(target.extension.isEmpty() ? QStringLiteral("unspecified") : target.extension)
         .arg(target.complete ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
+inline QString batchRenderedVideoEncoderPresetSummary(
+    const BatchExportFormatRequest & request)
+{
+    const BatchRenderedVideoEncoderPreset preset =
+        batchRenderedVideoEncoderPresetFromRequest(request);
+    return QStringLiteral("encoder-profile=%1 encoder-option=%2 encoder-extension=%3 encoder-ready=%4")
+        .arg(batchRenderedVideoEncoderProfileName(preset.profile))
+        .arg(batchRenderedVideoEncoderOptionName(preset.option))
+        .arg(preset.extension.isEmpty() ? QStringLiteral("unspecified") : preset.extension)
+        .arg(preset.ready ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
 /* Processing profile for batch export.
