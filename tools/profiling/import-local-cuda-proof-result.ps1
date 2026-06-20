@@ -206,6 +206,7 @@ if ($StrictQuotable -and $proofReportStatus -ne "QUOTABLE_PASS") {
 }
 $proofDiagnostics = if ($proofReport) { @($proofReport.diagnostics) } else { @() }
 $proofDiagnosticSummary = if ($proofReport) { $proofReport.diagnosticSummary } else { $null }
+$proofActionPlan = if ($proofReport) { $proofReport.actionPlan } else { $null }
 
 $status = if ($failures.Count -eq 0) { "imported" } else { "failed" }
 $importSummaryPath = Join-Path $extractRoot "import-summary.json"
@@ -236,6 +237,7 @@ $result = [ordered]@{
                     -not [string]::IsNullOrWhiteSpace($_)
                 } | Select-Object -Unique)
             diagnostics = $proofDiagnostics
+            actionPlan = $proofActionPlan
         }
     } else { $null }
     summary = if ($summary) {

@@ -192,6 +192,212 @@ function Get-DiagnosticSummary {
     }
 }
 
+function Test-DiagnosticCode {
+    param(
+        [object[]]$Diagnostics,
+        [string[]]$Codes
+    )
+    @($Diagnostics | Where-Object { [string]$_.code -in $Codes }).Count -gt 0
+}
+
+function New-ActionStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$Id,
+        [int]$Priority,
+        [Parameter(Mandatory = $true)][string]$Area,
+        [string[]]$ReasonCodes = @(),
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$Detail,
+        [string[]]$Commands = @(),
+        [string]$ProofBoundary = ""
+    )
+    [pscustomobject]@{
+        id = $Id
+        priority = $Priority
+        area = $Area
+        reasonCodes = @($ReasonCodes)
+        title = $Title
+        detail = $Detail
+        commands = @($Commands | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        proofBoundary = $ProofBoundary
+    }
+}
+
+function Add-ActionStep {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Steps,
+        [Parameter(Mandatory = $true)]$Step
+    )
+    if (@($Steps | Where-Object { [string]$_.id -eq [string]$Step.id }).Count -eq 0) {
+        [void]$Steps.Add($Step)
+    }
+}
+
+function New-ActionPlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$Status,
+        [object[]]$Diagnostics,
+        [AllowNull()]$DiagnosticSummary,
+        [AllowNull()]$Summary
+    )
+
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $clip = [string](Get-Field $Summary.inputs "clipPath")
+    if ([string]::IsNullOrWhiteSpace($clip)) {
+        $clip = "<Dual ISO .MLV>"
+    }
+    $directProofCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input '$clip'"
+    $kitProofCommand = ".\RUN-CUDA-DOGFOOD.ps1 -Input '$clip'"
+    $directSummaryCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
+    $importCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"
+
+    if ($Status -eq "QUOTABLE_PASS") {
+        Add-ActionStep -Steps $steps -Step (New-ActionStep `
+            -Id "QUOTE_WITH_BOUNDARIES" `
+            -Priority 10 `
+            -Area "claim-boundary" `
+            -Title "Review and quote only host-scoped support/speed claims." `
+            -Detail "The packet passed the fail-closed gate. Quote only the host, clip, receipt, codec set, max-frame count, release/backend hashes, and run order captured in this report." `
+            -Commands @($directSummaryCommand, $importCommand) `
+            -ProofBoundary "A QUOTABLE_PASS packet is still scoped evidence, not a universal GPU support claim.")
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "QUOTE_PLAYBACK_SUPPORT_NOT_SPEEDUP" `
+                -Priority 20 `
+                -Area "playback-speed" `
+                -ReasonCodes @("PLAYBACK_PRESENTED_FPS_NOT_IMPROVED") `
+                -Title "Treat playback as support/correctness evidence, not a speedup." `
+                -Detail "The packet can prove scoped playback support while also showing no presented-FPS improvement. Quote the support boundary and the measured delta, not a speedup." `
+                -Commands @($directSummaryCommand) `
+                -ProofBoundary "Clean playback proof without positive FPS delta is not a performance win.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_EXPORT_ELAPSED_REGRESSED", "DNG_COMPRESSION_DOMINATES_AFTER_GPU_GAIN")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "USE_PACKET_FOR_E3_THROUGHPUT_WORK" `
+                -Priority 30 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_EXPORT_ELAPSED_REGRESSED", "DNG_COMPRESSION_DOMINATES_AFTER_GPU_GAIN") `
+                -Title "Use the packet as E3 throughput input, not a speedup claim." `
+                -Detail "If Dual ISO GPU work improved but overall/lossless elapsed time did not, the next implementation target is compression/writer overlap rather than more recon tuning." `
+                -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <baseline-matrix.json> -Candidate <candidate-matrix.json>") `
+                -ProofBoundary "Correctness plus a wall-time regression should not be presented as a throughput win.")
+        }
+    }
+    else {
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DRY_RUN_PLAN_ONLY")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "RUN_REAL_HOST_PROOF" `
+                -Priority 10 `
+                -Area "run" `
+                -ReasonCodes @("DRY_RUN_PLAN_ONLY") `
+                -Title "Run the proof for real on the NVIDIA host." `
+                -Detail "The current packet is a dry-run plan. Run the same kit or repo command without -DryRun on Dell or UltraMagnus before making support or speed claims." `
+                -Commands @($kitProofCommand, $directProofCommand) `
+                -ProofBoundary "A dry-run packet proves script wiring only, not CUDA playback, DNG parity, or speed.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("NVIDIA_SMI_UNUSABLE")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "FIX_NVIDIA_DISCOVERY" `
+                -Priority 20 `
+                -Area "host" `
+                -ReasonCodes @("NVIDIA_SMI_UNUSABLE") `
+                -Title "Fix NVIDIA driver discovery before rerunning proof." `
+                -Detail "The proof did not see a usable NVIDIA GPU. Confirm the NVIDIA driver and nvidia-smi are visible on the target host, then rerun the local proof." `
+                -Commands @("nvidia-smi", $directProofCommand) `
+                -ProofBoundary "No NVIDIA discovery means no CUDA support or speed claim.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("PLAYBACK_GL_PROBE_INACTIVE", "GL_RENDERER_NOT_REPORTED", "GL_RENDERER_DOES_NOT_NAME_NVIDIA")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "FIX_HYBRID_GL_CUDA_SELECTION" `
+                -Priority 30 `
+                -Area "hybrid-gpu" `
+                -ReasonCodes @("PLAYBACK_GL_PROBE_INACTIVE", "GL_RENDERER_NOT_REPORTED", "GL_RENDERER_DOES_NOT_NAME_NVIDIA") `
+                -Title "Verify CUDA and OpenGL land on the intended NVIDIA adapter." `
+                -Detail "Hybrid laptops can load CUDA on the NVIDIA GPU while the viewport runs elsewhere. Keep high-performance GPU preference enabled and require GL renderer/probe evidence before trusting no-readback playback." `
+                -Commands @($directProofCommand, "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\start-release-cuda-playback.ps1 -RepoRoot . -Input '$clip'") `
+                -ProofBoundary "CUDA load alone is not no-readback playback proof on a hybrid-GPU laptop.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("PLAYBACK_CORRECTNESS_NOT_VALIDATED", "PLAYBACK_NO_GPU_TEXTURE_NR_FRAMES", "PLAYBACK_FALLBACK_FRAMES", "PLAYBACK_GL_PARITY_MISMATCH")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "INSPECT_PLAYBACK_PROOF_CHILD" `
+                -Priority 40 `
+                -Area "playback" `
+                -ReasonCodes @("PLAYBACK_CORRECTNESS_NOT_VALIDATED", "PLAYBACK_NO_GPU_TEXTURE_NR_FRAMES", "PLAYBACK_FALLBACK_FRAMES", "PLAYBACK_GL_PARITY_MISMATCH") `
+                -Title "Inspect the playback child proof before changing defaults." `
+                -Detail "The P3 no-readback path did not produce clean correctness/no-fallback/GL parity evidence. Inspect fallback reasons, scoped receipt/settings, screenshots, and child output tails before treating FPS as meaningful." `
+                -Commands @($directSummaryCommand) `
+                -ProofBoundary "Playback FPS is not proof if pixels, fallback counts, or GL parity fail.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("PLAYBACK_AB_MISSING", "PLAYBACK_AB_STATUS_NOT_SUCCESS", "PLAYBACK_AB_COMPARE_MISSING", "PLAYBACK_AB_PROOF_FAILURE")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "RERUN_PLAYBACK_AB" `
+                -Priority 50 `
+                -Area "playback-speed" `
+                -ReasonCodes @("PLAYBACK_AB_MISSING", "PLAYBACK_AB_STATUS_NOT_SUCCESS", "PLAYBACK_AB_COMPARE_MISSING", "PLAYBACK_AB_PROOF_FAILURE") `
+                -Title "Rerun paired CPU-vs-CUDA playback A/B." `
+                -Detail "Playback speed cannot be quoted without a clean same-release CPU baseline versus CUDA candidate comparison." `
+                -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\run-release-cuda-playback-ab.ps1 -RepoRoot . -ClipPath '$clip'") `
+                -ProofBoundary "P3 correctness packets and launcher success are not playback speed evidence.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("CDNG_PROOF_MISSING", "CDNG_VERDICT_NOT_PASS", "DNG_HASH_MISSING", "DNG_HASH_NOT_PASS", "CDNG_SPEED_MISSING", "CDNG_SPEED_EMPTY", "DNG_CANDIDATE_FRAME_COUNT_ZERO", "DNG_GPU_ATTEMPT_INCOMPLETE", "DNG_GPU_REPLACEMENT_INCOMPLETE", "DNG_GPU_TRUSTED_INCOMPLETE")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "RERUN_DNG_HASH_AND_EXPORT_PROOF" `
+                -Priority 60 `
+                -Area "dng-export" `
+                -ReasonCodes @("CDNG_PROOF_MISSING", "CDNG_VERDICT_NOT_PASS", "DNG_HASH_MISSING", "DNG_HASH_NOT_PASS", "CDNG_SPEED_MISSING", "CDNG_SPEED_EMPTY", "DNG_CANDIDATE_FRAME_COUNT_ZERO", "DNG_GPU_ATTEMPT_INCOMPLETE", "DNG_GPU_REPLACEMENT_INCOMPLETE", "DNG_GPU_TRUSTED_INCOMPLETE") `
+                -Title "Rerun DNG hash/export proof before claiming CUDA DNG support." `
+                -Detail "DNG export needs CDNG PASS, DNG hash PASS, and full candidate GPU attempted/replaced coverage, plus trusted frames when trusted export is requested." `
+                -Commands @($directProofCommand, "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\run-release-cdng-export-profile-matrix.ps1 -RepoRoot . -CasesPath <cases.json> -CandidateEnableGpuExport -RequireDngHashMatch") `
+                -ProofBoundary "Export is not proven by backend load; CPU-vs-GPU DNG hashes must pass.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_EXPORT_ELAPSED_REGRESSED", "DNG_COMPRESSION_DOMINATES_AFTER_GPU_GAIN")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "USE_PACKET_FOR_E3_THROUGHPUT_WORK" `
+                -Priority 70 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_EXPORT_ELAPSED_REGRESSED", "DNG_COMPRESSION_DOMINATES_AFTER_GPU_GAIN") `
+                -Title "Use the packet as E3 throughput input, not a speedup claim." `
+                -Detail "If Dual ISO GPU work improved but overall/lossless elapsed time did not, the next implementation target is compression/writer overlap rather than more recon tuning." `
+                -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <baseline-matrix.json> -Candidate <candidate-matrix.json>") `
+                -ProofBoundary "Correctness plus a wall-time regression should not be presented as a throughput win.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("TOP_LEVEL_STATUS_NOT_SUCCESS", "TOP_LEVEL_FAILURE")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "INSPECT_TOP_LEVEL_FAILURES" `
+                -Priority 80 `
+                -Area "run" `
+                -ReasonCodes @("TOP_LEVEL_STATUS_NOT_SUCCESS", "TOP_LEVEL_FAILURE") `
+                -Title "Inspect top-level failures and child output tails." `
+                -Detail "The wrapper status or failure list was not clean. Read summary.json childProcesses output tails and fix the first failing stage." `
+                -Commands @($directSummaryCommand) `
+                -ProofBoundary "A failed wrapper status keeps all support and speed claims closed.")
+        }
+        if ($steps.Count -eq 0) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "INSPECT_DIAGNOSTIC_PACKET" `
+                -Priority 90 `
+                -Area "triage" `
+                -Title "Inspect the diagnostic packet manually." `
+                -Detail "The packet is NOT_QUOTABLE but did not match a known action-plan code. Inspect diagnostics, blockers, warnings, and child summaries before changing code." `
+                -Commands @($directSummaryCommand, $importCommand) `
+                -ProofBoundary "Unknown diagnostic shapes remain fail-closed.")
+        }
+    }
+
+    $orderedSteps = @($steps | Sort-Object Priority, Id)
+    [pscustomobject]@{
+        status = if ($Status -eq "QUOTABLE_PASS") { "claim-review" } else { "blocked-triage" }
+        primaryBlocker = if ($DiagnosticSummary) { $DiagnosticSummary.primaryBlocker } else { $null }
+        stepCount = $orderedSteps.Count
+        steps = $orderedSteps
+        proofBoundary = @(
+            "Action plans are triage guidance, not proof.",
+            "Only QUOTABLE_PASS from the same host unlocks support or speed claims.",
+            "If multiple steps are listed, address them in priority order and rerun the packet."
+        )
+    }
+}
+
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($SummaryPath)) {
     $SummaryPath = Join-Path $root ".claude-state\profiling\local-cuda-playback-dng-smoke-latest.json"
@@ -598,6 +804,11 @@ foreach ($section in @($playbackVerdict, $playbackAbVerdict, $cdngVerdict)) {
 $overallStatus = if ($overallBlockers.Count -eq 0) { "QUOTABLE_PASS" } else { "NOT_QUOTABLE" }
 $diagnosticList = @($diagnostics)
 $diagnosticSummary = Get-DiagnosticSummary -Diagnostics $diagnosticList
+$actionPlan = New-ActionPlan `
+    -Status $overallStatus `
+    -Diagnostics $diagnosticList `
+    -DiagnosticSummary $diagnosticSummary `
+    -Summary $summary
 
 $report = [pscustomobject]@{
     schema = "mlvapp-local-cuda-proof-report.v1"
@@ -622,6 +833,7 @@ $report = [pscustomobject]@{
     blockers = @($overallBlockers | Select-Object -Unique)
     diagnostics = $diagnosticList
     diagnosticSummary = $diagnosticSummary
+    actionPlan = $actionPlan
     proofBoundary = @(
         "Quote support or speed only when status is QUOTABLE_PASS and this summary was produced on the same host being claimed.",
         "Playback proof requires correctnessValidated=true, GPU Tex NR/no-readback frames, zero fallback frames, active GL parity probes, and zero GL mismatches.",
@@ -700,6 +912,24 @@ if ($diagnosticList.Count -gt 0) {
         [void]$lines.Add($line)
         foreach ($item in @($diagnostic.evidence)) {
             [void]$lines.Add("  - evidence: $item")
+        }
+    }
+}
+if ($actionPlan -and @($actionPlan.steps).Count -gt 0) {
+    [void]$lines.Add("")
+    [void]$lines.Add("## Action Plan")
+    [void]$lines.Add("- Status: $($actionPlan.status)")
+    if (-not [string]::IsNullOrWhiteSpace([string]$actionPlan.primaryBlocker)) {
+        [void]$lines.Add("- Primary blocker: $($actionPlan.primaryBlocker)")
+    }
+    foreach ($step in @($actionPlan.steps)) {
+        [void]$lines.Add("- P$($step.priority) $($step.id): $($step.title)")
+        [void]$lines.Add("  - detail: $($step.detail)")
+        foreach ($command in @($step.commands)) {
+            [void]$lines.Add("  - command: $command")
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$step.proofBoundary)) {
+            [void]$lines.Add("  - boundary: $($step.proofBoundary)")
         }
     }
 }

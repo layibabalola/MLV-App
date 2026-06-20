@@ -247,6 +247,7 @@ $manifest = [ordered]@{
         diagnosticCodes = @($proofReport.diagnostics | ForEach-Object { [string]$_.code } | Where-Object {
                 -not [string]::IsNullOrWhiteSpace($_)
             } | Select-Object -Unique)
+        actionPlan = $proofReport.actionPlan
     }
     proof = [ordered]@{
         nvidiaRows = @($summary.host.nvidiaSmi.rows)

@@ -249,6 +249,15 @@ bottlenecks. Packet manifests and import summaries carry those diagnostics
 forward so a returned `NOT_QUOTABLE` packet immediately points at the next
 implementation slice. These diagnostics are triage metadata only; they do not
 weaken the `QUOTABLE_PASS` support/speed gate.
+The follow-up action-plan slice derives ordered `actionPlan.steps` from those
+diagnostic codes and carries the plan through proof reports, packet manifests,
+and imports. A dry-run packet now points first at a real Dell/UltraMagnus proof
+run, hybrid GL/CUDA diagnostics point at adapter-selection proof, playback speed
+gaps point at the paired A/B runner, DNG hash/export gaps point at the CDNG
+matrix/hash gate, and DNG speed regressions point at E3 compression/writer
+overlap. `actionPlan` is still advisory triage only: a `NOT_QUOTABLE` packet
+stays fail-closed, and a `QUOTABLE_PASS` packet remains host/clip/hash scoped
+rather than a universal support claim.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
