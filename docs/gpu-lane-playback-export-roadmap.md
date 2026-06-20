@@ -131,6 +131,41 @@ also emits a hash-bound `igpu_recon_cuda.arch.json` sidecar from `cuobjdump`, so
 dogfood/proof kits can verify portable `sm_86`/`sm_89` coverage on machines that
 have only the NVIDIA driver installed.
 
+Update 2026-06-20 UltraMagnus CUDA/DNG proof refresh: source head
+`ce4f77cb9e83bd25abf05c542632171ac7baf51b` now has a longer scoped RTX 4090
+playback packet and a fresh CDNG export packet. The playback packet
+`.claude-state/profiling/ultramagnus-p3-texture-present/remote-packets/ultra-magnus-20260620T144939-mlvapp-p3-evidence-latest.zip`
+(Length `1406138`, SHA256
+`04E46B087B17C725B2CF9CE50525D35707EE1AD75DD078EF202F340DD47F22CA`) used
+`M16-1327.MLV`, FastProxy, 30 seconds, and 1000 ms settle against release exe
+SHA256 `007619AB21594FCB27553E08A2434A1BC0636CFFC51FDE914F4E9EE0A63CE4D1`.
+It imported with `correctnessValidated=true`, `presentedFrames=140`,
+`presented_fps=5.432`, `timeline_fps=5.509`, `gpu_texture_no_readback_frames=140`,
+`fallbackFrameCount=0`, renderer `NVIDIA GeForce RTX 4090/PCIe/SSE2`, backend
+DLL SHA256 `8F36E963E29D1909C7681BE734C4B39CF9CED572D4F3DFFAD32526D0EC71C3C4`,
+15 active GL probes, 15/15 GL parity matches, 15 distinct texture hashes, and
+0 GL mismatches. This is a scoped UltraMagnus/RTX 4090 FastProxy proof, not a
+Dell RTX 3060 Laptop claim.
+
+The matching CDNG export packet
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260620T145054-mlvapp-cdng-export-evidence-latest.zip`
+(Length `35741`, SHA256
+`46BFB6F95D1FD87301C46380CC94C15FFFD00C256496DFCAA0CCA8DADFB30747`) passed on
+`NVIDIA GeForce RTX 4090, 596.36, 24564 MiB` with source head `ce4f77cb...`,
+release SHA256 `007619AB21594FCB27553E08A2434A1BC0636CFFC51FDE914F4E9EE0A63CE4D1`,
+embedded app `build_sha=b2b953a489aa08cadb8e516c334f16435e2ba6d6`, and deployed
+backend SHA256 `C8A775BCA0E83664D533F144C8EED19B60E097094A3A2F4F24D2637C53344285`.
+With `MaxFrames=4`, `uncompressed` and `lossless` both reported PASS, candidate
+GPU export attempted/replaced/trusted 4/4 frames per codec, candidate skips 0,
+and DNG hash PASS 8/8 with 0 mismatches. Throughput classification remains
+evidence-only: uncompressed improved from 4085.458 ms to 2752.335 ms
+(`wall_clock_improved`, 32.631%) and stayed `recon-bound`; lossless improved
+from 3105.536 ms to 2852.209 ms (`wall_clock_improved_completion_lag_shift`,
+8.157%) but stayed `compress-bound`, with suggested optimization
+`review_per_run_throughput_classification_before_promotion` /
+`parallelize_or_offload_dng_compress`. This supports the scoped DNG proof path
+and E3 triage, not default export promotion.
+
 Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-playback-dng-smoke.ps1`
 now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
 gate into one host-local smoke. It checks the release exe, deployed CUDA backend,
