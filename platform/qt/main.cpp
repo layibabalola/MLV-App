@@ -22,6 +22,13 @@
 #include <QTextStream>
 #include <cstring>
 
+#ifdef Q_OS_WIN
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 /* Raw argv scan for "--batch" BEFORE QApplication is constructed.
  * QCommandLineParser needs QApplication, but we need to know the
  * mode early to skip MainWindow creation entirely in batch mode. */
