@@ -771,6 +771,32 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegFilterArguments)
                    filterPlan).toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoSourceAudioContract)
+{
+    BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+        batchRenderedVideoSourceAudioPlanForCurrentBuild(
+            QStringLiteral("C:\\clips\\M16-1327.MLV"));
+
+    ASSERT_TRUE( sourceAudioPlan.contractReady );
+    ASSERT_TRUE( sourceAudioPlan.videoOnlyFallbackReady );
+    ASSERT_FALSE( sourceAudioPlan.discoveryOwned );
+    ASSERT_FALSE( sourceAudioPlan.discoveryAttempted );
+    ASSERT_FALSE( sourceAudioPlan.sourceAudioKnown );
+    ASSERT_FALSE( sourceAudioPlan.sourceAudioPresent );
+    ASSERT_FALSE( sourceAudioPlan.extractionOwned );
+    ASSERT_FALSE( sourceAudioPlan.muxInputOwned );
+    ASSERT_FALSE( sourceAudioPlan.syncValidationOwned );
+    ASSERT_EQ( std::string("video-only-undiscovered"),
+               std::string(sourceAudioPlan.source.toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/clips/M16-1327.MLV"),
+               std::string(sourceAudioPlan.clipPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("unknown"),
+               std::string(sourceAudioPlan.audioState.toUtf8().constData()) );
+    ASSERT_EQ( std::string("source-audio-source=video-only-undiscovered source-audio-clip=C:/clips/M16-1327.MLV source-audio-state=unknown source-audio-discovery-owned=false source-audio-discovery-attempted=false source-audio-known=false source-audio-present=false source-audio-extraction-owned=false source-audio-mux-input-owned=false source-audio-sync-validation-owned=false source-audio-video-only-ready=true source-audio-contract-ready=true source-audio-reason=none"),
+               std::string(batchRenderedVideoSourceAudioPlanSummary(
+                   sourceAudioPlan).toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegAudioContract)
 {
     BatchRenderedVideoFfmpegAudioPlan audioPlan =
@@ -1076,6 +1102,9 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.metadataReady );
     ASSERT_FALSE( basePlan.ffmpegFrameReady );
     ASSERT_TRUE( basePlan.ffmpegFilterReady );
+    ASSERT_TRUE( basePlan.sourceAudioContractReady );
+    ASSERT_TRUE( basePlan.sourceAudioPlan.contractReady );
+    ASSERT_FALSE( basePlan.sourceAudioPlan.discoveryAttempted );
     ASSERT_TRUE( basePlan.ffmpegAudioContractReady );
     ASSERT_TRUE( basePlan.ffmpegAudioPlan.contractReady );
     ASSERT_FALSE( basePlan.ffmpegAudioPlan.audioMuxOwned );
@@ -1130,6 +1159,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-filter-source=gui-base-color-scale") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-source=video-only-undiscovered") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-state=unknown") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-discovery-attempted=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-known=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-video-only-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-args=-an") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
@@ -1443,6 +1478,10 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-source=video-only-undiscovered") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-discovery-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-known=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-audio-video-only-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-source-discovery-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-extraction-owned=false") != std::string::npos );

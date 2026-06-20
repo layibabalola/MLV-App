@@ -1137,6 +1137,8 @@ _Current E4 implementation note (2026-06-20 audio-contract slice): the central j
 
 _Current E4 implementation note (2026-06-20 ffmpeg override slice): the batch CLI now accepts a plan-only `--rendered-ffmpeg <path-or-name>` option and stores the trimmed request in `BatchContext`. Static rendered-plan validation preserves the requested executable, while the runner uses it for the existing ffmpeg discovery/reporting preflight so failure logs can distinguish the future command's requested binary from the default `ffmpeg` name. This remains fail-closed scaffolding: the option does not execute ffmpeg, create output directories, process frames, mux audio, verify media, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 source-audio discovery contract slice): the central rendered job plan now carries a separate `BatchRenderedVideoSourceAudioPlan` before the ffmpeg audio command contract. The current plan reports source audio as `unknown`, discovery/extraction/mux-input/sync validation as unowned, and video-only fallback as ready, which keeps the existing `-an` command shape honest without implying that source audio was inspected. This remains fail-closed scaffolding: it does not parse MLV audio blocks, extract audio, mux audio, validate sync, execute ffmpeg, verify media, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
