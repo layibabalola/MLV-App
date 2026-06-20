@@ -599,9 +599,11 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
                static_cast<int>(preset.profile) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H264HighMp4),
                static_cast<int>(preset.option) );
+    ASSERT_EQ( CODEC_H264, preset.guiCodecProfile );
+    ASSERT_EQ( CODEC_H264_H_MP4, preset.guiCodecOption );
     ASSERT_EQ( std::string(".mp4"),
                std::string(preset.extension.toUtf8().constData()) );
-    ASSERT_EQ( std::string("encoder-profile=h264 encoder-option=ffmpeg-mp4-high encoder-extension=.mp4 encoder-ready=true"),
+    ASSERT_EQ( std::string("encoder-profile=h264 encoder-option=ffmpeg-mp4-high gui-codec-profile=9 gui-codec-option=1 encoder-extension=.mp4 encoder-ready=true"),
                std::string(batchRenderedVideoEncoderPresetSummary(request).toUtf8().constData()) );
 
     request = batchExportFormatRequestFromString(QStringLiteral("mkv"));
@@ -611,6 +613,8 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
                static_cast<int>(preset.profile) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H264HighMkv),
                static_cast<int>(preset.option) );
+    ASSERT_EQ( CODEC_H264, preset.guiCodecProfile );
+    ASSERT_EQ( CODEC_H264_H_MKV, preset.guiCodecOption );
     ASSERT_EQ( std::string(".mkv"),
                std::string(preset.extension.toUtf8().constData()) );
 
@@ -621,6 +625,8 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
                static_cast<int>(preset.profile) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::H265HighMp4),
                static_cast<int>(preset.option) );
+    ASSERT_EQ( CODEC_H265_8, preset.guiCodecProfile );
+    ASSERT_EQ( CODEC_H265_H_MP4, preset.guiCodecOption );
     ASSERT_EQ( std::string(".mp4"),
                std::string(preset.extension.toUtf8().constData()) );
 
@@ -631,6 +637,8 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
                static_cast<int>(preset.profile) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::ProResFfmpegKostya),
                static_cast<int>(preset.option) );
+    ASSERT_EQ( CODEC_PRORES422HQ, preset.guiCodecProfile );
+    ASSERT_EQ( CODEC_PRORES_OPTION_KS, preset.guiCodecOption );
     ASSERT_EQ( std::string(".mov"),
                std::string(preset.extension.toUtf8().constData()) );
 
@@ -641,6 +649,8 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
                static_cast<int>(preset.profile) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoEncoderOption::Unspecified),
                static_cast<int>(preset.option) );
+    ASSERT_EQ( -1, preset.guiCodecProfile );
+    ASSERT_EQ( -1, preset.guiCodecOption );
     ASSERT_TRUE( preset.extension.isEmpty() );
 }
 

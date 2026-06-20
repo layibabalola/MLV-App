@@ -14,7 +14,7 @@
 /* MainWindow.h gives us the static exportCdngSequence helper
  * and pulls in mlv_include.h (C API) transitively. */
 #include "../../platform/qt/MainWindow.h"
-#include "../../platform/qt/ExportSettingsDialog.h"
+#include "../../platform/qt/ExportCodecIds.h"
 #include "../../platform/qt/StretchFactors.h"
 #include "../../platform/qt/ReceiptSettings.h"
 

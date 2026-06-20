@@ -1,6 +1,8 @@
 #ifndef BATCHTYPES_H
 #define BATCHTYPES_H
 
+#include "../../platform/qt/ExportCodecIds.h"
+
 #include <QString>
 
 /* Shared type header for batch mode.
@@ -71,6 +73,8 @@ struct BatchRenderedVideoEncoderPreset
         BatchRenderedVideoEncoderProfile::Unspecified;
     BatchRenderedVideoEncoderOption option =
         BatchRenderedVideoEncoderOption::Unspecified;
+    int guiCodecProfile = -1;
+    int guiCodecOption = -1;
     QString extension;
     bool ready = false;
 };
@@ -425,16 +429,20 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromTarget
     {
         case BatchRenderedVideoCodec::H264:
             preset.profile = BatchRenderedVideoEncoderProfile::H264;
+            preset.guiCodecProfile = CODEC_H264;
             switch( target.container )
             {
                 case BatchRenderedVideoContainer::Mov:
                     preset.option = BatchRenderedVideoEncoderOption::H264HighMov;
+                    preset.guiCodecOption = CODEC_H264_H_MOV;
                     break;
                 case BatchRenderedVideoContainer::Mp4:
                     preset.option = BatchRenderedVideoEncoderOption::H264HighMp4;
+                    preset.guiCodecOption = CODEC_H264_H_MP4;
                     break;
                 case BatchRenderedVideoContainer::Mkv:
                     preset.option = BatchRenderedVideoEncoderOption::H264HighMkv;
+                    preset.guiCodecOption = CODEC_H264_H_MKV;
                     break;
                 case BatchRenderedVideoContainer::Unspecified:
                     break;
@@ -442,16 +450,20 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromTarget
             break;
         case BatchRenderedVideoCodec::H265:
             preset.profile = BatchRenderedVideoEncoderProfile::H265_8;
+            preset.guiCodecProfile = CODEC_H265_8;
             switch( target.container )
             {
                 case BatchRenderedVideoContainer::Mov:
                     preset.option = BatchRenderedVideoEncoderOption::H265HighMov;
+                    preset.guiCodecOption = CODEC_H265_H_MOV;
                     break;
                 case BatchRenderedVideoContainer::Mp4:
                     preset.option = BatchRenderedVideoEncoderOption::H265HighMp4;
+                    preset.guiCodecOption = CODEC_H265_H_MP4;
                     break;
                 case BatchRenderedVideoContainer::Mkv:
                     preset.option = BatchRenderedVideoEncoderOption::H265HighMkv;
+                    preset.guiCodecOption = CODEC_H265_H_MKV;
                     break;
                 case BatchRenderedVideoContainer::Unspecified:
                     break;
@@ -463,6 +475,8 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromTarget
                 preset.profile = BatchRenderedVideoEncoderProfile::ProRes422HQ;
                 preset.option =
                     BatchRenderedVideoEncoderOption::ProResFfmpegKostya;
+                preset.guiCodecProfile = CODEC_PRORES422HQ;
+                preset.guiCodecOption = CODEC_PRORES_OPTION_KS;
             }
             break;
         case BatchRenderedVideoCodec::Unspecified:
@@ -472,9 +486,15 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromTarget
     preset.ready =
         preset.profile != BatchRenderedVideoEncoderProfile::Unspecified
      && preset.option != BatchRenderedVideoEncoderOption::Unspecified
+     && preset.guiCodecProfile >= 0
+     && preset.guiCodecOption >= 0
      && !preset.extension.isEmpty();
     if( !preset.ready )
+    {
         preset.extension.clear();
+        preset.guiCodecProfile = -1;
+        preset.guiCodecOption = -1;
+    }
     return preset;
 }
 
@@ -501,9 +521,11 @@ inline QString batchRenderedVideoEncoderPresetSummary(
 {
     const BatchRenderedVideoEncoderPreset preset =
         batchRenderedVideoEncoderPresetFromRequest(request);
-    return QStringLiteral("encoder-profile=%1 encoder-option=%2 encoder-extension=%3 encoder-ready=%4")
+    return QStringLiteral("encoder-profile=%1 encoder-option=%2 gui-codec-profile=%3 gui-codec-option=%4 encoder-extension=%5 encoder-ready=%6")
         .arg(batchRenderedVideoEncoderProfileName(preset.profile))
         .arg(batchRenderedVideoEncoderOptionName(preset.option))
+        .arg(preset.guiCodecProfile)
+        .arg(preset.guiCodecOption)
         .arg(preset.extension.isEmpty() ? QStringLiteral("unspecified") : preset.extension)
         .arg(preset.ready ? QStringLiteral("true") : QStringLiteral("false"));
 }
