@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QLocale>
 #include <QString>
+#include <QStringList>
 #include <QStandardPaths>
 
 /* Shared type header for batch mode.
@@ -526,6 +527,8 @@ struct BatchRenderedVideoOutputVerificationPlan
     QString source = QStringLiteral("planned-output-contract");
     QString expectedOutputPath;
     QString expectedExtension;
+    QString expectedCodec;
+    QString expectedContainer;
     QString reason;
     qulonglong nonEmptyMinimumBytes = 1;
     bool outputPathReady = false;
@@ -535,6 +538,9 @@ struct BatchRenderedVideoOutputVerificationPlan
     bool filesystemInspectionOwned = false;
     bool fileExistenceCheckReady = false;
     bool nonEmptyCheckReady = false;
+    bool codecContainerCheckPlanned = false;
+    bool codecContainerExpectationReady = false;
+    bool codecContainerValidationReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeOwned = false;
@@ -550,6 +556,8 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     QString source = QStringLiteral("post-ffmpeg-output-verification-contract");
     QString expectedOutputPath;
     QString expectedExtension;
+    QString expectedCodec;
+    QString expectedContainer;
     QString mediaProbeExecutable = QStringLiteral("ffprobe");
     QString mediaProbeBinarySource =
         QStringLiteral("default-executable-name");
@@ -591,6 +599,9 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     bool filesystemInspectionOwned = false;
     bool fileExistenceCheckReady = false;
     bool nonEmptyCheckReady = false;
+    bool codecContainerCheckPlanned = false;
+    bool codecContainerExpectationReady = false;
+    bool codecContainerValidationReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeExecutionOwned = false;
@@ -881,6 +892,34 @@ inline const char * batchRenderedVideoContainerExtension(BatchRenderedVideoConta
             break;
     }
     return "";
+}
+
+inline const char * batchRenderedVideoMediaProbeCodecName(BatchRenderedVideoCodec codec)
+{
+    switch( codec )
+    {
+        case BatchRenderedVideoCodec::H265:
+            return "hevc";
+        case BatchRenderedVideoCodec::H264:
+        case BatchRenderedVideoCodec::ProRes:
+        case BatchRenderedVideoCodec::Unspecified:
+            break;
+    }
+    return batchRenderedVideoCodecName(codec);
+}
+
+inline const char * batchRenderedVideoMediaProbeContainerName(BatchRenderedVideoContainer container)
+{
+    switch( container )
+    {
+        case BatchRenderedVideoContainer::Mkv:
+            return "matroska";
+        case BatchRenderedVideoContainer::Mov:
+        case BatchRenderedVideoContainer::Mp4:
+        case BatchRenderedVideoContainer::Unspecified:
+            break;
+    }
+    return batchRenderedVideoContainerName(container);
 }
 
 inline const char * batchRenderedVideoEncoderProfileName(
@@ -2248,6 +2287,11 @@ batchRenderedVideoOutputVerificationPlanFromOutput(
     BatchRenderedVideoOutputVerificationPlan plan;
     plan.expectedOutputPath = outputPlan.outputPath;
     plan.expectedExtension = target.extension;
+    plan.expectedCodec =
+        QString::fromLatin1(batchRenderedVideoMediaProbeCodecName(target.codec));
+    plan.expectedContainer =
+        QString::fromLatin1(batchRenderedVideoMediaProbeContainerName(
+            target.container));
 
     if( !outputPlan.ready )
     {
@@ -2263,16 +2307,23 @@ batchRenderedVideoOutputVerificationPlanFromOutput(
     }
 
     plan.outputPathReady = !plan.expectedOutputPath.isEmpty();
+    plan.codecContainerExpectationReady =
+        !plan.expectedCodec.isEmpty()
+     && plan.expectedCodec != QStringLiteral("unspecified")
+     && !plan.expectedContainer.isEmpty()
+     && plan.expectedContainer != QStringLiteral("unspecified");
     const QFileInfo outputInfo(plan.expectedOutputPath);
     plan.extensionMatchesTarget =
         outputInfo.suffix().toLower()
             == plan.expectedExtension.mid(1).toLower();
     plan.contractReady = plan.outputPathReady
-                      && plan.extensionMatchesTarget;
+                      && plan.extensionMatchesTarget
+                      && plan.codecContainerExpectationReady;
     if( plan.contractReady )
     {
         plan.fileExistenceCheckPlanned = true;
         plan.nonEmptyCheckPlanned = true;
+        plan.codecContainerCheckPlanned = true;
     }
     if( !plan.contractReady )
     {
@@ -2644,6 +2695,8 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     BatchRenderedVideoOutputVerificationExecutionPlan plan;
     plan.expectedOutputPath = outputVerificationPlan.expectedOutputPath;
     plan.expectedExtension = outputVerificationPlan.expectedExtension;
+    plan.expectedCodec = outputVerificationPlan.expectedCodec;
+    plan.expectedContainer = outputVerificationPlan.expectedContainer;
     plan.mediaProbeBinarySource = mediaProbeBinaryPlan.source;
     plan.mediaProbeRequestedExecutable =
         mediaProbeBinaryPlan.requestedExecutable;
@@ -2707,6 +2760,13 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.fileExistenceCheckReady =
         outputVerificationPlan.fileExistenceCheckReady;
     plan.nonEmptyCheckReady = outputVerificationPlan.nonEmptyCheckReady;
+    plan.codecContainerCheckPlanned =
+        outputVerificationPlan.codecContainerCheckPlanned;
+    plan.codecContainerExpectationReady =
+        outputVerificationPlan.codecContainerExpectationReady;
+    plan.codecContainerValidationReady =
+        outputVerificationPlan.codecContainerValidationReady
+     && plan.codecContainerValidationOwned;
     plan.fileExistenceCheckOwned =
         outputVerificationPlan.fileExistenceCheckOwned;
     plan.nonEmptyCheckOwned = outputVerificationPlan.nonEmptyCheckOwned;
@@ -2728,9 +2788,12 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
 
     plan.contractReady = !plan.expectedOutputPath.isEmpty()
                       && !plan.expectedExtension.isEmpty()
+                      && !plan.expectedCodec.isEmpty()
+                      && !plan.expectedContainer.isEmpty()
                       && !plan.mediaProbeExecutable.isEmpty()
                       && plan.mediaProbeCommandReady
                       && plan.mediaProbeCommandContractReady
+                      && plan.codecContainerExpectationReady
                       && plan.outputVerificationContractReady
                       && plan.ffmpegExecutionContractReady;
     plan.verificationExecutionReady = plan.fileExistenceCheckOwned
@@ -3967,89 +4030,97 @@ inline QString batchRenderedVideoOutputPlanSummary(
 inline QString batchRenderedVideoOutputVerificationPlanSummary(
     const BatchRenderedVideoOutputVerificationPlan & plan)
 {
-    return QStringLiteral("output-verification-source=%1 output-verification-path=%2 output-verification-extension=%3 output-verification-path-ready=%4 output-verification-extension-match=%5 output-verification-file-exists-planned=%6 output-verification-nonempty-planned=%7 output-verification-nonempty-min-bytes=%8 output-verification-filesystem-inspection-owned=%9 output-verification-file-exists-ready=%10 output-verification-nonempty-ready=%11 output-verification-file-exists-owned=%12 output-verification-nonempty-owned=%13 output-verification-probe-owned=%14 output-verification-codec-container-owned=%15 output-verification-frame-count-owned=%16 output-verification-receipt-hash-owned=%17 output-verification-execution-owned=%18 output-verification-contract-ready=%19 output-verification-reason=%20")
-        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
-        .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
-        .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
-        .arg(plan.outputPathReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.extensionMatchesTarget ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyMinimumBytes)
-        .arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.codecContainerCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.frameCountCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.receiptOrHashOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.verificationExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
+        << QStringLiteral("output-verification-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
+        << QStringLiteral("output-verification-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-path-ready=%1").arg(plan.outputPathReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-extension-match=%1").arg(plan.extensionMatchesTarget ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-file-exists-planned=%1").arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-nonempty-planned=%1").arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-nonempty-min-bytes=%1").arg(plan.nonEmptyMinimumBytes)
+        << QStringLiteral("output-verification-filesystem-inspection-owned=%1").arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-file-exists-ready=%1").arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-nonempty-ready=%1").arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-codec-container-planned=%1").arg(plan.codecContainerCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-codec-container-input-ready=%1").arg(plan.codecContainerExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-codec-container-validation-ready=%1").arg(plan.codecContainerValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-file-exists-owned=%1").arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-nonempty-owned=%1").arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-owned=%1").arg(plan.mediaProbeOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-codec-container-owned=%1").arg(plan.codecContainerCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-frame-count-owned=%1").arg(plan.frameCountCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-owned=%1").arg(plan.receiptOrHashOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-execution-owned=%1").arg(plan.verificationExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
 }
 
 inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
     const BatchRenderedVideoOutputVerificationExecutionPlan & plan)
 {
-    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-probe-binary-source=%5 output-verification-exec-probe-binary-request=%6 output-verification-exec-probe-binary-resolved=%7 output-verification-exec-probe-binary-path-search-owned=%8 output-verification-exec-probe-binary-path-search-attempted=%9 output-verification-exec-probe-binary-found=%10 output-verification-exec-probe-binary-command-ready=%11 output-verification-exec-probe-binary-reason=%12 output-verification-exec-output-contract-ready=%13 output-verification-exec-ffmpeg-contract-ready=%14 output-verification-exec-ffmpeg-audio-args=%15 output-verification-exec-ffmpeg-audio-transition-source=%16 output-verification-exec-ffmpeg-audio-transition-args=%17 output-verification-exec-ffmpeg-audio-contract-ready=%18 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%19 output-verification-exec-ffmpeg-audio-mux-planned=%20 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%21 output-verification-exec-ffmpeg-audio-sync-planned=%22 output-verification-exec-ffmpeg-audio-mux-exec-ready=%23 output-verification-exec-ffmpeg-audio-mux-command-planned=%24 output-verification-exec-ffmpeg-audio-mux-command-ready=%25 output-verification-exec-ffmpeg-audio-owned=%26 output-verification-exec-file-exists-planned=%27 output-verification-exec-nonempty-planned=%28 output-verification-exec-nonempty-min-bytes=%29 output-verification-exec-filesystem-inspection-owned=%30 output-verification-exec-file-exists-ready=%31 output-verification-exec-nonempty-ready=%32 output-verification-exec-file-exists-owned=%33 output-verification-exec-nonempty-owned=%34 output-verification-exec-probe-owned=%35 output-verification-exec-codec-container-owned=%36 output-verification-exec-frame-count-owned=%37 output-verification-exec-receipt-hash-owned=%38 output-verification-exec-ready=%39 output-verification-exec-contract-ready=%40 output-verification-exec-probe-command-source=%41 output-verification-exec-probe-command-args=%42 output-verification-exec-probe-command-line=%43 output-verification-exec-probe-command-planned=%44 output-verification-exec-probe-command-ready=%45 output-verification-exec-probe-command-owned=%46 output-verification-exec-probe-command-exec-ready=%47 output-verification-exec-probe-command-contract-ready=%48 output-verification-exec-probe-command-reason=%49 output-verification-exec-reason=%50")
-        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
-        .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
-        .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
-        .arg(plan.mediaProbeExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeExecutable)
-        .arg(plan.mediaProbeBinarySource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeBinarySource)
-        .arg(plan.mediaProbeRequestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeRequestedExecutable)
-        .arg(plan.mediaProbeResolvedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResolvedExecutable)
-        .arg(plan.mediaProbePathSearchOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbePathSearchAttempted ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeFoundOnPath ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeBinaryReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeBinaryReason)
-        .arg(plan.outputVerificationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioArguments.isEmpty()
-            ? QStringLiteral("unspecified")
-            : plan.ffmpegAudioArguments)
-        .arg(plan.ffmpegAudioTransitionSource.isEmpty()
-            ? QStringLiteral("unspecified")
-            : plan.ffmpegAudioTransitionSource)
-        .arg(plan.ffmpegAudioTransitionArguments.isEmpty()
-            ? QStringLiteral("unspecified")
-            : plan.ffmpegAudioTransitionArguments)
-        .arg(plan.ffmpegAudioContractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioMuxExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioMuxPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioMuxArgumentHandoffPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioSyncValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioMuxExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegMuxedAudioCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegMuxedAudioCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.ffmpegAudioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyMinimumBytes)
-        .arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.codecContainerValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.frameCountValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.receiptHashValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.verificationExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandSource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandSource)
-        .arg(plan.mediaProbeCommandArguments.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandArguments)
-        .arg(plan.mediaProbeCommandLine.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandLine)
-        .arg(plan.mediaProbeCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeInvocationCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandContractReady ? QStringLiteral("true") : QStringLiteral("false"))
-        .arg(plan.mediaProbeCommandReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeCommandReason)
-        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-exec-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-exec-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-exec-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
+        << QStringLiteral("output-verification-exec-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
+        << QStringLiteral("output-verification-exec-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-exec-probe=%1").arg(plan.mediaProbeExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeExecutable)
+        << QStringLiteral("output-verification-exec-probe-binary-source=%1").arg(plan.mediaProbeBinarySource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeBinarySource)
+        << QStringLiteral("output-verification-exec-probe-binary-request=%1").arg(plan.mediaProbeRequestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeRequestedExecutable)
+        << QStringLiteral("output-verification-exec-probe-binary-resolved=%1").arg(plan.mediaProbeResolvedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResolvedExecutable)
+        << QStringLiteral("output-verification-exec-probe-binary-path-search-owned=%1").arg(plan.mediaProbePathSearchOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-binary-path-search-attempted=%1").arg(plan.mediaProbePathSearchAttempted ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-binary-found=%1").arg(plan.mediaProbeFoundOnPath ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-binary-command-ready=%1").arg(plan.mediaProbeCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-binary-reason=%1").arg(plan.mediaProbeBinaryReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeBinaryReason)
+        << QStringLiteral("output-verification-exec-output-contract-ready=%1").arg(plan.outputVerificationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-contract-ready=%1").arg(plan.ffmpegExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-args=%1").arg(plan.ffmpegAudioArguments.isEmpty() ? QStringLiteral("unspecified") : plan.ffmpegAudioArguments)
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-transition-source=%1").arg(plan.ffmpegAudioTransitionSource.isEmpty() ? QStringLiteral("unspecified") : plan.ffmpegAudioTransitionSource)
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-transition-args=%1").arg(plan.ffmpegAudioTransitionArguments.isEmpty() ? QStringLiteral("unspecified") : plan.ffmpegAudioTransitionArguments)
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-contract-ready=%1").arg(plan.ffmpegAudioContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%1").arg(plan.ffmpegAudioMuxExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-planned=%1").arg(plan.ffmpegAudioMuxPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%1").arg(plan.ffmpegAudioMuxArgumentHandoffPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-sync-planned=%1").arg(plan.ffmpegAudioSyncValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-exec-ready=%1").arg(plan.ffmpegAudioMuxExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-command-planned=%1").arg(plan.ffmpegMuxedAudioCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-mux-command-ready=%1").arg(plan.ffmpegMuxedAudioCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ffmpeg-audio-owned=%1").arg(plan.ffmpegAudioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-file-exists-planned=%1").arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-nonempty-planned=%1").arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-nonempty-min-bytes=%1").arg(plan.nonEmptyMinimumBytes)
+        << QStringLiteral("output-verification-exec-filesystem-inspection-owned=%1").arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-file-exists-ready=%1").arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-nonempty-ready=%1").arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-codec-container-planned=%1").arg(plan.codecContainerCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-codec-container-input-ready=%1").arg(plan.codecContainerExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-codec-container-validation-ready=%1").arg(plan.codecContainerValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-file-exists-owned=%1").arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-nonempty-owned=%1").arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-owned=%1").arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-codec-container-owned=%1").arg(plan.codecContainerValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-frame-count-owned=%1").arg(plan.frameCountValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-hash-owned=%1").arg(plan.receiptHashValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-ready=%1").arg(plan.verificationExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-source=%1").arg(plan.mediaProbeCommandSource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandSource)
+        << QStringLiteral("output-verification-exec-probe-command-args=%1").arg(plan.mediaProbeCommandArguments.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandArguments)
+        << QStringLiteral("output-verification-exec-probe-command-line=%1").arg(plan.mediaProbeCommandLine.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandLine)
+        << QStringLiteral("output-verification-exec-probe-command-planned=%1").arg(plan.mediaProbeCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-ready=%1").arg(plan.mediaProbeInvocationCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-owned=%1").arg(plan.mediaProbeCommandExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-exec-ready=%1").arg(plan.mediaProbeCommandExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-contract-ready=%1").arg(plan.mediaProbeCommandContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-command-reason=%1").arg(plan.mediaProbeCommandReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeCommandReason)
+        << QStringLiteral("output-verification-exec-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
 }
 
 inline QString batchRenderedVideoOutputPlanSummary(

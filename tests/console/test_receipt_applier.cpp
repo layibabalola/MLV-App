@@ -426,18 +426,28 @@ TEST(BatchExportFormat, PreservesRenderedVideoRequestIntent)
                std::string(batchRenderedVideoCodecName(request.renderedCodec)) );
     ASSERT_EQ( std::string("mp4"),
                std::string(batchRenderedVideoContainerName(request.renderedContainer)) );
+    ASSERT_EQ( std::string("h264"),
+               std::string(batchRenderedVideoMediaProbeCodecName(request.renderedCodec)) );
+    ASSERT_EQ( std::string("mp4"),
+               std::string(batchRenderedVideoMediaProbeContainerName(request.renderedContainer)) );
 
     request = batchExportFormatRequestFromString(QStringLiteral("hevc-mp4"));
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H265),
                static_cast<int>(request.renderedCodec) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
                static_cast<int>(request.renderedContainer) );
+    ASSERT_EQ( std::string("hevc"),
+               std::string(batchRenderedVideoMediaProbeCodecName(request.renderedCodec)) );
 
     request = batchExportFormatRequestFromString(QStringLiteral("prores"));
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::ProRes),
                static_cast<int>(request.renderedCodec) );
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mov),
                static_cast<int>(request.renderedContainer) );
+    ASSERT_EQ( std::string("prores"),
+               std::string(batchRenderedVideoMediaProbeCodecName(request.renderedCodec)) );
+    ASSERT_EQ( std::string("mov"),
+               std::string(batchRenderedVideoMediaProbeContainerName(request.renderedContainer)) );
 
     request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::Unspecified),
@@ -477,6 +487,9 @@ TEST(BatchExportFormat, ParsesRenderedVideoOptionAliases)
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mkv),
                static_cast<int>(batchRenderedVideoContainerFromString(QStringLiteral("matroska"), &ok)) );
     ASSERT_TRUE( ok );
+    ASSERT_EQ( std::string("matroska"),
+               std::string(batchRenderedVideoMediaProbeContainerName(
+                   BatchRenderedVideoContainer::Mkv)) );
 
     ok = true;
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Unspecified),
@@ -2448,6 +2461,9 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.fileExistenceCheckOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.nonEmptyCheckOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeExecutionOwned );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.codecContainerCheckPlanned );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.codecContainerExpectationReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.codecContainerValidationReady );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.codecContainerValidationOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.frameCountValidationOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.receiptHashValidationOwned );
@@ -2652,12 +2668,19 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("output-verification-probe-binary-path-search-attempted=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-binary-found=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-binary-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-expected-container=mp4") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-source=output-verification-probe-command-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-source=post-ffmpeg-output-verification-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-expected-container=mp4") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-source=default-executable-name") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-request=ffprobe") != std::string::npos );
@@ -2684,8 +2707,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-command-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-codec-container-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-file-exists-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
@@ -3016,11 +3043,18 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-transition-args=deferred-until-audio-mux-execution-owned") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-probe-binary-source=default-executable-name") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-probe-binary-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-expected-container=mp4") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-codec-container-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-probe-command-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-probe-command-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-probe-command-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-binary-source=default-executable-name") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-binary-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-expected-container=mp4") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-command-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-command-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-command-exec-ready=false") != std::string::npos );
@@ -3034,8 +3068,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-execution-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-codec-container-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-file-exists-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("runner-audio-mux-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=false") != std::string::npos );
@@ -3279,11 +3317,14 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
     ASSERT_TRUE( verificationPlan.extensionMatchesTarget );
     ASSERT_TRUE( verificationPlan.fileExistenceCheckPlanned );
     ASSERT_TRUE( verificationPlan.nonEmptyCheckPlanned );
+    ASSERT_TRUE( verificationPlan.codecContainerCheckPlanned );
+    ASSERT_TRUE( verificationPlan.codecContainerExpectationReady );
     ASSERT_EQ( static_cast<qulonglong>(1),
                verificationPlan.nonEmptyMinimumBytes );
     ASSERT_FALSE( verificationPlan.filesystemInspectionOwned );
     ASSERT_FALSE( verificationPlan.fileExistenceCheckReady );
     ASSERT_FALSE( verificationPlan.nonEmptyCheckReady );
+    ASSERT_FALSE( verificationPlan.codecContainerValidationReady );
     ASSERT_FALSE( verificationPlan.fileExistenceCheckOwned );
     ASSERT_FALSE( verificationPlan.nonEmptyCheckOwned );
     ASSERT_FALSE( verificationPlan.mediaProbeOwned );
@@ -3295,7 +3336,11 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
                std::string(verificationPlan.expectedOutputPath.toUtf8().constData()) );
     ASSERT_EQ( std::string(".mp4"),
                std::string(verificationPlan.expectedExtension.toUtf8().constData()) );
-    ASSERT_EQ( std::string("output-verification-source=planned-output-contract output-verification-path=C:/renders/M16-1327.mp4 output-verification-extension=.mp4 output-verification-path-ready=true output-verification-extension-match=true output-verification-file-exists-planned=true output-verification-nonempty-planned=true output-verification-nonempty-min-bytes=1 output-verification-filesystem-inspection-owned=false output-verification-file-exists-ready=false output-verification-nonempty-ready=false output-verification-file-exists-owned=false output-verification-nonempty-owned=false output-verification-probe-owned=false output-verification-codec-container-owned=false output-verification-frame-count-owned=false output-verification-receipt-hash-owned=false output-verification-execution-owned=false output-verification-contract-ready=true output-verification-reason=none"),
+    ASSERT_EQ( std::string("h264"),
+               std::string(verificationPlan.expectedCodec.toUtf8().constData()) );
+    ASSERT_EQ( std::string("mp4"),
+               std::string(verificationPlan.expectedContainer.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-source=planned-output-contract output-verification-path=C:/renders/M16-1327.mp4 output-verification-extension=.mp4 output-verification-expected-codec=h264 output-verification-expected-container=mp4 output-verification-path-ready=true output-verification-extension-match=true output-verification-file-exists-planned=true output-verification-nonempty-planned=true output-verification-nonempty-min-bytes=1 output-verification-filesystem-inspection-owned=false output-verification-file-exists-ready=false output-verification-nonempty-ready=false output-verification-codec-container-planned=true output-verification-codec-container-input-ready=true output-verification-codec-container-validation-ready=false output-verification-file-exists-owned=false output-verification-nonempty-owned=false output-verification-probe-owned=false output-verification-codec-container-owned=false output-verification-frame-count-owned=false output-verification-receipt-hash-owned=false output-verification-execution-owned=false output-verification-contract-ready=true output-verification-reason=none"),
                std::string(batchRenderedVideoOutputVerificationPlanSummary(
                    verificationPlan).toUtf8().constData()) );
 
@@ -3314,9 +3359,14 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
     ASSERT_TRUE( summary.find("output-verification-file-exists-planned=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-nonempty-planned=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-nonempty-min-bytes=1") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-expected-container=mp4") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-filesystem-inspection-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-file-exists-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-nonempty-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-codec-container-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-file-exists-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-execution-owned=false") != std::string::npos );
 
@@ -3394,11 +3444,14 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.ffmpegAudioInputOwned );
     ASSERT_TRUE( executionPlan.fileExistenceCheckPlanned );
     ASSERT_TRUE( executionPlan.nonEmptyCheckPlanned );
+    ASSERT_TRUE( executionPlan.codecContainerCheckPlanned );
+    ASSERT_TRUE( executionPlan.codecContainerExpectationReady );
     ASSERT_EQ( static_cast<qulonglong>(1),
                executionPlan.nonEmptyMinimumBytes );
     ASSERT_FALSE( executionPlan.filesystemInspectionOwned );
     ASSERT_FALSE( executionPlan.fileExistenceCheckReady );
     ASSERT_FALSE( executionPlan.nonEmptyCheckReady );
+    ASSERT_FALSE( executionPlan.codecContainerValidationReady );
     ASSERT_FALSE( executionPlan.fileExistenceCheckOwned );
     ASSERT_FALSE( executionPlan.nonEmptyCheckOwned );
     ASSERT_FALSE( executionPlan.mediaProbeExecutionOwned );
@@ -3417,13 +3470,33 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_EQ( std::string("ffprobe"),
                std::string(executionPlan.mediaProbeResolvedExecutable
                    .toUtf8().constData()) );
+    ASSERT_EQ( std::string("h264"),
+               std::string(executionPlan.expectedCodec.toUtf8().constData()) );
+    ASSERT_EQ( std::string("mp4"),
+               std::string(executionPlan.expectedContainer.toUtf8().constData()) );
     ASSERT_FALSE( executionPlan.mediaProbePathSearchOwned );
     ASSERT_FALSE( executionPlan.mediaProbePathSearchAttempted );
     ASSERT_FALSE( executionPlan.mediaProbeFoundOnPath );
     ASSERT_TRUE( executionPlan.mediaProbeCommandReady );
-    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-probe-binary-source=default-executable-name output-verification-exec-probe-binary-request=ffprobe output-verification-exec-probe-binary-resolved=ffprobe output-verification-exec-probe-binary-path-search-owned=false output-verification-exec-probe-binary-path-search-attempted=false output-verification-exec-probe-binary-found=false output-verification-exec-probe-binary-command-ready=true output-verification-exec-probe-binary-reason=none output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-ffmpeg-audio-args=-an output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract output-verification-exec-ffmpeg-audio-transition-args=unspecified output-verification-exec-ffmpeg-audio-contract-ready=true output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true output-verification-exec-ffmpeg-audio-mux-planned=false output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=false output-verification-exec-ffmpeg-audio-sync-planned=false output-verification-exec-ffmpeg-audio-mux-exec-ready=false output-verification-exec-ffmpeg-audio-mux-command-planned=false output-verification-exec-ffmpeg-audio-mux-command-ready=false output-verification-exec-ffmpeg-audio-owned=false output-verification-exec-file-exists-planned=true output-verification-exec-nonempty-planned=true output-verification-exec-nonempty-min-bytes=1 output-verification-exec-filesystem-inspection-owned=false output-verification-exec-file-exists-ready=false output-verification-exec-nonempty-ready=false output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-probe-command-source=output-verification-probe-command-contract output-verification-exec-probe-command-args=-v error -show_format -show_streams -of json C:/renders/M16-1327.mp4 output-verification-exec-probe-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4 output-verification-exec-probe-command-planned=true output-verification-exec-probe-command-ready=true output-verification-exec-probe-command-owned=false output-verification-exec-probe-command-exec-ready=false output-verification-exec-probe-command-contract-ready=true output-verification-exec-probe-command-reason=none output-verification-exec-reason=none"),
-               std::string(batchRenderedVideoOutputVerificationExecutionPlanSummary(
-                   executionPlan).toUtf8().constData()) );
+    const std::string executionSummary =
+        std::string(batchRenderedVideoOutputVerificationExecutionPlanSummary(
+            executionPlan).toUtf8().constData());
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-source=post-ffmpeg-output-verification-contract") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-path=C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-extension=.mp4") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-expected-container=mp4") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-file-exists-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-nonempty-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-codec-container-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-codec-container-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-codec-container-validation-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-reason=none") != std::string::npos );
 
     BatchRenderedVideoFfmpegExecutionPlan invalidFfmpegExecutionPlan;
     executionPlan =
