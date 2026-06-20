@@ -654,6 +654,60 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
     ASSERT_TRUE( preset.extension.isEmpty() );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoFfmpegVideoArguments)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoFfmpegVideoPlan ffmpegPlan =
+        batchRenderedVideoFfmpegVideoPlanFromRequest(request);
+    ASSERT_TRUE( ffmpegPlan.ready );
+    ASSERT_EQ( std::string("libx264"),
+               std::string(ffmpegPlan.encoder.toUtf8().constData()) );
+    ASSERT_EQ( std::string("medium"),
+               std::string(ffmpegPlan.preset.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-crf"),
+               std::string(ffmpegPlan.qualityFlag.toUtf8().constData()) );
+    ASSERT_EQ( 14, ffmpegPlan.qualityValue );
+    ASSERT_EQ( std::string("yuv420p"),
+               std::string(ffmpegPlan.pixelFormat.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p"),
+               std::string(ffmpegPlan.videoArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-video-encoder=libx264 ffmpeg-video-preset=medium ffmpeg-video-quality=-crf:14 ffmpeg-video-pix-fmt=yuv420p ffmpeg-video-tag=none ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p ffmpeg-video-ready=true ffmpeg-video-reason=none"),
+               std::string(batchRenderedVideoFfmpegVideoPlanSummary(request).toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("h265"));
+    ffmpegPlan = batchRenderedVideoFfmpegVideoPlanFromRequest(request);
+    ASSERT_TRUE( ffmpegPlan.ready );
+    ASSERT_EQ( std::string("libx265"),
+               std::string(ffmpegPlan.encoder.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-crf"),
+               std::string(ffmpegPlan.qualityFlag.toUtf8().constData()) );
+    ASSERT_EQ( 18, ffmpegPlan.qualityValue );
+    ASSERT_EQ( std::string("hvc1"),
+               std::string(ffmpegPlan.videoTag.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-c:v libx265 -preset medium -crf 18 -tag:v hvc1 -pix_fmt yuv420p"),
+               std::string(ffmpegPlan.videoArguments.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mov"));
+    ffmpegPlan = batchRenderedVideoFfmpegVideoPlanFromRequest(request);
+    ASSERT_TRUE( ffmpegPlan.ready );
+    ASSERT_EQ( std::string("prores_ks"),
+               std::string(ffmpegPlan.encoder.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-profile:v"),
+               std::string(ffmpegPlan.qualityFlag.toUtf8().constData()) );
+    ASSERT_EQ( CODEC_PRORES422HQ, ffmpegPlan.qualityValue );
+    ASSERT_EQ( std::string("yuv422p10"),
+               std::string(ffmpegPlan.pixelFormat.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-c:v prores_ks -profile:v 3 -pix_fmt yuv422p10"),
+               std::string(ffmpegPlan.videoArguments.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    ffmpegPlan = batchRenderedVideoFfmpegVideoPlanFromRequest(request);
+    ASSERT_FALSE( ffmpegPlan.ready );
+    ASSERT_EQ( std::string("rendered encoder preset incomplete"),
+               std::string(ffmpegPlan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
 {
     BatchExportFormatRequest request =
@@ -717,6 +771,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.requestValid );
     ASSERT_TRUE( plan.targetReady );
     ASSERT_TRUE( plan.encoderReady );
+    ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
@@ -734,6 +789,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     const std::string summary =
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( summary.find("request=rendered-video codec=h264 container=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 

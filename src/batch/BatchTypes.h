@@ -81,6 +81,19 @@ struct BatchRenderedVideoEncoderPreset
     bool ready = false;
 };
 
+struct BatchRenderedVideoFfmpegVideoPlan
+{
+    QString encoder;
+    QString preset;
+    QString qualityFlag;
+    int qualityValue = -1;
+    QString pixelFormat;
+    QString videoTag;
+    QString videoArguments;
+    QString reason;
+    bool ready = false;
+};
+
 struct BatchRenderedVideoOutputPlan
 {
     QString outputPath;
@@ -101,11 +114,13 @@ struct BatchRenderedVideoJobPlan
     BatchExportFormatRequest request;
     BatchRenderedVideoTarget target;
     BatchRenderedVideoEncoderPreset encoderPreset;
+    BatchRenderedVideoFfmpegVideoPlan ffmpegVideoPlan;
     BatchRenderedVideoOutputPlan outputPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
     bool targetReady = false;
     bool encoderReady = false;
+    bool ffmpegVideoReady = false;
     bool outputReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -537,6 +552,72 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromReques
         batchRenderedVideoTargetFromRequest(request));
 }
 
+inline BatchRenderedVideoFfmpegVideoPlan
+batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(
+    const BatchRenderedVideoEncoderPreset & preset)
+{
+    BatchRenderedVideoFfmpegVideoPlan plan;
+    if( !preset.ready )
+    {
+        plan.reason = QStringLiteral("rendered encoder preset incomplete");
+        return plan;
+    }
+
+    switch( preset.profile )
+    {
+        case BatchRenderedVideoEncoderProfile::H264:
+            plan.encoder = QStringLiteral("libx264");
+            plan.preset = QStringLiteral("medium");
+            plan.qualityFlag = QStringLiteral("-crf");
+            plan.qualityValue = 14;
+            plan.pixelFormat = QStringLiteral("yuv420p");
+            break;
+        case BatchRenderedVideoEncoderProfile::H265_8:
+            plan.encoder = QStringLiteral("libx265");
+            plan.preset = QStringLiteral("medium");
+            plan.qualityFlag = QStringLiteral("-crf");
+            plan.qualityValue = 18;
+            plan.pixelFormat = QStringLiteral("yuv420p");
+            plan.videoTag = QStringLiteral("hvc1");
+            break;
+        case BatchRenderedVideoEncoderProfile::ProRes422HQ:
+            plan.encoder = QStringLiteral("prores_ks");
+            plan.qualityFlag = QStringLiteral("-profile:v");
+            plan.qualityValue = CODEC_PRORES422HQ;
+            plan.pixelFormat = QStringLiteral("yuv422p10");
+            break;
+        case BatchRenderedVideoEncoderProfile::Unspecified:
+            break;
+    }
+
+    plan.ready = !plan.encoder.isEmpty()
+              && !plan.qualityFlag.isEmpty()
+              && plan.qualityValue >= 0
+              && !plan.pixelFormat.isEmpty();
+    if( !plan.ready )
+    {
+        plan.reason = QStringLiteral("rendered ffmpeg video plan unavailable");
+        return plan;
+    }
+
+    plan.videoArguments = QStringLiteral("-c:v %1 ").arg(plan.encoder);
+    if( !plan.preset.isEmpty() )
+        plan.videoArguments += QStringLiteral("-preset %1 ").arg(plan.preset);
+    plan.videoArguments += QStringLiteral("%1 %2 ").arg(plan.qualityFlag).arg(plan.qualityValue);
+    if( !plan.videoTag.isEmpty() )
+        plan.videoArguments += QStringLiteral("-tag:v %1 ").arg(plan.videoTag);
+    plan.videoArguments += QStringLiteral("-pix_fmt %1").arg(plan.pixelFormat);
+    return plan;
+}
+
+inline BatchRenderedVideoFfmpegVideoPlan
+batchRenderedVideoFfmpegVideoPlanFromRequest(
+    const BatchExportFormatRequest & request)
+{
+    return batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(
+        batchRenderedVideoEncoderPresetFromRequest(request));
+}
+
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     const QString & inputPath,
     const QString & outputPath,
@@ -624,6 +705,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.target = batchRenderedVideoTargetFromRequest(request);
         plan.encoderPreset =
             batchRenderedVideoEncoderPresetFromTarget(plan.target);
+        plan.ffmpegVideoPlan =
+            batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(plan.encoderPreset);
         plan.outputPlan =
             batchRenderedVideoOutputPlanFromPaths(inputPath, outputPath, plan.target);
     }
@@ -636,10 +719,12 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         batchRenderedVideoRunnerPrerequisitesForCurrentBuild();
     plan.targetReady = plan.target.complete;
     plan.encoderReady = plan.encoderPreset.ready;
+    plan.ffmpegVideoReady = plan.ffmpegVideoPlan.ready;
     plan.outputReady = plan.outputPlan.ready;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
+                       && plan.ffmpegVideoReady
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -656,6 +741,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return QStringLiteral("rendered target incomplete");
     if( !plan.encoderReady )
         return QStringLiteral("rendered encoder preset unavailable");
+    if( !plan.ffmpegVideoReady )
+    {
+        return plan.ffmpegVideoPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg video plan unavailable")
+            : plan.ffmpegVideoPlan.reason;
+    }
     if( !plan.outputReady )
     {
         return plan.outputPlan.reason.isEmpty()
@@ -701,6 +792,28 @@ inline QString batchRenderedVideoEncoderPresetSummary(
         batchRenderedVideoEncoderPresetFromRequest(request));
 }
 
+inline QString batchRenderedVideoFfmpegVideoPlanSummary(
+    const BatchRenderedVideoFfmpegVideoPlan & plan)
+{
+    return QStringLiteral("ffmpeg-video-encoder=%1 ffmpeg-video-preset=%2 ffmpeg-video-quality=%3:%4 ffmpeg-video-pix-fmt=%5 ffmpeg-video-tag=%6 ffmpeg-video-args=%7 ffmpeg-video-ready=%8 ffmpeg-video-reason=%9")
+        .arg(plan.encoder.isEmpty() ? QStringLiteral("unspecified") : plan.encoder)
+        .arg(plan.preset.isEmpty() ? QStringLiteral("none") : plan.preset)
+        .arg(plan.qualityFlag.isEmpty() ? QStringLiteral("unspecified") : plan.qualityFlag)
+        .arg(plan.qualityValue)
+        .arg(plan.pixelFormat.isEmpty() ? QStringLiteral("unspecified") : plan.pixelFormat)
+        .arg(plan.videoTag.isEmpty() ? QStringLiteral("none") : plan.videoTag)
+        .arg(plan.videoArguments.isEmpty() ? QStringLiteral("unspecified") : plan.videoArguments)
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
+inline QString batchRenderedVideoFfmpegVideoPlanSummary(
+    const BatchExportFormatRequest & request)
+{
+    return batchRenderedVideoFfmpegVideoPlanSummary(
+        batchRenderedVideoFfmpegVideoPlanFromRequest(request));
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const BatchRenderedVideoOutputPlan & plan)
 {
@@ -736,10 +849,11 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 preflight-ready=%6 runnable=%7 first-blocker=%8")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 preflight-ready=%7 runnable=%8 first-blocker=%9")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
+        .arg(batchRenderedVideoFfmpegVideoPlanSummary(plan.ffmpegVideoPlan))
         .arg(batchRenderedVideoOutputPlanSummary(plan.outputPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
