@@ -4559,6 +4559,84 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_EQ( std::string("output-verification-execution-not-ready"),
                std::string(plan.outputVerificationReportContentPlan
                    .activeErrorCategory.toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationReportWriterContractReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.contractReady );
+    ASSERT_EQ( std::string("output-verification-report-writer-preflight-contract"),
+               std::string(plan.outputVerificationReportWriterPlan.source
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-report-content-schema-contract"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .serializationInput.toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .expectedOutputPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.verification-report.json"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .reportPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.verification-report.json.tmp"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .temporaryReportPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("json"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .reportFormat.toUtf8().constData()) );
+    ASSERT_EQ( std::string("rendered-output-verification-report.v1"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .reportSchema.toUtf8().constData()) );
+    ASSERT_EQ( std::string("utf-8"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .reportEncoding.toUtf8().constData()) );
+    ASSERT_EQ( std::string("atomic-json-sidecar"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .writeMode.toUtf8().constData()) );
+    ASSERT_EQ( std::string("failure"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .reportKind.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-execution-not-ready"),
+               std::string(plan.outputVerificationReportWriterPlan
+                   .activeErrorCategory.toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .outputVerificationReportContentContractReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .schemaDetailContractReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.reportPathReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .temporaryReportPathPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .temporaryReportPathReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.reportFormatReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.reportSchemaReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.reportEncodingReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.writeModeReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .writerPreflightPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .serializationInputReady );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .serializationPreflightPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .parentDirectoryPreflightPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan
+        .fileCreationPreflightPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.writePreflightPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportWriterPlan.cleanupPreflightPlanned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .jsonSerializationPlanned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .jsonSerializationOwned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .jsonSerializationReady );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.parentDirectoryOwned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .reportFileCreationPlanned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .reportFileCreationOwned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.reportWritePlanned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.reportWriteOwned );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.reportFileReady );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.reportWriteReady );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan.reportReady );
+    ASSERT_FALSE( plan.outputVerificationReportWriterPlan
+        .outputVerificationReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
 
@@ -4627,6 +4705,52 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_TRUE( contentSummary.find("output-verification-report-content-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( contentSummary.find("output-verification-report-content-reason=none") != std::string::npos );
 
+    const std::string writerSummary =
+        std::string(batchRenderedVideoOutputVerificationReportWriterPlanSummary(
+            plan.outputVerificationReportWriterPlan).toUtf8().constData());
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-source=output-verification-report-writer-preflight-contract") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-input=output-verification-report-content-schema-contract") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-output-path=C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-report-path=C:/renders/M16-1327.verification-report.json") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-temp-path=C:/renders/M16-1327.verification-report.json.tmp") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-format=json") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-schema=rendered-output-verification-report.v1") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-encoding=utf-8") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-mode=atomic-json-sidecar") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-kind=failure") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-active-error-category=output-verification-execution-not-ready") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-content-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-schema-detail-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-path-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-temp-path-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-temp-path-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-format-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-schema-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-encoding-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-mode-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-serialization-input-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-serialization-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-parent-dir-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-file-create-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-write-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-cleanup-preflight-planned=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-json-serialization-planned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-json-serialization-owned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-json-serialization-ready=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-parent-dir-owned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-file-create-planned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-file-create-owned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-write-owned=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-file-ready=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-write-ready=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-report-ready=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-failure-reason=rendered output verification execution is not ready") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( writerSummary.find("output-verification-report-writer-reason=none") != std::string::npos );
+
     const std::string jobSummary =
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( jobSummary.find("output-verification-report-contract-ready=true") != std::string::npos );
@@ -4637,6 +4761,11 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_TRUE( jobSummary.find("output-verification-report-content-top-level-keys=schema|kind|state|expected|checks|failure|artifacts") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-content-write-planned=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-content-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-writer-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-writer-temp-path=C:/renders/M16-1327.verification-report.json.tmp") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-writer-json-serialization-planned=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-writer-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-writer-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
 
@@ -4660,6 +4789,16 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_FALSE( blockedContentPlan.reportWritePlanned );
     ASSERT_EQ( std::string("rendered output verification report content contract unavailable"),
                std::string(blockedContentPlan.reason.toUtf8().constData()) );
+    BatchRenderedVideoOutputVerificationReportWriterPlan blockedWriterPlan =
+        batchRenderedVideoOutputVerificationReportWriterPlanFromContent(
+            BatchRenderedVideoOutputVerificationReportContentPlan());
+    ASSERT_FALSE( blockedWriterPlan.contractReady );
+    ASSERT_FALSE( blockedWriterPlan.outputVerificationReportContentContractReady );
+    ASSERT_FALSE( blockedWriterPlan.writerPreflightPlanned );
+    ASSERT_FALSE( blockedWriterPlan.jsonSerializationPlanned );
+    ASSERT_FALSE( blockedWriterPlan.reportWritePlanned );
+    ASSERT_EQ( std::string("rendered output verification report writer contract unavailable"),
+               std::string(blockedWriterPlan.reason.toUtf8().constData()) );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
@@ -4951,6 +5090,13 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("output-verification-report-content-write-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-content-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-content-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-content-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-temp-path=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-preflight-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-json-serialization-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-writer-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
     BatchRenderedVideoRenderSettings invalidSettings =

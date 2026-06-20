@@ -994,6 +994,55 @@ struct BatchRenderedVideoOutputVerificationReportContentPlan
     bool contractReady = false;
 };
 
+struct BatchRenderedVideoOutputVerificationReportWriterPlan
+{
+    QString source =
+        QStringLiteral("output-verification-report-writer-preflight-contract");
+    QString serializationInput =
+        QStringLiteral("output-verification-report-content-schema-contract");
+    QString expectedOutputPath;
+    QString reportPath;
+    QString temporaryReportPath;
+    QString reportFormat = QStringLiteral("json");
+    QString reportSchema =
+        QStringLiteral("rendered-output-verification-report.v1");
+    QString reportEncoding = QStringLiteral("utf-8");
+    QString writeMode = QStringLiteral("atomic-json-sidecar");
+    QString reportKind = QStringLiteral("failure");
+    QString activeErrorCategory;
+    QString failureReason;
+    QString reason;
+    bool outputVerificationReportContentContractReady = false;
+    bool schemaDetailContractReady = false;
+    bool reportPathReady = false;
+    bool temporaryReportPathPlanned = false;
+    bool temporaryReportPathReady = false;
+    bool reportFormatReady = false;
+    bool reportSchemaReady = false;
+    bool reportEncodingReady = false;
+    bool writeModeReady = false;
+    bool writerPreflightPlanned = false;
+    bool serializationInputReady = false;
+    bool serializationPreflightPlanned = false;
+    bool parentDirectoryPreflightPlanned = false;
+    bool fileCreationPreflightPlanned = false;
+    bool writePreflightPlanned = false;
+    bool cleanupPreflightPlanned = false;
+    bool jsonSerializationPlanned = false;
+    bool jsonSerializationOwned = false;
+    bool jsonSerializationReady = false;
+    bool parentDirectoryOwned = false;
+    bool reportFileCreationPlanned = false;
+    bool reportFileCreationOwned = false;
+    bool reportWritePlanned = false;
+    bool reportWriteOwned = false;
+    bool reportFileReady = false;
+    bool reportWriteReady = false;
+    bool reportReady = false;
+    bool outputVerificationReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoRunnerPrerequisites
 {
     bool processingParityReady = false;
@@ -1043,6 +1092,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoOutputVerificationResultPlan outputVerificationResultPlan;
     BatchRenderedVideoOutputVerificationReportPlan outputVerificationReportPlan;
     BatchRenderedVideoOutputVerificationReportContentPlan outputVerificationReportContentPlan;
+    BatchRenderedVideoOutputVerificationReportWriterPlan outputVerificationReportWriterPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
     bool targetReady = false;
@@ -1079,6 +1129,7 @@ struct BatchRenderedVideoJobPlan
     bool outputVerificationResultContractReady = false;
     bool outputVerificationReportContractReady = false;
     bool outputVerificationReportContentContractReady = false;
+    bool outputVerificationReportWriterContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
 };
@@ -4124,6 +4175,104 @@ batchRenderedVideoOutputVerificationReportContentPlanFromReport(
     return plan;
 }
 
+inline QString batchRenderedVideoOutputVerificationReportTemporaryPath(
+    const QString & reportPath)
+{
+    const QString cleaned = QDir::cleanPath(reportPath.trimmed());
+    if( cleaned.isEmpty() ) return QString();
+    return cleaned + QStringLiteral(".tmp");
+}
+
+inline BatchRenderedVideoOutputVerificationReportWriterPlan
+batchRenderedVideoOutputVerificationReportWriterPlanFromContent(
+    const BatchRenderedVideoOutputVerificationReportContentPlan & contentPlan)
+{
+    BatchRenderedVideoOutputVerificationReportWriterPlan plan;
+    plan.expectedOutputPath = contentPlan.expectedOutputPath;
+    plan.reportPath = contentPlan.reportPath;
+    plan.reportFormat = contentPlan.reportFormat;
+    plan.reportSchema = contentPlan.reportSchema;
+    plan.reportKind = contentPlan.reportKind;
+    plan.activeErrorCategory = contentPlan.activeErrorCategory;
+    plan.failureReason = contentPlan.failureReason;
+    plan.outputVerificationReportContentContractReady =
+        contentPlan.contractReady;
+    plan.schemaDetailContractReady =
+        contentPlan.schemaDetailContractReady;
+    plan.reportPathReady = contentPlan.reportPathReady;
+    plan.reportFormatReady = contentPlan.reportFormatReady
+                          && contentPlan.reportFormat
+                             == QStringLiteral("json");
+    plan.reportSchemaReady = contentPlan.reportSchemaReady
+                          && contentPlan.reportSchema
+                             == plan.reportSchema;
+    plan.reportEncodingReady = plan.reportEncoding == QStringLiteral("utf-8");
+    plan.writeModeReady = plan.writeMode
+                       == QStringLiteral("atomic-json-sidecar");
+
+    if( !contentPlan.contractReady )
+    {
+        plan.reason = contentPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification report writer contract unavailable")
+            : contentPlan.reason;
+        return plan;
+    }
+
+    plan.temporaryReportPath =
+        batchRenderedVideoOutputVerificationReportTemporaryPath(
+            contentPlan.reportPath);
+    plan.temporaryReportPathPlanned = true;
+    plan.temporaryReportPathReady =
+        !plan.temporaryReportPath.isEmpty()
+     && plan.temporaryReportPath != plan.reportPath;
+    plan.writerPreflightPlanned = true;
+    plan.serializationInputReady =
+        contentPlan.schemaDetailContractReady
+     && !contentPlan.topLevelKeys.isEmpty()
+     && !contentPlan.expectedOutputKeys.isEmpty()
+     && !contentPlan.verificationCheckKeys.isEmpty()
+     && !contentPlan.artifactKeys.isEmpty()
+     && !contentPlan.plannedErrorCategories.isEmpty()
+     && !contentPlan.activeErrorCategory.isEmpty();
+    plan.serializationPreflightPlanned = plan.serializationInputReady;
+    plan.parentDirectoryPreflightPlanned = plan.reportPathReady;
+    plan.fileCreationPreflightPlanned = plan.reportPathReady;
+    plan.writePreflightPlanned = plan.serializationInputReady
+                              && plan.temporaryReportPathReady;
+    plan.cleanupPreflightPlanned = plan.writePreflightPlanned;
+    plan.reportFileReady = plan.reportFileCreationOwned
+                        && plan.reportFileCreationPlanned;
+    plan.reportWriteReady = plan.reportWriteOwned
+                         && plan.reportWritePlanned;
+    plan.reportReady = plan.jsonSerializationReady
+                    && plan.reportFileReady
+                    && plan.reportWriteReady;
+    plan.outputVerificationReady = contentPlan.outputVerificationReady
+                                && plan.reportReady;
+    plan.contractReady =
+        plan.outputVerificationReportContentContractReady
+     && plan.schemaDetailContractReady
+     && plan.reportPathReady
+     && plan.temporaryReportPathReady
+     && plan.reportFormatReady
+     && plan.reportSchemaReady
+     && plan.reportEncodingReady
+     && plan.writeModeReady
+     && plan.writerPreflightPlanned
+     && plan.serializationInputReady
+     && plan.serializationPreflightPlanned
+     && plan.parentDirectoryPreflightPlanned
+     && plan.fileCreationPreflightPlanned
+     && plan.writePreflightPlanned
+     && plan.cleanupPreflightPlanned;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered output verification report writer contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoRunnerPrerequisites
 batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
@@ -4230,6 +4379,9 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationReportContentPlan =
             batchRenderedVideoOutputVerificationReportContentPlanFromReport(
                 plan.outputVerificationReportPlan);
+        plan.outputVerificationReportWriterPlan =
+            batchRenderedVideoOutputVerificationReportWriterPlanFromContent(
+                plan.outputVerificationReportContentPlan);
         plan.sourceAudioPlan =
             batchRenderedVideoSourceAudioPlanForCurrentBuild(inputPath);
         plan.sourceAudioExtractionPlan =
@@ -4310,6 +4462,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             QStringLiteral("not a rendered-video request");
         plan.outputVerificationReportContentPlan.reason =
             QStringLiteral("not a rendered-video request");
+        plan.outputVerificationReportWriterPlan.reason =
+            QStringLiteral("not a rendered-video request");
     }
 
     plan.runnerPrerequisites =
@@ -4363,6 +4517,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationReportPlan.contractReady;
     plan.outputVerificationReportContentContractReady =
         plan.outputVerificationReportContentPlan.contractReady;
+    plan.outputVerificationReportWriterContractReady =
+        plan.outputVerificationReportWriterPlan.contractReady;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -4609,6 +4765,11 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                 plan.outputVerificationReportPlan);
         plan.outputVerificationReportContentContractReady =
             plan.outputVerificationReportContentPlan.contractReady;
+        plan.outputVerificationReportWriterPlan =
+            batchRenderedVideoOutputVerificationReportWriterPlanFromContent(
+                plan.outputVerificationReportContentPlan);
+        plan.outputVerificationReportWriterContractReady =
+            plan.outputVerificationReportWriterPlan.contractReady;
     }
 
     plan.preflightReady = plan.requestValid
@@ -4650,7 +4811,9 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                            && plan.receiptHashValidationContractReady
                            && plan.outputVerificationDecisionContractReady
                            && plan.outputVerificationResultContractReady
-                           && plan.outputVerificationReportContractReady;
+                           && plan.outputVerificationReportContractReady
+                           && plan.outputVerificationReportContentContractReady
+                           && plan.outputVerificationReportWriterContractReady;
     }
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -4784,6 +4947,11 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             plan.outputVerificationReportPlan);
     plan.outputVerificationReportContentContractReady =
         plan.outputVerificationReportContentPlan.contractReady;
+    plan.outputVerificationReportWriterPlan =
+        batchRenderedVideoOutputVerificationReportWriterPlanFromContent(
+            plan.outputVerificationReportContentPlan);
+    plan.outputVerificationReportWriterContractReady =
+        plan.outputVerificationReportWriterPlan.contractReady;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -4817,7 +4985,9 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.receiptHashValidationContractReady
                        && plan.outputVerificationDecisionContractReady
                        && plan.outputVerificationResultContractReady
-                       && plan.outputVerificationReportContractReady;
+                       && plan.outputVerificationReportContractReady
+                       && plan.outputVerificationReportContentContractReady
+                       && plan.outputVerificationReportWriterContractReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
 }
@@ -5035,6 +5205,13 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.outputVerificationReportContentPlan.reason.isEmpty()
             ? QStringLiteral("rendered output verification report content contract unavailable")
             : plan.outputVerificationReportContentPlan.reason;
+    }
+    if( plan.metadataAttempted
+     && !plan.outputVerificationReportWriterContractReady )
+    {
+        return plan.outputVerificationReportWriterPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification report writer contract unavailable")
+            : plan.outputVerificationReportWriterPlan.reason;
     }
     if( !plan.runnerPrerequisites.ready )
         return plan.runnerPrerequisites.reason;
@@ -6070,6 +6247,56 @@ inline QString batchRenderedVideoOutputVerificationReportContentPlanSummary(
     return tokens.join(QLatin1Char(' '));
 }
 
+inline QString batchRenderedVideoOutputVerificationReportWriterPlanSummary(
+    const BatchRenderedVideoOutputVerificationReportWriterPlan & plan)
+{
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-report-writer-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-report-writer-input=%1").arg(plan.serializationInput.isEmpty() ? QStringLiteral("unspecified") : plan.serializationInput)
+        << QStringLiteral("output-verification-report-writer-output-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-report-writer-report-path=%1").arg(plan.reportPath.isEmpty() ? QStringLiteral("unspecified") : plan.reportPath)
+        << QStringLiteral("output-verification-report-writer-temp-path=%1").arg(plan.temporaryReportPath.isEmpty() ? QStringLiteral("unspecified") : plan.temporaryReportPath)
+        << QStringLiteral("output-verification-report-writer-format=%1").arg(plan.reportFormat.isEmpty() ? QStringLiteral("unspecified") : plan.reportFormat)
+        << QStringLiteral("output-verification-report-writer-schema=%1").arg(plan.reportSchema.isEmpty() ? QStringLiteral("unspecified") : plan.reportSchema)
+        << QStringLiteral("output-verification-report-writer-encoding=%1").arg(plan.reportEncoding.isEmpty() ? QStringLiteral("unspecified") : plan.reportEncoding)
+        << QStringLiteral("output-verification-report-writer-mode=%1").arg(plan.writeMode.isEmpty() ? QStringLiteral("unspecified") : plan.writeMode)
+        << QStringLiteral("output-verification-report-writer-kind=%1").arg(plan.reportKind.isEmpty() ? QStringLiteral("unspecified") : plan.reportKind)
+        << QStringLiteral("output-verification-report-writer-active-error-category=%1").arg(plan.activeErrorCategory.isEmpty() ? QStringLiteral("unspecified") : plan.activeErrorCategory)
+        << QStringLiteral("output-verification-report-writer-content-contract-ready=%1").arg(plan.outputVerificationReportContentContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-schema-detail-ready=%1").arg(plan.schemaDetailContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-path-ready=%1").arg(plan.reportPathReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-temp-path-planned=%1").arg(plan.temporaryReportPathPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-temp-path-ready=%1").arg(plan.temporaryReportPathReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-format-ready=%1").arg(plan.reportFormatReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-schema-ready=%1").arg(plan.reportSchemaReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-encoding-ready=%1").arg(plan.reportEncodingReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-mode-ready=%1").arg(plan.writeModeReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-preflight-planned=%1").arg(plan.writerPreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-serialization-input-ready=%1").arg(plan.serializationInputReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-serialization-preflight-planned=%1").arg(plan.serializationPreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-parent-dir-preflight-planned=%1").arg(plan.parentDirectoryPreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-file-create-preflight-planned=%1").arg(plan.fileCreationPreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-write-preflight-planned=%1").arg(plan.writePreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-cleanup-preflight-planned=%1").arg(plan.cleanupPreflightPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-json-serialization-planned=%1").arg(plan.jsonSerializationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-json-serialization-owned=%1").arg(plan.jsonSerializationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-json-serialization-ready=%1").arg(plan.jsonSerializationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-parent-dir-owned=%1").arg(plan.parentDirectoryOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-file-create-planned=%1").arg(plan.reportFileCreationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-file-create-owned=%1").arg(plan.reportFileCreationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-write-planned=%1").arg(plan.reportWritePlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-write-owned=%1").arg(plan.reportWriteOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-file-ready=%1").arg(plan.reportFileReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-write-ready=%1").arg(plan.reportWriteReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-report-ready=%1").arg(plan.reportReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-output-verification-ready=%1").arg(plan.outputVerificationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-failure-reason=%1").arg(plan.failureReason.isEmpty() ? QStringLiteral("none") : plan.failureReason)
+        << QStringLiteral("output-verification-report-writer-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-writer-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const QString & inputPath,
     const QString & outputPath,
@@ -6100,7 +6327,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 %33 %34 %35 %36 preflight-ready=%37 runnable=%38 first-blocker=%39")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 %33 %34 %35 %36 %37 preflight-ready=%38 runnable=%39 first-blocker=%40")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -6158,6 +6385,8 @@ inline QString batchRenderedVideoJobPlanSummary(
             plan.outputVerificationReportPlan))
         .arg(batchRenderedVideoOutputVerificationReportContentPlanSummary(
             plan.outputVerificationReportContentPlan))
+        .arg(batchRenderedVideoOutputVerificationReportWriterPlanSummary(
+            plan.outputVerificationReportWriterPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.runnable ? QStringLiteral("true") : QStringLiteral("false"))
