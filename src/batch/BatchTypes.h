@@ -429,6 +429,37 @@ struct BatchRenderedVideoMediaProbeCommandPlan
     bool contractReady = false;
 };
 
+struct BatchRenderedVideoMediaProbeResultPlan
+{
+    QString source = QStringLiteral("output-verification-probe-result-contract");
+    QString expectedOutputPath;
+    QString expectedCodec;
+    QString expectedContainer;
+    int expectedFrameCount = 0;
+    double expectedDurationSeconds = 0.0;
+    QString parsedCodec;
+    QString parsedContainer;
+    int parsedFrameCount = 0;
+    double parsedDurationSeconds = 0.0;
+    QString reason;
+    bool outputVerificationContractReady = false;
+    bool mediaProbeCommandContractReady = false;
+    bool mediaProbeCommandExecutionOwned = false;
+    bool mediaProbeCommandExecutionReady = false;
+    bool resultParsingPlanned = false;
+    bool resultSchemaReady = false;
+    bool codecContainerFieldsPlanned = false;
+    bool frameCountFieldPlanned = false;
+    bool durationFieldPlanned = false;
+    bool mediaProbeResultOwned = false;
+    bool jsonParseOwned = false;
+    bool codecContainerResultReady = false;
+    bool frameCountResultReady = false;
+    bool durationResultReady = false;
+    bool resultReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoFfmpegCommandPlan
 {
     QString source = QStringLiteral("gui-rawvideo-pipe");
@@ -579,6 +610,13 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     QString mediaProbeCommandArguments;
     QString mediaProbeCommandLine;
     QString mediaProbeCommandReason;
+    QString mediaProbeResultSource =
+        QStringLiteral("output-verification-probe-result-contract");
+    QString mediaProbeResultParsedCodec;
+    QString mediaProbeResultParsedContainer;
+    int mediaProbeResultParsedFrameCount = 0;
+    double mediaProbeResultParsedDurationSeconds = 0.0;
+    QString mediaProbeResultReason;
     QString reason;
     bool outputVerificationContractReady = false;
     bool ffmpegExecutionContractReady = false;
@@ -591,6 +629,18 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     bool mediaProbeCommandExecutionOwned = false;
     bool mediaProbeCommandExecutionReady = false;
     bool mediaProbeCommandContractReady = false;
+    bool mediaProbeResultContractReady = false;
+    bool mediaProbeResultParsingPlanned = false;
+    bool mediaProbeResultSchemaReady = false;
+    bool mediaProbeResultCodecContainerFieldsPlanned = false;
+    bool mediaProbeResultFrameCountFieldPlanned = false;
+    bool mediaProbeResultDurationFieldPlanned = false;
+    bool mediaProbeResultOwned = false;
+    bool mediaProbeResultJsonParseOwned = false;
+    bool mediaProbeResultCodecContainerReady = false;
+    bool mediaProbeResultFrameCountReady = false;
+    bool mediaProbeResultDurationReady = false;
+    bool mediaProbeResultReady = false;
     QString ffmpegAudioArguments;
     QString ffmpegAudioTransitionSource;
     QString ffmpegAudioTransitionArguments;
@@ -665,6 +715,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoOutputVerificationPlan outputVerificationPlan;
     BatchRenderedVideoMediaProbeBinaryPlan mediaProbeBinaryPlan;
     BatchRenderedVideoMediaProbeCommandPlan mediaProbeCommandPlan;
+    BatchRenderedVideoMediaProbeResultPlan mediaProbeResultPlan;
     BatchRenderedVideoOutputVerificationExecutionPlan outputVerificationExecutionPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
@@ -693,6 +744,7 @@ struct BatchRenderedVideoJobPlan
     bool outputVerificationContractReady = false;
     bool mediaProbeCommandReady = false;
     bool mediaProbeCommandContractReady = false;
+    bool mediaProbeResultContractReady = false;
     bool outputVerificationExecutionContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -2556,6 +2608,69 @@ batchRenderedVideoMediaProbeCommandPlanFromContracts(
     return plan;
 }
 
+inline BatchRenderedVideoMediaProbeResultPlan
+batchRenderedVideoMediaProbeResultPlanFromContracts(
+    const BatchRenderedVideoOutputVerificationPlan & outputVerificationPlan,
+    const BatchRenderedVideoMediaProbeCommandPlan & mediaProbeCommandPlan)
+{
+    BatchRenderedVideoMediaProbeResultPlan plan;
+    plan.expectedOutputPath = outputVerificationPlan.expectedOutputPath;
+    plan.expectedCodec = outputVerificationPlan.expectedCodec;
+    plan.expectedContainer = outputVerificationPlan.expectedContainer;
+    plan.expectedFrameCount = outputVerificationPlan.expectedFrameCount;
+    plan.expectedDurationSeconds =
+        outputVerificationPlan.expectedDurationSeconds;
+    plan.outputVerificationContractReady =
+        outputVerificationPlan.contractReady;
+    plan.mediaProbeCommandContractReady =
+        mediaProbeCommandPlan.contractReady;
+    plan.mediaProbeCommandExecutionOwned =
+        mediaProbeCommandPlan.executionOwned;
+    plan.mediaProbeCommandExecutionReady =
+        mediaProbeCommandPlan.executionReady;
+
+    if( !outputVerificationPlan.contractReady )
+    {
+        plan.reason = outputVerificationPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification contract unavailable")
+            : outputVerificationPlan.reason;
+        return plan;
+    }
+    if( !mediaProbeCommandPlan.contractReady )
+    {
+        plan.reason = mediaProbeCommandPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification probe command contract unavailable")
+            : mediaProbeCommandPlan.reason;
+        return plan;
+    }
+
+    plan.codecContainerFieldsPlanned =
+        outputVerificationPlan.codecContainerCheckPlanned
+     && outputVerificationPlan.codecContainerExpectationReady;
+    plan.frameCountFieldPlanned =
+        outputVerificationPlan.frameCountCheckPlanned
+     && outputVerificationPlan.frameCountExpectationReady;
+    plan.durationFieldPlanned =
+        plan.frameCountFieldPlanned
+     && outputVerificationPlan.expectedDurationSeconds > 0.0;
+    plan.resultParsingPlanned =
+        mediaProbeCommandPlan.commandPlanned
+     && !mediaProbeCommandPlan.commandLine.isEmpty();
+    plan.resultSchemaReady = plan.codecContainerFieldsPlanned
+                          || plan.frameCountFieldPlanned
+                          || plan.durationFieldPlanned;
+    plan.contractReady = plan.outputVerificationContractReady
+                      && plan.mediaProbeCommandContractReady
+                      && plan.resultParsingPlanned
+                      && plan.resultSchemaReady;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered output verification probe result contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoFfmpegCommandPlan
 batchRenderedVideoFfmpegCommandPlanFromParts(
     const BatchRenderedVideoFfmpegFramePlan & framePlan,
@@ -2771,6 +2886,44 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
         mediaProbeCommandPlan.executionReady;
     plan.mediaProbeCommandContractReady =
         mediaProbeCommandPlan.contractReady;
+    const BatchRenderedVideoMediaProbeResultPlan mediaProbeResultPlan =
+        batchRenderedVideoMediaProbeResultPlanFromContracts(
+            outputVerificationPlan,
+            mediaProbeCommandPlan);
+    plan.mediaProbeResultSource = mediaProbeResultPlan.source;
+    plan.mediaProbeResultParsedCodec =
+        mediaProbeResultPlan.parsedCodec;
+    plan.mediaProbeResultParsedContainer =
+        mediaProbeResultPlan.parsedContainer;
+    plan.mediaProbeResultParsedFrameCount =
+        mediaProbeResultPlan.parsedFrameCount;
+    plan.mediaProbeResultParsedDurationSeconds =
+        mediaProbeResultPlan.parsedDurationSeconds;
+    plan.mediaProbeResultReason = mediaProbeResultPlan.reason;
+    plan.mediaProbeResultContractReady =
+        mediaProbeResultPlan.contractReady;
+    plan.mediaProbeResultParsingPlanned =
+        mediaProbeResultPlan.resultParsingPlanned;
+    plan.mediaProbeResultSchemaReady =
+        mediaProbeResultPlan.resultSchemaReady;
+    plan.mediaProbeResultCodecContainerFieldsPlanned =
+        mediaProbeResultPlan.codecContainerFieldsPlanned;
+    plan.mediaProbeResultFrameCountFieldPlanned =
+        mediaProbeResultPlan.frameCountFieldPlanned;
+    plan.mediaProbeResultDurationFieldPlanned =
+        mediaProbeResultPlan.durationFieldPlanned;
+    plan.mediaProbeResultOwned =
+        mediaProbeResultPlan.mediaProbeResultOwned;
+    plan.mediaProbeResultJsonParseOwned =
+        mediaProbeResultPlan.jsonParseOwned;
+    plan.mediaProbeResultCodecContainerReady =
+        mediaProbeResultPlan.codecContainerResultReady;
+    plan.mediaProbeResultFrameCountReady =
+        mediaProbeResultPlan.frameCountResultReady;
+    plan.mediaProbeResultDurationReady =
+        mediaProbeResultPlan.durationResultReady;
+    plan.mediaProbeResultReady =
+        mediaProbeResultPlan.resultReady;
     plan.outputVerificationContractReady =
         outputVerificationPlan.contractReady;
     plan.ffmpegExecutionContractReady = ffmpegExecutionPlan.contractReady;
@@ -2844,6 +2997,7 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                       && !plan.mediaProbeExecutable.isEmpty()
                       && plan.mediaProbeCommandReady
                       && plan.mediaProbeCommandContractReady
+                      && plan.mediaProbeResultContractReady
                       && plan.codecContainerExpectationReady
                       && plan.outputVerificationContractReady
                       && plan.ffmpegExecutionContractReady;
@@ -2944,6 +3098,10 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             batchRenderedVideoMediaProbeCommandPlanFromContracts(
                 plan.outputVerificationPlan,
                 plan.mediaProbeBinaryPlan);
+        plan.mediaProbeResultPlan =
+            batchRenderedVideoMediaProbeResultPlanFromContracts(
+                plan.outputVerificationPlan,
+                plan.mediaProbeCommandPlan);
         plan.outputVerificationExecutionPlan =
             batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                 plan.outputVerificationPlan,
@@ -3012,6 +3170,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             QStringLiteral("not a rendered-video request");
         plan.outputVerificationPlan.reason =
             QStringLiteral("not a rendered-video request");
+        plan.mediaProbeResultPlan.reason =
+            QStringLiteral("not a rendered-video request");
         plan.outputVerificationExecutionPlan.reason =
             QStringLiteral("not a rendered-video request");
     }
@@ -3046,6 +3206,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.mediaProbeBinaryPlan.commandExecutableReady;
     plan.mediaProbeCommandContractReady =
         plan.mediaProbeCommandPlan.contractReady;
+    plan.mediaProbeResultContractReady =
+        plan.mediaProbeResultPlan.contractReady;
     plan.outputReady = plan.outputPlan.ready;
     plan.outputVerificationContractReady =
         plan.outputVerificationPlan.contractReady;
@@ -3068,6 +3230,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.ffmpegBinaryCommandReady
                        && plan.mediaProbeCommandReady
                        && plan.mediaProbeCommandContractReady
+                       && plan.mediaProbeResultContractReady
                        && plan.renderSettings.ready
                        && plan.outputReady
                        && plan.outputVerificationContractReady;
@@ -3243,6 +3406,12 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                 plan.ffmpegExecutionPlan,
                 plan.mediaProbeBinaryPlan,
                 plan.mediaProbeCommandPlan);
+        plan.mediaProbeResultPlan =
+            batchRenderedVideoMediaProbeResultPlanFromContracts(
+                plan.outputVerificationPlan,
+                plan.mediaProbeCommandPlan);
+        plan.mediaProbeResultContractReady =
+            plan.mediaProbeResultPlan.contractReady;
         plan.outputVerificationExecutionContractReady =
             plan.outputVerificationExecutionPlan.contractReady;
     }
@@ -3276,6 +3445,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                            && plan.frameProcessingContractReady
                            && plan.ffmpegCommandReady
                            && plan.ffmpegExecutionContractReady
+                           && plan.mediaProbeResultContractReady
                            && plan.outputVerificationExecutionContractReady;
     }
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
@@ -3353,6 +3523,12 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
         plan.mediaProbeBinaryPlan.commandExecutableReady;
     plan.mediaProbeCommandContractReady =
         plan.mediaProbeCommandPlan.contractReady;
+    plan.mediaProbeResultPlan =
+        batchRenderedVideoMediaProbeResultPlanFromContracts(
+            plan.outputVerificationPlan,
+            plan.mediaProbeCommandPlan);
+    plan.mediaProbeResultContractReady =
+        plan.mediaProbeResultPlan.contractReady;
     plan.outputVerificationExecutionPlan =
         batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
             plan.outputVerificationPlan,
@@ -3378,6 +3554,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.ffmpegBinaryCommandReady
                        && plan.mediaProbeCommandReady
                        && plan.mediaProbeCommandContractReady
+                       && plan.mediaProbeResultContractReady
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
@@ -3496,6 +3673,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.mediaProbeCommandPlan.reason.isEmpty()
             ? QStringLiteral("rendered output verification media probe command contract unavailable")
             : plan.mediaProbeCommandPlan.reason;
+    }
+    if( !plan.mediaProbeResultContractReady )
+    {
+        return plan.mediaProbeResultPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification media probe result contract unavailable")
+            : plan.mediaProbeResultPlan.reason;
     }
     if( !plan.renderSettings.ready )
     {
@@ -4046,6 +4229,41 @@ inline QString batchRenderedVideoMediaProbeCommandPlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoMediaProbeResultPlanSummary(
+    const BatchRenderedVideoMediaProbeResultPlan & plan)
+{
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-probe-result-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-probe-result-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-probe-result-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
+        << QStringLiteral("output-verification-probe-result-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-probe-result-expected-frame-count=%1").arg(plan.expectedFrameCount)
+        << QStringLiteral("output-verification-probe-result-expected-duration-seconds=%1").arg(QLocale::c().toString(plan.expectedDurationSeconds, 'f', 6))
+        << QStringLiteral("output-verification-probe-result-parsed-codec=%1").arg(plan.parsedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.parsedCodec)
+        << QStringLiteral("output-verification-probe-result-parsed-container=%1").arg(plan.parsedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.parsedContainer)
+        << QStringLiteral("output-verification-probe-result-parsed-frame-count=%1").arg(plan.parsedFrameCount)
+        << QStringLiteral("output-verification-probe-result-parsed-duration-seconds=%1").arg(QLocale::c().toString(plan.parsedDurationSeconds, 'f', 6))
+        << QStringLiteral("output-verification-probe-result-output-contract-ready=%1").arg(plan.outputVerificationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-command-contract-ready=%1").arg(plan.mediaProbeCommandContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-command-owned=%1").arg(plan.mediaProbeCommandExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-command-exec-ready=%1").arg(plan.mediaProbeCommandExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-parse-planned=%1").arg(plan.resultParsingPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-schema-ready=%1").arg(plan.resultSchemaReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-codec-container-fields-planned=%1").arg(plan.codecContainerFieldsPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-frame-count-field-planned=%1").arg(plan.frameCountFieldPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-duration-field-planned=%1").arg(plan.durationFieldPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-owned=%1").arg(plan.mediaProbeResultOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-json-parse-owned=%1").arg(plan.jsonParseOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-codec-container-ready=%1").arg(plan.codecContainerResultReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-frame-count-ready=%1").arg(plan.frameCountResultReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-duration-ready=%1").arg(plan.durationResultReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-ready=%1").arg(plan.resultReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-probe-result-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
+}
+
 inline QString batchRenderedVideoSourceMetadataSummary(
     const BatchRenderedVideoSourceMetadata & metadata)
 {
@@ -4198,6 +4416,24 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         << QStringLiteral("output-verification-exec-probe-command-exec-ready=%1").arg(plan.mediaProbeCommandExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-command-contract-ready=%1").arg(plan.mediaProbeCommandContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-command-reason=%1").arg(plan.mediaProbeCommandReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeCommandReason)
+        << QStringLiteral("output-verification-exec-probe-result-source=%1").arg(plan.mediaProbeResultSource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResultSource)
+        << QStringLiteral("output-verification-exec-probe-result-parsed-codec=%1").arg(plan.mediaProbeResultParsedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResultParsedCodec)
+        << QStringLiteral("output-verification-exec-probe-result-parsed-container=%1").arg(plan.mediaProbeResultParsedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResultParsedContainer)
+        << QStringLiteral("output-verification-exec-probe-result-parsed-frame-count=%1").arg(plan.mediaProbeResultParsedFrameCount)
+        << QStringLiteral("output-verification-exec-probe-result-parsed-duration-seconds=%1").arg(QLocale::c().toString(plan.mediaProbeResultParsedDurationSeconds, 'f', 6))
+        << QStringLiteral("output-verification-exec-probe-result-parse-planned=%1").arg(plan.mediaProbeResultParsingPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-schema-ready=%1").arg(plan.mediaProbeResultSchemaReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-codec-container-fields-planned=%1").arg(plan.mediaProbeResultCodecContainerFieldsPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-frame-count-field-planned=%1").arg(plan.mediaProbeResultFrameCountFieldPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-duration-field-planned=%1").arg(plan.mediaProbeResultDurationFieldPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-owned=%1").arg(plan.mediaProbeResultOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-json-parse-owned=%1").arg(plan.mediaProbeResultJsonParseOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-codec-container-ready=%1").arg(plan.mediaProbeResultCodecContainerReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-frame-count-ready=%1").arg(plan.mediaProbeResultFrameCountReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-duration-ready=%1").arg(plan.mediaProbeResultDurationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-ready=%1").arg(plan.mediaProbeResultReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-contract-ready=%1").arg(plan.mediaProbeResultContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-probe-result-reason=%1").arg(plan.mediaProbeResultReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeResultReason)
         << QStringLiteral("output-verification-exec-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
     return tokens.join(QLatin1Char(' '));
 }
@@ -4232,7 +4468,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 preflight-ready=%29 runnable=%30 first-blocker=%31")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 preflight-ready=%30 runnable=%31 first-blocker=%32")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -4259,6 +4495,8 @@ inline QString batchRenderedVideoJobPlanSummary(
             plan.mediaProbeBinaryPlan))
         .arg(batchRenderedVideoMediaProbeCommandPlanSummary(
             plan.mediaProbeCommandPlan))
+        .arg(batchRenderedVideoMediaProbeResultPlanSummary(
+            plan.mediaProbeResultPlan))
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
