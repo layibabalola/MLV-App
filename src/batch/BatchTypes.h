@@ -185,12 +185,19 @@ struct BatchRenderedVideoFrameProcessingPlan
     QString reason;
     bool sourceMetadataReady = false;
     bool frameGeometryReady = false;
+    bool receiptApplicationContractReady = false;
+    bool debayerContractReady = false;
+    bool previewProcessingContractReady = false;
+    bool resizeProcessingContractReady = false;
+    bool rgb48FrameBufferContractReady = false;
+    bool frameIterationContractReady = false;
     bool receiptApplicationOwned = false;
     bool debayerOwned = false;
     bool previewProcessingOwned = false;
     bool resizeProcessingOwned = false;
     bool rgb48FrameBufferOwned = false;
     bool frameIterationOwned = false;
+    bool processingParityValidationOwned = false;
     bool processingParityReady = false;
     bool frameProcessingReady = false;
     bool contractReady = false;
@@ -1229,10 +1236,20 @@ batchRenderedVideoFrameProcessingPlanFromFramePlan(
                       && !plan.outputSize.isEmpty()
                       && plan.sourceMetadataReady
                       && plan.frameGeometryReady;
+    if( plan.contractReady )
+    {
+        plan.receiptApplicationContractReady = true;
+        plan.debayerContractReady = true;
+        plan.previewProcessingContractReady = true;
+        plan.resizeProcessingContractReady = true;
+        plan.rgb48FrameBufferContractReady = true;
+        plan.frameIterationContractReady = true;
+    }
     plan.processingParityReady = plan.receiptApplicationOwned
                               && plan.debayerOwned
                               && plan.previewProcessingOwned
-                              && plan.resizeProcessingOwned;
+                              && plan.resizeProcessingOwned
+                              && plan.processingParityValidationOwned;
     plan.frameProcessingReady = plan.processingParityReady
                              && plan.rgb48FrameBufferOwned
                              && plan.frameIterationOwned;
@@ -2169,18 +2186,25 @@ inline QString batchRenderedVideoFfmpegFramePlanSummary(
 inline QString batchRenderedVideoFrameProcessingPlanSummary(
     const BatchRenderedVideoFrameProcessingPlan & plan)
 {
-    return QStringLiteral("render-processing-source=%1 render-processing-pix-fmt=%2 render-processing-output-size=%3 render-processing-metadata-ready=%4 render-processing-frame-geometry-ready=%5 render-processing-receipt-owned=%6 render-processing-debayer-owned=%7 render-processing-preview-owned=%8 render-processing-resize-owned=%9 render-processing-rgb48-buffer-owned=%10 render-processing-frame-iteration-owned=%11 render-processing-parity-ready=%12 render-processing-frame-ready=%13 render-processing-contract-ready=%14 render-processing-reason=%15")
+    return QStringLiteral("render-processing-source=%1 render-processing-pix-fmt=%2 render-processing-output-size=%3 render-processing-metadata-ready=%4 render-processing-frame-geometry-ready=%5 render-processing-receipt-contract-ready=%6 render-processing-debayer-contract-ready=%7 render-processing-preview-contract-ready=%8 render-processing-resize-contract-ready=%9 render-processing-rgb48-buffer-contract-ready=%10 render-processing-frame-iteration-contract-ready=%11 render-processing-receipt-owned=%12 render-processing-debayer-owned=%13 render-processing-preview-owned=%14 render-processing-resize-owned=%15 render-processing-rgb48-buffer-owned=%16 render-processing-frame-iteration-owned=%17 render-processing-parity-validation-owned=%18 render-processing-parity-ready=%19 render-processing-frame-ready=%20 render-processing-contract-ready=%21 render-processing-reason=%22")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.rawFramePixelFormat.isEmpty() ? QStringLiteral("unspecified") : plan.rawFramePixelFormat)
         .arg(plan.outputSize.isEmpty() ? QStringLiteral("unspecified") : plan.outputSize)
         .arg(plan.sourceMetadataReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.frameGeometryReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.receiptApplicationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.debayerContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.previewProcessingContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.resizeProcessingContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.rgb48FrameBufferContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameIterationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.receiptApplicationOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.debayerOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.previewProcessingOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.resizeProcessingOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.rgb48FrameBufferOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.frameIterationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.processingParityValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.processingParityReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.frameProcessingReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))

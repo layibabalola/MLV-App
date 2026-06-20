@@ -961,19 +961,26 @@ TEST(BatchExportFormat, PlansRenderedVideoFrameProcessingContract)
     ASSERT_TRUE( processingPlan.contractReady );
     ASSERT_TRUE( processingPlan.sourceMetadataReady );
     ASSERT_TRUE( processingPlan.frameGeometryReady );
+    ASSERT_TRUE( processingPlan.receiptApplicationContractReady );
+    ASSERT_TRUE( processingPlan.debayerContractReady );
+    ASSERT_TRUE( processingPlan.previewProcessingContractReady );
+    ASSERT_TRUE( processingPlan.resizeProcessingContractReady );
+    ASSERT_TRUE( processingPlan.rgb48FrameBufferContractReady );
+    ASSERT_TRUE( processingPlan.frameIterationContractReady );
     ASSERT_FALSE( processingPlan.receiptApplicationOwned );
     ASSERT_FALSE( processingPlan.debayerOwned );
     ASSERT_FALSE( processingPlan.previewProcessingOwned );
     ASSERT_FALSE( processingPlan.resizeProcessingOwned );
     ASSERT_FALSE( processingPlan.rgb48FrameBufferOwned );
     ASSERT_FALSE( processingPlan.frameIterationOwned );
+    ASSERT_FALSE( processingPlan.processingParityValidationOwned );
     ASSERT_FALSE( processingPlan.processingParityReady );
     ASSERT_FALSE( processingPlan.frameProcessingReady );
     ASSERT_EQ( std::string("rgb48"),
                std::string(processingPlan.rawFramePixelFormat.toUtf8().constData()) );
     ASSERT_EQ( std::string("5792x3872"),
                std::string(processingPlan.outputSize.toUtf8().constData()) );
-    ASSERT_EQ( std::string("render-processing-source=headless-rendered-frame-contract render-processing-pix-fmt=rgb48 render-processing-output-size=5792x3872 render-processing-metadata-ready=true render-processing-frame-geometry-ready=true render-processing-receipt-owned=false render-processing-debayer-owned=false render-processing-preview-owned=false render-processing-resize-owned=false render-processing-rgb48-buffer-owned=false render-processing-frame-iteration-owned=false render-processing-parity-ready=false render-processing-frame-ready=false render-processing-contract-ready=true render-processing-reason=none"),
+    ASSERT_EQ( std::string("render-processing-source=headless-rendered-frame-contract render-processing-pix-fmt=rgb48 render-processing-output-size=5792x3872 render-processing-metadata-ready=true render-processing-frame-geometry-ready=true render-processing-receipt-contract-ready=true render-processing-debayer-contract-ready=true render-processing-preview-contract-ready=true render-processing-resize-contract-ready=true render-processing-rgb48-buffer-contract-ready=true render-processing-frame-iteration-contract-ready=true render-processing-receipt-owned=false render-processing-debayer-owned=false render-processing-preview-owned=false render-processing-resize-owned=false render-processing-rgb48-buffer-owned=false render-processing-frame-iteration-owned=false render-processing-parity-validation-owned=false render-processing-parity-ready=false render-processing-frame-ready=false render-processing-contract-ready=true render-processing-reason=none"),
                std::string(batchRenderedVideoFrameProcessingPlanSummary(
                    processingPlan).toUtf8().constData()) );
 
@@ -988,6 +995,12 @@ TEST(BatchExportFormat, PlansRenderedVideoFrameProcessingContract)
         framePlan);
     ASSERT_FALSE( processingPlan.contractReady );
     ASSERT_FALSE( processingPlan.sourceMetadataReady );
+    ASSERT_FALSE( processingPlan.receiptApplicationContractReady );
+    ASSERT_FALSE( processingPlan.debayerContractReady );
+    ASSERT_FALSE( processingPlan.previewProcessingContractReady );
+    ASSERT_FALSE( processingPlan.resizeProcessingContractReady );
+    ASSERT_FALSE( processingPlan.rgb48FrameBufferContractReady );
+    ASSERT_FALSE( processingPlan.frameIterationContractReady );
     ASSERT_EQ( std::string("rendered source dimensions invalid"),
                std::string(processingPlan.reason.toUtf8().constData()) );
 }
@@ -1261,6 +1274,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.frameProcessingPlan.contractReady );
     ASSERT_TRUE( plan.frameProcessingPlan.sourceMetadataReady );
     ASSERT_TRUE( plan.frameProcessingPlan.frameGeometryReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.receiptApplicationContractReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.debayerContractReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.previewProcessingContractReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.resizeProcessingContractReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.rgb48FrameBufferContractReady );
+    ASSERT_TRUE( plan.frameProcessingPlan.frameIterationContractReady );
     ASSERT_FALSE( plan.frameProcessingPlan.processingParityReady );
     ASSERT_FALSE( plan.frameProcessingPlan.frameProcessingReady );
     ASSERT_FALSE( plan.frameProcessingPlan.receiptApplicationOwned );
@@ -1269,6 +1288,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.frameProcessingPlan.resizeProcessingOwned );
     ASSERT_FALSE( plan.frameProcessingPlan.rgb48FrameBufferOwned );
     ASSERT_FALSE( plan.frameProcessingPlan.frameIterationOwned );
+    ASSERT_FALSE( plan.frameProcessingPlan.processingParityValidationOwned );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_TRUE( plan.ffmpegExecutionContractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionContractReady );
@@ -1325,10 +1345,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-frame-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-output-size=1920x1284") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-receipt-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-debayer-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-preview-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-resize-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-rgb48-buffer-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-frame-iteration-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-receipt-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-debayer-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-preview-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-rgb48-buffer-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-processing-parity-validation-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-parity-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-frame-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 1920x1284 -pix_fmt rgb48 -i -") != std::string::npos );
