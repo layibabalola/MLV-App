@@ -654,6 +654,56 @@ TEST(BatchExportFormat, ResolvesRenderedVideoEncoderPresets)
     ASSERT_TRUE( preset.extension.isEmpty() );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoOutputPlan plan =
+        batchRenderedVideoOutputPlanFromPaths(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            target);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.outputPath.toUtf8().constData()) );
+    ASSERT_TRUE( plan.reason.isEmpty() );
+    ASSERT_EQ( std::string("rendered-output=C:/renders/M16-1327.mp4 rendered-output-ready=true rendered-output-reason=none"),
+               std::string(batchRenderedVideoOutputPlanSummary(
+                   QStringLiteral("C:/clips/M16-1327.MLV"),
+                   QStringLiteral("C:/renders"),
+                   request).toUtf8().constData()) );
+
+    plan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders/custom.mp4"),
+        target);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( std::string("C:/renders/custom.mp4"),
+               std::string(plan.outputPath.toUtf8().constData()) );
+
+    plan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders/custom.mov"),
+        target);
+    ASSERT_FALSE( plan.ready );
+    ASSERT_TRUE( plan.outputPath.isEmpty() );
+    ASSERT_EQ( std::string("output path extension does not match target extension"),
+               std::string(plan.reason.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    plan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders"),
+        target);
+    ASSERT_FALSE( plan.ready );
+    ASSERT_TRUE( plan.outputPath.isEmpty() );
+    ASSERT_EQ( std::string("rendered target incomplete"),
+               std::string(plan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

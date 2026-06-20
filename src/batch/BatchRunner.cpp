@@ -58,10 +58,22 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 .arg(batchRenderedVideoTargetSummary(exportRequest)));
             return 2;
         }
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. %1. %2. %3. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n")
+        const BatchRenderedVideoOutputPlan outputPlan =
+            batchRenderedVideoOutputPlanFromPaths(inputPath, outputPath, renderedTarget);
+        if( !outputPlan.ready )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video output path is invalid. %1. %2. %3. Choose an output directory or an explicit rendered file path ending in %4.\n")
+                .arg(batchExportFormatRequestSummary(exportRequest))
+                .arg(batchRenderedVideoTargetSummary(exportRequest))
+                .arg(batchRenderedVideoOutputPlanSummary(inputPath, outputPath, exportRequest))
+                .arg(renderedTarget.extension));
+            return 2;
+        }
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. %1. %2. %3. %4. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n")
             .arg(batchExportFormatRequestSummary(exportRequest))
             .arg(batchRenderedVideoTargetSummary(exportRequest))
-            .arg(batchRenderedVideoEncoderPresetSummary(exportRequest)));
+            .arg(batchRenderedVideoEncoderPresetSummary(exportRequest))
+            .arg(batchRenderedVideoOutputPlanSummary(inputPath, outputPath, exportRequest)));
         return 2;
     }
     if( exportRequest.format != BatchExportFormat::Cdng )

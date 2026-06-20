@@ -3,6 +3,8 @@
 
 #include "../../platform/qt/ExportCodecIds.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QString>
 
 /* Shared type header for batch mode.
@@ -76,6 +78,13 @@ struct BatchRenderedVideoEncoderPreset
     int guiCodecProfile = -1;
     int guiCodecOption = -1;
     QString extension;
+    bool ready = false;
+};
+
+struct BatchRenderedVideoOutputPlan
+{
+    QString outputPath;
+    QString reason;
     bool ready = false;
 };
 
@@ -505,6 +514,67 @@ inline BatchRenderedVideoEncoderPreset batchRenderedVideoEncoderPresetFromReques
         batchRenderedVideoTargetFromRequest(request));
 }
 
+inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchRenderedVideoTarget & target)
+{
+    BatchRenderedVideoOutputPlan plan;
+    if( !target.complete || target.extension.isEmpty() )
+    {
+        plan.reason = QStringLiteral("rendered target incomplete");
+        return plan;
+    }
+
+    const QString inputTrimmed = inputPath.trimmed();
+    if( inputTrimmed.isEmpty() )
+    {
+        plan.reason = QStringLiteral("input path is empty");
+        return plan;
+    }
+
+    const QString outputTrimmed = outputPath.trimmed();
+    if( outputTrimmed.isEmpty() )
+    {
+        plan.reason = QStringLiteral("output path is empty");
+        return plan;
+    }
+
+    const QFileInfo inputInfo(inputTrimmed);
+    const QString baseName = inputInfo.completeBaseName();
+    if( baseName.isEmpty() )
+    {
+        plan.reason = QStringLiteral("input base name is empty");
+        return plan;
+    }
+
+    const QString extension = target.extension.startsWith(QLatin1Char('.'))
+        ? target.extension
+        : QStringLiteral(".") + target.extension;
+    const bool explicitDirectory =
+        outputTrimmed.endsWith(QLatin1Char('/'))
+     || outputTrimmed.endsWith(QLatin1Char('\\'));
+    const QFileInfo outputInfo(outputTrimmed);
+
+    if( explicitDirectory || outputInfo.suffix().isEmpty() )
+    {
+        plan.outputPath = QDir::cleanPath(
+            QDir(outputTrimmed).filePath(baseName + extension));
+        plan.ready = true;
+        return plan;
+    }
+
+    if( outputInfo.suffix().toLower() != extension.mid(1).toLower() )
+    {
+        plan.reason = QStringLiteral("output path extension does not match target extension");
+        return plan;
+    }
+
+    plan.outputPath = QDir::cleanPath(outputTrimmed);
+    plan.ready = true;
+    return plan;
+}
+
 inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & request)
 {
     const BatchRenderedVideoTarget target =
@@ -528,6 +598,22 @@ inline QString batchRenderedVideoEncoderPresetSummary(
         .arg(preset.guiCodecOption)
         .arg(preset.extension.isEmpty() ? QStringLiteral("unspecified") : preset.extension)
         .arg(preset.ready ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
+inline QString batchRenderedVideoOutputPlanSummary(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request)
+{
+    const BatchRenderedVideoOutputPlan plan =
+        batchRenderedVideoOutputPlanFromPaths(
+            inputPath,
+            outputPath,
+            batchRenderedVideoTargetFromRequest(request));
+    return QStringLiteral("rendered-output=%1 rendered-output-ready=%2 rendered-output-reason=%3")
+        .arg(plan.outputPath.isEmpty() ? QStringLiteral("unspecified") : plan.outputPath)
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
 /* Processing profile for batch export.
