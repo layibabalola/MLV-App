@@ -8,9 +8,11 @@ the RTX 4090 FastProxy proof validates the raw-fixes-enabled HQ Dual ISO
 no-readback CUDA-to-GL R16 texture path with GL/backend/oracle parity;
 unsupported states still fail closed to CPU readback or CPU presentation. The
 remaining priority order is Lane A E4 rendered export, then Lane C portable GPU
-backends. Future P4 default-promotion work requires a widened no-readback proof
-scope, for example a non-Dual-ISO `GPU Tex NR` proof packet, before Auto may
-sharpen beyond the current capability gate.
+backends. Lane C now has named-backend loader selection plus export/playback
+proof-wrapper plumbing; actual Vulkan/Metal backend implementation remains the
+next portable-backend product step. Future P4 default-promotion work requires a
+widened no-readback proof scope, for example a non-Dual-ISO `GPU Tex NR` proof
+packet, before Auto may sharpen beyond the current capability gate.
 
 Update 2026-06-19: P-pre **processing parity** has progressed beyond the
 original curve-first `allow_creative_adjustments` plan: creative slices 1-6 are
