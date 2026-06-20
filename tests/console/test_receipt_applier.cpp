@@ -1468,25 +1468,51 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegAudioContract)
     BatchRenderedVideoAudioMuxPrerequisitesPlan audioMuxPlan =
         batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
             sourceAudioPlan);
+    BatchRenderedVideoSourceAudioExtractionPlan extractionPlan =
+        batchRenderedVideoSourceAudioExtractionPlanFromSourceAudio(
+            sourceAudioPlan);
+    BatchRenderedVideoSourceAudioExtractionExecutionPlan extractionExecutionPlan =
+        batchRenderedVideoSourceAudioExtractionExecutionPlanFromExtraction(
+            extractionPlan);
+    BatchRenderedVideoFfmpegAudioInputHandoffPlan handoffPlan =
+        batchRenderedVideoFfmpegAudioInputHandoffPlanFromExtractionExecution(
+            extractionExecutionPlan);
+    BatchRenderedVideoAudioMuxExecutionPlan audioMuxExecutionPlan =
+        batchRenderedVideoAudioMuxExecutionPlanFromContracts(
+            sourceAudioPlan,
+            handoffPlan,
+            audioMuxPlan);
     BatchRenderedVideoFfmpegAudioPlan audioPlan =
         batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
             sourceAudioPlan,
-            audioMuxPlan);
+            audioMuxPlan,
+            audioMuxExecutionPlan);
 
     ASSERT_TRUE( audioMuxPlan.contractReady );
+    ASSERT_TRUE( audioMuxExecutionPlan.contractReady );
     ASSERT_TRUE( audioPlan.contractReady );
     ASSERT_TRUE( audioPlan.videoOnlyCommandReady );
     ASSERT_TRUE( audioPlan.audioInputContractReady );
+    ASSERT_TRUE( audioPlan.audioMuxExecutionContractReady );
     ASSERT_FALSE( audioPlan.sourceAudioDiscoveryOwned );
     ASSERT_FALSE( audioPlan.sourceAudioExtractionOwned );
     ASSERT_FALSE( audioPlan.audioInputOwned );
+    ASSERT_FALSE( audioPlan.audioMuxPlanned );
+    ASSERT_FALSE( audioPlan.audioMuxArgumentHandoffPlanned );
+    ASSERT_FALSE( audioPlan.audioSyncValidationPlanned );
     ASSERT_FALSE( audioPlan.audioMuxOwned );
+    ASSERT_FALSE( audioPlan.audioMuxArgumentHandoffOwned );
     ASSERT_FALSE( audioPlan.audioSyncOwned );
-    ASSERT_EQ( std::string("video-only-contract"),
+    ASSERT_FALSE( audioPlan.audioMuxExecutionReady );
+    ASSERT_FALSE( audioPlan.muxedAudioCommandPlanned );
+    ASSERT_FALSE( audioPlan.muxedAudioCommandReady );
+    ASSERT_EQ( std::string("video-only-to-mux-transition-contract"),
                std::string(audioPlan.source.toUtf8().constData()) );
     ASSERT_EQ( std::string("-an"),
                std::string(audioPlan.audioArguments.toUtf8().constData()) );
-    ASSERT_EQ( std::string("ffmpeg-audio-source=video-only-contract ffmpeg-audio-args=-an ffmpeg-audio-video-only-ready=true ffmpeg-audio-source-discovery-owned=false ffmpeg-audio-extraction-owned=false ffmpeg-audio-input-contract-ready=true ffmpeg-audio-input-owned=false ffmpeg-audio-mux-owned=false ffmpeg-audio-sync-owned=false ffmpeg-audio-contract-ready=true ffmpeg-audio-reason=none"),
+    ASSERT_EQ( std::string(""),
+               std::string(audioPlan.muxTransitionArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-audio-source=video-only-to-mux-transition-contract ffmpeg-audio-args=-an ffmpeg-audio-mux-transition-args=unspecified ffmpeg-audio-video-only-ready=true ffmpeg-audio-source-discovery-owned=false ffmpeg-audio-extraction-owned=false ffmpeg-audio-input-contract-ready=true ffmpeg-audio-input-owned=false ffmpeg-audio-mux-exec-contract-ready=true ffmpeg-audio-mux-planned=false ffmpeg-audio-mux-args-handoff-planned=false ffmpeg-audio-sync-planned=false ffmpeg-audio-mux-owned=false ffmpeg-audio-mux-args-handoff-owned=false ffmpeg-audio-sync-owned=false ffmpeg-audio-mux-exec-ready=false ffmpeg-audio-mux-command-planned=false ffmpeg-audio-mux-command-ready=false ffmpeg-audio-contract-ready=true ffmpeg-audio-reason=none"),
                std::string(batchRenderedVideoFfmpegAudioPlanSummary(
                    audioPlan).toUtf8().constData()) );
 
@@ -1498,30 +1524,58 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegAudioContract)
             48000,
             16,
             123456);
-    BatchRenderedVideoSourceAudioExtractionPlan extractionPlan =
+    extractionPlan =
         batchRenderedVideoSourceAudioExtractionPlanFromSourceAudio(
             sourceAudioPlan,
             QStringLiteral("C:/renders/M16-1327.source-audio.wav"));
+    extractionExecutionPlan =
+        batchRenderedVideoSourceAudioExtractionExecutionPlanFromExtraction(
+            extractionPlan);
+    handoffPlan =
+        batchRenderedVideoFfmpegAudioInputHandoffPlanFromExtractionExecution(
+            extractionExecutionPlan);
+    BatchRenderedVideoFfmpegAudioInputPlan audioInputPlan =
+        batchRenderedVideoFfmpegAudioInputPlanFromHandoff(
+            extractionPlan,
+            handoffPlan);
     audioMuxPlan =
         batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
             sourceAudioPlan,
-            extractionPlan);
+            extractionPlan,
+            audioInputPlan);
+    audioMuxExecutionPlan =
+        batchRenderedVideoAudioMuxExecutionPlanFromContracts(
+            sourceAudioPlan,
+            handoffPlan,
+            audioMuxPlan);
     audioPlan =
         batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
             sourceAudioPlan,
-            audioMuxPlan);
+            audioMuxPlan,
+            audioMuxExecutionPlan);
     ASSERT_TRUE( audioMuxPlan.contractReady );
+    ASSERT_TRUE( audioMuxExecutionPlan.contractReady );
     ASSERT_TRUE( audioPlan.contractReady );
     ASSERT_TRUE( audioPlan.videoOnlyCommandReady );
     ASSERT_TRUE( audioPlan.audioInputContractReady );
+    ASSERT_TRUE( audioPlan.audioMuxExecutionContractReady );
     ASSERT_TRUE( audioPlan.sourceAudioDiscoveryOwned );
     ASSERT_FALSE( audioPlan.sourceAudioExtractionOwned );
     ASSERT_FALSE( audioPlan.audioInputOwned );
+    ASSERT_TRUE( audioPlan.audioMuxPlanned );
+    ASSERT_TRUE( audioPlan.audioMuxArgumentHandoffPlanned );
+    ASSERT_TRUE( audioPlan.audioSyncValidationPlanned );
     ASSERT_FALSE( audioPlan.audioMuxOwned );
+    ASSERT_FALSE( audioPlan.audioMuxArgumentHandoffOwned );
     ASSERT_FALSE( audioPlan.audioSyncOwned );
+    ASSERT_FALSE( audioPlan.audioMuxExecutionReady );
+    ASSERT_TRUE( audioPlan.muxedAudioCommandPlanned );
+    ASSERT_FALSE( audioPlan.muxedAudioCommandReady );
     ASSERT_EQ( std::string("-an"),
                std::string(audioPlan.audioArguments.toUtf8().constData()) );
-    ASSERT_EQ( std::string("ffmpeg-audio-source=video-only-contract ffmpeg-audio-args=-an ffmpeg-audio-video-only-ready=true ffmpeg-audio-source-discovery-owned=true ffmpeg-audio-extraction-owned=false ffmpeg-audio-input-contract-ready=true ffmpeg-audio-input-owned=false ffmpeg-audio-mux-owned=false ffmpeg-audio-sync-owned=false ffmpeg-audio-contract-ready=true ffmpeg-audio-reason=none"),
+    ASSERT_EQ( std::string("deferred-until-audio-mux-execution-owned"),
+               std::string(audioPlan.muxTransitionArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-audio-source=video-only-to-mux-transition-contract ffmpeg-audio-args=-an ffmpeg-audio-mux-transition-args=deferred-until-audio-mux-execution-owned ffmpeg-audio-video-only-ready=true ffmpeg-audio-source-discovery-owned=true ffmpeg-audio-extraction-owned=false ffmpeg-audio-input-contract-ready=true ffmpeg-audio-input-owned=false ffmpeg-audio-mux-exec-contract-ready=true ffmpeg-audio-mux-planned=true ffmpeg-audio-mux-args-handoff-planned=true ffmpeg-audio-sync-planned=true ffmpeg-audio-mux-owned=false ffmpeg-audio-mux-args-handoff-owned=false ffmpeg-audio-sync-owned=false ffmpeg-audio-mux-exec-ready=false ffmpeg-audio-mux-command-planned=true ffmpeg-audio-mux-command-ready=false ffmpeg-audio-contract-ready=true ffmpeg-audio-reason=none"),
                std::string(batchRenderedVideoFfmpegAudioPlanSummary(
                    audioPlan).toUtf8().constData()) );
 
@@ -2252,10 +2306,19 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("audio-mux-exec-sync-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("audio-mux-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("audio-mux-exec-contract-ready=true") != std::string::npos );
-    ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-to-mux-transition-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-args=-an") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-transition-args=unspecified") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-args-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-sync-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-args-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-command-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-settings-source=explicit-headless render-settings-explicit-headless=true render-settings-gui-owned=false render-settings-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-settings-resize=true render-settings-resize-width=1920") != std::string::npos );
@@ -2589,11 +2652,20 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("audio-mux-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("audio-mux-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-source-discovery-owned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-transition-args=deferred-until-audio-mux-execution-owned") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-extraction-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-args-handoff-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-sync-planned=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-args-handoff-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-sync-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-command-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-args=-an") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("runner-audio-mux-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=false") != std::string::npos );
@@ -3179,11 +3251,15 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("audio-mux-exec-sync-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("audio-mux-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("audio-mux-exec-contract-ready=true") != std::string::npos );
-    ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-source=video-only-to-mux-transition-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-transition-args=unspecified") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-source-discovery-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-extraction-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-mux-command-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("receipt-application-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("receipt-application-reason=rendered source metadata unavailable") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-contract-ready=false") != std::string::npos );
