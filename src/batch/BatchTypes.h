@@ -134,6 +134,10 @@ struct BatchRenderedVideoSourceAudioPlan
     QString clipPath;
     QString audioState = QStringLiteral("unknown");
     QString reason;
+    int sampleRate = 0;
+    int channels = 0;
+    int bitsPerSample = 0;
+    qulonglong audioBytes = 0;
     bool discoveryOwned = false;
     bool discoveryAttempted = false;
     bool sourceAudioKnown = false;
@@ -979,6 +983,51 @@ batchRenderedVideoSourceAudioPlanForCurrentBuild(
     {
         plan.reason =
             QStringLiteral("rendered source audio contract unavailable");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoSourceAudioPlan
+batchRenderedVideoSourceAudioPlanFromDiscoveredAudio(
+    const QString & clipPath,
+    bool sourceAudioPresent,
+    int channels,
+    int sampleRate,
+    int bitsPerSample,
+    qulonglong audioBytes)
+{
+    BatchRenderedVideoSourceAudioPlan plan =
+        batchRenderedVideoSourceAudioPlanForCurrentBuild(clipPath);
+    plan.source = QStringLiteral("open-mlv-audio-metadata");
+    plan.audioState = sourceAudioPresent
+        ? QStringLiteral("present")
+        : QStringLiteral("absent");
+    plan.discoveryOwned = true;
+    plan.discoveryAttempted = true;
+    plan.sourceAudioKnown = true;
+    plan.sourceAudioPresent = sourceAudioPresent;
+    plan.channels = sourceAudioPresent ? channels : 0;
+    plan.sampleRate = sourceAudioPresent ? sampleRate : 0;
+    plan.bitsPerSample = sourceAudioPresent ? bitsPerSample : 0;
+    plan.audioBytes = sourceAudioPresent ? audioBytes : 0;
+    plan.videoOnlyFallbackReady = true;
+
+    if( sourceAudioPresent
+     && (plan.channels <= 0
+      || plan.sampleRate <= 0
+      || plan.bitsPerSample <= 0) )
+    {
+        plan.reason = QStringLiteral("rendered source audio metadata invalid");
+        plan.contractReady = false;
+        return plan;
+    }
+
+    plan.contractReady = plan.sourceAudioKnown
+                      && plan.videoOnlyFallbackReady;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered source audio discovery contract unavailable");
     }
     return plan;
 }
@@ -2028,6 +2077,78 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         binaryPlan);
 }
 
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
+    const BatchRenderedVideoJobPlan & preflightPlan,
+    const BatchRenderedVideoSourceAudioPlan & sourceAudioPlan)
+{
+    BatchRenderedVideoJobPlan plan = preflightPlan;
+    plan.sourceAudioPlan = sourceAudioPlan;
+    plan.audioMuxPrerequisitesPlan =
+        batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
+            plan.sourceAudioPlan);
+    plan.ffmpegAudioPlan =
+        batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
+            plan.sourceAudioPlan,
+            plan.audioMuxPrerequisitesPlan);
+    plan.sourceAudioContractReady =
+        plan.sourceAudioPlan.contractReady;
+    plan.audioMuxPrerequisitesContractReady =
+        plan.audioMuxPrerequisitesPlan.contractReady;
+    plan.ffmpegAudioContractReady =
+        plan.ffmpegAudioPlan.contractReady;
+
+    if( plan.metadataAttempted )
+    {
+        plan.ffmpegCommandPlan =
+            batchRenderedVideoFfmpegCommandPlanFromParts(
+                plan.ffmpegFramePlan,
+                plan.ffmpegFilterPlan,
+                plan.ffmpegAudioPlan,
+                plan.ffmpegVideoPlan,
+                plan.outputPlan,
+                plan.ffmpegBinaryPlan);
+        plan.ffmpegCommandReady = plan.ffmpegCommandPlan.ready;
+        plan.ffmpegExecutionPlan =
+            batchRenderedVideoFfmpegExecutionPlanFromCommand(
+                plan.ffmpegCommandPlan);
+        plan.ffmpegExecutionContractReady =
+            plan.ffmpegExecutionPlan.contractReady;
+        plan.outputVerificationExecutionPlan =
+            batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
+                plan.outputVerificationPlan,
+                plan.ffmpegExecutionPlan);
+        plan.outputVerificationExecutionContractReady =
+            plan.outputVerificationExecutionPlan.contractReady;
+    }
+
+    plan.preflightReady = plan.requestValid
+                       && plan.targetReady
+                       && plan.encoderReady
+                       && plan.ffmpegVideoReady
+                       && plan.ffmpegFilterReady
+                       && plan.optionalFilterContractReady
+                       && plan.sourceAudioContractReady
+                       && plan.audioMuxPrerequisitesContractReady
+                       && plan.ffmpegAudioContractReady
+                       && plan.ffmpegBinaryCommandReady
+                       && plan.renderSettings.ready
+                       && plan.outputReady
+                       && plan.outputVerificationContractReady;
+    if( plan.metadataAttempted )
+    {
+        plan.preflightReady = plan.preflightReady
+                           && plan.metadataReady
+                           && plan.ffmpegFrameReady
+                           && plan.receiptApplicationContractReady
+                           && plan.frameProcessingContractReady
+                           && plan.ffmpegCommandReady
+                           && plan.ffmpegExecutionContractReady
+                           && plan.outputVerificationExecutionContractReady;
+    }
+    plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
+    return plan;
+}
+
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
     const BatchRenderedVideoJobPlan & preflightPlan,
     const BatchRenderedVideoSourceMetadata & metadata,
@@ -2336,10 +2457,14 @@ inline QString batchRenderedVideoOptionalFilterPlanSummary(
 inline QString batchRenderedVideoSourceAudioPlanSummary(
     const BatchRenderedVideoSourceAudioPlan & plan)
 {
-    return QStringLiteral("source-audio-source=%1 source-audio-clip=%2 source-audio-state=%3 source-audio-discovery-owned=%4 source-audio-discovery-attempted=%5 source-audio-known=%6 source-audio-present=%7 source-audio-extraction-owned=%8 source-audio-mux-input-owned=%9 source-audio-sync-validation-owned=%10 source-audio-video-only-ready=%11 source-audio-contract-ready=%12 source-audio-reason=%13")
+    return QStringLiteral("source-audio-source=%1 source-audio-clip=%2 source-audio-state=%3 source-audio-sample-rate=%4 source-audio-channels=%5 source-audio-bits=%6 source-audio-bytes=%7 source-audio-discovery-owned=%8 source-audio-discovery-attempted=%9 source-audio-known=%10 source-audio-present=%11 source-audio-extraction-owned=%12 source-audio-mux-input-owned=%13 source-audio-sync-validation-owned=%14 source-audio-video-only-ready=%15 source-audio-contract-ready=%16 source-audio-reason=%17")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.clipPath.isEmpty() ? QStringLiteral("unspecified") : plan.clipPath)
         .arg(plan.audioState.isEmpty() ? QStringLiteral("unspecified") : plan.audioState)
+        .arg(plan.sampleRate)
+        .arg(plan.channels)
+        .arg(plan.bitsPerSample)
+        .arg(plan.audioBytes)
         .arg(plan.discoveryOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.discoveryAttempted ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.sourceAudioKnown ? QStringLiteral("true") : QStringLiteral("false"))

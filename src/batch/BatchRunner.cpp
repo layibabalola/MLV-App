@@ -45,6 +45,22 @@ static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromOpenMlv(
         receipt.stretchFactorY());
 }
 
+static BatchRenderedVideoSourceAudioPlan renderedVideoSourceAudioPlanFromOpenMlv(
+    mlvObject_t *mlvObject,
+    const QString &clipPath)
+{
+    const bool sourceAudioPresent = doesMlvHaveAudio( mlvObject );
+    return batchRenderedVideoSourceAudioPlanFromDiscoveredAudio(
+        clipPath,
+        sourceAudioPresent,
+        sourceAudioPresent ? static_cast<int>(getMlvAudioChannels( mlvObject )) : 0,
+        sourceAudioPresent ? static_cast<int>(getMlvSampleRate( mlvObject )) : 0,
+        sourceAudioPresent ? static_cast<int>(getMlvAudioBitsPerSample( mlvObject )) : 0,
+        sourceAudioPresent
+            ? static_cast<qulonglong>(getMlvAudioSize( mlvObject ))
+            : 0);
+}
+
 int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 {
     QElapsedTimer totalTimer;
@@ -278,9 +294,15 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 
         const BatchRenderedVideoSourceMetadata metadata =
             renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
+        const BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+            renderedVideoSourceAudioPlanFromOpenMlv( mlvObject, mlvPath );
+        const BatchRenderedVideoJobPlan audioDiscoveredPlan =
+            batchRenderedVideoJobPlanWithSourceAudio(
+                basePlan,
+                sourceAudioPlan);
         const BatchRenderedVideoJobPlan renderedPlan =
             batchRenderedVideoJobPlanWithMetadata(
-                basePlan,
+                audioDiscoveredPlan,
                 metadata,
                 renderSettings);
         freeMlvObject( mlvObject );
