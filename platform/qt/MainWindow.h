@@ -1354,6 +1354,7 @@ private:
     int openMlv(QString fileName);
     void playbackHandling( int timeDiff );
     void initGui( void );
+    void showPerformanceProfilingDialog( void );
     void initLib( void );
     void readSettings( void );
     void writeSettings( void );

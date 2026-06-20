@@ -1517,46 +1517,19 @@ int main(int argc, char *argv[])
     a.setAttribute(Qt::AA_Use96Dpi);
 #endif
 
+    const bool perfFieldLogRequested =
+        envFlagEnabled("MLVAPP_PERF_FIELD_LOG")
+        || (!batch && CrashForensics::performanceFieldLogSettingsEnabled());
+    if (perfFieldLogRequested)
+    {
+        CrashForensics::applyPerformanceFieldLogEnvironment(true);
+    }
     if (profile_playback
         || gui_playback_smoke
         || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")
-        || envFlagEnabled("MLVAPP_PERF_FIELD_LOG"))
+        || perfFieldLogRequested)
     {
         CrashForensics::publishMachineFingerprintEnvironment();
-    }
-    if (envFlagEnabled("MLVAPP_PERF_FIELD_LOG"))
-    {
-        const QString logsDir = CrashForensics::logsDirectoryPath();
-        if (!logsDir.isEmpty())
-        {
-            qputenv("MLVAPP_PERF_FIELD_LOG_DIR",
-                    QDir::toNativeSeparators(logsDir).toUtf8());
-            if (qEnvironmentVariable("MLVAPP_PERF_FIELD_LOG_PATH").trimmed().isEmpty())
-            {
-                const QString perfLogStamp =
-                    QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"));
-                qputenv("MLVAPP_PERF_FIELD_LOG_PATH",
-                        QDir::toNativeSeparators(
-                            QDir(logsDir).absoluteFilePath(
-                                QStringLiteral("mlvapp-perf-field-%1.jsonl")
-                                    .arg(perfLogStamp))).toUtf8());
-            }
-            if (!envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER"))
-            {
-                qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
-            }
-            if (qEnvironmentVariable("MLVAPP_EXPORT_STAGE_PROFILE_FILE").trimmed().isEmpty())
-            {
-                const QString stamp =
-                    QDateTime::currentDateTimeUtc().toString(
-                        QStringLiteral("yyyyMMdd-HHmmss-zzz"));
-                qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE",
-                        QDir::toNativeSeparators(
-                            QDir(logsDir).absoluteFilePath(
-                                QStringLiteral("mlvapp-export-stage-profile-%1.json")
-                                    .arg(stamp))).toUtf8());
-            }
-        }
     }
 
     if (batch)

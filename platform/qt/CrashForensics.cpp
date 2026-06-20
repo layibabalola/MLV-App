@@ -62,6 +62,19 @@ static QMutex g_machineFingerprintMutex;
 static bool g_machineFingerprintCached = false;
 static QJsonObject g_machineFingerprintCache;
 
+static const char * kPerformanceFieldLogSetting =
+    "PerformanceProfiling/FieldLogEnabled";
+
+bool envFlagEnabled(const char *name)
+{
+    const QByteArray value = qgetenv(name).trimmed().toLower();
+    return !value.isEmpty()
+        && value != QByteArrayLiteral("0")
+        && value != QByteArrayLiteral("false")
+        && value != QByteArrayLiteral("off")
+        && value != QByteArrayLiteral("no");
+}
+
 QJsonValue stringOrNull(const QString & value)
 {
     return value.isEmpty() ? QJsonValue() : QJsonValue(value);
@@ -231,6 +244,34 @@ QString todaysLogFileName()
     return QStringLiteral("mlvapp-")
         + QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"))
         + QStringLiteral(".log");
+}
+
+QString defaultPerformanceFieldLogPath()
+{
+    if (g_logsDir.isEmpty()) return QString();
+    return QDir(g_logsDir).absoluteFilePath(
+        QStringLiteral("mlvapp-perf-field-%1.jsonl")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"))));
+}
+
+QString defaultExportStageProfilePath()
+{
+    if (g_logsDir.isEmpty()) return QString();
+    return QDir(g_logsDir).absoluteFilePath(
+        QStringLiteral("mlvapp-export-stage-profile-%1.json")
+            .arg(QDateTime::currentDateTimeUtc().toString(
+                QStringLiteral("yyyyMMdd-HHmmss-zzz"))));
+}
+
+void putNativePathEnv(const char *name, const QString &path)
+{
+    if (path.isEmpty()) return;
+    qputenv(name, QDir::toNativeSeparators(path).toUtf8());
+}
+
+bool envEmpty(const char *name)
+{
+    return qEnvironmentVariable(name).trimmed().isEmpty();
 }
 
 void pruneOldLogs(const QString & logsDir, int keep)
@@ -528,6 +569,87 @@ void publishMachineFingerprintEnvironment()
     publishNumber("MLVAPP_MACHINE_FINGERPRINT_CPU_THREADS", "cpu_threads");
     publishNumber("MLVAPP_MACHINE_FINGERPRINT_RAM_TOTAL_MB", "ram_total_mb");
     publishString("MLVAPP_MACHINE_FINGERPRINT_OS_VERSION", "os_version");
+}
+
+bool performanceFieldLogSettingsEnabled()
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    return set.value(QString::fromLatin1(kPerformanceFieldLogSetting), false)
+        .toBool();
+}
+
+void setPerformanceFieldLogSettingsEnabled(bool enabled)
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    set.setValue(QString::fromLatin1(kPerformanceFieldLogSetting), enabled);
+    set.sync();
+}
+
+bool performanceFieldLogRuntimeEnabled()
+{
+    return envFlagEnabled("MLVAPP_PERF_FIELD_LOG")
+        || performanceFieldLogSettingsEnabled();
+}
+
+QString performanceFieldLogPath()
+{
+    const QString path = qEnvironmentVariable("MLVAPP_PERF_FIELD_LOG_PATH").trimmed();
+    return path.isEmpty() ? defaultPerformanceFieldLogPath() : path;
+}
+
+void applyPerformanceFieldLogEnvironment(bool enabled)
+{
+    if (!enabled) {
+        qputenv("MLVAPP_PERF_FIELD_LOG", QByteArrayLiteral("0"));
+        if (envFlagEnabled("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED")) {
+            qunsetenv("MLVAPP_PERF_FIELD_LOG_PATH");
+        }
+        if (envFlagEnabled("MLVAPP_PERF_FIELD_LOG_DIR_GUI_MANAGED")) {
+            qunsetenv("MLVAPP_PERF_FIELD_LOG_DIR");
+        }
+        if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED")) {
+            qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("0"));
+            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED");
+        }
+        if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
+            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED");
+        }
+        qunsetenv("MLVAPP_PERF_FIELD_LOG_GUI_MANAGED");
+        qunsetenv("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED");
+        qunsetenv("MLVAPP_PERF_FIELD_LOG_DIR_GUI_MANAGED");
+        return;
+    }
+
+    publishMachineFingerprintEnvironment();
+    qputenv("MLVAPP_PERF_FIELD_LOG", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_PERF_FIELD_LOG_GUI_MANAGED", QByteArrayLiteral("1"));
+
+    if (!g_logsDir.isEmpty()) {
+        putNativePathEnv("MLVAPP_PERF_FIELD_LOG_DIR", g_logsDir);
+        qputenv("MLVAPP_PERF_FIELD_LOG_DIR_GUI_MANAGED", QByteArrayLiteral("1"));
+    }
+    if (envEmpty("MLVAPP_PERF_FIELD_LOG_PATH")
+     || envFlagEnabled("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED")) {
+        putNativePathEnv("MLVAPP_PERF_FIELD_LOG_PATH",
+                         defaultPerformanceFieldLogPath());
+        qputenv("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED", QByteArrayLiteral("1"));
+    }
+    if (!envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")) {
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED", QByteArrayLiteral("1"));
+    }
+    if (envEmpty("MLVAPP_EXPORT_STAGE_PROFILE_FILE")
+     || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
+        putNativePathEnv("MLVAPP_EXPORT_STAGE_PROFILE_FILE",
+                         defaultExportStageProfilePath());
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED",
+                QByteArrayLiteral("1"));
+    }
 }
 
 QString runMetadataJson()

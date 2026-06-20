@@ -78,6 +78,16 @@ QString machineFingerprintJson();
 void publishMachineFingerprintEnvironment();
 
 /*!
+ * Persistent GUI-facing opt-in for the compact playback/export perf JSONL log.
+ * Environment flags remain supported for script-driven profiling.
+ */
+bool performanceFieldLogSettingsEnabled();
+void setPerformanceFieldLogSettingsEnabled(bool enabled);
+bool performanceFieldLogRuntimeEnabled();
+QString performanceFieldLogPath();
+void applyPerformanceFieldLogEnvironment(bool enabled);
+
+/*!
  * Emit the startup metadata line through qInfo() so it is captured in
  * the rotating log.  Call this immediately after install().
  */

@@ -14,8 +14,14 @@ extern "C" {
 }
 #include "math.h"
 
+#include <QCheckBox>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QShortcut>
 #include <QThread>
 #include <QTime>
@@ -34,6 +40,8 @@ extern "C" {
 #include <QScrollBar>
 #include <QScreen>
 #include <QMimeData>
+#include <QUrl>
+#include <QVBoxLayout>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -862,19 +870,12 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
 
 static bool perfFieldLogEnabled()
 {
-    return environmentFlagEnabled( "MLVAPP_PERF_FIELD_LOG" );
+    return CrashForensics::performanceFieldLogRuntimeEnabled();
 }
 
 static QString perfFieldLogPath()
 {
-    QString path = qEnvironmentVariable( "MLVAPP_PERF_FIELD_LOG_PATH" ).trimmed();
-    if( !path.isEmpty() ) return path;
-    const QString logsDir = CrashForensics::logsDirectoryPath();
-    if( logsDir.isEmpty() ) return QString();
-    return QDir( logsDir ).absoluteFilePath(
-        QStringLiteral("mlvapp-perf-field-%1.jsonl")
-            .arg( QDateTime::currentDateTime().toString(
-                QStringLiteral("yyyyMMdd") ) ) );
+    return CrashForensics::performanceFieldLogPath();
 }
 
 static void appendPerfFieldLogLine( const QJsonObject &line )
@@ -7820,6 +7821,64 @@ void MainWindow::playbackHandling(int timeDiff)
     }
 }
 
+void MainWindow::showPerformanceProfilingDialog( void )
+{
+    QDialog dialog( this );
+    dialog.setWindowTitle( tr( "Performance Profiling" ) );
+
+    QVBoxLayout * layout = new QVBoxLayout( &dialog );
+
+    QCheckBox * enable =
+        new QCheckBox( tr( "Record performance summaries" ), &dialog );
+    enable->setChecked( CrashForensics::performanceFieldLogRuntimeEnabled() );
+    layout->addWidget( enable );
+
+    const QString logPath = CrashForensics::performanceFieldLogPath();
+    QLabel * pathLabel = new QLabel(
+        tr( "Log file: %1" ).arg(
+            logPath.isEmpty()
+                ? tr( "unavailable" )
+                : QDir::toNativeSeparators( logPath ) ),
+        &dialog );
+    pathLabel->setWordWrap( true );
+    pathLabel->setTextInteractionFlags( Qt::TextSelectableByMouse );
+    layout->addWidget( pathLabel );
+
+    QPushButton * openLogs =
+        new QPushButton( tr( "Open Logs Folder" ), &dialog );
+    connect( openLogs,
+             &QPushButton::clicked,
+             this,
+             []()
+             {
+                 const QString logsDir = CrashForensics::logsDirectoryPath();
+                 if( !logsDir.isEmpty() )
+                 {
+                     QDesktopServices::openUrl(
+                         QUrl::fromLocalFile( logsDir ) );
+                 }
+             } );
+    layout->addWidget( openLogs );
+
+    QDialogButtonBox * buttons =
+        new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                              &dialog );
+    connect( buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept );
+    connect( buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject );
+    layout->addWidget( buttons );
+
+    if( dialog.exec() != QDialog::Accepted ) return;
+
+    const bool enabled = enable->isChecked();
+    CrashForensics::setPerformanceFieldLogSettingsEnabled( enabled );
+    CrashForensics::applyPerformanceFieldLogEnvironment( enabled );
+    statusBar()->showMessage(
+        enabled
+            ? tr( "Performance profiling enabled" )
+            : tr( "Performance profiling disabled" ),
+        5000 );
+}
+
 //Initialize the GUI
 void MainWindow::initGui( void )
 {
@@ -7900,6 +7959,15 @@ void MainWindow::initGui( void )
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale2 );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale4 );
     m_playbackScaleFactorGroup->addAction( ui->actionPlaybackScale8 );
+
+    QAction * performanceProfilingAction =
+        new QAction( tr( "Performance Profiling..." ), this );
+    connect( performanceProfilingAction,
+             &QAction::triggered,
+             this,
+             &MainWindow::showPerformanceProfilingDialog );
+    ui->menuPlayback->addSeparator();
+    ui->menuPlayback->addAction( performanceProfilingAction );
 
     const QString phase3Tooltip = tr(
         "Experimental Phase 3 pipeline parallelism. Falls back to serial "
