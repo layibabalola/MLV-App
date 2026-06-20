@@ -1185,6 +1185,8 @@ _Current E4 implementation note (2026-06-20 probe JSON ownership/error-reporting
 
 _Current E4 implementation note (2026-06-20 optional-filter ownership contract slice): the central rendered job plan now carries a separate `BatchRenderedVideoOptionalFilterPlan` derived from the base ffmpeg filter plan. It reports the current base color-scale filter contract plus explicit false ownership for optional filter graph construction, moiree filtering, HDR blend, stabilization, optional filter ordering, optional filter parity validation, and optional filter execution readiness. This is optional-filter proof-boundary scaffolding only: it does not add headless optional-filter CLI controls, run moiree/HDR/stabilization processing, prove optional-filter parity, alter the base ffmpeg color-scale wrapper, execute ffmpeg, create outputs, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 parsed probe-validation boundary slice): the central rendered job plan now carries a `BatchRenderedVideoMediaProbeValidationPlan` after the parsed probe-result contract. It records future parsed-result ingestion and codec/container, frame-count, and duration comparison readiness while keeping parsed-result ingestion ownership, comparison readiness, match status, validation ownership, output verification readiness, filesystem inspection, `ffprobe` execution, receipt/hash validation, and rendered export all false. This is validation-boundary scaffolding only: it does not inspect files, run `ffprobe`, parse media JSON, compare encoded metadata, execute ffmpeg, create outputs, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
