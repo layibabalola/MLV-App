@@ -869,7 +869,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(basePlan).toUtf8().constData()) );
 
     BatchRenderedVideoSourceMetadata metadata =
@@ -906,7 +906,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_EQ( 1284, plan.ffmpegFramePlan.outputHeight );
     ASSERT_EQ( std::string("23.976"),
                std::string(plan.ffmpegFramePlan.frameRateArgument.toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     const std::string summary =
@@ -1021,7 +1021,7 @@ TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
     ASSERT_TRUE( plan.ffmpegFrameReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
-    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     metadata = BatchRunner::renderedVideoSourceMetadataFromClipState(
@@ -1132,14 +1132,18 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.frameProcessingReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.audioMuxReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.ffmpegExecutionReady );
+    ASSERT_FALSE( plan.runnerPrerequisites.outputVerificationReady );
     ASSERT_FALSE( plan.runnerPrerequisites.headlessRunnerReady );
     ASSERT_FALSE( plan.runnerPrerequisites.ready );
     ASSERT_FALSE( plan.runnable );
     ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
                std::string(plan.outputPlan.outputPath.toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
-    ASSERT_EQ( std::string("runner-processing-parity-ready=false runner-headless-export-ready=false runner-ready=false runner-reason=rendered processing parity and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("runner-processing-parity-ready=false runner-frame-processing-ready=false runner-audio-mux-ready=false runner-ffmpeg-execution-ready=false runner-output-verification-ready=false runner-headless-export-ready=false runner-ready=false runner-reason=rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoRunnerPrerequisitesSummary(
                    plan.runnerPrerequisites).toUtf8().constData()) );
 

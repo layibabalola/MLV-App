@@ -164,8 +164,12 @@ struct BatchRenderedVideoOutputPlan
 struct BatchRenderedVideoRunnerPrerequisites
 {
     bool processingParityReady = false;
+    bool frameProcessingReady = false;
+    bool audioMuxReady = false;
+    bool ffmpegExecutionReady = false;
+    bool outputVerificationReady = false;
     bool headlessRunnerReady = false;
-    QString reason = QStringLiteral("rendered processing parity and headless rendered-export runner are not implemented");
+    QString reason = QStringLiteral("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
     bool ready = false;
 };
 
@@ -1037,9 +1041,21 @@ batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
     BatchRenderedVideoRunnerPrerequisites prerequisites;
     prerequisites.processingParityReady = false;
+    prerequisites.frameProcessingReady = false;
+    prerequisites.audioMuxReady = false;
+    prerequisites.ffmpegExecutionReady = false;
+    prerequisites.outputVerificationReady = false;
     prerequisites.headlessRunnerReady = false;
-    prerequisites.reason = QStringLiteral("rendered processing parity and headless rendered-export runner are not implemented");
-    prerequisites.ready = false;
+    prerequisites.ready = prerequisites.processingParityReady
+                       && prerequisites.frameProcessingReady
+                       && prerequisites.audioMuxReady
+                       && prerequisites.ffmpegExecutionReady
+                       && prerequisites.outputVerificationReady
+                       && prerequisites.headlessRunnerReady;
+    if( !prerequisites.ready )
+    {
+        prerequisites.reason = QStringLiteral("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
+    }
     return prerequisites;
 }
 
@@ -1372,8 +1388,12 @@ inline QString batchRenderedVideoOutputPlanSummary(
 inline QString batchRenderedVideoRunnerPrerequisitesSummary(
     const BatchRenderedVideoRunnerPrerequisites & prerequisites)
 {
-    return QStringLiteral("runner-processing-parity-ready=%1 runner-headless-export-ready=%2 runner-ready=%3 runner-reason=%4")
+    return QStringLiteral("runner-processing-parity-ready=%1 runner-frame-processing-ready=%2 runner-audio-mux-ready=%3 runner-ffmpeg-execution-ready=%4 runner-output-verification-ready=%5 runner-headless-export-ready=%6 runner-ready=%7 runner-reason=%8")
         .arg(prerequisites.processingParityReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.frameProcessingReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.audioMuxReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.ffmpegExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.outputVerificationReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.headlessRunnerReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.ready ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.reason.isEmpty() ? QStringLiteral("none") : prerequisites.reason);

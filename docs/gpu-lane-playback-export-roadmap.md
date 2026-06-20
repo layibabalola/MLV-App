@@ -1125,6 +1125,8 @@ _Current E4 implementation note (2026-06-19): `BatchRenderedVideoJobPlan` now al
 
 _Current E4 implementation note (2026-06-19 resize CLI slice): the headless batch parser now accepts plan-only `--rendered-resize-width`, `--rendered-resize-height`, and `--rendered-resize-height-locked` options for rendered-video requests, validates them before runner work, and stores the resulting `BatchRenderedVideoRenderSettings` in `BatchContext` so the runner-side `BatchRenderedVideoJobPlan` can combine request, target, encoder preset, ffmpeg video/filter plans, output path, source metadata, explicit resize intent, and runner prerequisites. These switches are rejected for explicit CDNG requests; if no export format is provided, the rendered option follows the existing rendered-intent path and still fails closed before output creation or frame processing because processing parity and the headless rendered-export runner remain unimplemented._
 
+_Current E4 implementation note (2026-06-19 prerequisite decomposition slice): `BatchRenderedVideoRunnerPrerequisites` now reports the remaining runner gates separately: processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and the headless runner itself. All of those gates remain false in the current build, so complete rendered-video requests can still reach metadata/frame planning but remain `runnable=false`; this is audio/output proof-boundary scaffolding only, not audio support, ffmpeg process execution, output verification, or real rendered export._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
