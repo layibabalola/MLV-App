@@ -87,6 +87,25 @@ bool performanceFieldLogRuntimeEnabled();
 QString performanceFieldLogPath();
 void applyPerformanceFieldLogEnvironment(bool enabled);
 
+/*! GUI-owned opt-in presets for normal dogfooding. These remain off by
+ * default and only manage environment variables marked with matching
+ * *_GUI_MANAGED sentinels, so script-provided profiling environments are not
+ * overwritten by the dialog.
+ */
+bool cudaPlaybackProfilingSettingsEnabled();
+void setCudaPlaybackProfilingSettingsEnabled(bool enabled);
+void applyCudaPlaybackProfilingEnvironment(bool enabled);
+
+bool dngAsyncCompressionProfilingSettingsEnabled();
+int dngAsyncCompressionQueueDepthSettingsValue();
+int dngAsyncCompressionThreadCountSettingsValue();
+void setDngAsyncCompressionProfilingSettings(bool enabled,
+                                             int queueDepth,
+                                             int threadCount);
+void applyDngAsyncCompressionProfilingEnvironment(bool enabled,
+                                                  int queueDepth,
+                                                  int threadCount);
+
 /*!
  * Emit the startup metadata line through qInfo() so it is captured in
  * the rotating log.  Call this immediately after install().

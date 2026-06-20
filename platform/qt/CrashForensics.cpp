@@ -64,6 +64,14 @@ static QJsonObject g_machineFingerprintCache;
 
 static const char * kPerformanceFieldLogSetting =
     "PerformanceProfiling/FieldLogEnabled";
+static const char * kCudaPlaybackProfilingSetting =
+    "PerformanceProfiling/CudaPlaybackProfilingEnabled";
+static const char * kDngAsyncCompressionProfilingSetting =
+    "PerformanceProfiling/DngAsyncCompressionProfilingEnabled";
+static const char * kDngAsyncCompressionQueueDepthSetting =
+    "PerformanceProfiling/DngAsyncCompressionQueueDepth";
+static const char * kDngAsyncCompressionThreadCountSetting =
+    "PerformanceProfiling/DngAsyncCompressionThreadCount";
 
 bool envFlagEnabled(const char *name)
 {
@@ -272,6 +280,75 @@ void putNativePathEnv(const char *name, const QString &path)
 bool envEmpty(const char *name)
 {
     return qEnvironmentVariable(name).trimmed().isEmpty();
+}
+
+int boundedProfilingSettingInt(const char *settingKey,
+                               int defaultValue,
+                               int minimum,
+                               int maximum)
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    bool ok = false;
+    int value = set.value(QString::fromLatin1(settingKey), defaultValue).toInt(&ok);
+    if (!ok) value = defaultValue;
+    if (value < minimum) return minimum;
+    if (value > maximum) return maximum;
+    return value;
+}
+
+bool profilingSettingEnabled(const char *settingKey)
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    return set.value(QString::fromLatin1(settingKey), false).toBool();
+}
+
+void setManagedEnv(const char *name, const QByteArray &value, const char *managedName)
+{
+    qputenv(name, value);
+    qputenv(managedName, QByteArrayLiteral("1"));
+}
+
+void unsetManagedEnv(const char *name, const char *managedName)
+{
+    if (!envFlagEnabled(managedName)) return;
+    qunsetenv(name);
+    qunsetenv(managedName);
+}
+
+void applyManagedExportStageProfilerEnvironment()
+{
+    if (!envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")) {
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED", QByteArrayLiteral("1"));
+    }
+    if (envEmpty("MLVAPP_EXPORT_STAGE_PROFILE_FILE")
+     || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
+        putNativePathEnv("MLVAPP_EXPORT_STAGE_PROFILE_FILE",
+                         defaultExportStageProfilePath());
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED",
+                QByteArrayLiteral("1"));
+    }
+}
+
+void clearManagedExportStageProfilerEnvironmentIfUnneeded()
+{
+    if (envFlagEnabled("MLVAPP_PERF_FIELD_LOG")
+     || profilingSettingEnabled(kPerformanceFieldLogSetting)
+     || profilingSettingEnabled(kDngAsyncCompressionProfilingSetting)) {
+        return;
+    }
+    if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED")) {
+        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("0"));
+        qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED");
+    }
+    if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
+        qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+        qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED");
+    }
 }
 
 void pruneOldLogs(const QString & logsDir, int keep)
@@ -612,12 +689,7 @@ void applyPerformanceFieldLogEnvironment(bool enabled)
             qunsetenv("MLVAPP_PERF_FIELD_LOG_DIR");
         }
         if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED")) {
-            qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("0"));
-            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED");
-        }
-        if (envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
-            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
-            qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED");
+            clearManagedExportStageProfilerEnvironmentIfUnneeded();
         }
         qunsetenv("MLVAPP_PERF_FIELD_LOG_GUI_MANAGED");
         qunsetenv("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED");
@@ -639,17 +711,129 @@ void applyPerformanceFieldLogEnvironment(bool enabled)
                          defaultPerformanceFieldLogPath());
         qputenv("MLVAPP_PERF_FIELD_LOG_PATH_GUI_MANAGED", QByteArrayLiteral("1"));
     }
-    if (!envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")) {
-        qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
-        qputenv("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED", QByteArrayLiteral("1"));
+    applyManagedExportStageProfilerEnvironment();
+}
+
+bool cudaPlaybackProfilingSettingsEnabled()
+{
+    return profilingSettingEnabled(kCudaPlaybackProfilingSetting);
+}
+
+void setCudaPlaybackProfilingSettingsEnabled(bool enabled)
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    set.setValue(QString::fromLatin1(kCudaPlaybackProfilingSetting), enabled);
+    set.sync();
+}
+
+void applyCudaPlaybackProfilingEnvironment(bool enabled)
+{
+    const struct ManagedFlag
+    {
+        const char *name;
+        const char *managedName;
+        const char *value;
+    } flags[] = {
+        { "MLVAPP_EXPERIMENTAL_GL_VIEWPORT",
+          "MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED", "1" },
+        { "MLVAPP_EXPERIMENTAL_GPU_PROCESSING",
+          "MLVAPP_EXPERIMENTAL_GPU_PROCESSING_GUI_MANAGED", "1" },
+        { "MLVAPP_GPU_PLAYBACK_RECON",
+          "MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED", "1" },
+        { "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT",
+          "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT_GUI_MANAGED", "1" },
+        { "MLVAPP_PLAYBACK_PHASE3_UNATTENDED",
+          "MLVAPP_PLAYBACK_PHASE3_UNATTENDED_GUI_MANAGED", "1" },
+        { "MLVAPP_PLAYBACK_QUALITY_MODE",
+          "MLVAPP_PLAYBACK_QUALITY_MODE_GUI_MANAGED", "phase3_hq" },
+        { "MLVAPP_PLAYBACK_SCALE_FACTOR",
+          "MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED", "1" }
+    };
+
+    if (!enabled) {
+        for (const ManagedFlag &flag : flags) {
+            unsetManagedEnv(flag.name, flag.managedName);
+        }
+        return;
     }
-    if (envEmpty("MLVAPP_EXPORT_STAGE_PROFILE_FILE")
-     || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")) {
-        putNativePathEnv("MLVAPP_EXPORT_STAGE_PROFILE_FILE",
-                         defaultExportStageProfilePath());
-        qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED",
-                QByteArrayLiteral("1"));
+
+    for (const ManagedFlag &flag : flags) {
+        setManagedEnv(flag.name, QByteArray(flag.value), flag.managedName);
     }
+}
+
+bool dngAsyncCompressionProfilingSettingsEnabled()
+{
+    return profilingSettingEnabled(kDngAsyncCompressionProfilingSetting);
+}
+
+int dngAsyncCompressionQueueDepthSettingsValue()
+{
+    return boundedProfilingSettingInt(kDngAsyncCompressionQueueDepthSetting,
+                                      2,
+                                      1,
+                                      8);
+}
+
+int dngAsyncCompressionThreadCountSettingsValue()
+{
+    return boundedProfilingSettingInt(kDngAsyncCompressionThreadCountSetting,
+                                      2,
+                                      1,
+                                      4);
+}
+
+void setDngAsyncCompressionProfilingSettings(bool enabled,
+                                             int queueDepth,
+                                             int threadCount)
+{
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    const int boundedQueueDepth = qBound(1, queueDepth, 8);
+    const int boundedThreadCount = qBound(1, threadCount, 4);
+    set.setValue(QString::fromLatin1(kDngAsyncCompressionProfilingSetting),
+                 enabled);
+    set.setValue(QString::fromLatin1(kDngAsyncCompressionQueueDepthSetting),
+                 boundedQueueDepth);
+    set.setValue(QString::fromLatin1(kDngAsyncCompressionThreadCountSetting),
+                 boundedThreadCount);
+    set.sync();
+}
+
+void applyDngAsyncCompressionProfilingEnvironment(bool enabled,
+                                                  int queueDepth,
+                                                  int threadCount)
+{
+    if (!enabled) {
+        unsetManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER",
+                        "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_GUI_MANAGED");
+        unsetManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS",
+                        "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS_GUI_MANAGED");
+        unsetManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH",
+                        "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH_GUI_MANAGED");
+        unsetManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS",
+                        "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS_GUI_MANAGED");
+        clearManagedExportStageProfilerEnvironmentIfUnneeded();
+        return;
+    }
+
+    publishMachineFingerprintEnvironment();
+    applyManagedExportStageProfilerEnvironment();
+    setManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER",
+                  QByteArrayLiteral("1"),
+                  "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_GUI_MANAGED");
+    setManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS",
+                  QByteArrayLiteral("1"),
+                  "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS_GUI_MANAGED");
+    setManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH",
+                  QByteArray::number(qBound(1, queueDepth, 8)),
+                  "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH_GUI_MANAGED");
+    setManagedEnv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS",
+                  QByteArray::number(qBound(1, threadCount, 4)),
+                  "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS_GUI_MANAGED");
 }
 
 QString runMetadataJson()

@@ -18,11 +18,14 @@ extern "C" {
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QGroupBox>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QShortcut>
+#include <QSpinBox>
 #include <QThread>
 #include <QTime>
 #include <QByteArray>
@@ -89,16 +92,12 @@ static bool environmentFlagEnabled( const char *name )
 
 static bool cdngPayloadHandoffEnabled()
 {
-    static const bool enabled =
-        environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF" );
-    return enabled;
+    return environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF" );
 }
 
 static bool cdngAsyncWriterEnabled()
 {
-    static const bool enabled =
-        environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_ASYNC_WRITER" );
-    return enabled;
+    return environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_ASYNC_WRITER" );
 }
 
 static bool buildGpuPlaybackReconStateForTexturePresent(
@@ -2026,21 +2025,16 @@ static bool playback_recon_requested_by_environment()
         && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
 }
 
-/* Read MLVAPP_PLAYBACK_SCALE_FACTOR once and cache the request.
+/* Read MLVAPP_PLAYBACK_SCALE_FACTOR for each decision.
  * Accepts "1", "2", "4", "8", or "auto". Returns 0 when unset so the
  * caller can fall back to the GUI dial; returns -1 for "auto" so smoke/dev
  * runs can ignore a persisted GUI scale override and let the quality policy
- * drive scale. The render thread logs both this requested value and the
+ * drive scale. Re-reading keeps the GUI-owned profiling preset live in the
+ * current process; the render thread logs both this requested value and the
  * effective core value because clips with incompatible dimensions can reject
  * unsafe requests. */
 static int playback_scale_factor_env_override()
 {
-    static int cached_scale = -2; /* -2 == not yet probed, 0 == unset */
-    if (cached_scale != -2)
-    {
-        return cached_scale;
-    }
-
     const QString raw =
         qEnvironmentVariable("MLVAPP_PLAYBACK_SCALE_FACTOR").trimmed();
     int requested = 0;
@@ -2065,18 +2059,27 @@ static int playback_scale_factor_env_override()
                                  << "(must be 1, 2, 4, 8, or auto); falling back to GUI dial.";
         }
     }
-    cached_scale = requested;
     if (requested == -1)
     {
-        qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR = auto"
-                          << "(env override; the GUI scale override is bypassed).";
+        static bool loggedAuto = false;
+        if( !loggedAuto )
+        {
+            qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR = auto"
+                              << "(env override; the GUI scale override is bypassed).";
+            loggedAuto = true;
+        }
     }
     else if (requested != 0)
     {
-        qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR =" << requested
-                          << "(env override; the GUI dial is bypassed).";
+        static int lastLoggedScale = 0;
+        if( lastLoggedScale != requested )
+        {
+            qInfo().noquote() << "MLVAPP_PLAYBACK_SCALE_FACTOR =" << requested
+                              << "(env override; the GUI dial is bypassed).";
+            lastLoggedScale = requested;
+        }
     }
-    return cached_scale;
+    return requested;
 }
 
 
@@ -7828,10 +7831,13 @@ void MainWindow::showPerformanceProfilingDialog( void )
 
     QVBoxLayout * layout = new QVBoxLayout( &dialog );
 
+    QGroupBox * fieldLogGroup =
+        new QGroupBox( tr( "Session summaries" ), &dialog );
+    QVBoxLayout * fieldLogLayout = new QVBoxLayout( fieldLogGroup );
     QCheckBox * enable =
         new QCheckBox( tr( "Record performance summaries" ), &dialog );
     enable->setChecked( CrashForensics::performanceFieldLogRuntimeEnabled() );
-    layout->addWidget( enable );
+    fieldLogLayout->addWidget( enable );
 
     const QString logPath = CrashForensics::performanceFieldLogPath();
     QLabel * pathLabel = new QLabel(
@@ -7842,7 +7848,7 @@ void MainWindow::showPerformanceProfilingDialog( void )
         &dialog );
     pathLabel->setWordWrap( true );
     pathLabel->setTextInteractionFlags( Qt::TextSelectableByMouse );
-    layout->addWidget( pathLabel );
+    fieldLogLayout->addWidget( pathLabel );
 
     QPushButton * openLogs =
         new QPushButton( tr( "Open Logs Folder" ), &dialog );
@@ -7858,7 +7864,51 @@ void MainWindow::showPerformanceProfilingDialog( void )
                          QUrl::fromLocalFile( logsDir ) );
                  }
              } );
-    layout->addWidget( openLogs );
+    fieldLogLayout->addWidget( openLogs );
+    layout->addWidget( fieldLogGroup );
+
+    QGroupBox * presetGroup =
+        new QGroupBox( tr( "Dogfood presets" ), &dialog );
+    QVBoxLayout * presetLayout = new QVBoxLayout( presetGroup );
+
+    QCheckBox * cudaPlaybackPreset =
+        new QCheckBox( tr( "Scoped CUDA playback profiling preset" ), &dialog );
+    cudaPlaybackPreset->setChecked(
+        CrashForensics::cudaPlaybackProfilingSettingsEnabled() );
+    cudaPlaybackPreset->setToolTip(
+        tr( "Requests the scoped GPU Tex NR telemetry path: GL viewport, GPU preview processing, CUDA playback reconstruction, texture presentation, Phase 3 HQ, and x1 scale." ) );
+    presetLayout->addWidget( cudaPlaybackPreset );
+
+    QCheckBox * dngAsyncPreset =
+        new QCheckBox( tr( "DNG async-compress profiling preset" ), &dialog );
+    dngAsyncPreset->setChecked(
+        CrashForensics::dngAsyncCompressionProfilingSettingsEnabled() );
+    dngAsyncPreset->setToolTip(
+        tr( "Requests export stage profiling plus the opt-in DNG async writer/compression path for measurement." ) );
+    presetLayout->addWidget( dngAsyncPreset );
+
+    QFormLayout * dngForm = new QFormLayout();
+    QSpinBox * dngQueueDepth = new QSpinBox( &dialog );
+    dngQueueDepth->setRange( 1, 8 );
+    dngQueueDepth->setValue(
+        CrashForensics::dngAsyncCompressionQueueDepthSettingsValue() );
+    QSpinBox * dngThreadCount = new QSpinBox( &dialog );
+    dngThreadCount->setRange( 1, 4 );
+    dngThreadCount->setValue(
+        CrashForensics::dngAsyncCompressionThreadCountSettingsValue() );
+    dngForm->addRow( tr( "DNG queue depth" ), dngQueueDepth );
+    dngForm->addRow( tr( "DNG writer threads" ), dngThreadCount );
+    presetLayout->addLayout( dngForm );
+
+    auto updateDngControls = [dngAsyncPreset, dngQueueDepth, dngThreadCount]()
+    {
+        const bool enabled = dngAsyncPreset->isChecked();
+        dngQueueDepth->setEnabled( enabled );
+        dngThreadCount->setEnabled( enabled );
+    };
+    connect( dngAsyncPreset, &QCheckBox::toggled, &dialog, updateDngControls );
+    updateDngControls();
+    layout->addWidget( presetGroup );
 
     QDialogButtonBox * buttons =
         new QDialogButtonBox( QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
@@ -7869,12 +7919,48 @@ void MainWindow::showPerformanceProfilingDialog( void )
 
     if( dialog.exec() != QDialog::Accepted ) return;
 
+    const bool cudaWasEnabled =
+        CrashForensics::cudaPlaybackProfilingSettingsEnabled();
     const bool enabled = enable->isChecked();
     CrashForensics::setPerformanceFieldLogSettingsEnabled( enabled );
     CrashForensics::applyPerformanceFieldLogEnvironment( enabled );
+    const bool cudaEnabled = cudaPlaybackPreset->isChecked();
+    CrashForensics::setCudaPlaybackProfilingSettingsEnabled( cudaEnabled );
+    CrashForensics::applyCudaPlaybackProfilingEnvironment( cudaEnabled );
+    const bool dngAsyncEnabled = dngAsyncPreset->isChecked();
+    const int queueDepth = dngQueueDepth->value();
+    const int threadCount = dngThreadCount->value();
+    CrashForensics::setDngAsyncCompressionProfilingSettings(
+        dngAsyncEnabled,
+        queueDepth,
+        threadCount );
+    CrashForensics::applyDngAsyncCompressionProfilingEnvironment(
+        dngAsyncEnabled,
+        queueDepth,
+        threadCount );
+    if( cudaEnabled )
+    {
+        applyPlaybackQualityMode(
+            static_cast<int>( PlaybackQualityMode::Phase3HQ ),
+            /*persist*/false,
+            /*forceRefresh*/true );
+        applyPlaybackScaleFactorOverride( 1, /*persist*/false );
+        if( ui->actionCaching && ui->actionCaching->isChecked() )
+        {
+            ui->actionCaching->setChecked( false );
+            selectDebayerAlgorithm();
+        }
+        requestFrameRefresh( true, "performance-profiling-cuda-preset" );
+    }
+    else if( cudaWasEnabled )
+    {
+        initPlaybackQualityFromSettings();
+        initPlaybackScaleFactorFromSettings();
+        requestFrameRefresh( true, "performance-profiling-cuda-preset-disabled" );
+    }
     statusBar()->showMessage(
-        enabled
-            ? tr( "Performance profiling enabled" )
+        ( enabled || cudaEnabled || dngAsyncEnabled )
+            ? tr( "Performance profiling options applied" )
             : tr( "Performance profiling disabled" ),
         5000 );
 }

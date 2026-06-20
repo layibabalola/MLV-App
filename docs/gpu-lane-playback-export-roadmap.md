@@ -295,6 +295,17 @@ real same-clip host packets with fallback/no-readback/DNG hash/timing evidence.
 The dogfood kit README advertises both the GUI profiling path and the
 cross-machine comparator so returned proof packets and ad-hoc interactive
 field logs can be reviewed with the same table.
+The same dialog now also exposes two off-by-default dogfood presets: a scoped
+CUDA playback profiling preset that requests the validated `GPU Tex NR`
+telemetry path (GL viewport, GPU preview processing, CUDA playback recon,
+texture present, Phase 3 HQ, and x1 scale), and a DNG async-compress profiling
+preset with queue/thread controls that requests export-stage profiling plus the
+async writer/compression path. These GUI presets persist through QSettings and
+only manage environment values marked as GUI-owned, so script-driven proof
+wrappers remain authoritative and default playback/export behavior stays
+unchanged. The CUDA preset is still a request surface, not proof: Dell/UltraMagnus
+claims require the same host-local no-readback/fallback/FPS/DNG hash/timing
+evidence as the wrapper path.
 
 Update 2026-06-20 E3 dogfood async-compress surface: the simple CUDA DNG
 runner now exposes the same lossless compression-overlap knobs as the CDNG

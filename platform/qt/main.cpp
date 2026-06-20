@@ -1503,6 +1503,13 @@ int main(int argc, char *argv[])
     bool trim_mlv = hasTrimMlvFlag(argc, argv);
     bool profile_playback = hasPlaybackProfileFlag(argc, argv);
     bool gui_playback_smoke = hasGuiPlaybackSmokeFlag(argc, argv);
+    const bool normal_gui =
+        !batch && !trim_mlv && !profile_playback && !gui_playback_smoke;
+
+    if (normal_gui && CrashForensics::cudaPlaybackProfilingSettingsEnabled())
+    {
+        CrashForensics::applyCudaPlaybackProfilingEnvironment(true);
+    }
 
     if (shouldPreferDesktopOpenGl(argc, argv, batch, trim_mlv, profile_playback))
     {
@@ -1517,9 +1524,17 @@ int main(int argc, char *argv[])
     a.setAttribute(Qt::AA_Use96Dpi);
 #endif
 
+    if (normal_gui && CrashForensics::dngAsyncCompressionProfilingSettingsEnabled())
+    {
+        CrashForensics::applyDngAsyncCompressionProfilingEnvironment(
+            true,
+            CrashForensics::dngAsyncCompressionQueueDepthSettingsValue(),
+            CrashForensics::dngAsyncCompressionThreadCountSettingsValue());
+    }
+
     const bool perfFieldLogRequested =
         envFlagEnabled("MLVAPP_PERF_FIELD_LOG")
-        || (!batch && CrashForensics::performanceFieldLogSettingsEnabled());
+        || (normal_gui && CrashForensics::performanceFieldLogSettingsEnabled());
     if (perfFieldLogRequested)
     {
         CrashForensics::applyPerformanceFieldLogEnvironment(true);
