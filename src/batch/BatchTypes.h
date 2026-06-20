@@ -14,8 +14,32 @@ enum class BatchExportFormat : int
     Unknown = -1
 };
 
-inline BatchExportFormat batchExportFormatFromString(const QString & value)
+enum class BatchRenderedVideoCodec : int
 {
+    Unspecified = 0,
+    H264 = 1,
+    H265 = 2,
+    ProRes = 3
+};
+
+enum class BatchRenderedVideoContainer : int
+{
+    Unspecified = 0,
+    Mov = 1,
+    Mp4 = 2,
+    Mkv = 3
+};
+
+struct BatchExportFormatRequest
+{
+    BatchExportFormat format = BatchExportFormat::Cdng;
+    BatchRenderedVideoCodec renderedCodec = BatchRenderedVideoCodec::Unspecified;
+    BatchRenderedVideoContainer renderedContainer = BatchRenderedVideoContainer::Unspecified;
+};
+
+inline BatchExportFormatRequest batchExportFormatRequestFromString(const QString & value)
+{
+    BatchExportFormatRequest request;
     const QString normalized = value.trimmed().toLower();
     if( normalized.isEmpty()
      || normalized == QStringLiteral("cdng")
@@ -24,22 +48,71 @@ inline BatchExportFormat batchExportFormatFromString(const QString & value)
      || normalized == QStringLiteral("cinema-dng")
      || normalized == QStringLiteral("cinema_dng") )
     {
-        return BatchExportFormat::Cdng;
+        request.format = BatchExportFormat::Cdng;
+        return request;
     }
     if( normalized == QStringLiteral("rendered")
      || normalized == QStringLiteral("rendered-video")
      || normalized == QStringLiteral("rendered_video")
-     || normalized == QStringLiteral("video")
-     || normalized == QStringLiteral("mov")
-     || normalized == QStringLiteral("mp4")
-     || normalized == QStringLiteral("h264")
-     || normalized == QStringLiteral("h265")
-     || normalized == QStringLiteral("hevc")
-     || normalized == QStringLiteral("prores") )
+     || normalized == QStringLiteral("video") )
     {
-        return BatchExportFormat::RenderedVideo;
+        request.format = BatchExportFormat::RenderedVideo;
+        return request;
     }
-    return BatchExportFormat::Unknown;
+    if( normalized == QStringLiteral("mov") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedContainer = BatchRenderedVideoContainer::Mov;
+        return request;
+    }
+    if( normalized == QStringLiteral("mp4") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedContainer = BatchRenderedVideoContainer::Mp4;
+        return request;
+    }
+    if( normalized == QStringLiteral("mkv") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedContainer = BatchRenderedVideoContainer::Mkv;
+        return request;
+    }
+    if( normalized == QStringLiteral("h264")
+     || normalized == QStringLiteral("h264-mp4") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedCodec = BatchRenderedVideoCodec::H264;
+        if( normalized.endsWith(QStringLiteral("-mp4")) )
+            request.renderedContainer = BatchRenderedVideoContainer::Mp4;
+        return request;
+    }
+    if( normalized == QStringLiteral("h265")
+     || normalized == QStringLiteral("hevc")
+     || normalized == QStringLiteral("h265-mp4")
+     || normalized == QStringLiteral("hevc-mp4") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedCodec = BatchRenderedVideoCodec::H265;
+        if( normalized.endsWith(QStringLiteral("-mp4")) )
+            request.renderedContainer = BatchRenderedVideoContainer::Mp4;
+        return request;
+    }
+    if( normalized == QStringLiteral("prores")
+     || normalized == QStringLiteral("prores-mov") )
+    {
+        request.format = BatchExportFormat::RenderedVideo;
+        request.renderedCodec = BatchRenderedVideoCodec::ProRes;
+        request.renderedContainer = BatchRenderedVideoContainer::Mov;
+        return request;
+    }
+
+    request.format = BatchExportFormat::Unknown;
+    return request;
+}
+
+inline BatchExportFormat batchExportFormatFromString(const QString & value)
+{
+    return batchExportFormatRequestFromString(value).format;
 }
 
 inline const char * batchExportFormatName(BatchExportFormat format)
@@ -54,6 +127,38 @@ inline const char * batchExportFormatName(BatchExportFormat format)
             break;
     }
     return "unknown";
+}
+
+inline const char * batchRenderedVideoCodecName(BatchRenderedVideoCodec codec)
+{
+    switch( codec )
+    {
+        case BatchRenderedVideoCodec::Unspecified:
+            return "unspecified";
+        case BatchRenderedVideoCodec::H264:
+            return "h264";
+        case BatchRenderedVideoCodec::H265:
+            return "h265";
+        case BatchRenderedVideoCodec::ProRes:
+            return "prores";
+    }
+    return "unspecified";
+}
+
+inline const char * batchRenderedVideoContainerName(BatchRenderedVideoContainer container)
+{
+    switch( container )
+    {
+        case BatchRenderedVideoContainer::Unspecified:
+            return "unspecified";
+        case BatchRenderedVideoContainer::Mov:
+            return "mov";
+        case BatchRenderedVideoContainer::Mp4:
+            return "mp4";
+        case BatchRenderedVideoContainer::Mkv:
+            return "mkv";
+    }
+    return "unspecified";
 }
 
 /* Processing profile for batch export.

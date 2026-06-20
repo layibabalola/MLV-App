@@ -411,6 +411,40 @@ TEST(BatchExportFormat, RecognizesRenderedVideoAsBlockedE4)
                std::string(batchExportFormatName(BatchExportFormat::RenderedVideo)) );
 }
 
+TEST(BatchExportFormat, PreservesRenderedVideoRequestIntent)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264-mp4"));
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(request.format) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H264),
+               static_cast<int>(request.renderedCodec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
+               static_cast<int>(request.renderedContainer) );
+    ASSERT_EQ( std::string("h264"),
+               std::string(batchRenderedVideoCodecName(request.renderedCodec)) );
+    ASSERT_EQ( std::string("mp4"),
+               std::string(batchRenderedVideoContainerName(request.renderedContainer)) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("hevc-mp4"));
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H265),
+               static_cast<int>(request.renderedCodec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
+               static_cast<int>(request.renderedContainer) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("prores"));
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::ProRes),
+               static_cast<int>(request.renderedCodec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mov),
+               static_cast<int>(request.renderedContainer) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::Unspecified),
+               static_cast<int>(request.renderedCodec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Unspecified),
+               static_cast<int>(request.renderedContainer) );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),
