@@ -374,6 +374,12 @@ prints side-by-side presented FPS, no-readback percentage, fallback percentage,
 fallback count, bottleneck, and suggested-optimization rows. This is still a
 measurement surface only: Dell/UltraMagnus support and speed claims require
 real same-clip host packets with fallback/no-readback/DNG hash/timing evidence.
+The comparator also accepts valid export field-log rows and, for dogfood proof
+summaries, shows CDNG verdict, DNG hash verdict, GPU export replacement/trusted
+coverage, DNG wall-time delta, throughput classification, and the export-side
+suggested optimization alongside the playback columns. This keeps one
+cross-machine table useful for both realtime playback and DNG export triage
+without loosening the host-local proof gate.
 The dogfood kit README advertises both the GUI profiling path and the
 cross-machine comparator so returned proof packets and ad-hoc interactive
 field logs can be reviewed with the same table.

@@ -132,11 +132,26 @@ function Get-ClipPresentedFrames {
     $total
 }
 
+function Get-Percent {
+    param(
+        [object]$Numerator,
+        [object]$Denominator
+    )
+
+    $num = Convert-ToNullableDouble $Numerator
+    $den = Convert-ToNullableDouble $Denominator
+    if ($null -eq $num -or $null -eq $den -or [math]::Abs($den) -lt 0.000001) {
+        return $null
+    }
+    [math]::Round(($num * 100.0) / $den, 3)
+}
+
 function Get-ProofSummarySuggestion {
     param([object]$Record)
 
     $playback = $Record.proof.playback
     $playbackAb = $Record.proof.playbackAb
+    $cdng = $Record.proof.cdng
     if ($null -eq $playback) {
         return "run_playback_no_readback_proof"
     }
@@ -152,6 +167,25 @@ function Get-ProofSummarySuggestion {
     $fpsDelta = Convert-ToNullableDouble $playbackAb.compare.presentedFps.delta
     if ($null -ne $fpsDelta -and $fpsDelta -lt 0) {
         return "optimize_playback_cuda_candidate"
+    }
+    if ($null -eq $cdng) {
+        return "run_dng_hash_export_proof"
+    }
+    if ([string]$cdng.dngHash.verdict -ne "PASS") {
+        return "fix_dng_hash_parity"
+    }
+    $candidateFrames = Convert-ToNullableInt64 $cdng.candidateFrameCount
+    if ($null -ne $candidateFrames -and $candidateFrames -gt 0) {
+        if ((Convert-ToNullableInt64 $cdng.candidateGpuExportReplacedFrames) -lt $candidateFrames) {
+            return "fix_gpu_dng_export_replacement"
+        }
+        if ($Record.inputs.trustedGpuExport -and
+            (Convert-ToNullableInt64 $cdng.candidateGpuExportTrustedFrames) -lt $candidateFrames) {
+            return "fix_trusted_gpu_dng_export_coverage"
+        }
+    }
+    if ($cdng.throughputClassification -and $cdng.throughputClassification.suggestedOptimization) {
+        return [string]$cdng.throughputClassification.suggestedOptimization
     }
     return "quote_with_host_clip_boundaries"
 }
@@ -180,12 +214,21 @@ function New-ProfileRow {
     $presentedFps = if ($avgCadenceMs -gt 0.000001) { 1000.0 / $avgCadenceMs } else { $null }
 
     [pscustomobject]@{
+        record_kind = "playback_profile"
         machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
         presented_fps = if ($null -ne $presentedFps) { [math]::Round($presentedFps, 3) } else { $null }
         no_readback_pct = if ($total -gt 0) { [math]::Round(($noReadback * 100.0) / $total, 3) } else { $null }
         fallback_pct = if ($total -gt 0) { [math]::Round(($fallback * 100.0) / $total, 3) } else { $null }
         fallback_count = $fallback
+        export_frames = $null
+        cdng_verdict = $null
+        dng_hash = $null
+        gpu_export_replaced_pct = $null
+        gpu_export_trusted_pct = $null
+        dng_elapsed_delta_pct = $null
+        dng_throughput_status = $null
+        dng_suggested_optimization = $null
         dominant_bottleneck = $summary.bottleneck.limiting_stage
         suggested_optimization = $summary.bottleneck.suggested_optimization
         source = $Source
@@ -201,20 +244,36 @@ function New-FieldLogRow {
     if ([string]$Record.schema -ne "mlvapp.perf-field-log.v1") {
         throw "Unexpected perf field log schema in ${Source}: $($Record.schema)"
     }
-    if ([string]$Record.kind -ne "playback") {
-        throw "Unsupported perf field log kind in ${Source}: $($Record.kind)"
-    }
     Assert-MachineFingerprint -Fingerprint $Record.machineFingerprint -Source $Source
+    $kind = [string]$Record.kind
 
-    $total = Get-TotalPipelineFrames -Counts $Record.pipeline_counts
-    $fallback = [int]$Record.fallback_count
-    [pscustomobject]@{
+    if ($kind -ne "playback" -and $kind -ne "export") {
+        throw "Unsupported perf field log kind in ${Source}: $kind"
+    }
+
+    $total = if ($kind -eq "playback") {
+        Get-TotalPipelineFrames -Counts $Record.pipeline_counts
+    } else {
+        0
+    }
+    $fallback = if ($kind -eq "playback") { [int]$Record.fallback_count } else { $null }
+    $frameCount = Convert-ToNullableInt64 $Record.frame_count
+    return [pscustomobject]@{
+        record_kind = if ($kind -eq "playback") { "playback_field_log" } else { "export_field_log" }
         machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
-        presented_fps = if ($null -ne $Record.presented_fps) { [math]::Round([double]$Record.presented_fps, 3) } else { $null }
-        no_readback_pct = if ($null -ne $Record.no_readback_percent) { [math]::Round([double]$Record.no_readback_percent, 3) } else { $null }
-        fallback_pct = if ($total -gt 0) { [math]::Round(($fallback * 100.0) / $total, 3) } else { $null }
-        fallback_count = $fallback
+        presented_fps = if ($kind -eq "playback" -and $null -ne $Record.presented_fps) { [math]::Round([double]$Record.presented_fps, 3) } else { $null }
+        no_readback_pct = if ($kind -eq "playback" -and $null -ne $Record.no_readback_percent) { [math]::Round([double]$Record.no_readback_percent, 3) } else { $null }
+        fallback_pct = if ($kind -eq "playback" -and $total -gt 0) { [math]::Round(($fallback * 100.0) / $total, 3) } else { $null }
+        fallback_count = if ($kind -eq "playback") { $fallback } else { $null }
+        export_frames = if ($kind -eq "export") { $frameCount } else { $null }
+        cdng_verdict = $null
+        dng_hash = $null
+        gpu_export_replaced_pct = $null
+        gpu_export_trusted_pct = $null
+        dng_elapsed_delta_pct = $null
+        dng_throughput_status = $null
+        dng_suggested_optimization = $null
         dominant_bottleneck = $Record.bottleneck.limiting_stage
         suggested_optimization = $Record.suggested_optimization
         source = $Source
@@ -245,14 +304,33 @@ function New-LocalProofSummaryRow {
     $candidatePresentedFps = if ($playbackAb -and $playbackAb.compare) {
         Convert-ToNullableDouble $playbackAb.compare.presentedFps.candidate
     } else { $null }
+    $cdng = $Record.proof.cdng
+    $candidateFrames = if ($cdng) {
+        Convert-ToNullableInt64 $cdng.candidateFrameCount
+    } else { $null }
+    $dngElapsedDeltaPct = if ($cdng -and $cdng.speed) {
+        Convert-ToNullableDouble $cdng.speed.avgElapsedDeltaPercent
+    } else { $null }
+    $dngSuggestion = if ($cdng -and $cdng.throughputClassification) {
+        [string]$cdng.throughputClassification.suggestedOptimization
+    } else { $null }
 
     [pscustomobject]@{
+        record_kind = "local_proof_summary"
         machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
         presented_fps = if ($null -ne $candidatePresentedFps) { [math]::Round($candidatePresentedFps, 3) } else { $null }
         no_readback_pct = if ($presentedFrames -gt 0 -and $null -ne $noReadback) { [math]::Round(($noReadback * 100.0) / $presentedFrames, 3) } else { $null }
         fallback_pct = if ($presentedFrames -gt 0 -and $null -ne $fallback) { [math]::Round(($fallback * 100.0) / $presentedFrames, 3) } else { $null }
         fallback_count = if ($null -ne $fallback) { $fallback } else { $null }
+        export_frames = $candidateFrames
+        cdng_verdict = if ($cdng) { [string]$cdng.verdict } else { $null }
+        dng_hash = if ($cdng -and $cdng.dngHash) { [string]$cdng.dngHash.verdict } else { $null }
+        gpu_export_replaced_pct = if ($cdng -and $null -ne $candidateFrames) { Get-Percent $cdng.candidateGpuExportReplacedFrames $candidateFrames } else { $null }
+        gpu_export_trusted_pct = if ($cdng -and $null -ne $candidateFrames) { Get-Percent $cdng.candidateGpuExportTrustedFrames $candidateFrames } else { $null }
+        dng_elapsed_delta_pct = if ($null -ne $dngElapsedDeltaPct) { [math]::Round($dngElapsedDeltaPct, 3) } else { $null }
+        dng_throughput_status = if ($cdng -and $cdng.throughputClassification) { [string]$cdng.throughputClassification.status } else { $null }
+        dng_suggested_optimization = $dngSuggestion
         dominant_bottleneck = "unknown"
         suggested_optimization = Get-ProofSummarySuggestion -Record $Record
         build_status = $Record.status
@@ -284,6 +362,6 @@ if ($rows.Count -eq 0) {
 }
 
 $rows | Sort-Object machine, source |
-    Format-Table -AutoSize -Wrap machine, presented_fps, no_readback_pct, fallback_pct, fallback_count, dominant_bottleneck, suggested_optimization, build_sha, source |
+    Format-Table -AutoSize -Wrap record_kind, machine, presented_fps, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
     Out-String -Width 4096 |
     Write-Output

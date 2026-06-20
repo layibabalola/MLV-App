@@ -186,6 +186,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add('```')
     [void]$lines.Add("")
     [void]$lines.Add("This comparison is measurement evidence only. Keep host, clip, settings, release hash, fallback count, and no-readback percentage attached to any speed claim.")
+    [void]$lines.Add("For proof summaries and export field-log rows, the same table also carries CDNG/DNG hash/export coverage, DNG wall-time delta, throughput classification, and export-side suggested optimization when present.")
     [void]$lines.Add("")
     [void]$lines.Add("## DNG E3 Async Compression Trial")
     [void]$lines.Add("Lossless DNG compression-overlap remains opt-in. Use the async-compress commands above to measure whether moving LJ92 compression into the writer worker helps on this machine.")
