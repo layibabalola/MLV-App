@@ -2,9 +2,11 @@
 #define BATCHTYPES_H
 
 #include "../../platform/qt/ExportCodecIds.h"
+#include "../../platform/qt/StretchFactors.h"
 
 #include <QDir>
 #include <QFileInfo>
+#include <QLocale>
 #include <QString>
 
 /* Shared type header for batch mode.
@@ -91,6 +93,24 @@ struct BatchRenderedVideoFfmpegVideoPlan
     QString videoTag;
     QString videoArguments;
     QString reason;
+    bool ready = false;
+};
+
+struct BatchRenderedVideoFfmpegFramePlan
+{
+    int sourceWidth = 0;
+    int sourceHeight = 0;
+    int outputWidth = 0;
+    int outputHeight = 0;
+    double frameRate = 0.0;
+    QString frameRateArgument;
+    QString frameSizeArgument;
+    QString reason;
+    bool resizeEnabled = false;
+    bool resizeHeightLocked = false;
+    bool stretchApplied = false;
+    bool codecDimensionAdjusted = false;
+    bool scaled = false;
     bool ready = false;
 };
 
@@ -618,6 +638,138 @@ batchRenderedVideoFfmpegVideoPlanFromRequest(
         batchRenderedVideoEncoderPresetFromRequest(request));
 }
 
+inline bool batchRenderedVideoEncoderProfileRequiresEvenDimensions(
+    BatchRenderedVideoEncoderProfile profile)
+{
+    return profile == BatchRenderedVideoEncoderProfile::H264
+        || profile == BatchRenderedVideoEncoderProfile::H265_8;
+}
+
+inline QString batchRenderedVideoFfmpegFrameRateArgument(double frameRate)
+{
+    QLocale locale = QLocale(QLocale::English, QLocale::UnitedKingdom);
+    locale.setNumberOptions(QLocale::OmitGroupSeparator);
+    return locale.toString(frameRate);
+}
+
+inline BatchRenderedVideoFfmpegFramePlan
+batchRenderedVideoFfmpegFramePlanFromGuiState(
+    int sourceWidth,
+    int sourceHeight,
+    double frameRate,
+    double stretchFactorX,
+    double stretchFactorY,
+    bool resizeEnabled,
+    int resizeWidth,
+    int resizeHeight,
+    bool resizeHeightLocked,
+    BatchRenderedVideoEncoderProfile encoderProfile)
+{
+    BatchRenderedVideoFfmpegFramePlan plan;
+    plan.sourceWidth = sourceWidth;
+    plan.sourceHeight = sourceHeight;
+    plan.frameRate = frameRate;
+    plan.resizeEnabled = resizeEnabled;
+    plan.resizeHeightLocked = resizeHeightLocked;
+
+    if( sourceWidth <= 0 || sourceHeight <= 0 )
+    {
+        plan.reason = QStringLiteral("rendered source dimensions invalid");
+        return plan;
+    }
+    if( !(frameRate > 0.0) )
+    {
+        plan.reason = QStringLiteral("rendered frame rate invalid");
+        return plan;
+    }
+    if( !(stretchFactorX > 0.0) || !(stretchFactorY > 0.0) )
+    {
+        plan.reason = QStringLiteral("rendered stretch factors invalid");
+        return plan;
+    }
+
+    int width = sourceWidth;
+    int height = sourceHeight;
+
+    if( resizeEnabled )
+    {
+        if( resizeWidth <= 0 || (!resizeHeightLocked && resizeHeight <= 0) )
+        {
+            plan.reason = QStringLiteral("rendered resize dimensions invalid");
+            return plan;
+        }
+
+        if( resizeHeightLocked )
+        {
+            height = static_cast<int>(
+                static_cast<double>(resizeWidth)
+                / static_cast<double>(sourceWidth)
+                / stretchFactorX
+                * stretchFactorY
+                * static_cast<double>(sourceHeight)
+                + 0.5);
+        }
+        else
+        {
+            height = resizeHeight;
+        }
+        width = resizeWidth;
+        plan.scaled = true;
+    }
+    else if( stretchFactorX != STRETCH_H_100
+          || stretchFactorY != STRETCH_V_100 )
+    {
+        if( stretchFactorY == STRETCH_V_033 )
+        {
+            width = sourceWidth * 3;
+            height = sourceHeight;
+        }
+        else
+        {
+            width = static_cast<int>(
+                static_cast<double>(sourceWidth) * stretchFactorX);
+            height = static_cast<int>(
+                static_cast<double>(sourceHeight) * stretchFactorY);
+        }
+        plan.stretchApplied = true;
+        plan.scaled = true;
+    }
+
+    if( batchRenderedVideoEncoderProfileRequiresEvenDimensions(encoderProfile) )
+    {
+        if( (width % 2) != 0 )
+        {
+            width += width % 2;
+            plan.codecDimensionAdjusted = true;
+            plan.scaled = true;
+        }
+        if( (height % 2) != 0 )
+        {
+            height += height % 2;
+            plan.codecDimensionAdjusted = true;
+            plan.scaled = true;
+        }
+    }
+
+    if( width <= 0 || height <= 0 )
+    {
+        plan.reason = QStringLiteral("rendered output dimensions invalid");
+        return plan;
+    }
+
+    plan.outputWidth = width;
+    plan.outputHeight = height;
+    plan.frameRateArgument =
+        batchRenderedVideoFfmpegFrameRateArgument(frameRate);
+    plan.frameSizeArgument =
+        QStringLiteral("%1x%2").arg(width).arg(height);
+    plan.ready = !plan.frameRateArgument.isEmpty()
+              && !plan.frameSizeArgument.isEmpty();
+    if( !plan.ready )
+        plan.reason = QStringLiteral("rendered ffmpeg frame plan unavailable");
+    return plan;
+}
+
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     const QString & inputPath,
     const QString & outputPath,
@@ -812,6 +964,23 @@ inline QString batchRenderedVideoFfmpegVideoPlanSummary(
 {
     return batchRenderedVideoFfmpegVideoPlanSummary(
         batchRenderedVideoFfmpegVideoPlanFromRequest(request));
+}
+
+inline QString batchRenderedVideoFfmpegFramePlanSummary(
+    const BatchRenderedVideoFfmpegFramePlan & plan)
+{
+    return QStringLiteral("ffmpeg-frame-source=%1x%2 ffmpeg-frame-size=%3 ffmpeg-frame-rate=%4 ffmpeg-frame-resize=%5 ffmpeg-frame-resize-height-locked=%6 ffmpeg-frame-stretch=%7 ffmpeg-frame-codec-dimension-adjusted=%8 ffmpeg-frame-scaled=%9 ffmpeg-frame-ready=%10 ffmpeg-frame-reason=%11")
+        .arg(plan.sourceWidth)
+        .arg(plan.sourceHeight)
+        .arg(plan.frameSizeArgument.isEmpty() ? QStringLiteral("unspecified") : plan.frameSizeArgument)
+        .arg(plan.frameRateArgument.isEmpty() ? QStringLiteral("unspecified") : plan.frameRateArgument)
+        .arg(plan.resizeEnabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.resizeHeightLocked ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.stretchApplied ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.codecDimensionAdjusted ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.scaled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
 inline QString batchRenderedVideoOutputPlanSummary(

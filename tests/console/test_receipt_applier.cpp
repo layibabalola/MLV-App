@@ -708,6 +708,99 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegVideoArguments)
                std::string(ffmpegPlan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoFfmpegFrameGeometryFromGuiState)
+{
+    BatchRenderedVideoFfmpegFramePlan plan =
+        batchRenderedVideoFfmpegFramePlanFromGuiState(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            STRETCH_H_100,
+            STRETCH_V_100,
+            false,
+            0,
+            0,
+            false,
+            BatchRenderedVideoEncoderProfile::H264);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( 5792, plan.outputWidth );
+    ASSERT_EQ( 3872, plan.outputHeight );
+    ASSERT_EQ( std::string("23.976"),
+               std::string(plan.frameRateArgument.toUtf8().constData()) );
+    ASSERT_EQ( std::string("5792x3872"),
+               std::string(plan.frameSizeArgument.toUtf8().constData()) );
+    ASSERT_FALSE( plan.scaled );
+    ASSERT_FALSE( plan.codecDimensionAdjusted );
+    ASSERT_EQ( std::string("ffmpeg-frame-source=5792x3872 ffmpeg-frame-size=5792x3872 ffmpeg-frame-rate=23.976 ffmpeg-frame-resize=false ffmpeg-frame-resize-height-locked=false ffmpeg-frame-stretch=false ffmpeg-frame-codec-dimension-adjusted=false ffmpeg-frame-scaled=false ffmpeg-frame-ready=true ffmpeg-frame-reason=none"),
+               std::string(batchRenderedVideoFfmpegFramePlanSummary(plan).toUtf8().constData()) );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        1000,
+        500,
+        25.0,
+        STRETCH_H_200,
+        STRETCH_V_100,
+        true,
+        1920,
+        0,
+        true,
+        BatchRenderedVideoEncoderProfile::H264);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( 1920, plan.outputWidth );
+    ASSERT_EQ( 480, plan.outputHeight );
+    ASSERT_TRUE( plan.resizeEnabled );
+    ASSERT_TRUE( plan.resizeHeightLocked );
+    ASSERT_TRUE( plan.scaled );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        1000,
+        501,
+        25.0,
+        STRETCH_H_100,
+        STRETCH_V_033,
+        false,
+        0,
+        0,
+        false,
+        BatchRenderedVideoEncoderProfile::H264);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( 3000, plan.outputWidth );
+    ASSERT_EQ( 502, plan.outputHeight );
+    ASSERT_TRUE( plan.stretchApplied );
+    ASSERT_TRUE( plan.codecDimensionAdjusted );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        1001,
+        501,
+        25.0,
+        STRETCH_H_100,
+        STRETCH_V_100,
+        false,
+        0,
+        0,
+        false,
+        BatchRenderedVideoEncoderProfile::ProRes422HQ);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( 1001, plan.outputWidth );
+    ASSERT_EQ( 501, plan.outputHeight );
+    ASSERT_FALSE( plan.codecDimensionAdjusted );
+
+    plan = batchRenderedVideoFfmpegFramePlanFromGuiState(
+        0,
+        500,
+        25.0,
+        STRETCH_H_100,
+        STRETCH_V_100,
+        false,
+        0,
+        0,
+        false,
+        BatchRenderedVideoEncoderProfile::H264);
+    ASSERT_FALSE( plan.ready );
+    ASSERT_EQ( std::string("rendered source dimensions invalid"),
+               std::string(plan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
 {
     BatchExportFormatRequest request =
