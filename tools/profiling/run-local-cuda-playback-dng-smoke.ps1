@@ -244,6 +244,39 @@ function Convert-ToInt64 {
     [long]$Value
 }
 
+function Convert-ToNullableDouble {
+    param([object]$Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        return $parsed
+    }
+    $null
+}
+
+function Get-AverageOrNull {
+    param(
+        [object[]]$Rows,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+
+    $values = @($Rows | ForEach-Object {
+        Convert-ToNullableDouble $_.$PropertyName
+    } | Where-Object { $null -ne $_ })
+    if ($values.Count -eq 0) {
+        return $null
+    }
+
+    [Math]::Round((($values | Measure-Object -Average).Average), 3)
+}
+
 function Get-PlaybackProofSummary {
     param([AllowNull()]$Summary)
 
@@ -322,12 +355,30 @@ function Get-CdngProofSummary {
     $candidateTrusted = 0L
     $candidateFrames = 0L
     $baselineAttempted = 0L
+    $speedRuns = @()
     foreach ($run in $runs) {
         $candidateAttempted += Convert-ToInt64 $run.candidateGpuExportAttemptedFrames
         $candidateReplaced += Convert-ToInt64 $run.candidateGpuExportReplacedFrames
         $candidateTrusted += Convert-ToInt64 $run.candidateGpuExportTrustedFrames
         $candidateFrames += Convert-ToInt64 $run.candidateFrameCount
         $baselineAttempted += Convert-ToInt64 $run.baselineGpuExportAttemptedFrames
+        $speedRuns += [pscustomobject]@{
+            name = $run.name
+            cdngCodec = $run.cdngCodec
+            repeat = $run.repeat
+            runOrder = $run.runOrder
+            verdict = $run.verdict
+            baselineElapsedMs = Convert-ToNullableDouble $run.baselineElapsedMs
+            candidateElapsedMs = Convert-ToNullableDouble $run.candidateElapsedMs
+            elapsedDeltaMs = Convert-ToNullableDouble $run.elapsedDeltaMs
+            elapsedDeltaPercent = Convert-ToNullableDouble $run.elapsedDeltaPercent
+            frameTotalAvgDeltaMs = Convert-ToNullableDouble $run.frameTotalAvgDeltaMs
+            frameTotalP95DeltaMs = Convert-ToNullableDouble $run.frameTotalP95DeltaMs
+            llrawprocTotalAvgDeltaMs = Convert-ToNullableDouble $run.llrawprocTotalAvgDeltaMs
+            llrawprocDualIsoAvgDeltaMs = Convert-ToNullableDouble $run.llrawprocDualIsoAvgDeltaMs
+            dngCompressAvgDeltaMs = Convert-ToNullableDouble $run.dngCompressAvgDeltaMs
+            dngCompressOutputMiBPerSecondDelta = Convert-ToNullableDouble $run.dngCompressOutputMiBPerSecondDelta
+        }
     }
 
     [pscustomobject]@{
@@ -339,6 +390,19 @@ function Get-CdngProofSummary {
         candidateGpuExportAttemptedFrames = $candidateAttempted
         candidateGpuExportReplacedFrames = $candidateReplaced
         candidateGpuExportTrustedFrames = $candidateTrusted
+        speed = [pscustomobject]@{
+            runCount = $speedRuns.Count
+            avgBaselineElapsedMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "baselineElapsedMs"
+            avgCandidateElapsedMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "candidateElapsedMs"
+            avgElapsedDeltaMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "elapsedDeltaMs"
+            avgElapsedDeltaPercent = Get-AverageOrNull -Rows $speedRuns -PropertyName "elapsedDeltaPercent"
+            avgFrameTotalDeltaMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "frameTotalAvgDeltaMs"
+            avgLlrawprocTotalDeltaMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "llrawprocTotalAvgDeltaMs"
+            avgLlrawprocDualIsoDeltaMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "llrawprocDualIsoAvgDeltaMs"
+            avgDngCompressDeltaMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "dngCompressAvgDeltaMs"
+            runs = @($speedRuns)
+            proofBoundary = "Elapsed deltas are local to the host, clip, codec, max-frame count, release/backend hashes, and run order captured by the child CDNG matrix."
+        }
         cases = @($Summary.cases | ForEach-Object {
             [pscustomobject]@{
                 name = $_.name

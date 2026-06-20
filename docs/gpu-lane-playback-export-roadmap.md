@@ -143,6 +143,11 @@ carry correctness, GL/backend/fallback proof, DNG hash parity, and a local
 CPU-vs-CUDA playback speed comparison. A passing UltraMagnus packet still proves
 RTX 4090 only, and a passing Dell packet is required before claiming realtime
 CUDA support on that machine.
+The top-level local-smoke summary also now lifts the CDNG matrix wall-clock and
+stage timing deltas into `proof.cdng.speed`, so DNG export speed evidence sits
+beside the playback A/B speed evidence instead of requiring manual inspection of
+nested matrix files. Those export deltas are host/clip/codec/max-frame scoped,
+not universal throughput claims.
 
 Update 2026-06-20 ASAP DNG export runner:
 `tools/profiling/run-release-cuda-dng-export.ps1` now provides a direct
