@@ -49,6 +49,15 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 .arg(batchRenderedVideoRequestShapeError(exportRequest)));
             return 2;
         }
+        const BatchRenderedVideoTarget renderedTarget =
+            batchRenderedVideoTargetFromRequest(exportRequest);
+        if( !renderedTarget.complete )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video target is incomplete. %1. %2. Choose a rendered codec or container before runner work.\n")
+                .arg(batchExportFormatRequestSummary(exportRequest))
+                .arg(batchRenderedVideoTargetSummary(exportRequest)));
+            return 2;
+        }
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. %1. %2. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n")
             .arg(batchExportFormatRequestSummary(exportRequest))
             .arg(batchRenderedVideoTargetSummary(exportRequest)));

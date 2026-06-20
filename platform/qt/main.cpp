@@ -503,6 +503,17 @@ static int runBatch(QCoreApplication &app)
     }
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
+        const BatchRenderedVideoTarget renderedTarget =
+            batchRenderedVideoTargetFromRequest(exportRequest);
+        if( !renderedTarget.complete )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video target is incomplete. %1. %2. Choose a rendered codec or container, for example --export-format h264, --export-format mp4, or --export-format prores.\n\n")
+                .arg(batchExportFormatRequestSummary(exportRequest))
+                .arg(batchRenderedVideoTargetSummary(exportRequest)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. %2. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n")
             .arg(batchExportFormatRequestSummary(exportRequest))
             .arg(batchRenderedVideoTargetSummary(exportRequest)));
