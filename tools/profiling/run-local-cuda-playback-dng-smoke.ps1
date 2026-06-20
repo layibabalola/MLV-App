@@ -437,6 +437,12 @@ function Get-CdngProofSummary {
     $candidateTrusted = 0L
     $candidateFrames = 0L
     $baselineAttempted = 0L
+    $candidateAsyncWriterCompressRuns = 0L
+    $candidateAsyncWriterOverlapRuns = 0L
+    $candidateAsyncWriterMaxActive = 0L
+    $candidateAsyncWriterMaxQueued = 0L
+    $candidateAsyncWriterJobsStarted = 0L
+    $candidateAsyncWriterJobsFinished = 0L
     $speedRuns = @()
     foreach ($run in $runs) {
         $candidateAttempted += Convert-ToInt64 $run.candidateGpuExportAttemptedFrames
@@ -444,12 +450,37 @@ function Get-CdngProofSummary {
         $candidateTrusted += Convert-ToInt64 $run.candidateGpuExportTrustedFrames
         $candidateFrames += Convert-ToInt64 $run.candidateFrameCount
         $baselineAttempted += Convert-ToInt64 $run.baselineGpuExportAttemptedFrames
+        if ([bool]$run.candidateAsyncWriterCompressEnvEnabled) {
+            $candidateAsyncWriterCompressRuns++
+        }
+        if ([bool]$run.candidateAsyncWriterCanOverlapDngCompress) {
+            $candidateAsyncWriterOverlapRuns++
+        }
+        $candidateAsyncWriterMaxActive = [Math]::Max(
+            $candidateAsyncWriterMaxActive,
+            (Convert-ToInt64 $run.candidateAsyncWriterMaxActive))
+        $candidateAsyncWriterMaxQueued = [Math]::Max(
+            $candidateAsyncWriterMaxQueued,
+            (Convert-ToInt64 $run.candidateAsyncWriterMaxQueued))
+        $candidateAsyncWriterJobsStarted += Convert-ToInt64 $run.candidateAsyncWriterJobsStarted
+        $candidateAsyncWriterJobsFinished += Convert-ToInt64 $run.candidateAsyncWriterJobsFinished
         $speedRuns += [pscustomobject]@{
             name = $run.name
             cdngCodec = $run.cdngCodec
             repeat = $run.repeat
             runOrder = $run.runOrder
             verdict = $run.verdict
+            candidateBottleneck = $run.candidateBottleneck
+            candidateSuggestedOptimization = $run.candidateSuggestedOptimization
+            candidateDngCompressPlacement = $run.candidateDngCompressPlacement
+            candidateAsyncWriterCompressEnvEnabled = $run.candidateAsyncWriterCompressEnvEnabled
+            candidateAsyncWriterCanOverlapDngCompress = $run.candidateAsyncWriterCanOverlapDngCompress
+            candidateAsyncWriterThreadCount = $run.candidateAsyncWriterThreadCount
+            candidateAsyncWriterQueueCapacity = $run.candidateAsyncWriterQueueCapacity
+            candidateAsyncWriterMaxQueued = $run.candidateAsyncWriterMaxQueued
+            candidateAsyncWriterJobsStarted = $run.candidateAsyncWriterJobsStarted
+            candidateAsyncWriterJobsFinished = $run.candidateAsyncWriterJobsFinished
+            candidateAsyncWriterMaxActive = $run.candidateAsyncWriterMaxActive
             baselineElapsedMs = Convert-ToNullableDouble $run.baselineElapsedMs
             candidateElapsedMs = Convert-ToNullableDouble $run.candidateElapsedMs
             elapsedDeltaMs = Convert-ToNullableDouble $run.elapsedDeltaMs
@@ -472,6 +503,18 @@ function Get-CdngProofSummary {
         candidateGpuExportAttemptedFrames = $candidateAttempted
         candidateGpuExportReplacedFrames = $candidateReplaced
         candidateGpuExportTrustedFrames = $candidateTrusted
+        asyncWriter = [pscustomobject]@{
+            candidateUseAsyncWriter = [bool]$Summary.options.candidateUseAsyncWriter
+            candidateUseAsyncWriterCompression = [bool]$Summary.options.candidateUseAsyncWriterCompression
+            candidateAsyncWriterQueueDepth = $Summary.options.candidateAsyncWriterQueueDepth
+            candidateAsyncWriterThreadCount = $Summary.options.candidateAsyncWriterThreadCount
+            candidateAsyncWriterCompressRuns = $candidateAsyncWriterCompressRuns
+            candidateAsyncWriterOverlapRuns = $candidateAsyncWriterOverlapRuns
+            candidateAsyncWriterMaxActive = $candidateAsyncWriterMaxActive
+            candidateAsyncWriterMaxQueued = $candidateAsyncWriterMaxQueued
+            candidateAsyncWriterJobsStarted = $candidateAsyncWriterJobsStarted
+            candidateAsyncWriterJobsFinished = $candidateAsyncWriterJobsFinished
+        }
         speed = [pscustomobject]@{
             runCount = $speedRuns.Count
             avgBaselineElapsedMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "baselineElapsedMs"

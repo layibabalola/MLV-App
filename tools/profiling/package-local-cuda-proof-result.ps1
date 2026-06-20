@@ -267,6 +267,13 @@ $manifest = [ordered]@{
         candidateGpuExportAttemptedFrames = Convert-ToInt64 $summary.proof.cdng.candidateGpuExportAttemptedFrames
         candidateGpuExportReplacedFrames = Convert-ToInt64 $summary.proof.cdng.candidateGpuExportReplacedFrames
         candidateGpuExportTrustedFrames = Convert-ToInt64 $summary.proof.cdng.candidateGpuExportTrustedFrames
+        candidateUseAsyncWriter = [bool]$summary.proof.cdng.asyncWriter.candidateUseAsyncWriter
+        candidateUseAsyncWriterCompression = [bool]$summary.proof.cdng.asyncWriter.candidateUseAsyncWriterCompression
+        candidateAsyncWriterOverlapRuns = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterOverlapRuns
+        candidateAsyncWriterMaxActive = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterMaxActive
+        candidateAsyncWriterMaxQueued = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterMaxQueued
+        candidateAsyncWriterJobsStarted = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterJobsStarted
+        candidateAsyncWriterJobsFinished = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterJobsFinished
     }
     outputs = [ordered]@{
         runRoot = $runRootResolved

@@ -722,6 +722,23 @@ else {
                 -NextAction "Prioritize E3 compression/writer overlap for lossless throughput instead of more recon tuning."
         }
     }
+    $cdngAsyncWriter = Get-Field $cdng "asyncWriter"
+    if ($cdngAsyncWriter -and
+        [bool](Get-Field $cdngAsyncWriter "candidateUseAsyncWriterCompression") -and
+        (Convert-ToInt64 (Get-Field $cdngAsyncWriter "candidateAsyncWriterOverlapRuns")) -le 0) {
+        Add-Diagnostic `
+            -Diagnostics $diagnostics `
+            -Area "dng-export-speed" `
+            -Code "DNG_ASYNC_COMPRESS_NO_OVERLAP" `
+            -Severity "warning" `
+            -Message "DNG async compression was requested, but no candidate run reported async_writer_can_overlap_dng_compress=true." `
+            -Evidence @(
+                "overlapRuns=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterOverlapRuns'))",
+                "maxActive=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxActive'))",
+                "maxQueued=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxQueued'))"
+            ) `
+            -NextAction "Check candidate profile fields dng_compress_placement, async_writer_can_overlap_dng_compress, async_writer_max_active, and async_writer_max_queued."
+    }
 }
 $cdngEvidence = @()
 if ($cdng) {
@@ -738,6 +755,10 @@ if ($cdng) {
         $cdngEvidence += "DNG frame total avg delta: $(Format-Nullable $cdng.speed.avgFrameTotalDeltaMs ' ms')"
         $cdngEvidence += "DNG Dual ISO avg delta: $(Format-Nullable $cdng.speed.avgLlrawprocDualIsoDeltaMs ' ms')"
         $cdngEvidence += "DNG compression avg delta: $(Format-Nullable $cdng.speed.avgDngCompressDeltaMs ' ms')"
+    }
+    $cdngAsyncWriter = Get-Field $cdng "asyncWriter"
+    if ($cdngAsyncWriter) {
+        $cdngEvidence += "DNG async writer: requested=$((Get-Field $cdngAsyncWriter 'candidateUseAsyncWriter')), compress_requested=$((Get-Field $cdngAsyncWriter 'candidateUseAsyncWriterCompression')), overlap_runs=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterOverlapRuns')), max_active=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxActive')), max_queued=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxQueued')), jobs=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterJobsStarted'))/$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterJobsFinished'))"
     }
 }
 $cdngVerdict = New-SectionVerdict `
