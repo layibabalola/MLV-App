@@ -801,6 +801,91 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegFrameGeometryFromGuiState)
                std::string(plan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoJobPlan basePlan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request);
+
+    ASSERT_TRUE( basePlan.preflightReady );
+    ASSERT_FALSE( basePlan.metadataAttempted );
+    ASSERT_FALSE( basePlan.metadataReady );
+    ASSERT_FALSE( basePlan.ffmpegFrameReady );
+    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(basePlan).toUtf8().constData()) );
+
+    BatchRenderedVideoSourceMetadata metadata =
+        batchRenderedVideoSourceMetadata(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            STRETCH_H_100,
+            STRETCH_V_100);
+    ASSERT_TRUE( metadata.ready );
+    ASSERT_EQ( std::string("source-metadata=5792x3872"),
+               std::string(batchRenderedVideoSourceMetadataSummary(metadata)
+                   .left(QStringLiteral("source-metadata=5792x3872").length())
+                   .toUtf8().constData()) );
+
+    BatchRenderedVideoRenderSettings settings;
+    settings.resizeEnabled = true;
+    settings.resizeWidth = 1920;
+    settings.resizeHeightLocked = true;
+
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(basePlan, metadata, settings);
+    ASSERT_TRUE( plan.metadataAttempted );
+    ASSERT_TRUE( plan.metadataReady );
+    ASSERT_TRUE( plan.ffmpegFrameReady );
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_EQ( 1920, plan.ffmpegFramePlan.outputWidth );
+    ASSERT_EQ( 1284, plan.ffmpegFramePlan.outputHeight );
+    ASSERT_EQ( std::string("23.976"),
+               std::string(plan.ffmpegFramePlan.frameRateArgument.toUtf8().constData()) );
+    ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+
+    const std::string summary =
+        std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
+    ASSERT_TRUE( summary.find("source-metadata=5792x3872") != std::string::npos );
+    ASSERT_TRUE( summary.find("source-metadata-attempted=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-settings-resize=true render-settings-resize-width=1920") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-frame-size=1920x1284") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-frame-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+
+    metadata = batchRenderedVideoSourceMetadata(
+        0,
+        3872,
+        24000.0 / 1001.0,
+        STRETCH_H_100,
+        STRETCH_V_100);
+    plan = batchRenderedVideoJobPlanWithMetadata(basePlan, metadata, settings);
+    ASSERT_TRUE( plan.metadataAttempted );
+    ASSERT_FALSE( plan.metadataReady );
+    ASSERT_FALSE( plan.ffmpegFrameReady );
+    ASSERT_FALSE( plan.preflightReady );
+    ASSERT_EQ( std::string("rendered source dimensions invalid"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+
+    BatchRenderedVideoJobPlan invalidOutputPlan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders/custom.mov"),
+            request);
+    plan = batchRenderedVideoJobPlanWithMetadata(
+        invalidOutputPlan,
+        metadata,
+        settings);
+    ASSERT_EQ( std::string("output path extension does not match target extension"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
 {
     BatchExportFormatRequest request =

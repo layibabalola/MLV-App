@@ -114,6 +114,25 @@ struct BatchRenderedVideoFfmpegFramePlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoSourceMetadata
+{
+    int width = 0;
+    int height = 0;
+    double frameRate = 0.0;
+    double stretchFactorX = STRETCH_H_100;
+    double stretchFactorY = STRETCH_V_100;
+    QString reason;
+    bool ready = false;
+};
+
+struct BatchRenderedVideoRenderSettings
+{
+    bool resizeEnabled = false;
+    int resizeWidth = 0;
+    int resizeHeight = 0;
+    bool resizeHeightLocked = false;
+};
+
 struct BatchRenderedVideoOutputPlan
 {
     QString outputPath;
@@ -135,12 +154,18 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoTarget target;
     BatchRenderedVideoEncoderPreset encoderPreset;
     BatchRenderedVideoFfmpegVideoPlan ffmpegVideoPlan;
+    BatchRenderedVideoSourceMetadata sourceMetadata;
+    BatchRenderedVideoRenderSettings renderSettings;
+    BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
     BatchRenderedVideoOutputPlan outputPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
     bool targetReady = false;
     bool encoderReady = false;
     bool ffmpegVideoReady = false;
+    bool metadataAttempted = false;
+    bool metadataReady = false;
+    bool ffmpegFrameReady = false;
     bool outputReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -770,6 +795,78 @@ batchRenderedVideoFfmpegFramePlanFromGuiState(
     return plan;
 }
 
+inline BatchRenderedVideoSourceMetadata batchRenderedVideoSourceMetadata(
+    int width,
+    int height,
+    double frameRate,
+    double stretchFactorX,
+    double stretchFactorY)
+{
+    BatchRenderedVideoSourceMetadata metadata;
+    metadata.width = width;
+    metadata.height = height;
+    metadata.frameRate = frameRate;
+    metadata.stretchFactorX = stretchFactorX;
+    metadata.stretchFactorY = stretchFactorY;
+
+    if( width <= 0 || height <= 0 )
+    {
+        metadata.reason = QStringLiteral("rendered source dimensions invalid");
+        return metadata;
+    }
+    if( !(frameRate > 0.0) )
+    {
+        metadata.reason = QStringLiteral("rendered frame rate invalid");
+        return metadata;
+    }
+    if( !(stretchFactorX > 0.0) || !(stretchFactorY > 0.0) )
+    {
+        metadata.reason = QStringLiteral("rendered stretch factors invalid");
+        return metadata;
+    }
+
+    metadata.ready = true;
+    return metadata;
+}
+
+inline BatchRenderedVideoRenderSettings batchRenderedVideoDefaultRenderSettings()
+{
+    return BatchRenderedVideoRenderSettings();
+}
+
+inline BatchRenderedVideoFfmpegFramePlan
+batchRenderedVideoFfmpegFramePlanFromMetadata(
+    const BatchRenderedVideoSourceMetadata & metadata,
+    const BatchRenderedVideoRenderSettings & settings,
+    BatchRenderedVideoEncoderProfile encoderProfile)
+{
+    if( !metadata.ready )
+    {
+        BatchRenderedVideoFfmpegFramePlan plan;
+        plan.sourceWidth = metadata.width;
+        plan.sourceHeight = metadata.height;
+        plan.frameRate = metadata.frameRate;
+        plan.resizeEnabled = settings.resizeEnabled;
+        plan.resizeHeightLocked = settings.resizeHeightLocked;
+        plan.reason = metadata.reason.isEmpty()
+            ? QStringLiteral("rendered source metadata unavailable")
+            : metadata.reason;
+        return plan;
+    }
+
+    return batchRenderedVideoFfmpegFramePlanFromGuiState(
+        metadata.width,
+        metadata.height,
+        metadata.frameRate,
+        metadata.stretchFactorX,
+        metadata.stretchFactorY,
+        settings.resizeEnabled,
+        settings.resizeWidth,
+        settings.resizeHeight,
+        settings.resizeHeightLocked,
+        encoderProfile);
+}
+
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     const QString & inputPath,
     const QString & outputPath,
@@ -882,6 +979,42 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     return plan;
 }
 
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
+    const BatchRenderedVideoJobPlan & preflightPlan,
+    const BatchRenderedVideoSourceMetadata & metadata,
+    const BatchRenderedVideoRenderSettings & settings =
+        batchRenderedVideoDefaultRenderSettings())
+{
+    BatchRenderedVideoJobPlan plan = preflightPlan;
+    plan.sourceMetadata = metadata;
+    plan.renderSettings = settings;
+    plan.metadataAttempted = true;
+    plan.metadataReady = metadata.ready;
+    if( plan.encoderReady )
+    {
+        plan.ffmpegFramePlan =
+            batchRenderedVideoFfmpegFramePlanFromMetadata(
+                metadata,
+                settings,
+                plan.encoderPreset.profile);
+    }
+    else
+    {
+        plan.ffmpegFramePlan.reason =
+            QStringLiteral("rendered encoder preset incomplete");
+    }
+    plan.ffmpegFrameReady = plan.ffmpegFramePlan.ready;
+    plan.preflightReady = plan.requestValid
+                       && plan.targetReady
+                       && plan.encoderReady
+                       && plan.ffmpegVideoReady
+                       && plan.metadataReady
+                       && plan.ffmpegFrameReady
+                       && plan.outputReady;
+    plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
+    return plan;
+}
+
 inline QString batchRenderedVideoJobPlanFirstBlocker(
     const BatchRenderedVideoJobPlan & plan)
 {
@@ -904,6 +1037,18 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.outputPlan.reason.isEmpty()
             ? QStringLiteral("rendered output path invalid")
             : plan.outputPlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.metadataReady )
+    {
+        return plan.sourceMetadata.reason.isEmpty()
+            ? QStringLiteral("rendered source metadata unavailable")
+            : plan.sourceMetadata.reason;
+    }
+    if( plan.metadataAttempted && !plan.ffmpegFrameReady )
+    {
+        return plan.ffmpegFramePlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg frame plan unavailable")
+            : plan.ffmpegFramePlan.reason;
     }
     if( !plan.runnerPrerequisites.ready )
         return plan.runnerPrerequisites.reason;
@@ -983,6 +1128,37 @@ inline QString batchRenderedVideoFfmpegFramePlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoSourceMetadataSummary(
+    const BatchRenderedVideoSourceMetadata & metadata)
+{
+    return QStringLiteral("source-metadata=%1x%2 source-fps=%3 source-stretch-x=%4 source-stretch-y=%5 source-metadata-ready=%6 source-metadata-reason=%7")
+        .arg(metadata.width)
+        .arg(metadata.height)
+        .arg(metadata.frameRate)
+        .arg(metadata.stretchFactorX)
+        .arg(metadata.stretchFactorY)
+        .arg(metadata.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(metadata.reason.isEmpty() ? QStringLiteral("none") : metadata.reason);
+}
+
+inline QString batchRenderedVideoSourceMetadataSummary(
+    const BatchRenderedVideoJobPlan & plan)
+{
+    return QStringLiteral("%1 source-metadata-attempted=%2")
+        .arg(batchRenderedVideoSourceMetadataSummary(plan.sourceMetadata))
+        .arg(plan.metadataAttempted ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
+inline QString batchRenderedVideoRenderSettingsSummary(
+    const BatchRenderedVideoRenderSettings & settings)
+{
+    return QStringLiteral("render-settings-resize=%1 render-settings-resize-width=%2 render-settings-resize-height=%3 render-settings-resize-height-locked=%4")
+        .arg(settings.resizeEnabled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(settings.resizeWidth)
+        .arg(settings.resizeHeight)
+        .arg(settings.resizeHeightLocked ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const BatchRenderedVideoOutputPlan & plan)
 {
@@ -1018,11 +1194,14 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 preflight-ready=%7 runnable=%8 first-blocker=%9")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 preflight-ready=%10 runnable=%11 first-blocker=%12")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
         .arg(batchRenderedVideoFfmpegVideoPlanSummary(plan.ffmpegVideoPlan))
+        .arg(batchRenderedVideoSourceMetadataSummary(plan))
+        .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
+        .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
         .arg(batchRenderedVideoOutputPlanSummary(plan.outputPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
