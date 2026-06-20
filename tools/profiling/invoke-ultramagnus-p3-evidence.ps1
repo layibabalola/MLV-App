@@ -422,8 +422,10 @@ elseif ($failures.Count -eq 0) {
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
+`$amazeBackendBuildScript = Join-Path `$backendDir 'amaze-debayer-dll.ps1'
 `$backendDll = Join-Path `$backendDir 'igpu_recon_cuda.dll'
 `$backendArchSidecar = Join-Path `$backendDir 'igpu_recon_cuda.arch.json'
+`$amazeBackendDll = Join-Path `$backendDir 'igpu_amaze_debayer_cuda.dll'
 `$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
@@ -439,10 +441,13 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
         dir = `$backendDir
         buildScript = `$backendBuildScript
         buildExitCode = `$null
+        amazeBuildScript = `$amazeBackendBuildScript
+        amazeBuildExitCode = `$null
         deployDir = `$releaseDir
         artifacts = @()
         deployedArtifacts = @()
         output = @()
+        amazeOutput = @()
     }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     validatorExitCode = `$null
@@ -456,12 +461,19 @@ try {
         if (!(Test-Path -LiteralPath `$backendBuildScript)) {
             throw "Missing backend build script: `$backendBuildScript"
         }
+        if (!(Test-Path -LiteralPath `$amazeBackendBuildScript)) {
+            throw "Missing AMaZE backend build script: `$amazeBackendBuildScript"
+        }
         `$backendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$backendBuildScript -Dir `$backendDir 2>&1
         `$backendExit = `$LASTEXITCODE
         `$payload.backend.buildExitCode = `$backendExit
         `$payload.backend.output = @(`$backendOutput | ForEach-Object { [string]`$_ })
+        `$amazeBackendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$amazeBackendBuildScript -Dir `$backendDir -Arch portable 2>&1
+        `$amazeBackendExit = `$LASTEXITCODE
+        `$payload.backend.amazeBuildExitCode = `$amazeBackendExit
+        `$payload.backend.amazeOutput = @(`$amazeBackendOutput | ForEach-Object { [string]`$_ })
         `$payload.backend.artifacts = @(Get-ChildItem -LiteralPath `$backendDir -File -ErrorAction SilentlyContinue |
-            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|dll_test\.exe)$' } |
+            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|igpu_amaze_debayer_cuda\.(dll|lib|exp)|dll_test\.exe|amaze_dll_test\.exe)$' } |
             Sort-Object Name |
             ForEach-Object {
                 [ordered]@{
@@ -474,11 +486,17 @@ try {
         if (`$backendExit -ne 0) {
             throw "Backend DLL build failed with exit code `$backendExit"
         }
+        if (`$amazeBackendExit -ne 0) {
+            throw "AMaZE backend DLL build failed with exit code `$amazeBackendExit"
+        }
         if (!(Test-Path -LiteralPath `$backendDll)) {
             throw "Backend DLL build did not produce `$backendDll"
         }
         if (!(Test-Path -LiteralPath `$backendArchSidecar)) {
             throw "Backend DLL build did not produce architecture sidecar `$backendArchSidecar"
+        }
+        if (!(Test-Path -LiteralPath `$amazeBackendDll)) {
+            throw "AMaZE backend DLL build did not produce `$amazeBackendDll"
         }
         New-Item -ItemType Directory -Force -Path `$releaseDir | Out-Null
         `$deployTargets = @()
@@ -489,6 +507,10 @@ try {
         `$deployTargets += [ordered]@{
             source = `$backendArchSidecar
             destination = (Join-Path `$releaseDir 'igpu_recon_cuda.arch.json')
+        }
+        `$deployTargets += [ordered]@{
+            source = `$amazeBackendDll
+            destination = (Join-Path `$releaseDir 'igpu_amaze_debayer_cuda.dll')
         }
         `$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
