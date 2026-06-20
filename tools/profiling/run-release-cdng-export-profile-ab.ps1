@@ -267,6 +267,154 @@ function Get-CompareCompressionValue {
     $valueProperty.Value
 }
 
+function Convert-ToNullableDouble {
+    param([object]$Value)
+    if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) {
+        return $null
+    }
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        return $parsed
+    }
+    $null
+}
+
+function Get-CompareStageStatValue {
+    param(
+        [object]$Compare,
+        [string]$StageName,
+        [ValidateSet("avgMs", "p50Ms", "p95Ms")]
+        [string]$Statistic,
+        [ValidateSet("baseline", "candidate", "delta", "deltaPercent")]
+        [string]$ValueName
+    )
+
+    if ($null -eq $Compare -or $null -eq $Compare.stages) {
+        return $null
+    }
+    $stageProperty = $Compare.stages.PSObject.Properties[$StageName]
+    if ($null -eq $stageProperty -or $null -eq $stageProperty.Value) {
+        return $null
+    }
+    $statProperty = $stageProperty.Value.PSObject.Properties[$Statistic]
+    if ($null -eq $statProperty -or $null -eq $statProperty.Value) {
+        return $null
+    }
+    $valueProperty = $statProperty.Value.PSObject.Properties[$ValueName]
+    if ($null -eq $valueProperty) {
+        return $null
+    }
+    $valueProperty.Value
+}
+
+function New-CdngThroughputClassification {
+    param(
+        [AllowNull()][object]$Compare,
+        [Parameter(Mandatory = $true)][object]$ElapsedDelta,
+        [AllowNull()][string[]]$CompareFailures,
+        [AllowNull()][string[]]$ElapsedGateFailures,
+        [bool]$RequireElapsedImprovement,
+        [double]$MinElapsedImprovementPercent,
+        [bool]$FailOnRegression,
+        [double]$MaxFrameTotalRegressionPercent,
+        [double]$MaxFrameTotalP95RegressionPercent,
+        [AllowNull()][object]$CandidateProfileJson
+    )
+
+    $elapsedDeltaMs = Convert-ToNullableDouble $ElapsedDelta.deltaMs
+    $elapsedDeltaPercent = Convert-ToNullableDouble $ElapsedDelta.deltaPercent
+    $elapsedImprovementPercent = if ($null -ne $elapsedDeltaPercent) {
+        -1.0 * $elapsedDeltaPercent
+    }
+    else {
+        $null
+    }
+    $wallClockImproved = ($null -ne $elapsedDeltaMs -and $elapsedDeltaMs -lt 0.0)
+    $elapsedGatePassed = if ($RequireElapsedImprovement) {
+        @($ElapsedGateFailures).Count -eq 0
+    }
+    else {
+        $wallClockImproved
+    }
+
+    $frameAvgDeltaMs = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "frame_total_ms" -Statistic "avgMs" -ValueName "delta")
+    $frameAvgDeltaPercent = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "frame_total_ms" -Statistic "avgMs" -ValueName "deltaPercent")
+    $frameP95DeltaMs = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "frame_total_ms" -Statistic "p95Ms" -ValueName "delta")
+    $frameP95DeltaPercent = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "frame_total_ms" -Statistic "p95Ms" -ValueName "deltaPercent")
+    $frameAvgRegression = ($null -ne $frameAvgDeltaPercent -and $frameAvgDeltaPercent -gt $MaxFrameTotalRegressionPercent)
+    $frameP95Regression = ($null -ne $frameP95DeltaPercent -and $frameP95DeltaPercent -gt $MaxFrameTotalP95RegressionPercent)
+    $frameAttributionHold = ([bool]$FailOnRegression -and ($frameAvgRegression -or $frameP95Regression))
+
+    $producerFrameAvgDeltaMs = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "producer_frame_ms" -Statistic "avgMs" -ValueName "delta")
+    $writerLagAvgDeltaMs = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "writer_completion_lag_ms" -Statistic "avgMs" -ValueName "delta")
+    $writerLagP95DeltaMs = Convert-ToNullableDouble (Get-CompareStageStatValue -Compare $Compare -StageName "writer_completion_lag_ms" -Statistic "p95Ms" -ValueName "delta")
+    $producerImproved = ($null -ne $producerFrameAvgDeltaMs -and $producerFrameAvgDeltaMs -lt 0.0)
+    $writerLagIncreased = (($null -ne $writerLagAvgDeltaMs -and $writerLagAvgDeltaMs -gt 0.0) -or
+        ($null -ne $writerLagP95DeltaMs -and $writerLagP95DeltaMs -gt 0.0))
+    $asyncOverlap = if ($CandidateProfileJson -and
+        $CandidateProfileJson.PSObject.Properties["async_writer_can_overlap_dng_compress"]) {
+        [bool]$CandidateProfileJson.async_writer_can_overlap_dng_compress
+    }
+    else {
+        $false
+    }
+
+    $token = "insufficient_data"
+    $suggested = "collect_cdng_matrix_with_elapsed_and_stage_profiles"
+    if ($null -ne $elapsedDeltaMs) {
+        if (-not $wallClockImproved) {
+            $token = "not_promotable"
+            $suggested = "improve_export_wall_clock_before_scheduler_promotion"
+        }
+        elseif ($RequireElapsedImprovement -and -not $elapsedGatePassed) {
+            $token = "not_promotable"
+            $suggested = "increase_elapsed_improvement_or_reduce_run_variance"
+        }
+        elseif ($frameAttributionHold) {
+            $token = "wall_clock_improved_attribution_hold"
+            $suggested = "separate_writer_completion_lag_from_export_wall_clock_gate"
+        }
+        elseif ($asyncOverlap -and $producerImproved -and $writerLagIncreased) {
+            $token = "wall_clock_improved_completion_lag_shift"
+            $suggested = "review_async_writer_completion_lag_policy_before_default_promotion"
+        }
+        else {
+            $token = "wall_clock_improved"
+            $suggested = "validate_broader_lossless_matrix_before_default_promotion"
+        }
+    }
+
+    [pscustomobject]@{
+        schema = "mlvapp.cdng_throughput_classification.v1"
+        token = $token
+        wallClockImproved = $wallClockImproved
+        elapsedGatePassed = [bool]$elapsedGatePassed
+        elapsedDeltaMs = $elapsedDeltaMs
+        elapsedDeltaPercent = $elapsedDeltaPercent
+        elapsedImprovementPercent = $elapsedImprovementPercent
+        minElapsedImprovementPercent = $MinElapsedImprovementPercent
+        frameTotalAttributionGateActive = [bool]$FailOnRegression
+        frameTotalAttributionPassed = if ($FailOnRegression) { -not $frameAttributionHold } else { $null }
+        frameTotalAvgDeltaMs = $frameAvgDeltaMs
+        frameTotalAvgDeltaPercent = $frameAvgDeltaPercent
+        frameTotalP95DeltaMs = $frameP95DeltaMs
+        frameTotalP95DeltaPercent = $frameP95DeltaPercent
+        writerCompletionLagAvgDeltaMs = $writerLagAvgDeltaMs
+        writerCompletionLagP95DeltaMs = $writerLagP95DeltaMs
+        producerFrameAvgDeltaMs = $producerFrameAvgDeltaMs
+        asyncWriterCanOverlapDngCompress = $asyncOverlap
+        compareFailureCount = @($CompareFailures).Count
+        elapsedGateFailureCount = @($ElapsedGateFailures).Count
+        defaultPromotionCandidate = ($token -eq "wall_clock_improved" -and @($CompareFailures).Count -eq 0 -and @($ElapsedGateFailures).Count -eq 0)
+        suggestedOptimization = $suggested
+        proofBoundary = "Classification is throughput triage only; DNG hash/proof gates and default export behavior remain unchanged."
+    }
+}
+
 function Format-GpuExportSkipCounts {
     param(
         [Parameter(Mandatory = $true)]
@@ -523,6 +671,17 @@ if ($RequireElapsedImprovement) {
         $elapsedGateFailures += "elapsed-improvement-percent expected_min=$MinElapsedImprovementPercent actual=$elapsedImprovementPercent"
     }
 }
+$throughputClassification = New-CdngThroughputClassification `
+    -Compare $compare `
+    -ElapsedDelta $elapsedDelta `
+    -CompareFailures $compareFailures `
+    -ElapsedGateFailures $elapsedGateFailures `
+    -RequireElapsedImprovement ([bool]$RequireElapsedImprovement) `
+    -MinElapsedImprovementPercent $MinElapsedImprovementPercent `
+    -FailOnRegression ([bool]$FailOnRegression) `
+    -MaxFrameTotalRegressionPercent $MaxFrameTotalRegressionPercent `
+    -MaxFrameTotalP95RegressionPercent $MaxFrameTotalP95RegressionPercent `
+    -CandidateProfileJson $candidateProfileJson
 $summaryFailures = @($compareFailures + $proofFailures + $elapsedGateFailures)
 $summary = [pscustomobject]@{
     schema = "release-cdng-export-profile-ab.v1"
@@ -655,6 +814,7 @@ $summary = [pscustomobject]@{
         dngCompressOutputRatioDelta = Get-CompareCompressionValue -Compare $compare -MetricName "dngCompressOutputRatio" -ValueName "delta"
         dngCompressPlacement = if ($compare -and $compare.compression) { $compare.compression.dngCompressPlacement } else { $null }
         asyncWriterCanOverlapDngCompress = if ($compare -and $compare.compression) { $compare.compression.asyncWriterCanOverlapDngCompress } else { $null }
+        throughputClassification = $throughputClassification
         failures = $summaryFailures
     }
     proofGates = [pscustomobject]@{
@@ -671,6 +831,7 @@ $summary = [pscustomobject]@{
         elapsedImprovementPercent = $elapsedImprovementPercent
         failures = $elapsedGateFailures
     }
+    throughputClassification = $throughputClassification
     verdict = if ($compareExit -eq 0 -and $compare -and $compare.verdict -eq "PASS" -and $summaryFailures.Count -eq 0) { "PASS" } else { "FAIL" }
 }
 

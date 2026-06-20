@@ -188,6 +188,83 @@ function Convert-ToIntOrDefault {
     $parsed
 }
 
+function Get-ThroughputClassificationRollup {
+    param([AllowNull()]$CaseResults)
+
+    $counts = [ordered]@{}
+    $runCount = 0
+    $classifiedRunCount = 0
+    $wallClockImprovedCount = 0
+    $attributionHoldCount = 0
+    $defaultPromotionCandidateCount = 0
+    $notPromotableCount = 0
+    foreach ($caseResult in @($CaseResults)) {
+        foreach ($run in @($caseResult.runs)) {
+            $runCount++
+            $classification = $run.throughputClassification
+            if ($null -eq $classification) {
+                continue
+            }
+            $classifiedRunCount++
+            $token = [string]$classification.token
+            if ([string]::IsNullOrWhiteSpace($token)) {
+                $token = "unknown"
+            }
+            if (-not $counts.Contains($token)) {
+                $counts[$token] = 0
+            }
+            $counts[$token] = [int]$counts[$token] + 1
+            if ([bool]$classification.wallClockImproved) {
+                $wallClockImprovedCount++
+            }
+            if ([bool]$classification.defaultPromotionCandidate) {
+                $defaultPromotionCandidateCount++
+            }
+            if ($token -eq "wall_clock_improved_attribution_hold") {
+                $attributionHoldCount++
+            }
+            if ($token -eq "not_promotable") {
+                $notPromotableCount++
+            }
+        }
+    }
+
+    $status = "unclassified"
+    $suggested = "collect_cdng_matrix_with_current_throughput_classification"
+    if ($classifiedRunCount -gt 0) {
+        if ($attributionHoldCount -gt 0) {
+            $status = "attribution_hold"
+            $suggested = "separate_writer_completion_lag_from_export_wall_clock_gate"
+        }
+        elseif ($notPromotableCount -gt 0) {
+            $status = "not_promotable"
+            $suggested = "improve_export_wall_clock_before_scheduler_promotion"
+        }
+        elseif ($defaultPromotionCandidateCount -eq $classifiedRunCount) {
+            $status = "promotion_candidate"
+            $suggested = "validate_broader_lossless_matrix_before_default_promotion"
+        }
+        else {
+            $status = "mixed"
+            $suggested = "review_per_run_throughput_classification_before_promotion"
+        }
+    }
+
+    [pscustomobject]@{
+        schema = "mlvapp.cdng_throughput_classification_rollup.v1"
+        status = $status
+        runCount = $runCount
+        classifiedRunCount = $classifiedRunCount
+        tokenCounts = [pscustomobject]$counts
+        wallClockImprovedCount = $wallClockImprovedCount
+        attributionHoldCount = $attributionHoldCount
+        defaultPromotionCandidateCount = $defaultPromotionCandidateCount
+        notPromotableCount = $notPromotableCount
+        suggestedOptimization = $suggested
+        proofBoundary = "Rollup classifies throughput evidence only; CDNG proof, DNG hash, and default export behavior remain separately gated."
+    }
+}
+
 function Convert-ToCdngCodecOrDefault {
     param(
         [object]$Value,
@@ -656,6 +733,7 @@ foreach ($case in $cases) {
             candidateDngCompressOutputRatio = if ($abSummary) { $abSummary.candidate.dngCompressOutputRatio } else { $null }
             baselineElapsedMs = if ($abSummary) { $abSummary.baseline.elapsedMs } else { $null }
             candidateElapsedMs = if ($abSummary) { $abSummary.candidate.elapsedMs } else { $null }
+            throughputClassification = if ($abSummary) { $abSummary.throughputClassification } else { $null }
             elapsedDeltaMs = if ($abSummary) { $abSummary.compare.elapsedDeltaMs } else { $null }
             elapsedDeltaPercent = if ($abSummary) { $abSummary.compare.elapsedDeltaPercent } else { $null }
             baselineAsyncWriterCompressEnvEnabled = if ($abSummary) { $abSummary.baseline.asyncWriterCompressEnvEnabled } else { $null }
@@ -807,6 +885,7 @@ $matrix = [pscustomobject]@{
         passCount = $passCount
         failCount = $failCount
     }
+    throughputClassification = Get-ThroughputClassificationRollup -CaseResults $caseResults
     cases = $caseResults
     verdict = if ($failCount -eq 0) { "PASS" } else { "FAIL" }
 }

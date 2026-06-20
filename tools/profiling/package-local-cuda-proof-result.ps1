@@ -274,6 +274,12 @@ $manifest = [ordered]@{
         candidateAsyncWriterMaxQueued = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterMaxQueued
         candidateAsyncWriterJobsStarted = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterJobsStarted
         candidateAsyncWriterJobsFinished = Convert-ToInt64 $summary.proof.cdng.asyncWriter.candidateAsyncWriterJobsFinished
+        dngThroughputClassificationStatus = $summary.proof.cdng.throughputClassification.status
+        dngThroughputClassifiedRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.classifiedRunCount
+        dngThroughputWallClockImprovedRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.wallClockImprovedCount
+        dngThroughputAttributionHoldRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.attributionHoldCount
+        dngThroughputDefaultPromotionCandidateRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.defaultPromotionCandidateCount
+        dngThroughputSuggestedOptimization = $summary.proof.cdng.throughputClassification.suggestedOptimization
     }
     outputs = [ordered]@{
         runRoot = $runRootResolved

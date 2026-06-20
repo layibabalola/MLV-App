@@ -312,6 +312,18 @@ promotion: keep DNG hash PASS, release/backend hashes, codec, frame count,
 async-writer active/queue counters, bottleneck fields, and host/clip identity
 attached to any E3 speed claim.
 
+Update 2026-06-20 E3 throughput classification: the CDNG A/B and matrix proof
+stack now emits `mlvapp.cdng_throughput_classification.v1` / rollup JSON that
+separates wall-clock elapsed improvement from writer-completion/frame-total
+attribution holds. Local Dell/UltraMagnus proof summaries, proof reports, and
+proof-packet manifests carry the same classification plus a machine-readable
+`suggestedOptimization`, so an async-compress result can be triaged as
+`wall_clock_improved`, `wall_clock_improved_attribution_hold`,
+`not_promotable`, or unclassified without changing any existing fail-closed
+verdict. This is still proof/reporting policy only: default DNG export remains
+legacy/CPU-authoritative unless a later reviewed promotion explicitly accepts
+the throughput and attribution gates.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive

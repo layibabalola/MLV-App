@@ -443,6 +443,12 @@ function Get-CdngProofSummary {
     $candidateAsyncWriterMaxQueued = 0L
     $candidateAsyncWriterJobsStarted = 0L
     $candidateAsyncWriterJobsFinished = 0L
+    $throughputTokenCounts = [ordered]@{}
+    $throughputClassifiedRuns = 0L
+    $throughputWallClockImprovedRuns = 0L
+    $throughputAttributionHoldRuns = 0L
+    $throughputDefaultPromotionCandidateRuns = 0L
+    $throughputNotPromotableRuns = 0L
     $speedRuns = @()
     foreach ($run in $runs) {
         $candidateAttempted += Convert-ToInt64 $run.candidateGpuExportAttemptedFrames
@@ -464,12 +470,37 @@ function Get-CdngProofSummary {
             (Convert-ToInt64 $run.candidateAsyncWriterMaxQueued))
         $candidateAsyncWriterJobsStarted += Convert-ToInt64 $run.candidateAsyncWriterJobsStarted
         $candidateAsyncWriterJobsFinished += Convert-ToInt64 $run.candidateAsyncWriterJobsFinished
+        $throughputClassification = $run.throughputClassification
+        if ($throughputClassification) {
+            $throughputClassifiedRuns++
+            $token = [string]$throughputClassification.token
+            if ([string]::IsNullOrWhiteSpace($token)) {
+                $token = "unknown"
+            }
+            if (-not $throughputTokenCounts.Contains($token)) {
+                $throughputTokenCounts[$token] = 0
+            }
+            $throughputTokenCounts[$token] = [int]$throughputTokenCounts[$token] + 1
+            if ([bool]$throughputClassification.wallClockImproved) {
+                $throughputWallClockImprovedRuns++
+            }
+            if ([bool]$throughputClassification.defaultPromotionCandidate) {
+                $throughputDefaultPromotionCandidateRuns++
+            }
+            if ($token -eq "wall_clock_improved_attribution_hold") {
+                $throughputAttributionHoldRuns++
+            }
+            if ($token -eq "not_promotable") {
+                $throughputNotPromotableRuns++
+            }
+        }
         $speedRuns += [pscustomobject]@{
             name = $run.name
             cdngCodec = $run.cdngCodec
             repeat = $run.repeat
             runOrder = $run.runOrder
             verdict = $run.verdict
+            throughputClassification = $throughputClassification
             candidateBottleneck = $run.candidateBottleneck
             candidateSuggestedOptimization = $run.candidateSuggestedOptimization
             candidateDngCompressPlacement = $run.candidateDngCompressPlacement
@@ -494,6 +525,27 @@ function Get-CdngProofSummary {
         }
     }
 
+    $throughputStatus = "unclassified"
+    $throughputSuggested = "collect_cdng_matrix_with_current_throughput_classification"
+    if ($throughputClassifiedRuns -gt 0) {
+        if ($throughputAttributionHoldRuns -gt 0) {
+            $throughputStatus = "attribution_hold"
+            $throughputSuggested = "separate_writer_completion_lag_from_export_wall_clock_gate"
+        }
+        elseif ($throughputNotPromotableRuns -gt 0) {
+            $throughputStatus = "not_promotable"
+            $throughputSuggested = "improve_export_wall_clock_before_scheduler_promotion"
+        }
+        elseif ($throughputDefaultPromotionCandidateRuns -eq $throughputClassifiedRuns) {
+            $throughputStatus = "promotion_candidate"
+            $throughputSuggested = "validate_broader_lossless_matrix_before_default_promotion"
+        }
+        else {
+            $throughputStatus = "mixed"
+            $throughputSuggested = "review_per_run_throughput_classification_before_promotion"
+        }
+    }
+
     [pscustomobject]@{
         verdict = $Summary.verdict
         totals = $Summary.totals
@@ -514,6 +566,19 @@ function Get-CdngProofSummary {
             candidateAsyncWriterMaxQueued = $candidateAsyncWriterMaxQueued
             candidateAsyncWriterJobsStarted = $candidateAsyncWriterJobsStarted
             candidateAsyncWriterJobsFinished = $candidateAsyncWriterJobsFinished
+        }
+        throughputClassification = [pscustomobject]@{
+            schema = "mlvapp.cdng_throughput_classification_rollup.v1"
+            status = $throughputStatus
+            runCount = $speedRuns.Count
+            classifiedRunCount = $throughputClassifiedRuns
+            tokenCounts = [pscustomobject]$throughputTokenCounts
+            wallClockImprovedCount = $throughputWallClockImprovedRuns
+            attributionHoldCount = $throughputAttributionHoldRuns
+            defaultPromotionCandidateCount = $throughputDefaultPromotionCandidateRuns
+            notPromotableCount = $throughputNotPromotableRuns
+            suggestedOptimization = $throughputSuggested
+            proofBoundary = "Rollup classifies throughput evidence only; CDNG proof, DNG hash, and default export behavior remain separately gated."
         }
         speed = [pscustomobject]@{
             runCount = $speedRuns.Count

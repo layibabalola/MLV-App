@@ -282,6 +282,17 @@ function New-ActionPlan {
                 -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <baseline-matrix.json> -Candidate <candidate-matrix.json>") `
                 -ProofBoundary "Correctness plus a wall-time regression should not be presented as a throughput win.")
         }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_THROUGHPUT_ATTRIBUTION_HOLD")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "REVIEW_E3_THROUGHPUT_ATTRIBUTION_HOLD" `
+                -Priority 35 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_THROUGHPUT_ATTRIBUTION_HOLD") `
+                -Title "Review async writer lag before default promotion." `
+                -Detail "The packet improved wall-clock export time but still carried writer-completion attribution holds. Treat it as an opt-in throughput candidate until the promotion gate policy explicitly accepts or fixes that lag." `
+                -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <async-matrix.json>") `
+                -ProofBoundary "Wall-clock improvement is useful evidence, but it is not automatic default-promotion authority.")
+        }
     }
     else {
         if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DRY_RUN_PLAN_ONLY")) {
@@ -360,6 +371,17 @@ function New-ActionPlan {
                 -Detail "If Dual ISO GPU work improved but overall/lossless elapsed time did not, the next implementation target is compression/writer overlap rather than more recon tuning." `
                 -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <baseline-matrix.json> -Candidate <candidate-matrix.json>") `
                 -ProofBoundary "Correctness plus a wall-time regression should not be presented as a throughput win.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_THROUGHPUT_ATTRIBUTION_HOLD")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "REVIEW_E3_THROUGHPUT_ATTRIBUTION_HOLD" `
+                -Priority 75 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_THROUGHPUT_ATTRIBUTION_HOLD") `
+                -Title "Review async writer lag before default promotion." `
+                -Detail "The packet improved wall-clock export time but still carried writer-completion attribution holds. Treat it as an opt-in throughput candidate until the promotion gate policy explicitly accepts or fixes that lag." `
+                -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <async-matrix.json>") `
+                -ProofBoundary "Wall-clock improvement is useful evidence, but it is not automatic default-promotion authority.")
         }
         if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("TOP_LEVEL_STATUS_NOT_SUCCESS", "TOP_LEVEL_FAILURE")) {
             Add-ActionStep -Steps $steps -Step (New-ActionStep `
@@ -739,6 +761,23 @@ else {
             ) `
             -NextAction "Check candidate profile fields dng_compress_placement, async_writer_can_overlap_dng_compress, async_writer_max_active, and async_writer_max_queued."
     }
+    $cdngThroughput = Get-Field $cdng "throughputClassification"
+    if ($cdngThroughput -and
+        (Convert-ToInt64 (Get-Field $cdngThroughput "attributionHoldCount")) -gt 0) {
+        Add-Diagnostic `
+            -Diagnostics $diagnostics `
+            -Area "dng-export-speed" `
+            -Code "DNG_THROUGHPUT_ATTRIBUTION_HOLD" `
+            -Severity "warning" `
+            -Message "DNG export wall-clock improved in at least one run, but writer-completion/frame-total attribution still holds default promotion." `
+            -Evidence @(
+                "status=$((Get-Field $cdngThroughput 'status'))",
+                "attributionHoldCount=$((Get-Field $cdngThroughput 'attributionHoldCount'))",
+                "wallClockImprovedCount=$((Get-Field $cdngThroughput 'wallClockImprovedCount'))",
+                "suggested=$((Get-Field $cdngThroughput 'suggestedOptimization'))"
+            ) `
+            -NextAction "Keep the candidate opt-in and review the async writer completion-lag gate before changing default export behavior."
+    }
 }
 $cdngEvidence = @()
 if ($cdng) {
@@ -759,6 +798,10 @@ if ($cdng) {
     $cdngAsyncWriter = Get-Field $cdng "asyncWriter"
     if ($cdngAsyncWriter) {
         $cdngEvidence += "DNG async writer: requested=$((Get-Field $cdngAsyncWriter 'candidateUseAsyncWriter')), compress_requested=$((Get-Field $cdngAsyncWriter 'candidateUseAsyncWriterCompression')), overlap_runs=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterOverlapRuns')), max_active=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxActive')), max_queued=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterMaxQueued')), jobs=$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterJobsStarted'))/$((Get-Field $cdngAsyncWriter 'candidateAsyncWriterJobsFinished'))"
+    }
+    $cdngThroughput = Get-Field $cdng "throughputClassification"
+    if ($cdngThroughput) {
+        $cdngEvidence += "DNG throughput classification: status=$((Get-Field $cdngThroughput 'status')), classified_runs=$((Get-Field $cdngThroughput 'classifiedRunCount')), wall_clock_improved=$((Get-Field $cdngThroughput 'wallClockImprovedCount')), attribution_hold=$((Get-Field $cdngThroughput 'attributionHoldCount')), default_promotion_candidates=$((Get-Field $cdngThroughput 'defaultPromotionCandidateCount')), suggested=$((Get-Field $cdngThroughput 'suggestedOptimization'))"
     }
 }
 $cdngVerdict = New-SectionVerdict `
