@@ -170,6 +170,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add("- DNG trial only: ``$($commands.dngOnly)``")
     [void]$lines.Add("- DNG async-compress trial: ``$($commands.dngAsyncCompress)``")
     [void]$lines.Add("- Full proof with DNG async-compress candidate: ``$($commands.proofAsyncCompress)``")
+    [void]$lines.Add("- Full proof with lossless-only DNG async-compress candidate: ``$($commands.proofLosslessAsyncCompress)``")
     [void]$lines.Add("- Read an existing summary: ``$($commands.summaryOnly)``")
     [void]$lines.Add("- Compare machine perf JSON/profile outputs: ``$($commands.compareMachinePerf)``")
     [void]$lines.Add("- Repackage a proof run: ``$($commands.proofPacket)``")
@@ -188,6 +189,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add("")
     [void]$lines.Add("## DNG E3 Async Compression Trial")
     [void]$lines.Add("Lossless DNG compression-overlap remains opt-in. Use the async-compress commands above to measure whether moving LJ92 compression into the writer worker helps on this machine.")
+    [void]$lines.Add("When the report emits `DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL`, rerun the lossless-only proof command before treating the signal as an E3 optimization target.")
     [void]$lines.Add("A useful first pass is queue depth 2 and thread count 2; keep DNG hash PASS, release hash, codec, frame count, and bottleneck fields with any speed claim.")
     [void]$lines.Add("")
     [void]$lines.Add("## Return Packet Import")
@@ -232,6 +234,8 @@ param(
     [Alias("Input")]
     [string]$ClipPath,
     [string]$Receipt = "receipts\FastProxy.marxml",
+    [ValidateSet("uncompressed", "lossless", "fast-pass")]
+    [string[]]$DngCodecs = @("uncompressed", "lossless"),
     [string]$OutputRoot = "",
     [string]$SummaryPath = "",
     [switch]$DngAsyncWriter,
@@ -325,6 +329,7 @@ if ($DngOnly) {
     -Input $ClipPath `
     -Receipt $Receipt `
     -OutputRoot (Join-Path $OutputRoot "proof") `
+    -CdngCodecs $DngCodecs `
     @proofOverlapArgs `
     @dryArgs
 $proofExit = $LASTEXITCODE
@@ -451,6 +456,7 @@ $manifest = [ordered]@{
         dngOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly"
         dngAsyncCompress = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
         proofAsyncCompress = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
+        proofLosslessAsyncCompress = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngCodecs lossless -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
         summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
         proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         importProofPacket = ".\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"

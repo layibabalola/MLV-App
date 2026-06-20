@@ -427,6 +427,14 @@ proof-packet manifests carry the same classification plus a machine-readable
 verdict. This is still proof/reporting policy only: default DNG export remains
 legacy/CPU-authoritative unless a later reviewed promotion explicitly accepts
 the throughput and attribution gates.
+Codec-scoped rollups now also feed the operator-facing action plan: when a
+summary emits `DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL`, proof reports recommend a
+lossless-only async-compress rerun before treating the signal as an E3
+optimization target. The dogfood launcher accepts `-DngCodecs lossless` and the
+kit README advertises the full lossless-only proof command, keeping this as a
+clean GUI/kit workflow instead of an env-var-only path. This does not promote
+default/all-codec export speed; it only makes the next scoped measurement easier
+to run on Dell and UltraMagnus.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still

@@ -267,6 +267,8 @@ function New-ActionPlan {
     }
     $directProofCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input '$clip'"
     $kitProofCommand = ".\RUN-CUDA-DOGFOOD.ps1 -Input '$clip'"
+    $directLosslessAsyncProofCommand = "$directProofCommand -CdngCodecs lossless -CandidateUseAsyncWriter -CandidateUseAsyncWriterCompression -CandidateAsyncWriterQueueDepth 2 -CandidateAsyncWriterThreadCount 2"
+    $kitLosslessAsyncProofCommand = "$kitProofCommand -DngCodecs lossless -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
     $directSummaryCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     $importCommand = "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"
 
@@ -311,6 +313,17 @@ function New-ActionPlan {
                 -Detail "The packet improved wall-clock export time but still carried writer-completion attribution holds. Treat it as an opt-in throughput candidate until the promotion gate policy explicitly accepts or fixes that lag." `
                 -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <async-matrix.json>") `
                 -ProofBoundary "Wall-clock improvement is useful evidence, but it is not automatic default-promotion authority.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "REVIEW_E3_CODEC_SCOPED_THROUGHPUT" `
+                -Priority 38 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL") `
+                -Title "Use codec-scoped DNG evidence without promoting defaults." `
+                -Detail "A codec group improved while the all-codec/default gate stayed stricter. Run or compare a lossless-only async-compress proof before deciding whether the next optimization belongs in lossless writer/compression policy or uncompressed wall-clock work." `
+                -Commands @($kitLosslessAsyncProofCommand, $directLosslessAsyncProofCommand, "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <lossless-async-matrix.json>") `
+                -ProofBoundary "Codec-scoped throughput evidence cannot prove default all-codec export speed or support.")
         }
     }
     else {
@@ -401,6 +414,17 @@ function New-ActionPlan {
                 -Detail "The packet improved wall-clock export time but still carried writer-completion attribution holds. Treat it as an opt-in throughput candidate until the promotion gate policy explicitly accepts or fixes that lag." `
                 -Commands @("pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <async-matrix.json>") `
                 -ProofBoundary "Wall-clock improvement is useful evidence, but it is not automatic default-promotion authority.")
+        }
+        if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL")) {
+            Add-ActionStep -Steps $steps -Step (New-ActionStep `
+                -Id "REVIEW_E3_CODEC_SCOPED_THROUGHPUT" `
+                -Priority 78 `
+                -Area "e3-throughput" `
+                -ReasonCodes @("DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL") `
+                -Title "Use codec-scoped DNG evidence without promoting defaults." `
+                -Detail "A codec group improved while the all-codec/default gate stayed stricter. Keep any support/speed claim blocked until proof blockers are fixed, then rerun or compare a lossless-only async-compress proof." `
+                -Commands @($kitLosslessAsyncProofCommand, $directLosslessAsyncProofCommand, "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tools\profiling\compare-cdng-export-matrices.ps1 -RepoRoot . -Baseline <identity-matrix.json> -Candidate <lossless-async-matrix.json>") `
+                -ProofBoundary "Codec-scoped throughput evidence cannot prove default all-codec export speed or support.")
         }
         if (Test-DiagnosticCode -Diagnostics $Diagnostics -Codes @("TOP_LEVEL_STATUS_NOT_SUCCESS", "TOP_LEVEL_FAILURE")) {
             Add-ActionStep -Steps $steps -Step (New-ActionStep `
