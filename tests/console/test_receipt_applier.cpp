@@ -708,6 +708,28 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegVideoArguments)
                std::string(ffmpegPlan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoFfmpegFilterArguments)
+{
+    BatchRenderedVideoFfmpegFilterPlan filterPlan =
+        batchRenderedVideoFfmpegFilterPlanForCurrentBuild();
+
+    ASSERT_TRUE( filterPlan.ready );
+    ASSERT_TRUE( filterPlan.baseColorScaleReady );
+    ASSERT_FALSE( filterPlan.optionalFiltersOwned );
+    ASSERT_FALSE( filterPlan.moireeFilterOwned );
+    ASSERT_FALSE( filterPlan.hdrBlendOwned );
+    ASSERT_FALSE( filterPlan.stabilizationOwned );
+    ASSERT_EQ( std::string("gui-base-color-scale"),
+               std::string(filterPlan.source.toUtf8().constData()) );
+    ASSERT_EQ( std::string("scale=in_color_matrix=bt601:out_color_matrix=bt709"),
+               std::string(filterPlan.colorScaleFilter.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-vf scale=in_color_matrix=bt601:out_color_matrix=bt709"),
+               std::string(filterPlan.filterArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-filter-source=gui-base-color-scale ffmpeg-filter-base-color-scale-ready=true ffmpeg-filter-optional-owned=false ffmpeg-filter-moiree-owned=false ffmpeg-filter-hdr-owned=false ffmpeg-filter-stabilization-owned=false ffmpeg-filter-color-scale=scale=in_color_matrix=bt601:out_color_matrix=bt709 ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709 ffmpeg-filter-ready=true ffmpeg-filter-reason=none"),
+               std::string(batchRenderedVideoFfmpegFilterPlanSummary(
+                   filterPlan).toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegFrameGeometryFromGuiState)
 {
     BatchRenderedVideoFfmpegFramePlan plan =
@@ -815,6 +837,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.metadataAttempted );
     ASSERT_FALSE( basePlan.metadataReady );
     ASSERT_FALSE( basePlan.ffmpegFrameReady );
+    ASSERT_TRUE( basePlan.ffmpegFilterReady );
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
@@ -862,6 +885,9 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( summary.find("source-metadata=5792x3872") != std::string::npos );
     ASSERT_TRUE( summary.find("source-metadata-attempted=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-filter-source=gui-base-color-scale") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-settings-source=explicit-headless render-settings-explicit-headless=true render-settings-gui-owned=false render-settings-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-settings-resize=true render-settings-resize-width=1920") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-frame-size=1920x1284") != std::string::npos );
@@ -1049,6 +1075,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.targetReady );
     ASSERT_TRUE( plan.encoderReady );
     ASSERT_TRUE( plan.ffmpegVideoReady );
+    ASSERT_TRUE( plan.ffmpegFilterReady );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
@@ -1067,6 +1094,8 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( summary.find("request=rendered-video codec=h264 container=unspecified") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
@@ -1080,6 +1109,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.targetReady );
     ASSERT_TRUE( plan.encoderReady );
     ASSERT_TRUE( plan.ffmpegVideoReady );
+    ASSERT_TRUE( plan.ffmpegFilterReady );
     ASSERT_FALSE( plan.outputReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );

@@ -96,6 +96,20 @@ struct BatchRenderedVideoFfmpegVideoPlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoFfmpegFilterPlan
+{
+    QString source = QStringLiteral("gui-base-color-scale");
+    QString colorScaleFilter;
+    QString filterArguments;
+    QString reason;
+    bool baseColorScaleReady = false;
+    bool optionalFiltersOwned = false;
+    bool moireeFilterOwned = false;
+    bool hdrBlendOwned = false;
+    bool stabilizationOwned = false;
+    bool ready = false;
+};
+
 struct BatchRenderedVideoFfmpegFramePlan
 {
     int sourceWidth = 0;
@@ -161,6 +175,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoTarget target;
     BatchRenderedVideoEncoderPreset encoderPreset;
     BatchRenderedVideoFfmpegVideoPlan ffmpegVideoPlan;
+    BatchRenderedVideoFfmpegFilterPlan ffmpegFilterPlan;
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
     BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
@@ -170,6 +185,7 @@ struct BatchRenderedVideoJobPlan
     bool targetReady = false;
     bool encoderReady = false;
     bool ffmpegVideoReady = false;
+    bool ffmpegFilterReady = false;
     bool metadataAttempted = false;
     bool metadataReady = false;
     bool ffmpegFrameReady = false;
@@ -670,6 +686,20 @@ batchRenderedVideoFfmpegVideoPlanFromRequest(
         batchRenderedVideoEncoderPresetFromRequest(request));
 }
 
+inline BatchRenderedVideoFfmpegFilterPlan
+batchRenderedVideoFfmpegFilterPlanForCurrentBuild()
+{
+    BatchRenderedVideoFfmpegFilterPlan plan;
+    plan.colorScaleFilter =
+        QStringLiteral("scale=in_color_matrix=bt601:out_color_matrix=bt709");
+    plan.filterArguments = QStringLiteral("-vf %1").arg(plan.colorScaleFilter);
+    plan.baseColorScaleReady = !plan.colorScaleFilter.isEmpty();
+    plan.ready = plan.baseColorScaleReady && !plan.filterArguments.isEmpty();
+    if( !plan.ready )
+        plan.reason = QStringLiteral("rendered ffmpeg filter plan unavailable");
+    return plan;
+}
+
 inline bool batchRenderedVideoEncoderProfileRequiresEvenDimensions(
     BatchRenderedVideoEncoderProfile profile)
 {
@@ -1031,6 +1061,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             batchRenderedVideoEncoderPresetFromTarget(plan.target);
         plan.ffmpegVideoPlan =
             batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(plan.encoderPreset);
+        plan.ffmpegFilterPlan =
+            batchRenderedVideoFfmpegFilterPlanForCurrentBuild();
         plan.outputPlan =
             batchRenderedVideoOutputPlanFromPaths(
                 inputPath,
@@ -1048,11 +1080,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     plan.targetReady = plan.target.complete;
     plan.encoderReady = plan.encoderPreset.ready;
     plan.ffmpegVideoReady = plan.ffmpegVideoPlan.ready;
+    plan.ffmpegFilterReady = plan.ffmpegFilterPlan.ready;
     plan.outputReady = plan.outputPlan.ready;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
+                       && plan.ffmpegFilterReady
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -1099,6 +1133,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.targetReady
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
+                       && plan.ffmpegFilterReady
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
                        && plan.outputReady;
@@ -1122,6 +1157,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegVideoPlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg video plan unavailable")
             : plan.ffmpegVideoPlan.reason;
+    }
+    if( !plan.ffmpegFilterReady )
+    {
+        return plan.ffmpegFilterPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg filter plan unavailable")
+            : plan.ffmpegFilterPlan.reason;
     }
     if( !plan.outputReady )
     {
@@ -1200,6 +1241,22 @@ inline QString batchRenderedVideoFfmpegVideoPlanSummary(
 {
     return batchRenderedVideoFfmpegVideoPlanSummary(
         batchRenderedVideoFfmpegVideoPlanFromRequest(request));
+}
+
+inline QString batchRenderedVideoFfmpegFilterPlanSummary(
+    const BatchRenderedVideoFfmpegFilterPlan & plan)
+{
+    return QStringLiteral("ffmpeg-filter-source=%1 ffmpeg-filter-base-color-scale-ready=%2 ffmpeg-filter-optional-owned=%3 ffmpeg-filter-moiree-owned=%4 ffmpeg-filter-hdr-owned=%5 ffmpeg-filter-stabilization-owned=%6 ffmpeg-filter-color-scale=%7 ffmpeg-filter-args=%8 ffmpeg-filter-ready=%9 ffmpeg-filter-reason=%10")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.baseColorScaleReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.optionalFiltersOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.moireeFilterOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.hdrBlendOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.stabilizationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.colorScaleFilter.isEmpty() ? QStringLiteral("unspecified") : plan.colorScaleFilter)
+        .arg(plan.filterArguments.isEmpty() ? QStringLiteral("unspecified") : plan.filterArguments)
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
 inline QString batchRenderedVideoFfmpegFramePlanSummary(
@@ -1292,11 +1349,12 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 preflight-ready=%10 runnable=%11 first-blocker=%12")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 preflight-ready=%11 runnable=%12 first-blocker=%13")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
         .arg(batchRenderedVideoFfmpegVideoPlanSummary(plan.ffmpegVideoPlan))
+        .arg(batchRenderedVideoFfmpegFilterPlanSummary(plan.ffmpegFilterPlan))
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
