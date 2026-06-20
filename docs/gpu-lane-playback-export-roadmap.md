@@ -138,6 +138,21 @@ entrypoint; a passing UltraMagnus packet still proves RTX 4090 only, and a
 passing Dell packet is required before claiming realtime CUDA support on that
 machine.
 
+Update 2026-06-20 ASAP interactive launcher:
+`tools/profiling/start-release-cuda-playback.ps1` now starts the user-facing
+release executable with the scoped CUDA playback environment requested:
+desktop OpenGL, experimental GL viewport, GPU preview processing, CUDA playback
+recon, CUDA-to-GL texture presentation, Phase 3 unattended, Phase 3 HQ, x1
+scale, and the deployed `igpu_recon_cuda.dll`. On Windows it also sets the
+per-app high-performance GPU preference unless disabled, which matters on
+hybrid Dell/NVIDIA laptops where CUDA and GL must land on the same adapter. The
+launcher writes a manifest under `.claude-state/profiling/*-cuda-playback-launch`
+and updates `.claude-state/profiling/cuda-playback-launch-latest.json`. This is
+an ASAP usability surface, not a proof surface: a started process does not prove
+realtime playback, no-readback presentation, or Dell support. Use the local
+smoke wrapper above for backend load, `GPU Tex NR`/fallback counts, FPS, and DNG
+hash evidence.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
