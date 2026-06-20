@@ -128,6 +128,25 @@ struct BatchRenderedVideoFfmpegFramePlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoFfmpegCommandPlan
+{
+    QString source = QStringLiteral("gui-rawvideo-pipe");
+    QString executable = QStringLiteral("ffmpeg");
+    QString rawInputPixelFormat = QStringLiteral("rgb48");
+    QString rawInputArguments;
+    QString colorTagSource = QStringLiteral("rec709-default");
+    int colorTag = 1;
+    QString colorArguments;
+    QString arguments;
+    QString commandLine;
+    QString reason;
+    bool rawVideoPipeInputReady = false;
+    bool audioInputOwned = false;
+    bool executionOwned = false;
+    bool outputVerificationOwned = false;
+    bool ready = false;
+};
+
 struct BatchRenderedVideoSourceMetadata
 {
     int width = 0;
@@ -183,6 +202,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
     BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
+    BatchRenderedVideoFfmpegCommandPlan ffmpegCommandPlan;
     BatchRenderedVideoOutputPlan outputPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
@@ -193,6 +213,7 @@ struct BatchRenderedVideoJobPlan
     bool metadataAttempted = false;
     bool metadataReady = false;
     bool ffmpegFrameReady = false;
+    bool ffmpegCommandReady = false;
     bool outputReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -1036,6 +1057,78 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
         1);
 }
 
+inline BatchRenderedVideoFfmpegCommandPlan
+batchRenderedVideoFfmpegCommandPlanFromParts(
+    const BatchRenderedVideoFfmpegFramePlan & framePlan,
+    const BatchRenderedVideoFfmpegFilterPlan & filterPlan,
+    const BatchRenderedVideoFfmpegVideoPlan & videoPlan,
+    const BatchRenderedVideoOutputPlan & outputPlan)
+{
+    BatchRenderedVideoFfmpegCommandPlan plan;
+    if( !framePlan.ready )
+    {
+        plan.reason = framePlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg frame plan unavailable")
+            : framePlan.reason;
+        return plan;
+    }
+    if( !filterPlan.ready )
+    {
+        plan.reason = filterPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg filter plan unavailable")
+            : filterPlan.reason;
+        return plan;
+    }
+    if( !videoPlan.ready )
+    {
+        plan.reason = videoPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg video plan unavailable")
+            : videoPlan.reason;
+        return plan;
+    }
+    if( !outputPlan.ready )
+    {
+        plan.reason = outputPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output path invalid")
+            : outputPlan.reason;
+        return plan;
+    }
+
+    plan.rawInputArguments =
+        QStringLiteral("-r %1 -y -f rawvideo -s %2 -pix_fmt %3 -i -")
+            .arg(framePlan.frameRateArgument)
+            .arg(framePlan.frameSizeArgument)
+            .arg(plan.rawInputPixelFormat);
+    plan.rawVideoPipeInputReady =
+        !plan.rawInputArguments.isEmpty()
+     && !framePlan.frameRateArgument.isEmpty()
+     && !framePlan.frameSizeArgument.isEmpty();
+    plan.colorArguments =
+        QStringLiteral("-color_primaries %1 -color_trc %1 -colorspace bt709")
+            .arg(plan.colorTag);
+
+    plan.arguments =
+        QStringLiteral("%1 %2 %3 %4 \"%5\"")
+            .arg(plan.rawInputArguments)
+            .arg(videoPlan.videoArguments)
+            .arg(plan.colorArguments)
+            .arg(filterPlan.filterArguments)
+            .arg(outputPlan.outputPath);
+    plan.commandLine =
+        QStringLiteral("%1 %2").arg(plan.executable, plan.arguments);
+    plan.ready = !plan.executable.isEmpty()
+              && plan.rawVideoPipeInputReady
+              && !videoPlan.videoArguments.isEmpty()
+              && !filterPlan.filterArguments.isEmpty()
+              && !plan.colorArguments.isEmpty()
+              && !outputPlan.outputPath.isEmpty()
+              && !plan.arguments.isEmpty()
+              && !plan.commandLine.isEmpty();
+    if( !plan.ready )
+        plan.reason = QStringLiteral("rendered ffmpeg command plan unavailable");
+    return plan;
+}
+
 inline BatchRenderedVideoRunnerPrerequisites
 batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
@@ -1162,6 +1255,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             QStringLiteral("rendered encoder preset incomplete");
     }
     plan.ffmpegFrameReady = plan.ffmpegFramePlan.ready;
+    plan.ffmpegCommandPlan =
+        batchRenderedVideoFfmpegCommandPlanFromParts(
+            plan.ffmpegFramePlan,
+            plan.ffmpegFilterPlan,
+            plan.ffmpegVideoPlan,
+            plan.outputPlan);
+    plan.ffmpegCommandReady = plan.ffmpegCommandPlan.ready;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -1170,6 +1270,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
+                       && plan.ffmpegCommandReady
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -1231,6 +1332,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegFramePlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg frame plan unavailable")
             : plan.ffmpegFramePlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.ffmpegCommandReady )
+    {
+        return plan.ffmpegCommandPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg command plan unavailable")
+            : plan.ffmpegCommandPlan.reason;
     }
     if( !plan.runnerPrerequisites.ready )
         return plan.runnerPrerequisites.reason;
@@ -1326,6 +1433,25 @@ inline QString batchRenderedVideoFfmpegFramePlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoFfmpegCommandPlanSummary(
+    const BatchRenderedVideoFfmpegCommandPlan & plan)
+{
+    return QStringLiteral("ffmpeg-command-source=%1 ffmpeg-command-exe=%2 ffmpeg-command-raw-pix-fmt=%3 ffmpeg-command-raw-input=%4 ffmpeg-command-color-source=%5 ffmpeg-command-color-tag=%6 ffmpeg-command-color-args=%7 ffmpeg-command-audio-owned=%8 ffmpeg-command-execution-owned=%9 ffmpeg-command-output-verification-owned=%10 ffmpeg-command-args=%11 ffmpeg-command-ready=%12 ffmpeg-command-reason=%13")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.executable.isEmpty() ? QStringLiteral("unspecified") : plan.executable)
+        .arg(plan.rawInputPixelFormat.isEmpty() ? QStringLiteral("unspecified") : plan.rawInputPixelFormat)
+        .arg(plan.rawInputArguments.isEmpty() ? QStringLiteral("unspecified") : plan.rawInputArguments)
+        .arg(plan.colorTagSource.isEmpty() ? QStringLiteral("unspecified") : plan.colorTagSource)
+        .arg(plan.colorTag)
+        .arg(plan.colorArguments.isEmpty() ? QStringLiteral("unspecified") : plan.colorArguments)
+        .arg(plan.audioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.executionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.outputVerificationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.arguments.isEmpty() ? QStringLiteral("unspecified") : plan.arguments)
+        .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
 inline QString batchRenderedVideoSourceMetadataSummary(
     const BatchRenderedVideoSourceMetadata & metadata)
 {
@@ -1403,7 +1529,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 preflight-ready=%11 runnable=%12 first-blocker=%13")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 preflight-ready=%12 runnable=%13 first-blocker=%14")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -1412,6 +1538,7 @@ inline QString batchRenderedVideoJobPlanSummary(
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
+        .arg(batchRenderedVideoFfmpegCommandPlanSummary(plan.ffmpegCommandPlan))
         .arg(batchRenderedVideoOutputPlanSummary(plan.outputPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
