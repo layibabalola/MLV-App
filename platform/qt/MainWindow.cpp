@@ -61,6 +61,7 @@ extern "C" {
 #include <functional>
 #include <limits>
 #include <memory>
+#include <new>
 #include <unistd.h>
 #include <math.h>
 #include <sys/stat.h>
@@ -548,6 +549,75 @@ static QString telemetryStringValue( const QJsonObject &telemetry,
                                      const char *key )
 {
     return telemetry.value( QString::fromLatin1( key ) ).toString();
+}
+
+static bool buildPostWbRawFloatFromRggbBayer16( const uint16_t *bayer16,
+                                                size_t bayerWords,
+                                                int width,
+                                                int height,
+                                                int blackLevel,
+                                                const double wbMultipliers[3],
+                                                std::vector<float> *outRawFloat,
+                                                QString *reason )
+{
+    if( !bayer16
+     || !outRawFloat
+     || !wbMultipliers
+     || width <= 0
+     || height <= 0 )
+    {
+        if( reason ) *reason = QStringLiteral("post-WB Bayer fallback input is invalid");
+        return false;
+    }
+    if( wbMultipliers[0] <= 0.0
+     || wbMultipliers[1] <= 0.0
+     || wbMultipliers[2] <= 0.0 )
+    {
+        if( reason ) *reason = QStringLiteral("post-WB Bayer fallback WB multipliers are invalid");
+        return false;
+    }
+
+    const size_t pixelCount =
+        static_cast<size_t>( width ) * static_cast<size_t>( height );
+    if( bayerWords < pixelCount )
+    {
+        if( reason ) *reason = QStringLiteral("post-WB Bayer fallback source is shorter than the frame geometry");
+        return false;
+    }
+
+    try
+    {
+        outRawFloat->assign( pixelCount, 0.0f );
+    }
+    catch( const std::bad_alloc & )
+    {
+        if( reason ) *reason = QStringLiteral("post-WB Bayer fallback allocation failed");
+        return false;
+    }
+
+    if( blackLevel < 1000 ) blackLevel = -1000;
+    float *out = outRawFloat->data();
+    for( int y = 0; y < height; ++y )
+    {
+        const size_t rowBase =
+            static_cast<size_t>( y ) * static_cast<size_t>( width );
+        for( int x = 0; x < width; ++x )
+        {
+            const size_t index = rowBase + static_cast<size_t>( x );
+            const int channel =
+                ((y & 1) == 0 && (x & 1) == 0)
+                    ? 0
+                    : (((y & 1) == 1 && (x & 1) == 1) ? 2 : 1);
+            out[index] =
+                static_cast<float>(
+                    (static_cast<double>( bayer16[index] )
+                        - static_cast<double>( blackLevel ))
+                    * wbMultipliers[channel] );
+        }
+    }
+
+    if( reason ) reason->clear();
+    return true;
 }
 
 static void insertNullableDouble( QJsonObject *object,
@@ -3538,11 +3608,16 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
     const size_t sourceImageBytes = static_cast<size_t>( sourceWidth )
         * static_cast<size_t>( sourceHeight ) * 3u;
     const size_t sourceImage16Bytes = sourceImageBytes * sizeof( uint16_t );
+    const size_t readyFrameRawImage16Bytes =
+        task.readyFrame.rawImage16Words * sizeof( uint16_t );
     const uint16_t *rgb16DisplaySource =
         (task.sourceImage16 != nullptr && task.sourceImage16Size > 0
          && task.sourceImage16Size >= sourceImage16Bytes)
             ? task.sourceImage16
-            : task.readyFrame.rawImage16;
+            : ((task.readyFrame.rawImage16
+                && readyFrameRawImage16Bytes >= sourceImage16Bytes)
+                    ? task.readyFrame.rawImage16
+                    : nullptr);
     const uint8_t *rgb8DisplaySource =
         (task.sourceImage != nullptr && task.sourceImageSize > 0
          && task.sourceImageSize >= sourceImageBytes)
@@ -3579,12 +3654,25 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         return result;
     }
 
+    if( task.readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+     && telemetryBoolValue( task.readyFrame.stageTimingTelemetry,
+                            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) )
+    {
+        result.preparedWidth = sourceWidth;
+        result.preparedHeight = sourceHeight;
+        result.task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_amaze_texture_present_prep_passthrough"),
+            true );
+        result.imageBuildMs = (mlv_stage_timing_now() - image_start) * 1000.0;
+        return result;
+    }
+
     QImage displayImage;
     bool displayImageOwnsData = false;
     std::vector<uint8_t> displayImageBacking;
     uint8_t underOver = 0;
 
-    if( gpu16PreviewActive )
+    if( gpu16PreviewActive && rgb16DisplaySource )
     {
         const size_t pixelCount = static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
         std::vector<uint16_t> gpu16FallbackProcessed;
@@ -4052,11 +4140,16 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const size_t sourceImageBytes = static_cast<size_t>( sourceWidth )
         * static_cast<size_t>( sourceHeight ) * 3u;
     const size_t sourceImage16Bytes = sourceImageBytes * sizeof( uint16_t );
+    const size_t readyFrameRawImage16Bytes =
+        task.readyFrame.rawImage16Words * sizeof( uint16_t );
     const uint16_t *rgb16DisplaySource =
         (task.sourceImage16 != nullptr && task.sourceImage16Size > 0
          && task.sourceImage16Size >= sourceImage16Bytes)
             ? task.sourceImage16
-            : task.readyFrame.rawImage16;
+            : ((task.readyFrame.rawImage16
+                && readyFrameRawImage16Bytes >= sourceImage16Bytes)
+                    ? task.readyFrame.rawImage16
+                    : nullptr);
     const uint8_t *rgb8DisplaySource =
         (task.sourceImage != nullptr && task.sourceImageSize > 0
          && task.sourceImageSize >= sourceImageBytes)
@@ -4240,6 +4333,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
         false );
+    const bool cpuAmazeSkippedForGpuTextureNoReadback =
+        telemetryBoolValue( readyFrame.stageTimingTelemetry,
+                            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" );
     if( !framePresentedByViewport && gpuPlaybackReconTextureNoReadbackCandidate )
     {
         llrpGpuPlaybackReconState_t gpuReconState;
@@ -4258,6 +4354,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             r16AmazeAvailability.available;
         bool gpuPlaybackReconAmazeTextureAttempted = false;
         bool gpuPlaybackReconAmazeTextureActive = false;
+        bool gpuPlaybackReconNoReadbackPresented = false;
         QString texturePresentSource =
             QStringLiteral("cuda_gl_r16_texture_failed");
         if( hasGpuReconState
@@ -4279,11 +4376,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             gpuPlaybackReconAmazeTextureActive = framePresentedByViewport;
             if( framePresentedByViewport )
             {
+                gpuPlaybackReconNoReadbackPresented = true;
                 texturePresentSource =
                     QStringLiteral("cuda_gl_rgba16_amaze_texture");
             }
         }
-        if( hasGpuReconState && !framePresentedByViewport )
+        if( hasGpuReconState
+         && !framePresentedByViewport
+         && !cpuAmazeSkippedForGpuTextureNoReadback )
         {
             framePresentedByViewport =
                 GpuDisplayViewport::presentGpuPlaybackReconTexture(
@@ -4297,8 +4397,110 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                     &texturePresentTiming );
             if( framePresentedByViewport )
             {
+                gpuPlaybackReconNoReadbackPresented = true;
                 texturePresentSource =
                     QStringLiteral("cuda_gl_r16_texture");
+            }
+        }
+        if( hasGpuReconState
+         && !framePresentedByViewport
+         && cpuAmazeSkippedForGpuTextureNoReadback )
+        {
+            const uint16_t *fallbackBayer16 = nullptr;
+            size_t fallbackBayer16Words = 0;
+            if( task.gpuPlaybackReconTextureBayerFrame
+             && task.gpuPlaybackReconTextureBayerFrameSize
+                    >= expectedPlaybackReconTextureBayerPixels )
+            {
+                fallbackBayer16 = task.gpuPlaybackReconTextureBayerFrame;
+                fallbackBayer16Words = task.gpuPlaybackReconTextureBayerFrameSize;
+            }
+            else if( task.sourceImage16
+                  && task.sourceImage16Size
+                        >= expectedPlaybackReconTextureBayerPixels * sizeof( uint16_t ) )
+            {
+                fallbackBayer16 = task.sourceImage16;
+                fallbackBayer16Words =
+                    task.sourceImage16Size / sizeof( uint16_t );
+            }
+
+            QString fallbackReason;
+            std::vector<float> fallbackPostWbRaw;
+            const bool fallbackRawOk =
+                buildPostWbRawFloatFromRggbBayer16(
+                    fallbackBayer16,
+                    fallbackBayer16Words,
+                    sourceWidth,
+                    sourceHeight,
+                    readyFrame.gpuPlaybackReconTextureBlackLevel,
+                    readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
+                    &fallbackPostWbRaw,
+                    &fallbackReason );
+            std::vector<uint16_t> fallbackRgb16;
+            bool fallbackOk = false;
+            QString fallbackRenderer;
+            GpuAmazeDebayerBackendTiming fallbackTiming;
+            if( fallbackRawOk )
+            {
+                fallbackRgb16.resize(
+                    expectedPlaybackReconTextureBayerPixels * 3u );
+                fallbackOk =
+                    gpuAmazeDebayerApplyGpuOffscreenPostWb(
+                        fallbackPostWbRaw.data(),
+                        fallbackRgb16.data(),
+                        sourceWidth,
+                        sourceHeight,
+                        readyFrame.gpuPlaybackReconTextureBlackLevel,
+                        readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
+                        &fallbackReason,
+                        &fallbackRenderer,
+                        &fallbackTiming );
+            }
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_amaze_texture_present_readback_fallback_active"),
+                fallbackOk );
+            if( !fallbackReason.isEmpty() )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_playback_recon_amaze_texture_present_readback_fallback_reason"),
+                    fallbackReason );
+            }
+            if( fallbackOk )
+            {
+                framePresentedByViewport =
+                    GpuDisplayViewport::presentRgb16(
+                        ui->graphicsView,
+                        m_pGraphicsItem,
+                        fallbackRgb16.data(),
+                        sourceWidth,
+                        sourceHeight,
+                        task.gpuPresentationOptions );
+                if( framePresentedByViewport )
+                {
+                    texturePresentSource =
+                        QStringLiteral("cuda_amaze_readback_rgb16_fallback");
+                    readyFrame.usedGpuAmazeDebayer = true;
+                    readyFrame.gpuAmazeFallbackReason =
+                        texturePresentReason.isEmpty()
+                            ? QStringLiteral("GPU playback recon AMaZE texture-present failed; used readback RGB16 fallback")
+                            : texturePresentReason;
+                    readyFrame.gpuAmazeRendererDescription = fallbackRenderer;
+                }
+                if( fallbackTiming.available )
+                {
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_playback_recon_amaze_readback_fallback_upload_ms"),
+                        fallbackTiming.uploadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_playback_recon_amaze_readback_fallback_kernel_ms"),
+                        fallbackTiming.kernelMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_playback_recon_amaze_readback_fallback_download_ms"),
+                        fallbackTiming.downloadMs );
+                    readyFrame.stageTimingTelemetry.insert(
+                        QStringLiteral("gpu_playback_recon_amaze_readback_fallback_total_ms"),
+                        fallbackTiming.totalMs );
+                }
             }
         }
         const double texturePresentMs =
@@ -4329,7 +4531,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             framePresentedByViewport );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_active"),
-            framePresentedByViewport );
+            gpuPlaybackReconNoReadbackPresented );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_source"),
             framePresentedByViewport
@@ -4362,6 +4564,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         // of whether this frame is sampled (same CUDA->GL R16 texture path).
         bool runNoReadbackOutputValidationThisFrame = false;
         if( framePresentedByViewport
+         && gpuPlaybackReconNoReadbackPresented
          && !gpuPlaybackReconAmazeTextureActive
          && playbackGpuNoReadbackOutputValidationEnabled() )
         {
@@ -4650,7 +4853,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                            ? gpuCpuReplayTiming.total_ms
                            : 0.0, 0, 'f', 3 );
         }
-        if( !framePresentedByViewport )
+        if( !gpuPlaybackReconNoReadbackPresented )
         {
             readyFrame.stageTimingTelemetry.insert(
                 QStringLiteral("gpu_playback_recon_texture_present_no_readback_fallback_reason"),
@@ -4713,7 +4916,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             task.requestContext.gpuPlaybackReconTexturePresentFallbackReason );
     }
     uint8_t underOver = result.underOver;
-    if( !framePresentedByViewport && gpu16PreviewActive )
+    if( !framePresentedByViewport && gpu16PreviewActive && rgb16DisplaySource )
     {
         framePresentedByViewport = GpuDisplayViewport::presentRgb16( ui->graphicsView,
                                                                     m_pGraphicsItem,
@@ -23800,8 +24003,10 @@ void MainWindow::drawFrameReady()
             ? static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight ) * 3u
               * sizeof( uint16_t )
             : 0;
+    const size_t readyFrameRawImage16Bytes =
+        readyFrame.rawImage16Words * sizeof( uint16_t );
     task.sourceImage16 = readyFrame.rawImage16;
-    task.sourceImage16Size = sourceImage16Bytes;
+    task.sourceImage16Size = readyFrameRawImage16Bytes;
     task.sourceWidth = sourceWidth;
     task.sourceHeight = sourceHeight;
     task.sceneWidth = sceneWidth;
@@ -23843,7 +24048,10 @@ void MainWindow::drawFrameReady()
         || gpuPreviewProcessingActive
         || cpuPreviewProcessingActive
         || readyFrame.outputMode != RenderFrameThread::OutputProcessed8;
-    if( needsOwnedRgb16 && sourceImage16Bytes > 0 && readyFrame.rawImage16 )
+    if( needsOwnedRgb16
+     && sourceImage16Bytes > 0
+     && readyFrame.rawImage16
+     && readyFrameRawImage16Bytes >= sourceImage16Bytes )
     {
         const size_t sourceImage16Words = sourceImage16Bytes / sizeof( uint16_t );
         task.ownedSourceImage16.assign( readyFrame.rawImage16,

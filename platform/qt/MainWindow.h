@@ -675,6 +675,7 @@ private:
                 sourceImage16 = ownedSourceImage16.data();
                 sourceImage16Size = ownedSourceImage16.size() * sizeof( uint16_t );
                 readyFrame.rawImage16 = sourceImage16;
+                readyFrame.rawImage16Words = ownedSourceImage16.size();
             }
             if( !ownedGpuAmazeTextureRawFrame.empty() )
             {

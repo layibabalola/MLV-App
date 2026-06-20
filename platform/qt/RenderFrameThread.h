@@ -118,6 +118,7 @@ public:
 
         const uint8_t *rawImage8 = nullptr;
         const uint16_t *rawImage16 = nullptr;
+        size_t rawImage16Words = 0;
         const uint8_t *playbackScaledImage8 = nullptr;
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;

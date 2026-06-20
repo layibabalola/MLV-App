@@ -460,6 +460,7 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
     {
         frame->rawImage8 = slot.rawImage8.empty() ? nullptr : slot.rawImage8.data();
         frame->rawImage16 = slot.rawImage16.empty() ? nullptr : slot.rawImage16.data();
+        frame->rawImage16Words = slot.rawImage16.size();
         frame->playbackScaledImage8 =
             slot.playbackScaledImage8.empty() ? nullptr : slot.playbackScaledImage8.data();
         frame->frameNumber = slot.frameNumber;
