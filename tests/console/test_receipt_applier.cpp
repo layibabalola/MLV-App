@@ -815,6 +815,9 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.metadataAttempted );
     ASSERT_FALSE( basePlan.metadataReady );
     ASSERT_FALSE( basePlan.ffmpegFrameReady );
+    ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
+               std::string(batchRenderedVideoRenderSettingsSummary(
+                   basePlan.renderSettings).toUtf8().constData()) );
     ASSERT_EQ( std::string("rendered processing parity and headless rendered-export runner are not implemented"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(basePlan).toUtf8().constData()) );
 
@@ -831,10 +834,15 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
                    .left(QStringLiteral("source-metadata=5792x3872").length())
                    .toUtf8().constData()) );
 
-    BatchRenderedVideoRenderSettings settings;
-    settings.resizeEnabled = true;
-    settings.resizeWidth = 1920;
-    settings.resizeHeightLocked = true;
+    BatchRenderedVideoRenderSettings settings =
+        batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            1920,
+            0,
+            true);
+    ASSERT_TRUE( settings.ready );
+    ASSERT_TRUE( settings.explicitHeadlessSettings );
+    ASSERT_FALSE( settings.guiSettingsOwned );
 
     BatchRenderedVideoJobPlan plan =
         batchRenderedVideoJobPlanWithMetadata(basePlan, metadata, settings);
@@ -854,10 +862,29 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( summary.find("source-metadata=5792x3872") != std::string::npos );
     ASSERT_TRUE( summary.find("source-metadata-attempted=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("render-settings-source=explicit-headless render-settings-explicit-headless=true render-settings-gui-owned=false render-settings-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("render-settings-resize=true render-settings-resize-width=1920") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-frame-size=1920x1284") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-frame-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+
+    BatchRenderedVideoRenderSettings invalidSettings =
+        batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            0,
+            1080,
+            false);
+    ASSERT_FALSE( invalidSettings.ready );
+    plan = batchRenderedVideoJobPlanWithMetadata(
+        basePlan,
+        metadata,
+        invalidSettings);
+    ASSERT_TRUE( plan.metadataAttempted );
+    ASSERT_TRUE( plan.metadataReady );
+    ASSERT_FALSE( plan.ffmpegFrameReady );
+    ASSERT_FALSE( plan.preflightReady );
+    ASSERT_EQ( std::string("rendered resize dimensions invalid"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     metadata = batchRenderedVideoSourceMetadata(
         0,

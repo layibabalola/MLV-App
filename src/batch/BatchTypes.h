@@ -127,10 +127,15 @@ struct BatchRenderedVideoSourceMetadata
 
 struct BatchRenderedVideoRenderSettings
 {
+    QString source = QStringLiteral("batch-defaults");
     bool resizeEnabled = false;
     int resizeWidth = 0;
     int resizeHeight = 0;
     bool resizeHeightLocked = false;
+    bool explicitHeadlessSettings = false;
+    bool guiSettingsOwned = false;
+    QString reason;
+    bool ready = true;
 };
 
 struct BatchRenderedVideoOutputPlan
@@ -836,6 +841,30 @@ inline BatchRenderedVideoRenderSettings batchRenderedVideoDefaultRenderSettings(
     return BatchRenderedVideoRenderSettings();
 }
 
+inline BatchRenderedVideoRenderSettings
+batchRenderedVideoRenderSettingsFromExplicitResize(
+    bool resizeEnabled,
+    int resizeWidth,
+    int resizeHeight,
+    bool resizeHeightLocked)
+{
+    BatchRenderedVideoRenderSettings settings;
+    settings.source = QStringLiteral("explicit-headless");
+    settings.resizeEnabled = resizeEnabled;
+    settings.resizeWidth = resizeWidth;
+    settings.resizeHeight = resizeHeight;
+    settings.resizeHeightLocked = resizeHeightLocked;
+    settings.explicitHeadlessSettings = true;
+    settings.guiSettingsOwned = false;
+    if( resizeEnabled
+     && (resizeWidth <= 0 || (!resizeHeightLocked && resizeHeight <= 0)) )
+    {
+        settings.ready = false;
+        settings.reason = QStringLiteral("rendered resize dimensions invalid");
+    }
+    return settings;
+}
+
 inline BatchRenderedVideoFfmpegFramePlan
 batchRenderedVideoFfmpegFramePlanFromMetadata(
     const BatchRenderedVideoSourceMetadata & metadata,
@@ -853,6 +882,20 @@ batchRenderedVideoFfmpegFramePlanFromMetadata(
         plan.reason = metadata.reason.isEmpty()
             ? QStringLiteral("rendered source metadata unavailable")
             : metadata.reason;
+        return plan;
+    }
+
+    if( !settings.ready )
+    {
+        BatchRenderedVideoFfmpegFramePlan plan;
+        plan.sourceWidth = metadata.width;
+        plan.sourceHeight = metadata.height;
+        plan.frameRate = metadata.frameRate;
+        plan.resizeEnabled = settings.resizeEnabled;
+        plan.resizeHeightLocked = settings.resizeHeightLocked;
+        plan.reason = settings.reason.isEmpty()
+            ? QStringLiteral("rendered render settings unavailable")
+            : settings.reason;
         return plan;
     }
 
@@ -1200,7 +1243,12 @@ inline QString batchRenderedVideoSourceMetadataSummary(
 inline QString batchRenderedVideoRenderSettingsSummary(
     const BatchRenderedVideoRenderSettings & settings)
 {
-    return QStringLiteral("render-settings-resize=%1 render-settings-resize-width=%2 render-settings-resize-height=%3 render-settings-resize-height-locked=%4")
+    return QStringLiteral("render-settings-source=%1 render-settings-explicit-headless=%2 render-settings-gui-owned=%3 render-settings-ready=%4 render-settings-reason=%5 render-settings-resize=%6 render-settings-resize-width=%7 render-settings-resize-height=%8 render-settings-resize-height-locked=%9")
+        .arg(settings.source.isEmpty() ? QStringLiteral("unspecified") : settings.source)
+        .arg(settings.explicitHeadlessSettings ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(settings.guiSettingsOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(settings.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(settings.reason.isEmpty() ? QStringLiteral("none") : settings.reason)
         .arg(settings.resizeEnabled ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(settings.resizeWidth)
         .arg(settings.resizeHeight)
