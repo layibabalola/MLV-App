@@ -1047,10 +1047,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     const QString & inputPath,
     const QString & outputPath,
     const BatchExportFormatRequest & request,
-    int inputClipCount)
+    int inputClipCount,
+    const BatchRenderedVideoRenderSettings & settings =
+        batchRenderedVideoDefaultRenderSettings())
 {
     BatchRenderedVideoJobPlan plan;
     plan.request = request;
+    plan.renderSettings = settings;
     plan.requestValid = request.format == BatchExportFormat::RenderedVideo
                      && batchRenderedVideoRequestShapeValid(request);
 
@@ -1087,6 +1090,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
                        && plan.ffmpegFilterReady
+                       && plan.renderSettings.ready
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -1104,11 +1108,24 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         1);
 }
 
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request,
+    const BatchRenderedVideoRenderSettings & settings)
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        1,
+        settings);
+}
+
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
     const BatchRenderedVideoJobPlan & preflightPlan,
     const BatchRenderedVideoSourceMetadata & metadata,
-    const BatchRenderedVideoRenderSettings & settings =
-        batchRenderedVideoDefaultRenderSettings())
+    const BatchRenderedVideoRenderSettings & settings)
 {
     BatchRenderedVideoJobPlan plan = preflightPlan;
     plan.sourceMetadata = metadata;
@@ -1134,11 +1151,22 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
                        && plan.ffmpegFilterReady
+                       && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
+    const BatchRenderedVideoJobPlan & preflightPlan,
+    const BatchRenderedVideoSourceMetadata & metadata)
+{
+    return batchRenderedVideoJobPlanWithMetadata(
+        preflightPlan,
+        metadata,
+        preflightPlan.renderSettings);
 }
 
 inline QString batchRenderedVideoJobPlanFirstBlocker(
@@ -1163,6 +1191,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegFilterPlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg filter plan unavailable")
             : plan.ffmpegFilterPlan.reason;
+    }
+    if( !plan.renderSettings.ready )
+    {
+        return plan.renderSettings.reason.isEmpty()
+            ? QStringLiteral("rendered render settings unavailable")
+            : plan.renderSettings.reason;
     }
     if( !plan.outputReady )
     {

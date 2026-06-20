@@ -9,6 +9,7 @@ bool BatchContext::s_resumeEnabled = false;
 uint32_t BatchContext::s_maxFrames = 0;
 int BatchContext::s_cdngCodecOffset = 0;
 BatchExportFormatRequest BatchContext::s_exportFormatRequest;
+BatchRenderedVideoRenderSettings BatchContext::s_renderedVideoRenderSettings;
 QString BatchContext::s_logPath;
 QString BatchContext::s_receiptPath;
 
@@ -47,4 +48,15 @@ void BatchContext::setExportFormatRequest(const BatchExportFormatRequest &reques
 BatchExportFormatRequest BatchContext::exportFormatRequest()
 {
     return s_exportFormatRequest;
+}
+
+void BatchContext::setRenderedVideoRenderSettings(
+    const BatchRenderedVideoRenderSettings &settings)
+{
+    s_renderedVideoRenderSettings = settings;
+}
+
+BatchRenderedVideoRenderSettings BatchContext::renderedVideoRenderSettings()
+{
+    return s_renderedVideoRenderSettings;
 }

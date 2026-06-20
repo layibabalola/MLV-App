@@ -42,6 +42,10 @@ public:
     static void setExportFormatRequest(const BatchExportFormatRequest &request);
     static BatchExportFormatRequest exportFormatRequest();
 
+    static void setRenderedVideoRenderSettings(
+        const BatchRenderedVideoRenderSettings &settings);
+    static BatchRenderedVideoRenderSettings renderedVideoRenderSettings();
+
 private:
     BatchContext() = delete; /* Pure static — no instances */
 
@@ -53,6 +57,7 @@ private:
     static uint32_t s_maxFrames;
     static int s_cdngCodecOffset;
     static BatchExportFormatRequest s_exportFormatRequest;
+    static BatchRenderedVideoRenderSettings s_renderedVideoRenderSettings;
     static QString s_logPath;
     static QString s_receiptPath;
 };

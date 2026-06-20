@@ -310,6 +310,14 @@ static int parseBatchCdngCodecOffset(const QString & value, bool * ok)
     return 0;
 }
 
+static int parsePositiveBatchInteger(const QString & value, bool * ok)
+{
+    bool parsed = false;
+    const int result = value.trimmed().toInt(&parsed);
+    if( ok ) *ok = parsed && result > 0;
+    return parsed ? result : 0;
+}
+
 static int runBatch(QCoreApplication &app)
 {
     QCommandLineParser parser;
@@ -399,6 +407,23 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("container"));
     parser.addOption(renderedContainerOpt);
 
+    QCommandLineOption renderedResizeWidthOpt(
+        QStringLiteral("rendered-resize-width"),
+        QStringLiteral("Planned rendered-video resize width in pixels for the future E4 runner. Requires rendered-video mode and still fails closed before export."),
+        QStringLiteral("pixels"));
+    parser.addOption(renderedResizeWidthOpt);
+
+    QCommandLineOption renderedResizeHeightOpt(
+        QStringLiteral("rendered-resize-height"),
+        QStringLiteral("Planned rendered-video resize height in pixels for the future E4 runner unless --rendered-resize-height-locked is set."),
+        QStringLiteral("pixels"));
+    parser.addOption(renderedResizeHeightOpt);
+
+    QCommandLineOption renderedResizeHeightLockedOpt(
+        QStringLiteral("rendered-resize-height-locked"),
+        QStringLiteral("Derive planned rendered-video resize height from source geometry, stretch, and --rendered-resize-width."));
+    parser.addOption(renderedResizeHeightLockedOpt);
+
     QCommandLineOption cdngCodecOpt(
         QStringLiteral("cdng-codec"),
         QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
@@ -444,12 +469,23 @@ static int runBatch(QCoreApplication &app)
         batchExportFormatRequestFromString(exportFormatRaw);
     const bool renderedCodecSet = parser.isSet(renderedCodecOpt);
     const bool renderedContainerSet = parser.isSet(renderedContainerOpt);
-    const bool renderedOptionSet = renderedCodecSet || renderedContainerSet;
+    const bool renderedResizeWidthSet = parser.isSet(renderedResizeWidthOpt);
+    const bool renderedResizeHeightSet = parser.isSet(renderedResizeHeightOpt);
+    const bool renderedResizeHeightLockedSet =
+        parser.isSet(renderedResizeHeightLockedOpt);
+    const bool renderedResizeOptionSet = renderedResizeWidthSet
+                                      || renderedResizeHeightSet
+                                      || renderedResizeHeightLockedSet;
+    const bool renderedOptionSet = renderedCodecSet
+                                || renderedContainerSet
+                                || renderedResizeOptionSet;
+    BatchRenderedVideoRenderSettings renderedSettings =
+        batchRenderedVideoDefaultRenderSettings();
     if( renderedOptionSet
      && parser.isSet(exportFormatOpt)
      && exportRequest.format == BatchExportFormat::Cdng )
     {
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-codec and --rendered-container require --export-format rendered-video or a rendered-video alias; omit them for cdng.\n\n"));
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video options require --export-format rendered-video or a rendered-video alias; omit them for cdng.\n\n"));
         BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
         BatchLogger::shutdown();
         return 2;
@@ -482,6 +518,62 @@ static int runBatch(QCoreApplication &app)
             return 2;
         }
     }
+    if( renderedResizeOptionSet )
+    {
+        if( !renderedResizeWidthSet )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-width is required when using rendered resize options.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        bool ok = false;
+        const int resizeWidth =
+            parsePositiveBatchInteger(parser.value(renderedResizeWidthOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-width must be a positive integer.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        int resizeHeight = 0;
+        if( renderedResizeHeightSet )
+        {
+            resizeHeight =
+                parsePositiveBatchInteger(parser.value(renderedResizeHeightOpt), &ok);
+            if( !ok )
+            {
+                BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-height must be a positive integer.\n\n"));
+                BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+                BatchLogger::shutdown();
+                return 2;
+            }
+        }
+        else if( !renderedResizeHeightLockedSet )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-height is required unless --rendered-resize-height-locked is set.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        renderedSettings = batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            resizeWidth,
+            resizeHeight,
+            renderedResizeHeightLockedSet);
+        if( !renderedSettings.ready )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video resize settings are invalid. %1.\n\n")
+                .arg(batchRenderedVideoRenderSettingsSummary(renderedSettings)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
     const BatchExportFormat exportFormat =
         exportRequest.format;
     if( exportFormat == BatchExportFormat::Unknown )
@@ -494,7 +586,11 @@ static int runBatch(QCoreApplication &app)
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
         const BatchRenderedVideoJobPlan renderedPlan =
-            batchRenderedVideoJobPlanFromRequest(inputPath, outputPath, exportRequest);
+            batchRenderedVideoJobPlanFromRequest(
+                inputPath,
+                outputPath,
+                exportRequest,
+                renderedSettings);
         if( !renderedPlan.requestValid )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
@@ -574,6 +670,7 @@ static int runBatch(QCoreApplication &app)
     BatchContext::setMaxFrames(static_cast<uint32_t>(maxFrames));
     BatchContext::setCdngCodecOffset(cdngCodecOffset);
     BatchContext::setExportFormatRequest(exportRequest);
+    BatchContext::setRenderedVideoRenderSettings(renderedSettings);
 
     int exitCode = BatchRunner::run(inputPath, outputPath);
     BatchLogger::shutdown();

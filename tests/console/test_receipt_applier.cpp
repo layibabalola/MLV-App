@@ -506,6 +506,34 @@ TEST(BatchExportFormat, BatchContextPreservesExportRequestIntent)
     BatchContext::setExportFormatRequest(BatchExportFormatRequest());
 }
 
+TEST(BatchExportFormat, BatchContextPreservesRenderedRenderSettings)
+{
+    BatchRenderedVideoRenderSettings settings =
+        batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            2048,
+            0,
+            true);
+
+    BatchContext::setRenderedVideoRenderSettings(settings);
+
+    const BatchRenderedVideoRenderSettings stored =
+        BatchContext::renderedVideoRenderSettings();
+    ASSERT_TRUE( stored.ready );
+    ASSERT_TRUE( stored.explicitHeadlessSettings );
+    ASSERT_FALSE( stored.guiSettingsOwned );
+    ASSERT_TRUE( stored.resizeEnabled );
+    ASSERT_EQ( 2048, stored.resizeWidth );
+    ASSERT_EQ( 0, stored.resizeHeight );
+    ASSERT_TRUE( stored.resizeHeightLocked );
+    ASSERT_EQ( std::string("render-settings-source=explicit-headless render-settings-explicit-headless=true render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=true render-settings-resize-width=2048 render-settings-resize-height=0 render-settings-resize-height-locked=true"),
+               std::string(batchRenderedVideoRenderSettingsSummary(
+                   stored).toUtf8().constData()) );
+
+    BatchContext::setRenderedVideoRenderSettings(
+        batchRenderedVideoDefaultRenderSettings());
+}
+
 TEST(BatchExportFormat, ValidatesRenderedVideoRequestShape)
 {
     BatchExportFormatRequest request =
@@ -894,6 +922,31 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-frame-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
+    BatchRenderedVideoJobPlan settingsBasePlan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request,
+            settings);
+    ASSERT_TRUE( settingsBasePlan.preflightReady );
+    ASSERT_TRUE( settingsBasePlan.renderSettings.explicitHeadlessSettings );
+
+    BatchRenderedVideoJobPlan implicitSettingsPlan =
+        batchRenderedVideoJobPlanWithMetadata(settingsBasePlan, metadata);
+    ASSERT_TRUE( implicitSettingsPlan.metadataAttempted );
+    ASSERT_TRUE( implicitSettingsPlan.metadataReady );
+    ASSERT_TRUE( implicitSettingsPlan.ffmpegFrameReady );
+    ASSERT_TRUE( implicitSettingsPlan.preflightReady );
+    ASSERT_FALSE( implicitSettingsPlan.runnable );
+    ASSERT_EQ( 1920, implicitSettingsPlan.ffmpegFramePlan.outputWidth );
+    ASSERT_EQ( 1284, implicitSettingsPlan.ffmpegFramePlan.outputHeight );
+    ASSERT_TRUE( implicitSettingsPlan.renderSettings.explicitHeadlessSettings );
+    const std::string implicitSettingsSummary =
+        std::string(batchRenderedVideoJobPlanSummary(
+            implicitSettingsPlan).toUtf8().constData());
+    ASSERT_TRUE( implicitSettingsSummary.find("render-settings-source=explicit-headless render-settings-explicit-headless=true") != std::string::npos );
+    ASSERT_TRUE( implicitSettingsSummary.find("ffmpeg-frame-size=1920x1284") != std::string::npos );
+
     BatchRenderedVideoRenderSettings invalidSettings =
         batchRenderedVideoRenderSettingsFromExplicitResize(
             true,
@@ -1098,6 +1151,33 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+
+    BatchRenderedVideoRenderSettings invalidSettings =
+        batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            0,
+            1080,
+            false);
+    ASSERT_FALSE( invalidSettings.ready );
+    plan = batchRenderedVideoJobPlanFromRequest(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders"),
+        request,
+        invalidSettings);
+
+    ASSERT_TRUE( plan.requestValid );
+    ASSERT_TRUE( plan.targetReady );
+    ASSERT_TRUE( plan.encoderReady );
+    ASSERT_TRUE( plan.ffmpegVideoReady );
+    ASSERT_TRUE( plan.ffmpegFilterReady );
+    ASSERT_FALSE( plan.renderSettings.ready );
+    ASSERT_TRUE( plan.outputReady );
+    ASSERT_FALSE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_EQ( std::string("rendered resize dimensions invalid"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData())
+        .find("render-settings-ready=false render-settings-reason=rendered resize dimensions invalid") != std::string::npos );
 
     plan = batchRenderedVideoJobPlanFromRequest(
         QStringLiteral("C:/clips/M16-1327.MLV"),

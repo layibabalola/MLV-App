@@ -1123,6 +1123,8 @@ CDNG stores **post-recon Bayer** (debayer/processing happen later in the user's 
 
 _Current E4 implementation note (2026-06-19): `BatchRenderedVideoJobPlan` now also carries a plan-only `BatchRenderedVideoFfmpegFilterPlan` for the GUI path's always-on base color-scale wrapper (`-vf scale=in_color_matrix=bt601:out_color_matrix=bt709`), narrowing the earlier blanket filter exclusion to optional filters. Optional moiree, HDR blend, stabilization, audio, frame processing, pipe execution, and hardware encoders remain outside the current headless runner contract; rendered-video requests still fail closed on the runner prerequisite._
 
+_Current E4 implementation note (2026-06-19 resize CLI slice): the headless batch parser now accepts plan-only `--rendered-resize-width`, `--rendered-resize-height`, and `--rendered-resize-height-locked` options for rendered-video requests, validates them before runner work, and stores the resulting `BatchRenderedVideoRenderSettings` in `BatchContext` so the runner-side `BatchRenderedVideoJobPlan` can combine request, target, encoder preset, ffmpeg video/filter plans, output path, source metadata, explicit resize intent, and runner prerequisites. These switches are rejected for explicit CDNG requests; if no export format is provided, the rendered option follows the existing rendered-intent path and still fails closed before output creation or frame processing because processing parity and the headless rendered-export runner remain unimplemented._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the

@@ -52,12 +52,18 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 
     const BatchExportFormatRequest exportRequest =
         BatchContext::exportFormatRequest();
+    const BatchRenderedVideoRenderSettings renderSettings =
+        BatchContext::renderedVideoRenderSettings();
     const bool renderedVideoRequested =
         exportRequest.format == BatchExportFormat::RenderedVideo;
     if( exportRequest.format == BatchExportFormat::RenderedVideo )
     {
         const BatchRenderedVideoJobPlan renderedPlan =
-            batchRenderedVideoJobPlanFromRequest(inputPath, outputPath, exportRequest);
+            batchRenderedVideoJobPlanFromRequest(
+                inputPath,
+                outputPath,
+                exportRequest,
+                renderSettings);
         if( !renderedPlan.requestValid )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner invalid rendered-video request. %1. %2.\n")
@@ -230,7 +236,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 mlvPath,
                 outputPath,
                 exportRequest,
-                mlvFiles.size());
+                mlvFiles.size(),
+                renderSettings);
 
         if( !basePlan.preflightReady )
         {
@@ -263,7 +270,10 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         const BatchRenderedVideoSourceMetadata metadata =
             renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
         const BatchRenderedVideoJobPlan renderedPlan =
-            batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
+            batchRenderedVideoJobPlanWithMetadata(
+                basePlan,
+                metadata,
+                renderSettings);
         freeMlvObject( mlvObject );
 
         if( !renderedPlan.preflightReady )
