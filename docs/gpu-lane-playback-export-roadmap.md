@@ -166,6 +166,33 @@ from 3105.536 ms to 2852.209 ms (`wall_clock_improved_completion_lag_shift`,
 `parallelize_or_offload_dng_compress`. This supports the scoped DNG proof path
 and E3 triage, not default export promotion.
 
+Follow-up 2026-06-20 E3 promotion-gate proof: the larger UltraMagnus matrix
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260620T145731-mlvapp-cdng-export-evidence-latest.zip`
+(Length `102369`, SHA256
+`D53A68A985A334A5C81314C6B5FC310F628B61799AAFD3B6F5B9B95E853A685D`) deliberately
+used a fail-closed promotion shape: `MaxFrames=16`, `Repeats=3`, `uncompressed`
+plus `lossless`, trusted GPU export, async writer compression, and
+`RequireElapsedImprovement` with `MinElapsedImprovementPercent=5`. DNG identity
+still passed (`96/96` matched, `0` mismatches) and candidate GPU export
+attempted/replaced/trusted `16/16` frames in every run, but the matrix verdict was
+FAIL because uncompressed repeat 2 improved only `2.957%` and repeat 3 regressed
+`-0.939%`. The rollup status was `not_promotable` with suggested optimization
+`improve_export_wall_clock_before_scheduler_promotion`. This is the current
+default/all-codec E3 promotion boundary.
+
+The focused lossless-only gate
+`.claude-state/profiling/ultramagnus-cdng-export/remote-packets/ultra-magnus-20260620T145917-mlvapp-cdng-export-evidence-latest.zip`
+(Length `57896`, SHA256
+`F32EE83F8F2C869C8241514A1A8BEF8EC1DF002F594A2EE5E4DF7A197A3562F1`) passed the
+same 16-frame/3-repeat/5% elapsed-improvement gate for `lossless` only. DNG
+identity passed (`48/48` matched, `0` mismatches), candidate GPU
+attempted/replaced/trusted `16/16` frames on each repeat, and elapsed improvements
+were `31.514%`, `28.071%`, and `26.829%`. The token remained
+`wall_clock_improved_completion_lag_shift`, not `promotion_candidate`, because
+producer work moved earlier while writer completion lag moved later. Treat this
+as scoped lossless-DNG async-compress evidence and an E3 policy/implementation
+input, not a default export promotion.
+
 Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-playback-dng-smoke.ps1`
 now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
 gate into one host-local smoke. It checks the release exe, deployed CUDA backend,
