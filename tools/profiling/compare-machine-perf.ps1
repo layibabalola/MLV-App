@@ -672,6 +672,57 @@ function New-LocalProofSummaryRow {
     }
 }
 
+function New-PlaybackAbSummaryRow {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    if ([string]$Record.schema -ne "mlvapp-cuda-playback-ab.v1") {
+        throw "Unexpected playback A/B schema in ${Source}: $($Record.schema)"
+    }
+    Assert-MachineFingerprint -Fingerprint $Record.machineFingerprint -Source $Source
+
+    $baselinePresented = Convert-ToNullableDouble $Record.compare.presentedFps.baseline
+    $candidatePresented = Convert-ToNullableDouble $Record.compare.presentedFps.candidate
+    $deltaPct = Convert-ToNullableDouble $Record.compare.presentedFps.deltaPercent
+    $suggestion = if ([string]$Record.status -ne "success") {
+        "fix_playback_ab_proof_failures"
+    } elseif ($null -eq $deltaPct) {
+        "rerun_playback_ab_for_presented_fps_delta"
+    } elseif ($deltaPct -lt 0.0) {
+        "investigate_cuda_playback_regression"
+    } elseif ($deltaPct -lt 10.0) {
+        "profile_present_decode_and_recon_stages"
+    } else {
+        "validate_same_clip_on_dell"
+    }
+
+    [pscustomobject]@{
+        record_kind = "playback_ab_summary"
+        machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
+        build_sha = $Record.machineFingerprint.build_sha
+        baseline_presented_fps = if ($null -ne $baselinePresented) { [math]::Round($baselinePresented, 3) } else { $null }
+        presented_fps = if ($null -ne $candidatePresented) { [math]::Round($candidatePresented, 3) } else { $null }
+        playback_fps_delta_pct = if ($null -ne $deltaPct) { [math]::Round($deltaPct, 3) } else { $null }
+        no_readback_pct = $null
+        fallback_pct = $null
+        fallback_count = $null
+        export_frames = $null
+        cdng_verdict = $null
+        dng_hash = $null
+        gpu_export_replaced_pct = $null
+        gpu_export_trusted_pct = $null
+        dng_elapsed_delta_pct = $null
+        dng_throughput_status = $null
+        dng_suggested_optimization = $null
+        dominant_bottleneck = "unknown"
+        suggested_optimization = $suggestion
+        build_status = $Record.status
+        source = $Source
+    }
+}
+
 function New-ComparisonDocument {
     param(
         [object[]]$Rows,
@@ -700,6 +751,9 @@ foreach ($path in $InputPath) {
         }
         elseif ($schema -eq "mlvapp-local-cuda-playback-dng-smoke.v1") {
             $rows += New-LocalProofSummaryRow -Record $record.json -Source $record.source
+        }
+        elseif ($schema -eq "mlvapp-cuda-playback-ab.v1") {
+            $rows += New-PlaybackAbSummaryRow -Record $record.json -Source $record.source
         }
         elseif ($schema -eq "mlvapp-ultramagnus-p3-validation.v1") {
             $rows += New-RemoteP3SummaryRow -Record $record.json -Source $record.source
@@ -730,6 +784,6 @@ if ($Json) {
 }
 
 $sortedRows |
-    Format-Table -AutoSize -Wrap record_kind, machine, presented_fps, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
+    Format-Table -AutoSize -Wrap record_kind, machine, baseline_presented_fps, presented_fps, playback_fps_delta_pct, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
     Out-String -Width 4096 |
     Write-Output

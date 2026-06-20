@@ -268,6 +268,79 @@ function Get-NvidiaSmiComputeCapability {
     [string]$parts[2]
 }
 
+function Get-FirstNvidiaSmiFingerprintRow {
+    param([AllowNull()]$NvidiaSmi)
+
+    if ($null -eq $NvidiaSmi -or -not [bool]$NvidiaSmi.found) {
+        return $null
+    }
+    $row = @($NvidiaSmi.output | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1)
+    if ($row.Count -eq 0) {
+        return $null
+    }
+    $parts = @([string]$row[0] -split "," | ForEach-Object { ([string]$_).Trim() })
+    if ($parts.Count -lt 4) {
+        return $null
+    }
+    $vram = $null
+    $parsedVram = 0
+    if ([int]::TryParse($parts[3], [ref]$parsedVram)) {
+        $vram = $parsedVram
+    }
+    elseif ($parts[3] -match '([0-9]+)') {
+        $parsedVram = [int]$Matches[1]
+        $vram = $parsedVram
+    }
+    [pscustomobject]@{
+        gpu_name = $parts[0]
+        gpu_driver_version = $parts[1]
+        gpu_compute_capability = $parts[2]
+        gpu_vram_total_mb = $vram
+    }
+}
+
+function Get-RepoBuildSha {
+    param([string]$RepoRoot)
+    try {
+        $sha = (& git -C $RepoRoot rev-parse --verify HEAD 2>$null)
+        if (-not [string]::IsNullOrWhiteSpace($sha)) {
+            return [string]$sha
+        }
+    }
+    catch {
+    }
+    $null
+}
+
+function Get-LocalMachineFingerprint {
+    param(
+        [string]$RepoRoot,
+        [AllowNull()]$NvidiaSmi
+    )
+
+    $gpu = Get-FirstNvidiaSmiFingerprintRow -NvidiaSmi $NvidiaSmi
+    $cpu = $null
+    $computer = $null
+    $os = $null
+    try { $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 } catch {}
+    try { $computer = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 } catch {}
+    try { $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1 } catch {}
+
+    [pscustomobject]@{
+        schema = "machine-fingerprint.v1"
+        build_sha = Get-RepoBuildSha -RepoRoot $RepoRoot
+        gpu_name = if ($gpu) { $gpu.gpu_name } else { $null }
+        gpu_driver_version = if ($gpu) { $gpu.gpu_driver_version } else { $null }
+        gpu_compute_capability = if ($gpu) { $gpu.gpu_compute_capability } else { $null }
+        gpu_vram_total_mb = if ($gpu) { $gpu.gpu_vram_total_mb } else { $null }
+        cpu_model = if ($cpu) { [string]$cpu.Name } else { $null }
+        cpu_cores = if ($cpu) { [int]$cpu.NumberOfCores } else { $null }
+        cpu_threads = if ($cpu) { [int]$cpu.NumberOfLogicalProcessors } else { $null }
+        ram_total_mb = if ($computer) { [int64]([math]::Round([double]$computer.TotalPhysicalMemory / 1MB)) } else { $null }
+        os_version = if ($os) { "$($os.Caption) $($os.Version)" } else { $null }
+    }
+}
+
 function Test-CudaBackendCompatibility {
     param(
         [AllowNull()]$ArchitectureInfo,
@@ -362,6 +435,7 @@ function Read-SmokeSummary {
         exists = $true
         exitCode = $ExitCode
         validationOk = $validationOk
+        runMetadata = Get-NestedValue $json "log.runMetadata"
         validationFailures = @(Get-NestedValue $json "validation.failures")
         validationWarnings = @(Get-NestedValue $json "validation.warnings")
         presentedFrames = $presentedFrames
@@ -542,6 +616,7 @@ else {
 }
 $backend = (Resolve-Path -LiteralPath $BackendDll).Path
 $nvidiaSmi = Get-NvidiaSmiSnapshot
+$machineFingerprint = Get-LocalMachineFingerprint -RepoRoot $root -NvidiaSmi $nvidiaSmi
 $backendArchitecture = Get-CudaBackendArchitectureInfo -Path $backend
 $backendCompatibility = Test-CudaBackendCompatibility `
     -ArchitectureInfo $backendArchitecture `
@@ -565,6 +640,10 @@ $runRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPa
     (Resolve-RepoPath -Root $root -Path $OutputRoot))
 $summaryPath = Join-Path $runRoot "summary.json"
 $latestPath = Join-Path $root ".claude-state\profiling\cuda-playback-ab-latest.json"
+$latestParent = Split-Path -Parent $latestPath
+if ($latestParent) {
+    New-Item -ItemType Directory -Force -Path $latestParent | Out-Null
+}
 $baselineOutput = Join-Path $runRoot "baseline-cpu.json"
 $candidateOutput = Join-Path $runRoot "candidate-cuda.json"
 $baselineScreenshots = Join-Path $runRoot "baseline-screenshots"
@@ -651,6 +730,7 @@ $summary = [ordered]@{
     scaleFactor = $ScaleFactor
     validationSampleEvery = $ValidationSampleEvery
     runOrder = if ($CandidateFirst) { @("candidate", "baseline") } else { @("baseline", "candidate") }
+    machineFingerprint = $machineFingerprint
     nvidiaSmi = $nvidiaSmi
     preflightFailures = @($preflightFailures)
     gpuPreference = [pscustomobject]@{
@@ -727,6 +807,17 @@ foreach ($step in $steps) {
 
 $baselineSummary = Read-SmokeSummary -Path $baselineOutput -ExitCode $baselineResult.exitCode
 $candidateSummary = Read-SmokeSummary -Path $candidateOutput -ExitCode $candidateResult.exitCode
+
+$observedBuildSha = Get-NestedValue $candidateSummary "runMetadata.build_sha"
+if ([string]::IsNullOrWhiteSpace([string]$observedBuildSha)) {
+    $observedBuildSha = Get-NestedValue $baselineSummary "runMetadata.build_sha"
+}
+$missingFingerprintBuildSha =
+    [string]::IsNullOrWhiteSpace([string]$summary["machineFingerprint"].build_sha)
+if (-not [string]::IsNullOrWhiteSpace([string]$observedBuildSha) -and
+    $missingFingerprintBuildSha) {
+    $summary["machineFingerprint"].build_sha = [string]$observedBuildSha
+}
 
 $proofFailures = @()
 if ($baselineResult.exitCode -ne 0) {
