@@ -307,6 +307,19 @@ from speed timing. This is a CPU/memory-copy reduction in the presentation
 handoff, not a claim that CUDA playback is now faster; quote speed only from a
 fresh same-host A/B packet built from this source.
 
+Update 2026-06-20 cadence-attribution telemetry slice: playback profiles and
+the opt-in interactive perf field log now promote queue-wait and present-pacing
+sub-stages beside the existing decode/recon/process/present timing fields:
+`stage_queue_wait_ms`, `stage_present_ui_signal_latency_ms`,
+`stage_present_draw_ms`, `stage_present_overlays_scopes_ms`,
+`stage_present_slot_release_ms`, `stage_present_pacing_ms`, and
+`stage_presentation_overhead_ms` where available. The CUDA playback A/B wrapper
+also lifts the existing `playback_smoke.stage_split_summary` into compare
+metrics, and the comparator can refine generic `cadence-bound` packets into
+`queue-wait-bound` or `frame-pacing-bound` when those deltas dominate. This is
+measurement/actionability work only: it does not change default playback,
+claim CUDA speedup, or weaken the 30s screenshot/GL parity proof gate.
+
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel
 i9-12900HK, 64 GB RAM, and an `NVIDIA GeForce RTX 3060 Laptop GPU`. That is an

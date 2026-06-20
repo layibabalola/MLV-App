@@ -699,6 +699,22 @@ static void insertPlaybackStageSummaryFields( QJsonObject *sample )
         0.0,
         rawPrefetchHit || processed8PrefetchHit );
 
+    const double queueWaitMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("render_thread_queue_wait_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_queue_wait_ms"),
+        queueWaitMs,
+        valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_ui_signal_latency_ms"),
+        queueWaitMs,
+        valid );
+
     const double reconMs = playbackSampleStageValue(
         *sample,
         QStringList()
@@ -737,7 +753,13 @@ static void insertPlaybackStageSummaryFields( QJsonObject *sample )
         gpuUploadMs,
         valid );
 
-    const double presentMs = playbackSampleStageValue(
+    bool drawTotalValid = false;
+    const double drawTotalMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("draw_frame_ready_total_ms"),
+        &drawTotalValid );
+    const double fallbackPresentMs = playbackSampleStageValue(
         *sample,
         QStringList()
             << QStringLiteral("draw_frame_ready_present_ms")
@@ -747,8 +769,89 @@ static void insertPlaybackStageSummaryFields( QJsonObject *sample )
     insertNullableDouble(
         sample,
         QStringLiteral("stage_present_ms"),
-        presentMs,
+        drawTotalValid ? drawTotalMs : fallbackPresentMs,
+        drawTotalValid || valid );
+
+    const double presentDrawMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("draw_frame_ready_image_ms")
+            << QStringLiteral("draw_frame_ready_present_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_draw_ms"),
+        presentDrawMs,
         valid );
+
+    const double presentOverlaysScopesMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("draw_frame_ready_scopes_ms")
+            << QStringLiteral("draw_frame_ready_overlay_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_overlays_scopes_ms"),
+        presentOverlaysScopesMs,
+        valid );
+
+    const double presentSlotReleaseMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("draw_frame_ready_advance_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_slot_release_ms"),
+        presentSlotReleaseMs,
+        valid );
+
+    bool renderTotalValid = false;
+    const double renderTotalMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("render_thread_total_ms"),
+        &renderTotalValid );
+    const bool cadenceValid =
+        sample->contains( QStringLiteral("cadence_ms") )
+        && sample->value( QStringLiteral("cadence_ms") ).isDouble();
+    const double cadenceMs =
+        cadenceValid
+            ? sample->value( QStringLiteral("cadence_ms") ).toDouble()
+            : 0.0;
+    const double presentPacingMs =
+        qMax( 0.0,
+              cadenceMs
+              - renderTotalMs
+              - queueWaitMs
+              - presentDrawMs
+              - presentOverlaysScopesMs
+              - presentSlotReleaseMs );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_pacing_ms"),
+        presentPacingMs,
+        cadenceValid && renderTotalValid );
+
+    const bool overheadValid =
+        sample->contains(
+            QStringLiteral("presentation_overhead_excluding_headless_color_ms") )
+        || sample->contains( QStringLiteral("presentation_overhead_ms") );
+    const double overheadMs =
+        sample->contains(
+            QStringLiteral("presentation_overhead_excluding_headless_color_ms") )
+            ? sample->value(
+                  QStringLiteral(
+                      "presentation_overhead_excluding_headless_color_ms" ) )
+                  .toDouble()
+            : sample->value( QStringLiteral("presentation_overhead_ms") )
+                  .toDouble();
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_presentation_overhead_ms"),
+        overheadMs,
+        overheadValid );
 }
 
 static double sortedPercentile( QVector<double> values, double percentile )
@@ -774,8 +877,16 @@ static QString suggestedOptimizationForBottleneck( const QString &bottleneck )
         return QStringLiteral("move_processing_to_gpu_or_fast_subset");
     if( bottleneck == QStringLiteral("gpu-upload-bound") )
         return QStringLiteral("reduce_gpu_upload_or_enable_no_readback");
+    if( bottleneck == QStringLiteral("queue-wait-bound") )
+        return QStringLiteral("reduce_render_queue_wait_or_present_signal_latency");
     if( bottleneck == QStringLiteral("present-bound") )
         return QStringLiteral("reduce_present_overhead");
+    if( bottleneck == QStringLiteral("present-draw-bound") )
+        return QStringLiteral("reduce_present_draw_overhead");
+    if( bottleneck == QStringLiteral("frame-pacing-bound") )
+        return QStringLiteral("stabilize_playback_frame_pacing");
+    if( bottleneck == QStringLiteral("presentation-overhead-bound") )
+        return QStringLiteral("reduce_ui_presentation_overhead");
     if( bottleneck == QStringLiteral("compress-bound") )
         return QStringLiteral("parallelize_or_offload_dng_compress");
     if( bottleneck == QStringLiteral("write-bound") )
@@ -888,8 +999,16 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
                                           QStringLiteral("stage_process_ms") )
                             << qMakePair( QStringLiteral("gpu-upload-bound"),
                                           QStringLiteral("stage_gpu_upload_ms") )
+                            << qMakePair( QStringLiteral("queue-wait-bound"),
+                                          QStringLiteral("stage_queue_wait_ms") )
                             << qMakePair( QStringLiteral("present-bound"),
-                                          QStringLiteral("stage_present_ms") ) ) );
+                                          QStringLiteral("stage_present_ms") )
+                            << qMakePair( QStringLiteral("present-draw-bound"),
+                                          QStringLiteral("stage_present_draw_ms") )
+                            << qMakePair( QStringLiteral("frame-pacing-bound"),
+                                          QStringLiteral("stage_present_pacing_ms") )
+                            << qMakePair( QStringLiteral("presentation-overhead-bound"),
+                                          QStringLiteral("stage_presentation_overhead_ms") ) ) );
     return summary;
 }
 
@@ -21230,8 +21349,38 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
             hasFrames );
         insertNullableDouble(
             &averageFrame,
+            QStringLiteral("stage_queue_wait_ms"),
+            avgQueueWaitMs,
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_ui_signal_latency_ms"),
+            avgSmokeMs( m_playbackSmokePresentUiSignalLatencySumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
             QStringLiteral("stage_present_ms"),
             avgDrawTotalMs,
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_draw_ms"),
+            avgSmokeMs( m_playbackSmokePresentDrawPresentSumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_overlays_scopes_ms"),
+            avgSmokeMs( m_playbackSmokePresentOverlaysScopesSumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_slot_release_ms"),
+            avgSmokeMs( m_playbackSmokePresentRenderSlotReleaseSumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_pacing_ms"),
+            avgSmokeMs( m_playbackSmokePresentPacingSumMs ),
             hasFrames );
         QJsonArray averageFrames;
         averageFrames.append( averageFrame );
@@ -21245,8 +21394,14 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                                   QStringLiteral("stage_recon_ms") )
                     << qMakePair( QStringLiteral("process-bound"),
                                   QStringLiteral("stage_process_ms") )
+                    << qMakePair( QStringLiteral("queue-wait-bound"),
+                                  QStringLiteral("stage_queue_wait_ms") )
                     << qMakePair( QStringLiteral("present-bound"),
-                                  QStringLiteral("stage_present_ms") ) );
+                                  QStringLiteral("stage_present_ms") )
+                    << qMakePair( QStringLiteral("present-draw-bound"),
+                                  QStringLiteral("stage_present_draw_ms") )
+                    << qMakePair( QStringLiteral("frame-pacing-bound"),
+                                  QStringLiteral("stage_present_pacing_ms") ) );
         const double noReadbackPercent =
             m_playbackSmokePresentedFrames > 0
                 ? ( static_cast<double>(

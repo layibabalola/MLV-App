@@ -216,6 +216,9 @@ function New-PlaybackAbAnalysis {
     $queueWaitDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgQueueWaitMs"
     $llrawprocDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgLlrawprocMs"
     $drawTotalDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgDrawTotalMs"
+    $presentUiSignalLatencyDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentUiSignalLatencyMs"
+    $presentDrawPresentDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentDrawPresentMs"
+    $presentPacingDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentPacingMs"
     $prepBeforeFinishDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPrepBeforeFinishMs"
 
     $dominant = "unknown"
@@ -233,7 +236,19 @@ function New-PlaybackAbAnalysis {
                 $suggestion = "reduce_gpu_present_draw_queue_sync"
                 $confidence = "observed_stage_regression"
             }
+            elseif ((Test-DeltaAtLeast -Value $queueWaitDeltaPct -Threshold 25.0) -or
+                    (Test-DeltaAtLeast -Value $presentUiSignalLatencyDeltaPct -Threshold 25.0)) {
+                $dominant = "queue-wait-bound"
+                $suggestion = "reduce_render_queue_wait_or_present_signal_latency"
+                $confidence = "observed_stage_regression"
+            }
+            elseif (Test-DeltaAtLeast -Value $presentPacingDeltaPct -Threshold 25.0) {
+                $dominant = "frame-pacing-bound"
+                $suggestion = "stabilize_playback_frame_pacing"
+                $confidence = "observed_stage_regression"
+            }
             elseif ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 15.0) -or
+                    (Test-DeltaAtLeast -Value $presentDrawPresentDeltaPct -Threshold 15.0) -or
                     (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 15.0) -or
                     (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 15.0)) {
                 $dominant = "present-bound"
@@ -275,6 +290,9 @@ function New-PlaybackAbAnalysis {
             queueWaitDeltaPercent = $queueWaitDeltaPct
             llrawprocDeltaPercent = $llrawprocDeltaPct
             drawTotalDeltaPercent = $drawTotalDeltaPct
+            presentUiSignalLatencyDeltaPercent = $presentUiSignalLatencyDeltaPct
+            presentDrawPresentDeltaPercent = $presentDrawPresentDeltaPct
+            presentPacingDeltaPercent = $presentPacingDeltaPct
             prepBeforeFinishDeltaPercent = $prepBeforeFinishDeltaPct
         }
         proofFailures = @($ProofFailures)
@@ -548,6 +566,11 @@ function Read-SmokeSummary {
         avgLlrawprocMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_llrawproc_ms")
         avgProcessed8Ms = Convert-ToNullableDouble (Get-NestedValue $summary "avg_processed8_ms")
         avgDrawTotalMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_draw_total_ms")
+        avgPresentUiSignalLatencyMs = Convert-ToNullableDouble (Get-NestedValue $json "log.stageSplitSummary.avg_present_ui_signal_latency_ms")
+        avgPresentDrawPresentMs = Convert-ToNullableDouble (Get-NestedValue $json "log.stageSplitSummary.avg_present_draw_present_ms")
+        avgPresentOverlaysScopesMs = Convert-ToNullableDouble (Get-NestedValue $json "log.stageSplitSummary.avg_present_overlays_scopes_ms")
+        avgPresentRenderSlotReleaseMs = Convert-ToNullableDouble (Get-NestedValue $json "log.stageSplitSummary.avg_present_render_slot_release_ms")
+        avgPresentPacingMs = Convert-ToNullableDouble (Get-NestedValue $json "log.stageSplitSummary.avg_present_pacing_ms")
         avgPrepWorkerBuildMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_worker_build_ms")
         avgPrepWorkerTotalMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_worker_total_ms")
         avgPrepBeforeFinishMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_total_before_finish_ms")
@@ -1053,6 +1076,11 @@ function New-PlaybackCompare {
         avgLlrawprocMs = New-MetricDelta -BaselineValue $BaselineSummary.avgLlrawprocMs -CandidateValue $CandidateSummary.avgLlrawprocMs
         avgProcessed8Ms = New-MetricDelta -BaselineValue $BaselineSummary.avgProcessed8Ms -CandidateValue $CandidateSummary.avgProcessed8Ms
         avgDrawTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgDrawTotalMs -CandidateValue $CandidateSummary.avgDrawTotalMs
+        avgPresentUiSignalLatencyMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentUiSignalLatencyMs -CandidateValue $CandidateSummary.avgPresentUiSignalLatencyMs
+        avgPresentDrawPresentMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentDrawPresentMs -CandidateValue $CandidateSummary.avgPresentDrawPresentMs
+        avgPresentOverlaysScopesMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentOverlaysScopesMs -CandidateValue $CandidateSummary.avgPresentOverlaysScopesMs
+        avgPresentRenderSlotReleaseMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentRenderSlotReleaseMs -CandidateValue $CandidateSummary.avgPresentRenderSlotReleaseMs
+        avgPresentPacingMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentPacingMs -CandidateValue $CandidateSummary.avgPresentPacingMs
         avgPrepWorkerBuildMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerBuildMs -CandidateValue $CandidateSummary.avgPrepWorkerBuildMs
         avgPrepWorkerTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerTotalMs -CandidateValue $CandidateSummary.avgPrepWorkerTotalMs
         avgPrepBeforeFinishMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepBeforeFinishMs -CandidateValue $CandidateSummary.avgPrepBeforeFinishMs

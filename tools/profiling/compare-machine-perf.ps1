@@ -402,7 +402,9 @@ function Test-DeltaAtLeast {
 function Get-PlaybackAbAnalysis {
     param([object]$Record)
 
-    if ($Record.analysis -and $Record.analysis.dominantBottleneck) {
+    if ($Record.analysis -and
+        $Record.analysis.dominantBottleneck -and
+        [string]$Record.analysis.dominantBottleneck -ne "cadence-bound") {
         return [pscustomobject]@{
             dominantBottleneck = [string]$Record.analysis.dominantBottleneck
             suggestedOptimization = [string]$Record.analysis.suggestedOptimization
@@ -416,6 +418,9 @@ function Get-PlaybackAbAnalysis {
     $queueWaitDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgQueueWaitMs"
     $llrawprocDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgLlrawprocMs"
     $drawTotalDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgDrawTotalMs"
+    $presentUiSignalLatencyDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPresentUiSignalLatencyMs"
+    $presentDrawPresentDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPresentDrawPresentMs"
+    $presentPacingDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPresentPacingMs"
     $prepBeforeFinishDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPrepBeforeFinishMs"
 
     if ($null -eq $fpsDeltaPct) {
@@ -435,7 +440,21 @@ function Get-PlaybackAbAnalysis {
                 suggestedOptimization = "reduce_gpu_present_draw_queue_sync"
             }
         }
+        if ((Test-DeltaAtLeast -Value $queueWaitDeltaPct -Threshold 25.0) -or
+            (Test-DeltaAtLeast -Value $presentUiSignalLatencyDeltaPct -Threshold 25.0)) {
+            return [pscustomobject]@{
+                dominantBottleneck = "queue-wait-bound"
+                suggestedOptimization = "reduce_render_queue_wait_or_present_signal_latency"
+            }
+        }
+        if (Test-DeltaAtLeast -Value $presentPacingDeltaPct -Threshold 25.0) {
+            return [pscustomobject]@{
+                dominantBottleneck = "frame-pacing-bound"
+                suggestedOptimization = "stabilize_playback_frame_pacing"
+            }
+        }
         if ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 15.0) -or
+            (Test-DeltaAtLeast -Value $presentDrawPresentDeltaPct -Threshold 15.0) -or
             (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 15.0) -or
             (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 15.0)) {
             return [pscustomobject]@{
