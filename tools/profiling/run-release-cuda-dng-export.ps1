@@ -13,6 +13,10 @@ param(
     [string]$GpuExportBackend = "cuda",
     [string]$GpuExportDll = "",
     [int]$MaxFrames = 0,
+    [switch]$UseAsyncWriter,
+    [switch]$UseAsyncWriterCompression,
+    [int]$AsyncWriterQueueDepth = 0,
+    [int]$AsyncWriterThreadCount = 0,
     [string]$OutputRoot = "",
     [string[]]$AdditionalArgs = @(),
     [switch]$DryRun
@@ -22,6 +26,15 @@ $ErrorActionPreference = "Stop"
 
 if ($MaxFrames -lt 0) {
     throw "-MaxFrames must be >= 0."
+}
+if ($UseAsyncWriterCompression -and -not $UseAsyncWriter) {
+    throw "-UseAsyncWriterCompression requires -UseAsyncWriter."
+}
+if ($AsyncWriterQueueDepth -lt 0) {
+    throw "-AsyncWriterQueueDepth must be >= 0."
+}
+if ($AsyncWriterThreadCount -lt 0) {
+    throw "-AsyncWriterThreadCount must be >= 0."
 }
 
 function Resolve-RepoPath {
@@ -241,6 +254,18 @@ if (-not [string]::IsNullOrWhiteSpace($GpuExportBackend)) {
 if ($GpuExportMode -eq "trusted") {
     $environment["MLVAPP_GPU_EXPORT_TRUSTED"] = "1"
 }
+if ($UseAsyncWriter) {
+    $environment["MLVAPP_CDNG_EXPORT_ASYNC_WRITER"] = "1"
+    if ($UseAsyncWriterCompression) {
+        $environment["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"] = "1"
+    }
+    if ($AsyncWriterQueueDepth -gt 0) {
+        $environment["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH"] = [string]$AsyncWriterQueueDepth
+    }
+    if ($AsyncWriterThreadCount -gt 0) {
+        $environment["MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS"] = [string]$AsyncWriterThreadCount
+    }
+}
 
 $status = if ($DryRun) { "planned" } else { "starting" }
 $summary = [ordered]@{
@@ -259,6 +284,10 @@ $summary = [ordered]@{
     cdngCodec = $CdngCodec
     maxFrames = $MaxFrames
     gpuExportMode = $GpuExportMode
+    useAsyncWriter = [bool]$UseAsyncWriter
+    useAsyncWriterCompression = [bool]$UseAsyncWriterCompression
+    asyncWriterQueueDepth = $AsyncWriterQueueDepth
+    asyncWriterThreadCount = $AsyncWriterThreadCount
     arguments = $arguments
     environment = $environment
     nvidiaSmi = Get-NvidiaSmiSnapshot
@@ -275,6 +304,7 @@ $summary = [ordered]@{
         notes = @(
             "This runner performs a real release --batch DNG export with explicit CUDA export environment.",
             "Trusted mode is an opt-in CUDA output path for the scoped Dual ISO shape; unsupported states still need telemetry/profile review.",
+            "Async-writer compression is opt-in E3 measurement only; use it to test lossless compression overlap, not as a default behavior change.",
             "Use the local smoke wrapper for CPU-baseline-vs-candidate DNG hash proof on a specific host."
         )
     }

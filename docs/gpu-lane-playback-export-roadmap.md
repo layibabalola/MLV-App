@@ -296,6 +296,22 @@ The dogfood kit README advertises both the GUI profiling path and the
 cross-machine comparator so returned proof packets and ad-hoc interactive
 field logs can be reviewed with the same table.
 
+Update 2026-06-20 E3 dogfood async-compress surface: the simple CUDA DNG
+runner now exposes the same lossless compression-overlap knobs as the CDNG
+profile matrix: `tools/profiling/run-release-cuda-dng-export.ps1` accepts
+`-UseAsyncWriter`, `-UseAsyncWriterCompression`, `-AsyncWriterQueueDepth`, and
+`-AsyncWriterThreadCount`, while
+`tools/profiling/run-local-cuda-playback-dng-smoke.ps1` forwards candidate
+`-CandidateUseAsyncWriter*` settings into its CDNG matrix child and records
+those knobs in `summary.json`. The dogfood kit advertises direct
+`RUN-CUDA-DOGFOOD.ps1 -DngOnly -DngAsyncWriter -DngAsyncWriterCompression`
+and full-proof async-compress commands, so Dell/UltraMagnus can measure whether
+moving LJ92 compression into writer workers helps the lossless DNG path without
+changing default export behavior. This remains measurement/proof plumbing, not
+promotion: keep DNG hash PASS, release/backend hashes, codec, frame count,
+async-writer active/queue counters, bottleneck fields, and host/clip identity
+attached to any E3 speed claim.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive

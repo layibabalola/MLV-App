@@ -150,6 +150,8 @@ function Write-DogfoodReadme {
     [void]$lines.Add("- Full proof: ``$($commands.proof)``")
     [void]$lines.Add("- Launch only: ``$($commands.launchOnly)``")
     [void]$lines.Add("- DNG trial only: ``$($commands.dngOnly)``")
+    [void]$lines.Add("- DNG async-compress trial: ``$($commands.dngAsyncCompress)``")
+    [void]$lines.Add("- Full proof with DNG async-compress candidate: ``$($commands.proofAsyncCompress)``")
     [void]$lines.Add("- Read an existing summary: ``$($commands.summaryOnly)``")
     [void]$lines.Add("- Compare machine perf JSON/profile outputs: ``$($commands.compareMachinePerf)``")
     [void]$lines.Add("- Repackage a proof run: ``$($commands.proofPacket)``")
@@ -164,6 +166,10 @@ function Write-DogfoodReadme {
     [void]$lines.Add('```')
     [void]$lines.Add("")
     [void]$lines.Add("This comparison is measurement evidence only. Keep host, clip, settings, release hash, fallback count, and no-readback percentage attached to any speed claim.")
+    [void]$lines.Add("")
+    [void]$lines.Add("## DNG E3 Async Compression Trial")
+    [void]$lines.Add("Lossless DNG compression-overlap remains opt-in. Use the async-compress commands above to measure whether moving LJ92 compression into the writer worker helps on this machine.")
+    [void]$lines.Add("A useful first pass is queue depth 2 and thread count 2; keep DNG hash PASS, release hash, codec, frame count, and bottleneck fields with any speed claim.")
     [void]$lines.Add("")
     [void]$lines.Add("## Return Packet Import")
     [void]$lines.Add('Copy the generated `mlvapp-local-cuda-proof-*.zip` back to the repo machine and run:')
@@ -208,6 +214,10 @@ param(
     [string]$Receipt = "receipts\FastProxy.marxml",
     [string]$OutputRoot = "",
     [string]$SummaryPath = "",
+    [switch]$DngAsyncWriter,
+    [switch]$DngAsyncWriterCompression,
+    [int]$DngAsyncWriterQueueDepth = 0,
+    [int]$DngAsyncWriterThreadCount = 0,
     [switch]$LaunchOnly,
     [switch]$DngOnly,
     [switch]$ProofOnly,
@@ -225,6 +235,33 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 $dryArgs = @()
 if ($DryRun) {
     $dryArgs += "-DryRun"
+}
+if ($DngAsyncWriterCompression -and -not $DngAsyncWriter) {
+    throw "-DngAsyncWriterCompression requires -DngAsyncWriter."
+}
+if ($DngAsyncWriterQueueDepth -lt 0) {
+    throw "-DngAsyncWriterQueueDepth must be >= 0."
+}
+if ($DngAsyncWriterThreadCount -lt 0) {
+    throw "-DngAsyncWriterThreadCount must be >= 0."
+}
+$dngOnlyOverlapArgs = @()
+$proofOverlapArgs = @()
+if ($DngAsyncWriter) {
+    $dngOnlyOverlapArgs += "-UseAsyncWriter"
+    $proofOverlapArgs += "-CandidateUseAsyncWriter"
+    if ($DngAsyncWriterCompression) {
+        $dngOnlyOverlapArgs += "-UseAsyncWriterCompression"
+        $proofOverlapArgs += "-CandidateUseAsyncWriterCompression"
+    }
+    if ($DngAsyncWriterQueueDepth -gt 0) {
+        $dngOnlyOverlapArgs += @("-AsyncWriterQueueDepth", [string]$DngAsyncWriterQueueDepth)
+        $proofOverlapArgs += @("-CandidateAsyncWriterQueueDepth", [string]$DngAsyncWriterQueueDepth)
+    }
+    if ($DngAsyncWriterThreadCount -gt 0) {
+        $dngOnlyOverlapArgs += @("-AsyncWriterThreadCount", [string]$DngAsyncWriterThreadCount)
+        $proofOverlapArgs += @("-CandidateAsyncWriterThreadCount", [string]$DngAsyncWriterThreadCount)
+    }
 }
 
 if ($SummaryOnly) {
@@ -257,6 +294,7 @@ if ($DngOnly) {
         -Receipt $Receipt `
         -CdngCodec lossless `
         -OutputRoot (Join-Path $OutputRoot "dng-export") `
+        @dngOnlyOverlapArgs `
         @dryArgs
     exit $LASTEXITCODE
 }
@@ -267,6 +305,7 @@ if ($DngOnly) {
     -Input $ClipPath `
     -Receipt $Receipt `
     -OutputRoot (Join-Path $OutputRoot "proof") `
+    @proofOverlapArgs `
     @dryArgs
 $proofExit = $LASTEXITCODE
 $proofSummary = Join-Path $OutputRoot "proof\summary.json"
@@ -371,6 +410,8 @@ $manifest = [ordered]@{
         proof = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv>"
         launchOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -LaunchOnly"
         dngOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly"
+        dngAsyncCompress = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
+        proofAsyncCompress = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngAsyncWriter -DngAsyncWriterCompression -DngAsyncWriterQueueDepth 2 -DngAsyncWriterThreadCount 2"
         summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
         proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         importProofPacket = ".\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"

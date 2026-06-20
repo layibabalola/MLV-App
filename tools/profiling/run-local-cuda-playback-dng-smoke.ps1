@@ -19,6 +19,10 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [string]$GpuExportBackend = "",
     [bool]$TrustedGpuExport = $true,
+    [switch]$CandidateUseAsyncWriter,
+    [switch]$CandidateUseAsyncWriterCompression,
+    [int]$CandidateAsyncWriterQueueDepth = 0,
+    [int]$CandidateAsyncWriterThreadCount = 0,
     [switch]$NoHighPerformancePreference,
     [switch]$SkipPlayback,
     [switch]$SkipPlaybackAb,
@@ -51,6 +55,15 @@ if ($Repeats -lt 1) {
 }
 if ($SkipPlayback -and $SkipPlaybackAb -and $SkipCdng) {
     throw "At least one of playback validation, playback A/B, or CDNG validation must run."
+}
+if ($CandidateUseAsyncWriterCompression -and -not $CandidateUseAsyncWriter) {
+    throw "-CandidateUseAsyncWriterCompression requires -CandidateUseAsyncWriter."
+}
+if ($CandidateAsyncWriterQueueDepth -lt 0) {
+    throw "-CandidateAsyncWriterQueueDepth must be >= 0."
+}
+if ($CandidateAsyncWriterThreadCount -lt 0) {
+    throw "-CandidateAsyncWriterThreadCount must be >= 0."
 }
 
 function Resolve-RepoPath {
@@ -739,6 +752,18 @@ if (-not $SkipCdng -and $failures.Count -eq 0) {
     if (-not [string]::IsNullOrWhiteSpace($GpuExportBackend)) {
         $cdngArgs += @("-CandidateGpuExportBackend", $GpuExportBackend)
     }
+    if ($CandidateUseAsyncWriter) {
+        $cdngArgs += "-CandidateUseAsyncWriter"
+        if ($CandidateUseAsyncWriterCompression) {
+            $cdngArgs += "-CandidateUseAsyncWriterCompression"
+        }
+        if ($CandidateAsyncWriterQueueDepth -gt 0) {
+            $cdngArgs += @("-CandidateAsyncWriterQueueDepth", [string]$CandidateAsyncWriterQueueDepth)
+        }
+        if ($CandidateAsyncWriterThreadCount -gt 0) {
+            $cdngArgs += @("-CandidateAsyncWriterThreadCount", [string]$CandidateAsyncWriterThreadCount)
+        }
+    }
     if ($DryRun) {
         $cdngArgs += "-DryRun"
     }
@@ -811,6 +836,10 @@ $summary = [pscustomobject]@{
         trustedGpuExport = [bool]$TrustedGpuExport
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         gpuExportBackend = $GpuExportBackend
+        candidateUseAsyncWriter = [bool]$CandidateUseAsyncWriter
+        candidateUseAsyncWriterCompression = [bool]$CandidateUseAsyncWriterCompression
+        candidateAsyncWriterQueueDepth = $CandidateAsyncWriterQueueDepth
+        candidateAsyncWriterThreadCount = $CandidateAsyncWriterThreadCount
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
