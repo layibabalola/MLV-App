@@ -18,6 +18,7 @@ param(
     [switch]$ShowWindow,
     [switch]$WaitForPaint,
     [string[]]$AdditionalArgs = @(),
+    [string]$GpuPlaybackReconBackend = "",
     [string[]]$ExtraEnvironment = @(),
     [switch]$DryRun
 )
@@ -97,6 +98,10 @@ try {
             qtPluginPath = $env:QT_PLUGIN_PATH
             qwindowsExists = $true
             previousQtQpaPlatform = $previousPlatform
+            gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+            environment = [pscustomobject]@{
+                MLVAPP_GPU_PLAYBACK_RECON_BACKEND = $(if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) { $GpuPlaybackReconBackend } else { $null })
+            }
         } | ConvertTo-Json -Depth 3
         return
     }
@@ -169,6 +174,12 @@ try {
     }
     elseif ($envBlock.ContainsKey("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")) {
         [void]$envBlock.Remove("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW")
+    }
+    if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
+        $envBlock["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
+    }
+    else {
+        [void]$envBlock.Remove("MLVAPP_GPU_PLAYBACK_RECON_BACKEND")
     }
     Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 
