@@ -769,6 +769,34 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegFilterArguments)
     ASSERT_EQ( std::string("ffmpeg-filter-source=gui-base-color-scale ffmpeg-filter-base-color-scale-ready=true ffmpeg-filter-optional-owned=false ffmpeg-filter-moiree-owned=false ffmpeg-filter-hdr-owned=false ffmpeg-filter-stabilization-owned=false ffmpeg-filter-color-scale=scale=in_color_matrix=bt601:out_color_matrix=bt709 ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709 ffmpeg-filter-ready=true ffmpeg-filter-reason=none"),
                std::string(batchRenderedVideoFfmpegFilterPlanSummary(
                    filterPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoOptionalFilterPlan optionalFilterPlan =
+        batchRenderedVideoOptionalFilterPlanFromFilterPlan(filterPlan);
+    ASSERT_TRUE( optionalFilterPlan.contractReady );
+    ASSERT_TRUE( optionalFilterPlan.baseFilterContractReady );
+    ASSERT_FALSE( optionalFilterPlan.optionalFiltersRequested );
+    ASSERT_FALSE( optionalFilterPlan.optionalFilterGraphOwned );
+    ASSERT_FALSE( optionalFilterPlan.moireeFilterOwned );
+    ASSERT_FALSE( optionalFilterPlan.hdrBlendOwned );
+    ASSERT_FALSE( optionalFilterPlan.stabilizationOwned );
+    ASSERT_FALSE( optionalFilterPlan.optionalFilterOrderOwned );
+    ASSERT_FALSE( optionalFilterPlan.optionalFilterParityOwned );
+    ASSERT_FALSE( optionalFilterPlan.optionalFilterExecutionReady );
+    ASSERT_EQ( std::string("optional-filter-ownership-contract"),
+               std::string(optionalFilterPlan.source.toUtf8().constData()) );
+    ASSERT_EQ( std::string("-vf scale=in_color_matrix=bt601:out_color_matrix=bt709"),
+               std::string(optionalFilterPlan.baseFilterArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("optional-filter-source=optional-filter-ownership-contract optional-filter-base-contract-ready=true optional-filter-base-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709 optional-filter-requested=false optional-filter-graph-owned=false optional-filter-moiree-owned=false optional-filter-hdr-owned=false optional-filter-stabilization-owned=false optional-filter-order-owned=false optional-filter-parity-owned=false optional-filter-exec-ready=false optional-filter-contract-ready=true optional-filter-reason=none"),
+               std::string(batchRenderedVideoOptionalFilterPlanSummary(
+                   optionalFilterPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoFfmpegFilterPlan invalidFilterPlan;
+    optionalFilterPlan =
+        batchRenderedVideoOptionalFilterPlanFromFilterPlan(invalidFilterPlan);
+    ASSERT_FALSE( optionalFilterPlan.contractReady );
+    ASSERT_FALSE( optionalFilterPlan.baseFilterContractReady );
+    ASSERT_EQ( std::string("rendered ffmpeg filter plan unavailable"),
+               std::string(optionalFilterPlan.reason.toUtf8().constData()) );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoSourceAudioContract)
@@ -1175,6 +1203,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.metadataReady );
     ASSERT_FALSE( basePlan.ffmpegFrameReady );
     ASSERT_TRUE( basePlan.ffmpegFilterReady );
+    ASSERT_TRUE( basePlan.optionalFilterContractReady );
+    ASSERT_TRUE( basePlan.optionalFilterPlan.contractReady );
+    ASSERT_TRUE( basePlan.optionalFilterPlan.baseFilterContractReady );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.optionalFiltersRequested );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.optionalFilterGraphOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.moireeFilterOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.hdrBlendOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.stabilizationOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.optionalFilterOrderOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.optionalFilterParityOwned );
+    ASSERT_FALSE( basePlan.optionalFilterPlan.optionalFilterExecutionReady );
     ASSERT_TRUE( basePlan.sourceAudioContractReady );
     ASSERT_TRUE( basePlan.sourceAudioPlan.contractReady );
     ASSERT_FALSE( basePlan.sourceAudioPlan.discoveryAttempted );
@@ -1259,6 +1298,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-filter-source=gui-base-color-scale") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-source=optional-filter-ownership-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-base-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-requested=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-graph-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-moiree-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-hdr-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-stabilization-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-order-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-parity-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-source=video-only-undiscovered") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-state=unknown") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-discovery-attempted=false") != std::string::npos );
@@ -1409,6 +1459,7 @@ TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
     ASSERT_TRUE( plan.metadataReady );
     ASSERT_TRUE( plan.ffmpegFrameReady );
     ASSERT_TRUE( plan.frameProcessingContractReady );
+    ASSERT_TRUE( plan.optionalFilterContractReady );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_TRUE( plan.ffmpegExecutionContractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionContractReady );
@@ -1654,6 +1705,10 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.encoderReady );
     ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.ffmpegFilterReady );
+    ASSERT_TRUE( plan.optionalFilterContractReady );
+    ASSERT_TRUE( plan.optionalFilterPlan.contractReady );
+    ASSERT_FALSE( plan.optionalFilterPlan.optionalFiltersRequested );
+    ASSERT_FALSE( plan.optionalFilterPlan.optionalFilterExecutionReady );
     ASSERT_TRUE( plan.ffmpegAudioContractReady );
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
@@ -1683,6 +1738,10 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-args=-vf scale=in_color_matrix=bt601:out_color_matrix=bt709") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-filter-optional-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-source=optional-filter-ownership-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-graph-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("optional-filter-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-source=video-only-undiscovered") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-discovery-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-known=false") != std::string::npos );
@@ -1721,6 +1780,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.encoderReady );
     ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.ffmpegFilterReady );
+    ASSERT_TRUE( plan.optionalFilterContractReady );
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
@@ -1745,6 +1805,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.encoderReady );
     ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.ffmpegFilterReady );
+    ASSERT_TRUE( plan.optionalFilterContractReady );
     ASSERT_FALSE( plan.frameProcessingContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegExecutionContractReady );
