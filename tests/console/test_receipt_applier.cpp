@@ -1901,6 +1901,100 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegBinaryResolution)
         .find("ffmpeg-binary-source=requested-executable ffmpeg-binary-request=C:/tools/ffmpeg-custom.exe ffmpeg-binary-resolved=C:/tools/ffmpeg-custom.exe") != std::string::npos );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoMediaProbeBinaryResolution)
+{
+    BatchRenderedVideoMediaProbeBinaryPlan defaultPlan =
+        batchRenderedVideoMediaProbeBinaryPlanFromRequestedName();
+    ASSERT_FALSE( defaultPlan.pathSearchOwned );
+    ASSERT_FALSE( defaultPlan.pathSearchAttempted );
+    ASSERT_FALSE( defaultPlan.foundOnPath );
+    ASSERT_TRUE( defaultPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(defaultPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-probe-binary-source=default-executable-name output-verification-probe-binary-request=ffprobe output-verification-probe-binary-resolved=ffprobe output-verification-probe-binary-path-search-owned=false output-verification-probe-binary-path-search-attempted=false output-verification-probe-binary-found=false output-verification-probe-binary-command-ready=true output-verification-probe-binary-reason=none"),
+               std::string(batchRenderedVideoMediaProbeBinaryPlanSummary(
+                   defaultPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoMediaProbeBinaryPlan foundPlan =
+        batchRenderedVideoMediaProbeBinaryPlanFromResolvedPath(
+            QStringLiteral("ffprobe"),
+            QStringLiteral("C:/tools/ffprobe.exe"));
+    ASSERT_TRUE( foundPlan.pathSearchOwned );
+    ASSERT_TRUE( foundPlan.pathSearchAttempted );
+    ASSERT_TRUE( foundPlan.foundOnPath );
+    ASSERT_TRUE( foundPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("C:/tools/ffprobe.exe"),
+               std::string(foundPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-probe-binary-source=path-search output-verification-probe-binary-request=ffprobe output-verification-probe-binary-resolved=C:/tools/ffprobe.exe output-verification-probe-binary-path-search-owned=true output-verification-probe-binary-path-search-attempted=true output-verification-probe-binary-found=true output-verification-probe-binary-command-ready=true output-verification-probe-binary-reason=none"),
+               std::string(batchRenderedVideoMediaProbeBinaryPlanSummary(
+                   foundPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoMediaProbeBinaryPlan missingPlan =
+        batchRenderedVideoMediaProbeBinaryPlanFromResolvedPath(
+            QStringLiteral("ffprobe"),
+            QString());
+    ASSERT_TRUE( missingPlan.pathSearchOwned );
+    ASSERT_TRUE( missingPlan.pathSearchAttempted );
+    ASSERT_FALSE( missingPlan.foundOnPath );
+    ASSERT_TRUE( missingPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(missingPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe executable not found on PATH"),
+               std::string(missingPlan.reason.toUtf8().constData()) );
+
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoSourceMetadata metadata =
+        batchRenderedVideoSourceMetadata(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            STRETCH_H_100,
+            STRETCH_V_100);
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(
+            batchRenderedVideoJobPlanFromRequest(
+                QStringLiteral("C:/clips/M16-1327.MLV"),
+                QStringLiteral("C:/renders"),
+                request,
+                1,
+                batchRenderedVideoDefaultRenderSettings(),
+                batchRenderedVideoFfmpegBinaryPlanFromRequestedName(),
+                foundPlan),
+            metadata);
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.mediaProbeCommandReady );
+    ASSERT_EQ( std::string("C:/tools/ffprobe.exe"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .mediaProbeExecutable.toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.mediaProbeFoundOnPath );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan)
+        .toUtf8().constData())
+        .find("output-verification-probe-binary-source=path-search output-verification-probe-binary-request=ffprobe output-verification-probe-binary-resolved=C:/tools/ffprobe.exe output-verification-probe-binary-path-search-owned=true output-verification-probe-binary-path-search-attempted=true output-verification-probe-binary-found=true output-verification-probe-binary-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan)
+        .toUtf8().constData())
+        .find("output-verification-exec-probe=C:/tools/ffprobe.exe output-verification-exec-probe-binary-source=path-search output-verification-exec-probe-binary-request=ffprobe output-verification-exec-probe-binary-resolved=C:/tools/ffprobe.exe") != std::string::npos );
+
+    plan = batchRenderedVideoJobPlanWithMetadata(
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request,
+            1,
+            batchRenderedVideoDefaultRenderSettings(),
+            batchRenderedVideoFfmpegBinaryPlanFromRequestedName(),
+            missingPlan),
+        metadata);
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.mediaProbeCommandReady );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeFoundOnPath );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan)
+        .toUtf8().constData())
+        .find("output-verification-probe-binary-found=false output-verification-probe-binary-command-ready=true output-verification-probe-binary-reason=ffprobe executable not found on PATH") != std::string::npos );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
 {
     BatchExportFormatRequest request =
@@ -2138,6 +2232,13 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.frameProcessingContractReady );
     ASSERT_FALSE( basePlan.ffmpegExecutionContractReady );
     ASSERT_FALSE( basePlan.outputVerificationExecutionContractReady );
+    ASSERT_TRUE( basePlan.mediaProbeCommandReady );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(basePlan.mediaProbeBinaryPlan.requestedExecutable
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(basePlan.mediaProbeBinaryPlan.resolvedExecutable
+                   .toUtf8().constData()) );
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
@@ -2208,6 +2309,22 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.contractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.outputVerificationContractReady );
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.ffmpegExecutionContractReady );
+    ASSERT_EQ( std::string("default-executable-name"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .mediaProbeBinarySource.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .mediaProbeRequestedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .mediaProbeResolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(plan.outputVerificationExecutionPlan
+                   .mediaProbeExecutable.toUtf8().constData()) );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbePathSearchOwned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbePathSearchAttempted );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeFoundOnPath );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan.mediaProbeCommandReady );
     ASSERT_EQ( std::string("-an"),
                std::string(plan.outputVerificationExecutionPlan
                    .ffmpegAudioArguments.toUtf8().constData()) );
@@ -2426,8 +2543,22 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-execution-raw-frame-feed-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-request=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-resolved=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-path-search-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-path-search-attempted=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-found=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-source=post-ffmpeg-output-verification-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-request=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-resolved=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-path-search-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-path-search-attempted=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-found=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-args=-an") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
@@ -2771,6 +2902,10 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-args=-an") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-transition-args=deferred-until-audio-mux-execution-owned") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-probe-binary-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("output-verification-exec-probe-binary-command-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ffmpeg-audio-mux-planned=true") != std::string::npos );
@@ -3135,7 +3270,20 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.verificationExecutionReady );
     ASSERT_EQ( std::string("ffprobe"),
                std::string(executionPlan.mediaProbeExecutable.toUtf8().constData()) );
-    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-ffmpeg-audio-args=-an output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract output-verification-exec-ffmpeg-audio-transition-args=unspecified output-verification-exec-ffmpeg-audio-contract-ready=true output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true output-verification-exec-ffmpeg-audio-mux-planned=false output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=false output-verification-exec-ffmpeg-audio-sync-planned=false output-verification-exec-ffmpeg-audio-mux-exec-ready=false output-verification-exec-ffmpeg-audio-mux-command-planned=false output-verification-exec-ffmpeg-audio-mux-command-ready=false output-verification-exec-ffmpeg-audio-owned=false output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-reason=none"),
+    ASSERT_EQ( std::string("default-executable-name"),
+               std::string(executionPlan.mediaProbeBinarySource
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(executionPlan.mediaProbeRequestedExecutable
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffprobe"),
+               std::string(executionPlan.mediaProbeResolvedExecutable
+                   .toUtf8().constData()) );
+    ASSERT_FALSE( executionPlan.mediaProbePathSearchOwned );
+    ASSERT_FALSE( executionPlan.mediaProbePathSearchAttempted );
+    ASSERT_FALSE( executionPlan.mediaProbeFoundOnPath );
+    ASSERT_TRUE( executionPlan.mediaProbeCommandReady );
+    ASSERT_EQ( std::string("output-verification-exec-source=post-ffmpeg-output-verification-contract output-verification-exec-path=C:/renders/M16-1327.mp4 output-verification-exec-extension=.mp4 output-verification-exec-probe=ffprobe output-verification-exec-probe-binary-source=default-executable-name output-verification-exec-probe-binary-request=ffprobe output-verification-exec-probe-binary-resolved=ffprobe output-verification-exec-probe-binary-path-search-owned=false output-verification-exec-probe-binary-path-search-attempted=false output-verification-exec-probe-binary-found=false output-verification-exec-probe-binary-command-ready=true output-verification-exec-probe-binary-reason=none output-verification-exec-output-contract-ready=true output-verification-exec-ffmpeg-contract-ready=true output-verification-exec-ffmpeg-audio-args=-an output-verification-exec-ffmpeg-audio-transition-source=video-only-to-mux-transition-contract output-verification-exec-ffmpeg-audio-transition-args=unspecified output-verification-exec-ffmpeg-audio-contract-ready=true output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=true output-verification-exec-ffmpeg-audio-mux-planned=false output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=false output-verification-exec-ffmpeg-audio-sync-planned=false output-verification-exec-ffmpeg-audio-mux-exec-ready=false output-verification-exec-ffmpeg-audio-mux-command-planned=false output-verification-exec-ffmpeg-audio-mux-command-ready=false output-verification-exec-ffmpeg-audio-owned=false output-verification-exec-file-exists-owned=false output-verification-exec-nonempty-owned=false output-verification-exec-probe-owned=false output-verification-exec-codec-container-owned=false output-verification-exec-frame-count-owned=false output-verification-exec-receipt-hash-owned=false output-verification-exec-ready=false output-verification-exec-contract-ready=true output-verification-exec-reason=none"),
                std::string(batchRenderedVideoOutputVerificationExecutionPlanSummary(
                    executionPlan).toUtf8().constData()) );
 
@@ -3398,9 +3546,13 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-binary-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-output-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ffmpeg-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe=ffprobe") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-source=default-executable-name") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-binary-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );

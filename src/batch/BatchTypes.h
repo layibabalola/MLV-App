@@ -399,6 +399,18 @@ struct BatchRenderedVideoFfmpegBinaryPlan
     bool commandExecutableReady = true;
 };
 
+struct BatchRenderedVideoMediaProbeBinaryPlan
+{
+    QString source = QStringLiteral("default-executable-name");
+    QString requestedExecutable = QStringLiteral("ffprobe");
+    QString resolvedExecutable = QStringLiteral("ffprobe");
+    QString reason;
+    bool pathSearchOwned = false;
+    bool pathSearchAttempted = false;
+    bool foundOnPath = false;
+    bool commandExecutableReady = true;
+};
+
 struct BatchRenderedVideoFfmpegCommandPlan
 {
     QString source = QStringLiteral("gui-rawvideo-pipe");
@@ -516,9 +528,18 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     QString expectedOutputPath;
     QString expectedExtension;
     QString mediaProbeExecutable = QStringLiteral("ffprobe");
+    QString mediaProbeBinarySource =
+        QStringLiteral("default-executable-name");
+    QString mediaProbeRequestedExecutable = QStringLiteral("ffprobe");
+    QString mediaProbeResolvedExecutable = QStringLiteral("ffprobe");
+    QString mediaProbeBinaryReason;
     QString reason;
     bool outputVerificationContractReady = false;
     bool ffmpegExecutionContractReady = false;
+    bool mediaProbePathSearchOwned = false;
+    bool mediaProbePathSearchAttempted = false;
+    bool mediaProbeFoundOnPath = false;
+    bool mediaProbeCommandReady = true;
     QString ffmpegAudioArguments;
     QString ffmpegAudioTransitionSource;
     QString ffmpegAudioTransitionArguments;
@@ -579,6 +600,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoFfmpegExecutionPlan ffmpegExecutionPlan;
     BatchRenderedVideoOutputPlan outputPlan;
     BatchRenderedVideoOutputVerificationPlan outputVerificationPlan;
+    BatchRenderedVideoMediaProbeBinaryPlan mediaProbeBinaryPlan;
     BatchRenderedVideoOutputVerificationExecutionPlan outputVerificationExecutionPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
@@ -605,6 +627,7 @@ struct BatchRenderedVideoJobPlan
     bool ffmpegExecutionContractReady = false;
     bool outputReady = false;
     bool outputVerificationContractReady = false;
+    bool mediaProbeCommandReady = false;
     bool outputVerificationExecutionContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -2273,6 +2296,67 @@ batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment(
         QStandardPaths::findExecutable(requested));
 }
 
+inline BatchRenderedVideoMediaProbeBinaryPlan
+batchRenderedVideoMediaProbeBinaryPlanFromRequestedName(
+    const QString & requestedExecutable = QStringLiteral("ffprobe"))
+{
+    BatchRenderedVideoMediaProbeBinaryPlan plan;
+    const QString requested = requestedExecutable.trimmed();
+    plan.requestedExecutable = requested.isEmpty()
+        ? QStringLiteral("ffprobe")
+        : requested;
+    if( !requested.isEmpty() && requested != QStringLiteral("ffprobe") )
+        plan.source = QStringLiteral("requested-executable");
+    plan.resolvedExecutable = plan.requestedExecutable;
+    plan.commandExecutableReady = !plan.resolvedExecutable.isEmpty();
+    if( !plan.commandExecutableReady )
+    {
+        plan.reason = QStringLiteral("ffprobe executable name is empty");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoMediaProbeBinaryPlan
+batchRenderedVideoMediaProbeBinaryPlanFromResolvedPath(
+    const QString & requestedExecutable,
+    const QString & resolvedExecutable)
+{
+    BatchRenderedVideoMediaProbeBinaryPlan plan =
+        batchRenderedVideoMediaProbeBinaryPlanFromRequestedName(
+            requestedExecutable);
+    plan.source = QStringLiteral("path-search");
+    plan.pathSearchOwned = true;
+    plan.pathSearchAttempted = true;
+
+    const QString resolved = resolvedExecutable.trimmed();
+    if( !resolved.isEmpty() )
+    {
+        plan.resolvedExecutable = QDir::cleanPath(resolved);
+        plan.foundOnPath = true;
+        plan.commandExecutableReady = true;
+        plan.reason.clear();
+    }
+    else
+    {
+        plan.foundOnPath = false;
+        plan.commandExecutableReady = !plan.requestedExecutable.isEmpty();
+        plan.reason = QStringLiteral("ffprobe executable not found on PATH");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoMediaProbeBinaryPlan
+batchRenderedVideoMediaProbeBinaryPlanFromCurrentEnvironment(
+    const QString & requestedExecutable = QStringLiteral("ffprobe"))
+{
+    const QString requested = requestedExecutable.trimmed().isEmpty()
+        ? QStringLiteral("ffprobe")
+        : requestedExecutable.trimmed();
+    return batchRenderedVideoMediaProbeBinaryPlanFromResolvedPath(
+        requested,
+        QStandardPaths::findExecutable(requested));
+}
+
 inline QString batchRenderedVideoCommandExecutableForDisplay(
     const QString & executable)
 {
@@ -2457,11 +2541,30 @@ batchRenderedVideoFfmpegExecutionPlanFromCommand(
 inline BatchRenderedVideoOutputVerificationExecutionPlan
 batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     const BatchRenderedVideoOutputVerificationPlan & outputVerificationPlan,
-    const BatchRenderedVideoFfmpegExecutionPlan & ffmpegExecutionPlan)
+    const BatchRenderedVideoFfmpegExecutionPlan & ffmpegExecutionPlan,
+    const BatchRenderedVideoMediaProbeBinaryPlan & mediaProbeBinaryPlan =
+        batchRenderedVideoMediaProbeBinaryPlanFromRequestedName())
 {
     BatchRenderedVideoOutputVerificationExecutionPlan plan;
     plan.expectedOutputPath = outputVerificationPlan.expectedOutputPath;
     plan.expectedExtension = outputVerificationPlan.expectedExtension;
+    plan.mediaProbeBinarySource = mediaProbeBinaryPlan.source;
+    plan.mediaProbeRequestedExecutable =
+        mediaProbeBinaryPlan.requestedExecutable;
+    plan.mediaProbeResolvedExecutable =
+        mediaProbeBinaryPlan.resolvedExecutable;
+    plan.mediaProbeBinaryReason = mediaProbeBinaryPlan.reason;
+    plan.mediaProbePathSearchOwned =
+        mediaProbeBinaryPlan.pathSearchOwned;
+    plan.mediaProbePathSearchAttempted =
+        mediaProbeBinaryPlan.pathSearchAttempted;
+    plan.mediaProbeFoundOnPath = mediaProbeBinaryPlan.foundOnPath;
+    plan.mediaProbeCommandReady =
+        mediaProbeBinaryPlan.commandExecutableReady;
+    plan.mediaProbeExecutable =
+        mediaProbeBinaryPlan.resolvedExecutable.isEmpty()
+            ? mediaProbeBinaryPlan.requestedExecutable
+            : mediaProbeBinaryPlan.resolvedExecutable;
     plan.outputVerificationContractReady =
         outputVerificationPlan.contractReady;
     plan.ffmpegExecutionContractReady = ffmpegExecutionPlan.contractReady;
@@ -2505,6 +2608,7 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.contractReady = !plan.expectedOutputPath.isEmpty()
                       && !plan.expectedExtension.isEmpty()
                       && !plan.mediaProbeExecutable.isEmpty()
+                      && plan.mediaProbeCommandReady
                       && plan.outputVerificationContractReady
                       && plan.ffmpegExecutionContractReady;
     plan.verificationExecutionReady = plan.fileExistenceCheckOwned
@@ -2550,12 +2654,15 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     const BatchExportFormatRequest & request,
     int inputClipCount,
     const BatchRenderedVideoRenderSettings & settings,
-    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan)
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan,
+    const BatchRenderedVideoMediaProbeBinaryPlan & mediaProbeBinaryPlan =
+        batchRenderedVideoMediaProbeBinaryPlanFromRequestedName())
 {
     BatchRenderedVideoJobPlan plan;
     plan.request = request;
     plan.renderSettings = settings;
     plan.ffmpegBinaryPlan = binaryPlan;
+    plan.mediaProbeBinaryPlan = mediaProbeBinaryPlan;
     plan.requestValid = request.format == BatchExportFormat::RenderedVideo
                      && batchRenderedVideoRequestShapeValid(request);
 
@@ -2584,7 +2691,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationExecutionPlan =
             batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                 plan.outputVerificationPlan,
-                plan.ffmpegExecutionPlan);
+                plan.ffmpegExecutionPlan,
+                plan.mediaProbeBinaryPlan);
         plan.sourceAudioPlan =
             batchRenderedVideoSourceAudioPlanForCurrentBuild(inputPath);
         plan.sourceAudioExtractionPlan =
@@ -2677,6 +2785,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.ffmpegAudioPlan.contractReady;
     plan.ffmpegBinaryCommandReady =
         plan.ffmpegBinaryPlan.commandExecutableReady;
+    plan.mediaProbeCommandReady =
+        plan.mediaProbeBinaryPlan.commandExecutableReady;
     plan.outputReady = plan.outputPlan.ready;
     plan.outputVerificationContractReady =
         plan.outputVerificationPlan.contractReady;
@@ -2697,6 +2807,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.audioMuxExecutionContractReady
                        && plan.ffmpegAudioContractReady
                        && plan.ffmpegBinaryCommandReady
+                       && plan.mediaProbeCommandReady
                        && plan.renderSettings.ready
                        && plan.outputReady
                        && plan.outputVerificationContractReady;
@@ -2779,6 +2890,24 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         binaryPlan);
 }
 
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request,
+    const BatchRenderedVideoRenderSettings & settings,
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan,
+    const BatchRenderedVideoMediaProbeBinaryPlan & mediaProbeBinaryPlan)
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        1,
+        settings,
+        binaryPlan,
+        mediaProbeBinaryPlan);
+}
+
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
     const BatchRenderedVideoJobPlan & preflightPlan,
     const BatchRenderedVideoSourceAudioPlan & sourceAudioPlan)
@@ -2851,7 +2980,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
         plan.outputVerificationExecutionPlan =
             batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                 plan.outputVerificationPlan,
-                plan.ffmpegExecutionPlan);
+                plan.ffmpegExecutionPlan,
+                plan.mediaProbeBinaryPlan);
         plan.outputVerificationExecutionContractReady =
             plan.outputVerificationExecutionPlan.contractReady;
     }
@@ -2871,6 +3001,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                        && plan.audioMuxExecutionContractReady
                        && plan.ffmpegAudioContractReady
                        && plan.ffmpegBinaryCommandReady
+                       && plan.mediaProbeCommandReady
                        && plan.renderSettings.ready
                        && plan.outputReady
                        && plan.outputVerificationContractReady;
@@ -2948,7 +3079,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
     plan.outputVerificationExecutionPlan =
         batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
             plan.outputVerificationPlan,
-            plan.ffmpegExecutionPlan);
+            plan.ffmpegExecutionPlan,
+            plan.mediaProbeBinaryPlan);
     plan.outputVerificationExecutionContractReady =
         plan.outputVerificationExecutionPlan.contractReady;
     plan.preflightReady = plan.requestValid
@@ -2966,6 +3098,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.audioMuxExecutionContractReady
                        && plan.ffmpegAudioContractReady
                        && plan.ffmpegBinaryCommandReady
+                       && plan.mediaProbeCommandReady
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
@@ -3072,6 +3205,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegBinaryPlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg executable unavailable")
             : plan.ffmpegBinaryPlan.reason;
+    }
+    if( !plan.mediaProbeCommandReady )
+    {
+        return plan.mediaProbeBinaryPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification media probe executable unavailable")
+            : plan.mediaProbeBinaryPlan.reason;
     }
     if( !plan.renderSettings.ready )
     {
@@ -3589,6 +3728,20 @@ inline QString batchRenderedVideoFfmpegBinaryPlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoMediaProbeBinaryPlanSummary(
+    const BatchRenderedVideoMediaProbeBinaryPlan & plan)
+{
+    return QStringLiteral("output-verification-probe-binary-source=%1 output-verification-probe-binary-request=%2 output-verification-probe-binary-resolved=%3 output-verification-probe-binary-path-search-owned=%4 output-verification-probe-binary-path-search-attempted=%5 output-verification-probe-binary-found=%6 output-verification-probe-binary-command-ready=%7 output-verification-probe-binary-reason=%8")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.requestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.requestedExecutable)
+        .arg(plan.resolvedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.resolvedExecutable)
+        .arg(plan.pathSearchOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.pathSearchAttempted ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.foundOnPath ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.commandExecutableReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
 inline QString batchRenderedVideoSourceMetadataSummary(
     const BatchRenderedVideoSourceMetadata & metadata)
 {
@@ -3659,11 +3812,19 @@ inline QString batchRenderedVideoOutputVerificationPlanSummary(
 inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
     const BatchRenderedVideoOutputVerificationExecutionPlan & plan)
 {
-    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-output-contract-ready=%5 output-verification-exec-ffmpeg-contract-ready=%6 output-verification-exec-ffmpeg-audio-args=%7 output-verification-exec-ffmpeg-audio-transition-source=%8 output-verification-exec-ffmpeg-audio-transition-args=%9 output-verification-exec-ffmpeg-audio-contract-ready=%10 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%11 output-verification-exec-ffmpeg-audio-mux-planned=%12 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%13 output-verification-exec-ffmpeg-audio-sync-planned=%14 output-verification-exec-ffmpeg-audio-mux-exec-ready=%15 output-verification-exec-ffmpeg-audio-mux-command-planned=%16 output-verification-exec-ffmpeg-audio-mux-command-ready=%17 output-verification-exec-ffmpeg-audio-owned=%18 output-verification-exec-file-exists-owned=%19 output-verification-exec-nonempty-owned=%20 output-verification-exec-probe-owned=%21 output-verification-exec-codec-container-owned=%22 output-verification-exec-frame-count-owned=%23 output-verification-exec-receipt-hash-owned=%24 output-verification-exec-ready=%25 output-verification-exec-contract-ready=%26 output-verification-exec-reason=%27")
+    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-probe-binary-source=%5 output-verification-exec-probe-binary-request=%6 output-verification-exec-probe-binary-resolved=%7 output-verification-exec-probe-binary-path-search-owned=%8 output-verification-exec-probe-binary-path-search-attempted=%9 output-verification-exec-probe-binary-found=%10 output-verification-exec-probe-binary-command-ready=%11 output-verification-exec-probe-binary-reason=%12 output-verification-exec-output-contract-ready=%13 output-verification-exec-ffmpeg-contract-ready=%14 output-verification-exec-ffmpeg-audio-args=%15 output-verification-exec-ffmpeg-audio-transition-source=%16 output-verification-exec-ffmpeg-audio-transition-args=%17 output-verification-exec-ffmpeg-audio-contract-ready=%18 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%19 output-verification-exec-ffmpeg-audio-mux-planned=%20 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%21 output-verification-exec-ffmpeg-audio-sync-planned=%22 output-verification-exec-ffmpeg-audio-mux-exec-ready=%23 output-verification-exec-ffmpeg-audio-mux-command-planned=%24 output-verification-exec-ffmpeg-audio-mux-command-ready=%25 output-verification-exec-ffmpeg-audio-owned=%26 output-verification-exec-file-exists-owned=%27 output-verification-exec-nonempty-owned=%28 output-verification-exec-probe-owned=%29 output-verification-exec-codec-container-owned=%30 output-verification-exec-frame-count-owned=%31 output-verification-exec-receipt-hash-owned=%32 output-verification-exec-ready=%33 output-verification-exec-contract-ready=%34 output-verification-exec-reason=%35")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
         .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
         .arg(plan.mediaProbeExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeExecutable)
+        .arg(plan.mediaProbeBinarySource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeBinarySource)
+        .arg(plan.mediaProbeRequestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeRequestedExecutable)
+        .arg(plan.mediaProbeResolvedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeResolvedExecutable)
+        .arg(plan.mediaProbePathSearchOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.mediaProbePathSearchAttempted ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.mediaProbeFoundOnPath ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.mediaProbeCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.mediaProbeBinaryReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeBinaryReason)
         .arg(plan.outputVerificationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ffmpegExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ffmpegAudioArguments.isEmpty()
@@ -3725,7 +3886,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 preflight-ready=%27 runnable=%28 first-blocker=%29")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 preflight-ready=%28 runnable=%29 first-blocker=%30")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -3748,6 +3909,8 @@ inline QString batchRenderedVideoJobPlanSummary(
             plan.audioMuxExecutionPlan))
         .arg(batchRenderedVideoFfmpegAudioPlanSummary(plan.ffmpegAudioPlan))
         .arg(batchRenderedVideoFfmpegBinaryPlanSummary(plan.ffmpegBinaryPlan))
+        .arg(batchRenderedVideoMediaProbeBinaryPlanSummary(
+            plan.mediaProbeBinaryPlan))
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
