@@ -293,6 +293,20 @@ CUDA proof wrapper now requests this separated speed leg by default (use
 measurement isolation for the next engine optimization target, not as a CUDA
 playback speed claim.
 
+Update 2026-06-20 present-bound optimization slice: the first engine response to
+`reduce_gpu_present_draw_queue_sync` removes the proof-only recon-output Bayer
+oracle copy from normal no-readback playback. When
+`MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1` is set, the render thread still
+snapshots the recon Bayer, requires it for the no-readback candidate, and the
+GUI GL-vs-CPU parity probe remains fail-closed. When validation is off (the
+separated A/B speed leg and normal experimental playback), the no-readback path
+can stay armed with only the required prepared input Bayer + CUDA state, and
+telemetry records `gpu_playback_recon_texture_present_no_readback_oracle_*` plus
+the owned-byte counters so UltraMagnus can verify the proof buffer is absent
+from speed timing. This is a CPU/memory-copy reduction in the presentation
+handoff, not a claim that CUDA playback is now faster; quote speed only from a
+fresh same-host A/B packet built from this source.
+
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel
 i9-12900HK, 64 GB RAM, and an `NVIDIA GeForce RTX 3060 Laptop GPU`. That is an

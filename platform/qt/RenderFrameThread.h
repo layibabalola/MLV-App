@@ -275,9 +275,10 @@ private:
         /* Recon-output Dual ISO bayer, snapshotted right after the recon stage.
          * The slot's rawImage16 buffer is later overwritten by the process stage
          * (getMlvProcessedFrame16Scaled), so the recon bayer that the no-readback
-         * GL R16 texture actually represents must be preserved separately to serve
-         * as the parity oracle. Without this, the GL-vs-oracle comparison wrongly
-         * uses the fully-processed display frame and always reports a mismatch. */
+         * GL R16 texture actually represents must be preserved separately when
+         * output-validation is explicitly enabled. Normal no-readback playback
+         * leaves this empty so it does not copy a proof-only full-resolution
+         * oracle on every presented frame. */
         std::vector<uint16_t> gpuPlaybackReconTextureBayerFrame;
         GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         int gpuPlaybackReconTextureWidth = 0;
