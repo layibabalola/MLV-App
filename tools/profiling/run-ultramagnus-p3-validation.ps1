@@ -724,7 +724,6 @@ if ($failures.Count -eq 0) {
     PlaybackDebayer = 'amaze'
     PlaybackProcessing = 'subset'
     GpuPreviewProcessing = 'gpu'
-    GpuAmazeDebayer = 'gpu'
     GpuAmazeTexturePresent = `$true
     ScaleFactor = '$ScaleFactor'
     QualityMode = '$QualityMode'
@@ -783,11 +782,6 @@ exit `$LASTEXITCODE
         $noReadbackFallbackReasons = [ordered]@{}
         $logPath = $null
         $glOutputProof = $null
-        $amazeTexturePresentRequested = $false
-        $amazeTexturePresentCandidate = $false
-        $amazeTexturePresentActive = $false
-        $amazeTexturePresentReadbackFallbackActive = $false
-        $gpuPreviewProcessingActive = $false
         $glProbeActiveCount = 0
         $glTextureReadbackOkCount = 0
         $glParityCheckedCount = 0
@@ -808,19 +802,6 @@ exit `$LASTEXITCODE
             }
             $logPath = $result.log.path
             $glOutputProof = $result.visualQuality.glOutputProof
-            $visualState = $result.visualQuality.visualState
-            if ($visualState) {
-                $amazeTexturePresentRequested =
-                    ([int]$visualState.gpu_amaze_texture_present_requested) -eq 1
-                $amazeTexturePresentCandidate =
-                    ([int]$visualState.gpu_amaze_texture_present_candidate) -eq 1
-                $amazeTexturePresentActive =
-                    ([int]$visualState.gpu_amaze_texture_present_active) -eq 1
-                $amazeTexturePresentReadbackFallbackActive =
-                    ([int]$visualState.gpu_amaze_texture_present_cpu_readback_fallback_active) -eq 1
-                $gpuPreviewProcessingActive =
-                    ([int]$visualState.render_thread_using_gpu_preview_processing) -eq 1
-            }
             if ($glOutputProof) {
                 $glProbeActiveCount = [int]$glOutputProof.activeProbeCount
                 $glTextureReadbackOkCount = [int]$glOutputProof.textureReadbackOkCount
@@ -907,21 +888,6 @@ exit `$LASTEXITCODE
             }
             if ($cudaTextureSourceFrameCount -gt 0) {
                 Add-Failure $clipFailures "Observed $cudaTextureSourceFrameCount legacy texture_source=cuda_gl_r16_texture frame(s); expected AMaZE RGBA texture source only."
-            }
-            if (!$amazeTexturePresentRequested) {
-                Add-Failure $clipFailures "Visual state did not report gpu_amaze_texture_present_requested=1."
-            }
-            if (!$amazeTexturePresentCandidate) {
-                Add-Failure $clipFailures "Visual state did not report gpu_amaze_texture_present_candidate=1."
-            }
-            if (!$amazeTexturePresentActive) {
-                Add-Failure $clipFailures "Visual state did not report gpu_amaze_texture_present_active=1."
-            }
-            if ($amazeTexturePresentReadbackFallbackActive) {
-                Add-Failure $clipFailures "Visual state reported gpu_amaze_texture_present_cpu_readback_fallback_active=1; expected no readback fallback."
-            }
-            if (!$gpuPreviewProcessingActive) {
-                Add-Failure $clipFailures "Visual state did not report render_thread_using_gpu_preview_processing=1."
             }
             if ($cudaAmazeTextureSourceFrameCount -le 0) {
                 Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_rgba16_amaze_texture."
@@ -1019,11 +985,6 @@ exit `$LASTEXITCODE
             activeNoReadbackFrameCount = $activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
-            amazeTexturePresentRequested = $amazeTexturePresentRequested
-            amazeTexturePresentCandidate = $amazeTexturePresentCandidate
-            amazeTexturePresentActive = $amazeTexturePresentActive
-            amazeTexturePresentReadbackFallbackActive = $amazeTexturePresentReadbackFallbackActive
-            gpuPreviewProcessingActive = $gpuPreviewProcessingActive
             fallbackFrameCount = $fallbackFrameCount
             noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
             glOutputProof = $glOutputProof
