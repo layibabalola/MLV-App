@@ -19,6 +19,7 @@ param(
     [switch]$FailOnColorArtifact,
     [switch]$RequireCandidateImprovesPresentedFps,
     [switch]$RequireCandidateGlParity,
+    [switch]$NoHighPerformancePreference,
     [switch]$DryRun
 )
 
@@ -77,6 +78,31 @@ function Get-FileArtifact {
         lastWriteTime = $item.LastWriteTime
         sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
     }
+}
+
+function Get-GpuPreferenceValue {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    if (!(Test-Path -LiteralPath $prefKey)) {
+        return $null
+    }
+    $item = Get-ItemProperty -LiteralPath $prefKey -Name $Executable -ErrorAction SilentlyContinue
+    if ($null -eq $item) {
+        return $null
+    }
+    return [string]$item.$Executable
+}
+
+function Set-GpuPreferenceHighPerformance {
+    param([Parameter(Mandatory = $true)][string]$Executable)
+    $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
+    New-Item -Path $prefKey -Force | Out-Null
+    New-ItemProperty `
+        -Path $prefKey `
+        -Name $Executable `
+        -Value "GpuPreference=2;" `
+        -PropertyType String `
+        -Force | Out-Null
 }
 
 function Convert-ToNullableDouble {
@@ -158,8 +184,28 @@ function New-MetricDelta {
     }
 }
 
-function Get-NvidiaSmiSnapshot {
+function Resolve-NvidiaSmiCommand {
     $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        "C:\Windows\System32\nvidia-smi.exe",
+        (Join-Path $env:ProgramFiles "NVIDIA Corporation\NVSMI\nvidia-smi.exe"),
+        (Join-Path $env:ProgramW6432 "NVIDIA Corporation\NVSMI\nvidia-smi.exe")
+    )
+    foreach ($candidate in @($candidates | Select-Object -Unique)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and
+            (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    $null
+}
+
+function Get-NvidiaSmiSnapshot {
+    $cmd = Resolve-NvidiaSmiCommand
     if (-not $cmd) {
         return [pscustomobject]@{
             found = $false
@@ -170,10 +216,10 @@ function Get-NvidiaSmiSnapshot {
     }
 
     try {
-        $output = & $cmd.Source --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1
+        $output = & $cmd --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1
         return [pscustomobject]@{
             found = $true
-            path = $cmd.Source
+            path = $cmd
             output = @($output | ForEach-Object { [string]$_ })
             error = $null
         }
@@ -269,81 +315,6 @@ function Read-SmokeSummary {
             capabilityConsistent = Get-NestedValue $json "visualQuality.autoDecision.capabilityConsistent"
         }
     }
-}
-
-function New-RunCommand {
-    param(
-        [Parameter(Mandatory = $true)][string]$SmokeScript,
-        [Parameter(Mandatory = $true)][string]$RepoRoot,
-        [Parameter(Mandatory = $true)][string]$Exe,
-        [Parameter(Mandatory = $true)][string]$Clip,
-        [Parameter(Mandatory = $true)][string]$Output,
-        [Parameter(Mandatory = $true)][string]$ScreenshotDir,
-        [Parameter(Mandatory = $true)][string]$ReceiptPath,
-        [Parameter(Mandatory = $true)][string]$Quality,
-        [Parameter(Mandatory = $true)][string]$Scale,
-        [Parameter(Mandatory = $true)][string]$ThreadSetting,
-        [Parameter(Mandatory = $true)][int]$SecondsValue,
-        [Parameter(Mandatory = $true)][int]$SettleMsValue,
-        [Parameter(Mandatory = $true)][int]$StartFrameValue,
-        [Parameter(Mandatory = $true)][string]$GpuPreviewProcessing,
-        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GpuBackend,
-        [Parameter(Mandatory = $true)][string[]]$ExtraEnvironment,
-        [Parameter(Mandatory = $true)][bool]$CaptureScreenshot,
-        [Parameter(Mandatory = $true)][bool]$FailOnColorArtifactValue,
-        [Parameter(Mandatory = $true)][bool]$DryRunValue
-    )
-
-    $expectedScale = -1
-    [void][int]::TryParse($Scale, [ref]$expectedScale)
-    $expectedQuality = -1
-    [void][int]::TryParse($Quality, [ref]$expectedQuality)
-
-    $args = @(
-        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-        "-File", $SmokeScript,
-        "-RepoRoot", $RepoRoot,
-        "-ExePath", $Exe,
-        "-ClipPath", $Clip,
-        "-Output", $Output,
-        "-Receipt", $ReceiptPath,
-        "-Seconds", [string]$SecondsValue,
-        "-SettleMs", [string]$SettleMsValue,
-        "-StartFrame", [string]$StartFrameValue,
-        "-Threads", $ThreadSetting,
-        "-Scope", "none",
-        "-PlaybackDebayer", "amaze",
-        "-PlaybackProcessing", "subset",
-        "-GpuPreviewProcessing", $GpuPreviewProcessing,
-        "-ScaleFactor", $Scale,
-        "-QualityMode", $Quality,
-        "-ExpectedScaleRequest", [string]$expectedScale,
-        "-ExpectedVisualScaleRequest", [string]$expectedScale,
-        "-ExpectedQualityMode", [string]$expectedQuality,
-        "-RequireLookAssist:`$false",
-        "-DisableLookAssist",
-        "-EnablePhase3QualityModes",
-        "-PreserveExperimentalEnvironment",
-        "-FrameTelemetry",
-        "-DetectPlaybackArtifacts",
-        "-ExtraEnvironment"
-    )
-    if ($ExtraEnvironment.Count -gt 0) {
-        $args += ($ExtraEnvironment -join ",")
-    }
-    if (-not [string]::IsNullOrWhiteSpace($GpuBackend)) {
-        $args += @("-GpuPlaybackReconBackend", $GpuBackend)
-    }
-    if ($CaptureScreenshot) {
-        $args += @("-CaptureScreenshot", "-ScreenshotOutputDir", $ScreenshotDir)
-    }
-    if ($FailOnColorArtifactValue) {
-        $args += "-FailOnColorArtifact"
-    }
-    if ($DryRunValue) {
-        $args += "-DryRun"
-    }
-    $args
 }
 
 function ConvertTo-PowerShellSingleQuotedLiteral {
@@ -466,6 +437,12 @@ else {
 }
 $exe = (Resolve-Path -LiteralPath $ExePath).Path
 $exeDir = Split-Path -Parent $exe
+$gpuPreferenceBefore = Get-GpuPreferenceValue -Executable $exe
+$gpuPreferenceAfter = $gpuPreferenceBefore
+if (!$DryRun -and !$NoHighPerformancePreference) {
+    Set-GpuPreferenceHighPerformance -Executable $exe
+    $gpuPreferenceAfter = Get-GpuPreferenceValue -Executable $exe
+}
 
 $smokeScript = Join-Path $root "tools\profiling\run-release-gui-smoke.ps1"
 if (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) {
@@ -576,6 +553,13 @@ $summary = [ordered]@{
     validationSampleEvery = $ValidationSampleEvery
     runOrder = if ($CandidateFirst) { @("candidate", "baseline") } else { @("baseline", "candidate") }
     nvidiaSmi = Get-NvidiaSmiSnapshot
+    gpuPreference = [pscustomobject]@{
+        attemptedHighPerformance = [bool](!$NoHighPerformancePreference)
+        mutated = [bool](!$DryRun -and !$NoHighPerformancePreference)
+        before = $gpuPreferenceBefore
+        after = $gpuPreferenceAfter
+        expected = "GpuPreference=2;"
+    }
     commands = [pscustomobject]@{
         baseline = $baselineCommand
         candidate = $candidateCommand
@@ -592,6 +576,7 @@ $summary = [ordered]@{
         provesDellSupport = $false
         notes = @(
             "This wrapper compares CPU baseline and scoped CUDA no-readback candidate on the same release executable.",
+            "On Windows hybrid-GPU laptops, the wrapper sets the per-app high-performance GPU preference before real runs unless -NoHighPerformancePreference is passed.",
             "A speed gain is quotable only for the host, clip, settings, and run duration captured in this summary.",
             "UltraMagnus RTX 4090 results do not prove Dell laptop support; run this wrapper on the Dell laptop for that claim."
         )
@@ -642,6 +627,9 @@ if ($baselineResult.exitCode -ne 0) {
 }
 if ($candidateResult.exitCode -ne 0) {
     $proofFailures += "candidate-smoke-exit-code=$($candidateResult.exitCode)"
+}
+if (-not $NoHighPerformancePreference -and $gpuPreferenceAfter -ne "GpuPreference=2;") {
+    $proofFailures += "windows-high-performance-gpu-preference-not-set actual=$gpuPreferenceAfter"
 }
 if (-not $baselineSummary.validationOk) {
     $proofFailures += "baseline-validation-not-ok"

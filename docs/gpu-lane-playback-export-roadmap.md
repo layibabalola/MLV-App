@@ -177,6 +177,10 @@ GUI/status FPS, timeline FPS, render/draw/recon timing deltas, validation
 failures, and candidate GL proof fields. This is the correct surface for
 answering "GPU playback speed gain versus legacy CPU" on UltraMagnus or the Dell
 laptop; prior P3 proof packets prove no-readback correctness, not a speedup.
+The follow-up hybrid-GPU hardening makes real A/B runs set the Windows per-app
+high-performance GPU preference for `MLVApp.exe` unless disabled, and both the
+A/B and DNG runners now look for `nvidia-smi.exe` in the usual Windows NVSMI
+locations when it is not on PATH.
 
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel
