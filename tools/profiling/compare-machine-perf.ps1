@@ -1,9 +1,34 @@
 param(
-    [Parameter(Mandatory = $true, ValueFromRemainingArguments = $true)]
-    [string[]]$InputPath
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RawArgs
 )
 
 $ErrorActionPreference = "Stop"
+
+$Json = $false
+$OutputJson = ""
+$InputPath = @()
+for ($i = 0; $i -lt @($RawArgs).Count; $i++) {
+    $arg = [string]$RawArgs[$i]
+    $normalizedArg = $arg.ToLowerInvariant()
+    if ($normalizedArg -eq "-json") {
+        $Json = $true
+        continue
+    }
+    if ($normalizedArg -eq "-outputjson") {
+        if ($i + 1 -ge @($RawArgs).Count) {
+            throw "-OutputJson requires a path argument."
+        }
+        $i++
+        $OutputJson = [string]$RawArgs[$i]
+        continue
+    }
+    $InputPath += $arg
+}
+
+if (@($InputPath).Count -eq 0) {
+    throw "At least one input JSON/profile/field-log path is required."
+}
 
 function Read-JsonRecords {
     param([string]$Path)
@@ -47,6 +72,20 @@ function Read-JsonRecords {
         }
         return $records
     }
+}
+
+function Write-JsonFile {
+    param(
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+    $dir = Split-Path -Parent $resolved
+    if ($dir) {
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    }
+    $Value | ConvertTo-Json -Depth 64 | Set-Content -LiteralPath $resolved -Encoding UTF8
 }
 
 function Assert-MachineFingerprint {
@@ -338,6 +377,22 @@ function New-LocalProofSummaryRow {
     }
 }
 
+function New-ComparisonDocument {
+    param(
+        [object[]]$Rows,
+        [string[]]$Inputs
+    )
+
+    [pscustomobject]@{
+        schema = "mlvapp.compare-machine-perf.v1"
+        generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+        input_count = @($Inputs).Count
+        row_count = @($Rows).Count
+        inputs = @($Inputs)
+        rows = @($Rows)
+    }
+}
+
 $rows = @()
 foreach ($path in $InputPath) {
     foreach ($record in (Read-JsonRecords -Path $path)) {
@@ -361,7 +416,19 @@ if ($rows.Count -eq 0) {
     throw "No comparable playback perf rows were produced."
 }
 
-$rows | Sort-Object machine, source |
+$sortedRows = @($rows | Sort-Object machine, source)
+$comparison = New-ComparisonDocument -Rows $sortedRows -Inputs $InputPath
+
+if (-not [string]::IsNullOrWhiteSpace($OutputJson)) {
+    Write-JsonFile -Value $comparison -Path $OutputJson
+}
+
+if ($Json) {
+    $comparison | ConvertTo-Json -Depth 64 | Write-Output
+    return
+}
+
+$sortedRows |
     Format-Table -AutoSize -Wrap record_kind, machine, presented_fps, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
     Out-String -Width 4096 |
     Write-Output

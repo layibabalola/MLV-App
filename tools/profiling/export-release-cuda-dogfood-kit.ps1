@@ -173,6 +173,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add("- Full proof with lossless-only DNG async-compress candidate: ``$($commands.proofLosslessAsyncCompress)``")
     [void]$lines.Add("- Read an existing summary: ``$($commands.summaryOnly)``")
     [void]$lines.Add("- Compare machine perf JSON/profile outputs: ``$($commands.compareMachinePerf)``")
+    [void]$lines.Add("- Write versioned machine perf comparison JSON: ``$($commands.compareMachinePerfJson)``")
     [void]$lines.Add("- Repackage a proof run: ``$($commands.proofPacket)``")
     [void]$lines.Add("")
     [void]$lines.Add("## GUI Performance Profiling")
@@ -186,6 +187,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add('```')
     [void]$lines.Add("")
     [void]$lines.Add("This comparison is measurement evidence only. Keep host, clip, settings, release hash, fallback count, and no-readback percentage attached to any speed claim.")
+    [void]$lines.Add('Use `-Json` or `-OutputJson <compare.json>` when the Dell/UltraMagnus comparison needs to be archived as `mlvapp.compare-machine-perf.v1` instead of copied from the console table.')
     [void]$lines.Add("For proof summaries and export field-log rows, the same table also carries CDNG/DNG hash/export coverage, DNG wall-time delta, throughput classification, and export-side suggested optimization when present.")
     [void]$lines.Add("")
     [void]$lines.Add("## DNG E3 Async Compression Trial")
@@ -462,6 +464,7 @@ $manifest = [ordered]@{
         proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         importProofPacket = ".\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"
         compareMachinePerf = ".\tools\profiling\compare-machine-perf.ps1 <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-profile-or-jsonl>"
+        compareMachinePerfJson = ".\tools\profiling\compare-machine-perf.ps1 -OutputJson .\machine-compare.json <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-profile-or-jsonl>"
         directProof = ".\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input <clip.mlv>"
         directSummary = ".\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     }

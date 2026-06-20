@@ -374,6 +374,9 @@ prints side-by-side presented FPS, no-readback percentage, fallback percentage,
 fallback count, bottleneck, and suggested-optimization rows. This is still a
 measurement surface only: Dell/UltraMagnus support and speed claims require
 real same-clip host packets with fallback/no-readback/DNG hash/timing evidence.
+The same comparator can also emit a versioned
+`mlvapp.compare-machine-perf.v1` JSON document via `-Json` or `-OutputJson`,
+so cross-machine results can be archived without scraping the console table.
 The comparator also accepts valid export field-log rows and, for dogfood proof
 summaries, shows CDNG verdict, DNG hash verdict, GPU export replacement/trusted
 coverage, DNG wall-time delta, throughput classification, and the export-side
