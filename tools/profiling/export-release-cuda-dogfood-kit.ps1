@@ -118,9 +118,11 @@ param(
     [string]$ClipPath,
     [string]$Receipt = "receipts\FastProxy.marxml",
     [string]$OutputRoot = "",
+    [string]$SummaryPath = "",
     [switch]$LaunchOnly,
     [switch]$DngOnly,
     [switch]$ProofOnly,
+    [switch]$SummaryOnly,
     [switch]$DryRun
 )
 
@@ -133,6 +135,17 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 $dryArgs = @()
 if ($DryRun) {
     $dryArgs += "-DryRun"
+}
+
+if ($SummaryOnly) {
+    if ([string]::IsNullOrWhiteSpace($SummaryPath)) {
+        $SummaryPath = Join-Path $repoRoot ".claude-state\profiling\local-cuda-playback-dng-smoke-latest.json"
+    }
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $repoRoot "tools\profiling\summarize-local-cuda-proof.ps1") `
+        -RepoRoot $repoRoot `
+        -SummaryPath $SummaryPath
+    exit $LASTEXITCODE
 }
 
 if ($LaunchOnly) {
@@ -165,7 +178,16 @@ if ($DngOnly) {
     -Receipt $Receipt `
     -OutputRoot (Join-Path $OutputRoot "proof") `
     @dryArgs
-exit $LASTEXITCODE
+$proofExit = $LASTEXITCODE
+$proofSummary = Join-Path $OutputRoot "proof\summary.json"
+if (Test-Path -LiteralPath $proofSummary -PathType Leaf) {
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File (Join-Path $repoRoot "tools\profiling\summarize-local-cuda-proof.ps1") `
+        -RepoRoot $repoRoot `
+        -SummaryPath $proofSummary `
+        -Output (Join-Path $OutputRoot "proof\proof-report.md")
+}
+exit $proofExit
 '@
 
     $dir = Split-Path -Parent $Path
@@ -251,7 +273,9 @@ $manifest = [ordered]@{
         proof = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv>"
         launchOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -LaunchOnly"
         dngOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly"
+        summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
         directProof = ".\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input <clip.mlv>"
+        directSummary = ".\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     }
     proofBoundary = [pscustomobject]@{
         packageOnly = $true

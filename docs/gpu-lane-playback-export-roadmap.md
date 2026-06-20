@@ -215,6 +215,17 @@ NVIDIA host" surface for Dell/UltraMagnus trials: it preserves the paths the
 proof scripts expect and records release/backend hashes up front. The kit is
 packaging evidence only; Dell or UltraMagnus support and speed claims still come
 only from a passing host-local proof summary produced by the bundled scripts.
+`tools/profiling/summarize-local-cuda-proof.ps1` now reads that top-level local
+proof summary and emits an operator-facing Markdown/JSON report that separates
+playback no-readback proof, playback CPU-vs-CUDA speed, DNG hash/GPU replacement
+proof, DNG export speed, artifact hashes, blockers, and quote boundaries. The
+dogfood launcher writes `proof-report.md` beside a completed proof summary and
+also exposes `-SummaryOnly -SummaryPath <summary.json>` for reading an imported
+Dell/UltraMagnus packet. The summarizer is deliberately fail-closed:
+`QUOTABLE_PASS` requires a real non-dry-run host success with NVIDIA discovery,
+playback correctness/no-readback/no-fallback/GL-parity proof, clean playback A/B,
+and CDNG/DNG-hash/GPU-replacement proof; otherwise it reports `NOT_QUOTABLE`
+with blockers.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
