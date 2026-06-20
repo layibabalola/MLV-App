@@ -1049,6 +1049,17 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_TRUE( plan.ffmpegCommandPlan.ready );
     ASSERT_TRUE( plan.ffmpegCommandPlan.rawVideoPipeInputReady );
+    ASSERT_TRUE( plan.ffmpegExecutionContractReady );
+    ASSERT_TRUE( plan.ffmpegExecutionPlan.contractReady );
+    ASSERT_TRUE( plan.ffmpegExecutionPlan.commandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.executionReady );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.processLaunchOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.stdinPipeOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.rawFrameFeedOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.stderrCaptureOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.exitCodeValidationOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.timeoutOwned );
+    ASSERT_FALSE( plan.ffmpegExecutionPlan.cleanupOwned );
     ASSERT_EQ( std::string("-an"),
                std::string(plan.ffmpegCommandPlan.audioArguments.toUtf8().constData()) );
     ASSERT_FALSE( plan.ffmpegCommandPlan.audioInputOwned );
@@ -1075,6 +1086,9 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
     ASSERT_EQ( std::string("ffmpeg-command-source=gui-rawvideo-pipe ffmpeg-command-exe=ffmpeg ffmpeg-command-raw-pix-fmt=rgb48 ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - ffmpeg-command-color-source=rec709-default ffmpeg-command-color-tag=1 ffmpeg-command-color-args=-color_primaries 1 -color_trc 1 -colorspace bt709 ffmpeg-command-audio-args=-an ffmpeg-command-audio-owned=false ffmpeg-command-execution-owned=false ffmpeg-command-output-verification-owned=false ffmpeg-command-args=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - -c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p -color_primaries 1 -color_trc 1 -colorspace bt709 -vf scale=in_color_matrix=bt601:out_color_matrix=bt709 -an \"C:/renders/M16-1327.mp4\" ffmpeg-command-ready=true ffmpeg-command-reason=none"),
                 std::string(batchRenderedVideoFfmpegCommandPlanSummary(
                     plan.ffmpegCommandPlan).toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-execution-source=command-contract ffmpeg-execution-exe=ffmpeg ffmpeg-execution-command-ready=true ffmpeg-execution-process-launch-owned=false ffmpeg-execution-stdin-pipe-owned=false ffmpeg-execution-raw-frame-feed-owned=false ffmpeg-execution-stderr-capture-owned=false ffmpeg-execution-exit-code-owned=false ffmpeg-execution-timeout-owned=false ffmpeg-execution-cleanup-owned=false ffmpeg-execution-ready=false ffmpeg-execution-contract-ready=true ffmpeg-execution-reason=none"),
+               std::string(batchRenderedVideoFfmpegExecutionPlanSummary(
+                   plan.ffmpegExecutionPlan).toUtf8().constData()) );
 
     BatchRenderedVideoFfmpegCommandPlan invalidPlan =
         batchRenderedVideoFfmpegCommandPlanFromParts(
@@ -1085,6 +1099,12 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
     ASSERT_FALSE( invalidPlan.ready );
     ASSERT_EQ( std::string("rendered ffmpeg frame plan unavailable"),
                std::string(invalidPlan.reason.toUtf8().constData()) );
+    BatchRenderedVideoFfmpegExecutionPlan invalidExecutionPlan =
+        batchRenderedVideoFfmpegExecutionPlanFromCommand(invalidPlan);
+    ASSERT_FALSE( invalidExecutionPlan.contractReady );
+    ASSERT_FALSE( invalidExecutionPlan.executionReady );
+    ASSERT_EQ( std::string("rendered ffmpeg frame plan unavailable"),
+               std::string(invalidExecutionPlan.reason.toUtf8().constData()) );
 }
 
 TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
@@ -1108,6 +1128,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( basePlan.ffmpegAudioContractReady );
     ASSERT_TRUE( basePlan.ffmpegAudioPlan.contractReady );
     ASSERT_FALSE( basePlan.ffmpegAudioPlan.audioMuxOwned );
+    ASSERT_FALSE( basePlan.ffmpegExecutionContractReady );
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
@@ -1143,6 +1164,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.metadataReady );
     ASSERT_TRUE( plan.ffmpegFrameReady );
     ASSERT_TRUE( plan.ffmpegCommandReady );
+    ASSERT_TRUE( plan.ffmpegExecutionContractReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
     ASSERT_EQ( 1920, plan.ffmpegFramePlan.outputWidth );
@@ -1176,6 +1198,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 1920x1284 -pix_fmt rgb48 -i -") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-audio-owned=false ffmpeg-command-execution-owned=false ffmpeg-command-output-verification-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-process-launch-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-stdin-pipe-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-raw-frame-feed-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
     BatchRenderedVideoJobPlan settingsBasePlan =
@@ -1193,6 +1221,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( implicitSettingsPlan.metadataReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegFrameReady );
     ASSERT_TRUE( implicitSettingsPlan.ffmpegCommandReady );
+    ASSERT_TRUE( implicitSettingsPlan.ffmpegExecutionContractReady );
     ASSERT_TRUE( implicitSettingsPlan.preflightReady );
     ASSERT_FALSE( implicitSettingsPlan.runnable );
     ASSERT_EQ( 1920, implicitSettingsPlan.ffmpegFramePlan.outputWidth );
@@ -1219,6 +1248,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( plan.metadataReady );
     ASSERT_FALSE( plan.ffmpegFrameReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionContractReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_EQ( std::string("rendered resize dimensions invalid"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
@@ -1234,6 +1264,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.metadataReady );
     ASSERT_FALSE( plan.ffmpegFrameReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionContractReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_EQ( std::string("rendered source dimensions invalid"),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
@@ -1279,6 +1310,7 @@ TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
     ASSERT_TRUE( plan.metadataReady );
     ASSERT_TRUE( plan.ffmpegFrameReady );
     ASSERT_TRUE( plan.ffmpegCommandReady );
+    ASSERT_TRUE( plan.ffmpegExecutionContractReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
     ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
@@ -1454,6 +1486,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.ffmpegFilterReady );
     ASSERT_TRUE( plan.ffmpegAudioContractReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionContractReady );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
@@ -1487,6 +1520,8 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("ffmpeg-audio-extraction-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-mux-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-execution-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
@@ -1509,6 +1544,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.ffmpegFilterReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionContractReady );
     ASSERT_FALSE( plan.renderSettings.ready );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_FALSE( plan.preflightReady );
@@ -1530,6 +1566,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( plan.ffmpegVideoReady );
     ASSERT_TRUE( plan.ffmpegFilterReady );
     ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegExecutionContractReady );
     ASSERT_FALSE( plan.outputReady );
     ASSERT_FALSE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );

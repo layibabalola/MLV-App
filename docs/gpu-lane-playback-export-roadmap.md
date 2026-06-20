@@ -1139,6 +1139,8 @@ _Current E4 implementation note (2026-06-20 ffmpeg override slice): the batch CL
 
 _Current E4 implementation note (2026-06-20 source-audio discovery contract slice): the central rendered job plan now carries a separate `BatchRenderedVideoSourceAudioPlan` before the ffmpeg audio command contract. The current plan reports source audio as `unknown`, discovery/extraction/mux-input/sync validation as unowned, and video-only fallback as ready, which keeps the existing `-an` command shape honest without implying that source audio was inspected. This remains fail-closed scaffolding: it does not parse MLV audio blocks, extract audio, mux audio, validate sync, execute ffmpeg, verify media, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 ffmpeg execution contract slice): the central rendered job plan now carries a `BatchRenderedVideoFfmpegExecutionPlan` after the command-shape phase. Once source metadata makes the command concrete, the plan reports bound executable/command readiness and explicitly keeps process launch, stdin pipe ownership, raw-frame feeding, stderr/progress capture, exit-code validation, timeout handling, and cleanup ownership false. This is execution-boundary scaffolding only: it does not start an ffmpeg process, feed frames, create outputs, verify media, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
