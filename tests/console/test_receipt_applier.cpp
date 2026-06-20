@@ -3852,6 +3852,13 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
         batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
             verificationPlan,
             ffmpegExecutionPlan);
+    BatchRenderedVideoReceiptHashValidationPlan receiptHashPlan =
+        batchRenderedVideoReceiptHashValidationPlanFromExecution(
+            executionPlan);
+    executionPlan =
+        batchRenderedVideoOutputVerificationExecutionPlanWithReceiptHashValidation(
+            executionPlan,
+            receiptHashPlan);
     ASSERT_TRUE( executionPlan.contractReady );
     ASSERT_TRUE( executionPlan.outputVerificationContractReady );
     ASSERT_TRUE( executionPlan.ffmpegExecutionContractReady );
@@ -3890,7 +3897,18 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.mediaProbeExecutionOwned );
     ASSERT_FALSE( executionPlan.codecContainerValidationOwned );
     ASSERT_FALSE( executionPlan.frameCountValidationOwned );
+    ASSERT_TRUE( executionPlan.receiptHashValidationContractReady );
+    ASSERT_TRUE( executionPlan.receiptHashValidationPlanned );
+    ASSERT_TRUE( executionPlan.receiptComparisonPlanned );
+    ASSERT_TRUE( executionPlan.outputHashComparisonPlanned );
+    ASSERT_FALSE( executionPlan.receiptReadOwned );
+    ASSERT_FALSE( executionPlan.outputHashReadOwned );
+    ASSERT_FALSE( executionPlan.receiptComparisonOwned );
+    ASSERT_FALSE( executionPlan.outputHashComparisonOwned );
+    ASSERT_FALSE( executionPlan.receiptComparisonReady );
+    ASSERT_FALSE( executionPlan.outputHashComparisonReady );
     ASSERT_FALSE( executionPlan.receiptHashValidationOwned );
+    ASSERT_FALSE( executionPlan.receiptHashValidationReady );
     ASSERT_FALSE( executionPlan.verificationExecutionReady );
     ASSERT_EQ( std::string("ffprobe"),
                std::string(executionPlan.mediaProbeExecutable.toUtf8().constData()) );
@@ -3960,6 +3978,19 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_TRUE( executionSummary.find("output-verification-exec-frame-count-input-ready=false") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-frame-count-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-hash-source=output-verification-receipt-hash-validation-contract") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-hash-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-hash-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-compare-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-output-hash-compare-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-output-hash-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-output-hash-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-compare-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-output-hash-compare-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-hash-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-receipt-hash-ready=false") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4") != std::string::npos );
@@ -4005,6 +4036,116 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_TRUE( executionPlan.mediaProbeResultContractReady );
     ASSERT_EQ( std::string("rendered ffmpeg execution contract unavailable"),
                std::string(executionPlan.reason.toUtf8().constData()) );
+}
+
+TEST(BatchExportFormat, PlansRenderedVideoReceiptHashValidationContract)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(
+            batchRenderedVideoJobPlanFromRequest(
+                QStringLiteral("C:/clips/M16-1327.MLV"),
+                QStringLiteral("C:/renders"),
+                request),
+            batchRenderedVideoSourceMetadata(
+                5792,
+                3872,
+                24000.0 / 1001.0,
+                STRETCH_H_100,
+                STRETCH_V_100,
+                240));
+
+    ASSERT_TRUE( plan.outputVerificationExecutionContractReady );
+    ASSERT_TRUE( plan.receiptHashValidationContractReady );
+    ASSERT_TRUE( plan.receiptHashValidationPlan.contractReady );
+    ASSERT_EQ( std::string("output-verification-receipt-hash-validation-contract"),
+               std::string(plan.receiptHashValidationPlan.source
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.receiptHashValidationPlan
+                   .expectedOutputPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string(".mp4"),
+               std::string(plan.receiptHashValidationPlan
+                   .expectedExtension.toUtf8().constData()) );
+    ASSERT_EQ( std::string("h264"),
+               std::string(plan.receiptHashValidationPlan
+                   .expectedCodec.toUtf8().constData()) );
+    ASSERT_EQ( std::string("mp4"),
+               std::string(plan.receiptHashValidationPlan
+                   .expectedContainer.toUtf8().constData()) );
+    ASSERT_EQ( 240, plan.receiptHashValidationPlan.expectedFrameCount );
+    ASSERT_TRUE( std::fabs(plan.receiptHashValidationPlan
+        .expectedDurationSeconds - 10.01) < 0.000001 );
+    ASSERT_TRUE( plan.receiptHashValidationPlan
+        .outputVerificationExecutionContractReady );
+    ASSERT_TRUE( plan.receiptHashValidationPlan.validationPlanned );
+    ASSERT_TRUE( plan.receiptHashValidationPlan.receiptComparisonPlanned );
+    ASSERT_TRUE( plan.receiptHashValidationPlan.outputHashComparisonPlanned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.receiptReadOwned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.outputHashReadOwned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.receiptComparisonOwned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.outputHashComparisonOwned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.receiptComparisonReady );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.outputHashComparisonReady );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.receiptHashValidationOwned );
+    ASSERT_FALSE( plan.receiptHashValidationPlan.receiptHashValidationReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan
+        .receiptHashValidationContractReady );
+    ASSERT_TRUE( plan.outputVerificationExecutionPlan
+        .receiptHashValidationPlanned );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan
+        .receiptHashValidationReady );
+    ASSERT_TRUE( plan.outputVerificationDecisionPlan
+        .receiptHashValidationContractReady );
+    ASSERT_TRUE( plan.outputVerificationDecisionPlan
+        .receiptHashValidationPlanned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .receiptHashValidationReady );
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+
+    const std::string receiptHashSummary =
+        std::string(batchRenderedVideoReceiptHashValidationPlanSummary(
+            plan.receiptHashValidationPlan).toUtf8().constData());
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-source=output-verification-receipt-hash-validation-contract") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-path=C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-expected-codec=h264") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-expected-container=mp4") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-expected-frame-count=240") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-expected-duration-seconds=10.010000") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-validation-planned=true") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-receipt-compare-planned=true") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-output-hash-planned=true") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-receipt-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-output-hash-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-receipt-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-output-hash-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-receipt-compare-ready=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-output-hash-ready=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-owned=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-ready=false") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( receiptHashSummary.find("output-verification-receipt-hash-reason=none") != std::string::npos );
+
+    const std::string jobSummary =
+        std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
+    ASSERT_TRUE( jobSummary.find("output-verification-receipt-hash-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-exec-receipt-hash-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-decision-receipt-hash-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-decision-accepted=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
+
+    BatchRenderedVideoReceiptHashValidationPlan blockedPlan =
+        batchRenderedVideoReceiptHashValidationPlanFromExecution(
+            BatchRenderedVideoOutputVerificationExecutionPlan());
+    ASSERT_FALSE( blockedPlan.contractReady );
+    ASSERT_FALSE( blockedPlan.outputVerificationExecutionContractReady );
+    ASSERT_FALSE( blockedPlan.validationPlanned );
+    ASSERT_EQ( std::string("rendered receipt/hash validation contract unavailable"),
+               std::string(blockedPlan.reason.toUtf8().constData()) );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationDecisionContract)
@@ -4079,7 +4220,25 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationDecisionContract)
     ASSERT_FALSE( plan.outputVerificationDecisionPlan
         .durationComparisonReady );
     ASSERT_TRUE( plan.outputVerificationDecisionPlan
+        .receiptHashValidationContractReady );
+    ASSERT_TRUE( plan.outputVerificationDecisionPlan
         .receiptHashValidationPlanned );
+    ASSERT_TRUE( plan.outputVerificationDecisionPlan
+        .receiptComparisonPlanned );
+    ASSERT_TRUE( plan.outputVerificationDecisionPlan
+        .outputHashComparisonPlanned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .receiptReadOwned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .outputHashReadOwned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .receiptComparisonOwned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .outputHashComparisonOwned );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .receiptComparisonReady );
+    ASSERT_FALSE( plan.outputVerificationDecisionPlan
+        .outputHashComparisonReady );
     ASSERT_FALSE( plan.outputVerificationDecisionPlan
         .receiptHashValidationOwned );
     ASSERT_FALSE( plan.outputVerificationDecisionPlan
@@ -4112,13 +4271,24 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationDecisionContract)
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-codec-container-planned=true") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-frame-count-planned=true") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-duration-planned=true") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-source=output-verification-receipt-hash-validation-contract") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-planned=true") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-compare-planned=true") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-output-hash-compare-planned=true") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-output-hash-read-owned=false") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-output-hash-compare-owned=false") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-compare-ready=false") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-output-hash-compare-ready=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-owned=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-ready=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-ready=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-accepted=false") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( decisionSummary.find("output-verification-decision-receipt-hash-reason=none") != std::string::npos );
     ASSERT_TRUE( decisionSummary.find("output-verification-decision-reason=none") != std::string::npos );
 
     const std::string jobSummary =

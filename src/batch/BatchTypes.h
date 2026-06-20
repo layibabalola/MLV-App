@@ -778,8 +778,48 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     bool mediaProbeExecutionOwned = false;
     bool codecContainerValidationOwned = false;
     bool frameCountValidationOwned = false;
+    QString receiptHashValidationSource =
+        QStringLiteral("output-verification-receipt-hash-validation-contract");
+    QString receiptHashValidationReason;
+    bool receiptHashValidationContractReady = false;
+    bool receiptHashValidationPlanned = false;
+    bool receiptComparisonPlanned = false;
+    bool outputHashComparisonPlanned = false;
+    bool receiptReadOwned = false;
+    bool outputHashReadOwned = false;
+    bool receiptComparisonOwned = false;
+    bool outputHashComparisonOwned = false;
+    bool receiptComparisonReady = false;
+    bool outputHashComparisonReady = false;
     bool receiptHashValidationOwned = false;
+    bool receiptHashValidationReady = false;
     bool verificationExecutionReady = false;
+    bool contractReady = false;
+};
+
+struct BatchRenderedVideoReceiptHashValidationPlan
+{
+    QString source =
+        QStringLiteral("output-verification-receipt-hash-validation-contract");
+    QString expectedOutputPath;
+    QString expectedExtension;
+    QString expectedCodec;
+    QString expectedContainer;
+    int expectedFrameCount = 0;
+    double expectedDurationSeconds = 0.0;
+    QString reason;
+    bool outputVerificationExecutionContractReady = false;
+    bool validationPlanned = false;
+    bool receiptComparisonPlanned = false;
+    bool outputHashComparisonPlanned = false;
+    bool receiptReadOwned = false;
+    bool outputHashReadOwned = false;
+    bool receiptComparisonOwned = false;
+    bool outputHashComparisonOwned = false;
+    bool receiptComparisonReady = false;
+    bool outputHashComparisonReady = false;
+    bool receiptHashValidationOwned = false;
+    bool receiptHashValidationReady = false;
     bool contractReady = false;
 };
 
@@ -815,7 +855,19 @@ struct BatchRenderedVideoOutputVerificationDecisionPlan
     bool frameCountComparisonReady = false;
     bool durationComparisonPlanned = false;
     bool durationComparisonReady = false;
+    QString receiptHashValidationSource =
+        QStringLiteral("output-verification-receipt-hash-validation-contract");
+    QString receiptHashValidationReason;
+    bool receiptHashValidationContractReady = false;
     bool receiptHashValidationPlanned = false;
+    bool receiptComparisonPlanned = false;
+    bool outputHashComparisonPlanned = false;
+    bool receiptReadOwned = false;
+    bool outputHashReadOwned = false;
+    bool receiptComparisonOwned = false;
+    bool outputHashComparisonOwned = false;
+    bool receiptComparisonReady = false;
+    bool outputHashComparisonReady = false;
     bool receiptHashValidationOwned = false;
     bool receiptHashValidationReady = false;
     bool verificationExecutionReady = false;
@@ -868,6 +920,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoMediaProbeResultPlan mediaProbeResultPlan;
     BatchRenderedVideoMediaProbeValidationPlan mediaProbeValidationPlan;
     BatchRenderedVideoOutputVerificationExecutionPlan outputVerificationExecutionPlan;
+    BatchRenderedVideoReceiptHashValidationPlan receiptHashValidationPlan;
     BatchRenderedVideoOutputVerificationDecisionPlan outputVerificationDecisionPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
@@ -900,6 +953,7 @@ struct BatchRenderedVideoJobPlan
     bool mediaProbeResultContractReady = false;
     bool mediaProbeValidationContractReady = false;
     bool outputVerificationExecutionContractReady = false;
+    bool receiptHashValidationContractReady = false;
     bool outputVerificationDecisionContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
@@ -3387,7 +3441,7 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
                                    && plan.mediaProbeExecutionOwned
                                    && plan.codecContainerValidationOwned
                                    && plan.frameCountValidationOwned
-                                   && plan.receiptHashValidationOwned;
+                                   && plan.receiptHashValidationReady;
     if( !plan.contractReady )
     {
         plan.reason =
@@ -3452,6 +3506,92 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
             mediaProbeBinaryPlan));
 }
 
+inline BatchRenderedVideoReceiptHashValidationPlan
+batchRenderedVideoReceiptHashValidationPlanFromExecution(
+    const BatchRenderedVideoOutputVerificationExecutionPlan & executionPlan)
+{
+    BatchRenderedVideoReceiptHashValidationPlan plan;
+    plan.expectedOutputPath = executionPlan.expectedOutputPath;
+    plan.expectedExtension = executionPlan.expectedExtension;
+    plan.expectedCodec = executionPlan.expectedCodec;
+    plan.expectedContainer = executionPlan.expectedContainer;
+    plan.expectedFrameCount = executionPlan.expectedFrameCount;
+    plan.expectedDurationSeconds =
+        executionPlan.expectedDurationSeconds;
+    plan.outputVerificationExecutionContractReady =
+        executionPlan.contractReady;
+
+    if( !executionPlan.contractReady )
+    {
+        plan.reason = executionPlan.reason.isEmpty()
+            ? QStringLiteral("rendered receipt/hash validation contract unavailable")
+            : executionPlan.reason;
+        return plan;
+    }
+
+    plan.validationPlanned = true;
+    plan.receiptComparisonPlanned = true;
+    plan.outputHashComparisonPlanned = true;
+    plan.receiptHashValidationOwned =
+        executionPlan.receiptHashValidationOwned;
+    plan.receiptHashValidationReady =
+        plan.receiptHashValidationOwned
+     && plan.receiptComparisonReady
+     && plan.outputHashComparisonReady;
+    plan.contractReady = !plan.expectedOutputPath.isEmpty()
+                      && !plan.expectedExtension.isEmpty()
+                      && !plan.expectedCodec.isEmpty()
+                      && !plan.expectedContainer.isEmpty()
+                      && plan.outputVerificationExecutionContractReady
+                      && plan.validationPlanned
+                      && plan.receiptComparisonPlanned
+                      && plan.outputHashComparisonPlanned;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered receipt/hash validation contract unavailable");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoOutputVerificationExecutionPlan
+batchRenderedVideoOutputVerificationExecutionPlanWithReceiptHashValidation(
+    const BatchRenderedVideoOutputVerificationExecutionPlan & executionPlan,
+    const BatchRenderedVideoReceiptHashValidationPlan & receiptHashPlan)
+{
+    BatchRenderedVideoOutputVerificationExecutionPlan plan = executionPlan;
+    plan.receiptHashValidationSource = receiptHashPlan.source;
+    plan.receiptHashValidationReason = receiptHashPlan.reason;
+    plan.receiptHashValidationContractReady = receiptHashPlan.contractReady;
+    plan.receiptHashValidationPlanned =
+        receiptHashPlan.validationPlanned;
+    plan.receiptComparisonPlanned =
+        receiptHashPlan.receiptComparisonPlanned;
+    plan.outputHashComparisonPlanned =
+        receiptHashPlan.outputHashComparisonPlanned;
+    plan.receiptReadOwned = receiptHashPlan.receiptReadOwned;
+    plan.outputHashReadOwned = receiptHashPlan.outputHashReadOwned;
+    plan.receiptComparisonOwned =
+        receiptHashPlan.receiptComparisonOwned;
+    plan.outputHashComparisonOwned =
+        receiptHashPlan.outputHashComparisonOwned;
+    plan.receiptComparisonReady =
+        receiptHashPlan.receiptComparisonReady;
+    plan.outputHashComparisonReady =
+        receiptHashPlan.outputHashComparisonReady;
+    plan.receiptHashValidationOwned =
+        receiptHashPlan.receiptHashValidationOwned;
+    plan.receiptHashValidationReady =
+        receiptHashPlan.receiptHashValidationReady;
+    plan.verificationExecutionReady = plan.fileExistenceCheckOwned
+                                   && plan.nonEmptyCheckOwned
+                                   && plan.mediaProbeExecutionOwned
+                                   && plan.codecContainerValidationOwned
+                                   && plan.frameCountValidationOwned
+                                   && plan.receiptHashValidationReady;
+    return plan;
+}
+
 inline BatchRenderedVideoOutputVerificationDecisionPlan
 batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
     const BatchRenderedVideoOutputVerificationExecutionPlan & executionPlan)
@@ -3497,6 +3637,12 @@ batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
         executionPlan.mediaProbeValidationDurationComparisonPlanned;
     plan.durationComparisonReady =
         executionPlan.mediaProbeValidationDurationComparisonReady;
+    plan.receiptHashValidationSource =
+        executionPlan.receiptHashValidationSource;
+    plan.receiptHashValidationReason =
+        executionPlan.receiptHashValidationReason;
+    plan.receiptHashValidationContractReady =
+        executionPlan.receiptHashValidationContractReady;
     plan.mediaProbeValidationPlanned =
         executionPlan.mediaProbeValidationParsedResultIngestPlanned
      && plan.codecContainerComparisonPlanned;
@@ -3506,12 +3652,27 @@ batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
         executionPlan.mediaProbeValidationReady
      && plan.mediaProbeValidationOwned;
     plan.receiptHashValidationPlanned =
-        executionPlan.contractReady;
+        executionPlan.receiptHashValidationPlanned;
+    plan.receiptComparisonPlanned =
+        executionPlan.receiptComparisonPlanned;
+    plan.outputHashComparisonPlanned =
+        executionPlan.outputHashComparisonPlanned;
+    plan.receiptReadOwned =
+        executionPlan.receiptReadOwned;
+    plan.outputHashReadOwned =
+        executionPlan.outputHashReadOwned;
+    plan.receiptComparisonOwned =
+        executionPlan.receiptComparisonOwned;
+    plan.outputHashComparisonOwned =
+        executionPlan.outputHashComparisonOwned;
+    plan.receiptComparisonReady =
+        executionPlan.receiptComparisonReady;
+    plan.outputHashComparisonReady =
+        executionPlan.outputHashComparisonReady;
     plan.receiptHashValidationOwned =
         executionPlan.receiptHashValidationOwned;
     plan.receiptHashValidationReady =
-        plan.receiptHashValidationOwned
-     && executionPlan.verificationExecutionReady;
+        executionPlan.receiptHashValidationReady;
     plan.verificationExecutionReady =
         executionPlan.verificationExecutionReady;
     plan.verificationDecisionReady = plan.fileChecksReady
@@ -3523,6 +3684,7 @@ batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
                       && plan.fileChecksPlanned
                       && plan.mediaProbeValidationContractReady
                       && plan.mediaProbeValidationPlanned
+                      && plan.receiptHashValidationContractReady
                       && plan.receiptHashValidationPlanned;
     if( !plan.contractReady )
     {
@@ -3620,6 +3782,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                 plan.mediaProbeJsonPlan,
                 plan.mediaProbeResultPlan,
                 plan.mediaProbeValidationPlan);
+        plan.receiptHashValidationPlan =
+            batchRenderedVideoReceiptHashValidationPlanFromExecution(
+                plan.outputVerificationExecutionPlan);
+        plan.outputVerificationExecutionPlan =
+            batchRenderedVideoOutputVerificationExecutionPlanWithReceiptHashValidation(
+                plan.outputVerificationExecutionPlan,
+                plan.receiptHashValidationPlan);
         plan.outputVerificationDecisionPlan =
             batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
                 plan.outputVerificationExecutionPlan);
@@ -3693,6 +3862,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             QStringLiteral("not a rendered-video request");
         plan.outputVerificationExecutionPlan.reason =
             QStringLiteral("not a rendered-video request");
+        plan.receiptHashValidationPlan.reason =
+            QStringLiteral("not a rendered-video request");
         plan.outputVerificationDecisionPlan.reason =
             QStringLiteral("not a rendered-video request");
     }
@@ -3738,6 +3909,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationPlan.contractReady;
     plan.outputVerificationExecutionContractReady =
         plan.outputVerificationExecutionPlan.contractReady;
+    plan.receiptHashValidationContractReady =
+        plan.receiptHashValidationPlan.contractReady;
     plan.outputVerificationDecisionContractReady =
         plan.outputVerificationDecisionPlan.contractReady;
     plan.preflightReady = plan.requestValid
@@ -3955,8 +4128,17 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                 plan.mediaProbeJsonPlan,
                 plan.mediaProbeResultPlan,
                 plan.mediaProbeValidationPlan);
+        plan.receiptHashValidationPlan =
+            batchRenderedVideoReceiptHashValidationPlanFromExecution(
+                plan.outputVerificationExecutionPlan);
+        plan.outputVerificationExecutionPlan =
+            batchRenderedVideoOutputVerificationExecutionPlanWithReceiptHashValidation(
+                plan.outputVerificationExecutionPlan,
+                plan.receiptHashValidationPlan);
         plan.outputVerificationExecutionContractReady =
             plan.outputVerificationExecutionPlan.contractReady;
+        plan.receiptHashValidationContractReady =
+            plan.receiptHashValidationPlan.contractReady;
         plan.outputVerificationDecisionPlan =
             batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
                 plan.outputVerificationExecutionPlan);
@@ -4000,6 +4182,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                            && plan.mediaProbeResultContractReady
                            && plan.mediaProbeValidationContractReady
                            && plan.outputVerificationExecutionContractReady
+                           && plan.receiptHashValidationContractReady
                            && plan.outputVerificationDecisionContractReady;
     }
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
@@ -4103,8 +4286,17 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             plan.mediaProbeJsonPlan,
             plan.mediaProbeResultPlan,
             plan.mediaProbeValidationPlan);
+    plan.receiptHashValidationPlan =
+        batchRenderedVideoReceiptHashValidationPlanFromExecution(
+            plan.outputVerificationExecutionPlan);
+    plan.outputVerificationExecutionPlan =
+        batchRenderedVideoOutputVerificationExecutionPlanWithReceiptHashValidation(
+            plan.outputVerificationExecutionPlan,
+            plan.receiptHashValidationPlan);
     plan.outputVerificationExecutionContractReady =
         plan.outputVerificationExecutionPlan.contractReady;
+    plan.receiptHashValidationContractReady =
+        plan.receiptHashValidationPlan.contractReady;
     plan.outputVerificationDecisionPlan =
         batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
             plan.outputVerificationExecutionPlan);
@@ -4140,6 +4332,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.outputReady
                        && plan.outputVerificationContractReady
                        && plan.outputVerificationExecutionContractReady
+                       && plan.receiptHashValidationContractReady
                        && plan.outputVerificationDecisionContractReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -4327,6 +4520,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.outputVerificationExecutionPlan.reason.isEmpty()
             ? QStringLiteral("rendered output verification execution contract unavailable")
             : plan.outputVerificationExecutionPlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.receiptHashValidationContractReady )
+    {
+        return plan.receiptHashValidationPlan.reason.isEmpty()
+            ? QStringLiteral("rendered receipt/hash validation contract unavailable")
+            : plan.receiptHashValidationPlan.reason;
     }
     if( plan.metadataAttempted && !plan.outputVerificationDecisionContractReady )
     {
@@ -5066,7 +5265,19 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         << QStringLiteral("output-verification-exec-probe-owned=%1").arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-codec-container-owned=%1").arg(plan.codecContainerValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-frame-count-owned=%1").arg(plan.frameCountValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-hash-source=%1").arg(plan.receiptHashValidationSource.isEmpty() ? QStringLiteral("unspecified") : plan.receiptHashValidationSource)
+        << QStringLiteral("output-verification-exec-receipt-hash-contract-ready=%1").arg(plan.receiptHashValidationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-hash-planned=%1").arg(plan.receiptHashValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-compare-planned=%1").arg(plan.receiptComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-output-hash-compare-planned=%1").arg(plan.outputHashComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-read-owned=%1").arg(plan.receiptReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-output-hash-read-owned=%1").arg(plan.outputHashReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-compare-owned=%1").arg(plan.receiptComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-output-hash-compare-owned=%1").arg(plan.outputHashComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-compare-ready=%1").arg(plan.receiptComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-output-hash-compare-ready=%1").arg(plan.outputHashComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-receipt-hash-owned=%1").arg(plan.receiptHashValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-receipt-hash-ready=%1").arg(plan.receiptHashValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-ready=%1").arg(plan.verificationExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-command-source=%1").arg(plan.mediaProbeCommandSource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeCommandSource)
@@ -5134,7 +5345,37 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         << QStringLiteral("output-verification-exec-probe-validation-ready=%1").arg(plan.mediaProbeValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-validation-contract-ready=%1").arg(plan.mediaProbeValidationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-validation-reason=%1").arg(plan.mediaProbeValidationReason.isEmpty() ? QStringLiteral("none") : plan.mediaProbeValidationReason)
+        << QStringLiteral("output-verification-exec-receipt-hash-reason=%1").arg(plan.receiptHashValidationReason.isEmpty() ? QStringLiteral("none") : plan.receiptHashValidationReason)
         << QStringLiteral("output-verification-exec-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
+}
+
+inline QString batchRenderedVideoReceiptHashValidationPlanSummary(
+    const BatchRenderedVideoReceiptHashValidationPlan & plan)
+{
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-receipt-hash-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-receipt-hash-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-receipt-hash-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
+        << QStringLiteral("output-verification-receipt-hash-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
+        << QStringLiteral("output-verification-receipt-hash-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-receipt-hash-expected-frame-count=%1").arg(plan.expectedFrameCount)
+        << QStringLiteral("output-verification-receipt-hash-expected-duration-seconds=%1").arg(QLocale::c().toString(plan.expectedDurationSeconds, 'f', 6))
+        << QStringLiteral("output-verification-receipt-hash-exec-contract-ready=%1").arg(plan.outputVerificationExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-validation-planned=%1").arg(plan.validationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-receipt-compare-planned=%1").arg(plan.receiptComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-output-hash-planned=%1").arg(plan.outputHashComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-receipt-read-owned=%1").arg(plan.receiptReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-output-hash-read-owned=%1").arg(plan.outputHashReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-receipt-compare-owned=%1").arg(plan.receiptComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-output-hash-compare-owned=%1").arg(plan.outputHashComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-receipt-compare-ready=%1").arg(plan.receiptComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-output-hash-ready=%1").arg(plan.outputHashComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-owned=%1").arg(plan.receiptHashValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-ready=%1").arg(plan.receiptHashValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-receipt-hash-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
     return tokens.join(QLatin1Char(' '));
 }
 
@@ -5171,13 +5412,24 @@ inline QString batchRenderedVideoOutputVerificationDecisionPlanSummary(
         << QStringLiteral("output-verification-decision-frame-count-ready=%1").arg(plan.frameCountComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-duration-planned=%1").arg(plan.durationComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-duration-ready=%1").arg(plan.durationComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-hash-source=%1").arg(plan.receiptHashValidationSource.isEmpty() ? QStringLiteral("unspecified") : plan.receiptHashValidationSource)
+        << QStringLiteral("output-verification-decision-receipt-hash-contract-ready=%1").arg(plan.receiptHashValidationContractReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-receipt-hash-planned=%1").arg(plan.receiptHashValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-compare-planned=%1").arg(plan.receiptComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-output-hash-compare-planned=%1").arg(plan.outputHashComparisonPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-read-owned=%1").arg(plan.receiptReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-output-hash-read-owned=%1").arg(plan.outputHashReadOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-compare-owned=%1").arg(plan.receiptComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-output-hash-compare-owned=%1").arg(plan.outputHashComparisonOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-compare-ready=%1").arg(plan.receiptComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-output-hash-compare-ready=%1").arg(plan.outputHashComparisonReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-receipt-hash-owned=%1").arg(plan.receiptHashValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-receipt-hash-ready=%1").arg(plan.receiptHashValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-verification-exec-ready=%1").arg(plan.verificationExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-ready=%1").arg(plan.verificationDecisionReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-accepted=%1").arg(plan.outputAccepted ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-decision-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-decision-receipt-hash-reason=%1").arg(plan.receiptHashValidationReason.isEmpty() ? QStringLiteral("none") : plan.receiptHashValidationReason)
         << QStringLiteral("output-verification-decision-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
     return tokens.join(QLatin1Char(' '));
 }
@@ -5212,7 +5464,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 preflight-ready=%33 runnable=%34 first-blocker=%35")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 %33 preflight-ready=%34 runnable=%35 first-blocker=%36")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -5260,6 +5512,8 @@ inline QString batchRenderedVideoJobPlanSummary(
             plan.outputVerificationPlan))
         .arg(batchRenderedVideoOutputVerificationExecutionPlanSummary(
             plan.outputVerificationExecutionPlan))
+        .arg(batchRenderedVideoReceiptHashValidationPlanSummary(
+            plan.receiptHashValidationPlan))
         .arg(batchRenderedVideoOutputVerificationDecisionPlanSummary(
             plan.outputVerificationDecisionPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
