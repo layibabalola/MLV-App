@@ -851,6 +851,88 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegFrameGeometryFromGuiState)
                std::string(plan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoFfmpegBinaryResolution)
+{
+    BatchRenderedVideoFfmpegBinaryPlan defaultPlan =
+        batchRenderedVideoFfmpegBinaryPlanFromRequestedName();
+    ASSERT_FALSE( defaultPlan.pathSearchOwned );
+    ASSERT_FALSE( defaultPlan.pathSearchAttempted );
+    ASSERT_FALSE( defaultPlan.foundOnPath );
+    ASSERT_TRUE( defaultPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("ffmpeg"),
+               std::string(defaultPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-binary-source=default-executable-name ffmpeg-binary-request=ffmpeg ffmpeg-binary-resolved=ffmpeg ffmpeg-binary-path-search-owned=false ffmpeg-binary-path-search-attempted=false ffmpeg-binary-found=false ffmpeg-binary-command-ready=true ffmpeg-binary-reason=none"),
+               std::string(batchRenderedVideoFfmpegBinaryPlanSummary(
+                   defaultPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoFfmpegBinaryPlan foundPlan =
+        batchRenderedVideoFfmpegBinaryPlanFromResolvedPath(
+            QStringLiteral("ffmpeg"),
+            QStringLiteral("C:/tools/ffmpeg.exe"));
+    ASSERT_TRUE( foundPlan.pathSearchOwned );
+    ASSERT_TRUE( foundPlan.pathSearchAttempted );
+    ASSERT_TRUE( foundPlan.foundOnPath );
+    ASSERT_TRUE( foundPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("C:/tools/ffmpeg.exe"),
+               std::string(foundPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-binary-source=path-search ffmpeg-binary-request=ffmpeg ffmpeg-binary-resolved=C:/tools/ffmpeg.exe ffmpeg-binary-path-search-owned=true ffmpeg-binary-path-search-attempted=true ffmpeg-binary-found=true ffmpeg-binary-command-ready=true ffmpeg-binary-reason=none"),
+               std::string(batchRenderedVideoFfmpegBinaryPlanSummary(
+                   foundPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoFfmpegBinaryPlan missingPlan =
+        batchRenderedVideoFfmpegBinaryPlanFromResolvedPath(
+            QStringLiteral("ffmpeg"),
+            QString());
+    ASSERT_TRUE( missingPlan.pathSearchOwned );
+    ASSERT_TRUE( missingPlan.pathSearchAttempted );
+    ASSERT_FALSE( missingPlan.foundOnPath );
+    ASSERT_TRUE( missingPlan.commandExecutableReady );
+    ASSERT_EQ( std::string("ffmpeg"),
+               std::string(missingPlan.resolvedExecutable.toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg executable not found on PATH"),
+               std::string(missingPlan.reason.toUtf8().constData()) );
+
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoJobPlan basePlan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request,
+            batchRenderedVideoDefaultRenderSettings(),
+            foundPlan);
+    BatchRenderedVideoSourceMetadata metadata =
+        batchRenderedVideoSourceMetadata(
+            5792,
+            3872,
+            24000.0 / 1001.0,
+            STRETCH_H_100,
+            STRETCH_V_100);
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.ffmpegCommandReady );
+    ASSERT_EQ( std::string("C:/tools/ffmpeg.exe"),
+               std::string(plan.ffmpegCommandPlan.executable.toUtf8().constData()) );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData())
+        .find("ffmpeg-binary-source=path-search ffmpeg-binary-request=ffmpeg ffmpeg-binary-resolved=C:/tools/ffmpeg.exe ffmpeg-binary-path-search-owned=true ffmpeg-binary-path-search-attempted=true ffmpeg-binary-found=true ffmpeg-binary-command-ready=true") != std::string::npos );
+
+    basePlan = batchRenderedVideoJobPlanFromRequest(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders"),
+        request,
+        batchRenderedVideoDefaultRenderSettings(),
+        missingPlan);
+    plan = batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
+    ASSERT_TRUE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.ffmpegCommandReady );
+    ASSERT_FALSE( plan.ffmpegBinaryPlan.foundOnPath );
+    ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData())
+        .find("ffmpeg-binary-found=false ffmpeg-binary-command-ready=true ffmpeg-binary-reason=ffmpeg executable not found on PATH") != std::string::npos );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
 {
     BatchExportFormatRequest request =

@@ -1129,6 +1129,8 @@ _Current E4 implementation note (2026-06-19 prerequisite decomposition slice): `
 
 _Current E4 implementation note (2026-06-20 command-shape slice): the central job plan now carries a plan-only `BatchRenderedVideoFfmpegCommandPlan` once real source metadata is overlaid. It mirrors the existing GUI ffmpeg rawvideo pipe shape (`ffmpeg -r ... -y -f rawvideo -s ... -pix_fmt rgb48 -i -`), the planned codec arguments, the base BT.601-to-BT.709 filter, Rec.709 color tags, and the resolved output path, while reporting audio input ownership, ffmpeg execution ownership, and output-verification ownership as false. This is command construction scaffolding only: it does not discover an ffmpeg binary, launch a process, pipe frames, mux/extract audio, verify an output file, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 ffmpeg binary-plan slice): the central job plan now also carries a `BatchRenderedVideoFfmpegBinaryPlan`. Pure planning helpers keep the deterministic default executable name (`ffmpeg`), while the live batch runner performs a PATH search with `QStandardPaths::findExecutable` and reports whether an ffmpeg binary was found plus the executable that the future command plan would use. Missing ffmpeg discovery is reported but still does not launch or block on a process because `runner-ffmpeg-execution-ready=false` remains the fail-closed execution gate. This is binary discovery/reporting scaffolding only: it does not execute ffmpeg, pipe frames, mux audio, verify outputs, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the

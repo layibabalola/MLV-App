@@ -56,6 +56,10 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         BatchContext::renderedVideoRenderSettings();
     const bool renderedVideoRequested =
         exportRequest.format == BatchExportFormat::RenderedVideo;
+    const BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan =
+        renderedVideoRequested
+            ? batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment()
+            : BatchRenderedVideoFfmpegBinaryPlan();
     if( exportRequest.format == BatchExportFormat::RenderedVideo )
     {
         const BatchRenderedVideoJobPlan renderedPlan =
@@ -63,7 +67,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 inputPath,
                 outputPath,
                 exportRequest,
-                renderSettings);
+                renderSettings,
+                ffmpegBinaryPlan);
         if( !renderedPlan.requestValid )
         {
             BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner invalid rendered-video request. %1. %2.\n")
@@ -237,7 +242,8 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                 outputPath,
                 exportRequest,
                 mlvFiles.size(),
-                renderSettings);
+                renderSettings,
+                ffmpegBinaryPlan);
 
         if( !basePlan.preflightReady )
         {

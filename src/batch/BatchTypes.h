@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QLocale>
 #include <QString>
+#include <QStandardPaths>
 
 /* Shared type header for batch mode.
  * Include this instead of MainWindow.h to avoid circular dependencies.
@@ -128,6 +129,18 @@ struct BatchRenderedVideoFfmpegFramePlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoFfmpegBinaryPlan
+{
+    QString source = QStringLiteral("default-executable-name");
+    QString requestedExecutable = QStringLiteral("ffmpeg");
+    QString resolvedExecutable = QStringLiteral("ffmpeg");
+    QString reason;
+    bool pathSearchOwned = false;
+    bool pathSearchAttempted = false;
+    bool foundOnPath = false;
+    bool commandExecutableReady = true;
+};
+
 struct BatchRenderedVideoFfmpegCommandPlan
 {
     QString source = QStringLiteral("gui-rawvideo-pipe");
@@ -202,6 +215,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
     BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
+    BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan;
     BatchRenderedVideoFfmpegCommandPlan ffmpegCommandPlan;
     BatchRenderedVideoOutputPlan outputPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
@@ -213,6 +227,7 @@ struct BatchRenderedVideoJobPlan
     bool metadataAttempted = false;
     bool metadataReady = false;
     bool ffmpegFrameReady = false;
+    bool ffmpegBinaryCommandReady = false;
     bool ffmpegCommandReady = false;
     bool outputReady = false;
     bool preflightReady = false;
@@ -1057,14 +1072,93 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
         1);
 }
 
+inline BatchRenderedVideoFfmpegBinaryPlan
+batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
+    const QString & requestedExecutable = QStringLiteral("ffmpeg"))
+{
+    BatchRenderedVideoFfmpegBinaryPlan plan;
+    const QString requested = requestedExecutable.trimmed();
+    plan.requestedExecutable = requested.isEmpty()
+        ? QStringLiteral("ffmpeg")
+        : requested;
+    plan.resolvedExecutable = plan.requestedExecutable;
+    plan.commandExecutableReady = !plan.resolvedExecutable.isEmpty();
+    if( !plan.commandExecutableReady )
+    {
+        plan.reason = QStringLiteral("ffmpeg executable name is empty");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoFfmpegBinaryPlan
+batchRenderedVideoFfmpegBinaryPlanFromResolvedPath(
+    const QString & requestedExecutable,
+    const QString & resolvedExecutable)
+{
+    BatchRenderedVideoFfmpegBinaryPlan plan =
+        batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
+            requestedExecutable);
+    plan.source = QStringLiteral("path-search");
+    plan.pathSearchOwned = true;
+    plan.pathSearchAttempted = true;
+
+    const QString resolved = resolvedExecutable.trimmed();
+    if( !resolved.isEmpty() )
+    {
+        plan.resolvedExecutable = QDir::cleanPath(resolved);
+        plan.foundOnPath = true;
+        plan.commandExecutableReady = true;
+        plan.reason.clear();
+    }
+    else
+    {
+        plan.foundOnPath = false;
+        plan.commandExecutableReady = !plan.requestedExecutable.isEmpty();
+        plan.reason = QStringLiteral("ffmpeg executable not found on PATH");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoFfmpegBinaryPlan
+batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment(
+    const QString & requestedExecutable = QStringLiteral("ffmpeg"))
+{
+    const QString requested = requestedExecutable.trimmed().isEmpty()
+        ? QStringLiteral("ffmpeg")
+        : requestedExecutable.trimmed();
+    return batchRenderedVideoFfmpegBinaryPlanFromResolvedPath(
+        requested,
+        QStandardPaths::findExecutable(requested));
+}
+
+inline QString batchRenderedVideoCommandExecutableForDisplay(
+    const QString & executable)
+{
+    if( executable.contains(QLatin1Char(' '))
+     || executable.contains(QLatin1Char('\t')) )
+    {
+        return QStringLiteral("\"%1\"").arg(executable);
+    }
+    return executable;
+}
+
 inline BatchRenderedVideoFfmpegCommandPlan
 batchRenderedVideoFfmpegCommandPlanFromParts(
     const BatchRenderedVideoFfmpegFramePlan & framePlan,
     const BatchRenderedVideoFfmpegFilterPlan & filterPlan,
     const BatchRenderedVideoFfmpegVideoPlan & videoPlan,
-    const BatchRenderedVideoOutputPlan & outputPlan)
+    const BatchRenderedVideoOutputPlan & outputPlan,
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan)
 {
     BatchRenderedVideoFfmpegCommandPlan plan;
+    plan.executable = binaryPlan.resolvedExecutable;
+    if( !binaryPlan.commandExecutableReady )
+    {
+        plan.reason = binaryPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg executable unavailable")
+            : binaryPlan.reason;
+        return plan;
+    }
     if( !framePlan.ready )
     {
         plan.reason = framePlan.reason.isEmpty()
@@ -1115,7 +1209,9 @@ batchRenderedVideoFfmpegCommandPlanFromParts(
             .arg(filterPlan.filterArguments)
             .arg(outputPlan.outputPath);
     plan.commandLine =
-        QStringLiteral("%1 %2").arg(plan.executable, plan.arguments);
+        QStringLiteral("%1 %2")
+            .arg(batchRenderedVideoCommandExecutableForDisplay(plan.executable),
+                 plan.arguments);
     plan.ready = !plan.executable.isEmpty()
               && plan.rawVideoPipeInputReady
               && !videoPlan.videoArguments.isEmpty()
@@ -1127,6 +1223,21 @@ batchRenderedVideoFfmpegCommandPlanFromParts(
     if( !plan.ready )
         plan.reason = QStringLiteral("rendered ffmpeg command plan unavailable");
     return plan;
+}
+
+inline BatchRenderedVideoFfmpegCommandPlan
+batchRenderedVideoFfmpegCommandPlanFromParts(
+    const BatchRenderedVideoFfmpegFramePlan & framePlan,
+    const BatchRenderedVideoFfmpegFilterPlan & filterPlan,
+    const BatchRenderedVideoFfmpegVideoPlan & videoPlan,
+    const BatchRenderedVideoOutputPlan & outputPlan)
+{
+    return batchRenderedVideoFfmpegCommandPlanFromParts(
+        framePlan,
+        filterPlan,
+        videoPlan,
+        outputPlan,
+        batchRenderedVideoFfmpegBinaryPlanFromRequestedName());
 }
 
 inline BatchRenderedVideoRunnerPrerequisites
@@ -1157,12 +1268,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     const QString & outputPath,
     const BatchExportFormatRequest & request,
     int inputClipCount,
-    const BatchRenderedVideoRenderSettings & settings =
-        batchRenderedVideoDefaultRenderSettings())
+    const BatchRenderedVideoRenderSettings & settings,
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan)
 {
     BatchRenderedVideoJobPlan plan;
     plan.request = request;
     plan.renderSettings = settings;
+    plan.ffmpegBinaryPlan = binaryPlan;
     plan.requestValid = request.format == BatchExportFormat::RenderedVideo
                      && batchRenderedVideoRequestShapeValid(request);
 
@@ -1193,16 +1305,52 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     plan.encoderReady = plan.encoderPreset.ready;
     plan.ffmpegVideoReady = plan.ffmpegVideoPlan.ready;
     plan.ffmpegFilterReady = plan.ffmpegFilterPlan.ready;
+    plan.ffmpegBinaryCommandReady =
+        plan.ffmpegBinaryPlan.commandExecutableReady;
     plan.outputReady = plan.outputPlan.ready;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
                        && plan.ffmpegFilterReady
+                       && plan.ffmpegBinaryCommandReady
                        && plan.renderSettings.ready
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request,
+    int inputClipCount,
+    const BatchRenderedVideoRenderSettings & settings =
+        batchRenderedVideoDefaultRenderSettings())
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        inputClipCount,
+        settings,
+        batchRenderedVideoFfmpegBinaryPlanFromRequestedName());
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request,
+    int inputClipCount,
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan)
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        inputClipCount,
+        batchRenderedVideoDefaultRenderSettings(),
+        binaryPlan);
 }
 
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
@@ -1229,6 +1377,22 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         request,
         1,
         settings);
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request,
+    const BatchRenderedVideoRenderSettings & settings,
+    const BatchRenderedVideoFfmpegBinaryPlan & binaryPlan)
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        1,
+        settings,
+        binaryPlan);
 }
 
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
@@ -1260,13 +1424,15 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             plan.ffmpegFramePlan,
             plan.ffmpegFilterPlan,
             plan.ffmpegVideoPlan,
-            plan.outputPlan);
+            plan.outputPlan,
+            plan.ffmpegBinaryPlan);
     plan.ffmpegCommandReady = plan.ffmpegCommandPlan.ready;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
                        && plan.ffmpegVideoReady
                        && plan.ffmpegFilterReady
+                       && plan.ffmpegBinaryCommandReady
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
@@ -1308,6 +1474,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegFilterPlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg filter plan unavailable")
             : plan.ffmpegFilterPlan.reason;
+    }
+    if( !plan.ffmpegBinaryCommandReady )
+    {
+        return plan.ffmpegBinaryPlan.reason.isEmpty()
+            ? QStringLiteral("rendered ffmpeg executable unavailable")
+            : plan.ffmpegBinaryPlan.reason;
     }
     if( !plan.renderSettings.ready )
     {
@@ -1452,6 +1624,20 @@ inline QString batchRenderedVideoFfmpegCommandPlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoFfmpegBinaryPlanSummary(
+    const BatchRenderedVideoFfmpegBinaryPlan & plan)
+{
+    return QStringLiteral("ffmpeg-binary-source=%1 ffmpeg-binary-request=%2 ffmpeg-binary-resolved=%3 ffmpeg-binary-path-search-owned=%4 ffmpeg-binary-path-search-attempted=%5 ffmpeg-binary-found=%6 ffmpeg-binary-command-ready=%7 ffmpeg-binary-reason=%8")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.requestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.requestedExecutable)
+        .arg(plan.resolvedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.resolvedExecutable)
+        .arg(plan.pathSearchOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.pathSearchAttempted ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.foundOnPath ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.commandExecutableReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
 inline QString batchRenderedVideoSourceMetadataSummary(
     const BatchRenderedVideoSourceMetadata & metadata)
 {
@@ -1529,12 +1715,13 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 preflight-ready=%12 runnable=%13 first-blocker=%14")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 preflight-ready=%13 runnable=%14 first-blocker=%15")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
         .arg(batchRenderedVideoFfmpegVideoPlanSummary(plan.ffmpegVideoPlan))
         .arg(batchRenderedVideoFfmpegFilterPlanSummary(plan.ffmpegFilterPlan))
+        .arg(batchRenderedVideoFfmpegBinaryPlanSummary(plan.ffmpegBinaryPlan))
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
