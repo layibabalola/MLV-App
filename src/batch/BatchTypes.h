@@ -527,8 +527,14 @@ struct BatchRenderedVideoOutputVerificationPlan
     QString expectedOutputPath;
     QString expectedExtension;
     QString reason;
+    qulonglong nonEmptyMinimumBytes = 1;
     bool outputPathReady = false;
     bool extensionMatchesTarget = false;
+    bool fileExistenceCheckPlanned = false;
+    bool nonEmptyCheckPlanned = false;
+    bool filesystemInspectionOwned = false;
+    bool fileExistenceCheckReady = false;
+    bool nonEmptyCheckReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeOwned = false;
@@ -579,6 +585,12 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     bool ffmpegMuxedAudioCommandPlanned = false;
     bool ffmpegMuxedAudioCommandReady = false;
     bool ffmpegAudioInputOwned = false;
+    qulonglong nonEmptyMinimumBytes = 1;
+    bool fileExistenceCheckPlanned = false;
+    bool nonEmptyCheckPlanned = false;
+    bool filesystemInspectionOwned = false;
+    bool fileExistenceCheckReady = false;
+    bool nonEmptyCheckReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeExecutionOwned = false;
@@ -2257,6 +2269,11 @@ batchRenderedVideoOutputVerificationPlanFromOutput(
             == plan.expectedExtension.mid(1).toLower();
     plan.contractReady = plan.outputPathReady
                       && plan.extensionMatchesTarget;
+    if( plan.contractReady )
+    {
+        plan.fileExistenceCheckPlanned = true;
+        plan.nonEmptyCheckPlanned = true;
+    }
     if( !plan.contractReady )
     {
         plan.reason = QStringLiteral("rendered output verification contract unavailable");
@@ -2681,6 +2698,18 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.ffmpegMuxedAudioCommandReady =
         ffmpegExecutionPlan.muxedAudioCommandReady;
     plan.ffmpegAudioInputOwned = ffmpegExecutionPlan.audioInputOwned;
+    plan.nonEmptyMinimumBytes = outputVerificationPlan.nonEmptyMinimumBytes;
+    plan.fileExistenceCheckPlanned =
+        outputVerificationPlan.fileExistenceCheckPlanned;
+    plan.nonEmptyCheckPlanned = outputVerificationPlan.nonEmptyCheckPlanned;
+    plan.filesystemInspectionOwned =
+        outputVerificationPlan.filesystemInspectionOwned;
+    plan.fileExistenceCheckReady =
+        outputVerificationPlan.fileExistenceCheckReady;
+    plan.nonEmptyCheckReady = outputVerificationPlan.nonEmptyCheckReady;
+    plan.fileExistenceCheckOwned =
+        outputVerificationPlan.fileExistenceCheckOwned;
+    plan.nonEmptyCheckOwned = outputVerificationPlan.nonEmptyCheckOwned;
 
     if( !outputVerificationPlan.contractReady )
     {
@@ -3938,12 +3967,18 @@ inline QString batchRenderedVideoOutputPlanSummary(
 inline QString batchRenderedVideoOutputVerificationPlanSummary(
     const BatchRenderedVideoOutputVerificationPlan & plan)
 {
-    return QStringLiteral("output-verification-source=%1 output-verification-path=%2 output-verification-extension=%3 output-verification-path-ready=%4 output-verification-extension-match=%5 output-verification-file-exists-owned=%6 output-verification-nonempty-owned=%7 output-verification-probe-owned=%8 output-verification-codec-container-owned=%9 output-verification-frame-count-owned=%10 output-verification-receipt-hash-owned=%11 output-verification-execution-owned=%12 output-verification-contract-ready=%13 output-verification-reason=%14")
+    return QStringLiteral("output-verification-source=%1 output-verification-path=%2 output-verification-extension=%3 output-verification-path-ready=%4 output-verification-extension-match=%5 output-verification-file-exists-planned=%6 output-verification-nonempty-planned=%7 output-verification-nonempty-min-bytes=%8 output-verification-filesystem-inspection-owned=%9 output-verification-file-exists-ready=%10 output-verification-nonempty-ready=%11 output-verification-file-exists-owned=%12 output-verification-nonempty-owned=%13 output-verification-probe-owned=%14 output-verification-codec-container-owned=%15 output-verification-frame-count-owned=%16 output-verification-receipt-hash-owned=%17 output-verification-execution-owned=%18 output-verification-contract-ready=%19 output-verification-reason=%20")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
         .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
         .arg(plan.outputPathReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.extensionMatchesTarget ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyMinimumBytes)
+        .arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.mediaProbeOwned ? QStringLiteral("true") : QStringLiteral("false"))
@@ -3958,7 +3993,7 @@ inline QString batchRenderedVideoOutputVerificationPlanSummary(
 inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
     const BatchRenderedVideoOutputVerificationExecutionPlan & plan)
 {
-    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-probe-binary-source=%5 output-verification-exec-probe-binary-request=%6 output-verification-exec-probe-binary-resolved=%7 output-verification-exec-probe-binary-path-search-owned=%8 output-verification-exec-probe-binary-path-search-attempted=%9 output-verification-exec-probe-binary-found=%10 output-verification-exec-probe-binary-command-ready=%11 output-verification-exec-probe-binary-reason=%12 output-verification-exec-output-contract-ready=%13 output-verification-exec-ffmpeg-contract-ready=%14 output-verification-exec-ffmpeg-audio-args=%15 output-verification-exec-ffmpeg-audio-transition-source=%16 output-verification-exec-ffmpeg-audio-transition-args=%17 output-verification-exec-ffmpeg-audio-contract-ready=%18 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%19 output-verification-exec-ffmpeg-audio-mux-planned=%20 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%21 output-verification-exec-ffmpeg-audio-sync-planned=%22 output-verification-exec-ffmpeg-audio-mux-exec-ready=%23 output-verification-exec-ffmpeg-audio-mux-command-planned=%24 output-verification-exec-ffmpeg-audio-mux-command-ready=%25 output-verification-exec-ffmpeg-audio-owned=%26 output-verification-exec-file-exists-owned=%27 output-verification-exec-nonempty-owned=%28 output-verification-exec-probe-owned=%29 output-verification-exec-codec-container-owned=%30 output-verification-exec-frame-count-owned=%31 output-verification-exec-receipt-hash-owned=%32 output-verification-exec-ready=%33 output-verification-exec-contract-ready=%34 output-verification-exec-probe-command-source=%35 output-verification-exec-probe-command-args=%36 output-verification-exec-probe-command-line=%37 output-verification-exec-probe-command-planned=%38 output-verification-exec-probe-command-ready=%39 output-verification-exec-probe-command-owned=%40 output-verification-exec-probe-command-exec-ready=%41 output-verification-exec-probe-command-contract-ready=%42 output-verification-exec-probe-command-reason=%43 output-verification-exec-reason=%44")
+    return QStringLiteral("output-verification-exec-source=%1 output-verification-exec-path=%2 output-verification-exec-extension=%3 output-verification-exec-probe=%4 output-verification-exec-probe-binary-source=%5 output-verification-exec-probe-binary-request=%6 output-verification-exec-probe-binary-resolved=%7 output-verification-exec-probe-binary-path-search-owned=%8 output-verification-exec-probe-binary-path-search-attempted=%9 output-verification-exec-probe-binary-found=%10 output-verification-exec-probe-binary-command-ready=%11 output-verification-exec-probe-binary-reason=%12 output-verification-exec-output-contract-ready=%13 output-verification-exec-ffmpeg-contract-ready=%14 output-verification-exec-ffmpeg-audio-args=%15 output-verification-exec-ffmpeg-audio-transition-source=%16 output-verification-exec-ffmpeg-audio-transition-args=%17 output-verification-exec-ffmpeg-audio-contract-ready=%18 output-verification-exec-ffmpeg-audio-mux-exec-contract-ready=%19 output-verification-exec-ffmpeg-audio-mux-planned=%20 output-verification-exec-ffmpeg-audio-mux-args-handoff-planned=%21 output-verification-exec-ffmpeg-audio-sync-planned=%22 output-verification-exec-ffmpeg-audio-mux-exec-ready=%23 output-verification-exec-ffmpeg-audio-mux-command-planned=%24 output-verification-exec-ffmpeg-audio-mux-command-ready=%25 output-verification-exec-ffmpeg-audio-owned=%26 output-verification-exec-file-exists-planned=%27 output-verification-exec-nonempty-planned=%28 output-verification-exec-nonempty-min-bytes=%29 output-verification-exec-filesystem-inspection-owned=%30 output-verification-exec-file-exists-ready=%31 output-verification-exec-nonempty-ready=%32 output-verification-exec-file-exists-owned=%33 output-verification-exec-nonempty-owned=%34 output-verification-exec-probe-owned=%35 output-verification-exec-codec-container-owned=%36 output-verification-exec-frame-count-owned=%37 output-verification-exec-receipt-hash-owned=%38 output-verification-exec-ready=%39 output-verification-exec-contract-ready=%40 output-verification-exec-probe-command-source=%41 output-verification-exec-probe-command-args=%42 output-verification-exec-probe-command-line=%43 output-verification-exec-probe-command-planned=%44 output-verification-exec-probe-command-ready=%45 output-verification-exec-probe-command-owned=%46 output-verification-exec-probe-command-exec-ready=%47 output-verification-exec-probe-command-contract-ready=%48 output-verification-exec-probe-command-reason=%49 output-verification-exec-reason=%50")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
         .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
@@ -3991,6 +4026,12 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         .arg(plan.ffmpegMuxedAudioCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ffmpegMuxedAudioCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ffmpegAudioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyMinimumBytes)
+        .arg(plan.filesystemInspectionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.fileExistenceCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyCheckReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
