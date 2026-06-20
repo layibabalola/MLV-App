@@ -591,6 +591,17 @@ $playbackVerdict = New-SectionVerdict `
     -Blockers @($playbackBlockers)
 
 $playbackAbBlockers = [System.Collections.Generic.List[string]]::new()
+$playbackAbSpeedCompare = $null
+$playbackAbComparisonBasis = "candidate"
+if ($playbackAb) {
+    if ($playbackAb.speedCompare) {
+        $playbackAbSpeedCompare = $playbackAb.speedCompare
+        $playbackAbComparisonBasis = "candidateSpeed"
+    }
+    else {
+        $playbackAbSpeedCompare = $playbackAb.compare
+    }
+}
 if ($null -eq $playbackAb) {
     [void]$playbackAbBlockers.Add("playback A/B did not run or did not produce a summary")
     Add-Diagnostic `
@@ -611,7 +622,7 @@ else {
             -Evidence @("status=$($playbackAb.status)") `
             -NextAction "Inspect the playback A/B child summary for GUI smoke, GL parity, or artifact-detection failures."
     }
-    if ($null -eq $playbackAb.compare) {
+    if ($null -eq $playbackAbSpeedCompare) {
         [void]$playbackAbBlockers.Add("playback A/B compare metrics were missing")
         Add-Diagnostic `
             -Diagnostics $diagnostics `
@@ -631,8 +642,8 @@ else {
                 -NextAction "Fix the A/B proof failure before quoting playback speed."
         }
     }
-    if ($playbackAb.compare -and $null -ne $playbackAb.compare.presentedFps) {
-        $fpsDelta = Convert-ToNullableDouble (Get-Field $playbackAb.compare.presentedFps "delta")
+    if ($playbackAbSpeedCompare -and $null -ne $playbackAbSpeedCompare.presentedFps) {
+        $fpsDelta = Convert-ToNullableDouble (Get-Field $playbackAbSpeedCompare.presentedFps "delta")
         if ($null -ne $fpsDelta -and $fpsDelta -le 0) {
             Add-Diagnostic `
                 -Diagnostics $diagnostics `
@@ -640,19 +651,26 @@ else {
                 -Code "PLAYBACK_PRESENTED_FPS_NOT_IMPROVED" `
                 -Severity "warning" `
                 -Message "CUDA playback did not improve presented FPS in the paired A/B metrics." `
-                -Evidence @((Format-MetricDeltaLine -Label "presented FPS" -Metric $playbackAb.compare.presentedFps)) `
-                -NextAction "Treat the packet as a support/correctness result, not a speedup claim, and inspect per-stage timing deltas."
+                -Evidence @(
+                    "comparison_basis=$playbackAbComparisonBasis",
+                    (Format-MetricDeltaLine -Label "presented FPS" -Metric $playbackAbSpeedCompare.presentedFps)
+                ) `
+                -NextAction "Treat the packet as a support/correctness result, not a speedup claim, and inspect per-stage timing deltas or the playback A/B analysis suggestion."
         }
     }
 }
 $playbackSpeedEvidence = @()
-if ($playbackAb -and $playbackAb.compare) {
+if ($playbackAb -and $playbackAbSpeedCompare) {
     $playbackSpeedEvidence = @(
-        (Format-MetricDeltaLine -Label "presented FPS" -Metric $playbackAb.compare.presentedFps),
-        (Format-MetricDeltaLine -Label "GUI status FPS" -Metric $playbackAb.compare.guiStatusFps),
-        (Format-MetricDeltaLine -Label "avg present interval" -Metric $playbackAb.compare.avgPresentIntervalMs -Unit " ms" -LowerIsBetter),
-        (Format-MetricDeltaLine -Label "render total" -Metric $playbackAb.compare.avgRenderTotalMs -Unit " ms" -LowerIsBetter)
+        "comparison_basis=$playbackAbComparisonBasis",
+        (Format-MetricDeltaLine -Label "presented FPS" -Metric $playbackAbSpeedCompare.presentedFps),
+        (Format-MetricDeltaLine -Label "GUI status FPS" -Metric $playbackAbSpeedCompare.guiStatusFps),
+        (Format-MetricDeltaLine -Label "avg present interval" -Metric $playbackAbSpeedCompare.avgPresentIntervalMs -Unit " ms" -LowerIsBetter),
+        (Format-MetricDeltaLine -Label "render total" -Metric $playbackAbSpeedCompare.avgRenderTotalMs -Unit " ms" -LowerIsBetter)
     )
+    if ($playbackAb.analysis -and $playbackAb.analysis.suggestedOptimization) {
+        $playbackSpeedEvidence += "suggested_optimization=$($playbackAb.analysis.suggestedOptimization)"
+    }
 }
 $playbackAbVerdict = New-SectionVerdict `
     -Status $(if ($playbackAbBlockers.Count -eq 0) { "PASS" } else { "BLOCKED" }) `

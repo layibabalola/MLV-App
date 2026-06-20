@@ -283,8 +283,15 @@ CPU-vs-CUDA packet is deliberately still a failed proof because the CUDA
 candidate hit cadence jitter, but its stage deltas classify the regression as
 `present-bound` with suggested optimization
 `reduce_gpu_present_draw_queue_sync`: recon/render-work got slightly cheaper
-while queue wait, draw total, and prep-before-finish grew. Treat that as the
-next playback engine optimization target, not as a CUDA playback speed claim.
+while queue wait, draw total, and prep-before-finish grew. The next A/B tooling
+slice separates the CUDA candidate into a GL-parity proof leg and a speed leg:
+the proof leg keeps `MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1` but does not
+run the temporal artifact detector, while the speed leg omits the heavy
+GL-vs-oracle readback and carries cadence/FPS validation. The combined local
+CUDA proof wrapper now requests this separated speed leg by default (use
+`-SkipPlaybackAbSpeedRun` to return to the old two-leg A/B shape). Treat this as
+measurement isolation for the next engine optimization target, not as a CUDA
+playback speed claim.
 
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel

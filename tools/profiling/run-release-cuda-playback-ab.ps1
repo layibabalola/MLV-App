@@ -19,6 +19,7 @@ param(
     [switch]$FailOnColorArtifact,
     [switch]$RequireCandidateImprovesPresentedFps,
     [switch]$RequireCandidateGlParity,
+    [switch]$SeparateCandidateSpeedRun,
     [switch]$NoHighPerformancePreference,
     [switch]$DryRun
 )
@@ -205,7 +206,8 @@ function Test-DeltaAtLeast {
 function New-PlaybackAbAnalysis {
     param(
         [object]$Compare,
-        [string[]]$ProofFailures
+        [string[]]$ProofFailures,
+        [string]$ComparisonBasis = "candidate"
     )
 
     $fpsDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "presentedFps"
@@ -262,6 +264,7 @@ function New-PlaybackAbAnalysis {
     [pscustomobject]@{
         schema = "mlvapp.playback_ab_analysis.v1"
         proofPassed = (@($ProofFailures).Count -eq 0)
+        comparisonBasis = $ComparisonBasis
         dominantBottleneck = $dominant
         suggestedOptimization = $suggestion
         confidence = $confidence
@@ -599,6 +602,7 @@ function Write-SmokeInvokeScript {
         [Parameter(Mandatory = $true)][string[]]$ExtraEnvironment,
         [Parameter(Mandatory = $true)][bool]$CaptureScreenshot,
         [Parameter(Mandatory = $true)][bool]$FailOnColorArtifactValue,
+        [Parameter(Mandatory = $true)][bool]$DetectPlaybackArtifactsValue,
         [Parameter(Mandatory = $true)][bool]$DryRunValue
     )
 
@@ -644,8 +648,10 @@ function Write-SmokeInvokeScript {
     EnablePhase3QualityModes = `$true
     PreserveExperimentalEnvironment = `$true
     FrameTelemetry = `$true
-    DetectPlaybackArtifacts = `$true
     ExtraEnvironment = `$envList
+}
+if (`$$DetectPlaybackArtifactsValue) {
+    `$smokeParams['DetectPlaybackArtifacts'] = `$true
 }
 if (-not [string]::IsNullOrWhiteSpace($gpuBackendLiteral)) {
     `$smokeParams['GpuPlaybackReconBackend'] = $gpuBackendLiteral
@@ -739,10 +745,13 @@ if ($latestParent) {
 }
 $baselineOutput = Join-Path $runRoot "baseline-cpu.json"
 $candidateOutput = Join-Path $runRoot "candidate-cuda.json"
+$candidateSpeedOutput = Join-Path $runRoot "candidate-cuda-speed.json"
 $baselineScreenshots = Join-Path $runRoot "baseline-screenshots"
 $candidateScreenshots = Join-Path $runRoot "candidate-screenshots"
+$candidateSpeedScreenshots = Join-Path $runRoot "candidate-speed-screenshots"
 $baselineInvokeScript = Join-Path $runRoot "invoke-baseline.ps1"
 $candidateInvokeScript = Join-Path $runRoot "invoke-candidate.ps1"
+$candidateSpeedInvokeScript = Join-Path $runRoot "invoke-candidate-speed.ps1"
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
 
 $captureScreenshot = -not [bool]$NoScreenshot
@@ -758,6 +767,14 @@ $candidateEnv = @(
     "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend",
     "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1",
     "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery"
+)
+$candidateSpeedEnv = @(
+    "QT_OPENGL=desktop",
+    "MLVAPP_EXPERIMENTAL_GL_VIEWPORT=1",
+    "MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1",
+    "MLVAPP_GPU_PLAYBACK_RECON=1",
+    "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1",
+    "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
 )
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -780,6 +797,7 @@ $baselineCommand = Write-SmokeInvokeScript `
     -ExtraEnvironment $baselineEnv `
     -CaptureScreenshot $captureScreenshot `
     -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
+    -DetectPlaybackArtifactsValue $true `
     -DryRunValue ([bool]$DryRun)
 
 $candidateCommand = Write-SmokeInvokeScript `
@@ -802,7 +820,34 @@ $candidateCommand = Write-SmokeInvokeScript `
     -ExtraEnvironment $candidateEnv `
     -CaptureScreenshot $captureScreenshot `
     -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
+    -DetectPlaybackArtifactsValue (-not [bool]$SeparateCandidateSpeedRun) `
     -DryRunValue ([bool]$DryRun)
+
+$candidateSpeedCommand = $null
+if ($SeparateCandidateSpeedRun) {
+    $candidateSpeedCommand = Write-SmokeInvokeScript `
+        -Path $candidateSpeedInvokeScript `
+        -SmokeScript $smokeScript `
+        -RepoRoot $root `
+        -Exe $exe `
+        -Clip $clip `
+        -Output $candidateSpeedOutput `
+        -ScreenshotDir $candidateSpeedScreenshots `
+        -ReceiptPath $receiptPath `
+        -Quality $QualityMode `
+        -Scale $ScaleFactor `
+        -ThreadSetting $Threads `
+        -SecondsValue $Seconds `
+        -SettleMsValue $SettleMs `
+        -StartFrameValue $StartFrame `
+        -GpuPreviewProcessing "gpu" `
+        -GpuBackend $GpuPlaybackReconBackend `
+        -ExtraEnvironment $candidateSpeedEnv `
+        -CaptureScreenshot $captureScreenshot `
+        -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
+        -DetectPlaybackArtifactsValue $true `
+        -DryRunValue ([bool]$DryRun)
+}
 
 $summary = [ordered]@{
     schema = "mlvapp-cuda-playback-ab.v1"
@@ -822,7 +867,12 @@ $summary = [ordered]@{
     qualityMode = $QualityMode
     scaleFactor = $ScaleFactor
     validationSampleEvery = $ValidationSampleEvery
-    runOrder = if ($CandidateFirst) { @("candidate", "baseline") } else { @("baseline", "candidate") }
+    separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
+    runOrder = if ($CandidateFirst) {
+        if ($SeparateCandidateSpeedRun) { @("candidate", "candidate_speed", "baseline") } else { @("candidate", "baseline") }
+    } else {
+        if ($SeparateCandidateSpeedRun) { @("baseline", "candidate", "candidate_speed") } else { @("baseline", "candidate") }
+    }
     machineFingerprint = $machineFingerprint
     nvidiaSmi = $nvidiaSmi
     preflightFailures = @($preflightFailures)
@@ -836,10 +886,12 @@ $summary = [ordered]@{
     commands = [pscustomobject]@{
         baseline = $baselineCommand
         candidate = $candidateCommand
+        candidateSpeed = $candidateSpeedCommand
     }
     outputs = [pscustomobject]@{
         baseline = $baselineOutput
         candidate = $candidateOutput
+        candidateSpeed = if ($SeparateCandidateSpeedRun) { $candidateSpeedOutput } else { $null }
         summary = $summaryPath
     }
     proofBoundary = [pscustomobject]@{
@@ -849,6 +901,7 @@ $summary = [ordered]@{
         provesDellSupport = $false
         notes = @(
             "This wrapper compares CPU baseline and scoped CUDA no-readback candidate on the same release executable.",
+            "When separateCandidateSpeedRun is true, candidate proves GL parity without the temporal detector and candidateSpeed measures cadence without heavy GL-vs-oracle readback.",
             "On Windows hybrid-GPU laptops, the wrapper sets the per-app high-performance GPU preference before real runs unless -NoHighPerformancePreference is passed.",
             "A speed gain is quotable only for the host, clip, settings, and run duration captured in this summary.",
             "UltraMagnus RTX 4090 results do not prove Dell laptop support; run this wrapper on the Dell laptop for that claim."
@@ -872,17 +925,34 @@ if ($preflightFailures.Count -gt 0) {
 
 $baselineResult = $null
 $candidateResult = $null
+$candidateSpeedResult = $null
 $steps = if ($CandidateFirst) {
-    @(
+    $items = @(
         [pscustomobject]@{ label = "candidate"; invokeScript = $candidateCommand.invokeScript },
         [pscustomobject]@{ label = "baseline"; invokeScript = $baselineCommand.invokeScript }
     )
+    if ($SeparateCandidateSpeedRun) {
+        $items = @(
+            [pscustomobject]@{ label = "candidate"; invokeScript = $candidateCommand.invokeScript },
+            [pscustomobject]@{ label = "candidate_speed"; invokeScript = $candidateSpeedCommand.invokeScript },
+            [pscustomobject]@{ label = "baseline"; invokeScript = $baselineCommand.invokeScript }
+        )
+    }
+    $items
 }
 else {
-    @(
+    $items = @(
         [pscustomobject]@{ label = "baseline"; invokeScript = $baselineCommand.invokeScript },
         [pscustomobject]@{ label = "candidate"; invokeScript = $candidateCommand.invokeScript }
     )
+    if ($SeparateCandidateSpeedRun) {
+        $items = @(
+            [pscustomobject]@{ label = "baseline"; invokeScript = $baselineCommand.invokeScript },
+            [pscustomobject]@{ label = "candidate"; invokeScript = $candidateCommand.invokeScript },
+            [pscustomobject]@{ label = "candidate_speed"; invokeScript = $candidateSpeedCommand.invokeScript }
+        )
+    }
+    $items
 }
 
 foreach ($step in $steps) {
@@ -893,13 +963,21 @@ foreach ($step in $steps) {
     if ($step.label -eq "baseline") {
         $baselineResult = $result
     }
-    else {
+    elseif ($step.label -eq "candidate") {
         $candidateResult = $result
+    }
+    else {
+        $candidateSpeedResult = $result
     }
 }
 
 $baselineSummary = Read-SmokeSummary -Path $baselineOutput -ExitCode $baselineResult.exitCode
 $candidateSummary = Read-SmokeSummary -Path $candidateOutput -ExitCode $candidateResult.exitCode
+$candidateSpeedSummary = if ($SeparateCandidateSpeedRun) {
+    Read-SmokeSummary -Path $candidateSpeedOutput -ExitCode $candidateSpeedResult.exitCode
+} else {
+    $null
+}
 
 $observedBuildSha = Get-NestedValue $candidateSummary "runMetadata.build_sha"
 if ([string]::IsNullOrWhiteSpace([string]$observedBuildSha)) {
@@ -919,6 +997,9 @@ if ($baselineResult.exitCode -ne 0) {
 if ($candidateResult.exitCode -ne 0) {
     $proofFailures += "candidate-smoke-exit-code=$($candidateResult.exitCode)"
 }
+if ($SeparateCandidateSpeedRun -and $candidateSpeedResult.exitCode -ne 0) {
+    $proofFailures += "candidate-speed-smoke-exit-code=$($candidateSpeedResult.exitCode)"
+}
 if (-not $NoHighPerformancePreference -and $gpuPreferenceAfter -ne "GpuPreference=2;") {
     $proofFailures += "windows-high-performance-gpu-preference-not-set actual=$gpuPreferenceAfter"
 }
@@ -927,6 +1008,9 @@ if (-not $baselineSummary.validationOk) {
 }
 if (-not $candidateSummary.validationOk) {
     $proofFailures += "candidate-validation-not-ok"
+}
+if ($SeparateCandidateSpeedRun -and -not $candidateSpeedSummary.validationOk) {
+    $proofFailures += "candidate-speed-validation-not-ok"
 }
 if ($RequireCandidateGlParity) {
     if (-not $candidateSummary.glProof.requested) {
@@ -944,38 +1028,58 @@ if ($RequireCandidateGlParity) {
 }
 if ($RequireCandidateImprovesPresentedFps) {
     $baselineFps = Convert-ToNullableDouble $baselineSummary.presentedFps
-    $candidateFps = Convert-ToNullableDouble $candidateSummary.presentedFps
+    $candidateForSpeed = if ($SeparateCandidateSpeedRun) { $candidateSpeedSummary } else { $candidateSummary }
+    $candidateFps = Convert-ToNullableDouble $candidateForSpeed.presentedFps
     if ($null -eq $baselineFps -or $null -eq $candidateFps -or $candidateFps -le $baselineFps) {
         $proofFailures += "candidate-presented-fps-not-improved baseline=$baselineFps candidate=$candidateFps"
     }
 }
 
-$compare = [pscustomobject]@{
-    presentedFps = New-MetricDelta -BaselineValue $baselineSummary.presentedFps -CandidateValue $candidateSummary.presentedFps
-    timelineFps = New-MetricDelta -BaselineValue $baselineSummary.timelineFps -CandidateValue $candidateSummary.timelineFps
-    guiStatusFps = New-MetricDelta -BaselineValue $baselineSummary.guiStatusFps -CandidateValue $candidateSummary.guiStatusFps
-    visibleGuiFps = New-MetricDelta -BaselineValue $baselineSummary.visibleGuiFps -CandidateValue $candidateSummary.visibleGuiFps
-    avgPresentIntervalMs = New-MetricDelta -BaselineValue $baselineSummary.avgPresentIntervalMs -CandidateValue $candidateSummary.avgPresentIntervalMs
-    avgRenderTotalMs = New-MetricDelta -BaselineValue $baselineSummary.avgRenderTotalMs -CandidateValue $candidateSummary.avgRenderTotalMs
-    avgRenderWorkMs = New-MetricDelta -BaselineValue $baselineSummary.avgRenderWorkMs -CandidateValue $candidateSummary.avgRenderWorkMs
-    avgQueueWaitMs = New-MetricDelta -BaselineValue $baselineSummary.avgQueueWaitMs -CandidateValue $candidateSummary.avgQueueWaitMs
-    avgLlrawprocMs = New-MetricDelta -BaselineValue $baselineSummary.avgLlrawprocMs -CandidateValue $candidateSummary.avgLlrawprocMs
-    avgProcessed8Ms = New-MetricDelta -BaselineValue $baselineSummary.avgProcessed8Ms -CandidateValue $candidateSummary.avgProcessed8Ms
-    avgDrawTotalMs = New-MetricDelta -BaselineValue $baselineSummary.avgDrawTotalMs -CandidateValue $candidateSummary.avgDrawTotalMs
-    avgPrepWorkerBuildMs = New-MetricDelta -BaselineValue $baselineSummary.avgPrepWorkerBuildMs -CandidateValue $candidateSummary.avgPrepWorkerBuildMs
-    avgPrepWorkerTotalMs = New-MetricDelta -BaselineValue $baselineSummary.avgPrepWorkerTotalMs -CandidateValue $candidateSummary.avgPrepWorkerTotalMs
-    avgPrepBeforeFinishMs = New-MetricDelta -BaselineValue $baselineSummary.avgPrepBeforeFinishMs -CandidateValue $candidateSummary.avgPrepBeforeFinishMs
+function New-PlaybackCompare {
+    param(
+        [object]$BaselineSummary,
+        [object]$CandidateSummary
+    )
+
+    [pscustomobject]@{
+        presentedFps = New-MetricDelta -BaselineValue $BaselineSummary.presentedFps -CandidateValue $CandidateSummary.presentedFps
+        timelineFps = New-MetricDelta -BaselineValue $BaselineSummary.timelineFps -CandidateValue $CandidateSummary.timelineFps
+        guiStatusFps = New-MetricDelta -BaselineValue $BaselineSummary.guiStatusFps -CandidateValue $CandidateSummary.guiStatusFps
+        visibleGuiFps = New-MetricDelta -BaselineValue $BaselineSummary.visibleGuiFps -CandidateValue $CandidateSummary.visibleGuiFps
+        avgPresentIntervalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPresentIntervalMs -CandidateValue $CandidateSummary.avgPresentIntervalMs
+        avgRenderTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgRenderTotalMs -CandidateValue $CandidateSummary.avgRenderTotalMs
+        avgRenderWorkMs = New-MetricDelta -BaselineValue $BaselineSummary.avgRenderWorkMs -CandidateValue $CandidateSummary.avgRenderWorkMs
+        avgQueueWaitMs = New-MetricDelta -BaselineValue $BaselineSummary.avgQueueWaitMs -CandidateValue $CandidateSummary.avgQueueWaitMs
+        avgLlrawprocMs = New-MetricDelta -BaselineValue $BaselineSummary.avgLlrawprocMs -CandidateValue $CandidateSummary.avgLlrawprocMs
+        avgProcessed8Ms = New-MetricDelta -BaselineValue $BaselineSummary.avgProcessed8Ms -CandidateValue $CandidateSummary.avgProcessed8Ms
+        avgDrawTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgDrawTotalMs -CandidateValue $CandidateSummary.avgDrawTotalMs
+        avgPrepWorkerBuildMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerBuildMs -CandidateValue $CandidateSummary.avgPrepWorkerBuildMs
+        avgPrepWorkerTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerTotalMs -CandidateValue $CandidateSummary.avgPrepWorkerTotalMs
+        avgPrepBeforeFinishMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepBeforeFinishMs -CandidateValue $CandidateSummary.avgPrepBeforeFinishMs
+    }
 }
+
+$compare = New-PlaybackCompare -BaselineSummary $baselineSummary -CandidateSummary $candidateSummary
+$speedCompare = if ($SeparateCandidateSpeedRun) {
+    New-PlaybackCompare -BaselineSummary $baselineSummary -CandidateSummary $candidateSpeedSummary
+} else {
+    $null
+}
+$analysisCompare = if ($SeparateCandidateSpeedRun) { $speedCompare } else { $compare }
+$analysisBasis = if ($SeparateCandidateSpeedRun) { "candidateSpeed" } else { "candidate" }
 
 $summary["status"] = if ($proofFailures.Count -eq 0) { "success" } else { "failed" }
 $summary["baseline"] = $baselineSummary
 $summary["candidate"] = $candidateSummary
+$summary["candidateSpeed"] = $candidateSpeedSummary
 $summary["compare"] = $compare
+$summary["speedCompare"] = $speedCompare
 $summary["proofFailures"] = @($proofFailures)
-$summary["analysis"] = New-PlaybackAbAnalysis -Compare $compare -ProofFailures @($proofFailures)
+$summary["analysis"] = New-PlaybackAbAnalysis -Compare $analysisCompare -ProofFailures @($proofFailures) -ComparisonBasis $analysisBasis
 $summary["childOutput"] = [pscustomobject]@{
     baseline = $baselineResult.output
     candidate = $candidateResult.output
+    candidateSpeed = if ($SeparateCandidateSpeedRun) { $candidateSpeedResult.output } else { $null }
 }
 Write-JsonFile -Value ([pscustomobject]$summary) -Path $summaryPath
 Copy-Item -LiteralPath $summaryPath -Destination $latestPath -Force

@@ -343,13 +343,20 @@ function Get-ProofSummarySuggestion {
     if ((Convert-ToNullableInt64 $playback.totalGpuTextureNoReadbackFrames) -le 0) {
         return "enable_gpu_texture_no_readback_or_fix_adapter"
     }
-    if ($null -eq $playbackAb -or $null -eq $playbackAb.compare) {
+    $playbackAbCompare = if ($playbackAb -and $playbackAb.speedCompare) {
+        $playbackAb.speedCompare
+    } elseif ($playbackAb) {
+        $playbackAb.compare
+    } else {
+        $null
+    }
+    if ($null -eq $playbackAb -or $null -eq $playbackAbCompare) {
         return "run_playback_ab_speed_probe"
     }
     if ($playbackAb.analysis -and $playbackAb.analysis.suggestedOptimization) {
         return [string]$playbackAb.analysis.suggestedOptimization
     }
-    $fpsDelta = Convert-ToNullableDouble $playbackAb.compare.presentedFps.delta
+    $fpsDelta = Convert-ToNullableDouble $playbackAbCompare.presentedFps.delta
     if ($null -ne $fpsDelta -and $fpsDelta -lt 0) {
         return "optimize_playback_cuda_candidate"
     }
@@ -402,7 +409,7 @@ function Get-PlaybackAbAnalysis {
         }
     }
 
-    $compare = $Record.compare
+    $compare = if ($Record.speedCompare) { $Record.speedCompare } else { $Record.compare }
     $fpsDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "presentedFps"
     $presentIntervalDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPresentIntervalMs"
     $renderWorkDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgRenderWorkMs"
@@ -725,8 +732,16 @@ function New-LocalProofSummaryRow {
     $fallback = if ($playback) {
         Convert-ToNullableInt64 $playback.totalFallbackFrames
     } else { $null }
-    $candidatePresentedFps = if ($playbackAb -and $playbackAb.compare) {
-        Convert-ToNullableDouble $playbackAb.compare.presentedFps.candidate
+    $playbackAbCompare = if ($playbackAb -and $playbackAb.speedCompare) {
+        $playbackAb.speedCompare
+    } elseif ($playbackAb) {
+        $playbackAb.compare
+    } else {
+        $null
+    }
+    $playbackComparisonBasis = if ($playbackAb -and $playbackAb.speedCompare) { "candidateSpeed" } elseif ($playbackAb) { "candidate" } else { $null }
+    $candidatePresentedFps = if ($playbackAb -and $playbackAbCompare) {
+        Convert-ToNullableDouble $playbackAbCompare.presentedFps.candidate
     } else { $null }
     $cdng = $Record.proof.cdng
     $candidateFrames = if ($cdng) {
@@ -743,6 +758,7 @@ function New-LocalProofSummaryRow {
         record_kind = "local_proof_summary"
         machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
+        playback_comparison_basis = $playbackComparisonBasis
         presented_fps = if ($null -ne $candidatePresentedFps) { [math]::Round($candidatePresentedFps, 3) } else { $null }
         no_readback_pct = if ($presentedFrames -gt 0 -and $null -ne $noReadback) { [math]::Round(($noReadback * 100.0) / $presentedFrames, 3) } else { $null }
         fallback_pct = if ($presentedFrames -gt 0 -and $null -ne $fallback) { [math]::Round(($fallback * 100.0) / $presentedFrames, 3) } else { $null }
@@ -773,9 +789,11 @@ function New-PlaybackAbSummaryRow {
     }
     Assert-MachineFingerprint -Fingerprint $Record.machineFingerprint -Source $Source
 
-    $baselinePresented = Convert-ToNullableDouble $Record.compare.presentedFps.baseline
-    $candidatePresented = Convert-ToNullableDouble $Record.compare.presentedFps.candidate
-    $deltaPct = Convert-ToNullableDouble $Record.compare.presentedFps.deltaPercent
+    $speedCompare = if ($Record.speedCompare) { $Record.speedCompare } else { $Record.compare }
+    $playbackComparisonBasis = if ($Record.speedCompare) { "candidateSpeed" } else { "candidate" }
+    $baselinePresented = Convert-ToNullableDouble $speedCompare.presentedFps.baseline
+    $candidatePresented = Convert-ToNullableDouble $speedCompare.presentedFps.candidate
+    $deltaPct = Convert-ToNullableDouble $speedCompare.presentedFps.deltaPercent
     $analysis = Get-PlaybackAbAnalysis -Record $Record
     $suggestion = if ([string]::IsNullOrWhiteSpace([string]$analysis.suggestedOptimization)) {
         if ([string]$Record.status -ne "success") {
@@ -791,6 +809,7 @@ function New-PlaybackAbSummaryRow {
         record_kind = "playback_ab_summary"
         machine = Get-MachineLabel -Fingerprint $Record.machineFingerprint
         build_sha = $Record.machineFingerprint.build_sha
+        playback_comparison_basis = $playbackComparisonBasis
         baseline_presented_fps = if ($null -ne $baselinePresented) { [math]::Round($baselinePresented, 3) } else { $null }
         presented_fps = if ($null -ne $candidatePresented) { [math]::Round($candidatePresented, 3) } else { $null }
         playback_fps_delta_pct = if ($null -ne $deltaPct) { [math]::Round($deltaPct, 3) } else { $null }
@@ -873,6 +892,6 @@ if ($Json) {
 }
 
 $sortedRows |
-    Format-Table -AutoSize -Wrap record_kind, machine, baseline_presented_fps, presented_fps, playback_fps_delta_pct, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
+    Format-Table -AutoSize -Wrap record_kind, machine, playback_comparison_basis, baseline_presented_fps, presented_fps, playback_fps_delta_pct, no_readback_pct, fallback_pct, fallback_count, export_frames, cdng_verdict, dng_hash, gpu_export_replaced_pct, gpu_export_trusted_pct, dng_elapsed_delta_pct, dng_throughput_status, dominant_bottleneck, suggested_optimization, dng_suggested_optimization, build_sha, source |
     Out-String -Width 4096 |
     Write-Output

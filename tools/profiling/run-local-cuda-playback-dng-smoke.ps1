@@ -12,6 +12,7 @@ param(
     [string]$ScaleFactor = "1",
     [int]$PlaybackAbSeconds = 30,
     [int]$PlaybackAbSettleMs = 2500,
+    [switch]$SkipPlaybackAbSpeedRun,
     [int]$MaxFrames = 4,
     [int]$Repeats = 1,
     [string[]]$CdngCodecs = @("uncompressed", "lossless"),
@@ -702,8 +703,11 @@ function Get-PlaybackAbProofSummary {
         nvidiaSmi = $Summary.nvidiaSmi
         baseline = $Summary.baseline
         candidate = $Summary.candidate
+        candidateSpeed = $Summary.candidateSpeed
         compare = $Summary.compare
-        proofFailures = @($Summary.proofFailures)
+        speedCompare = $Summary.speedCompare
+        analysis = $Summary.analysis
+        proofFailures = @($Summary.proofFailures | Where-Object { $null -ne $_ })
         proofBoundary = $Summary.proofBoundary
         summaryPath = $Summary.outputs.summary
     }
@@ -886,6 +890,9 @@ if (-not $SkipPlaybackAb -and $failures.Count -eq 0) {
         "-FailOnColorArtifact",
         "-RequireCandidateGlParity"
     )
+    if (-not $SkipPlaybackAbSpeedRun) {
+        $playbackAbArgs += "-SeparateCandidateSpeedRun"
+    }
     if ($NoHighPerformancePreference) {
         $playbackAbArgs += "-NoHighPerformancePreference"
     }
@@ -1029,6 +1036,7 @@ $summary = [pscustomobject]@{
         settleMs = $SettleMs
         playbackAbSeconds = $PlaybackAbSeconds
         playbackAbSettleMs = $PlaybackAbSettleMs
+        playbackAbSeparateCandidateSpeedRun = (-not [bool]$SkipPlaybackAb -and -not [bool]$SkipPlaybackAbSpeedRun)
         validationSampleEvery = $ValidationSampleEvery
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor

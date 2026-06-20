@@ -163,6 +163,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add("")
     [void]$lines.Add('Use a real Dual ISO `.MLV` path. Do not add `-DryRun` for proof.')
     [void]$lines.Add('The proof helper runs playback no-readback validation, paired CPU-vs-CUDA playback A/B, DNG hash/export proof, writes `proof-report.md` / `proof-report.json`, and packages a `mlvapp-local-cuda-proof-<host>-<stamp>.zip` return packet.')
+    [void]$lines.Add('The playback A/B stage separates CUDA GL-parity proof from the speed leg by default, so cadence/FPS is measured without the heavy GL-vs-oracle readback. Use `-SkipPlaybackAbSpeedRun` only when intentionally reproducing the older two-leg shape.')
     [void]$lines.Add("")
     [void]$lines.Add("## Useful Modes")
     [void]$lines.Add("- Full proof: ``$($commands.proof)``")
@@ -250,6 +251,7 @@ param(
     [switch]$ProofOnly,
     [switch]$SummaryOnly,
     [switch]$NoProofPacket,
+    [switch]$SkipPlaybackAbSpeedRun,
     [switch]$DryRun
 )
 
@@ -289,6 +291,9 @@ if ($DngAsyncWriter) {
         $dngOnlyOverlapArgs += @("-AsyncWriterThreadCount", [string]$DngAsyncWriterThreadCount)
         $proofOverlapArgs += @("-CandidateAsyncWriterThreadCount", [string]$DngAsyncWriterThreadCount)
     }
+}
+if ($SkipPlaybackAbSpeedRun) {
+    $proofOverlapArgs += "-SkipPlaybackAbSpeedRun"
 }
 
 if ($SummaryOnly) {
