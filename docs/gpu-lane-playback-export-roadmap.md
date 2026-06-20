@@ -1133,6 +1133,8 @@ _Current E4 implementation note (2026-06-20 ffmpeg binary-plan slice): the centr
 
 _Current E4 implementation note (2026-06-20 output-verification contract slice): the central job plan now carries a `BatchRenderedVideoOutputVerificationPlan` for the planned rendered artifact. It records the expected output path/extension and a contract-ready flag while explicitly reporting that file-existence checks, non-empty checks, media probing, codec/container validation, frame-count validation, receipt/hash proof, and verification execution are not owned yet. This is output-proof boundary scaffolding only: it does not touch the filesystem, run ffprobe, verify a rendered file, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 audio-contract slice): the central job plan now carries a `BatchRenderedVideoFfmpegAudioPlan` for the future rendered ffmpeg command. The current contract is deliberately video-only (`-an`) and reports source-audio discovery, extraction, ffmpeg audio input, muxing, and sync ownership as false while `runner-audio-mux-ready=false` remains a blocking runner prerequisite. This is audio proof-boundary scaffolding only: it does not discover source audio, extract audio, mux audio, validate sync, execute ffmpeg, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the
