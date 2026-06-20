@@ -35,6 +35,14 @@ struct igpu_amaze_debayer_backend
 {
     std::string description;
     igpu_amaze_debayer_timing_t lastTiming;
+    uint16_t * liveReconBayer16 = nullptr;
+    float * liveRawFloat = nullptr;
+    uint16_t * liveRgb16 = nullptr;
+    DeviceBuffers liveDeviceBuffers;
+    std::size_t livePixelCount = 0;
+    int liveWidth = 0;
+    int liveHeight = 0;
+    bool liveDeviceBuffersAllocated = false;
 };
 
 namespace
@@ -148,6 +156,161 @@ __global__ void k_pack_rgb16_to_rgba16_post_wb_undo(const uint16_t * rgb,
         clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 2u]) / wbMultiplierB)
                             + static_cast<double>(blackLevel));
     rgba[rgbaIndex + 3u] = 65535u;
+}
+
+__device__ __forceinline__ int fc_rggb_absolute(int row, int col)
+{
+    const int row2 = row & 1;
+    const int col2 = col & 1;
+    if (row2 == 0 && col2 == 0) return 0;
+    if (row2 == 1 && col2 == 1) return 2;
+    return 1;
+}
+
+__global__ void k_bayer16_to_post_wb_raw_float(const uint16_t * bayer16,
+                                               float * rawFloat,
+                                               std::size_t pixelCount,
+                                               int width,
+                                               int blackLevel,
+                                               double wbMultiplierR,
+                                               double wbMultiplierG,
+                                               double wbMultiplierB)
+{
+    const std::size_t pixel =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (pixel >= pixelCount) return;
+
+    const int row = static_cast<int>(pixel / static_cast<std::size_t>(width));
+    const int col = static_cast<int>(pixel - static_cast<std::size_t>(row) * width);
+    const int channel = fc_rggb_absolute(row, col);
+    const double wb =
+        (channel == 0) ? wbMultiplierR : ((channel == 2) ? wbMultiplierB : wbMultiplierG);
+    rawFloat[pixel] =
+        static_cast<float>((static_cast<double>(bayer16[pixel]) - static_cast<double>(blackLevel)) * wb);
+}
+
+void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
+{
+    if (!backend) return;
+    cudaFree(backend->liveReconBayer16);
+    cudaFree(backend->liveRawFloat);
+    cudaFree(backend->liveRgb16);
+    backend->liveReconBayer16 = nullptr;
+    backend->liveRawFloat = nullptr;
+    backend->liveRgb16 = nullptr;
+    if (backend->liveDeviceBuffersAllocated)
+    {
+        free_device(&backend->liveDeviceBuffers);
+        backend->liveDeviceBuffers = DeviceBuffers();
+        backend->liveDeviceBuffersAllocated = false;
+    }
+    backend->livePixelCount = 0;
+    backend->liveWidth = 0;
+    backend->liveHeight = 0;
+}
+
+void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
+                                 int width,
+                                 int height)
+{
+    if (!backend || width <= 0 || height <= 0)
+    {
+        throw CudaStageProbeError("invalid live texture buffer geometry");
+    }
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (backend->liveReconBayer16
+        && backend->liveRawFloat
+        && backend->liveRgb16
+        && backend->liveDeviceBuffersAllocated
+        && backend->livePixelCount == pixelCount
+        && backend->liveWidth == width
+        && backend->liveHeight == height)
+    {
+        return;
+    }
+
+    free_live_texture_buffers(backend);
+    CK(cudaMalloc(&backend->liveReconBayer16, pixelCount * sizeof(uint16_t)));
+    CK(cudaMalloc(&backend->liveRawFloat, pixelCount * sizeof(float)));
+    CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
+    allocate_device(&backend->liveDeviceBuffers, 1);
+    backend->liveDeviceBuffersAllocated = true;
+    backend->livePixelCount = pixelCount;
+    backend->liveWidth = width;
+    backend->liveHeight = height;
+}
+
+int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
+                                   uint16_t * dBayer16,
+                                   int width,
+                                   int height)
+{
+    if (glTexture == 0 || !dBayer16 || width <= 0 || height <= 0) return -1;
+
+    cudaGraphicsResource * resource = nullptr;
+    cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                 glTexture,
+                                                 GL_TEXTURE_2D,
+                                                 cudaGraphicsRegisterFlagsReadOnly);
+    if (rc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_R16 source texture) failed: %s\n",
+                     cudaGetErrorString(rc));
+        return 2;
+    }
+
+    rc = cudaGraphicsMapResources(1, &resource, 0);
+    if (rc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_R16 source texture) failed: %s\n",
+                     cudaGetErrorString(rc));
+        cudaGraphicsUnregisterResource(resource);
+        return 2;
+    }
+
+    cudaArray_t mappedArray = nullptr;
+    rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
+    if (rc == cudaSuccess)
+    {
+        const std::size_t rowBytes = static_cast<std::size_t>(width) * sizeof(uint16_t);
+        rc = cudaMemcpy2DFromArray(dBayer16,
+                                   rowBytes,
+                                   mappedArray,
+                                   0,
+                                   0,
+                                   rowBytes,
+                                   static_cast<std::size_t>(height),
+                                   cudaMemcpyDeviceToDevice);
+    }
+
+    const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
+    const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+    if (rc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] GL_R16 source texture device copy failed: %s\n",
+                     cudaGetErrorString(rc));
+        return 2;
+    }
+    if (unmapRc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_R16 source texture) failed: %s\n",
+                     cudaGetErrorString(unmapRc));
+        return 2;
+    }
+    if (unregisterRc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(GL_R16 source texture) failed: %s\n",
+                     cudaGetErrorString(unregisterRc));
+        return 2;
+    }
+    return 0;
 }
 
 void run_tile(const float * dRaw,
@@ -548,6 +711,7 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
 
 extern "C" void igpu_amaze_debayer_destroy(igpu_amaze_debayer_backend * backend)
 {
+    free_live_texture_buffers(backend);
     delete backend;
 }
 
@@ -749,6 +913,89 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_back
         free_device(&d);
         cudaFree(dRaw);
         cudaFree(dRgb16);
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return -2;
+    }
+}
+
+extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
+    igpu_amaze_debayer_backend * backend,
+    unsigned int in_r16_gl_texture,
+    unsigned int out_rgba16_gl_texture,
+    int width,
+    int height,
+    int black_level,
+    double wb_multiplier_r,
+    double wb_multiplier_g,
+    double wb_multiplier_b)
+{
+    if (!backend || in_r16_gl_texture == 0 || out_rgba16_gl_texture == 0
+        || width <= 32 || height <= 32
+        || wb_multiplier_r <= 0.0 || wb_multiplier_g <= 0.0 || wb_multiplier_b <= 0.0)
+    {
+        return -1;
+    }
+
+    if (black_level < 1000) black_level = -1000;
+
+    const std::size_t pixelCount =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t rgbBytes = pixelCount * 3u * sizeof(uint16_t);
+    std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
+
+    const double totalStart = now_ms();
+    try
+    {
+        ensure_live_texture_buffers(backend, width, height);
+        CK(cudaMemset(backend->liveRgb16, 0, rgbBytes));
+
+        const double uploadStart = now_ms();
+        const int copyRc = copy_gl_r16_texture_to_bayer16(in_r16_gl_texture,
+                                                          backend->liveReconBayer16,
+                                                          width,
+                                                          height);
+        if (copyRc != 0) return copyRc;
+        const int threads = 256;
+        const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
+        k_bayer16_to_post_wb_raw_float<<<blocks, threads>>>(backend->liveReconBayer16,
+                                                            backend->liveRawFloat,
+                                                            pixelCount,
+                                                            width,
+                                                            black_level,
+                                                            wb_multiplier_r,
+                                                            wb_multiplier_g,
+                                                            wb_multiplier_b);
+        CK(cudaGetLastError());
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.upload_ms = now_ms() - uploadStart;
+
+        const double kernelStart = now_ms();
+        run_frame_to_device_rgb16(backend->liveRawFloat,
+                                  backend->liveRgb16,
+                                  backend->liveDeviceBuffers,
+                                  width,
+                                  height);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.kernel_ms = now_ms() - kernelStart;
+
+        const double handoffStart = now_ms();
+        const int rc =
+            copy_rgb16_to_gl_rgba16_texture_post_wb_undo(backend->liveRgb16,
+                                                         width,
+                                                         height,
+                                                         out_rgba16_gl_texture,
+                                                         black_level,
+                                                         wb_multiplier_r,
+                                                         wb_multiplier_g,
+                                                         wb_multiplier_b);
+        CK(cudaDeviceSynchronize());
+        backend->lastTiming.download_ms = now_ms() - handoffStart;
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return rc;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return -2;
     }

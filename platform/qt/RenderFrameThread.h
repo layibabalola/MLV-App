@@ -150,6 +150,8 @@ public:
         size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
+        int gpuPlaybackReconTextureBlackLevel = 0;
+        std::array<double, 3> gpuPlaybackReconTextureWbMultipliers{{1.0, 1.0, 1.0}};
         GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
@@ -283,6 +285,8 @@ private:
         GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
+        int gpuPlaybackReconTextureBlackLevel = 0;
+        std::array<double, 3> gpuPlaybackReconTextureWbMultipliers{{1.0, 1.0, 1.0}};
         double dualIsoPreviewHistogramMs = 0.0;
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
@@ -333,6 +337,8 @@ private:
             gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
             gpuPlaybackReconTextureWidth = 0;
             gpuPlaybackReconTextureHeight = 0;
+            gpuPlaybackReconTextureBlackLevel = 0;
+            gpuPlaybackReconTextureWbMultipliers = {{1.0, 1.0, 1.0}};
             dualIsoPreviewHistogramMs = 0.0;
             dualIsoPreviewRegressionMs = 0.0;
             dualIsoPreviewRowscaleMs = 0.0;

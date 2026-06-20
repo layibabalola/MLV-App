@@ -25,12 +25,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$root = (Resolve-Path -LiteralPath $RepoRoot).Path
+function Resolve-FileSystemProviderPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    $resolved = Resolve-Path -LiteralPath $Path
+    if (-not [string]::IsNullOrWhiteSpace($resolved.ProviderPath)) {
+        return $resolved.ProviderPath
+    }
+    return $resolved.Path
+}
+
+$root = Resolve-FileSystemProviderPath -Path $RepoRoot
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
 }
 
-$exe = (Resolve-Path -LiteralPath $ExePath).Path
+$exe = Resolve-FileSystemProviderPath -Path $ExePath
 $exeDir = Split-Path -Parent $exe
 $platformDir = Join-Path $exeDir "platforms"
 $qwindows = Join-Path $platformDir "qwindows.dll"
@@ -113,7 +124,7 @@ try {
         throw "Missing -Output <profile.json>."
     }
 
-    $inputPath = (Resolve-Path -LiteralPath $ClipPath).Path
+    $inputPath = Resolve-FileSystemProviderPath -Path $ClipPath
     $outputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
     $outputDir = Split-Path -Parent $outputPath
     if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
@@ -130,7 +141,7 @@ try {
         "--threads", $Threads
     )
     if (-not [string]::IsNullOrWhiteSpace($Receipt)) {
-        $arguments += @("--receipt", (Resolve-Path -LiteralPath $Receipt).Path)
+        $arguments += @("--receipt", (Resolve-FileSystemProviderPath -Path $Receipt))
     }
     if ($ShowWindow) {
         $arguments += "--show-window"
@@ -144,6 +155,7 @@ try {
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $exe
+    $startInfo.WorkingDirectory = $root
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = -not ($ShowWindow -or $WaitForPaint)
     foreach ($argument in $arguments) {

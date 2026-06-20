@@ -60,6 +60,22 @@ int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_backend * backe
                                               double wb_multiplier_g,
                                               double wb_multiplier_b);
 
+/* Optional live-playback extension: consume an already-reconstructed GL_R16
+ * Bayer texture and write a post-WB GL_RGBA16 texture without CPU readback.
+ * Older DLLs may omit this symbol; callers must fail closed to the existing
+ * CPU/readback or shader-side fallback path.
+ */
+int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
+    igpu_amaze_debayer_backend * backend,
+    unsigned int in_r16_gl_texture,
+    unsigned int out_rgba16_gl_texture,
+    int width,
+    int height,
+    int black_level,
+    double wb_multiplier_r,
+    double wb_multiplier_g,
+    double wb_multiplier_b);
+
 int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,
                                    igpu_amaze_debayer_timing_t * timing);
 

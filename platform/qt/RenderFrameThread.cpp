@@ -513,6 +513,9 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
                 : 0;
         frame->gpuPlaybackReconTextureWidth = slot.gpuPlaybackReconTextureWidth;
         frame->gpuPlaybackReconTextureHeight = slot.gpuPlaybackReconTextureHeight;
+        frame->gpuPlaybackReconTextureBlackLevel = slot.gpuPlaybackReconTextureBlackLevel;
+        frame->gpuPlaybackReconTextureWbMultipliers =
+            slot.gpuPlaybackReconTextureWbMultipliers;
         frame->gpuPlaybackReconTextureState = slot.gpuPlaybackReconTextureState;
         frame->dualIsoPreviewHistogramMs = slot.dualIsoPreviewHistogramMs;
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
@@ -1847,6 +1850,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
     std::vector<uint16_t> preservedGpuPlaybackReconTextureInputBayerFrame;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureBayerFrame;
     GpuPlaybackReconTextureState preservedGpuPlaybackReconTextureState;
+    int preservedGpuPlaybackReconTextureBlackLevel = 0;
+    std::array<double, 3> preservedGpuPlaybackReconTextureWbMultipliers{{1.0, 1.0, 1.0}};
     QJsonObject preservedGpuPlaybackReconTextureTelemetry;
     const auto preserveGpuPlaybackReconTextureTelemetry =
         [&slot, &preservedGpuPlaybackReconTextureTelemetry]( const char * key )
@@ -1884,6 +1889,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
             std::move( slot.gpuPlaybackReconTextureBayerFrame );
         preservedGpuPlaybackReconTextureState =
             slot.gpuPlaybackReconTextureState;
+        preservedGpuPlaybackReconTextureBlackLevel =
+            slot.gpuPlaybackReconTextureBlackLevel;
+        preservedGpuPlaybackReconTextureWbMultipliers =
+            slot.gpuPlaybackReconTextureWbMultipliers;
     }
     slot.resetMetadata();
     slot.frameNumber = m_activeFrameNumber;
@@ -1899,6 +1908,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
             std::move( preservedGpuPlaybackReconTextureBayerFrame );
         slot.gpuPlaybackReconTextureState =
             preservedGpuPlaybackReconTextureState;
+        slot.gpuPlaybackReconTextureBlackLevel =
+            preservedGpuPlaybackReconTextureBlackLevel;
+        slot.gpuPlaybackReconTextureWbMultipliers =
+            preservedGpuPlaybackReconTextureWbMultipliers;
     }
     for( auto it = preservedGpuPlaybackReconTextureTelemetry.begin();
          it != preservedGpuPlaybackReconTextureTelemetry.end();
@@ -2017,7 +2030,60 @@ void RenderFrameThread::drawFrame( int slotIndex,
         QStringLiteral("render_thread_openmp_thread_cap_active"),
         openMpThreads < generalWorkerThreads );
 
-    if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
+    GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability;
+    bool skipCpuDebayerForGpuTextureNoReadback = false;
+    if( outputMode == OutputDebayered16
+     && !slot.rawImage16.empty()
+     && m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
+     && playbackScaleFactor == 1
+     && slot.gpuPlaybackReconTextureNoReadbackCandidate
+     && !slot.gpuPlaybackReconTextureInputBayerFrame.empty()
+     && slot.gpuPlaybackReconTextureState.valid
+     && slot.gpuPlaybackReconTextureState.width == m_imageWidth
+     && slot.gpuPlaybackReconTextureState.height == m_imageHeight )
+    {
+        r16AmazeTextureAvailability = gpuAmazeDebayerProbeR16TextureBackend();
+        skipCpuDebayerForGpuTextureNoReadback =
+            r16AmazeTextureAvailability.available;
+    }
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_preflight_available"),
+        r16AmazeTextureAvailability.available );
+    if( !r16AmazeTextureAvailability.reason.isEmpty() )
+    {
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_amaze_texture_present_preflight_reason"),
+            r16AmazeTextureAvailability.reason );
+    }
+    if( !r16AmazeTextureAvailability.rendererDescription.isEmpty() )
+    {
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_amaze_texture_present_preflight_renderer"),
+            r16AmazeTextureAvailability.rendererDescription );
+    }
+
+    if( skipCpuDebayerForGpuTextureNoReadback )
+    {
+        slot.usedGpuAmazeDebayer = true;
+        slot.gpuAmazeFallbackReason.clear();
+        slot.gpuAmazeRendererDescription =
+            r16AmazeTextureAvailability.rendererDescription.isEmpty()
+                ? QStringLiteral("pending CUDA AMaZE R16 texture present")
+                : r16AmazeTextureAvailability.rendererDescription;
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_amaze_debayer_active"),
+            true );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_amaze_texture_present_candidate"),
+            true );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr"),
+            true );
+        mlv_stage_timing_note_elapsed("render_thread_draw16_debayered",
+                                      frameNumber,
+                                      0.0);
+    }
+    else if ( outputMode == OutputProcessed16 && !slot.rawImage16.empty() )
     {
         getMlvProcessedFrame16Scaled( m_pMlvObject,
                                       frameNumber,
@@ -2368,6 +2434,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
             slot.gpuPlaybackReconTexturePresentCandidate ? m_imageWidth : 0;
         slot.gpuPlaybackReconTextureHeight =
             slot.gpuPlaybackReconTexturePresentCandidate ? m_imageHeight : 0;
+        slot.gpuPlaybackReconTextureBlackLevel =
+            ( slot.gpuPlaybackReconTexturePresentCandidate && m_pMlvObject )
+                ? getMlvBlackLevel( m_pMlvObject )
+                : 0;
+        slot.gpuPlaybackReconTextureWbMultipliers =
+            slot.gpuPlaybackReconTexturePresentCandidate
+                ? normalizedWbMultipliers6500()
+                : std::array<double, 3>{{1.0, 1.0, 1.0}};
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_readback_bayer_candidate"),
             readbackBayerCandidate );
