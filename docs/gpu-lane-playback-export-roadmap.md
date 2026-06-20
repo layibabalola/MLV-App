@@ -226,6 +226,14 @@ Dell/UltraMagnus packet. The summarizer is deliberately fail-closed:
 playback correctness/no-readback/no-fallback/GL-parity proof, clean playback A/B,
 and CDNG/DNG-hash/GPU-replacement proof; otherwise it reports `NOT_QUOTABLE`
 with blockers.
+`tools/profiling/package-local-cuda-proof-result.ps1` now packages a host-local
+proof run root into `mlvapp-local-cuda-proof-<host>-<stamp>.zip` with a
+`local-cuda-proof-packet-manifest.json`, raw `summary.json`, Markdown/JSON proof
+reports, child playback/A-B/CDNG artifacts, hashes, host metadata, and the same
+quote boundaries. `RUN-CUDA-DOGFOOD.ps1` creates this packet by default after a
+proof run (`-NoProofPacket` opts out). The packet is transport/integrity
+evidence only: `proofReport.status=QUOTABLE_PASS` is still the required reader
+gate before claiming Dell/UltraMagnus support or speed.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still

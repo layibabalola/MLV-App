@@ -123,6 +123,7 @@ param(
     [switch]$DngOnly,
     [switch]$ProofOnly,
     [switch]$SummaryOnly,
+    [switch]$NoProofPacket,
     [switch]$DryRun
 )
 
@@ -186,6 +187,13 @@ if (Test-Path -LiteralPath $proofSummary -PathType Leaf) {
         -RepoRoot $repoRoot `
         -SummaryPath $proofSummary `
         -Output (Join-Path $OutputRoot "proof\proof-report.md")
+    if (-not $NoProofPacket) {
+        & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File (Join-Path $repoRoot "tools\profiling\package-local-cuda-proof-result.ps1") `
+            -RepoRoot $repoRoot `
+            -RunRoot (Join-Path $OutputRoot "proof") `
+            @dryArgs
+    }
 }
 exit $proofExit
 '@
@@ -274,6 +282,7 @@ $manifest = [ordered]@{
         launchOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -LaunchOnly"
         dngOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -DngOnly"
         summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
+        proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         directProof = ".\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input <clip.mlv>"
         directSummary = ".\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     }
