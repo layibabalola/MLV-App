@@ -4502,6 +4502,63 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_EQ( std::string("rendered output verification execution is not ready"),
                std::string(plan.outputVerificationReportPlan.failureReason
                    .toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationReportContentContractReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.contractReady );
+    ASSERT_EQ( std::string("output-verification-report-content-schema-contract"),
+               std::string(plan.outputVerificationReportContentPlan.source
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .expectedOutputPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.verification-report.json"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .reportPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string("json"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .reportFormat.toUtf8().constData()) );
+    ASSERT_EQ( std::string("rendered-output-verification-report.v1"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .reportSchema.toUtf8().constData()) );
+    ASSERT_EQ( std::string("failure"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .reportKind.toUtf8().constData()) );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .outputVerificationReportContractReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.reportPathReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.reportFormatReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.reportSchemaReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.reportKindReady );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan.reportContentPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .failureReportContentPlanned );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan
+        .acceptedReportContentPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .topLevelKeysPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .expectedOutputKeysPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .verificationCheckKeysPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .artifactKeysPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .errorCategoriesPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .activeErrorCategoryPlanned );
+    ASSERT_TRUE( plan.outputVerificationReportContentPlan
+        .schemaDetailContractReady );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan
+        .jsonSerializationPlanned );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan
+        .jsonSerializationOwned );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan.reportWritePlanned );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan.reportWriteOwned );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan.reportReady );
+    ASSERT_FALSE( plan.outputVerificationReportContentPlan
+        .outputVerificationReady );
+    ASSERT_EQ( std::string("output-verification-execution-not-ready"),
+               std::string(plan.outputVerificationReportContentPlan
+                   .activeErrorCategory.toUtf8().constData()) );
     ASSERT_TRUE( plan.preflightReady );
     ASSERT_FALSE( plan.runnable );
 
@@ -4544,12 +4601,42 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_TRUE( reportSummary.find("output-verification-report-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( reportSummary.find("output-verification-report-reason=none") != std::string::npos );
 
+    const std::string contentSummary =
+        std::string(batchRenderedVideoOutputVerificationReportContentPlanSummary(
+            plan.outputVerificationReportContentPlan).toUtf8().constData());
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-source=output-verification-report-content-schema-contract") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-output-path=C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-result-state=blocked") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-kind=failure") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-path=C:/renders/M16-1327.verification-report.json") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-format=json") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-schema=rendered-output-verification-report.v1") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-top-level-keys=schema|kind|state|expected|checks|failure|artifacts") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-expected-keys=path|extension|codec|container|frame_count|duration_seconds") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-check-keys=file_exists|file_non_empty|ffprobe_json|codec_container|frame_count|duration|receipt_hash") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-artifact-keys=rendered_output|verification_report|ffprobe_command|receipt_sidecar") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-error-categories=runner-prerequisite|file-check|media-probe-execution|media-probe-json|codec-container-mismatch|frame-count-mismatch|duration-mismatch|receipt-hash-mismatch|report-write") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-active-error-category=output-verification-execution-not-ready") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-report-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-schema-detail-ready=true") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-json-serialization-planned=false") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-report-ready=false") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-failure-reason=rendered output verification execution is not ready") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( contentSummary.find("output-verification-report-content-reason=none") != std::string::npos );
+
     const std::string jobSummary =
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( jobSummary.find("output-verification-report-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-path=C:/renders/M16-1327.verification-report.json") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-write-planned=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-content-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-content-top-level-keys=schema|kind|state|expected|checks|failure|artifacts") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-content-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("output-verification-report-content-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
 
@@ -4562,6 +4649,17 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_FALSE( blockedPlan.reportPathPlanned );
     ASSERT_EQ( std::string("rendered output verification report artifact contract unavailable"),
                std::string(blockedPlan.reason.toUtf8().constData()) );
+    BatchRenderedVideoOutputVerificationReportContentPlan blockedContentPlan =
+        batchRenderedVideoOutputVerificationReportContentPlanFromReport(
+            BatchRenderedVideoOutputVerificationReportPlan());
+    ASSERT_FALSE( blockedContentPlan.contractReady );
+    ASSERT_FALSE( blockedContentPlan.outputVerificationReportContractReady );
+    ASSERT_FALSE( blockedContentPlan.topLevelKeysPlanned );
+    ASSERT_FALSE( blockedContentPlan.schemaDetailContractReady );
+    ASSERT_FALSE( blockedContentPlan.jsonSerializationPlanned );
+    ASSERT_FALSE( blockedContentPlan.reportWritePlanned );
+    ASSERT_EQ( std::string("rendered output verification report content contract unavailable"),
+               std::string(blockedContentPlan.reason.toUtf8().constData()) );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
@@ -4846,6 +4944,13 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("output-verification-report-write-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-report-contract-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-top-level-keys=none") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-schema-detail-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-json-serialization-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-write-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-output-verification-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-report-content-contract-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
 
     BatchRenderedVideoRenderSettings invalidSettings =
