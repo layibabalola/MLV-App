@@ -15,8 +15,10 @@
 #include "../../src/batch/MlvTrim.h"
 #include "debug/ForceSingleThread.h"
 
+#include <QByteArray>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QTextStream>
@@ -66,6 +68,17 @@ static bool hasGuiPlaybackSmokeFlag(int argc, char *argv[])
         if (std::strcmp(argv[i], "--gui-smoke-playback") == 0) return true;
     }
     return false;
+}
+
+static bool envFlagEnabled(const char *name)
+{
+    if (!name || !qEnvironmentVariableIsSet(name)) return false;
+    const QByteArray value = qgetenv(name).trimmed().toLower();
+    return !value.isEmpty()
+        && value != QByteArrayLiteral("0")
+        && value != QByteArrayLiteral("false")
+        && value != QByteArrayLiteral("off")
+        && value != QByteArrayLiteral("no");
 }
 
 static bool argvOptionMatches(const char *arg, const char *option)
@@ -1503,6 +1516,48 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     a.setAttribute(Qt::AA_Use96Dpi);
 #endif
+
+    if (profile_playback
+        || gui_playback_smoke
+        || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")
+        || envFlagEnabled("MLVAPP_PERF_FIELD_LOG"))
+    {
+        CrashForensics::publishMachineFingerprintEnvironment();
+    }
+    if (envFlagEnabled("MLVAPP_PERF_FIELD_LOG"))
+    {
+        const QString logsDir = CrashForensics::logsDirectoryPath();
+        if (!logsDir.isEmpty())
+        {
+            qputenv("MLVAPP_PERF_FIELD_LOG_DIR",
+                    QDir::toNativeSeparators(logsDir).toUtf8());
+            if (qEnvironmentVariable("MLVAPP_PERF_FIELD_LOG_PATH").trimmed().isEmpty())
+            {
+                const QString perfLogStamp =
+                    QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd"));
+                qputenv("MLVAPP_PERF_FIELD_LOG_PATH",
+                        QDir::toNativeSeparators(
+                            QDir(logsDir).absoluteFilePath(
+                                QStringLiteral("mlvapp-perf-field-%1.jsonl")
+                                    .arg(perfLogStamp))).toUtf8());
+            }
+            if (!envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER"))
+            {
+                qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+            }
+            if (qEnvironmentVariable("MLVAPP_EXPORT_STAGE_PROFILE_FILE").trimmed().isEmpty())
+            {
+                const QString stamp =
+                    QDateTime::currentDateTimeUtc().toString(
+                        QStringLiteral("yyyyMMdd-HHmmss-zzz"));
+                qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE",
+                        QDir::toNativeSeparators(
+                            QDir(logsDir).absoluteFilePath(
+                                QStringLiteral("mlvapp-export-stage-profile-%1.json")
+                                    .arg(stamp))).toUtf8());
+            }
+        }
+    }
 
     if (batch)
     {

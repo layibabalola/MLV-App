@@ -7,6 +7,7 @@
 
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
+#include "CrashForensics.h"
 #include "debug/StageTiming.h"
 extern "C" {
 #include "../../src/mlv/pipeline_stage_capture.h"
@@ -35,10 +36,15 @@ extern "C" {
 #include <QMimeData>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSpacerItem>
 #include <QDate>
 #include <QStorageInfo>
 #include <QColorDialog>
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -503,6 +509,389 @@ static bool telemetryBoolValue( const QJsonObject &telemetry,
                                 const char *key )
 {
     return telemetry.value( QString::fromLatin1( key ) ).toBool();
+}
+
+static QString telemetryStringValue( const QJsonObject &telemetry,
+                                     const char *key )
+{
+    return telemetry.value( QString::fromLatin1( key ) ).toString();
+}
+
+static void insertNullableDouble( QJsonObject *object,
+                                  const QString &key,
+                                  double value,
+                                  bool valid )
+{
+    if( !object ) return;
+    object->insert( key, valid ? QJsonValue( value ) : QJsonValue() );
+}
+
+static QString canonicalPlaybackFallbackReason( const QString &reason )
+{
+    const QString normalized = reason.trimmed().toLower();
+    if( normalized.isEmpty() ) return QString();
+    if( normalized.contains( QStringLiteral("backend") )
+     || normalized.contains( QStringLiteral("unavailable") )
+     || normalized.contains( QStringLiteral("not available") ) )
+    {
+        return QStringLiteral("backend_unavailable");
+    }
+    if( normalized.contains( QStringLiteral("capability") )
+     || normalized.contains( QStringLiteral("gate") )
+     || normalized.contains( QStringLiteral("admitted") ) )
+    {
+        return QStringLiteral("capability_gate_failed");
+    }
+    if( normalized.contains( QStringLiteral("unsupported") )
+     || normalized.contains( QStringLiteral("processing") )
+     || normalized.contains( QStringLiteral("settings") ) )
+    {
+        return QStringLiteral("unsupported_processing_stage");
+    }
+    if( normalized.contains( QStringLiteral("state") )
+     || normalized.contains( QStringLiteral("snapshot") )
+     || normalized.contains( QStringLiteral("config") )
+     || normalized.contains( QStringLiteral("incomplete") )
+     || normalized.contains( QStringLiteral("mismatch") ) )
+    {
+        return QStringLiteral("state_mismatch");
+    }
+    if( normalized.contains( QStringLiteral("vram") )
+     || normalized.contains( QStringLiteral("memory") )
+     || normalized.contains( QStringLiteral("alloc") ) )
+    {
+        return QStringLiteral("vram");
+    }
+    return QStringLiteral("other");
+}
+
+static QString playbackFallbackReasonToken(
+    const QJsonObject &telemetry,
+    GpuPlaybackPipelineStatus status,
+    const QStringList &extraReasons = QStringList() )
+{
+    const bool noReadbackCandidate = telemetryBoolValue(
+        telemetry,
+        "gpu_playback_recon_texture_present_no_readback_candidate" );
+    const bool textureCandidate = telemetryBoolValue(
+        telemetry,
+        "gpu_playback_recon_texture_present_candidate" );
+    const bool textureRequested = telemetryBoolValue(
+        telemetry,
+        "gpu_playback_recon_texture_present_requested" );
+    const bool reconAttempted = telemetryBoolValue(
+        telemetry,
+        "gpu_playback_recon_attempted" );
+
+    bool demoted = false;
+    if( noReadbackCandidate
+     && status != GpuPlaybackPipelineStatus::GpuTextureNoReadback )
+    {
+        demoted = true;
+    }
+    else if( textureCandidate
+          && status != GpuPlaybackPipelineStatus::GpuTextureReadback
+          && status != GpuPlaybackPipelineStatus::GpuTextureNoReadback )
+    {
+        demoted = true;
+    }
+    else if( ( textureRequested || reconAttempted )
+          && status == GpuPlaybackPipelineStatus::Cpu )
+    {
+        demoted = true;
+    }
+
+    if( !demoted ) return QString();
+
+    QStringList reasons = extraReasons;
+    reasons
+        << telemetryStringValue(
+               telemetry,
+               "gpu_playback_recon_texture_present_no_readback_fallback_reason" )
+        << telemetryStringValue(
+               telemetry,
+               "gpu_playback_recon_texture_present_fallback_reason" )
+        << telemetryStringValue(
+               telemetry,
+               "gpu_amaze_texture_present_fallback_reason" );
+    for( const QString &reason : reasons )
+    {
+        const QString token = canonicalPlaybackFallbackReason( reason );
+        if( !token.isEmpty() ) return token;
+    }
+    return QStringLiteral("other");
+}
+
+static double playbackSampleStageValue( const QJsonObject &sample,
+                                        const QStringList &keys,
+                                        bool *valid )
+{
+    double total = 0.0;
+    bool found = false;
+    for( const QString &key : keys )
+    {
+        if( sample.contains( key ) )
+        {
+            total += sample.value( key ).toDouble();
+            found = true;
+        }
+    }
+    if( valid ) *valid = found;
+    return total;
+}
+
+static void insertPlaybackStageSummaryFields( QJsonObject *sample )
+{
+    if( !sample ) return;
+
+    bool valid = false;
+    const double decodeMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("raw_uint16_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_decode_ms"),
+        decodeMs,
+        valid );
+
+    const bool rawPrefetchHit =
+        sample->value( QStringLiteral("raw_uint16_prefetch_hit") ).toBool();
+    const bool processed8PrefetchHit =
+        sample->value( QStringLiteral("processed8_prefetch_hit") ).toBool();
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_prefetch_ms"),
+        0.0,
+        rawPrefetchHit || processed8PrefetchHit );
+
+    const double reconMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("llrawproc_total_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_recon_ms"),
+        reconMs,
+        valid );
+
+    const double processMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("processed8_total_ms")
+            << QStringLiteral("processed16_total_ms")
+            << QStringLiteral("processing_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_process_ms"),
+        processMs,
+        valid );
+
+    const double gpuUploadMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("gpu_playback_recon_texture_present_upload_ms")
+            << QStringLiteral("gpu_bilinear_debayer_upload_ms")
+            << QStringLiteral("gpu_amaze_debayer_upload_ms")
+            << QStringLiteral("gpu_amaze_texture_present_upload_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_gpu_upload_ms"),
+        gpuUploadMs,
+        valid );
+
+    const double presentMs = playbackSampleStageValue(
+        *sample,
+        QStringList()
+            << QStringLiteral("draw_frame_ready_present_ms")
+            << QStringLiteral("gpu_playback_recon_texture_present_total_ms")
+            << QStringLiteral("gpu_amaze_texture_present_total_ms"),
+        &valid );
+    insertNullableDouble(
+        sample,
+        QStringLiteral("stage_present_ms"),
+        presentMs,
+        valid );
+}
+
+static double sortedPercentile( QVector<double> values, double percentile )
+{
+    if( values.isEmpty() ) return 0.0;
+    std::sort( values.begin(), values.end() );
+    const int index =
+        qBound( 0,
+                static_cast<int>( ( values.size() - 1 ) * percentile ),
+                values.size() - 1 );
+    return values.at( index );
+}
+
+static QString suggestedOptimizationForBottleneck( const QString &bottleneck )
+{
+    if( bottleneck == QStringLiteral("decode-bound") )
+        return QStringLiteral("parallelize_lj92_decode");
+    if( bottleneck == QStringLiteral("prefetch-bound") )
+        return QStringLiteral("deepen_prefetch_window");
+    if( bottleneck == QStringLiteral("recon-bound") )
+        return QStringLiteral("optimize_dual_iso_recon");
+    if( bottleneck == QStringLiteral("process-bound") )
+        return QStringLiteral("move_processing_to_gpu_or_fast_subset");
+    if( bottleneck == QStringLiteral("gpu-upload-bound") )
+        return QStringLiteral("reduce_gpu_upload_or_enable_no_readback");
+    if( bottleneck == QStringLiteral("present-bound") )
+        return QStringLiteral("reduce_present_overhead");
+    if( bottleneck == QStringLiteral("compress-bound") )
+        return QStringLiteral("parallelize_or_offload_dng_compress");
+    if( bottleneck == QStringLiteral("write-bound") )
+        return QStringLiteral("increase_async_writer_depth_or_storage_bandwidth");
+    return QStringLiteral("collect_more_stage_samples");
+}
+
+static QJsonObject buildStageBottleneckSummary(
+    const QJsonArray &frames,
+    const QList<QPair<QString, QString>> &stages )
+{
+    QJsonObject stageSummary;
+    QString limitingStage = QStringLiteral("unknown");
+    double limitingMedian = 0.0;
+    double limitingP95 = 0.0;
+
+    for( const QPair<QString, QString> &stage : stages )
+    {
+        QVector<double> values;
+        for( const QJsonValue &value : frames )
+        {
+            const QJsonObject sample = value.toObject();
+            const QJsonValue stageValue = sample.value( stage.second );
+            if( stageValue.isDouble() )
+            {
+                values.append( stageValue.toDouble() );
+            }
+        }
+        if( values.isEmpty() ) continue;
+
+        const double median = sortedPercentile( values, 0.50 );
+        const double p95 = sortedPercentile( values, 0.95 );
+        QJsonObject oneStage;
+        oneStage.insert( QStringLiteral("samples"), values.size() );
+        oneStage.insert( QStringLiteral("median_ms"), median );
+        oneStage.insert( QStringLiteral("p95_ms"), p95 );
+        stageSummary.insert( stage.first, oneStage );
+        if( limitingStage == QStringLiteral("unknown") || median > limitingMedian )
+        {
+            limitingStage = stage.first;
+            limitingMedian = median;
+            limitingP95 = p95;
+        }
+    }
+
+    QJsonObject bottleneck;
+    bottleneck.insert( QStringLiteral("schema"),
+                       QStringLiteral("mlvapp.bottleneck-rollup.v1") );
+    bottleneck.insert( QStringLiteral("limiting_stage"), limitingStage );
+    bottleneck.insert( QStringLiteral("median_ms"), limitingMedian );
+    bottleneck.insert( QStringLiteral("p95_ms"), limitingP95 );
+    bottleneck.insert( QStringLiteral("suggested_optimization"),
+                       suggestedOptimizationForBottleneck( limitingStage ) );
+    bottleneck.insert( QStringLiteral("stages"), stageSummary );
+    return bottleneck;
+}
+
+static void incrementJsonCounter( QJsonObject *object, const QString &key )
+{
+    if( !object ) return;
+    object->insert( key, object->value( key ).toInt() + 1 );
+}
+
+static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
+{
+    QJsonObject pipelineCounts;
+    pipelineCounts.insert( QStringLiteral("cpu"), 0 );
+    pipelineCounts.insert( QStringLiteral("gpu_preview"), 0 );
+    pipelineCounts.insert( QStringLiteral("gpu_recon_readback"), 0 );
+    pipelineCounts.insert( QStringLiteral("gpu_texture_readback"), 0 );
+    pipelineCounts.insert( QStringLiteral("gpu_texture_no_readback"), 0 );
+
+    QJsonObject fallbackReasonHistogram;
+    int fallbackCount = 0;
+    for( const QJsonValue &value : frames )
+    {
+        const QJsonObject sample = value.toObject();
+        const QString pipeline =
+            sample.value( QStringLiteral("playback_pipeline") ).toString(
+                QStringLiteral("cpu") );
+        incrementJsonCounter( &pipelineCounts, pipeline );
+        const QString fallbackReason =
+            sample.value( QStringLiteral("fallback_reason") ).toString();
+        if( !fallbackReason.isEmpty() )
+        {
+            ++fallbackCount;
+            incrementJsonCounter( &fallbackReasonHistogram, fallbackReason );
+        }
+    }
+
+    QJsonObject summary;
+    summary.insert( QStringLiteral("schema"),
+                    QStringLiteral("mlvapp.playback-profile-summary.v1") );
+    summary.insert( QStringLiteral("sample_count"), frames.size() );
+    summary.insert( QStringLiteral("pipeline_counts"), pipelineCounts );
+    summary.insert( QStringLiteral("fallback_count"), fallbackCount );
+    summary.insert( QStringLiteral("fallback_reason_histogram"),
+                    fallbackReasonHistogram );
+    summary.insert( QStringLiteral("bottleneck"),
+                    buildStageBottleneckSummary(
+                        frames,
+                        QList<QPair<QString, QString>>()
+                            << qMakePair( QStringLiteral("decode-bound"),
+                                          QStringLiteral("stage_decode_ms") )
+                            << qMakePair( QStringLiteral("prefetch-bound"),
+                                          QStringLiteral("stage_prefetch_ms") )
+                            << qMakePair( QStringLiteral("recon-bound"),
+                                          QStringLiteral("stage_recon_ms") )
+                            << qMakePair( QStringLiteral("process-bound"),
+                                          QStringLiteral("stage_process_ms") )
+                            << qMakePair( QStringLiteral("gpu-upload-bound"),
+                                          QStringLiteral("stage_gpu_upload_ms") )
+                            << qMakePair( QStringLiteral("present-bound"),
+                                          QStringLiteral("stage_present_ms") ) ) );
+    return summary;
+}
+
+static bool perfFieldLogEnabled()
+{
+    return environmentFlagEnabled( "MLVAPP_PERF_FIELD_LOG" );
+}
+
+static QString perfFieldLogPath()
+{
+    QString path = qEnvironmentVariable( "MLVAPP_PERF_FIELD_LOG_PATH" ).trimmed();
+    if( !path.isEmpty() ) return path;
+    const QString logsDir = CrashForensics::logsDirectoryPath();
+    if( logsDir.isEmpty() ) return QString();
+    return QDir( logsDir ).absoluteFilePath(
+        QStringLiteral("mlvapp-perf-field-%1.jsonl")
+            .arg( QDateTime::currentDateTime().toString(
+                QStringLiteral("yyyyMMdd") ) ) );
+}
+
+static void appendPerfFieldLogLine( const QJsonObject &line )
+{
+    if( !perfFieldLogEnabled() ) return;
+    const QString path = perfFieldLogPath();
+    if( path.isEmpty() ) return;
+    QDir().mkpath( QFileInfo( path ).absolutePath() );
+    QFile file( path );
+    if( !file.open( QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text ) )
+    {
+        qWarning().noquote()
+            << QStringLiteral("perf_field_log_append_failed path=%1").arg( path );
+        return;
+    }
+    file.write( QJsonDocument( line ).toJson( QJsonDocument::Compact ) );
+    file.write( "\n" );
 }
 
 static void logInteractionEvent( const QString &event,
@@ -5275,6 +5664,33 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             {
                 sample.insert( QStringLiteral("cadence_ms"), static_cast<double>( completionNs - previousCompletionNs ) / 1000000.0 );
             }
+            {
+                const GpuPlaybackPipelineStatus pipelineStatus =
+                    m_lastPresentedRequestContextValid
+                        ? mainWindowGpuPlaybackPipelineStatus(
+                              m_lastPresentedRequestContext.gpuPreviewPolicy,
+                              sample.value( QStringLiteral("gpu_playback_recon_used") ).toBool(),
+                              sample.value( QStringLiteral("gpu_playback_recon_texture_present_active") ).toBool(),
+                              sample.value( QStringLiteral("gpu_playback_recon_texture_present_no_readback_active") ).toBool() )
+                        : GpuPlaybackPipelineStatus::Cpu;
+                sample.insert( QStringLiteral("playback_pipeline"),
+                               QString::fromLatin1(
+                                   mainWindowGpuPlaybackPipelineStatusToken(
+                                       pipelineStatus ) ) );
+                const QString fallbackReason =
+                    playbackFallbackReasonToken(
+                        sample,
+                        pipelineStatus,
+                        QStringList()
+                            << sample.value( QStringLiteral("gpu_bilinear_debayer_fallback_reason") ).toString()
+                            << sample.value( QStringLiteral("gpu_amaze_debayer_fallback_reason") ).toString() );
+                if( !fallbackReason.isEmpty() )
+                {
+                    sample.insert( QStringLiteral("fallback_reason"),
+                                   fallbackReason );
+                }
+                insertPlaybackStageSummaryFields( &sample );
+            }
             frameSamples.push_back( sample );
         }
 
@@ -6208,6 +6624,12 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     }
 
     QJsonObject documentRoot;
+    documentRoot.insert( QStringLiteral("schema"),
+                         QStringLiteral("mlvapp.playback_profile.v1") );
+    documentRoot.insert( QStringLiteral("machineFingerprint"),
+                         CrashForensics::machineFingerprintObject() );
+    documentRoot.insert( QStringLiteral("summary"),
+                         buildPlaybackProfileSummary( frameSamples ) );
     documentRoot.insert( QStringLiteral("metadata"), metadata );
     documentRoot.insert( QStringLiteral("frames"), frameSamples );
 
@@ -19172,6 +19594,8 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeGpuStatusReconReadbackFrames = 0;
     m_playbackSmokeGpuStatusTextureReadbackFrames = 0;
     m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
+    m_playbackSmokeFallbackCount = 0;
+    m_playbackSmokeFallbackReasonCounts = QJsonObject();
     m_playbackSmokeBorrowedPreparedRgb8Bytes = 0;
     m_playbackSmokeOwnedPreparedRgb8Bytes = 0;
     m_playbackSmokeMovedPreparedRgb8Bytes = 0;
@@ -20000,6 +20424,21 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         ++m_playbackSmokeGpuStatusTextureNoReadbackFrames;
         break;
     }
+    {
+        const QString fallbackReason =
+            playbackFallbackReasonToken(
+                timing,
+                gpuPlaybackPipelineStatus,
+                QStringList()
+                    << readyFrame.gpuBilinearFallbackReason
+                    << readyFrame.gpuAmazeFallbackReason );
+        if( !fallbackReason.isEmpty() )
+        {
+            ++m_playbackSmokeFallbackCount;
+            incrementJsonCounter( &m_playbackSmokeFallbackReasonCounts,
+                                  fallbackReason );
+        }
+    }
     if( queuedPlaybackDrops > 0 )
     {
         m_playbackSmokeQueuedPlaybackDropSum +=
@@ -20495,6 +20934,91 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
                .arg( m_playbackSmokeGpuStatusReconReadbackFrames )
                .arg( m_playbackSmokeGpuStatusTextureReadbackFrames )
                .arg( m_playbackSmokeGpuStatusTextureNoReadbackFrames );
+
+    if( perfFieldLogEnabled() )
+    {
+        QJsonObject pipelineCounts;
+        pipelineCounts.insert( QStringLiteral("cpu"),
+                               m_playbackSmokeGpuStatusCpuFrames );
+        pipelineCounts.insert( QStringLiteral("gpu_preview"),
+                               m_playbackSmokeGpuStatusPreviewFrames );
+        pipelineCounts.insert( QStringLiteral("gpu_recon_readback"),
+                               m_playbackSmokeGpuStatusReconReadbackFrames );
+        pipelineCounts.insert( QStringLiteral("gpu_texture_readback"),
+                               m_playbackSmokeGpuStatusTextureReadbackFrames );
+        pipelineCounts.insert( QStringLiteral("gpu_texture_no_readback"),
+                               m_playbackSmokeGpuStatusTextureNoReadbackFrames );
+
+        QJsonObject averageFrame;
+        const bool hasFrames = m_playbackSmokePresentedFrames > 0;
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_decode_ms"),
+            avgSmokeMs( m_playbackSmokeRawUint16SumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_recon_ms"),
+            avgSmokeMs( m_playbackSmokeLlrawprocTotalSumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_process_ms"),
+            avgSmokeMs( m_playbackSmokeProcessed8SumMs ),
+            hasFrames );
+        insertNullableDouble(
+            &averageFrame,
+            QStringLiteral("stage_present_ms"),
+            avgDrawTotalMs,
+            hasFrames );
+        QJsonArray averageFrames;
+        averageFrames.append( averageFrame );
+        const QJsonObject bottleneck =
+            buildStageBottleneckSummary(
+                averageFrames,
+                QList<QPair<QString, QString>>()
+                    << qMakePair( QStringLiteral("decode-bound"),
+                                  QStringLiteral("stage_decode_ms") )
+                    << qMakePair( QStringLiteral("recon-bound"),
+                                  QStringLiteral("stage_recon_ms") )
+                    << qMakePair( QStringLiteral("process-bound"),
+                                  QStringLiteral("stage_process_ms") )
+                    << qMakePair( QStringLiteral("present-bound"),
+                                  QStringLiteral("stage_present_ms") ) );
+        const double noReadbackPercent =
+            m_playbackSmokePresentedFrames > 0
+                ? ( static_cast<double>(
+                        m_playbackSmokeGpuStatusTextureNoReadbackFrames )
+                    * 100.0
+                    / static_cast<double>( m_playbackSmokePresentedFrames ) )
+                : 0.0;
+
+        QJsonObject fieldLog;
+        fieldLog.insert( QStringLiteral("schema"),
+                         QStringLiteral("mlvapp.perf-field-log.v1") );
+        fieldLog.insert( QStringLiteral("kind"), QStringLiteral("playback") );
+        fieldLog.insert( QStringLiteral("captured_at_utc"),
+                         QDateTime::currentDateTimeUtc().toString( Qt::ISODate ) );
+        fieldLog.insert( QStringLiteral("machineFingerprint"),
+                         CrashForensics::machineFingerprintObject() );
+        fieldLog.insert( QStringLiteral("session_id"),
+                         static_cast<double>( m_playbackSmokeSessionId ) );
+        fieldLog.insert( QStringLiteral("reason"),
+                         QString::fromLatin1( reason ? reason : "unknown" ) );
+        fieldLog.insert( QStringLiteral("presented_fps"), presentedFps );
+        fieldLog.insert( QStringLiteral("timeline_fps"), timelineFps );
+        fieldLog.insert( QStringLiteral("no_readback_percent"), noReadbackPercent );
+        fieldLog.insert( QStringLiteral("fallback_count"),
+                         m_playbackSmokeFallbackCount );
+        fieldLog.insert( QStringLiteral("fallback_reason_histogram"),
+                         m_playbackSmokeFallbackReasonCounts );
+        fieldLog.insert( QStringLiteral("pipeline_counts"), pipelineCounts );
+        fieldLog.insert( QStringLiteral("bottleneck"), bottleneck );
+        fieldLog.insert( QStringLiteral("suggested_optimization"),
+                         bottleneck.value(
+                             QStringLiteral("suggested_optimization") ) );
+        appendPerfFieldLogLine( fieldLog );
+    }
 
     qInfo().noquote()
         << QStringLiteral(

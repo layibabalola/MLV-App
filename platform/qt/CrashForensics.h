@@ -22,6 +22,7 @@
 #ifndef CRASH_FORENSICS_H
 #define CRASH_FORENSICS_H
 
+#include <QJsonObject>
 #include <QString>
 
 namespace CrashForensics {
@@ -58,6 +59,23 @@ QString logsDirectoryPath();
  * Keys: build_sha, app_version, qt_version, os, cpu_features, command_line.
  */
 QString runMetadataJson();
+
+/*!
+ * Build the opt-in perf identity block used by playback/export telemetry.
+ * Schema: machine-fingerprint.v1.
+ */
+QJsonObject machineFingerprintObject();
+
+/*!
+ * Compact JSON form of machineFingerprintObject().
+ */
+QString machineFingerprintJson();
+
+/*!
+ * Publish the machine fingerprint as environment variables for C-only
+ * telemetry writers. Safe to call more than once; values are cached.
+ */
+void publishMachineFingerprintEnvironment();
 
 /*!
  * Emit the startup metadata line through qInfo() so it is captured in

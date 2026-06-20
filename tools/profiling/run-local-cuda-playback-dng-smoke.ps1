@@ -206,7 +206,7 @@ function Get-NvidiaSmiRows {
     }
 
     try {
-        $rows = @(& $cmd --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>&1 |
+        $rows = @(& $cmd --query-gpu=name,driver_version,compute_cap,memory.total --format=csv,noheader,nounits 2>&1 |
             ForEach-Object { [string]$_ })
         if ($LASTEXITCODE -ne 0) {
             return [pscustomobject]@{
@@ -233,6 +233,75 @@ function Get-NvidiaSmiRows {
             rows = @()
             error = $_.Exception.Message
         }
+    }
+}
+
+function Get-RepoBuildSha {
+    param([string]$RepoRoot)
+    try {
+        $sha = (& git -C $RepoRoot rev-parse --verify HEAD 2>$null)
+        if (-not [string]::IsNullOrWhiteSpace($sha)) {
+            return [string]$sha
+        }
+    }
+    catch {
+    }
+    $null
+}
+
+function Get-FirstNvidiaSmiFingerprintRow {
+    param([object]$NvidiaSmi)
+
+    if ($null -eq $NvidiaSmi -or -not [bool]$NvidiaSmi.ok) {
+        return $null
+    }
+    $row = @($NvidiaSmi.rows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -First 1)
+    if ($row.Count -eq 0) {
+        return $null
+    }
+    $parts = @([string]$row[0] -split "," | ForEach-Object { ([string]$_).Trim() })
+    if ($parts.Count -lt 4) {
+        return $null
+    }
+    $vram = $null
+    $parsedVram = 0
+    if ([int]::TryParse($parts[3], [ref]$parsedVram)) {
+        $vram = $parsedVram
+    }
+    [pscustomobject]@{
+        gpu_name = $parts[0]
+        gpu_driver_version = $parts[1]
+        gpu_compute_capability = $parts[2]
+        gpu_vram_total_mb = $vram
+    }
+}
+
+function Get-LocalMachineFingerprint {
+    param(
+        [string]$RepoRoot,
+        [object]$NvidiaSmi
+    )
+
+    $gpu = Get-FirstNvidiaSmiFingerprintRow -NvidiaSmi $NvidiaSmi
+    $cpu = $null
+    $computer = $null
+    $os = $null
+    try { $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1 } catch {}
+    try { $computer = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 } catch {}
+    try { $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1 } catch {}
+
+    [pscustomobject]@{
+        schema = "machine-fingerprint.v1"
+        build_sha = Get-RepoBuildSha -RepoRoot $RepoRoot
+        gpu_name = if ($gpu) { $gpu.gpu_name } else { $null }
+        gpu_driver_version = if ($gpu) { $gpu.gpu_driver_version } else { $null }
+        gpu_compute_capability = if ($gpu) { $gpu.gpu_compute_capability } else { $null }
+        gpu_vram_total_mb = if ($gpu) { $gpu.gpu_vram_total_mb } else { $null }
+        cpu_model = if ($cpu) { [string]$cpu.Name } else { $null }
+        cpu_cores = if ($cpu) { [int]$cpu.NumberOfCores } else { $null }
+        cpu_threads = if ($cpu) { [int]$cpu.NumberOfLogicalProcessors } else { $null }
+        ram_total_mb = if ($computer) { [int64]([math]::Round([double]$computer.TotalPhysicalMemory / 1MB)) } else { $null }
+        os_version = if ($os) { "$($os.Caption) $($os.Version)" } else { $null }
     }
 }
 
@@ -703,15 +772,19 @@ else {
     "failed"
 }
 
+$machineFingerprint = Get-LocalMachineFingerprint -RepoRoot $root -NvidiaSmi $nvidia
+
 $summary = [pscustomobject]@{
     schema = "mlvapp-local-cuda-playback-dng-smoke.v1"
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     status = $status
     dryRun = [bool]$DryRun
     repoRoot = $root
+    machineFingerprint = $machineFingerprint
     host = [pscustomobject]@{
         name = $env:COMPUTERNAME
         requiredGpuNamePattern = $RequiredGpuNamePattern
+        machineFingerprint = $machineFingerprint
         nvidiaSmi = $nvidia
         gpuPreference = [pscustomobject]@{
             attemptedHighPerformance = [bool](!$NoHighPerformancePreference)

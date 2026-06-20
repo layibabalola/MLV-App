@@ -65,6 +65,10 @@
 #define ROL16(v,a) ((v) << (a) | (v) >> (16-(a)))
 #define log2(x) log((float)(x))/log(2.)
 
+#ifndef MLVAPP_GIT_SHA
+#define MLVAPP_GIT_SHA "unknown"
+#endif
+
 #ifdef __WIN32
 #define FMT_SIZE "%u"
 #else
@@ -174,6 +178,7 @@ static unsigned g_export_profile_async_writer_jobs_started = 0;
 static unsigned g_export_profile_async_writer_jobs_finished = 0;
 static unsigned g_export_profile_async_writer_max_active = 0;
 static int g_export_profile_async_writer_compress_used = 0;
+static int g_export_profile_field_log_appended = 0;
 static pthread_mutex_t g_export_profile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int export_profile_env_truthy(const char * value)
@@ -738,6 +743,98 @@ static void export_profile_write_json_string(FILE * file, const char * value)
     fputc('"', file);
 }
 
+static const char * export_profile_env_nonempty(const char * name)
+{
+    const char * value = getenv(name);
+    return (value != NULL && value[0] != '\0') ? value : NULL;
+}
+
+static void export_profile_write_json_string_or_null(FILE * file,
+                                                     const char * value)
+{
+    if(value != NULL && value[0] != '\0')
+    {
+        export_profile_write_json_string(file, value);
+    }
+    else
+    {
+        fputs("null", file);
+    }
+}
+
+static void export_profile_write_json_integer_or_null(FILE * file,
+                                                      const char * value)
+{
+    char * end = NULL;
+    if(value == NULL || value[0] == '\0')
+    {
+        fputs("null", file);
+        return;
+    }
+
+    long long parsed = strtoll(value, &end, 10);
+    if(end == value || (end != NULL && *end != '\0') || parsed < 0)
+    {
+        fputs("null", file);
+        return;
+    }
+
+    fprintf(file, "%lld", parsed);
+}
+
+static void export_profile_write_machine_fingerprint(FILE * file)
+{
+    const char * build_sha =
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_BUILD_SHA");
+    if(build_sha == NULL || build_sha[0] == '\0')
+    {
+        build_sha = (g_export_profile_build_id[0] != '\0')
+            ? g_export_profile_build_id
+            : MLVAPP_GIT_SHA;
+    }
+
+    fputs("{\"schema\":\"machine-fingerprint.v1\"", file);
+    fputs(",\"build_sha\":", file);
+    export_profile_write_json_string_or_null(file, build_sha);
+    fputs(",\"gpu_name\":", file);
+    export_profile_write_json_string_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_GPU_NAME"));
+    fputs(",\"gpu_driver_version\":", file);
+    export_profile_write_json_string_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_GPU_DRIVER_VERSION"));
+    fputs(",\"gpu_compute_capability\":", file);
+    export_profile_write_json_string_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_GPU_COMPUTE_CAPABILITY"));
+    fputs(",\"gpu_vram_total_mb\":", file);
+    export_profile_write_json_integer_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_GPU_VRAM_TOTAL_MB"));
+    fputs(",\"cpu_model\":", file);
+    export_profile_write_json_string_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_CPU_MODEL"));
+    fputs(",\"cpu_cores\":", file);
+    export_profile_write_json_integer_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_CPU_CORES"));
+    fputs(",\"cpu_threads\":", file);
+    export_profile_write_json_integer_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_CPU_THREADS"));
+    fputs(",\"ram_total_mb\":", file);
+    export_profile_write_json_integer_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_RAM_TOTAL_MB"));
+    fputs(",\"os_version\":", file);
+    export_profile_write_json_string_or_null(
+        file,
+        export_profile_env_nonempty("MLVAPP_MACHINE_FINGERPRINT_OS_VERSION"));
+    fputs("}", file);
+}
+
 static void export_profile_write_stage_stats(FILE * file,
                                              const char * name,
                                              int comma)
@@ -784,6 +881,178 @@ static void export_profile_write_stage_stats(FILE * file,
     free(values);
 }
 
+typedef struct
+{
+    const char * limiting_stage;
+    const char * source_stage;
+    const char * suggested_optimization;
+    double median_ms;
+    double p95_ms;
+    unsigned samples;
+} exportProfileBottleneck_t;
+
+static int export_profile_compute_stage_percentiles(const char * name,
+                                                    double * median_ms,
+                                                    double * p95_ms,
+                                                    unsigned * samples)
+{
+    double * values = NULL;
+    size_t count = 0;
+
+    if(median_ms) *median_ms = 0.0;
+    if(p95_ms) *p95_ms = 0.0;
+    if(samples) *samples = 0;
+
+    values = (double*)malloc(g_export_profile_frame_count * sizeof(double));
+    if(values == NULL) return 0;
+
+    for(size_t i = 0; i < g_export_profile_frame_count; i++)
+    {
+        double value = 0.0;
+        if(export_profile_stage_value(&g_export_profile_frames[i], name, &value))
+        {
+            values[count++] = value;
+        }
+    }
+
+    if(count == 0)
+    {
+        free(values);
+        return 0;
+    }
+
+    qsort(values, count, sizeof(double), export_profile_double_compare);
+    if(median_ms) *median_ms = values[(size_t)((count - 1) * 0.50)];
+    if(p95_ms) *p95_ms = values[(size_t)((count - 1) * 0.95)];
+    if(samples) *samples = (unsigned)count;
+    free(values);
+    return 1;
+}
+
+static const char * export_profile_suggested_optimization(const char * bottleneck)
+{
+    if(strcmp(bottleneck, "decode-bound") == 0)
+        return "parallelize_lj92_decode";
+    if(strcmp(bottleneck, "recon-bound") == 0)
+        return "optimize_dual_iso_recon";
+    if(strcmp(bottleneck, "compress-bound") == 0)
+        return "parallelize_or_offload_dng_compress";
+    if(strcmp(bottleneck, "write-bound") == 0)
+        return "increase_async_writer_depth_or_storage_bandwidth";
+    return "collect_more_stage_samples";
+}
+
+static exportProfileBottleneck_t export_profile_select_bottleneck(void)
+{
+    static const struct
+    {
+        const char * label;
+        const char * stage_name;
+    } candidates[] =
+    {
+        { "decode-bound", "raw_read_decode_unpack_ms" },
+        { "recon-bound", "llrawproc_total_ms" },
+        { "compress-bound", "dng_compress_ms" },
+        { "write-bound", "disk_write_ms" }
+    };
+
+    exportProfileBottleneck_t result;
+    memset(&result, 0, sizeof(result));
+    result.limiting_stage = "unknown";
+    result.source_stage = "unknown";
+    result.suggested_optimization =
+        export_profile_suggested_optimization(result.limiting_stage);
+
+    for(size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++)
+    {
+        double median_ms = 0.0;
+        double p95_ms = 0.0;
+        unsigned samples = 0;
+        if(!export_profile_compute_stage_percentiles(candidates[i].stage_name,
+                                                     &median_ms,
+                                                     &p95_ms,
+                                                     &samples))
+        {
+            continue;
+        }
+        if(strcmp(result.limiting_stage, "unknown") == 0
+        || median_ms > result.median_ms)
+        {
+            result.limiting_stage = candidates[i].label;
+            result.source_stage = candidates[i].stage_name;
+            result.suggested_optimization =
+                export_profile_suggested_optimization(candidates[i].label);
+            result.median_ms = median_ms;
+            result.p95_ms = p95_ms;
+            result.samples = samples;
+        }
+    }
+
+    return result;
+}
+
+static void export_profile_write_bottleneck(FILE * file,
+                                            const exportProfileBottleneck_t * bottleneck)
+{
+    const exportProfileBottleneck_t fallback = export_profile_select_bottleneck();
+    const exportProfileBottleneck_t * value =
+        bottleneck != NULL ? bottleneck : &fallback;
+
+    fputs("{\"schema\":\"mlvapp.bottleneck-rollup.v1\"", file);
+    fputs(",\"limiting_stage\":", file);
+    export_profile_write_json_string(file, value->limiting_stage);
+    fputs(",\"source_stage\":", file);
+    export_profile_write_json_string(file, value->source_stage);
+    fprintf(file,
+            ",\"median_ms\":%.6f,\"p95_ms\":%.6f,\"samples\":%u",
+            value->median_ms,
+            value->p95_ms,
+            value->samples);
+    fputs(",\"suggested_optimization\":", file);
+    export_profile_write_json_string(file, value->suggested_optimization);
+    fputs("}", file);
+}
+
+static void export_profile_append_perf_field_log(
+    const exportProfileBottleneck_t * bottleneck)
+{
+    const char * path = export_profile_env_nonempty("MLVAPP_PERF_FIELD_LOG_PATH");
+    FILE * log = NULL;
+    if(!export_profile_env_truthy(getenv("MLVAPP_PERF_FIELD_LOG")) || path == NULL)
+    {
+        return;
+    }
+    if(g_export_profile_field_log_appended)
+    {
+        return;
+    }
+
+    log = fopen(path, "ab");
+    if(log == NULL) return;
+
+    g_export_profile_field_log_appended = 1;
+    fputs("{\"schema\":\"mlvapp.perf-field-log.v1\"", log);
+    fputs(",\"kind\":\"export\"", log);
+    fputs(",\"machineFingerprint\":", log);
+    export_profile_write_machine_fingerprint(log);
+    fprintf(log, ",\"frame_count\":%u", (unsigned)g_export_profile_frame_count);
+    fputs(",\"pipeline_counts\":{}", log);
+    fputs(",\"presented_fps\":null,\"timeline_fps\":null", log);
+    fputs(",\"fallback_count\":", log);
+    fprintf(log, "%u", 0u);
+    fputs(",\"fallback_reason_histogram\":{}", log);
+    fputs(",\"bottleneck\":", log);
+    export_profile_write_bottleneck(log, bottleneck);
+    fputs(",\"suggested_optimization\":", log);
+    export_profile_write_json_string(
+        log,
+        bottleneck != NULL
+            ? bottleneck->suggested_optimization
+            : export_profile_suggested_optimization("unknown"));
+    fputs("}\n", log);
+    fclose(log);
+}
+
 static void export_profile_write_json(void)
 {
     FILE * file = NULL;
@@ -801,6 +1070,7 @@ static void export_profile_write_json(void)
     uint64_t dng_compress_input_bytes_total = 0;
     uint64_t dng_compress_output_bytes_total = 0;
     int async_writer_compress_used = 0;
+    exportProfileBottleneck_t bottleneck;
 
     if(g_export_profile_write_in_progress) return;
     if(g_export_profile_path[0] == '\0' || g_export_profile_frame_count == 0) return;
@@ -844,6 +1114,7 @@ static void export_profile_write_json(void)
     pthread_mutex_lock(&g_export_profile_mutex);
     async_writer_compress_used = g_export_profile_async_writer_compress_used;
     pthread_mutex_unlock(&g_export_profile_mutex);
+    bottleneck = export_profile_select_bottleneck();
 
     g_export_profile_write_in_progress = 1;
     file = fopen(g_export_profile_path, "wb");
@@ -882,6 +1153,9 @@ static void export_profile_write_json(void)
             dng_async_writer_compress_env_enabled() ? "true" : "false");
     fputs("  \"generated_utc\":", file);
     export_profile_write_json_string(file, generated);
+    fputs(",\n", file);
+    fputs("  \"machineFingerprint\":", file);
+    export_profile_write_machine_fingerprint(file);
     fputs(",\n", file);
     fprintf(file, "  \"frame_count\":%u,\n", (unsigned)g_export_profile_frame_count);
     fputs("  \"queue_idle_supported\":true,\n", file);
@@ -991,6 +1265,9 @@ static void export_profile_write_json(void)
     export_profile_write_stage_stats(file, "writer_completion_lag_ms", 1);
     export_profile_write_stage_stats(file, "frame_total_ms", 1);
     fputs("  },\n", file);
+    fputs("  \"bottleneck\":", file);
+    export_profile_write_bottleneck(file, &bottleneck);
+    fputs(",\n", file);
     fputs("  \"frames\":[\n", file);
     for(size_t i = 0; i < g_export_profile_frame_count; i++)
     {
@@ -1063,6 +1340,7 @@ static void export_profile_write_json(void)
     fputs("\n  ]\n", file);
     fputs("}\n", file);
     fclose(file);
+    export_profile_append_perf_field_log(&bottleneck);
     g_export_profile_write_in_progress = 0;
 }
 

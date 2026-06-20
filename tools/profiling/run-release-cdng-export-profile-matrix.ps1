@@ -631,7 +631,13 @@ foreach ($case in $cases) {
             cdngCodec = if ($abSummary) { $abSummary.cdngCodec } else { $case.cdngCodec }
             error = $errorMessage
             baselineFrameCount = if ($abSummary) { $abSummary.baseline.frameCount } else { $null }
+            baselineMachineFingerprint = if ($abSummary) { $abSummary.baseline.machineFingerprint } else { $null }
+            baselineBottleneck = if ($abSummary) { $abSummary.baseline.bottleneck } else { $null }
+            baselineSuggestedOptimization = if ($abSummary) { $abSummary.baseline.suggestedOptimization } else { $null }
             candidateFrameCount = if ($abSummary) { $abSummary.candidate.frameCount } else { $null }
+            candidateMachineFingerprint = if ($abSummary) { $abSummary.candidate.machineFingerprint } else { $null }
+            candidateBottleneck = if ($abSummary) { $abSummary.candidate.bottleneck } else { $null }
+            candidateSuggestedOptimization = if ($abSummary) { $abSummary.candidate.suggestedOptimization } else { $null }
             baselineDngCompressBytesValidFrames = if ($abSummary) { $abSummary.baseline.dngCompressBytesValidFrames } else { $null }
             baselineDngCompressInputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressInputBytesTotal } else { $null }
             baselineDngCompressOutputBytesTotal = if ($abSummary) { $abSummary.baseline.dngCompressOutputBytesTotal } else { $null }
@@ -733,9 +739,27 @@ foreach ($case in $cases) {
     }
 }
 
+$matrixMachineFingerprint = $null
+foreach ($caseResult in @($caseResults)) {
+    foreach ($run in @($caseResult.runs)) {
+        if ($run.candidateMachineFingerprint) {
+            $matrixMachineFingerprint = $run.candidateMachineFingerprint
+            break
+        }
+        if ($run.baselineMachineFingerprint) {
+            $matrixMachineFingerprint = $run.baselineMachineFingerprint
+            break
+        }
+    }
+    if ($matrixMachineFingerprint) {
+        break
+    }
+}
+
 $matrix = [pscustomobject]@{
     schema = "release-cdng-export-profile-matrix.v1"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
+    machineFingerprint = $matrixMachineFingerprint
     bundleDir = $bundleDir
     comparisonMode = $comparisonMode
     isIdentityComparison = $isIdentityComparison

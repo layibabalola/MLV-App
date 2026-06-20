@@ -22,7 +22,9 @@
 #include <QList>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QProcess>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QString>
 #include <QSysInfo>
@@ -56,6 +58,19 @@ static QString g_logsDir;
 static QStringList g_commandLine;
 static std::atomic<bool> g_installed{false};
 static QtMessageHandler g_previousHandler = nullptr;
+static QMutex g_machineFingerprintMutex;
+static bool g_machineFingerprintCached = false;
+static QJsonObject g_machineFingerprintCache;
+
+QJsonValue stringOrNull(const QString & value)
+{
+    return value.isEmpty() ? QJsonValue() : QJsonValue(value);
+}
+
+QJsonValue integerOrNull(qint64 value)
+{
+    return value < 0 ? QJsonValue() : QJsonValue(value);
+}
 
 QString cpuFeatureList()
 {
@@ -68,6 +83,135 @@ QString cpuFeatureList()
     if (__builtin_cpu_supports("avx512f")) features << QStringLiteral("avx512f");
 #endif
     return features.join(QLatin1Char(','));
+}
+
+QString cpuModelName()
+{
+#ifdef Q_OS_WIN
+    QSettings cpuKey(QStringLiteral(
+        "HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
+        QSettings::NativeFormat);
+    const QString registryName =
+        cpuKey.value(QStringLiteral("ProcessorNameString")).toString().trimmed();
+    if (!registryName.isEmpty()) return registryName;
+#endif
+    const QString processorIdentifier =
+        qEnvironmentVariable("PROCESSOR_IDENTIFIER").trimmed();
+    if (!processorIdentifier.isEmpty()) return processorIdentifier;
+    return QSysInfo::currentCpuArchitecture();
+}
+
+int physicalCpuCoreCount()
+{
+#ifdef Q_OS_WIN
+    DWORD bytes = 0;
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes)
+        && GetLastError() == ERROR_INSUFFICIENT_BUFFER
+        && bytes > 0) {
+        QByteArray buffer(static_cast<int>(bytes), 0);
+        PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX info =
+            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data());
+        if (GetLogicalProcessorInformationEx(RelationProcessorCore, info, &bytes)) {
+            int count = 0;
+            char *cursor = buffer.data();
+            const char *end = buffer.constData() + bytes;
+            while (cursor < end) {
+                PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX entry =
+                    reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(cursor);
+                if (entry->Relationship == RelationProcessorCore) {
+                    ++count;
+                }
+                if (entry->Size == 0) break;
+                cursor += entry->Size;
+            }
+            if (count > 0) return count;
+        }
+    }
+#endif
+    return QThread::idealThreadCount();
+}
+
+qint64 totalRamMb()
+{
+#ifdef Q_OS_WIN
+    MEMORYSTATUSEX memoryStatus;
+    memset(&memoryStatus, 0, sizeof(memoryStatus));
+    memoryStatus.dwLength = sizeof(memoryStatus);
+    if (GlobalMemoryStatusEx(&memoryStatus)) {
+        return static_cast<qint64>(memoryStatus.ullTotalPhys / (1024ULL * 1024ULL));
+    }
+#endif
+    return -1;
+}
+
+QString resolveNvidiaSmi()
+{
+    const QString fromPath = QStandardPaths::findExecutable(QStringLiteral("nvidia-smi"));
+    if (!fromPath.isEmpty()) return fromPath;
+
+    QStringList candidates;
+#ifdef Q_OS_WIN
+    const QString windowsDir = qEnvironmentVariable("WINDIR");
+    if (!windowsDir.isEmpty()) {
+        candidates << QDir(windowsDir).absoluteFilePath(
+            QStringLiteral("System32/nvidia-smi.exe"));
+    }
+    const QString programFiles = qEnvironmentVariable("ProgramFiles");
+    if (!programFiles.isEmpty()) {
+        candidates << QDir(programFiles).absoluteFilePath(
+            QStringLiteral("NVIDIA Corporation/NVSMI/nvidia-smi.exe"));
+    }
+    const QString programW6432 = qEnvironmentVariable("ProgramW6432");
+    if (!programW6432.isEmpty()) {
+        candidates << QDir(programW6432).absoluteFilePath(
+            QStringLiteral("NVIDIA Corporation/NVSMI/nvidia-smi.exe"));
+    }
+#endif
+    for (const QString &candidate : candidates) {
+        if (!candidate.isEmpty() && QFileInfo::exists(candidate)) {
+            return candidate;
+        }
+    }
+    return QString();
+}
+
+QJsonObject nvidiaGpuFingerprint()
+{
+    QJsonObject gpu;
+    const QString nvidiaSmi = resolveNvidiaSmi();
+    if (nvidiaSmi.isEmpty()) return gpu;
+
+    QProcess process;
+    process.setProgram(nvidiaSmi);
+    process.setArguments(QStringList()
+        << QStringLiteral("--query-gpu=name,driver_version,compute_cap,memory.total")
+        << QStringLiteral("--format=csv,noheader,nounits"));
+    process.start();
+    if (!process.waitForFinished(2500)) {
+        process.kill();
+        process.waitForFinished(500);
+        return gpu;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        return gpu;
+    }
+
+    const QString output = QString::fromLocal8Bit(process.readAllStandardOutput());
+    const QStringList lines = output.split(QRegularExpression(QStringLiteral("[\\r\\n]+")),
+                                           Qt::SkipEmptyParts);
+    if (lines.isEmpty()) return gpu;
+
+    const QStringList fields = lines.first().split(QLatin1Char(','));
+    if (fields.size() < 4) return gpu;
+
+    bool vramOk = false;
+    const qint64 vramMb = fields.at(3).trimmed().toLongLong(&vramOk);
+    gpu.insert(QStringLiteral("gpu_name"), fields.at(0).trimmed());
+    gpu.insert(QStringLiteral("gpu_driver_version"), fields.at(1).trimmed());
+    gpu.insert(QStringLiteral("gpu_compute_capability"), fields.at(2).trimmed());
+    gpu.insert(QStringLiteral("gpu_vram_total_mb"),
+               vramOk ? QJsonValue(vramMb) : QJsonValue());
+    return gpu;
 }
 
 QString levelTag(QtMsgType type)
@@ -310,6 +454,80 @@ QString currentLogFilePath()
 QString logsDirectoryPath()
 {
     return g_logsDir;
+}
+
+QJsonObject machineFingerprintObject()
+{
+    QMutexLocker locker(&g_machineFingerprintMutex);
+    if (g_machineFingerprintCached) return g_machineFingerprintCache;
+
+    const QJsonObject gpu = nvidiaGpuFingerprint();
+    QJsonObject root;
+    root.insert(QStringLiteral("schema"), QStringLiteral("machine-fingerprint.v1"));
+    root.insert(QStringLiteral("build_sha"), QString::fromLatin1(MLVAPP_GIT_SHA));
+    root.insert(QStringLiteral("gpu_name"),
+                gpu.contains(QStringLiteral("gpu_name"))
+                    ? gpu.value(QStringLiteral("gpu_name"))
+                    : QJsonValue());
+    root.insert(QStringLiteral("gpu_driver_version"),
+                gpu.contains(QStringLiteral("gpu_driver_version"))
+                    ? gpu.value(QStringLiteral("gpu_driver_version"))
+                    : QJsonValue());
+    root.insert(QStringLiteral("gpu_compute_capability"),
+                gpu.contains(QStringLiteral("gpu_compute_capability"))
+                    ? gpu.value(QStringLiteral("gpu_compute_capability"))
+                    : QJsonValue());
+    root.insert(QStringLiteral("gpu_vram_total_mb"),
+                gpu.contains(QStringLiteral("gpu_vram_total_mb"))
+                    ? gpu.value(QStringLiteral("gpu_vram_total_mb"))
+                    : QJsonValue());
+    root.insert(QStringLiteral("cpu_model"), stringOrNull(cpuModelName()));
+    root.insert(QStringLiteral("cpu_cores"), integerOrNull(physicalCpuCoreCount()));
+    root.insert(QStringLiteral("cpu_threads"), integerOrNull(QThread::idealThreadCount()));
+    root.insert(QStringLiteral("ram_total_mb"), integerOrNull(totalRamMb()));
+    root.insert(QStringLiteral("os_version"), stringOrNull(QSysInfo::prettyProductName()));
+
+    g_machineFingerprintCache = root;
+    g_machineFingerprintCached = true;
+    return g_machineFingerprintCache;
+}
+
+QString machineFingerprintJson()
+{
+    return QString::fromUtf8(
+        QJsonDocument(machineFingerprintObject()).toJson(QJsonDocument::Compact));
+}
+
+void publishMachineFingerprintEnvironment()
+{
+    const QJsonObject fp = machineFingerprintObject();
+    auto publishString = [&fp](const char * envName, const char * key)
+    {
+        const QString value = fp.value(QString::fromLatin1(key)).toString();
+        qputenv(envName, value.toUtf8());
+    };
+    auto publishNumber = [&fp](const char * envName, const char * key)
+    {
+        const QJsonValue value = fp.value(QString::fromLatin1(key));
+        qputenv(envName,
+                value.isDouble()
+                    ? QByteArray::number(static_cast<qint64>(value.toDouble()))
+                    : QByteArray());
+    };
+
+    qputenv("MLVAPP_MACHINE_FINGERPRINT_JSON",
+            QJsonDocument(fp).toJson(QJsonDocument::Compact));
+    publishString("MLVAPP_MACHINE_FINGERPRINT_SCHEMA", "schema");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_BUILD_SHA", "build_sha");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_GPU_NAME", "gpu_name");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_GPU_DRIVER_VERSION", "gpu_driver_version");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_GPU_COMPUTE_CAPABILITY", "gpu_compute_capability");
+    publishNumber("MLVAPP_MACHINE_FINGERPRINT_GPU_VRAM_TOTAL_MB", "gpu_vram_total_mb");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_CPU_MODEL", "cpu_model");
+    publishNumber("MLVAPP_MACHINE_FINGERPRINT_CPU_CORES", "cpu_cores");
+    publishNumber("MLVAPP_MACHINE_FINGERPRINT_CPU_THREADS", "cpu_threads");
+    publishNumber("MLVAPP_MACHINE_FINGERPRINT_RAM_TOTAL_MB", "ram_total_mb");
+    publishString("MLVAPP_MACHINE_FINGERPRINT_OS_VERSION", "os_version");
 }
 
 QString runMetadataJson()

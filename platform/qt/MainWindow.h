@@ -17,6 +17,7 @@
 #include <QThreadPool>
 #include <QProcess>
 #include <QVector>
+#include <QJsonObject>
 #include <QImage>
 #include <QPixmap>
 #include <QGraphicsPixmapItem>
@@ -1221,6 +1222,8 @@ private:
     int m_playbackSmokeGpuStatusReconReadbackFrames = 0;
     int m_playbackSmokeGpuStatusTextureReadbackFrames = 0;
     int m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
+    int m_playbackSmokeFallbackCount = 0;
+    QJsonObject m_playbackSmokeFallbackReasonCounts;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;
