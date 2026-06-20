@@ -306,6 +306,15 @@ wrappers remain authoritative and default playback/export behavior stays
 unchanged. The CUDA preset is still a request surface, not proof: Dell/UltraMagnus
 claims require the same host-local no-readback/fallback/FPS/DNG hash/timing
 evidence as the wrapper path.
+The dogfood/proof front doors now also record CUDA backend architecture tokens
+from the packaged `igpu_recon_cuda.dll` and compare them to the host
+`nvidia-smi` compute capability before real proof runs. This makes the current
+distinction explicit: an `sm_89`-only backend is UltraMagnus/RTX 4090-shaped but
+not Dell RTX 3060 Laptop-ready; the Dell path requires a portable backend with
+`sm_86` before runtime playback/export proof is meaningful. The gate is a
+preflight only, not a support claim: even an architecture-compatible DLL still
+needs the same backend-load, GL/no-readback, fallback, DNG hash, and timing
+packet before Dell or UltraMagnus speed/support can be quoted.
 
 Update 2026-06-20 E3 dogfood async-compress surface: the simple CUDA DNG
 runner now exposes the same lossless compression-overlap knobs as the CDNG

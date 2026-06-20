@@ -119,6 +119,42 @@ function Get-FileArtifact {
     }
 }
 
+function Get-CudaBackendArchitectureInfo {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [pscustomobject]@{
+            schema = "mlvapp.cuda-backend-architecture.v1"
+            path = $Path
+            exists = $false
+            detector = "ascii-token-scan"
+            tokens = @()
+            hasSm86 = $false
+            hasSm89 = $false
+            detectionReliable = $false
+            note = "backend DLL missing"
+        }
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $bytes = [System.IO.File]::ReadAllBytes($resolved)
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+    $tokens = @([regex]::Matches($text, "(?:sm|compute)_[0-9]{2,3}") |
+        ForEach-Object { $_.Value } |
+        Sort-Object -Unique)
+    [pscustomobject]@{
+        schema = "mlvapp.cuda-backend-architecture.v1"
+        path = $resolved
+        exists = $true
+        detector = "ascii-token-scan"
+        tokens = @($tokens)
+        hasSm86 = [bool]($tokens -contains "sm_86")
+        hasSm89 = [bool]($tokens -contains "sm_89")
+        detectionReliable = [bool]($tokens.Count -gt 0)
+        note = "Fail-closed hint for NVIDIA-host proof. Rebuild the backend with tools\\gpu\\backend\\build-backend-dll.ps1 -Arch portable when the target GPU architecture is absent."
+    }
+}
+
 function Get-GpuPreferenceValue {
     param([Parameter(Mandatory = $true)][string]$Executable)
     $prefKey = "HKCU:\Software\Microsoft\DirectX\UserGpuPreferences"
@@ -260,6 +296,70 @@ function Get-RepoBuildSha {
     catch {
     }
     $null
+}
+
+function Convert-ComputeCapabilityToCudaToken {
+    param([AllowNull()][string]$ComputeCapability)
+
+    if ([string]::IsNullOrWhiteSpace($ComputeCapability)) {
+        return $null
+    }
+    $trimmed = ([string]$ComputeCapability).Trim()
+    if ($trimmed -match '^([0-9]+)\.([0-9]+)$') {
+        return "sm_$($Matches[1])$($Matches[2])"
+    }
+    if ($trimmed -match '^([0-9]{2,3})$') {
+        return "sm_$trimmed"
+    }
+    $null
+}
+
+function Test-CudaBackendCompatibility {
+    param(
+        [AllowNull()]$ArchitectureInfo,
+        [AllowNull()]$NvidiaSmi
+    )
+
+    $gpu = Get-FirstNvidiaSmiFingerprintRow -NvidiaSmi $NvidiaSmi
+    $computeCapability = if ($gpu) { [string]$gpu.gpu_compute_capability } else { $null }
+    $smToken = Convert-ComputeCapabilityToCudaToken -ComputeCapability $computeCapability
+    $computeToken = if ($smToken) { $smToken -replace '^sm_', 'compute_' } else { $null }
+    $tokens = @()
+    if ($ArchitectureInfo -and $ArchitectureInfo.tokens) {
+        $tokens = @($ArchitectureInfo.tokens | ForEach-Object { [string]$_ })
+    }
+    $compatible = $null
+    $reason = "gpu_compute_capability_unavailable"
+    if ($null -eq $ArchitectureInfo -or -not [bool]$ArchitectureInfo.exists) {
+        $compatible = $false
+        $reason = "backend_missing"
+    }
+    elseif ($null -eq $smToken) {
+        $compatible = $null
+        $reason = "gpu_compute_capability_unavailable"
+    }
+    elseif ($tokens.Count -eq 0) {
+        $compatible = $false
+        $reason = "backend_architecture_metadata_unavailable"
+    }
+    elseif (($tokens -contains $smToken) -or ($tokens -contains $computeToken)) {
+        $compatible = $true
+        $reason = "compatible"
+    }
+    else {
+        $compatible = $false
+        $reason = "backend_architecture_missing_target"
+    }
+
+    [pscustomobject]@{
+        schema = "mlvapp.cuda-backend-compatibility.v1"
+        compatible = $compatible
+        reason = $reason
+        gpu_compute_capability = $computeCapability
+        required_tokens = @(@($smToken, $computeToken) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        backend_tokens = @($tokens)
+        proofBoundary = "This is a preflight compatibility gate only. Runtime support still requires backend load, no-readback playback proof, fallback counts, GL parity, DNG hash PASS, and timing evidence on the host."
+    }
 }
 
 function Get-FirstNvidiaSmiFingerprintRow {
@@ -702,10 +802,20 @@ $artifacts = [pscustomobject]@{
     backend = Get-FileArtifact -Path $backendDll
     cudart = Get-FileArtifact -Path $cudartDll
 }
+$backendArchitecture = Get-CudaBackendArchitectureInfo -Path $backendDll
+$backendCompatibility = Test-CudaBackendCompatibility `
+    -ArchitectureInfo $backendArchitecture `
+    -NvidiaSmi $nvidia
 foreach ($artifactName in @("exe", "backend", "cudart")) {
     if (-not [bool]$artifacts.$artifactName.exists) {
         Add-Failure $failures "Missing release artifact '$artifactName': $($artifacts.$artifactName.path)"
     }
+}
+if (!$DryRun -and [bool]$nvidia.ok -and $backendCompatibility.compatible -ne $true) {
+    Add-Failure $failures ("CUDA backend architecture is not compatible with this GPU: compute_capability={0}; backend_tokens=[{1}]; reason={2}. Rebuild/deploy igpu_recon_cuda.dll with tools\\gpu\\backend\\build-backend-dll.ps1 -Arch portable before using this proof packet for Dell/UltraMagnus claims." -f `
+        $backendCompatibility.gpu_compute_capability,
+        (($backendCompatibility.backend_tokens | ForEach-Object { [string]$_ }) -join ","),
+        $backendCompatibility.reason)
 }
 
 $gpuPreferenceBefore = $null
@@ -928,6 +1038,8 @@ $summary = [pscustomobject]@{
         }
     }
     artifacts = $artifacts
+    backendArchitecture = $backendArchitecture
+    backendCompatibility = $backendCompatibility
     inputs = [pscustomobject]@{
         clipPath = $clipFullPath
         receipt = $receiptFullPath
