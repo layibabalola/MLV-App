@@ -2089,13 +2089,98 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeCommandShape)
     ASSERT_TRUE( summary.find("output-verification-probe-command-executable=C:/tools/ffprobe.exe") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-command-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-stdout-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-raw-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-parse-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-result-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-probe-result-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-command-line=C:/tools/ffprobe.exe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-command-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-command-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-json-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-json-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-result-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-result-ready=false") != std::string::npos );
+}
+
+TEST(BatchExportFormat, PlansRenderedVideoMediaProbeJsonContract)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoOutputPlan outputPlan =
+        batchRenderedVideoOutputPlanFromPaths(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            target);
+    BatchRenderedVideoOutputVerificationPlan verificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            outputPlan,
+            target);
+    BatchRenderedVideoMediaProbeCommandPlan commandPlan =
+        batchRenderedVideoMediaProbeCommandPlanFromContracts(
+            verificationPlan,
+            batchRenderedVideoMediaProbeBinaryPlanFromRequestedName());
+    BatchRenderedVideoMediaProbeJsonPlan jsonPlan =
+        batchRenderedVideoMediaProbeJsonPlanFromCommand(commandPlan);
+
+    ASSERT_TRUE( jsonPlan.contractReady );
+    ASSERT_TRUE( jsonPlan.mediaProbeCommandContractReady );
+    ASSERT_FALSE( jsonPlan.mediaProbeCommandExecutionOwned );
+    ASSERT_FALSE( jsonPlan.mediaProbeCommandExecutionReady );
+    ASSERT_TRUE( jsonPlan.stdoutCapturePlanned );
+    ASSERT_TRUE( jsonPlan.stderrCapturePlanned );
+    ASSERT_TRUE( jsonPlan.exitCodeValidationPlanned );
+    ASSERT_TRUE( jsonPlan.timeoutPlanned );
+    ASSERT_TRUE( jsonPlan.errorReportingPlanned );
+    ASSERT_TRUE( jsonPlan.jsonDocumentPlanned );
+    ASSERT_FALSE( jsonPlan.stdoutCaptureOwned );
+    ASSERT_FALSE( jsonPlan.stderrCaptureOwned );
+    ASSERT_FALSE( jsonPlan.exitCodeValidationOwned );
+    ASSERT_FALSE( jsonPlan.timeoutOwned );
+    ASSERT_FALSE( jsonPlan.rawJsonOutputOwned );
+    ASSERT_FALSE( jsonPlan.jsonParseOwned );
+    ASSERT_FALSE( jsonPlan.rawJsonReady );
+    ASSERT_FALSE( jsonPlan.jsonParseReady );
+    ASSERT_FALSE( jsonPlan.errorFree );
+    ASSERT_EQ( std::string("output-verification-probe-json-source=output-verification-probe-json-contract output-verification-probe-json-path=C:/renders/M16-1327.mp4 output-verification-probe-json-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4 output-verification-probe-json-command-contract-ready=true output-verification-probe-json-command-owned=false output-verification-probe-json-command-exec-ready=false output-verification-probe-json-stdout-planned=true output-verification-probe-json-stderr-planned=true output-verification-probe-json-exit-code-planned=true output-verification-probe-json-timeout-planned=true output-verification-probe-json-error-reporting-planned=true output-verification-probe-json-document-planned=true output-verification-probe-json-stdout-owned=false output-verification-probe-json-stderr-owned=false output-verification-probe-json-exit-code-owned=false output-verification-probe-json-timeout-owned=false output-verification-probe-json-raw-owned=false output-verification-probe-json-parse-owned=false output-verification-probe-json-raw-ready=false output-verification-probe-json-parse-ready=false output-verification-probe-json-error-free=false output-verification-probe-json-contract-ready=true output-verification-probe-json-reason=none"),
+               std::string(batchRenderedVideoMediaProbeJsonPlanSummary(
+                   jsonPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(
+            batchRenderedVideoJobPlanFromRequest(
+                QStringLiteral("C:/clips/M16-1327.MLV"),
+                QStringLiteral("C:/renders"),
+                request),
+            batchRenderedVideoSourceMetadata(
+                5792,
+                3872,
+                24000.0 / 1001.0,
+                STRETCH_H_100,
+                STRETCH_V_100,
+                240));
+    ASSERT_TRUE( plan.mediaProbeJsonContractReady );
+    ASSERT_TRUE( plan.mediaProbeJsonPlan.stdoutCapturePlanned );
+    ASSERT_TRUE( plan.mediaProbeJsonPlan.errorReportingPlanned );
+    ASSERT_FALSE( plan.mediaProbeJsonPlan.rawJsonOutputOwned );
+    ASSERT_FALSE( plan.mediaProbeJsonPlan.jsonParseOwned );
+    ASSERT_FALSE( plan.mediaProbeJsonPlan.rawJsonReady );
+    ASSERT_FALSE( plan.mediaProbeJsonPlan.jsonParseReady );
+    ASSERT_FALSE( plan.mediaProbeJsonPlan.errorFree );
+    ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeJsonReady );
+    const std::string summary =
+        std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
+    ASSERT_TRUE( summary.find("output-verification-probe-json-source=output-verification-probe-json-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-document-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-raw-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-parse-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-probe-json-error-free=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-json-document-planned=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-json-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-exec-probe-json-contract-ready=true") != std::string::npos );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoMediaProbeResultContract)
@@ -2125,6 +2210,7 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeResultContract)
     ASSERT_TRUE( resultPlan.contractReady );
     ASSERT_TRUE( resultPlan.outputVerificationContractReady );
     ASSERT_TRUE( resultPlan.mediaProbeCommandContractReady );
+    ASSERT_TRUE( resultPlan.mediaProbeJsonContractReady );
     ASSERT_TRUE( resultPlan.resultParsingPlanned );
     ASSERT_TRUE( resultPlan.resultSchemaReady );
     ASSERT_TRUE( resultPlan.codecContainerFieldsPlanned );
@@ -2132,6 +2218,9 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeResultContract)
     ASSERT_FALSE( resultPlan.durationFieldPlanned );
     ASSERT_FALSE( resultPlan.mediaProbeCommandExecutionOwned );
     ASSERT_FALSE( resultPlan.mediaProbeCommandExecutionReady );
+    ASSERT_FALSE( resultPlan.rawJsonReady );
+    ASSERT_FALSE( resultPlan.jsonParseReady );
+    ASSERT_FALSE( resultPlan.jsonErrorFree );
     ASSERT_FALSE( resultPlan.mediaProbeResultOwned );
     ASSERT_FALSE( resultPlan.jsonParseOwned );
     ASSERT_FALSE( resultPlan.codecContainerResultReady );
@@ -3687,6 +3776,23 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.mediaProbePathSearchAttempted );
     ASSERT_FALSE( executionPlan.mediaProbeFoundOnPath );
     ASSERT_TRUE( executionPlan.mediaProbeCommandReady );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonContractReady );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonStdoutCapturePlanned );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonStderrCapturePlanned );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonExitCodeValidationPlanned );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonTimeoutPlanned );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonErrorReportingPlanned );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonDocumentPlanned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonStdoutCaptureOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonStderrCaptureOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonExitCodeValidationOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonTimeoutOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonRawOutputOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonParseOwned );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonRawOutputReady );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonParseReady );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonErrorFree );
+    ASSERT_FALSE( executionPlan.mediaProbeJsonReady );
     ASSERT_TRUE( executionPlan.mediaProbeResultContractReady );
     ASSERT_TRUE( executionPlan.mediaProbeResultParsingPlanned );
     ASSERT_TRUE( executionPlan.mediaProbeResultSchemaReady );
@@ -3722,6 +3828,24 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_TRUE( executionSummary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-command-line=ffprobe -v error -show_format -show_streams -of json C:/renders/M16-1327.mp4") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-source=output-verification-probe-json-contract") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-stdout-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-stderr-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-exit-code-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-timeout-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-error-reporting-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-document-planned=true") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-stdout-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-stderr-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-exit-code-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-timeout-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-raw-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-parse-owned=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-raw-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-parse-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-error-free=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-ready=false") != std::string::npos );
+    ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-json-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-result-source=output-verification-probe-result-contract") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-result-parse-planned=true") != std::string::npos );
     ASSERT_TRUE( executionSummary.find("output-verification-exec-probe-result-schema-ready=true") != std::string::npos );
@@ -3742,6 +3866,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationExecutionContract)
     ASSERT_FALSE( executionPlan.contractReady );
     ASSERT_TRUE( executionPlan.outputVerificationContractReady );
     ASSERT_FALSE( executionPlan.ffmpegExecutionContractReady );
+    ASSERT_TRUE( executionPlan.mediaProbeJsonContractReady );
     ASSERT_TRUE( executionPlan.mediaProbeResultContractReady );
     ASSERT_EQ( std::string("rendered ffmpeg execution contract unavailable"),
                std::string(executionPlan.reason.toUtf8().constData()) );
