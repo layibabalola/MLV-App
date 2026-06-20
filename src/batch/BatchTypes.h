@@ -238,6 +238,32 @@ inline QString batchExportFormatRequestSummary(const BatchExportFormatRequest & 
         .arg(batchRenderedVideoContainerName(request.renderedContainer));
 }
 
+inline bool batchRenderedVideoRequestShapeValid(const BatchExportFormatRequest & request)
+{
+    if( request.format != BatchExportFormat::RenderedVideo )
+        return true;
+
+    if( request.renderedCodec == BatchRenderedVideoCodec::ProRes
+     && request.renderedContainer != BatchRenderedVideoContainer::Unspecified
+     && request.renderedContainer != BatchRenderedVideoContainer::Mov )
+    {
+        return false;
+    }
+
+    return true;
+}
+
+inline QString batchRenderedVideoRequestShapeError(const BatchExportFormatRequest & request)
+{
+    if( batchRenderedVideoRequestShapeValid(request) )
+        return QString();
+
+    if( request.renderedCodec == BatchRenderedVideoCodec::ProRes )
+        return QStringLiteral("codec=prores requires container=mov or unspecified");
+
+    return QStringLiteral("unsupported rendered-video codec/container combination");
+}
+
 /* Processing profile for batch export.
  * v1 (Phases 1-5): Uses MLV-App defaults on file open. Only receiptPath
  * and exportFormat are stored here.

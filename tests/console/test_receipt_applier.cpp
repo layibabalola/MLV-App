@@ -506,6 +506,22 @@ TEST(BatchExportFormat, BatchContextPreservesExportRequestIntent)
     BatchContext::setExportFormatRequest(BatchExportFormatRequest());
 }
 
+TEST(BatchExportFormat, ValidatesRenderedVideoRequestShape)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264-mp4"));
+    ASSERT_TRUE( batchRenderedVideoRequestShapeValid(request) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("prores-mov"));
+    ASSERT_TRUE( batchRenderedVideoRequestShapeValid(request) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("prores"));
+    request.renderedContainer = BatchRenderedVideoContainer::Mp4;
+    ASSERT_FALSE( batchRenderedVideoRequestShapeValid(request) );
+    ASSERT_EQ( std::string("codec=prores requires container=mov or unspecified"),
+               std::string(batchRenderedVideoRequestShapeError(request).toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

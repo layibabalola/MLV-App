@@ -491,6 +491,16 @@ static int runBatch(QCoreApplication &app)
         BatchLogger::shutdown();
         return 2;
     }
+    if( exportFormat == BatchExportFormat::RenderedVideo
+     && !batchRenderedVideoRequestShapeValid(exportRequest) )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
+            .arg(batchExportFormatRequestSummary(exportRequest))
+            .arg(batchRenderedVideoRequestShapeError(exportRequest)));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n")
