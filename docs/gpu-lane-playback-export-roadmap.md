@@ -258,6 +258,12 @@ matrix/hash gate, and DNG speed regressions point at E3 compression/writer
 overlap. `actionPlan` is still advisory triage only: a `NOT_QUOTABLE` packet
 stays fail-closed, and a `QUOTABLE_PASS` packet remains host/clip/hash scoped
 rather than a universal support claim.
+The kit exporter now also writes `README-CUDA-DOGFOOD.md` and advertises it as
+`operatorGuide` in `cuda-dogfood-manifest.json`. The README records source and
+release/backend hashes, the full proof command, launch/DNG/summary modes,
+return-packet import, expected artifacts, Dell hybrid-GPU proof requirements,
+and the same non-claim boundaries. This makes the copied kit self-describing on
+the NVIDIA host without changing the hardware proof gate.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
