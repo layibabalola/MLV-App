@@ -119,6 +119,15 @@ renderer `NVIDIA GeForce RTX 4090/PCIe/SSE2`, backend DLL SHA256
 `glScreenshotMethod=app_internal_gl_viewport_grab`. VM-local playback remains
 tooling/fallback smoke only; P3 no-readback proof is UltraMagnus-backed.
 
+Update 2026-06-20 ASAP CUDA build packaging: the CUDA recon backend build script
+now defaults to a portable fat-DLL target set (`sm_61`, `sm_75`, `sm_86`,
+`sm_89`, plus `compute_89` PTX) instead of a 4090-only `sm_89` binary, while
+still accepting `-Arch sm_89` for narrow UltraMagnus-only rebuilds. This makes
+the same `igpu_recon_cuda.dll` build path more suitable for Dell/NVIDIA laptop
+smoke runs without weakening the proof rules: Dell playback/export still has to
+show backend load, GPU frame/output telemetry, and fallback-free behavior on the
+actual laptop before claiming realtime CUDA support there.
+
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
 round-tripping explicit `Fast` selections. This is only the first adaptive
