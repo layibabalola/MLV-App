@@ -158,6 +158,149 @@ function Get-MachineLabel {
     [string]$Fingerprint.cpu_model
 }
 
+function Get-FirstPropertyValue {
+    param(
+        [object]$Object,
+        [string[]]$Names
+    )
+
+    if ($null -eq $Object) {
+        return $null
+    }
+    foreach ($name in @($Names)) {
+        $property = $Object.PSObject.Properties[$name]
+        if ($null -ne $property -and $null -ne $property.Value) {
+            return $property.Value
+        }
+    }
+    return $null
+}
+
+function Get-AverageNullableDouble {
+    param([object[]]$Values)
+
+    $sum = 0.0
+    $count = 0
+    foreach ($value in @($Values)) {
+        $parsed = Convert-ToNullableDouble $value
+        if ($null -ne $parsed) {
+            $sum += $parsed
+            $count++
+        }
+    }
+    if ($count -eq 0) {
+        return $null
+    }
+    return ($sum / [double]$count)
+}
+
+function New-MachineFingerprintObject {
+    param(
+        [object]$BuildSha = $null,
+        [object]$GpuName = $null,
+        [object]$GpuDriverVersion = $null,
+        [object]$GpuComputeCapability = $null,
+        [object]$GpuVramTotalMb = $null,
+        [object]$CpuModel = $null,
+        [object]$CpuCores = $null,
+        [object]$CpuThreads = $null,
+        [object]$RamTotalMb = $null,
+        [object]$OsVersion = $null
+    )
+
+    [pscustomobject]@{
+        schema = "machine-fingerprint.v1"
+        build_sha = if ($null -ne $BuildSha) { [string]$BuildSha } else { $null }
+        gpu_name = if ($null -ne $GpuName) { [string]$GpuName } else { $null }
+        gpu_driver_version = if ($null -ne $GpuDriverVersion) { [string]$GpuDriverVersion } else { $null }
+        gpu_compute_capability = if ($null -ne $GpuComputeCapability) { [string]$GpuComputeCapability } else { $null }
+        gpu_vram_total_mb = Convert-ToNullableInt64 $GpuVramTotalMb
+        cpu_model = if ($null -ne $CpuModel) { [string]$CpuModel } else { $null }
+        cpu_cores = Convert-ToNullableInt64 $CpuCores
+        cpu_threads = Convert-ToNullableInt64 $CpuThreads
+        ram_total_mb = Convert-ToNullableInt64 $RamTotalMb
+        os_version = if ($null -ne $OsVersion) { [string]$OsVersion } else { $null }
+    }
+}
+
+function Convert-NvidiaSmiMemoryToMb {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $text = [string]$Value
+    $match = [regex]::Match($text, "([0-9]+)")
+    if (!$match.Success) {
+        return $null
+    }
+    return [long]$match.Groups[1].Value
+}
+
+function Get-ImportedP3RunMetadata {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    $sourcePath = $Source
+    $sourceLineIndex = $sourcePath.LastIndexOf(":")
+    if ($sourceLineIndex -gt 1 -and $sourcePath.Substring($sourceLineIndex - 1, 1) -ne ":") {
+        $candidate = $sourcePath.Substring(0, $sourceLineIndex)
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            $sourcePath = $candidate
+        }
+    }
+    $sourceDir = Split-Path -Parent $sourcePath
+    if ([string]::IsNullOrWhiteSpace($sourceDir)) {
+        return $null
+    }
+
+    foreach ($clip in @($Record.clipResults)) {
+        if ($null -eq $clip.output) {
+            continue
+        }
+        $leaf = Split-Path -Leaf ([string]$clip.output)
+        if ([string]::IsNullOrWhiteSpace($leaf)) {
+            continue
+        }
+        $candidatePath = Join-Path $sourceDir $leaf
+        if (!(Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            continue
+        }
+        try {
+            $clipJson = Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json -Depth 100
+            if ($clipJson.log -and $clipJson.log.runMetadata) {
+                return $clipJson.log.runMetadata
+            }
+        }
+        catch {
+            continue
+        }
+    }
+    return $null
+}
+
+function New-RemoteP3MachineFingerprint {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    $runMetadata = Get-ImportedP3RunMetadata -Record $Record -Source $Source
+    $gpuDevice = @($Record.gpu.devices | Select-Object -First 1)[0]
+    $osVersion = $null
+    if ($runMetadata -and $runMetadata.os) {
+        $osVersion = $runMetadata.os.pretty
+    }
+    New-MachineFingerprintObject `
+        -BuildSha (Get-FirstPropertyValue -Object $runMetadata -Names @("build_sha")) `
+        -GpuName (Get-FirstPropertyValue -Object $gpuDevice -Names @("name")) `
+        -GpuDriverVersion (Get-FirstPropertyValue -Object $gpuDevice -Names @("driverVersion")) `
+        -GpuVramTotalMb (Convert-NvidiaSmiMemoryToMb (Get-FirstPropertyValue -Object $gpuDevice -Names @("memoryTotal"))) `
+        -OsVersion $osVersion
+}
+
 function Get-ClipPresentedFrames {
     param([object[]]$Clips)
 
@@ -227,6 +370,158 @@ function Get-ProofSummarySuggestion {
         return [string]$cdng.throughputClassification.suggestedOptimization
     }
     return "quote_with_host_clip_boundaries"
+}
+
+function New-RemoteP3SummaryRow {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    if ([string]$Record.schema -ne "mlvapp-ultramagnus-p3-validation.v1") {
+        throw "Unexpected UltraMagnus P3 summary schema in ${Source}: $($Record.schema)"
+    }
+    $fingerprint = New-RemoteP3MachineFingerprint -Record $Record -Source $Source
+    Assert-MachineFingerprint -Fingerprint $fingerprint -Source $Source
+
+    $clips = @($Record.clipResults)
+    $presentedFrames = Get-ClipPresentedFrames -Clips $clips
+    $noReadback = 0L
+    $fallback = 0L
+    $fpsValues = @()
+    foreach ($clip in $clips) {
+        $nr = Convert-ToNullableInt64 $clip.gpuTextureNoReadbackFrames
+        if ($null -ne $nr) { $noReadback += $nr }
+        $fb = Convert-ToNullableInt64 $clip.fallbackFrameCount
+        if ($null -ne $fb) { $fallback += $fb }
+        $fpsValues += $clip.presentedFps
+    }
+    $presentedFps = Get-AverageNullableDouble -Values $fpsValues
+
+    $suggestion = if ([string]$Record.status -ne "success") {
+        "inspect_p3_remote_validation_failure"
+    } elseif (-not [bool]$Record.proof.correctnessValidated) {
+        "fix_playback_correctness_validation"
+    } elseif ($fallback -gt 0) {
+        "fix_playback_fallback_reason"
+    } elseif ($noReadback -le 0) {
+        "enable_gpu_texture_no_readback_or_fix_adapter"
+    } else {
+        "run_playback_ab_speed_probe"
+    }
+
+    [pscustomobject]@{
+        record_kind = "ultramagnus_p3_summary"
+        machine = Get-MachineLabel -Fingerprint $fingerprint
+        build_sha = $fingerprint.build_sha
+        presented_fps = if ($null -ne $presentedFps) { [math]::Round($presentedFps, 3) } else { $null }
+        no_readback_pct = if ($presentedFrames -gt 0) { [math]::Round(($noReadback * 100.0) / $presentedFrames, 3) } else { $null }
+        fallback_pct = if ($presentedFrames -gt 0) { [math]::Round(($fallback * 100.0) / $presentedFrames, 3) } else { $null }
+        fallback_count = $fallback
+        export_frames = $null
+        cdng_verdict = $null
+        dng_hash = $null
+        gpu_export_replaced_pct = $null
+        gpu_export_trusted_pct = $null
+        dng_elapsed_delta_pct = $null
+        dng_throughput_status = $null
+        dng_suggested_optimization = $null
+        dominant_bottleneck = "unknown"
+        suggested_optimization = $suggestion
+        build_status = $Record.status
+        source = $Source
+    }
+}
+
+function Get-RemoteCdngRuns {
+    param([object]$Record)
+
+    $runs = @()
+    foreach ($case in @($Record.proof.matrixSummary.cases)) {
+        foreach ($run in @($case.runs)) {
+            $runs += $run
+        }
+    }
+    return @($runs)
+}
+
+function Get-UniformOrMixed {
+    param([object[]]$Values)
+
+    $nonEmpty = @($Values | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+    if ($nonEmpty.Count -eq 0) {
+        return "unknown"
+    }
+    if ($nonEmpty.Count -eq 1) {
+        return $nonEmpty[0]
+    }
+    return "mixed"
+}
+
+function New-RemoteCdngSummaryRow {
+    param(
+        [object]$Record,
+        [string]$Source
+    )
+
+    if ([string]$Record.schema -ne "mlvapp-ultramagnus-cdng-export-validation.v1") {
+        throw "Unexpected UltraMagnus CDNG summary schema in ${Source}: $($Record.schema)"
+    }
+    $matrix = $Record.proof.matrixSummary
+    if ($null -eq $matrix -or [string]$matrix.schema -ne "release-cdng-export-profile-matrix.v1") {
+        throw "Missing or unsupported CDNG matrix summary schema in ${Source}: $($matrix.schema)"
+    }
+    Assert-MachineFingerprint -Fingerprint $matrix.machineFingerprint -Source $Source
+
+    $runs = Get-RemoteCdngRuns -Record $Record
+    $candidateFrames = 0L
+    $replacedFrames = 0L
+    $trustedFrames = 0L
+    $elapsedDeltaPctValues = @()
+    $bottlenecks = @()
+    foreach ($run in $runs) {
+        $frames = Convert-ToNullableInt64 $run.candidateFrameCount
+        if ($null -ne $frames) { $candidateFrames += $frames }
+        $replaced = Convert-ToNullableInt64 $run.candidateGpuExportReplacedFrames
+        if ($null -ne $replaced) { $replacedFrames += $replaced }
+        $trusted = Convert-ToNullableInt64 $run.candidateGpuExportTrustedFrames
+        if ($null -ne $trusted) { $trustedFrames += $trusted }
+        $elapsedDeltaPctValues += $run.elapsedDeltaPercent
+        if ($run.candidateBottleneck) {
+            $bottlenecks += $run.candidateBottleneck.limiting_stage
+        }
+    }
+    $elapsedDeltaPct = Get-AverageNullableDouble -Values $elapsedDeltaPctValues
+    $dngHashVerdict = if ($matrix.dngHash) {
+        [string]$matrix.dngHash.verdict
+    } elseif ($Record.proof.dngHashComparison) {
+        [string]$Record.proof.dngHashComparison.verdict
+    } else {
+        $null
+    }
+    $throughput = $matrix.throughputClassification
+
+    [pscustomobject]@{
+        record_kind = "ultramagnus_cdng_summary"
+        machine = Get-MachineLabel -Fingerprint $matrix.machineFingerprint
+        build_sha = $matrix.machineFingerprint.build_sha
+        presented_fps = $null
+        no_readback_pct = $null
+        fallback_pct = $null
+        fallback_count = $null
+        export_frames = $candidateFrames
+        cdng_verdict = [string]$matrix.verdict
+        dng_hash = $dngHashVerdict
+        gpu_export_replaced_pct = if ($candidateFrames -gt 0) { Get-Percent $replacedFrames $candidateFrames } else { $null }
+        gpu_export_trusted_pct = if ($candidateFrames -gt 0) { Get-Percent $trustedFrames $candidateFrames } else { $null }
+        dng_elapsed_delta_pct = if ($null -ne $elapsedDeltaPct) { [math]::Round($elapsedDeltaPct, 3) } else { $null }
+        dng_throughput_status = if ($throughput) { [string]$throughput.status } else { $null }
+        dng_suggested_optimization = if ($throughput) { [string]$throughput.suggestedOptimization } else { $null }
+        dominant_bottleneck = Get-UniformOrMixed -Values $bottlenecks
+        suggested_optimization = if ($throughput) { [string]$throughput.suggestedOptimization } else { "review_cdng_export_summary" }
+        build_status = $Record.status
+        source = $Source
+    }
 }
 
 function New-ProfileRow {
@@ -405,6 +700,12 @@ foreach ($path in $InputPath) {
         }
         elseif ($schema -eq "mlvapp-local-cuda-playback-dng-smoke.v1") {
             $rows += New-LocalProofSummaryRow -Record $record.json -Source $record.source
+        }
+        elseif ($schema -eq "mlvapp-ultramagnus-p3-validation.v1") {
+            $rows += New-RemoteP3SummaryRow -Record $record.json -Source $record.source
+        }
+        elseif ($schema -eq "mlvapp-ultramagnus-cdng-export-validation.v1") {
+            $rows += New-RemoteCdngSummaryRow -Record $record.json -Source $record.source
         }
         else {
             throw "Unsupported perf input schema in $($record.source): $schema"

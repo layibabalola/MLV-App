@@ -180,7 +180,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add("For normal interactive dogfooding, launch `platform\qt\build-release\release\MLVApp.exe`, then use `Playback -> Performance Profiling...`.")
     [void]$lines.Add("The dialog shows the current machine fingerprint/build SHA, can copy that identity as JSON, and can enable compact field-log summaries, the scoped CUDA playback profiling preset, and the DNG async-compress profiling preset without hand-editing environment variables.")
     [void]$lines.Add("This writes compact playback/export JSONL summaries under the app logs folder; use the dialog's `Open Logs Folder` button to find them.")
-    [void]$lines.Add("Compare Dell and UltraMagnus playback/profile/field-log/proof-summary JSON with:")
+    [void]$lines.Add("Compare Dell and UltraMagnus playback/profile/field-log/proof-summary JSON, including imported UltraMagnus P3/CDNG validation summaries, with:")
     [void]$lines.Add("")
     [void]$lines.Add('```powershell')
     [void]$lines.Add([string]$commands.compareMachinePerf)
@@ -463,8 +463,8 @@ $manifest = [ordered]@{
         summaryOnly = ".\RUN-CUDA-DOGFOOD.ps1 -Input <clip.mlv> -SummaryOnly -SummaryPath <summary.json>"
         proofPacket = ".\tools\profiling\package-local-cuda-proof-result.ps1 -RepoRoot . -RunRoot <proof-run-root>"
         importProofPacket = ".\tools\profiling\import-local-cuda-proof-result.ps1 -RepoRoot . -PacketPath <mlvapp-local-cuda-proof.zip>"
-        compareMachinePerf = ".\tools\profiling\compare-machine-perf.ps1 <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-profile-or-jsonl>"
-        compareMachinePerfJson = ".\tools\profiling\compare-machine-perf.ps1 -OutputJson .\machine-compare.json <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-profile-or-jsonl>"
+        compareMachinePerf = ".\tools\profiling\compare-machine-perf.ps1 <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-validation-summary-or-jsonl>"
+        compareMachinePerfJson = ".\tools\profiling\compare-machine-perf.ps1 -OutputJson .\machine-compare.json <dell-summary-or-profile-or-jsonl> <ultramagnus-summary-or-validation-summary-or-jsonl>"
         directProof = ".\tools\profiling\run-local-cuda-playback-dng-smoke.ps1 -RepoRoot . -Input <clip.mlv>"
         directSummary = ".\tools\profiling\summarize-local-cuda-proof.ps1 -RepoRoot . -SummaryPath <summary.json>"
     }

@@ -369,9 +369,10 @@ the same fingerprint and bottleneck rollup. The opt-in field log
 normal dogfooding, and the GUI exposes that through
 `Playback -> Performance Profiling...` rather than requiring users to set env
 vars by hand. `tools/profiling/compare-machine-perf.ps1` now accepts playback
-profile JSON, GUI field-log JSONL, and dogfood proof `summary.json` files, then
-prints side-by-side presented FPS, no-readback percentage, fallback percentage,
-fallback count, bottleneck, and suggested-optimization rows. This is still a
+profile JSON, GUI field-log JSONL, dogfood proof `summary.json` files, and the
+imported UltraMagnus P3/CDNG validation summaries, then prints side-by-side
+presented FPS, no-readback percentage, fallback percentage, fallback count,
+bottleneck, and suggested-optimization rows. This is still a
 measurement surface only: Dell/UltraMagnus support and speed claims require
 real same-clip host packets with fallback/no-readback/DNG hash/timing evidence.
 The same comparator can also emit a versioned
@@ -383,6 +384,10 @@ coverage, DNG wall-time delta, throughput classification, and the export-side
 suggested optimization alongside the playback columns. This keeps one
 cross-machine table useful for both realtime playback and DNG export triage
 without loosening the host-local proof gate.
+Imported UltraMagnus validator summaries are treated as scoped proof-summary
+inputs: P3 rows carry the validated no-readback/fallback/presented-FPS proof
+fields available in the validation packet, while CDNG rows carry the matrix
+hash/export/speed fields and the full machine fingerprint from the matrix.
 The dogfood kit README advertises both the GUI profiling path and the
 cross-machine comparator so returned proof packets and ad-hoc interactive
 field logs can be reviewed with the same table.
