@@ -1936,6 +1936,18 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
     ASSERT_FALSE( plan.ffmpegExecutionPlan.cleanupOwned );
     ASSERT_EQ( std::string("-an"),
                std::string(plan.ffmpegCommandPlan.audioArguments.toUtf8().constData()) );
+    ASSERT_EQ( std::string("video-only-to-mux-transition-contract"),
+               std::string(plan.ffmpegCommandPlan.audioTransitionSource
+                   .toUtf8().constData()) );
+    ASSERT_TRUE( plan.ffmpegCommandPlan.audioTransitionArguments.isEmpty() );
+    ASSERT_TRUE( plan.ffmpegCommandPlan.audioContractReady );
+    ASSERT_TRUE( plan.ffmpegCommandPlan.audioMuxExecutionContractReady );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.audioMuxPlanned );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.audioMuxArgumentHandoffPlanned );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.audioSyncValidationPlanned );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.audioMuxExecutionReady );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.muxedAudioCommandPlanned );
+    ASSERT_FALSE( plan.ffmpegCommandPlan.muxedAudioCommandReady );
     ASSERT_FALSE( plan.ffmpegCommandPlan.audioInputOwned );
     ASSERT_FALSE( plan.ffmpegCommandPlan.executionOwned );
     ASSERT_FALSE( plan.ffmpegCommandPlan.outputVerificationOwned );
@@ -1957,7 +1969,7 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
     ASSERT_EQ( std::string("ffmpeg -r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - -c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p -color_primaries 1 -color_trc 1 -colorspace bt709 -vf scale=in_color_matrix=bt601:out_color_matrix=bt709 -an \"C:/renders/M16-1327.mp4\""),
                std::string(plan.ffmpegCommandPlan.commandLine.toUtf8().constData()) );
 
-    ASSERT_EQ( std::string("ffmpeg-command-source=gui-rawvideo-pipe ffmpeg-command-exe=ffmpeg ffmpeg-command-raw-pix-fmt=rgb48 ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - ffmpeg-command-color-source=rec709-default ffmpeg-command-color-tag=1 ffmpeg-command-color-args=-color_primaries 1 -color_trc 1 -colorspace bt709 ffmpeg-command-audio-args=-an ffmpeg-command-audio-owned=false ffmpeg-command-execution-owned=false ffmpeg-command-output-verification-owned=false ffmpeg-command-args=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - -c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p -color_primaries 1 -color_trc 1 -colorspace bt709 -vf scale=in_color_matrix=bt601:out_color_matrix=bt709 -an \"C:/renders/M16-1327.mp4\" ffmpeg-command-ready=true ffmpeg-command-reason=none"),
+    ASSERT_EQ( std::string("ffmpeg-command-source=gui-rawvideo-pipe ffmpeg-command-exe=ffmpeg ffmpeg-command-raw-pix-fmt=rgb48 ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - ffmpeg-command-color-source=rec709-default ffmpeg-command-color-tag=1 ffmpeg-command-color-args=-color_primaries 1 -color_trc 1 -colorspace bt709 ffmpeg-command-audio-args=-an ffmpeg-command-audio-transition-source=video-only-to-mux-transition-contract ffmpeg-command-audio-transition-args=unspecified ffmpeg-command-audio-contract-ready=true ffmpeg-command-audio-mux-exec-contract-ready=true ffmpeg-command-audio-mux-planned=false ffmpeg-command-audio-mux-args-handoff-planned=false ffmpeg-command-audio-sync-planned=false ffmpeg-command-audio-mux-exec-ready=false ffmpeg-command-audio-mux-command-planned=false ffmpeg-command-audio-mux-command-ready=false ffmpeg-command-audio-owned=false ffmpeg-command-execution-owned=false ffmpeg-command-output-verification-owned=false ffmpeg-command-args=-r 23.976 -y -f rawvideo -s 5792x3872 -pix_fmt rgb48 -i - -c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p -color_primaries 1 -color_trc 1 -colorspace bt709 -vf scale=in_color_matrix=bt601:out_color_matrix=bt709 -an \"C:/renders/M16-1327.mp4\" ffmpeg-command-ready=true ffmpeg-command-reason=none"),
                 std::string(batchRenderedVideoFfmpegCommandPlanSummary(
                     plan.ffmpegCommandPlan).toUtf8().constData()) );
     ASSERT_EQ( std::string("ffmpeg-execution-source=command-contract ffmpeg-execution-exe=ffmpeg ffmpeg-execution-command-ready=true ffmpeg-execution-process-launch-owned=false ffmpeg-execution-stdin-pipe-owned=false ffmpeg-execution-raw-frame-feed-owned=false ffmpeg-execution-stderr-capture-owned=false ffmpeg-execution-exit-code-owned=false ffmpeg-execution-timeout-owned=false ffmpeg-execution-cleanup-owned=false ffmpeg-execution-ready=false ffmpeg-execution-contract-ready=true ffmpeg-execution-reason=none"),
@@ -2351,6 +2363,16 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("render-processing-parity-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("render-processing-frame-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-raw-input=-r 23.976 -y -f rawvideo -s 1920x1284 -pix_fmt rgb48 -i -") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-transition-args=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-args-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-sync-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-command-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-command-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-audio-owned=false ffmpeg-command-execution-owned=false ffmpeg-command-output-verification-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-command-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-execution-command-ready=true") != std::string::npos );
@@ -2667,6 +2689,16 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-command-planned=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-args=-an") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-transition-source=video-only-to-mux-transition-contract") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-transition-args=deferred-until-audio-mux-execution-owned") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-args-handoff-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-sync-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-exec-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-command-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-command-audio-mux-command-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("runner-audio-mux-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=false") != std::string::npos );
 

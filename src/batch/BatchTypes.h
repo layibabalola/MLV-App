@@ -413,6 +413,16 @@ struct BatchRenderedVideoFfmpegCommandPlan
     QString reason;
     bool rawVideoPipeInputReady = false;
     QString audioArguments;
+    QString audioTransitionSource;
+    QString audioTransitionArguments;
+    bool audioContractReady = false;
+    bool audioMuxExecutionContractReady = false;
+    bool audioMuxPlanned = false;
+    bool audioMuxArgumentHandoffPlanned = false;
+    bool audioSyncValidationPlanned = false;
+    bool audioMuxExecutionReady = false;
+    bool muxedAudioCommandPlanned = false;
+    bool muxedAudioCommandReady = false;
     bool audioInputOwned = false;
     bool executionOwned = false;
     bool outputVerificationOwned = false;
@@ -2317,6 +2327,17 @@ batchRenderedVideoFfmpegCommandPlanFromParts(
         QStringLiteral("-color_primaries %1 -color_trc %1 -colorspace bt709")
             .arg(plan.colorTag);
     plan.audioArguments = audioPlan.audioArguments;
+    plan.audioTransitionSource = audioPlan.source;
+    plan.audioTransitionArguments = audioPlan.muxTransitionArguments;
+    plan.audioContractReady = audioPlan.contractReady;
+    plan.audioMuxExecutionContractReady = audioPlan.audioMuxExecutionContractReady;
+    plan.audioMuxPlanned = audioPlan.audioMuxPlanned;
+    plan.audioMuxArgumentHandoffPlanned =
+        audioPlan.audioMuxArgumentHandoffPlanned;
+    plan.audioSyncValidationPlanned = audioPlan.audioSyncValidationPlanned;
+    plan.audioMuxExecutionReady = audioPlan.audioMuxExecutionReady;
+    plan.muxedAudioCommandPlanned = audioPlan.muxedAudioCommandPlanned;
+    plan.muxedAudioCommandReady = audioPlan.muxedAudioCommandReady;
     plan.audioInputOwned = audioPlan.audioInputOwned;
 
     plan.arguments =
@@ -3427,7 +3448,7 @@ inline QString batchRenderedVideoFrameProcessingPlanSummary(
 inline QString batchRenderedVideoFfmpegCommandPlanSummary(
     const BatchRenderedVideoFfmpegCommandPlan & plan)
 {
-    return QStringLiteral("ffmpeg-command-source=%1 ffmpeg-command-exe=%2 ffmpeg-command-raw-pix-fmt=%3 ffmpeg-command-raw-input=%4 ffmpeg-command-color-source=%5 ffmpeg-command-color-tag=%6 ffmpeg-command-color-args=%7 ffmpeg-command-audio-args=%8 ffmpeg-command-audio-owned=%9 ffmpeg-command-execution-owned=%10 ffmpeg-command-output-verification-owned=%11 ffmpeg-command-args=%12 ffmpeg-command-ready=%13 ffmpeg-command-reason=%14")
+    return QStringLiteral("ffmpeg-command-source=%1 ffmpeg-command-exe=%2 ffmpeg-command-raw-pix-fmt=%3 ffmpeg-command-raw-input=%4 ffmpeg-command-color-source=%5 ffmpeg-command-color-tag=%6 ffmpeg-command-color-args=%7 ffmpeg-command-audio-args=%8 ffmpeg-command-audio-transition-source=%9 ffmpeg-command-audio-transition-args=%10 ffmpeg-command-audio-contract-ready=%11 ffmpeg-command-audio-mux-exec-contract-ready=%12 ffmpeg-command-audio-mux-planned=%13 ffmpeg-command-audio-mux-args-handoff-planned=%14 ffmpeg-command-audio-sync-planned=%15 ffmpeg-command-audio-mux-exec-ready=%16 ffmpeg-command-audio-mux-command-planned=%17 ffmpeg-command-audio-mux-command-ready=%18 ffmpeg-command-audio-owned=%19 ffmpeg-command-execution-owned=%20 ffmpeg-command-output-verification-owned=%21 ffmpeg-command-args=%22 ffmpeg-command-ready=%23 ffmpeg-command-reason=%24")
         .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
         .arg(plan.executable.isEmpty() ? QStringLiteral("unspecified") : plan.executable)
         .arg(plan.rawInputPixelFormat.isEmpty() ? QStringLiteral("unspecified") : plan.rawInputPixelFormat)
@@ -3436,6 +3457,20 @@ inline QString batchRenderedVideoFfmpegCommandPlanSummary(
         .arg(plan.colorTag)
         .arg(plan.colorArguments.isEmpty() ? QStringLiteral("unspecified") : plan.colorArguments)
         .arg(plan.audioArguments.isEmpty() ? QStringLiteral("unspecified") : plan.audioArguments)
+        .arg(plan.audioTransitionSource.isEmpty()
+            ? QStringLiteral("unspecified")
+            : plan.audioTransitionSource)
+        .arg(plan.audioTransitionArguments.isEmpty()
+            ? QStringLiteral("unspecified")
+            : plan.audioTransitionArguments)
+        .arg(plan.audioContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioMuxExecutionContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioMuxPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioMuxArgumentHandoffPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioSyncValidationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioMuxExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.muxedAudioCommandPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.muxedAudioCommandReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.audioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.executionOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.outputVerificationOwned ? QStringLiteral("true") : QStringLiteral("false"))
