@@ -37,6 +37,14 @@ struct BatchExportFormatRequest
     BatchRenderedVideoContainer renderedContainer = BatchRenderedVideoContainer::Unspecified;
 };
 
+struct BatchRenderedVideoTarget
+{
+    BatchRenderedVideoCodec codec = BatchRenderedVideoCodec::Unspecified;
+    BatchRenderedVideoContainer container = BatchRenderedVideoContainer::Unspecified;
+    QString extension;
+    bool complete = false;
+};
+
 inline BatchRenderedVideoCodec batchRenderedVideoCodecFromString(const QString & value, bool * ok = nullptr)
 {
     const QString normalized = value.trimmed().toLower();
@@ -230,6 +238,22 @@ inline const char * batchRenderedVideoContainerName(BatchRenderedVideoContainer 
     return "unspecified";
 }
 
+inline const char * batchRenderedVideoContainerExtension(BatchRenderedVideoContainer container)
+{
+    switch( container )
+    {
+        case BatchRenderedVideoContainer::Mov:
+            return ".mov";
+        case BatchRenderedVideoContainer::Mp4:
+            return ".mp4";
+        case BatchRenderedVideoContainer::Mkv:
+            return ".mkv";
+        case BatchRenderedVideoContainer::Unspecified:
+            break;
+    }
+    return "";
+}
+
 inline QString batchExportFormatRequestSummary(const BatchExportFormatRequest & request)
 {
     return QStringLiteral("request=%1 codec=%2 container=%3")
@@ -262,6 +286,70 @@ inline QString batchRenderedVideoRequestShapeError(const BatchExportFormatReques
         return QStringLiteral("codec=prores requires container=mov or unspecified");
 
     return QStringLiteral("unsupported rendered-video codec/container combination");
+}
+
+inline BatchRenderedVideoTarget batchRenderedVideoTargetFromRequest(
+    const BatchExportFormatRequest & request)
+{
+    BatchRenderedVideoTarget target;
+    if( request.format != BatchExportFormat::RenderedVideo
+     || !batchRenderedVideoRequestShapeValid(request) )
+    {
+        return target;
+    }
+
+    target.codec = request.renderedCodec;
+    target.container = request.renderedContainer;
+
+    if( target.codec == BatchRenderedVideoCodec::Unspecified )
+    {
+        switch( target.container )
+        {
+            case BatchRenderedVideoContainer::Mov:
+                target.codec = BatchRenderedVideoCodec::ProRes;
+                break;
+            case BatchRenderedVideoContainer::Mp4:
+            case BatchRenderedVideoContainer::Mkv:
+                target.codec = BatchRenderedVideoCodec::H264;
+                break;
+            case BatchRenderedVideoContainer::Unspecified:
+                break;
+        }
+    }
+
+    if( target.container == BatchRenderedVideoContainer::Unspecified )
+    {
+        switch( target.codec )
+        {
+            case BatchRenderedVideoCodec::H264:
+            case BatchRenderedVideoCodec::H265:
+                target.container = BatchRenderedVideoContainer::Mp4;
+                break;
+            case BatchRenderedVideoCodec::ProRes:
+                target.container = BatchRenderedVideoContainer::Mov;
+                break;
+            case BatchRenderedVideoCodec::Unspecified:
+                break;
+        }
+    }
+
+    target.extension =
+        QString::fromLatin1(batchRenderedVideoContainerExtension(target.container));
+    target.complete = target.codec != BatchRenderedVideoCodec::Unspecified
+                   && target.container != BatchRenderedVideoContainer::Unspecified
+                   && !target.extension.isEmpty();
+    return target;
+}
+
+inline QString batchRenderedVideoTargetSummary(const BatchExportFormatRequest & request)
+{
+    const BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    return QStringLiteral("target-codec=%1 target-container=%2 target-extension=%3 target-complete=%4")
+        .arg(batchRenderedVideoCodecName(target.codec))
+        .arg(batchRenderedVideoContainerName(target.container))
+        .arg(target.extension.isEmpty() ? QStringLiteral("unspecified") : target.extension)
+        .arg(target.complete ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
 /* Processing profile for batch export.

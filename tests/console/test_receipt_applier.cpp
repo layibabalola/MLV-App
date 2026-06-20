@@ -522,6 +522,72 @@ TEST(BatchExportFormat, ValidatesRenderedVideoRequestShape)
                std::string(batchRenderedVideoRequestShapeError(request).toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, ResolvesRenderedVideoTargets)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H264),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
+               static_cast<int>(target.container) );
+    ASSERT_TRUE( target.complete );
+    ASSERT_EQ( std::string(".mp4"),
+               std::string(target.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mp4"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H264),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
+               static_cast<int>(target.container) );
+    ASSERT_TRUE( target.complete );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mkv"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H264),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mkv),
+               static_cast<int>(target.container) );
+    ASSERT_EQ( std::string(".mkv"),
+               std::string(target.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("h265"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H265),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mp4),
+               static_cast<int>(target.container) );
+    ASSERT_TRUE( target.complete );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("mov"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::ProRes),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mov),
+               static_cast<int>(target.container) );
+    ASSERT_EQ( std::string(".mov"),
+               std::string(target.extension.toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::Unspecified),
+               static_cast<int>(target.codec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Unspecified),
+               static_cast<int>(target.container) );
+    ASSERT_FALSE( target.complete );
+    ASSERT_TRUE( target.extension.isEmpty() );
+    ASSERT_EQ( std::string("target-codec=unspecified target-container=unspecified target-extension=unspecified target-complete=false"),
+               std::string(batchRenderedVideoTargetSummary(request).toUtf8().constData()) );
+
+    request = batchExportFormatRequestFromString(QStringLiteral("prores"));
+    request.renderedContainer = BatchRenderedVideoContainer::Mp4;
+    target = batchRenderedVideoTargetFromRequest(request);
+    ASSERT_FALSE( target.complete );
+    ASSERT_TRUE( target.extension.isEmpty() );
+}
+
 TEST(BatchExportFormat, RejectsUnknownFormats)
 {
     ASSERT_EQ( static_cast<int>(BatchExportFormat::Unknown),

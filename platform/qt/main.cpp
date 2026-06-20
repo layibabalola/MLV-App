@@ -503,8 +503,9 @@ static int runBatch(QCoreApplication &app)
     }
     if( exportFormat == BatchExportFormat::RenderedVideo )
     {
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n")
-            .arg(batchExportFormatRequestSummary(exportRequest)));
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format rendered-video is not implemented yet. %1. %2. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n\n")
+            .arg(batchExportFormatRequestSummary(exportRequest))
+            .arg(batchRenderedVideoTargetSummary(exportRequest)));
         BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
         BatchLogger::shutdown();
         return 2;
