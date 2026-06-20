@@ -23,6 +23,7 @@ param(
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
+    [string]$GpuPlaybackReconBackend = "",
     [switch]$CaptureScreenshot,
     [switch]$FailOnColorArtifact,
     [switch]$SkipWindowScreenshot,
@@ -904,6 +905,9 @@ if ($PreferHqMean23) {
 if ($RbfDetailTiming) {
     $launchEnv["MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"] = "1"
 }
+if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
+    $launchEnv["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
+}
 Add-EnvironmentPairs -Target $launchEnv -Pairs $ExtraEnvironment
 if (-not [string]::IsNullOrWhiteSpace($env:OMP_NUM_THREADS)) {
     $launchEnv["OMP_NUM_THREADS"] = $env:OMP_NUM_THREADS
@@ -918,6 +922,7 @@ $experimentalEnvironment = @(
     "MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8",
     "MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ",
     "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING",
+    "MLVAPP_GPU_PLAYBACK_RECON_BACKEND",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_CREATIVE_PROBE",
@@ -1046,6 +1051,12 @@ if ($RbfDetailTiming) {
 }
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")
+}
+if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
+    $envBlock["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_GPU_PLAYBACK_RECON_BACKEND")
 }
 Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 if (-not $PreserveExperimentalEnvironment) {

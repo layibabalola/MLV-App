@@ -14,6 +14,7 @@ param(
     [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [string]$GpuPlaybackReconBackend = "",
     [int]$AgentTimeoutSec = 2700,
     [switch]$SkipRemoteBuild,
     [switch]$SkipBackendBuild,
@@ -403,6 +404,7 @@ elseif ($failures.Count -eq 0) {
         $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
         $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+        $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -416,6 +418,7 @@ elseif ($failures.Count -eq 0) {
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
+`$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -440,6 +443,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
         deployedArtifacts = @()
         output = @()
     }
+    gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -530,6 +534,9 @@ try {
         '-SettleMs',
         '$( [string]$SettleMs )'
     )
+    if (-not [string]::IsNullOrWhiteSpace(`$gpuPlaybackReconBackend)) {
+        `$args += @('-GpuPlaybackReconBackend', `$gpuPlaybackReconBackend)
+    }
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'
         `$args += `$clipPaths
@@ -659,6 +666,9 @@ $summary = [pscustomobject]@{
     remoteJobOutput = $remoteJobOutput
     copiedPacket = $copiedPacket
     importResult = $importResult
+    options = [pscustomobject]@{
+        gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+    }
     warnings = @($warnings)
     failures = @($failures)
 }

@@ -600,6 +600,10 @@ no-readback observation in the current Auto run.
 Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
 Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
 must not be cited as visual playback, Auto sampler, FPS, or color proof.
+For P3 backend-selection evidence, pass `-GpuPlaybackReconBackend <name>` to
+`run-release-gui-smoke.ps1` or to the UltraMagnus P3 wrapper; the smoke wrapper
+sets `MLVAPP_GPU_PLAYBACK_RECON_BACKEND` and clears stale inherited values by
+default when the switch is omitted.
 `tools/profiling/compare-release-gui-smoke-ab.ps1` preserves those Auto fields
 under `autoDecision` when comparing two smoke JSON files. Its stdout and JSON
 include Auto reason changes plus average milliseconds and FPS-equivalent deltas,

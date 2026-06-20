@@ -1139,6 +1139,12 @@ The CDNG export profiling stack now carries that request through proof tooling:
 `tools/profiling/run-release-cdng-export-profile-matrix.ps1`, and the
 UltraMagnus CDNG evidence wrapper accept candidate/backend-name parameters and
 record the selected export backend in plan/summary JSON.
+The playback proof stack mirrors this for P3 smoke/evidence:
+`tools/profiling/run-release-gui-smoke.ps1`,
+`tools/profiling/run-ultramagnus-p3-validation.ps1`, and
+`tools/profiling/invoke-ultramagnus-p3-evidence.ps1` accept
+`-GpuPlaybackReconBackend <name>` and record the requested playback recon
+backend in smoke/validation/remote summaries.
 
 ## 6. Quality modes and Expert controls
 

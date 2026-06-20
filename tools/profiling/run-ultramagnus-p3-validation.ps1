@@ -12,6 +12,7 @@ param(
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
+    [string]$GpuPlaybackReconBackend = "",
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -677,6 +678,7 @@ else {
 
 $clipResults = @()
 $plannedCommands = @()
+$gpuPlaybackReconBackendLiteral = "'" + (($GpuPlaybackReconBackend -replace "'", "''")) + "'"
 
 if ($failures.Count -eq 0) {
     New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
@@ -723,6 +725,7 @@ if ($failures.Count -eq 0) {
     GpuPreviewProcessing = 'gpu'
     ScaleFactor = '$ScaleFactor'
     QualityMode = '$QualityMode'
+    GpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
     ExpectedScaleRequest = $expectedScaleRequest
     ExpectedVisualScaleRequest = $expectedScaleRequest
     ExpectedQualityMode = ([int]'$QualityMode')
@@ -1051,6 +1054,7 @@ $summary = [pscustomobject]@{
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
         validationSampleEvery = $ValidationSampleEvery
+        gpuPlaybackReconBackend = $GpuPlaybackReconBackend
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
