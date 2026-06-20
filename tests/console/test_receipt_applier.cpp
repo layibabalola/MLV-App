@@ -1073,6 +1073,113 @@ TEST(BatchExportFormat, PlansRenderedVideoSourceAudioExtractionExecutionContract
                std::string(executionPlan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoFfmpegAudioInputHandoffContract)
+{
+    BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+        batchRenderedVideoSourceAudioPlanForCurrentBuild(
+            QStringLiteral("C:\\clips\\M16-1327.MLV"));
+    BatchRenderedVideoSourceAudioExtractionPlan extractionPlan =
+        batchRenderedVideoSourceAudioExtractionPlanFromSourceAudio(
+            sourceAudioPlan,
+            QStringLiteral("C:\\renders\\M16-1327.source-audio.wav"));
+    BatchRenderedVideoSourceAudioExtractionExecutionPlan executionPlan =
+        batchRenderedVideoSourceAudioExtractionExecutionPlanFromExtraction(
+            extractionPlan);
+    BatchRenderedVideoFfmpegAudioInputHandoffPlan handoffPlan =
+        batchRenderedVideoFfmpegAudioInputHandoffPlanFromExtractionExecution(
+            executionPlan);
+
+    ASSERT_TRUE( handoffPlan.contractReady );
+    ASSERT_TRUE( handoffPlan.extractionExecutionContractReady );
+    ASSERT_FALSE( handoffPlan.sourceAudioKnown );
+    ASSERT_FALSE( handoffPlan.sourceAudioPresent );
+    ASSERT_FALSE( handoffPlan.extractionPathPlanned );
+    ASSERT_TRUE( handoffPlan.extractionPathReady );
+    ASSERT_FALSE( handoffPlan.extractionExecutionReady );
+    ASSERT_FALSE( handoffPlan.tempFileLifecycleReady );
+    ASSERT_FALSE( handoffPlan.cleanupOwned );
+    ASSERT_FALSE( handoffPlan.audioInputPlanned );
+    ASSERT_FALSE( handoffPlan.inputArgumentsPlanned );
+    ASSERT_FALSE( handoffPlan.extractionOutputOwned );
+    ASSERT_FALSE( handoffPlan.audioInputOwnershipPlanned );
+    ASSERT_FALSE( handoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( handoffPlan.audioInputOwned );
+    ASSERT_FALSE( handoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( handoffPlan.audioInputHandoffReady );
+    ASSERT_TRUE( handoffPlan.videoOnlyFallbackReady );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.source-audio.wav"),
+               std::string(handoffPlan.plannedAudioPath
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("-an"),
+               std::string(handoffPlan.activeAudioArguments
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("ffmpeg-audio-input-handoff-source=ffmpeg-audio-input-handoff-contract ffmpeg-audio-input-handoff-path=C:/renders/M16-1327.source-audio.wav ffmpeg-audio-input-handoff-planned-args=unspecified ffmpeg-audio-input-handoff-active-args=-an ffmpeg-audio-input-handoff-extraction-exec-contract-ready=true ffmpeg-audio-input-handoff-known=false ffmpeg-audio-input-handoff-present=false ffmpeg-audio-input-handoff-path-planned=false ffmpeg-audio-input-handoff-path-ready=true ffmpeg-audio-input-handoff-extraction-ready=false ffmpeg-audio-input-handoff-temp-lifecycle-ready=false ffmpeg-audio-input-handoff-cleanup-owned=false ffmpeg-audio-input-handoff-planned=false ffmpeg-audio-input-handoff-args-planned=false ffmpeg-audio-input-handoff-output-owned=false ffmpeg-audio-input-handoff-ownership-planned=false ffmpeg-audio-input-handoff-args-handoff-planned=false ffmpeg-audio-input-handoff-owned=false ffmpeg-audio-input-handoff-args-handoff-owned=false ffmpeg-audio-input-handoff-ready=false ffmpeg-audio-input-handoff-video-only-ready=true ffmpeg-audio-input-handoff-contract-ready=true ffmpeg-audio-input-handoff-reason=none"),
+               std::string(batchRenderedVideoFfmpegAudioInputHandoffPlanSummary(
+                   handoffPlan).toUtf8().constData()) );
+
+    sourceAudioPlan =
+        batchRenderedVideoSourceAudioPlanFromDiscoveredAudio(
+            QStringLiteral("C:\\clips\\M16-1327.MLV"),
+            true,
+            2,
+            48000,
+            16,
+            123456);
+    extractionPlan =
+        batchRenderedVideoSourceAudioExtractionPlanFromSourceAudio(
+            sourceAudioPlan,
+            QStringLiteral("C:/renders/M16-1327.source-audio.wav"));
+    executionPlan =
+        batchRenderedVideoSourceAudioExtractionExecutionPlanFromExtraction(
+            extractionPlan);
+    handoffPlan =
+        batchRenderedVideoFfmpegAudioInputHandoffPlanFromExtractionExecution(
+            executionPlan);
+    ASSERT_TRUE( handoffPlan.contractReady );
+    ASSERT_TRUE( handoffPlan.sourceAudioKnown );
+    ASSERT_TRUE( handoffPlan.sourceAudioPresent );
+    ASSERT_TRUE( handoffPlan.extractionPathPlanned );
+    ASSERT_TRUE( handoffPlan.extractionPathReady );
+    ASSERT_FALSE( handoffPlan.extractionExecutionReady );
+    ASSERT_FALSE( handoffPlan.tempFileLifecycleReady );
+    ASSERT_FALSE( handoffPlan.cleanupOwned );
+    ASSERT_TRUE( handoffPlan.audioInputPlanned );
+    ASSERT_TRUE( handoffPlan.inputArgumentsPlanned );
+    ASSERT_FALSE( handoffPlan.extractionOutputOwned );
+    ASSERT_TRUE( handoffPlan.audioInputOwnershipPlanned );
+    ASSERT_TRUE( handoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( handoffPlan.audioInputOwned );
+    ASSERT_FALSE( handoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( handoffPlan.audioInputHandoffReady );
+    ASSERT_EQ( std::string("-i \"C:/renders/M16-1327.source-audio.wav\""),
+               std::string(handoffPlan.plannedInputArguments
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("-an"),
+               std::string(handoffPlan.activeAudioArguments
+                   .toUtf8().constData()) );
+
+    extractionPlan =
+        batchRenderedVideoSourceAudioExtractionPlanFromSourceAudio(
+            sourceAudioPlan,
+            QString());
+    executionPlan =
+        batchRenderedVideoSourceAudioExtractionExecutionPlanFromExtraction(
+            extractionPlan);
+    handoffPlan =
+        batchRenderedVideoFfmpegAudioInputHandoffPlanFromExtractionExecution(
+            executionPlan);
+    ASSERT_FALSE( handoffPlan.contractReady );
+    ASSERT_FALSE( handoffPlan.extractionExecutionContractReady );
+    ASSERT_TRUE( handoffPlan.sourceAudioKnown );
+    ASSERT_TRUE( handoffPlan.sourceAudioPresent );
+    ASSERT_TRUE( handoffPlan.audioInputPlanned );
+    ASSERT_FALSE( handoffPlan.inputArgumentsPlanned );
+    ASSERT_FALSE( handoffPlan.extractionPathReady );
+    ASSERT_FALSE( handoffPlan.audioInputHandoffReady );
+    ASSERT_EQ( std::string("rendered source audio extraction prerequisite contract unavailable"),
+               std::string(handoffPlan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegAudioInputContract)
 {
     BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
@@ -1752,6 +1859,23 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( basePlan.sourceAudioExtractionExecutionPlan.extractionProcessOwned );
     ASSERT_FALSE( basePlan.sourceAudioExtractionExecutionPlan.tempFileLifecycleReady );
     ASSERT_FALSE( basePlan.sourceAudioExtractionExecutionPlan.extractionExecutionReady );
+    ASSERT_TRUE( basePlan.ffmpegAudioInputHandoffContractReady );
+    ASSERT_TRUE( basePlan.ffmpegAudioInputHandoffPlan.contractReady );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.sourceAudioKnown );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.sourceAudioPresent );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputPlanned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.inputArgumentsPlanned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputOwnershipPlanned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputOwned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( basePlan.ffmpegAudioInputHandoffPlan.audioInputHandoffReady );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.source-audio.wav"),
+               std::string(basePlan.ffmpegAudioInputHandoffPlan.plannedAudioPath
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("-an"),
+               std::string(basePlan.ffmpegAudioInputHandoffPlan.activeAudioArguments
+                   .toUtf8().constData()) );
     ASSERT_TRUE( basePlan.ffmpegAudioInputContractReady );
     ASSERT_TRUE( basePlan.ffmpegAudioInputPlan.contractReady );
     ASSERT_FALSE( basePlan.ffmpegAudioInputPlan.sourceAudioKnown );
@@ -1924,6 +2048,20 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-temp-lifecycle-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-source=ffmpeg-audio-input-handoff-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-planned-args=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-active-args=-an") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-known=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-present=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-ownership-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-source=ffmpeg-audio-input-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-planned-args=unspecified") != std::string::npos );
@@ -2047,6 +2185,23 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( audioBasePlan.sourceAudioExtractionExecutionPlan.extractionProcessOwned );
     ASSERT_FALSE( audioBasePlan.sourceAudioExtractionExecutionPlan.tempFileLifecycleReady );
     ASSERT_FALSE( audioBasePlan.sourceAudioExtractionExecutionPlan.extractionExecutionReady );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffContractReady );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.contractReady );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.sourceAudioKnown );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.sourceAudioPresent );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputPlanned );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.inputArgumentsPlanned );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputOwnershipPlanned );
+    ASSERT_TRUE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputOwned );
+    ASSERT_FALSE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( audioBasePlan.ffmpegAudioInputHandoffPlan.audioInputHandoffReady );
+    ASSERT_EQ( std::string("-i \"C:/renders/M16-1327.source-audio.wav\""),
+               std::string(audioBasePlan.ffmpegAudioInputHandoffPlan.plannedInputArguments
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("-an"),
+               std::string(audioBasePlan.ffmpegAudioInputHandoffPlan.activeAudioArguments
+                   .toUtf8().constData()) );
     ASSERT_TRUE( audioBasePlan.ffmpegAudioInputContractReady );
     ASSERT_TRUE( audioBasePlan.ffmpegAudioInputPlan.contractReady );
     ASSERT_TRUE( audioBasePlan.ffmpegAudioInputPlan.audioInputPlanned );
@@ -2107,6 +2262,17 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( discoveredPlan.sourceAudioExtractionExecutionPlan.extractionProcessOwned );
     ASSERT_FALSE( discoveredPlan.sourceAudioExtractionExecutionPlan.tempFileLifecycleReady );
     ASSERT_FALSE( discoveredPlan.sourceAudioExtractionExecutionPlan.extractionExecutionReady );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffContractReady );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.contractReady );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.sourceAudioKnown );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.sourceAudioPresent );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputPlanned );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.inputArgumentsPlanned );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputOwnershipPlanned );
+    ASSERT_TRUE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputOwned );
+    ASSERT_FALSE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( discoveredPlan.ffmpegAudioInputHandoffPlan.audioInputHandoffReady );
     ASSERT_TRUE( discoveredPlan.ffmpegAudioInputContractReady );
     ASSERT_TRUE( discoveredPlan.ffmpegAudioInputPlan.contractReady );
     ASSERT_TRUE( discoveredPlan.ffmpegAudioInputPlan.audioInputPlanned );
@@ -2171,6 +2337,20 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("source-audio-extraction-exec-temp-lifecycle-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("source-audio-extraction-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("source-audio-extraction-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-source=ffmpeg-audio-input-handoff-contract") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-planned-args=-i \"C:/renders/M16-1327.source-audio.wav\"") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-active-args=-an") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-known=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-present=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-args-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-ownership-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-args-handoff-planned=true") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-args-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-ready=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-handoff-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-source=ffmpeg-audio-input-contract") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("ffmpeg-audio-input-planned-args=-i \"C:/renders/M16-1327.source-audio.wav\"") != std::string::npos );
@@ -2590,6 +2770,23 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.sourceAudioExtractionExecutionPlan.extractionProcessOwned );
     ASSERT_FALSE( plan.sourceAudioExtractionExecutionPlan.tempFileLifecycleReady );
     ASSERT_FALSE( plan.sourceAudioExtractionExecutionPlan.extractionExecutionReady );
+    ASSERT_TRUE( plan.ffmpegAudioInputHandoffContractReady );
+    ASSERT_TRUE( plan.ffmpegAudioInputHandoffPlan.contractReady );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.sourceAudioKnown );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.sourceAudioPresent );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputPlanned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.inputArgumentsPlanned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputOwnershipPlanned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffPlanned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputOwned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputArgumentHandoffOwned );
+    ASSERT_FALSE( plan.ffmpegAudioInputHandoffPlan.audioInputHandoffReady );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.source-audio.wav"),
+               std::string(plan.ffmpegAudioInputHandoffPlan.plannedAudioPath
+                   .toUtf8().constData()) );
+    ASSERT_EQ( std::string("-an"),
+               std::string(plan.ffmpegAudioInputHandoffPlan.activeAudioArguments
+                   .toUtf8().constData()) );
     ASSERT_TRUE( plan.ffmpegAudioInputContractReady );
     ASSERT_TRUE( plan.ffmpegAudioInputPlan.contractReady );
     ASSERT_FALSE( plan.ffmpegAudioInputPlan.sourceAudioKnown );
@@ -2682,6 +2879,20 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-temp-lifecycle-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("source-audio-extraction-exec-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-source=ffmpeg-audio-input-handoff-contract") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-planned-args=unspecified") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-active-args=-an") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-known=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-present=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-ownership-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-handoff-planned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-args-handoff-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-ready=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("ffmpeg-audio-input-handoff-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-source=ffmpeg-audio-input-contract") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-path=C:/renders/M16-1327.source-audio.wav") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-audio-input-planned-args=unspecified") != std::string::npos );
