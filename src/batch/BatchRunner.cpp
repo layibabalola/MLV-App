@@ -225,6 +225,22 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
     {
         const QString mlvPath = mlvFiles.first();
         const QString baseName = QFileInfo(mlvPath).completeBaseName();
+        const BatchRenderedVideoJobPlan basePlan =
+            batchRenderedVideoJobPlanFromRequest(
+                mlvPath,
+                outputPath,
+                exportRequest,
+                mlvFiles.size());
+
+        if( !basePlan.preflightReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video input/output preflight failed. clip=%1 planned-clips=%2 %3.\n")
+                .arg(baseName)
+                .arg(mlvFiles.size())
+                .arg(batchRenderedVideoJobPlanSummary(basePlan)));
+            return 2;
+        }
+
         int mlvErr = MLV_ERR_NONE;
         char mlvErrMsg[256] = { 0 };
 
@@ -246,8 +262,6 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 
         const BatchRenderedVideoSourceMetadata metadata =
             renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
-        const BatchRenderedVideoJobPlan basePlan =
-            batchRenderedVideoJobPlanFromRequest(mlvPath, outputPath, exportRequest);
         const BatchRenderedVideoJobPlan renderedPlan =
             batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
         freeMlvObject( mlvObject );

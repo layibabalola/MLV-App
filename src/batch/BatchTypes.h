@@ -137,6 +137,8 @@ struct BatchRenderedVideoOutputPlan
 {
     QString outputPath;
     QString reason;
+    int inputClipCount = 1;
+    bool explicitFileOutput = false;
     bool ready = false;
 };
 
@@ -870,12 +872,20 @@ batchRenderedVideoFfmpegFramePlanFromMetadata(
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     const QString & inputPath,
     const QString & outputPath,
-    const BatchRenderedVideoTarget & target)
+    const BatchRenderedVideoTarget & target,
+    int inputClipCount)
 {
     BatchRenderedVideoOutputPlan plan;
+    plan.inputClipCount = inputClipCount;
     if( !target.complete || target.extension.isEmpty() )
     {
         plan.reason = QStringLiteral("rendered target incomplete");
+        return plan;
+    }
+
+    if( inputClipCount < 1 )
+    {
+        plan.reason = QStringLiteral("rendered input clip count invalid");
         return plan;
     }
 
@@ -908,8 +918,11 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
         outputTrimmed.endsWith(QLatin1Char('/'))
      || outputTrimmed.endsWith(QLatin1Char('\\'));
     const QFileInfo outputInfo(outputTrimmed);
+    const bool explicitFileOutput =
+        !explicitDirectory && !outputInfo.suffix().isEmpty();
+    plan.explicitFileOutput = explicitFileOutput;
 
-    if( explicitDirectory || outputInfo.suffix().isEmpty() )
+    if( !explicitFileOutput )
     {
         plan.outputPath = QDir::cleanPath(
             QDir(outputTrimmed).filePath(baseName + extension));
@@ -923,9 +936,27 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
         return plan;
     }
 
+    if( inputClipCount > 1 )
+    {
+        plan.reason = QStringLiteral("explicit rendered output file requires a single input clip");
+        return plan;
+    }
+
     plan.outputPath = QDir::cleanPath(outputTrimmed);
     plan.ready = true;
     return plan;
+}
+
+inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchRenderedVideoTarget & target)
+{
+    return batchRenderedVideoOutputPlanFromPaths(
+        inputPath,
+        outputPath,
+        target,
+        1);
 }
 
 inline BatchRenderedVideoRunnerPrerequisites
@@ -942,7 +973,8 @@ batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     const QString & inputPath,
     const QString & outputPath,
-    const BatchExportFormatRequest & request)
+    const BatchExportFormatRequest & request,
+    int inputClipCount)
 {
     BatchRenderedVideoJobPlan plan;
     plan.request = request;
@@ -957,7 +989,11 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.ffmpegVideoPlan =
             batchRenderedVideoFfmpegVideoPlanFromEncoderPreset(plan.encoderPreset);
         plan.outputPlan =
-            batchRenderedVideoOutputPlanFromPaths(inputPath, outputPath, plan.target);
+            batchRenderedVideoOutputPlanFromPaths(
+                inputPath,
+                outputPath,
+                plan.target,
+                inputClipCount);
     }
     else
     {
@@ -977,6 +1013,18 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.outputReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
+}
+
+inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
+    const QString & inputPath,
+    const QString & outputPath,
+    const BatchExportFormatRequest & request)
+{
+    return batchRenderedVideoJobPlanFromRequest(
+        inputPath,
+        outputPath,
+        request,
+        1);
 }
 
 inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
@@ -1162,8 +1210,10 @@ inline QString batchRenderedVideoRenderSettingsSummary(
 inline QString batchRenderedVideoOutputPlanSummary(
     const BatchRenderedVideoOutputPlan & plan)
 {
-    return QStringLiteral("rendered-output=%1 rendered-output-ready=%2 rendered-output-reason=%3")
+    return QStringLiteral("rendered-output=%1 rendered-output-explicit-file=%2 rendered-output-input-clips=%3 rendered-output-ready=%4 rendered-output-reason=%5")
         .arg(plan.outputPath.isEmpty() ? QStringLiteral("unspecified") : plan.outputPath)
+        .arg(plan.explicitFileOutput ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.inputClipCount)
         .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }

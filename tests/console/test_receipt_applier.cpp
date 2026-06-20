@@ -943,8 +943,10 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
     ASSERT_TRUE( plan.ready );
     ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
                std::string(plan.outputPath.toUtf8().constData()) );
+    ASSERT_FALSE( plan.explicitFileOutput );
+    ASSERT_EQ( 1, plan.inputClipCount );
     ASSERT_TRUE( plan.reason.isEmpty() );
-    ASSERT_EQ( std::string("rendered-output=C:/renders/M16-1327.mp4 rendered-output-ready=true rendered-output-reason=none"),
+    ASSERT_EQ( std::string("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true rendered-output-reason=none"),
                std::string(batchRenderedVideoOutputPlanSummary(
                    QStringLiteral("C:/clips/M16-1327.MLV"),
                    QStringLiteral("C:/renders"),
@@ -957,6 +959,33 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
     ASSERT_TRUE( plan.ready );
     ASSERT_EQ( std::string("C:/renders/custom.mp4"),
                std::string(plan.outputPath.toUtf8().constData()) );
+    ASSERT_TRUE( plan.explicitFileOutput );
+    ASSERT_EQ( 1, plan.inputClipCount );
+
+    plan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders"),
+        target,
+        2);
+    ASSERT_TRUE( plan.ready );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(plan.outputPath.toUtf8().constData()) );
+    ASSERT_FALSE( plan.explicitFileOutput );
+    ASSERT_EQ( 2, plan.inputClipCount );
+
+    plan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders/custom.mp4"),
+        target,
+        2);
+    ASSERT_FALSE( plan.ready );
+    ASSERT_TRUE( plan.outputPath.isEmpty() );
+    ASSERT_TRUE( plan.explicitFileOutput );
+    ASSERT_EQ( 2, plan.inputClipCount );
+    ASSERT_EQ( std::string("explicit rendered output file requires a single input clip"),
+               std::string(plan.reason.toUtf8().constData()) );
+    ASSERT_EQ( std::string("rendered-output=unspecified rendered-output-explicit-file=true rendered-output-input-clips=2 rendered-output-ready=false rendered-output-reason=explicit rendered output file requires a single input clip"),
+               std::string(batchRenderedVideoOutputPlanSummary(plan).toUtf8().constData()) );
 
     plan = batchRenderedVideoOutputPlanFromPaths(
         QStringLiteral("C:/clips/M16-1327.MLV"),
@@ -1011,8 +1040,26 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( summary.find("request=rendered-video codec=h264 container=unspecified") != std::string::npos );
     ASSERT_TRUE( summary.find("ffmpeg-video-args=-c:v libx264 -preset medium -crf 14 -pix_fmt yuv420p") != std::string::npos );
-    ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("rendered-output=C:/renders/M16-1327.mp4 rendered-output-explicit-file=false rendered-output-input-clips=1 rendered-output-ready=true") != std::string::npos );
     ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+
+    plan = batchRenderedVideoJobPlanFromRequest(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders/custom.mp4"),
+        request,
+        2);
+
+    ASSERT_TRUE( plan.requestValid );
+    ASSERT_TRUE( plan.targetReady );
+    ASSERT_TRUE( plan.encoderReady );
+    ASSERT_TRUE( plan.ffmpegVideoReady );
+    ASSERT_FALSE( plan.outputReady );
+    ASSERT_FALSE( plan.preflightReady );
+    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.outputPlan.explicitFileOutput );
+    ASSERT_EQ( 2, plan.outputPlan.inputClipCount );
+    ASSERT_EQ( std::string("explicit rendered output file requires a single input clip"),
+               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     request = batchExportFormatRequestFromString(QStringLiteral("rendered-video"));
     plan = batchRenderedVideoJobPlanFromRequest(
