@@ -193,6 +193,24 @@ struct BatchRenderedVideoOutputPlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoOutputVerificationPlan
+{
+    QString source = QStringLiteral("planned-output-contract");
+    QString expectedOutputPath;
+    QString expectedExtension;
+    QString reason;
+    bool outputPathReady = false;
+    bool extensionMatchesTarget = false;
+    bool fileExistenceCheckOwned = false;
+    bool nonEmptyCheckOwned = false;
+    bool mediaProbeOwned = false;
+    bool codecContainerCheckOwned = false;
+    bool frameCountCheckOwned = false;
+    bool receiptOrHashOwned = false;
+    bool verificationExecutionOwned = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoRunnerPrerequisites
 {
     bool processingParityReady = false;
@@ -218,6 +236,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan;
     BatchRenderedVideoFfmpegCommandPlan ffmpegCommandPlan;
     BatchRenderedVideoOutputPlan outputPlan;
+    BatchRenderedVideoOutputVerificationPlan outputVerificationPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
     bool targetReady = false;
@@ -230,6 +249,7 @@ struct BatchRenderedVideoJobPlan
     bool ffmpegBinaryCommandReady = false;
     bool ffmpegCommandReady = false;
     bool outputReady = false;
+    bool outputVerificationContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
 };
@@ -1072,6 +1092,42 @@ inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
         1);
 }
 
+inline BatchRenderedVideoOutputVerificationPlan
+batchRenderedVideoOutputVerificationPlanFromOutput(
+    const BatchRenderedVideoOutputPlan & outputPlan,
+    const BatchRenderedVideoTarget & target)
+{
+    BatchRenderedVideoOutputVerificationPlan plan;
+    plan.expectedOutputPath = outputPlan.outputPath;
+    plan.expectedExtension = target.extension;
+
+    if( !outputPlan.ready )
+    {
+        plan.reason = outputPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output path invalid")
+            : outputPlan.reason;
+        return plan;
+    }
+    if( plan.expectedExtension.isEmpty() )
+    {
+        plan.reason = QStringLiteral("rendered target extension unavailable");
+        return plan;
+    }
+
+    plan.outputPathReady = !plan.expectedOutputPath.isEmpty();
+    const QFileInfo outputInfo(plan.expectedOutputPath);
+    plan.extensionMatchesTarget =
+        outputInfo.suffix().toLower()
+            == plan.expectedExtension.mid(1).toLower();
+    plan.contractReady = plan.outputPathReady
+                      && plan.extensionMatchesTarget;
+    if( !plan.contractReady )
+    {
+        plan.reason = QStringLiteral("rendered output verification contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoFfmpegBinaryPlan
 batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
     const QString & requestedExecutable = QStringLiteral("ffmpeg"))
@@ -1293,10 +1349,16 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                 outputPath,
                 plan.target,
                 inputClipCount);
+        plan.outputVerificationPlan =
+            batchRenderedVideoOutputVerificationPlanFromOutput(
+                plan.outputPlan,
+                plan.target);
     }
     else
     {
         plan.outputPlan.reason = QStringLiteral("not a rendered-video request");
+        plan.outputVerificationPlan.reason =
+            QStringLiteral("not a rendered-video request");
     }
 
     plan.runnerPrerequisites =
@@ -1308,6 +1370,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     plan.ffmpegBinaryCommandReady =
         plan.ffmpegBinaryPlan.commandExecutableReady;
     plan.outputReady = plan.outputPlan.ready;
+    plan.outputVerificationContractReady =
+        plan.outputVerificationPlan.contractReady;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -1315,7 +1379,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.ffmpegFilterReady
                        && plan.ffmpegBinaryCommandReady
                        && plan.renderSettings.ready
-                       && plan.outputReady;
+                       && plan.outputReady
+                       && plan.outputVerificationContractReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
 }
@@ -1437,7 +1502,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
                        && plan.ffmpegCommandReady
-                       && plan.outputReady;
+                       && plan.outputReady
+                       && plan.outputVerificationContractReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
 }
@@ -1492,6 +1558,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.outputPlan.reason.isEmpty()
             ? QStringLiteral("rendered output path invalid")
             : plan.outputPlan.reason;
+    }
+    if( !plan.outputVerificationContractReady )
+    {
+        return plan.outputVerificationPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification contract unavailable")
+            : plan.outputVerificationPlan.reason;
     }
     if( plan.metadataAttempted && !plan.metadataReady )
     {
@@ -1685,6 +1757,26 @@ inline QString batchRenderedVideoOutputPlanSummary(
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
+inline QString batchRenderedVideoOutputVerificationPlanSummary(
+    const BatchRenderedVideoOutputVerificationPlan & plan)
+{
+    return QStringLiteral("output-verification-source=%1 output-verification-path=%2 output-verification-extension=%3 output-verification-path-ready=%4 output-verification-extension-match=%5 output-verification-file-exists-owned=%6 output-verification-nonempty-owned=%7 output-verification-probe-owned=%8 output-verification-codec-container-owned=%9 output-verification-frame-count-owned=%10 output-verification-receipt-hash-owned=%11 output-verification-execution-owned=%12 output-verification-contract-ready=%13 output-verification-reason=%14")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        .arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
+        .arg(plan.outputPathReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.extensionMatchesTarget ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.mediaProbeOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.codecContainerCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameCountCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.receiptOrHashOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.verificationExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const QString & inputPath,
     const QString & outputPath,
@@ -1715,7 +1807,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 preflight-ready=%13 runnable=%14 first-blocker=%15")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 preflight-ready=%14 runnable=%15 first-blocker=%16")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -1727,6 +1819,8 @@ inline QString batchRenderedVideoJobPlanSummary(
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
         .arg(batchRenderedVideoFfmpegCommandPlanSummary(plan.ffmpegCommandPlan))
         .arg(batchRenderedVideoOutputPlanSummary(plan.outputPlan))
+        .arg(batchRenderedVideoOutputVerificationPlanSummary(
+            plan.outputVerificationPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.runnable ? QStringLiteral("true") : QStringLiteral("false"))

@@ -1131,6 +1131,8 @@ _Current E4 implementation note (2026-06-20 command-shape slice): the central jo
 
 _Current E4 implementation note (2026-06-20 ffmpeg binary-plan slice): the central job plan now also carries a `BatchRenderedVideoFfmpegBinaryPlan`. Pure planning helpers keep the deterministic default executable name (`ffmpeg`), while the live batch runner performs a PATH search with `QStandardPaths::findExecutable` and reports whether an ffmpeg binary was found plus the executable that the future command plan would use. Missing ffmpeg discovery is reported but still does not launch or block on a process because `runner-ffmpeg-execution-ready=false` remains the fail-closed execution gate. This is binary discovery/reporting scaffolding only: it does not execute ffmpeg, pipe frames, mux audio, verify outputs, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 output-verification contract slice): the central job plan now carries a `BatchRenderedVideoOutputVerificationPlan` for the planned rendered artifact. It records the expected output path/extension and a contract-ready flag while explicitly reporting that file-existence checks, non-empty checks, media probing, codec/container validation, frame-count validation, receipt/hash proof, and verification execution are not owned yet. This is output-proof boundary scaffolding only: it does not touch the filesystem, run ffprobe, verify a rendered file, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the

@@ -1262,6 +1262,69 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputPaths)
                std::string(plan.reason.toUtf8().constData()) );
 }
 
+TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
+{
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoOutputPlan outputPlan =
+        batchRenderedVideoOutputPlanFromPaths(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            target);
+
+    BatchRenderedVideoOutputVerificationPlan verificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            outputPlan,
+            target);
+    ASSERT_TRUE( verificationPlan.contractReady );
+    ASSERT_TRUE( verificationPlan.outputPathReady );
+    ASSERT_TRUE( verificationPlan.extensionMatchesTarget );
+    ASSERT_FALSE( verificationPlan.fileExistenceCheckOwned );
+    ASSERT_FALSE( verificationPlan.nonEmptyCheckOwned );
+    ASSERT_FALSE( verificationPlan.mediaProbeOwned );
+    ASSERT_FALSE( verificationPlan.codecContainerCheckOwned );
+    ASSERT_FALSE( verificationPlan.frameCountCheckOwned );
+    ASSERT_FALSE( verificationPlan.receiptOrHashOwned );
+    ASSERT_FALSE( verificationPlan.verificationExecutionOwned );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
+               std::string(verificationPlan.expectedOutputPath.toUtf8().constData()) );
+    ASSERT_EQ( std::string(".mp4"),
+               std::string(verificationPlan.expectedExtension.toUtf8().constData()) );
+    ASSERT_EQ( std::string("output-verification-source=planned-output-contract output-verification-path=C:/renders/M16-1327.mp4 output-verification-extension=.mp4 output-verification-path-ready=true output-verification-extension-match=true output-verification-file-exists-owned=false output-verification-nonempty-owned=false output-verification-probe-owned=false output-verification-codec-container-owned=false output-verification-frame-count-owned=false output-verification-receipt-hash-owned=false output-verification-execution-owned=false output-verification-contract-ready=true output-verification-reason=none"),
+               std::string(batchRenderedVideoOutputVerificationPlanSummary(
+                   verificationPlan).toUtf8().constData()) );
+
+    BatchRenderedVideoJobPlan jobPlan =
+        batchRenderedVideoJobPlanFromRequest(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            request);
+    ASSERT_TRUE( jobPlan.outputVerificationContractReady );
+    ASSERT_TRUE( jobPlan.outputVerificationPlan.contractReady );
+    ASSERT_TRUE( jobPlan.preflightReady );
+    ASSERT_FALSE( jobPlan.runnable );
+    const std::string summary =
+        std::string(batchRenderedVideoJobPlanSummary(jobPlan).toUtf8().constData());
+    ASSERT_TRUE( summary.find("output-verification-contract-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-file-exists-owned=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("output-verification-execution-owned=false") != std::string::npos );
+
+    outputPlan = batchRenderedVideoOutputPlanFromPaths(
+        QStringLiteral("C:/clips/M16-1327.MLV"),
+        QStringLiteral("C:/renders/custom.mov"),
+        target);
+    verificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            outputPlan,
+            target);
+    ASSERT_FALSE( verificationPlan.contractReady );
+    ASSERT_FALSE( verificationPlan.outputPathReady );
+    ASSERT_EQ( std::string("output path extension does not match target extension"),
+               std::string(verificationPlan.reason.toUtf8().constData()) );
+}
+
 TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
 {
     BatchExportFormatRequest request =
