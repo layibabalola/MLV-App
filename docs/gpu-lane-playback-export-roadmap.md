@@ -126,7 +126,10 @@ still accepting `-Arch sm_89` for narrow UltraMagnus-only rebuilds. This makes
 the same `igpu_recon_cuda.dll` build path more suitable for Dell/NVIDIA laptop
 smoke runs without weakening the proof rules: Dell playback/export still has to
 show backend load, GPU frame/output telemetry, and fallback-free behavior on the
-actual laptop before claiming realtime CUDA support there.
+actual laptop before claiming realtime CUDA support there. The backend build now
+also emits a hash-bound `igpu_recon_cuda.arch.json` sidecar from `cuobjdump`, so
+dogfood/proof kits can verify portable `sm_86`/`sm_89` coverage on machines that
+have only the NVIDIA driver installed.
 
 Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-playback-dng-smoke.ps1`
 now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
@@ -306,15 +309,17 @@ wrappers remain authoritative and default playback/export behavior stays
 unchanged. The CUDA preset is still a request surface, not proof: Dell/UltraMagnus
 claims require the same host-local no-readback/fallback/FPS/DNG hash/timing
 evidence as the wrapper path.
-The dogfood/proof front doors now also record CUDA backend architecture tokens
-from the packaged `igpu_recon_cuda.dll` and compare them to the host
-`nvidia-smi` compute capability before real proof runs. This makes the current
-distinction explicit: an `sm_89`-only backend is UltraMagnus/RTX 4090-shaped but
-not Dell RTX 3060 Laptop-ready; the Dell path requires a portable backend with
-`sm_86` before runtime playback/export proof is meaningful. The gate is a
-preflight only, not a support claim: even an architecture-compatible DLL still
-needs the same backend-load, GL/no-readback, fallback, DNG hash, and timing
-packet before Dell or UltraMagnus speed/support can be quoted.
+The dogfood/proof front doors now also record CUDA backend architecture proof
+from a hash-matched `igpu_recon_cuda.arch.json` sidecar or host `cuobjdump`, then
+compare those tokens to the host `nvidia-smi` compute capability before real
+proof runs. ASCII string scanning is only an advisory fallback because embedded
+cubins can omit visible `sm_*` strings. This makes the important distinction
+explicit: an `sm_89`-only backend is UltraMagnus/RTX 4090-shaped but not Dell
+RTX 3060 Laptop-ready; the Dell path requires reliable `sm_86` proof before
+runtime playback/export proof is meaningful. The gate is a preflight only, not a
+support claim: even an architecture-compatible DLL still needs the same
+backend-load, GL/no-readback, fallback, DNG hash, and timing packet before Dell
+or UltraMagnus speed/support can be quoted.
 
 Update 2026-06-20 E3 dogfood async-compress surface: the simple CUDA DNG
 runner now exposes the same lossless compression-overlap knobs as the CDNG

@@ -23,6 +23,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "cuda-backend-architecture.ps1")
 
 if ($MaxFrames -lt 0) {
     throw "-MaxFrames must be >= 0."
@@ -132,42 +133,6 @@ function Get-NvidiaSmiSnapshot {
     }
 }
 
-function Get-CudaBackendArchitectureInfo {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [pscustomobject]@{
-            schema = "mlvapp.cuda-backend-architecture.v1"
-            path = $Path
-            exists = $false
-            detector = "ascii-token-scan"
-            tokens = @()
-            hasSm86 = $false
-            hasSm89 = $false
-            detectionReliable = $false
-            note = "backend DLL missing"
-        }
-    }
-
-    $resolved = (Resolve-Path -LiteralPath $Path).Path
-    $bytes = [System.IO.File]::ReadAllBytes($resolved)
-    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-    $tokens = @([regex]::Matches($text, "(?:sm|compute)_[0-9]{2,3}") |
-        ForEach-Object { $_.Value } |
-        Sort-Object -Unique)
-    [pscustomobject]@{
-        schema = "mlvapp.cuda-backend-architecture.v1"
-        path = $resolved
-        exists = $true
-        detector = "ascii-token-scan"
-        tokens = @($tokens)
-        hasSm86 = [bool]($tokens -contains "sm_86")
-        hasSm89 = [bool]($tokens -contains "sm_89")
-        detectionReliable = [bool]($tokens.Count -gt 0)
-        note = "Fail-closed hint for NVIDIA-host proof. Rebuild the backend with tools\\gpu\\backend\\build-backend-dll.ps1 -Arch portable when the target GPU architecture is absent."
-    }
-}
-
 function Convert-ComputeCapabilityToCudaToken {
     param([AllowNull()][string]$ComputeCapability)
 
@@ -223,6 +188,10 @@ function Test-CudaBackendCompatibility {
     elseif ($null -eq $smToken) {
         $compatible = $null
         $reason = "gpu_compute_capability_unavailable"
+    }
+    elseif (-not [bool]$ArchitectureInfo.detectionReliable) {
+        $compatible = $false
+        $reason = "backend_architecture_detection_unreliable"
     }
     elseif ($tokens.Count -eq 0) {
         $compatible = $false

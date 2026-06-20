@@ -20,6 +20,7 @@ if (-not $Dir) { $Dir = 'G:\Temp\mlv-gpu-profile\backend' }
 
 $src     = Join-Path $Dir 'igpu_recon_cuda.cu'
 $dll     = Join-Path $Dir 'igpu_recon_cuda.dll'
+$archSidecar = Join-Path $Dir 'igpu_recon_cuda.arch.json'
 $def     = Join-Path $Dir 'igpu_recon_cuda.def'
 $testsrc = Join-Path $Dir 'dll_test.cpp'
 $testexe = Join-Path $Dir 'dll_test.exe'
@@ -75,6 +76,75 @@ if ($archFlags.Count -eq 0) {
 $archLabel = ($requestedArchitectures -join ',')
 $archArgLine = ($archFlags -join ' ')
 
+function Get-CudaArchitectureTokensFromText {
+    param([AllowNull()][string[]]$Text)
+
+    @($Text |
+        ForEach-Object { [string]$_ } |
+        ForEach-Object { [regex]::Matches($_, "(?:sm|compute)_[0-9]{2,3}") } |
+        ForEach-Object { $_.Value } |
+        Sort-Object -Unique)
+}
+
+function Write-CudaBackendArchitectureSidecar {
+    param(
+        [Parameter(Mandatory = $true)][string]$DllPath,
+        [Parameter(Mandatory = $true)][string]$SidecarPath,
+        [Parameter(Mandatory = $true)][string]$CuobjdumpPath,
+        [Parameter(Mandatory = $true)][string[]]$RequestedArchitectures,
+        [Parameter(Mandatory = $true)][string[]]$ArchFlags
+    )
+
+    if (!(Test-Path -LiteralPath $CuobjdumpPath -PathType Leaf)) {
+        throw "cuobjdump not found: $CuobjdumpPath"
+    }
+    if (!(Test-Path -LiteralPath $DllPath -PathType Leaf)) {
+        throw "backend DLL not found for architecture sidecar: $DllPath"
+    }
+
+    $listElf = @(& $CuobjdumpPath --list-elf $DllPath 2>&1 | ForEach-Object { [string]$_ })
+    $listElfExit = $LASTEXITCODE
+    $ptx = @(& $CuobjdumpPath --dump-ptx $DllPath 2>&1 | ForEach-Object { [string]$_ })
+    $dumpPtxExit = $LASTEXITCODE
+    $ptxArchLines = @($ptx |
+        Where-Object { $_ -match "\.(version|target)|arch\s*=\s*(?:sm|compute)_[0-9]{2,3}|(?:sm|compute)_[0-9]{2,3}" } |
+        Select-Object -First 120)
+    $tokens = Get-CudaArchitectureTokensFromText -Text (@($listElf) + @($ptxArchLines))
+    if ($listElfExit -ne 0 -or $tokens.Count -eq 0) {
+        throw "cuobjdump architecture inspection failed; list-elf exit=$listElfExit tokens=$($tokens.Count)"
+    }
+
+    $item = Get-Item -LiteralPath $DllPath
+    $sidecar = [ordered]@{
+        schema = 'mlvapp.cuda-backend-architecture-sidecar.v1'
+        createdAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        backend = [ordered]@{
+            fileName = $item.Name
+            length = $item.Length
+            sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
+        }
+        requestedArchitectures = @($RequestedArchitectures)
+        archFlags = @($ArchFlags)
+        detector = 'cuobjdump'
+        detectionReliable = $true
+        tokens = @($tokens)
+        hasSm86 = [bool]($tokens -contains 'sm_86')
+        hasSm89 = [bool]($tokens -contains 'sm_89')
+        dellAmpereReady = [bool]($tokens -contains 'sm_86')
+        ultraMagnusAdaReady = [bool](($tokens -contains 'sm_89') -or ($tokens -contains 'compute_89'))
+        tool = [ordered]@{
+            cuobjdump = $CuobjdumpPath
+        }
+        raw = [ordered]@{
+            listElfExit = $listElfExit
+            listElf = @($listElf | Select-Object -First 120)
+            dumpPtxExit = $dumpPtxExit
+            ptxArchLines = @($ptxArchLines)
+        }
+    }
+    $sidecar | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $SidecarPath -Encoding UTF8
+}
+
 # Single .cmd: set MSVC env once, then build DLL (nvcc -shared) + test (cl).
 # nvcc -shared emits the .dll AND the import .lib/.exp automatically.
 # --fmad=false for IEEE float parity with the CPU oracle (same as parity probe).
@@ -97,9 +167,19 @@ $rc = $LASTEXITCODE
 Write-Host "build exit=$rc"
 if ($rc -ne 0) { Write-Host 'BUILD FAILED'; exit $rc }
 
+$cuobjdump = Join-Path $cudaBin 'cuobjdump.exe'
+Write-Host '--- writing architecture sidecar (cuobjdump, hash-bound) ---'
+Write-CudaBackendArchitectureSidecar `
+    -DllPath $dll `
+    -SidecarPath $archSidecar `
+    -CuobjdumpPath $cuobjdump `
+    -RequestedArchitectures $requestedArchitectures `
+    -ArchFlags $archFlags
+Write-Host "architecture sidecar: $archSidecar"
+
 # show emitted artifacts
 Write-Host '--- artifacts ---'
-Get-ChildItem $Dir -Include igpu_recon_cuda.dll,igpu_recon_cuda.lib,igpu_recon_cuda.exp,dll_test.exe -File -ErrorAction SilentlyContinue |
+Get-ChildItem $Dir -Include igpu_recon_cuda.dll,igpu_recon_cuda.lib,igpu_recon_cuda.exp,igpu_recon_cuda.arch.json,dll_test.exe -File -ErrorAction SilentlyContinue |
     Select-Object Name,Length | Format-Table -AutoSize
 
 # run the LoadLibrary parity harness (needs cudart on PATH)

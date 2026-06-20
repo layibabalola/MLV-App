@@ -423,6 +423,7 @@ elseif ($failures.Count -eq 0) {
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
 `$backendDll = Join-Path `$backendDir 'igpu_recon_cuda.dll'
+`$backendArchSidecar = Join-Path `$backendDir 'igpu_recon_cuda.arch.json'
 `$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
@@ -460,7 +461,7 @@ try {
         `$payload.backend.buildExitCode = `$backendExit
         `$payload.backend.output = @(`$backendOutput | ForEach-Object { [string]`$_ })
         `$payload.backend.artifacts = @(Get-ChildItem -LiteralPath `$backendDir -File -ErrorAction SilentlyContinue |
-            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp)|dll_test\.exe)$' } |
+            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|dll_test\.exe)$' } |
             Sort-Object Name |
             ForEach-Object {
                 [ordered]@{
@@ -476,11 +477,18 @@ try {
         if (!(Test-Path -LiteralPath `$backendDll)) {
             throw "Backend DLL build did not produce `$backendDll"
         }
+        if (!(Test-Path -LiteralPath `$backendArchSidecar)) {
+            throw "Backend DLL build did not produce architecture sidecar `$backendArchSidecar"
+        }
         New-Item -ItemType Directory -Force -Path `$releaseDir | Out-Null
         `$deployTargets = @()
         `$deployTargets += [ordered]@{
             source = `$backendDll
             destination = (Join-Path `$releaseDir 'igpu_recon_cuda.dll')
+        }
+        `$deployTargets += [ordered]@{
+            source = `$backendArchSidecar
+            destination = (Join-Path `$releaseDir 'igpu_recon_cuda.arch.json')
         }
         `$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |

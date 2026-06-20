@@ -11,6 +11,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "cuda-backend-architecture.ps1")
 
 function Resolve-RepoPath {
     param(
@@ -54,46 +55,6 @@ function Get-FileArtifact {
         length = $item.Length
         lastWriteTime = $item.LastWriteTime
         sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
-    }
-}
-
-function Get-CudaBackendArchitectureInfo {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [pscustomobject]@{
-            schema = "mlvapp.cuda-backend-architecture.v1"
-            path = $Path
-            exists = $false
-            detector = "ascii-token-scan"
-            tokens = @()
-            hasSm86 = $false
-            hasSm89 = $false
-            dellAmpereReady = $false
-            ultraMagnusAdaReady = $false
-            detectionReliable = $false
-            note = "backend DLL missing"
-        }
-    }
-
-    $resolved = (Resolve-Path -LiteralPath $Path).Path
-    $bytes = [System.IO.File]::ReadAllBytes($resolved)
-    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
-    $tokens = @([regex]::Matches($text, "(?:sm|compute)_[0-9]{2,3}") |
-        ForEach-Object { $_.Value } |
-        Sort-Object -Unique)
-    [pscustomobject]@{
-        schema = "mlvapp.cuda-backend-architecture.v1"
-        path = $resolved
-        exists = $true
-        detector = "ascii-token-scan"
-        tokens = @($tokens)
-        hasSm86 = [bool]($tokens -contains "sm_86")
-        hasSm89 = [bool]($tokens -contains "sm_89")
-        dellAmpereReady = [bool]($tokens -contains "sm_86")
-        ultraMagnusAdaReady = [bool](($tokens -contains "sm_89") -or ($tokens -contains "compute_89"))
-        detectionReliable = [bool]($tokens.Count -gt 0)
-        note = "Architecture-token preflight for copied dogfood kits. Dell RTX 3060 Laptop needs sm_86; UltraMagnus RTX 4090 needs sm_89 or compatible PTX."
     }
 }
 
@@ -164,6 +125,8 @@ function Write-DogfoodReadme {
     if ($backendArch -and $backendArch.tokens) {
         $backendTokens = @($backendArch.tokens | ForEach-Object { [string]$_ })
     }
+    $backendDetector = if ($backendArch) { [string]$backendArch.detector } else { "unknown" }
+    $backendReliable = if ($backendArch) { [bool]$backendArch.detectionReliable } else { $false }
     $commands = $Manifest.commands
 
     $lines = [System.Collections.Generic.List[string]]::new()
@@ -177,11 +140,16 @@ function Write-DogfoodReadme {
     [void]$lines.Add("- Release exe SHA256: ``$exeSha``")
     [void]$lines.Add("- CUDA backend SHA256: ``$backendSha``")
     [void]$lines.Add("- CUDA backend architecture tokens: ``$(if ($backendTokens.Count -gt 0) { $backendTokens -join ', ' } else { 'unknown' })``")
+    [void]$lines.Add("- CUDA backend architecture detector: ``$backendDetector``; reliable: ``$backendReliable``")
     [void]$lines.Add("- CUDA runtime SHA256: ``$cudartSha``")
     if (-not [string]::IsNullOrWhiteSpace($zipPath)) {
         [void]$lines.Add("- Kit zip path at creation: ``$zipPath``")
     }
-    if ($backendArch -and -not [bool]$backendArch.dellAmpereReady) {
+    if ($backendArch -and (-not [bool]$backendArch.detectionReliable)) {
+        [void]$lines.Add("")
+        [void]$lines.Add("> Dell RTX 3060 Laptop note: this packaged backend does not have reliable architecture proof. Include a hash-matched `igpu_recon_cuda.arch.json` sidecar from `tools\gpu\backend\build-backend-dll.ps1 -Arch portable` before treating this zip as Dell-ready.")
+    }
+    elseif ($backendArch -and -not [bool]$backendArch.dellAmpereReady) {
         [void]$lines.Add("")
         [void]$lines.Add("> Dell RTX 3060 Laptop note: this packaged backend does not advertise `sm_86`. Rebuild/deploy `igpu_recon_cuda.dll` with `tools\gpu\backend\build-backend-dll.ps1 -Arch portable` before treating this zip as Dell-ready.")
     }
@@ -235,7 +203,7 @@ function Write-DogfoodReadme {
     [void]$lines.Add('- Dell RTX 3060 Laptop support requires a Dell-local `QUOTABLE_PASS` packet.')
     [void]$lines.Add("- UltraMagnus RTX 4090 proof does not prove the Dell laptop, and Dell proof does not prove UltraMagnus.")
     [void]$lines.Add("- `MLVApp.exe` carries NVIDIA/AMD high-performance GPU request exports, and the proof wrappers also set Windows per-app `GpuPreference=2;` unless disabled.")
-    [void]$lines.Add("- Backend architecture is a preflight gate. Dell RTX 3060 Laptop requires `sm_86` in the packaged CUDA DLL; UltraMagnus RTX 4090 requires `sm_89` or compatible PTX. Runtime support still needs the proof packet.")
+    [void]$lines.Add("- Backend architecture is a preflight gate. Dell RTX 3060 Laptop requires reliable `sm_86` proof from a hash-matched sidecar or `cuobjdump`; UltraMagnus RTX 4090 requires `sm_89` or compatible PTX. Runtime support still needs the proof packet.")
     [void]$lines.Add("- On the Dell hybrid-GPU path, CUDA discovery alone is insufficient. The packet must show GL renderer/probe evidence, no-readback frames, zero fallback frames, clean GL parity, DNG hash PASS, and playback/DNG speed metrics.")
     [void]$lines.Add('- `NOT_QUOTABLE` packets are still useful diagnostics. Read `diagnosticSummary`, `diagnostics`, and `actionPlan` in `proof-report.json` or imported `import-summary.json`.')
     [void]$lines.Add("- Rendered-video/NVENC export is not part of this kit.")
@@ -412,15 +380,18 @@ $kitRoot = Join-Path $outputRootFull $KitName
 $manifestPath = Join-Path $kitRoot "cuda-dogfood-manifest.json"
 $zipPath = Join-Path $outputRootFull "$KitName.zip"
 
+$backendDllPath = Join-Path $releaseDir "igpu_recon_cuda.dll"
+$backendSidecarPath = Get-CudaBackendArchitectureSidecarPath -Path $backendDllPath
 $artifacts = [pscustomobject]@{
     exe = Get-FileArtifact -Path $exe
-    backend = Get-FileArtifact -Path (Join-Path $releaseDir "igpu_recon_cuda.dll")
+    backend = Get-FileArtifact -Path $backendDllPath
+    backendArchitectureSidecar = Get-FileArtifact -Path $backendSidecarPath
     cudart = Get-FileArtifact -Path (Join-Path $releaseDir "cudart64_12.dll")
     qwindows = Get-FileArtifact -Path (Join-Path $releaseDir "platforms\qwindows.dll")
 }
-$backendArchitecture = Get-CudaBackendArchitectureInfo -Path (Join-Path $releaseDir "igpu_recon_cuda.dll")
+$backendArchitecture = Get-CudaBackendArchitectureInfo -Path $backendDllPath
 $missing = @($artifacts.PSObject.Properties |
-    Where-Object { -not [bool]$_.Value.exists } |
+    Where-Object { $_.Name -ne "backendArchitectureSidecar" -and -not [bool]$_.Value.exists } |
     ForEach-Object { $_.Name })
 
 $head = (& git -C $root rev-parse --verify HEAD 2>$null)
@@ -459,8 +430,12 @@ $manifest = [ordered]@{
         schema = "mlvapp.cuda-backend-kit-compatibility.v1"
         dellAmpereSm86Ready = [bool]$backendArchitecture.dellAmpereReady
         ultraMagnusAdaSm89Ready = [bool]$backendArchitecture.ultraMagnusAdaReady
-        warning = if ([bool]$backendArchitecture.dellAmpereReady) {
+        detectionReliable = [bool]$backendArchitecture.detectionReliable
+        detector = [string]$backendArchitecture.detector
+        warning = if ([bool]$backendArchitecture.dellAmpereReady -and [bool]$backendArchitecture.detectionReliable) {
             $null
+        } elseif (-not [bool]$backendArchitecture.detectionReliable) {
+            "Packaged backend architecture proof is not reliable; include a hash-matched igpu_recon_cuda.arch.json sidecar or run on a host with cuobjdump before Dell RTX 3060 Laptop proof."
         } else {
             "Packaged backend does not advertise sm_86; rebuild/deploy portable backend before Dell RTX 3060 Laptop proof."
         }
