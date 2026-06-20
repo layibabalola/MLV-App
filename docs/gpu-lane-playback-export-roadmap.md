@@ -132,14 +132,17 @@ Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-play
 now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
 gate into one host-local smoke. It checks the release exe, deployed CUDA backend,
 and CUDA runtime, records `nvidia-smi`, runs the forced AMaZE/subset no-readback
-playback proof, and runs candidate GPU CDNG export against CPU baseline DNG
-hashes for the requested codecs. The wrapper now also sets the Windows per-app
+playback proof, runs a paired same-release CPU-vs-CUDA playback A/B speed
+capture, and runs candidate GPU CDNG export against CPU baseline DNG hashes for
+the requested codecs. The wrapper now also sets the Windows per-app
 high-performance GPU preference for `MLVApp.exe` unless disabled and searches
 the usual Windows NVSMI locations when `nvidia-smi.exe` is not on `PATH`, so the
 same entrypoint is suitable for the supplied hybrid Dell RTX 3060 Laptop target.
-This is the preferred Dell laptop proof entrypoint; a passing UltraMagnus packet
-still proves RTX 4090 only, and a passing Dell packet is required before
-claiming realtime CUDA support on that machine.
+This is the preferred Dell laptop proof entrypoint: one passing Dell packet can
+carry correctness, GL/backend/fallback proof, DNG hash parity, and a local
+CPU-vs-CUDA playback speed comparison. A passing UltraMagnus packet still proves
+RTX 4090 only, and a passing Dell packet is required before claiming realtime
+CUDA support on that machine.
 
 Update 2026-06-20 ASAP DNG export runner:
 `tools/profiling/run-release-cuda-dng-export.ps1` now provides a direct
@@ -183,7 +186,10 @@ laptop; prior P3 proof packets prove no-readback correctness, not a speedup.
 The follow-up hybrid-GPU hardening makes real A/B runs set the Windows per-app
 high-performance GPU preference for `MLVApp.exe` unless disabled, and both the
 A/B and DNG runners now look for `nvidia-smi.exe` in the usual Windows NVSMI
-locations when it is not on PATH.
+locations when it is not on PATH. `run-local-cuda-playback-dng-smoke.ps1` now
+invokes this A/B runner by default with a 30-second/2500-ms settled window
+(`-SkipPlaybackAb` disables it), so the preferred Dell proof packet includes the
+speed comparison unless deliberately suppressed.
 
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel

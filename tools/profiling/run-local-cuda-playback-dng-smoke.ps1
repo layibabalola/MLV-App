@@ -10,6 +10,8 @@ param(
     [int]$ValidationSampleEvery = 10,
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
+    [int]$PlaybackAbSeconds = 30,
+    [int]$PlaybackAbSettleMs = 2500,
     [int]$MaxFrames = 4,
     [int]$Repeats = 1,
     [string[]]$CdngCodecs = @("uncompressed", "lossless"),
@@ -19,6 +21,7 @@ param(
     [bool]$TrustedGpuExport = $true,
     [switch]$NoHighPerformancePreference,
     [switch]$SkipPlayback,
+    [switch]$SkipPlaybackAb,
     [switch]$SkipCdng,
     [switch]$DryRun
 )
@@ -31,6 +34,12 @@ if ($Seconds -lt 1) {
 if ($SettleMs -lt 0) {
     throw "-SettleMs must be >= 0."
 }
+if ($PlaybackAbSeconds -lt 1) {
+    throw "-PlaybackAbSeconds must be >= 1."
+}
+if ($PlaybackAbSettleMs -lt 0) {
+    throw "-PlaybackAbSettleMs must be >= 0."
+}
 if ($ValidationSampleEvery -lt 1) {
     throw "-ValidationSampleEvery must be >= 1."
 }
@@ -40,8 +49,8 @@ if ($MaxFrames -lt 1) {
 if ($Repeats -lt 1) {
     throw "-Repeats must be >= 1."
 }
-if ($SkipPlayback -and $SkipCdng) {
-    throw "At least one of playback or CDNG validation must run."
+if ($SkipPlayback -and $SkipPlaybackAb -and $SkipCdng) {
+    throw "At least one of playback validation, playback A/B, or CDNG validation must run."
 }
 
 function Resolve-RepoPath {
@@ -342,11 +351,37 @@ function Get-CdngProofSummary {
     }
 }
 
+function Get-PlaybackAbProofSummary {
+    param([AllowNull()]$Summary)
+
+    if ($null -eq $Summary) {
+        return $null
+    }
+
+    [pscustomobject]@{
+        status = $Summary.status
+        seconds = $Summary.seconds
+        settleMs = $Summary.settleMs
+        gpuPreference = $Summary.gpuPreference
+        nvidiaSmi = $Summary.nvidiaSmi
+        baseline = $Summary.baseline
+        candidate = $Summary.candidate
+        compare = $Summary.compare
+        proofFailures = @($Summary.proofFailures)
+        proofBoundary = $Summary.proofBoundary
+        summaryPath = $Summary.outputs.summary
+    }
+}
+
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 $smokeScript = Join-Path $root "tools\profiling\run-ultramagnus-p3-validation.ps1"
+$playbackAbScript = Join-Path $root "tools\profiling\run-release-cuda-playback-ab.ps1"
 $matrixScript = Join-Path $root "tools\profiling\run-release-cdng-export-profile-matrix.ps1"
 if (!(Test-Path -LiteralPath $smokeScript)) {
     throw "P3 validation script not found: $smokeScript"
+}
+if (!(Test-Path -LiteralPath $playbackAbScript)) {
+    throw "Playback A/B script not found: $playbackAbScript"
 }
 if (!(Test-Path -LiteralPath $matrixScript)) {
     throw "CDNG matrix script not found: $matrixScript"
@@ -383,6 +418,7 @@ if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
 $runRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
     (Resolve-RepoPath -Root $root -Path $OutputRoot))
 $playbackRoot = Join-Path $runRoot "playback"
+$playbackAbRoot = Join-Path $runRoot "playback-ab"
 $cdngRoot = Join-Path $runRoot "cdng"
 $summaryPath = Join-Path $runRoot "summary.json"
 $latestPath = Join-Path $root ".claude-state\profiling\local-cuda-playback-dng-smoke-latest.json"
@@ -477,6 +513,56 @@ if (-not $SkipPlayback -and $failures.Count -eq 0) {
     }
     elseif (!$DryRun -and $playback -and -not [bool]$playback.proof.correctnessValidated) {
         Add-Failure $failures "Playback validation did not set proof.correctnessValidated=true."
+    }
+}
+
+$playbackAb = $null
+$playbackAbChild = $null
+if (-not $SkipPlaybackAb -and $failures.Count -eq 0) {
+    $playbackReconBackendForAb =
+        if ([string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) { "cuda" }
+        else { $GpuPlaybackReconBackend }
+    $playbackAbArgs = @(
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", $playbackAbScript,
+        "-RepoRoot", $root,
+        "-ExePath", $ExePath,
+        "-ClipPath", $clipFullPath,
+        "-Receipt", $receiptFullPath,
+        "-BackendDll", $backendDll,
+        "-OutputRoot", $playbackAbRoot,
+        "-Seconds", ([string]$PlaybackAbSeconds),
+        "-SettleMs", ([string]$PlaybackAbSettleMs),
+        "-QualityMode", $QualityMode,
+        "-ScaleFactor", $ScaleFactor,
+        "-ValidationSampleEvery", ([string]$ValidationSampleEvery),
+        "-GpuPlaybackReconBackend", $playbackReconBackendForAb,
+        "-FailOnColorArtifact",
+        "-RequireCandidateGlParity"
+    )
+    if ($NoHighPerformancePreference) {
+        $playbackAbArgs += "-NoHighPerformancePreference"
+    }
+    if ($DryRun) {
+        $playbackAbArgs += "-DryRun"
+    }
+
+    $playbackAbChild = Invoke-ChildPowerShell -Arguments $playbackAbArgs
+    $playbackAbSummaryPath = Join-Path $playbackAbRoot "summary.json"
+    if (Test-Path -LiteralPath $playbackAbSummaryPath) {
+        $playbackAb = Get-Content -LiteralPath $playbackAbSummaryPath -Raw | ConvertFrom-Json -Depth 100
+    }
+    else {
+        Add-Failure $failures "Playback A/B did not write $playbackAbSummaryPath."
+    }
+    if ($playbackAbChild.exitCode -ne 0) {
+        Add-Failure $failures "Playback A/B exited with code $($playbackAbChild.exitCode)."
+    }
+    elseif ($playbackAb -and $playbackAb.status -notin @("success", "planned")) {
+        Add-Failure $failures "Playback A/B status was '$($playbackAb.status)'."
+    }
+    elseif (!$DryRun -and $playbackAb -and @($playbackAb.proofFailures).Count -gt 0) {
+        Add-Failure $failures "Playback A/B proof failures: $(@($playbackAb.proofFailures) -join '; ')"
     }
 }
 
@@ -577,6 +663,8 @@ $summary = [pscustomobject]@{
         receipt = $receiptFullPath
         seconds = $Seconds
         settleMs = $SettleMs
+        playbackAbSeconds = $PlaybackAbSeconds
+        playbackAbSettleMs = $PlaybackAbSettleMs
         validationSampleEvery = $ValidationSampleEvery
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
@@ -592,11 +680,13 @@ $summary = [pscustomobject]@{
         summary = $summaryPath
         latest = $latestPath
         playbackRoot = if ($SkipPlayback) { $null } else { $playbackRoot }
+        playbackAbRoot = if ($SkipPlaybackAb) { $null } else { $playbackAbRoot }
         cdngRoot = if ($SkipCdng) { $null } else { $cdngRoot }
         cdngCases = if ($SkipCdng) { $null } else { $casesPath }
     }
     proof = [pscustomobject]@{
         playback = Get-PlaybackProofSummary -Summary $playback
+        playbackAb = Get-PlaybackAbProofSummary -Summary $playbackAb
         cdng = Get-CdngProofSummary -Summary $cdng
     }
     childProcesses = [pscustomobject]@{
@@ -604,6 +694,12 @@ $summary = [pscustomobject]@{
             [pscustomobject]@{
                 exitCode = $playbackChild.exitCode
                 outputTail = @($playbackChild.output | Select-Object -Last 120)
+            }
+        } else { $null }
+        playbackAb = if ($playbackAbChild) {
+            [pscustomobject]@{
+                exitCode = $playbackAbChild.exitCode
+                outputTail = @($playbackAbChild.output | Select-Object -Last 120)
             }
         } else { $null }
         cdng = if ($cdngChild) {
