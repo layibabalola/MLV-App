@@ -494,9 +494,12 @@ struct BatchRenderedVideoSourceMetadata
     int width = 0;
     int height = 0;
     double frameRate = 0.0;
+    int frameCount = 0;
+    double durationSeconds = 0.0;
     double stretchFactorX = STRETCH_H_100;
     double stretchFactorY = STRETCH_V_100;
     QString reason;
+    bool frameCountReady = false;
     bool ready = false;
 };
 
@@ -529,6 +532,8 @@ struct BatchRenderedVideoOutputVerificationPlan
     QString expectedExtension;
     QString expectedCodec;
     QString expectedContainer;
+    int expectedFrameCount = 0;
+    double expectedDurationSeconds = 0.0;
     QString reason;
     qulonglong nonEmptyMinimumBytes = 1;
     bool outputPathReady = false;
@@ -541,6 +546,9 @@ struct BatchRenderedVideoOutputVerificationPlan
     bool codecContainerCheckPlanned = false;
     bool codecContainerExpectationReady = false;
     bool codecContainerValidationReady = false;
+    bool frameCountCheckPlanned = false;
+    bool frameCountExpectationReady = false;
+    bool frameCountValidationReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeOwned = false;
@@ -558,6 +566,8 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     QString expectedExtension;
     QString expectedCodec;
     QString expectedContainer;
+    int expectedFrameCount = 0;
+    double expectedDurationSeconds = 0.0;
     QString mediaProbeExecutable = QStringLiteral("ffprobe");
     QString mediaProbeBinarySource =
         QStringLiteral("default-executable-name");
@@ -602,6 +612,9 @@ struct BatchRenderedVideoOutputVerificationExecutionPlan
     bool codecContainerCheckPlanned = false;
     bool codecContainerExpectationReady = false;
     bool codecContainerValidationReady = false;
+    bool frameCountCheckPlanned = false;
+    bool frameCountExpectationReady = false;
+    bool frameCountValidationReady = false;
     bool fileExistenceCheckOwned = false;
     bool nonEmptyCheckOwned = false;
     bool mediaProbeExecutionOwned = false;
@@ -1969,12 +1982,14 @@ inline BatchRenderedVideoSourceMetadata batchRenderedVideoSourceMetadata(
     int height,
     double frameRate,
     double stretchFactorX,
-    double stretchFactorY)
+    double stretchFactorY,
+    int frameCount = 0)
 {
     BatchRenderedVideoSourceMetadata metadata;
     metadata.width = width;
     metadata.height = height;
     metadata.frameRate = frameRate;
+    metadata.frameCount = frameCount > 0 ? frameCount : 0;
     metadata.stretchFactorX = stretchFactorX;
     metadata.stretchFactorY = stretchFactorY;
 
@@ -1994,6 +2009,10 @@ inline BatchRenderedVideoSourceMetadata batchRenderedVideoSourceMetadata(
         return metadata;
     }
 
+    metadata.frameCountReady = metadata.frameCount > 0;
+    if( metadata.frameCountReady )
+        metadata.durationSeconds =
+            static_cast<double>(metadata.frameCount) / frameRate;
     metadata.ready = true;
     return metadata;
 }
@@ -2329,6 +2348,28 @@ batchRenderedVideoOutputVerificationPlanFromOutput(
     {
         plan.reason = QStringLiteral("rendered output verification contract unavailable");
     }
+    return plan;
+}
+
+inline BatchRenderedVideoOutputVerificationPlan
+batchRenderedVideoOutputVerificationPlanFromOutput(
+    const BatchRenderedVideoOutputPlan & outputPlan,
+    const BatchRenderedVideoTarget & target,
+    const BatchRenderedVideoSourceMetadata & sourceMetadata)
+{
+    BatchRenderedVideoOutputVerificationPlan plan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            outputPlan,
+            target);
+    plan.expectedFrameCount =
+        sourceMetadata.frameCountReady ? sourceMetadata.frameCount : 0;
+    plan.expectedDurationSeconds =
+        sourceMetadata.frameCountReady ? sourceMetadata.durationSeconds : 0.0;
+    plan.frameCountExpectationReady =
+        plan.expectedFrameCount > 0
+     && plan.expectedDurationSeconds > 0.0;
+    plan.frameCountCheckPlanned =
+        plan.contractReady && plan.frameCountExpectationReady;
     return plan;
 }
 
@@ -2697,6 +2738,9 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.expectedExtension = outputVerificationPlan.expectedExtension;
     plan.expectedCodec = outputVerificationPlan.expectedCodec;
     plan.expectedContainer = outputVerificationPlan.expectedContainer;
+    plan.expectedFrameCount = outputVerificationPlan.expectedFrameCount;
+    plan.expectedDurationSeconds =
+        outputVerificationPlan.expectedDurationSeconds;
     plan.mediaProbeBinarySource = mediaProbeBinaryPlan.source;
     plan.mediaProbeRequestedExecutable =
         mediaProbeBinaryPlan.requestedExecutable;
@@ -2767,6 +2811,13 @@ batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
     plan.codecContainerValidationReady =
         outputVerificationPlan.codecContainerValidationReady
      && plan.codecContainerValidationOwned;
+    plan.frameCountCheckPlanned =
+        outputVerificationPlan.frameCountCheckPlanned;
+    plan.frameCountExpectationReady =
+        outputVerificationPlan.frameCountExpectationReady;
+    plan.frameCountValidationReady =
+        outputVerificationPlan.frameCountValidationReady
+     && plan.frameCountValidationOwned;
     plan.fileExistenceCheckOwned =
         outputVerificationPlan.fileExistenceCheckOwned;
     plan.nonEmptyCheckOwned = outputVerificationPlan.nonEmptyCheckOwned;
@@ -3287,6 +3338,21 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             plan.ffmpegCommandPlan);
     plan.ffmpegExecutionContractReady =
         plan.ffmpegExecutionPlan.contractReady;
+    plan.outputVerificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput(
+            plan.outputPlan,
+            plan.target,
+            metadata);
+    plan.outputVerificationContractReady =
+        plan.outputVerificationPlan.contractReady;
+    plan.mediaProbeCommandPlan =
+        batchRenderedVideoMediaProbeCommandPlanFromContracts(
+            plan.outputVerificationPlan,
+            plan.mediaProbeBinaryPlan);
+    plan.mediaProbeCommandReady =
+        plan.mediaProbeBinaryPlan.commandExecutableReady;
+    plan.mediaProbeCommandContractReady =
+        plan.mediaProbeCommandPlan.contractReady;
     plan.outputVerificationExecutionPlan =
         batchRenderedVideoOutputVerificationExecutionPlanFromContracts(
             plan.outputVerificationPlan,
@@ -3983,12 +4049,15 @@ inline QString batchRenderedVideoMediaProbeCommandPlanSummary(
 inline QString batchRenderedVideoSourceMetadataSummary(
     const BatchRenderedVideoSourceMetadata & metadata)
 {
-    return QStringLiteral("source-metadata=%1x%2 source-fps=%3 source-stretch-x=%4 source-stretch-y=%5 source-metadata-ready=%6 source-metadata-reason=%7")
+    return QStringLiteral("source-metadata=%1x%2 source-fps=%3 source-frame-count=%4 source-duration-seconds=%5 source-stretch-x=%6 source-stretch-y=%7 source-frame-count-ready=%8 source-metadata-ready=%9 source-metadata-reason=%10")
         .arg(metadata.width)
         .arg(metadata.height)
         .arg(metadata.frameRate)
+        .arg(metadata.frameCount)
+        .arg(QLocale::c().toString(metadata.durationSeconds, 'f', 6))
         .arg(metadata.stretchFactorX)
         .arg(metadata.stretchFactorY)
+        .arg(metadata.frameCountReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(metadata.ready ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(metadata.reason.isEmpty() ? QStringLiteral("none") : metadata.reason);
 }
@@ -4037,6 +4106,8 @@ inline QString batchRenderedVideoOutputVerificationPlanSummary(
         << QStringLiteral("output-verification-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
         << QStringLiteral("output-verification-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
         << QStringLiteral("output-verification-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-expected-frame-count=%1").arg(plan.expectedFrameCount)
+        << QStringLiteral("output-verification-expected-duration-seconds=%1").arg(QLocale::c().toString(plan.expectedDurationSeconds, 'f', 6))
         << QStringLiteral("output-verification-path-ready=%1").arg(plan.outputPathReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-extension-match=%1").arg(plan.extensionMatchesTarget ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-file-exists-planned=%1").arg(plan.fileExistenceCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
@@ -4048,6 +4119,9 @@ inline QString batchRenderedVideoOutputVerificationPlanSummary(
         << QStringLiteral("output-verification-codec-container-planned=%1").arg(plan.codecContainerCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-codec-container-input-ready=%1").arg(plan.codecContainerExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-codec-container-validation-ready=%1").arg(plan.codecContainerValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-frame-count-planned=%1").arg(plan.frameCountCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-frame-count-input-ready=%1").arg(plan.frameCountExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-frame-count-validation-ready=%1").arg(plan.frameCountValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-file-exists-owned=%1").arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-nonempty-owned=%1").arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-probe-owned=%1").arg(plan.mediaProbeOwned ? QStringLiteral("true") : QStringLiteral("false"))
@@ -4070,6 +4144,8 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         << QStringLiteral("output-verification-exec-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
         << QStringLiteral("output-verification-exec-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
         << QStringLiteral("output-verification-exec-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-exec-expected-frame-count=%1").arg(plan.expectedFrameCount)
+        << QStringLiteral("output-verification-exec-expected-duration-seconds=%1").arg(QLocale::c().toString(plan.expectedDurationSeconds, 'f', 6))
         << QStringLiteral("output-verification-exec-probe=%1").arg(plan.mediaProbeExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeExecutable)
         << QStringLiteral("output-verification-exec-probe-binary-source=%1").arg(plan.mediaProbeBinarySource.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeBinarySource)
         << QStringLiteral("output-verification-exec-probe-binary-request=%1").arg(plan.mediaProbeRequestedExecutable.isEmpty() ? QStringLiteral("unspecified") : plan.mediaProbeRequestedExecutable)
@@ -4102,6 +4178,9 @@ inline QString batchRenderedVideoOutputVerificationExecutionPlanSummary(
         << QStringLiteral("output-verification-exec-codec-container-planned=%1").arg(plan.codecContainerCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-codec-container-input-ready=%1").arg(plan.codecContainerExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-codec-container-validation-ready=%1").arg(plan.codecContainerValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-frame-count-planned=%1").arg(plan.frameCountCheckPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-frame-count-input-ready=%1").arg(plan.frameCountExpectationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-exec-frame-count-validation-ready=%1").arg(plan.frameCountValidationReady ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-file-exists-owned=%1").arg(plan.fileExistenceCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-nonempty-owned=%1").arg(plan.nonEmptyCheckOwned ? QStringLiteral("true") : QStringLiteral("false"))
         << QStringLiteral("output-verification-exec-probe-owned=%1").arg(plan.mediaProbeExecutionOwned ? QStringLiteral("true") : QStringLiteral("false"))

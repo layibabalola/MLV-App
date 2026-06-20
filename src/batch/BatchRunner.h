@@ -62,7 +62,8 @@ public:
         int height,
         double frameRate,
         double receiptStretchX,
-        double receiptStretchY )
+        double receiptStretchY,
+        int frameCount = 0 )
     {
         if( receiptStretchX <= 0.0 )
             receiptStretchX = STRETCH_H_100;
@@ -74,7 +75,8 @@ public:
             height,
             frameRate,
             receiptStretchX,
-            receiptStretchY );
+            receiptStretchY,
+            frameCount );
     }
 
 private:

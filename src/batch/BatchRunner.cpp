@@ -42,7 +42,8 @@ static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromOpenMlv(
         static_cast<int>(getMlvHeight( mlvObject )),
         getMlvFramerate( mlvObject ),
         receipt.stretchFactorX(),
-        receipt.stretchFactorY());
+        receipt.stretchFactorY(),
+        static_cast<int>(getMlvFrames( mlvObject )));
 }
 
 static BatchRenderedVideoSourceAudioPlan renderedVideoSourceAudioPlanFromOpenMlv(
