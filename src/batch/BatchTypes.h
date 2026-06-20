@@ -145,6 +145,24 @@ struct BatchRenderedVideoSourceAudioPlan
     bool contractReady = false;
 };
 
+struct BatchRenderedVideoAudioMuxPrerequisitesPlan
+{
+    QString source = QStringLiteral("audio-mux-prerequisite-contract");
+    QString inputState = QStringLiteral("rendered-source-audio-discovery");
+    QString outputState =
+        QStringLiteral("ffmpeg-audio-input-or-video-only-fallback");
+    QString reason;
+    bool sourceAudioContractReady = false;
+    bool sourceAudioDiscoveryOwned = false;
+    bool sourceAudioExtractionOwned = false;
+    bool audioInputOwned = false;
+    bool audioMuxOwned = false;
+    bool audioSyncValidationOwned = false;
+    bool videoOnlyFallbackReady = false;
+    bool muxReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoFfmpegAudioPlan
 {
     QString source = QStringLiteral("video-only-contract");
@@ -364,6 +382,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoFfmpegFilterPlan ffmpegFilterPlan;
     BatchRenderedVideoOptionalFilterPlan optionalFilterPlan;
     BatchRenderedVideoSourceAudioPlan sourceAudioPlan;
+    BatchRenderedVideoAudioMuxPrerequisitesPlan audioMuxPrerequisitesPlan;
     BatchRenderedVideoFfmpegAudioPlan ffmpegAudioPlan;
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
@@ -384,6 +403,7 @@ struct BatchRenderedVideoJobPlan
     bool ffmpegFilterReady = false;
     bool optionalFilterContractReady = false;
     bool sourceAudioContractReady = false;
+    bool audioMuxPrerequisitesContractReady = false;
     bool ffmpegAudioContractReady = false;
     bool metadataAttempted = false;
     bool metadataReady = false;
@@ -963,28 +983,93 @@ batchRenderedVideoSourceAudioPlanForCurrentBuild(
     return plan;
 }
 
-inline BatchRenderedVideoFfmpegAudioPlan
-batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
+inline BatchRenderedVideoAudioMuxPrerequisitesPlan
+batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
     const BatchRenderedVideoSourceAudioPlan & sourceAudioPlan)
 {
-    BatchRenderedVideoFfmpegAudioPlan plan;
+    BatchRenderedVideoAudioMuxPrerequisitesPlan plan;
+    plan.sourceAudioContractReady = sourceAudioPlan.contractReady;
     plan.sourceAudioDiscoveryOwned = sourceAudioPlan.discoveryOwned;
     plan.sourceAudioExtractionOwned = sourceAudioPlan.extractionOwned;
     plan.audioInputOwned = sourceAudioPlan.muxInputOwned;
-    plan.audioMuxOwned = sourceAudioPlan.muxInputOwned;
-    plan.audioSyncOwned = sourceAudioPlan.syncValidationOwned;
-    plan.videoOnlyCommandReady = !plan.audioArguments.isEmpty();
-    plan.contractReady = plan.videoOnlyCommandReady;
+    plan.audioSyncValidationOwned = sourceAudioPlan.syncValidationOwned;
+    plan.videoOnlyFallbackReady = sourceAudioPlan.videoOnlyFallbackReady;
+
+    if( !sourceAudioPlan.contractReady )
+    {
+        plan.reason = sourceAudioPlan.reason.isEmpty()
+            ? QStringLiteral("rendered source audio contract unavailable")
+            : sourceAudioPlan.reason;
+        return plan;
+    }
+
+    plan.contractReady = plan.sourceAudioContractReady
+                      && plan.videoOnlyFallbackReady;
+    plan.muxReady = plan.sourceAudioDiscoveryOwned
+                 && plan.sourceAudioExtractionOwned
+                 && plan.audioInputOwned
+                 && plan.audioMuxOwned
+                 && plan.audioSyncValidationOwned;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered audio mux prerequisite contract unavailable");
+    }
+    return plan;
+}
+
+inline BatchRenderedVideoFfmpegAudioPlan
+batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
+    const BatchRenderedVideoSourceAudioPlan & sourceAudioPlan,
+    const BatchRenderedVideoAudioMuxPrerequisitesPlan & audioMuxPlan)
+{
+    BatchRenderedVideoFfmpegAudioPlan plan;
+    plan.sourceAudioDiscoveryOwned = audioMuxPlan.sourceAudioDiscoveryOwned;
+    plan.sourceAudioExtractionOwned = audioMuxPlan.sourceAudioExtractionOwned;
+    plan.audioInputOwned = audioMuxPlan.audioInputOwned;
+    plan.audioMuxOwned = audioMuxPlan.audioMuxOwned;
+    plan.audioSyncOwned = audioMuxPlan.audioSyncValidationOwned;
+    plan.videoOnlyCommandReady = !plan.audioArguments.isEmpty()
+                              && audioMuxPlan.videoOnlyFallbackReady;
+
+    if( !sourceAudioPlan.contractReady )
+    {
+        plan.reason = sourceAudioPlan.reason.isEmpty()
+            ? QStringLiteral("rendered source audio contract unavailable")
+            : sourceAudioPlan.reason;
+        return plan;
+    }
+    if( !audioMuxPlan.contractReady )
+    {
+        plan.reason = audioMuxPlan.reason.isEmpty()
+            ? QStringLiteral("rendered audio mux prerequisite contract unavailable")
+            : audioMuxPlan.reason;
+        return plan;
+    }
+
+    plan.contractReady = plan.videoOnlyCommandReady
+                      && audioMuxPlan.contractReady;
     if( !plan.contractReady )
         plan.reason = QStringLiteral("rendered ffmpeg audio contract unavailable");
     return plan;
 }
 
 inline BatchRenderedVideoFfmpegAudioPlan
-batchRenderedVideoFfmpegAudioPlanForCurrentBuild()
+batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
+    const BatchRenderedVideoSourceAudioPlan & sourceAudioPlan)
 {
     return batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
-        batchRenderedVideoSourceAudioPlanForCurrentBuild());
+        sourceAudioPlan,
+        batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
+            sourceAudioPlan));
+}
+
+inline BatchRenderedVideoFfmpegAudioPlan
+batchRenderedVideoFfmpegAudioPlanForCurrentBuild()
+{
+    const BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+        batchRenderedVideoSourceAudioPlanForCurrentBuild();
+    return batchRenderedVideoFfmpegAudioPlanForCurrentBuild(sourceAudioPlan);
 }
 
 inline bool batchRenderedVideoEncoderProfileRequiresEvenDimensions(
@@ -1785,9 +1870,13 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                 plan.ffmpegFilterPlan);
         plan.sourceAudioPlan =
             batchRenderedVideoSourceAudioPlanForCurrentBuild(inputPath);
+        plan.audioMuxPrerequisitesPlan =
+            batchRenderedVideoAudioMuxPrerequisitesPlanFromSourceAudio(
+                plan.sourceAudioPlan);
         plan.ffmpegAudioPlan =
             batchRenderedVideoFfmpegAudioPlanForCurrentBuild(
-                plan.sourceAudioPlan);
+                plan.sourceAudioPlan,
+                plan.audioMuxPrerequisitesPlan);
         plan.outputPlan =
             batchRenderedVideoOutputPlanFromPaths(
                 inputPath,
@@ -1809,6 +1898,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
     {
         plan.outputPlan.reason = QStringLiteral("not a rendered-video request");
         plan.sourceAudioPlan.reason =
+            QStringLiteral("not a rendered-video request");
+        plan.audioMuxPrerequisitesPlan.reason =
             QStringLiteral("not a rendered-video request");
         plan.ffmpegAudioPlan.reason =
             QStringLiteral("not a rendered-video request");
@@ -1834,6 +1925,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.optionalFilterPlan.contractReady;
     plan.sourceAudioContractReady =
         plan.sourceAudioPlan.contractReady;
+    plan.audioMuxPrerequisitesContractReady =
+        plan.audioMuxPrerequisitesPlan.contractReady;
     plan.ffmpegAudioContractReady =
         plan.ffmpegAudioPlan.contractReady;
     plan.ffmpegBinaryCommandReady =
@@ -1850,6 +1943,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
                        && plan.ffmpegFilterReady
                        && plan.optionalFilterContractReady
                        && plan.sourceAudioContractReady
+                       && plan.audioMuxPrerequisitesContractReady
                        && plan.ffmpegAudioContractReady
                        && plan.ffmpegBinaryCommandReady
                        && plan.renderSettings.ready
@@ -2003,6 +2097,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.ffmpegFilterReady
                        && plan.optionalFilterContractReady
                        && plan.sourceAudioContractReady
+                       && plan.audioMuxPrerequisitesContractReady
                        && plan.ffmpegAudioContractReady
                        && plan.ffmpegBinaryCommandReady
                        && plan.renderSettings.ready
@@ -2063,6 +2158,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.sourceAudioPlan.reason.isEmpty()
             ? QStringLiteral("rendered source audio contract unavailable")
             : plan.sourceAudioPlan.reason;
+    }
+    if( !plan.audioMuxPrerequisitesContractReady )
+    {
+        return plan.audioMuxPrerequisitesPlan.reason.isEmpty()
+            ? QStringLiteral("rendered audio mux prerequisite contract unavailable")
+            : plan.audioMuxPrerequisitesPlan.reason;
     }
     if( !plan.ffmpegAudioContractReady )
     {
@@ -2247,6 +2348,25 @@ inline QString batchRenderedVideoSourceAudioPlanSummary(
         .arg(plan.muxInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.syncValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.videoOnlyFallbackReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
+inline QString batchRenderedVideoAudioMuxPrerequisitesPlanSummary(
+    const BatchRenderedVideoAudioMuxPrerequisitesPlan & plan)
+{
+    return QStringLiteral("audio-mux-source=%1 audio-mux-input=%2 audio-mux-output=%3 audio-mux-source-contract-ready=%4 audio-mux-video-only-ready=%5 audio-mux-source-discovery-owned=%6 audio-mux-extraction-owned=%7 audio-mux-input-owned=%8 audio-mux-mux-owned=%9 audio-mux-sync-owned=%10 audio-mux-ready=%11 audio-mux-contract-ready=%12 audio-mux-reason=%13")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.inputState.isEmpty() ? QStringLiteral("unspecified") : plan.inputState)
+        .arg(plan.outputState.isEmpty() ? QStringLiteral("unspecified") : plan.outputState)
+        .arg(plan.sourceAudioContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.videoOnlyFallbackReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.sourceAudioDiscoveryOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.sourceAudioExtractionOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioInputOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioMuxOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.audioSyncValidationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.muxReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
@@ -2505,7 +2625,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 preflight-ready=%21 runnable=%22 first-blocker=%23")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 preflight-ready=%22 runnable=%23 first-blocker=%24")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -2514,6 +2634,8 @@ inline QString batchRenderedVideoJobPlanSummary(
         .arg(batchRenderedVideoOptionalFilterPlanSummary(
             plan.optionalFilterPlan))
         .arg(batchRenderedVideoSourceAudioPlanSummary(plan.sourceAudioPlan))
+        .arg(batchRenderedVideoAudioMuxPrerequisitesPlanSummary(
+            plan.audioMuxPrerequisitesPlan))
         .arg(batchRenderedVideoFfmpegAudioPlanSummary(plan.ffmpegAudioPlan))
         .arg(batchRenderedVideoFfmpegBinaryPlanSummary(plan.ffmpegBinaryPlan))
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
