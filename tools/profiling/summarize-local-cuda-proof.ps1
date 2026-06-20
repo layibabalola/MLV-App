@@ -99,6 +99,25 @@ function Format-MetricDeltaLine {
     "${Label}: CPU $baseline -> CUDA $candidate, delta $delta ($pct, $direction)"
 }
 
+function Format-CdngThroughputGroupLine {
+    param([AllowNull()]$Group)
+
+    $rollup = Get-Field $Group "rollup"
+    if ($null -eq $rollup) {
+        return $null
+    }
+    $groupBy = [string](Get-Field $Group "groupBy")
+    if ([string]::IsNullOrWhiteSpace($groupBy)) {
+        $groupBy = "group"
+    }
+    $value = [string](Get-Field $Group "value")
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        $value = "unspecified"
+    }
+    $caseCount = Get-Field $Group "caseCount"
+    "DNG throughput by ${groupBy} ${value}: status=$((Get-Field $rollup 'status')), cases=$caseCount, classified_runs=$((Get-Field $rollup 'classifiedRunCount')), wall_clock_improved=$((Get-Field $rollup 'wallClockImprovedCount')), attribution_hold=$((Get-Field $rollup 'attributionHoldCount')), not_promotable=$((Get-Field $rollup 'notPromotableCount')), default_promotion_candidates=$((Get-Field $rollup 'defaultPromotionCandidateCount')), suggested=$((Get-Field $rollup 'suggestedOptimization'))"
+}
+
 function New-SectionVerdict {
     param(
         [string]$Status,
@@ -778,6 +797,29 @@ else {
             ) `
             -NextAction "Keep the candidate opt-in and review the async writer completion-lag gate before changing default export behavior."
     }
+    $cdngThroughputByCodec = @(Get-Field $cdng "throughputClassificationByCodec")
+    foreach ($codecGroup in $cdngThroughputByCodec) {
+        $rollup = Get-Field $codecGroup "rollup"
+        if ($rollup -and
+            (Convert-ToInt64 (Get-Field $rollup "wallClockImprovedCount")) -gt 0 -and
+            [string](Get-Field $cdngThroughput "status") -ne "promotion_candidate") {
+            Add-Diagnostic `
+                -Diagnostics $diagnostics `
+                -Area "dng-export-speed" `
+                -Code "DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL" `
+                -Severity "info" `
+                -Message "At least one CDNG codec group has wall-clock improvement, but the default all-codec throughput gate remains stricter." `
+                -Evidence @(
+                    "groupBy=$((Get-Field $codecGroup 'groupBy'))",
+                    "value=$((Get-Field $codecGroup 'value'))",
+                    "status=$((Get-Field $rollup 'status'))",
+                    "wallClockImprovedCount=$((Get-Field $rollup 'wallClockImprovedCount'))",
+                    "notPromotableCount=$((Get-Field $rollup 'notPromotableCount'))",
+                    "suggested=$((Get-Field $rollup 'suggestedOptimization'))"
+                ) `
+                -NextAction "Treat this as codec-scoped evidence only until the top-level all-codec gate passes."
+        }
+    }
 }
 $cdngEvidence = @()
 if ($cdng) {
@@ -802,6 +844,18 @@ if ($cdng) {
     $cdngThroughput = Get-Field $cdng "throughputClassification"
     if ($cdngThroughput) {
         $cdngEvidence += "DNG throughput classification: status=$((Get-Field $cdngThroughput 'status')), classified_runs=$((Get-Field $cdngThroughput 'classifiedRunCount')), wall_clock_improved=$((Get-Field $cdngThroughput 'wallClockImprovedCount')), attribution_hold=$((Get-Field $cdngThroughput 'attributionHoldCount')), default_promotion_candidates=$((Get-Field $cdngThroughput 'defaultPromotionCandidateCount')), suggested=$((Get-Field $cdngThroughput 'suggestedOptimization'))"
+    }
+    foreach ($codecGroup in @(Get-Field $cdng "throughputClassificationByCodec")) {
+        $line = Format-CdngThroughputGroupLine -Group $codecGroup
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $cdngEvidence += $line
+        }
+    }
+    foreach ($caseGroup in @(Get-Field $cdng "throughputClassificationByCase")) {
+        $line = Format-CdngThroughputGroupLine -Group $caseGroup
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $cdngEvidence += $line
+        }
     }
 }
 $cdngVerdict = New-SectionVerdict `

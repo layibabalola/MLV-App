@@ -193,6 +193,23 @@ producer work moved earlier while writer completion lag moved later. Treat this
 as scoped lossless-DNG async-compress evidence and an E3 policy/implementation
 input, not a default export promotion.
 
+Update 2026-06-20 E3 scoped throughput rollups: the CDNG matrix now keeps the
+existing top-level `throughputClassification` as the fail-closed all-codec/default
+promotion gate, and adds grouped rollups under
+`throughputClassificationByCodec` and `throughputClassificationByCase`. The
+local CUDA proof summary, packet manifest, and report writer carry those grouped
+rollups through so a packet can say "lossless has wall-clock-improved scoped
+evidence" while still saying "all-codec/default is not promotable." Local tooling
+smoke
+`.claude-state/profiling/2026-06-20-e3-codec-rollup-smoke/matrix/matrix-summary.json`
+validated the split on one-frame `M16-1327.MLV` cases: top-level
+`not_promotable`; `cdngCodec=lossless` `mixed` with
+`wall_clock_improved_completion_lag_shift=1`; `cdngCodec=uncompressed`
+`not_promotable`. The synthetic local proof-report smoke emitted the matching
+`DNG_THROUGHPUT_CODEC_SCOPED_SIGNAL` info diagnostic while remaining
+`NOT_QUOTABLE`, so the new guidance does not relax DNG hash, GPU replacement, or
+hardware proof gates.
+
 Update 2026-06-20 Dell/local proof wrapper: `tools/profiling/run-local-cuda-playback-dng-smoke.ps1`
 now composes the existing P3 no-readback validator and CDNG matrix/DNG-hash
 gate into one host-local smoke. It checks the release exe, deployed CUDA backend,

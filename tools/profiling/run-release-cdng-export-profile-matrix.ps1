@@ -265,6 +265,44 @@ function Get-ThroughputClassificationRollup {
     }
 }
 
+function Get-ThroughputClassificationGroupedRollups {
+    param(
+        [AllowNull()]$CaseResults,
+        [Parameter(Mandatory = $true)][string]$PropertyName,
+        [Parameter(Mandatory = $true)][string]$GroupBy
+    )
+
+    $groups = [ordered]@{}
+    foreach ($caseResult in @($CaseResults)) {
+        $value = $null
+        if ($caseResult.PSObject.Properties.Name -contains $PropertyName) {
+            $value = $caseResult.$PropertyName
+        }
+        $key = [string]$value
+        if ([string]::IsNullOrWhiteSpace($key)) {
+            $key = "unspecified"
+        }
+        if (-not $groups.Contains($key)) {
+            $groups[$key] = @()
+        }
+        $groups[$key] = @($groups[$key]) + $caseResult
+    }
+
+    @($groups.Keys | Sort-Object | ForEach-Object {
+        $key = [string]$_
+        $groupCases = @($groups[$key])
+        [pscustomobject]@{
+            schema = "mlvapp.cdng_throughput_classification_grouped_rollup.v1"
+            groupBy = $GroupBy
+            value = $key
+            caseCount = $groupCases.Count
+            caseNames = @($groupCases | ForEach-Object { $_.name })
+            rollup = Get-ThroughputClassificationRollup -CaseResults $groupCases
+            proofBoundary = "Grouped rollup is scoped evidence only; top-level throughputClassification remains the fail-closed default promotion gate."
+        }
+    })
+}
+
 function Convert-ToCdngCodecOrDefault {
     param(
         [object]$Value,
@@ -886,6 +924,8 @@ $matrix = [pscustomobject]@{
         failCount = $failCount
     }
     throughputClassification = Get-ThroughputClassificationRollup -CaseResults $caseResults
+    throughputClassificationByCodec = Get-ThroughputClassificationGroupedRollups -CaseResults $caseResults -PropertyName "cdngCodec" -GroupBy "cdngCodec"
+    throughputClassificationByCase = Get-ThroughputClassificationGroupedRollups -CaseResults $caseResults -PropertyName "name" -GroupBy "case"
     cases = $caseResults
     verdict = if ($failCount -eq 0) { "PASS" } else { "FAIL" }
 }

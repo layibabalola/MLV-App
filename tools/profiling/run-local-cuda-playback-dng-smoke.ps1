@@ -615,6 +615,17 @@ function Get-CdngProofSummary {
         }
     }
 
+    $throughputByCodec = @()
+    if (($Summary.PSObject.Properties.Name -contains "throughputClassificationByCodec") -and
+        $null -ne $Summary.throughputClassificationByCodec) {
+        $throughputByCodec = @($Summary.throughputClassificationByCodec)
+    }
+    $throughputByCase = @()
+    if (($Summary.PSObject.Properties.Name -contains "throughputClassificationByCase") -and
+        $null -ne $Summary.throughputClassificationByCase) {
+        $throughputByCase = @($Summary.throughputClassificationByCase)
+    }
+
     [pscustomobject]@{
         verdict = $Summary.verdict
         totals = $Summary.totals
@@ -649,6 +660,8 @@ function Get-CdngProofSummary {
             suggestedOptimization = $throughputSuggested
             proofBoundary = "Rollup classifies throughput evidence only; CDNG proof, DNG hash, and default export behavior remain separately gated."
         }
+        throughputClassificationByCodec = @($throughputByCodec)
+        throughputClassificationByCase = @($throughputByCase)
         speed = [pscustomobject]@{
             runCount = $speedRuns.Count
             avgBaselineElapsedMs = Get-AverageOrNull -Rows $speedRuns -PropertyName "baselineElapsedMs"

@@ -280,6 +280,8 @@ $manifest = [ordered]@{
         dngThroughputAttributionHoldRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.attributionHoldCount
         dngThroughputDefaultPromotionCandidateRuns = Convert-ToInt64 $summary.proof.cdng.throughputClassification.defaultPromotionCandidateCount
         dngThroughputSuggestedOptimization = $summary.proof.cdng.throughputClassification.suggestedOptimization
+        dngThroughputByCodec = if ($summary.proof.cdng.throughputClassificationByCodec) { @($summary.proof.cdng.throughputClassificationByCodec) } else { @() }
+        dngThroughputByCase = if ($summary.proof.cdng.throughputClassificationByCase) { @($summary.proof.cdng.throughputClassificationByCase) } else { @() }
     }
     outputs = [ordered]@{
         runRoot = $runRootResolved
