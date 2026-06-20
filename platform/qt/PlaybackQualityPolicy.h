@@ -13,10 +13,10 @@
  * this layer only kicks in when those env vars are unset.
  *
  * Decisions:
- * - Fast: non-Dual ISO uses scale=4. Dual ISO uses the color-correct
+ * - Prioritize Smoothness (Fast): non-Dual ISO uses scale=4. Dual ISO uses the color-correct
  *   HQ+mean23 path and may start at scale=8 so it does not fall into the
  *   legacy preview-rowscale magenta-cast path.
- * - HighQuality: HQ + mean23 + scale=4, cast closed, slower cadence.
+ * - Prioritize Quality (HighQuality): HQ + mean23 + scale=4, cast closed, slower cadence.
  * - Auto: Sharp/Smooth starts at HQ scale=4; if measured cadence misses
  *   target, fall back to Fast for the next slot in Sharp/Smooth. Aggressive
  *   Dual ISO starts at HQ scale=8 so the preview keeps early Bayer-domain
@@ -104,7 +104,7 @@ namespace PlaybackQualitySettings
     inline constexpr const char * kKeyPhase3HQAutoFallbackFiredEpoch() { return "Playback/Phase3HQAutoFallbackFiredEpoch"; }
     inline constexpr const char * kKeyClipPlaytimePrefix() { return "Playback/ClipPlaytime/"; }
 
-    inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Fast ); }
+    inline constexpr int kDefaultQualityMode() { return static_cast<int>( PlaybackQualityMode::Auto ); }
     inline constexpr int kDefaultPreviewMode() { return static_cast<int>( PlaybackPreviewMode::SharpSmooth ); }
     inline constexpr int kDefaultScaleFactorOverride() { return 0; }
     inline constexpr int kDefaultPreviewResolution() { return static_cast<int>( PlaybackPreviewResolution::Auto ); }
@@ -144,7 +144,11 @@ inline bool playbackQualityModeParseOverride( const char * raw, int * outMode )
     if ( !raw || !*raw || !outMode ) return false;
 
     if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
-      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smoothness" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize_smoothness" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize-smoothness" ) )
     {
         *outMode = static_cast<int>( PlaybackQualityMode::Fast );
         return true;
@@ -154,7 +158,9 @@ inline bool playbackQualityModeParseOverride( const char * raw, int * outMode )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high" )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high_quality" )
       || playbackQualityAsciiEqualsIgnoreCase( raw, "high-quality" )
-      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize_quality" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "prioritize-quality" ) )
     {
         *outMode = static_cast<int>( PlaybackQualityMode::HighQuality );
         return true;
@@ -203,29 +209,26 @@ inline int playbackPreviewAggressiveEnvOverride()
     const char * raw = std::getenv("MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW");
     if ( raw && *raw )
     {
-        if ( std::strcmp(raw, "0") == 0
-          || std::strcmp(raw, "false") == 0
-          || std::strcmp(raw, "FALSE") == 0
-          || std::strcmp(raw, "False") == 0
-          || std::strcmp(raw, "off") == 0
-          || std::strcmp(raw, "OFF") == 0
-          || std::strcmp(raw, "sharp") == 0
-          || std::strcmp(raw, "sharp_smooth") == 0
-          || std::strcmp(raw, "smooth") == 0
-          || std::strcmp(raw, "quality") == 0 )
+        if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "false" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "off" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp_smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp-smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
         {
             return 0;
         }
-        if ( std::strcmp(raw, "1") == 0
-          || std::strcmp(raw, "true") == 0
-          || std::strcmp(raw, "TRUE") == 0
-          || std::strcmp(raw, "True") == 0
-          || std::strcmp(raw, "yes") == 0
-          || std::strcmp(raw, "on") == 0
-          || std::strcmp(raw, "aggressive") == 0
-          || std::strcmp(raw, "aggressive_performance") == 0
-          || std::strcmp(raw, "performance") == 0
-          || std::strcmp(raw, "fast") == 0 )
+        if ( playbackQualityAsciiEqualsIgnoreCase( raw, "1" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "true" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "yes" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "on" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive_performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive-performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "performance" )
+          || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
         {
             return 1;
         }
@@ -234,27 +237,27 @@ inline int playbackPreviewAggressiveEnvOverride()
 
     raw = std::getenv("MLVAPP_PLAYBACK_PREVIEW_MODE");
     if ( !raw || !*raw ) return -1;
-    if ( std::strcmp(raw, "1") == 0
-      || std::strcmp(raw, "aggressive") == 0
-      || std::strcmp(raw, "aggressive_performance") == 0
-      || std::strcmp(raw, "performance") == 0
-      || std::strcmp(raw, "fast") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "1" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive_performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "aggressive-performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "performance" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "fast" ) )
     {
         return 1;
     }
-    if ( std::strcmp(raw, "0") == 0
-      || std::strcmp(raw, "sharp") == 0
-      || std::strcmp(raw, "sharp_smooth") == 0
-      || std::strcmp(raw, "smooth") == 0
-      || std::strcmp(raw, "quality") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "0" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp_smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "sharp-smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "smooth" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "quality" ) )
     {
         return 0;
     }
-    if ( std::strcmp(raw, "true") == 0
-      || std::strcmp(raw, "TRUE") == 0
-      || std::strcmp(raw, "True") == 0
-      || std::strcmp(raw, "yes") == 0
-      || std::strcmp(raw, "on") == 0 )
+    if ( playbackQualityAsciiEqualsIgnoreCase( raw, "true" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "yes" )
+      || playbackQualityAsciiEqualsIgnoreCase( raw, "on" ) )
     {
         return 1;
     }
@@ -305,7 +308,8 @@ inline const char * playbackPreviewModeName( PlaybackPreviewMode mode )
     return "sharp_smooth";
 }
 
-/* Returns the user's persisted QualityMode (Fast=0, HighQuality=1, Auto=2). */
+/* Returns the user's persisted QualityMode. Invalid persisted values fall back
+ * to the same configured default used when the setting is absent. */
 #ifdef QT_CORE_LIB
 inline PlaybackQualityMode playbackQualityModeFromSettings()
 {
@@ -314,7 +318,9 @@ inline PlaybackQualityMode playbackQualityModeFromSettings()
                    PlaybackQualitySettings::kApplication() );
     const int raw = set.value( PlaybackQualitySettings::kKeyQualityMode(),
                                PlaybackQualitySettings::kDefaultQualityMode() ).toInt();
-    if ( raw < 0 || raw > 4 ) return PlaybackQualityMode::Fast;
+    if ( raw < 0 || raw > 4 )
+        return static_cast<PlaybackQualityMode>(
+            PlaybackQualitySettings::kDefaultQualityMode() );
     return static_cast<PlaybackQualityMode>( raw );
 }
 
@@ -746,6 +752,7 @@ enum class PlaybackQualityAutoDecisionReason
     AggressiveDualIsoDeepHq,
     MissedTargetFast,
     MissedTargetAggressiveDeepHq,
+    HeadroomAwaitingValidatedCapability,
     HeadroomNonDualIsoSharperHq,
     SteadyHq
 };
@@ -763,12 +770,19 @@ inline const char * playbackQualityAutoDecisionReasonName(
             return "missed_target_fast";
         case PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq:
             return "missed_target_aggressive_deep_hq";
+        case PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability:
+            return "headroom_waiting_for_validated_capability";
         case PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq:
             return "headroom_non_dual_iso_sharper_hq";
         case PlaybackQualityAutoDecisionReason::SteadyHq:
             return "steady_hq";
     }
     return "unknown";
+}
+
+inline double playbackQualityFpsEquivalentForFrameMs( double frameMs )
+{
+    return frameMs > 0.0 ? 1000.0 / frameMs : 0.0;
 }
 
 struct PlaybackQualityAutoSampler
@@ -803,7 +817,7 @@ struct PlaybackQualityAutoSampler
      *       -> downgrade to Fast (scale=4, no HQ) in Sharp/Smooth preview
      *       -> use deep HQ x8 preview in Aggressive preview
      *   - else if avg cadence < 0.65 * frame budget (lots of headroom)
-     *       and !dualIsoActive
+     *       and !dualIsoActive and sharper headroom promotion is allowed
      *       -> upgrade HQ to scale=2 (try sharper)
      *   - else stay at HQ scale=4 */
     struct Decision
@@ -811,6 +825,7 @@ struct PlaybackQualityAutoSampler
         int scaleFactor;       /* 1, 2, 4, or 8 */
         bool useHqMean23;      /* true => HQ + mean23, false => Fast preview */
         PlaybackQualityAutoDecisionReason reason;
+        bool sharperHeadroomScaleAllowed;
         double averageFrameMs; /* 0 while still warming up */
         double frameBudgetMs;
         size_t sampleCount;
@@ -818,7 +833,8 @@ struct PlaybackQualityAutoSampler
 
     Decision decideNextSlot( int targetFps,
                              bool dualIsoActive,
-                             bool aggressivePreviewActive = false ) const
+                             bool aggressivePreviewActive = false,
+                             bool sharperHeadroomScaleAllowed = false ) const
     {
         std::lock_guard<std::mutex> lock( m_mutex );
         if ( targetFps <= 0 ) targetFps = 30;
@@ -836,6 +852,7 @@ struct PlaybackQualityAutoSampler
                 8,
                 true,
                 PlaybackQualityAutoDecisionReason::AggressiveDualIsoDeepHq,
+                sharperHeadroomScaleAllowed,
                 0.0,
                 frameBudgetMs,
                 sampleCount
@@ -849,6 +866,7 @@ struct PlaybackQualityAutoSampler
                 4,
                 true,
                 PlaybackQualityAutoDecisionReason::WarmupHq,
+                sharperHeadroomScaleAllowed,
                 0.0,
                 frameBudgetMs,
                 sampleCount
@@ -869,6 +887,7 @@ struct PlaybackQualityAutoSampler
                     8,
                     true,
                     PlaybackQualityAutoDecisionReason::MissedTargetAggressiveDeepHq,
+                    sharperHeadroomScaleAllowed,
                     avgMs,
                     frameBudgetMs,
                     sampleCount
@@ -880,6 +899,7 @@ struct PlaybackQualityAutoSampler
                 4,
                 false,
                 PlaybackQualityAutoDecisionReason::MissedTargetFast,
+                sharperHeadroomScaleAllowed,
                 avgMs,
                 frameBudgetMs,
                 sampleCount
@@ -887,11 +907,27 @@ struct PlaybackQualityAutoSampler
         }
         if ( !dualIsoActive && avgMs < frameBudgetMs * 0.65 )
         {
+            if ( !sharperHeadroomScaleAllowed )
+            {
+                /* Headroom alone is not capability proof. Keep the safer x4
+                 * HQ preview until the caller has observed a validated
+                 * presentation path that can justify sharpening Auto. */
+                return Decision{
+                    4,
+                    true,
+                    PlaybackQualityAutoDecisionReason::HeadroomAwaitingValidatedCapability,
+                    sharperHeadroomScaleAllowed,
+                    avgMs,
+                    frameBudgetMs,
+                    sampleCount
+                };
+            }
             /* Plenty of headroom on a non-DI clip: try sharper HQ. */
             return Decision{
                 2,
                 true,
                 PlaybackQualityAutoDecisionReason::HeadroomNonDualIsoSharperHq,
+                sharperHeadroomScaleAllowed,
                 avgMs,
                 frameBudgetMs,
                 sampleCount
@@ -902,6 +938,7 @@ struct PlaybackQualityAutoSampler
             4,
             true,
             PlaybackQualityAutoDecisionReason::SteadyHq,
+            sharperHeadroomScaleAllowed,
             avgMs,
             frameBudgetMs,
             sampleCount
@@ -911,6 +948,59 @@ struct PlaybackQualityAutoSampler
 private:
     mutable std::mutex m_mutex;
     std::deque<double> m_window;
+};
+
+struct PlaybackQualityAutoCapabilityTracker
+{
+    bool notePresentedPipeline( bool gpuTextureNoReadbackActive,
+                                bool gpuTextureNoReadbackCandidate = false,
+                                bool dualIsoActive = false )
+    {
+        m_lastObservationDemotedCapability = false;
+        if ( gpuTextureNoReadbackActive )
+        {
+            m_validatedNoReadbackObserved = true;
+            if ( !dualIsoActive )
+            {
+                m_validatedNoReadbackObservedForHeadroom = true;
+            }
+            return m_validatedNoReadbackObserved;
+        }
+        if ( gpuTextureNoReadbackCandidate && m_validatedNoReadbackObserved )
+        {
+            m_validatedNoReadbackObserved = false;
+            m_validatedNoReadbackObservedForHeadroom = false;
+            m_lastObservationDemotedCapability = true;
+        }
+        return m_validatedNoReadbackObserved;
+    }
+
+    bool sharperHeadroomScaleAllowed() const
+    {
+        return m_validatedNoReadbackObservedForHeadroom;
+    }
+
+    bool validatedNoReadbackObserved() const
+    {
+        return m_validatedNoReadbackObserved;
+    }
+
+    bool lastObservationDemotedCapability() const
+    {
+        return m_lastObservationDemotedCapability;
+    }
+
+    void reset()
+    {
+        m_validatedNoReadbackObserved = false;
+        m_validatedNoReadbackObservedForHeadroom = false;
+        m_lastObservationDemotedCapability = false;
+    }
+
+private:
+    bool m_validatedNoReadbackObserved = false;
+    bool m_validatedNoReadbackObservedForHeadroom = false;
+    bool m_lastObservationDemotedCapability = false;
 };
 
 #endif // PLAYBACKQUALITYPOLICY_H

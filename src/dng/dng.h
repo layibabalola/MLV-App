@@ -61,8 +61,32 @@ typedef struct
     uint16_t * image_buf2;          // pointer to image buffer for temporary decompression
     uint16_t * image_buf_unpacked;  // pointer to bit packed image buffer
     dngExportOverrides_t overrides; // optional metadata defaults for export
+    int defer_payload_compress;      // opt-in async writer compresses this payload
+    int payload_compress_width;
+    int payload_compress_height;
+    uint32_t payload_compress_bpp;
+    uint64_t payload_compress_input_bytes;
 
 } dngObject_t;
+
+typedef struct
+{
+    uint32_t frame_index;
+    int raw_input_state;
+    int raw_output_state;
+    int compression_deferred;
+    int compression_width;
+    int compression_height;
+    uint32_t compression_bpp;
+    uint64_t compression_input_bytes;
+    size_t header_size;
+    size_t image_size;
+    size_t image_capacity;
+    uint8_t * header_buf;
+    uint8_t * image_buf;
+} dngFramePayload_t;
+
+typedef struct dngPayloadWriter dngPayloadWriter_t;
 
 /* routines to unpack, pack, decompress or compress raw data */
 void dng_unpack_image_bits(uint16_t * input_buffer, uint16_t * output_buffer, int width, int height, uint32_t bpp);
@@ -73,6 +97,13 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 /* routines to initialize, save and free DNG exporting struct */
 dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, int32_t par[4]);
 void setDngExportOverrides(dngObject_t * dng_data, const dngExportOverrides_t * overrides);
+dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, const char *props_filename);
+int writeDngFramePayload(dngFramePayload_t * payload, const char * dng_filename);
+void freeDngFramePayload(dngFramePayload_t * payload);
+dngPayloadWriter_t * createDngPayloadWriter(void);
+int finishDngPayloadWriter(dngPayloadWriter_t * writer);
+int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer, mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
+int saveDngFrameViaPayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 void freeDngObject(dngObject_t * dng_data);
 

@@ -23,6 +23,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QString>
@@ -35,6 +36,7 @@ extern "C" int llrpGpuExportBackendUnavailableForTesting(void);
 extern "C" int llrpGpuExportLastRunAttemptedForTesting(void);
 extern "C" int llrpGpuExportLastRunRcForTesting(void);
 extern "C" int llrpGpuExportLastReplacedForTesting(void);
+extern "C" int llrpGpuExportLastTrustedForTesting(void);
 extern "C" int llrpGpuExportLastMismatchForTesting(void);
 extern "C" int llrpGpuExportLastApplyDitherForTesting(void);
 extern "C" unsigned long long llrpGpuExportLastMismatchCountForTesting(void);
@@ -42,6 +44,7 @@ extern "C" unsigned long long llrpGpuExportLastMismatchFirstIndexForTesting(void
 extern "C" int llrpGpuExportLastMismatchFirstCpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchFirstGpuForTesting(void);
 extern "C" int llrpGpuExportLastMismatchMaxAbsForTesting(void);
+extern "C" int llrpGpuExportLastSkipCodeForTesting(void);
 extern "C" void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 extern "C" int llrpResetGpuPlaybackReconRunForTesting(void);
 extern "C" int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
@@ -56,8 +59,10 @@ static void assert_gpu_export_telemetry_idle()
     ASSERT_EQ(0, telemetry.attempted);
     ASSERT_EQ(0, telemetry.rc);
     ASSERT_EQ(0, telemetry.replaced);
+    ASSERT_EQ(0, telemetry.trusted);
     ASSERT_EQ(0, telemetry.allocated_bytes_valid);
     ASSERT_EQ(static_cast<uint64_t>(0), telemetry.allocated_bytes);
+    ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_NONE, telemetry.skip_code);
 }
 
 static void assert_fixture_ready(MlvPipelineFixture & fixture)
@@ -103,6 +108,118 @@ static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
                               0,
                               dng_path_bytes.data(),
                               nullptr));
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
+static QByteArray export_tiny_dng_via_payload_for_pipeline_prep(int raw_state,
+                                                                const QString & dng_path)
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngFramePayload_t * payload =
+        buildDngFramePayload(fixture.video(), dng, 0, nullptr);
+    ASSERT_TRUE(payload != nullptr);
+    ASSERT_EQ(static_cast<uint32_t>(0), payload->frame_index);
+    ASSERT_EQ(raw_state, payload->raw_output_state);
+    ASSERT_TRUE(payload->raw_input_state == UNCOMPRESSED_RAW
+             || payload->raw_input_state == COMPRESSED_RAW);
+    ASSERT_TRUE(payload->header_size > 0);
+    ASSERT_TRUE(payload->image_size > 0);
+
+    const QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, writeDngFramePayload(payload, dng_path_bytes.constData()));
+
+    freeDngFramePayload(payload);
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
+static QByteArray export_tiny_dng_via_payload_save_for_pipeline_prep(int raw_state,
+                                                                     const QString & dng_path)
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                        dng,
+                                        0,
+                                        dng_path_bytes.data(),
+                                        nullptr));
+    freeDngObject(dng);
+    return read_all_bytes(dng_path);
+}
+
+static QByteArray export_tiny_dng_via_async_writer_for_pipeline_prep(int raw_state,
+                                                                     const QString & dng_path)
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   dng_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
     freeDngObject(dng);
     return read_all_bytes(dng_path);
 }
@@ -190,12 +307,14 @@ static QByteArray export_dng_for_gpu_export_gate_cfg(int raw_state,
                                                      const QString & clip_relative_path,
                                                      const QString & receipt_relative_path,
                                                      const GpuExportDualIsoConfig & cfg,
-                                                     const dngExportOverrides_t * overrides)
+                                                     const dngExportOverrides_t * overrides,
+                                                     bool gpu_trusted = false)
 {
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
@@ -208,6 +327,9 @@ static QByteArray export_dng_for_gpu_export_gate_cfg(int raw_state,
 
     if (gpu_enabled) {
         qputenv("MLVAPP_GPU_EXPORT", QByteArrayLiteral("1"));
+        if (gpu_trusted) {
+            qputenv("MLVAPP_GPU_EXPORT_TRUSTED", QByteArrayLiteral("1"));
+        }
         qputenv("MLVAPP_GPU_EXPORT_DLL", dll_path.toLocal8Bit());
     }
 
@@ -233,7 +355,8 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
                                                  const QString & dll_path,
                                                  const QString & dng_path,
                                                  const QString & clip_relative_path,
-                                                 const QString & receipt_relative_path)
+                                                 const QString & receipt_relative_path,
+                                                 bool gpu_trusted = false)
 {
     return export_dng_for_gpu_export_gate_cfg(raw_state,
                                               gpu_enabled,
@@ -242,7 +365,8 @@ static QByteArray export_dng_for_gpu_export_gate(int raw_state,
                                               clip_relative_path,
                                               receipt_relative_path,
                                               kGpuExportSupportedDualIsoConfig,
-                                              nullptr);
+                                              nullptr,
+                                              gpu_trusted);
 }
 
 // Lane A E2 (slice 4) helper: export `target_frame` of a clip and return its DNG
@@ -296,7 +420,8 @@ static QByteArray export_one_frame_for_resume_proxy(int raw_state,
 static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
                                                       bool gpu_enabled,
                                                       const QString & dll_path,
-                                                      const QString & dng_path)
+                                                      const QString & dng_path,
+                                                      bool gpu_trusted = false)
 {
     return export_dng_for_gpu_export_gate(
         raw_state,
@@ -304,7 +429,8 @@ static QByteArray export_tiny_dng_for_gpu_export_gate(int raw_state,
         dll_path,
         dng_path,
         QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv"),
-        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"));
+        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+        gpu_trusted);
 }
 
 static void assert_profiler_json_has_stage(const QJsonObject & stages,
@@ -313,6 +439,15 @@ static void assert_profiler_json_has_stage(const QJsonObject & stages,
     ASSERT_TRUE(stages.contains(stage_name));
     const QJsonObject stage = stages.value(stage_name).toObject();
     ASSERT_TRUE(stage.value(QStringLiteral("samples")).toInt() >= 1);
+}
+
+static void assert_profiler_json_has_stage_with_min_samples(const QJsonObject & stages,
+                                                           const QString & stage_name,
+                                                           int min_samples)
+{
+    ASSERT_TRUE(stages.contains(stage_name));
+    const QJsonObject stage = stages.value(stage_name).toObject();
+    ASSERT_TRUE(stage.value(QStringLiteral("samples")).toInt(-1) >= min_samples);
 }
 
 static void assert_profiler_json_valid_for_raw_state(const QString & profile_path,
@@ -325,17 +460,73 @@ static void assert_profiler_json_valid_for_raw_state(const QString & profile_pat
     ASSERT_TRUE(root.value(QStringLiteral("schema")).toString()
                 == QStringLiteral("mlvapp.export_stage_profile.v1"));
     ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 1);
-    ASSERT_FALSE(root.value(QStringLiteral("queue_idle_supported")).toBool(true));
+    ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_attempted_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_replaced_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_trusted_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_allocated_bytes_valid_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_max_allocated_bytes")));
+    ASSERT_TRUE(root.contains(QStringLiteral("gpu_export_skipped_frames")));
+    ASSERT_TRUE(root.value(QStringLiteral("gpu_export_skip_reason_counts")).isObject());
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_bytes_valid_frames")));
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_input_bytes_total")));
+    ASSERT_TRUE(root.contains(QStringLiteral("dng_compress_output_bytes_total")));
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_placement")).toString()
+                == QStringLiteral("producer_before_payload"));
+    ASSERT_TRUE(root.contains(QStringLiteral("async_writer_can_overlap_dng_compress")));
+    ASSERT_FALSE(root.value(QStringLiteral("async_writer_can_overlap_dng_compress")).toBool(true));
 
     const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
     assert_profiler_json_has_stage(stages, QStringLiteral("raw_read_decode_unpack_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_total_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_dark_frame_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_vertical_stripes_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_focus_pixels_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_bad_pixels_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_pattern_noise_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_pre_dualiso_fix_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_dual_iso_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_chroma_smooth_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_shared_lock_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_dualiso_refine_lock_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_publish_lock_ms"));
+    assert_profiler_json_has_stage(stages, QStringLiteral("llrawproc_other_ms"));
     assert_profiler_json_has_stage(stages, QStringLiteral("disk_write_ms"));
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("payload_clone_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("writer_queue_wait_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("queue_idle_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("producer_queue_idle_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("producer_frame_ms"), 0);
+    assert_profiler_json_has_stage_with_min_samples(stages, QStringLiteral("writer_completion_lag_ms"), 0);
     assert_profiler_json_has_stage(stages, QStringLiteral("frame_total_ms"));
     if (raw_state == COMPRESSED_RAW) {
         assert_profiler_json_has_stage(stages, QStringLiteral("dng_compress_ms"));
     } else {
         assert_profiler_json_has_stage(stages, QStringLiteral("dng_pack_ms"));
+    }
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_FALSE(frames.isEmpty());
+    const QJsonObject first_frame = frames.first().toObject();
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_attempted")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_rc")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_replaced")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_trusted")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes_valid")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_allocated_bytes")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_skip_code")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("gpu_export_skip_reason")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_bytes_valid")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_input_bytes")));
+    ASSERT_TRUE(first_frame.contains(QStringLiteral("dng_compress_output_bytes")));
+    if (raw_state == COMPRESSED_RAW) {
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_bytes_valid")).toBool(false));
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_input_bytes")).toDouble() > 0.0);
+        ASSERT_TRUE(first_frame.value(QStringLiteral("dng_compress_output_bytes")).toDouble() > 0.0);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_bytes_valid_frames")).toInt() >= 1);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_input_bytes_total")).toDouble() > 0.0);
+        ASSERT_TRUE(root.value(QStringLiteral("dng_compress_output_bytes_total")).toDouble() > 0.0);
     }
 }
 
@@ -754,15 +945,27 @@ TEST(DualIsoPipeline, GpuExportMissingDllFallbackIsByteInertForCompressedAndUnco
         ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
 
         const QByteArray fallback_bytes =
-            export_tiny_dng_for_gpu_export_gate(raw_state, true, missing_dll, fallback_dng);
+            export_tiny_dng_for_gpu_export_gate(raw_state, true, missing_dll, fallback_dng, true);
         ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
         ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastTrustedForTesting());
+        ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                  llrpGpuExportLastSkipCodeForTesting());
+        {
+            llrpGpuExportTelemetry_t telemetry = {};
+            llrpGetLastGpuExportTelemetry(&telemetry);
+            ASSERT_EQ(0, telemetry.trusted);
+            ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                      telemetry.skip_code);
+        }
 
         preserve_gpu_export_gate_artifacts(suffix, cpu_dng, fallback_dng);
         ASSERT_TRUE(cpu_bytes == fallback_bytes);
     }
 
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
@@ -901,6 +1104,69 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAttemptsValidatedStateBacke
     ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
 
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconBackendNameEnvIsReportedWhenUnavailable)
+{
+    static int dummy_int_lut[1] = { 0 };
+    static double dummy_double_lut[1] = { 0.0 };
+    uint16_t rawInput[4] = { 1024, 2048, 3072, 4096 };
+    llrpGpuPlaybackReconState_t state = {};
+    llrpGpuPlaybackReconTiming_t timing = {};
+    llrpGpuPlaybackReconBackendInfo_t backend_info = {};
+    int rc = 123;
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_BACKEND");
+    qunsetenv("MLVAPP_GPU_EXPORT_BACKEND");
+    qputenv("MLVAPP_GPU_RECON_DLL",
+            QByteArrayLiteral("definitely-missing-portable-recon.dll"));
+    qputenv("MLVAPP_GPU_RECON_BACKEND", QByteArrayLiteral("vulkan"));
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+
+    state.valid = 1;
+    state.width = 2;
+    state.height = 2;
+    state.black_level = 131008;
+    state.white_level = 960000;
+    state.white_darkened = 174632;
+    state.black_delta = 0;
+    state.ev_correction = 3.0;
+    state.dark_noise = 512.0;
+    state.interp_method = 1;
+    state.use_alias_map = 1;
+    state.use_fullres = 1;
+    state.chroma_smooth_method = 0;
+    state.is_bright[0] = 1;
+    state.is_bright[1] = 1;
+    state.is_bright[2] = 0;
+    state.is_bright[3] = 0;
+    state.raw2ev = dummy_int_lut;
+    state.ev2raw = dummy_int_lut;
+    state.mix_curve = dummy_double_lut;
+    state.fullres_curve = dummy_double_lut;
+
+    timing.available = 1;
+    ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                  rawInput,
+                                                  sizeof(rawInput),
+                                                  7,
+                                                  &rc,
+                                                  &timing));
+    ASSERT_EQ(-1, rc);
+    ASSERT_EQ(0, timing.available);
+    ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconGetBackendInfo(&backend_info));
+    ASSERT_EQ(std::string("vulkan"),
+              std::string(backend_info.requested_backend));
+    ASSERT_EQ(std::string("definitely-missing-portable-recon.dll"),
+              std::string(backend_info.requested_path));
+
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_BACKEND");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
 
@@ -1316,6 +1582,7 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
             const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
             const int run_rc = llrpGpuExportLastRunRcForTesting();
             const int replaced = llrpGpuExportLastReplacedForTesting();
+            const int trusted = llrpGpuExportLastTrustedForTesting();
             const int mismatch = llrpGpuExportLastMismatchForTesting();
             const int apply_dither = llrpGpuExportLastApplyDitherForTesting();
             const unsigned long long mismatch_count =
@@ -1363,6 +1630,7 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
             ASSERT_EQ(1, run_attempted);
             ASSERT_EQ(0, run_rc);
             ASSERT_EQ(1, replaced);
+            ASSERT_EQ(0, trusted);
             ASSERT_EQ(0, mismatch);
 
             preserve_gpu_export_parity_artifacts(suffix, cpu_dng, gpu_dng);
@@ -1371,6 +1639,72 @@ TEST(DualIsoPipeline, GpuExportCudaBackendIsByteExactForCompressedAndUncompresse
     }
 
     qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
+    ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuExportTrustedCudaBackendIsByteExactForCompressedAndUncompressedDng)
+{
+    const QByteArray dll_env = qgetenv("MLVAPP_GPU_EXPORT_TEST_DLL");
+    if (dll_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_GPU_EXPORT_TEST_DLL=<path-to-igpu_recon_cuda.dll> to run.");
+    }
+
+    const QString dll_path = QString::fromLocal8Bit(dll_env);
+    ASSERT_TRUE(QFile::exists(dll_path));
+
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString raw_name = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString cpu_dng = temp_dir.filePath(
+            raw_name + QStringLiteral("-cpu.dng"));
+        const QString trusted_dng = temp_dir.filePath(
+            raw_name + QStringLiteral("-gpu-trusted.dng"));
+
+        const QByteArray cpu_bytes = export_tiny_dng_for_gpu_export_gate(
+            raw_state,
+            false,
+            QString(),
+            cpu_dng);
+        ASSERT_EQ(0, llrpGpuExportBackendAttemptedForTesting());
+        ASSERT_EQ(0, llrpGpuExportLastRunAttemptedForTesting());
+
+        const QByteArray trusted_bytes = export_tiny_dng_for_gpu_export_gate(
+            raw_state,
+            true,
+            dll_path,
+            trusted_dng,
+            true);
+        const int backend_attempted = llrpGpuExportBackendAttemptedForTesting();
+        const int backend_unavailable = llrpGpuExportBackendUnavailableForTesting();
+        const int run_attempted = llrpGpuExportLastRunAttemptedForTesting();
+        const int run_rc = llrpGpuExportLastRunRcForTesting();
+        const int replaced = llrpGpuExportLastReplacedForTesting();
+        const int trusted = llrpGpuExportLastTrustedForTesting();
+        const int mismatch = llrpGpuExportLastMismatchForTesting();
+
+        ASSERT_EQ(1, backend_attempted);
+        ASSERT_EQ(0, backend_unavailable);
+        ASSERT_EQ(1, run_attempted);
+        ASSERT_EQ(0, run_rc);
+        ASSERT_EQ(1, replaced);
+        ASSERT_EQ(1, trusted);
+        ASSERT_EQ(0, mismatch);
+
+        preserve_gpu_export_parity_artifacts(
+            raw_name + QStringLiteral("-trusted"), cpu_dng, trusted_dng);
+        ASSERT_TRUE(cpu_bytes == trusted_bytes);
+    }
+
+    qunsetenv("MLVAPP_GPU_EXPORT");
+    qunsetenv("MLVAPP_GPU_EXPORT_TRUSTED");
     qunsetenv("MLVAPP_GPU_EXPORT_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuExportRunForTesting());
@@ -1428,6 +1762,8 @@ TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossCo
                     cfg, overrides);
                 ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
                 ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
+                ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
+                          llrpGpuExportLastSkipCodeForTesting());
 
                 ASSERT_TRUE(cpu_bytes == fallback_bytes);
             }
@@ -1778,6 +2114,649 @@ TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressed
         ASSERT_TRUE(QFile::exists(on_profile));
         assert_profiler_json_valid_for_raw_state(on_profile, raw_state);
     }
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+}
+
+TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString saved_path = temp_dir.filePath(suffix + QStringLiteral("-save.dng"));
+        const QString payload_path = temp_dir.filePath(suffix + QStringLiteral("-payload.dng"));
+        const QString payload_save_path = temp_dir.filePath(suffix + QStringLiteral("-payload-save.dng"));
+        const QString async_writer_path = temp_dir.filePath(suffix + QStringLiteral("-async-writer.dng"));
+        const QString profile_path = temp_dir.filePath(suffix + QStringLiteral("-profile.json"));
+
+        const QByteArray saved_bytes =
+            export_tiny_dng_for_profiler_gate(raw_state, false, saved_path, profile_path);
+        const QByteArray payload_bytes =
+            export_tiny_dng_via_payload_for_pipeline_prep(raw_state, payload_path);
+        const QByteArray payload_save_bytes =
+            export_tiny_dng_via_payload_save_for_pipeline_prep(raw_state, payload_save_path);
+        const QByteArray async_writer_bytes =
+            export_tiny_dng_via_async_writer_for_pipeline_prep(raw_state, async_writer_path);
+
+        ASSERT_TRUE(saved_bytes == payload_bytes);
+        ASSERT_TRUE(saved_bytes == payload_save_bytes);
+        ASSERT_TRUE(saved_bytes == async_writer_bytes);
+    }
+}
+
+TEST(DualIsoPipeline, DngFramePayloadReuseMatchesSaveDngFrame)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+
+        MlvPipelineFixture fixture;
+        assert_fixture_ready(fixture);
+        std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+        ASSERT_TRUE(!frame.empty());
+
+        int32_t par[4] = { 1, 1, 1, 1 };
+        dngObject_t * serial_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(serial_dng != nullptr);
+        dngObject_t * payload_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(payload_dng != nullptr);
+        dngObject_t * async_dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(async_dng != nullptr);
+
+        dngPayloadWriter_t * writer = createDngPayloadWriter();
+        ASSERT_TRUE(writer != nullptr);
+
+        const QString serial_first_path = temp_dir.filePath(suffix + QStringLiteral("-serial-first.dng"));
+        const QString serial_second_path = temp_dir.filePath(suffix + QStringLiteral("-serial-second.dng"));
+        const QString payload_first_path = temp_dir.filePath(suffix + QStringLiteral("-payload-first.dng"));
+        const QString payload_second_path = temp_dir.filePath(suffix + QStringLiteral("-payload-second.dng"));
+        const QString async_first_path = temp_dir.filePath(suffix + QStringLiteral("-async-first.dng"));
+        const QString async_second_path = temp_dir.filePath(suffix + QStringLiteral("-async-second.dng"));
+
+        QByteArray serial_first_bytes_path = serial_first_path.toLocal8Bit();
+        QByteArray serial_second_bytes_path = serial_second_path.toLocal8Bit();
+        QByteArray payload_first_bytes_path = payload_first_path.toLocal8Bit();
+        QByteArray payload_second_bytes_path = payload_second_path.toLocal8Bit();
+        QByteArray async_first_bytes_path = async_first_path.toLocal8Bit();
+        QByteArray async_second_bytes_path = async_second_path.toLocal8Bit();
+
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  serial_dng,
+                                  0,
+                                  serial_first_bytes_path.data(),
+                                  nullptr));
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  serial_dng,
+                                  0,
+                                  serial_second_bytes_path.data(),
+                                  nullptr));
+        ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                            payload_dng,
+                                            0,
+                                            payload_first_bytes_path.data(),
+                                            nullptr));
+        ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                            payload_dng,
+                                            0,
+                                            payload_second_bytes_path.data(),
+                                            nullptr));
+        ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                       fixture.video(),
+                                                       async_dng,
+                                                       0,
+                                                       async_first_bytes_path.data(),
+                                                       nullptr));
+        ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                       fixture.video(),
+                                                       async_dng,
+                                                       0,
+                                                       async_second_bytes_path.data(),
+                                                       nullptr));
+        ASSERT_EQ(0, finishDngPayloadWriter(writer));
+
+        const QByteArray serial_first = read_all_bytes(serial_first_path);
+        const QByteArray serial_second = read_all_bytes(serial_second_path);
+        const QByteArray payload_first = read_all_bytes(payload_first_path);
+        const QByteArray payload_second = read_all_bytes(payload_second_path);
+        const QByteArray async_first = read_all_bytes(async_first_path);
+        const QByteArray async_second = read_all_bytes(async_second_path);
+
+        ASSERT_TRUE(serial_first == serial_second);
+        ASSERT_TRUE(serial_first == payload_first);
+        ASSERT_TRUE(serial_second == payload_second);
+        ASSERT_TRUE(serial_first == async_first);
+        ASSERT_TRUE(serial_second == async_second);
+
+        freeDngObject(serial_dng);
+        freeDngObject(payload_dng);
+        freeDngObject(async_dng);
+    }
+}
+
+TEST(DualIsoPipeline, DngFramePayloadSavePreservesExportStageProfiler)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString dng_path = temp_dir.filePath(QStringLiteral("payload-save.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("payload-save-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("payload-save-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF", QByteArrayLiteral("1"));
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaPayload(fixture.video(),
+                                        dng,
+                                        0,
+                                        dng_path_bytes.data(),
+                                        nullptr));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("payload_handoff_env_enabled")).toBool(false));
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    ASSERT_TRUE(stages.value(QStringLiteral("disk_write_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("payload_clone_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_queue_wait_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_queue_idle_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 1);
+    ASSERT_TRUE(frames.at(0).toObject().value(QStringLiteral("success")).toBool(false));
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString dng_path = temp_dir.filePath(QStringLiteral("async-writer.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("async-writer-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-writer-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   dng_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    ASSERT_TRUE(stages.value(QStringLiteral("disk_write_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("payload_clone_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_queue_wait_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_queue_idle_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt(-1) >= 0);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("frame_total_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 1);
+    ASSERT_TRUE(frames.at(0).toObject().value(QStringLiteral("success")).toBool(false));
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString first_path = temp_dir.filePath(QStringLiteral("async-depth-first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("async-depth-second.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("async-depth-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-depth-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH", QByteArrayLiteral("2"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   first_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   second_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_queued")).toInt() >= 1);
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
+    ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 2);
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    ASSERT_TRUE(stages.value(QStringLiteral("payload_clone_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_queue_idle_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 2);
+    ASSERT_TRUE(frames.at(0).toObject().value(QStringLiteral("success")).toBool(false));
+    ASSERT_TRUE(frames.at(1).toObject().value(QStringLiteral("success")).toBool(false));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("producer_queue_idle_ms")));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("writer_completion_lag_ms")));
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredThreadCountAndPreservesBytes)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString reference_path = temp_dir.filePath(QStringLiteral("async-threads-reference.dng"));
+    const QString first_path = temp_dir.filePath(QStringLiteral("async-threads-first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("async-threads-second.dng"));
+    const QString third_path = temp_dir.filePath(QStringLiteral("async-threads-third.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("async-threads-profile.json"));
+
+    const QByteArray reference =
+        export_tiny_dng_for_profiler_gate(UNCOMPRESSED_RAW,
+                                          false,
+                                          reference_path,
+                                          profile_path);
+    ASSERT_TRUE(!reference.isEmpty());
+
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-thread-count-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH", QByteArrayLiteral("3"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS", QByteArrayLiteral("2"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    QByteArray third_path_bytes = third_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   first_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   second_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   third_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    ASSERT_TRUE(reference == read_all_bytes(first_path));
+    ASSERT_TRUE(reference == read_all_bytes(second_path));
+    ASSERT_TRUE(reference == read_all_bytes(third_path));
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(3, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_queued")).toInt() >= 1);
+    ASSERT_EQ(3, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(3, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_active")).toInt() >= 1);
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_max_active")).toInt() <= 2);
+    ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 3);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 3);
+    for (const QJsonValue & value : frames) {
+        ASSERT_TRUE(value.toObject().value(QStringLiteral("success")).toBool(false));
+    }
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterCompressionPreservesCompressedDngBytesAndProfilesPlacement)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString reference_path = temp_dir.filePath(QStringLiteral("compress-reference.dng"));
+    const QString reference_profile = temp_dir.filePath(QStringLiteral("compress-reference-profile.json"));
+    const QString async_path = temp_dir.filePath(QStringLiteral("compress-async-writer.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("compress-async-profile.json"));
+
+    const QByteArray reference =
+        export_tiny_dng_for_profiler_gate(COMPRESSED_RAW,
+                                          false,
+                                          reference_path,
+                                          reference_profile);
+    ASSERT_TRUE(!reference.isEmpty());
+
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-writer-compress-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS", QByteArrayLiteral("1"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), COMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray async_path_bytes = async_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   async_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    ASSERT_TRUE(reference == read_all_bytes(async_path));
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_compress_env_enabled")).toBool(false));
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_can_overlap_dng_compress")).toBool(false));
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_placement")).toString()
+                == QStringLiteral("async_writer_after_payload"));
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_bytes_valid_frames")).toInt() >= 1);
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_input_bytes_total")).toDouble() > 0.0);
+    ASSERT_TRUE(root.value(QStringLiteral("dng_compress_output_bytes_total")).toDouble() > 0.0);
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    ASSERT_TRUE(stages.value(QStringLiteral("dng_compress_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("dng_compress_encode_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 1);
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterDebugDelayCanFillConfiguredQueue)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString first_path = temp_dir.filePath(QStringLiteral("async-delay-first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("async-delay-second.dng"));
+    const QString profile_path = temp_dir.filePath(QStringLiteral("async-delay-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("async-delay-test"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH", QByteArrayLiteral("2"));
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS", QByteArrayLiteral("2000"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   first_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   second_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("async_writer_env_enabled")).toBool(false));
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_queue_capacity")).toInt());
+    ASSERT_EQ(2000, root.value(QStringLiteral("async_writer_debug_delay_ms")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_max_queued")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(2, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_DEBUG_DELAY_MS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, ExportStageProfilerRecordsQueueIdleBetweenFrameSaves)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    const QString profile_path = temp_dir.filePath(QStringLiteral("queue-idle.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("queue-idle-test"));
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> warm = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!warm.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    const QString first_path = temp_dir.filePath(QStringLiteral("first.dng"));
+    const QString second_path = temp_dir.filePath(QStringLiteral("second.dng"));
+    QByteArray first_path_bytes = first_path.toLocal8Bit();
+    QByteArray second_path_bytes = second_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(fixture.video(), dng, 0, first_path_bytes.data(), nullptr));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_EQ(0, saveDngFrame(fixture.video(), dng, 0, second_path_bytes.data(), nullptr));
+    freeDngObject(dng);
+
+    const QByteArray json_bytes = read_all_bytes(profile_path);
+    const QJsonDocument doc = QJsonDocument::fromJson(json_bytes);
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_TRUE(root.value(QStringLiteral("queue_idle_supported")).toBool(false));
+    ASSERT_TRUE(root.value(QStringLiteral("frame_count")).toInt() >= 2);
+
+    const QJsonObject stages = root.value(QStringLiteral("stages")).toObject();
+    const QJsonObject queue_idle = stages.value(QStringLiteral("queue_idle_ms")).toObject();
+    ASSERT_TRUE(queue_idle.value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(queue_idle.value(QStringLiteral("avg_ms")).toDouble(-1.0) >= 0.0);
+    const QJsonObject producer_queue_idle =
+        stages.value(QStringLiteral("producer_queue_idle_ms")).toObject();
+    ASSERT_TRUE(producer_queue_idle.value(QStringLiteral("samples")).toInt() >= 1);
+    ASSERT_TRUE(producer_queue_idle.value(QStringLiteral("avg_ms")).toDouble(-1.0) >= 0.0);
+    ASSERT_TRUE(stages.value(QStringLiteral("producer_frame_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
+    ASSERT_TRUE(stages.value(QStringLiteral("writer_completion_lag_ms")).toObject()
+                    .value(QStringLiteral("samples")).toInt() >= 2);
+
+    const QJsonArray frames = root.value(QStringLiteral("frames")).toArray();
+    ASSERT_TRUE(frames.size() >= 2);
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("queue_idle_ms")));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("producer_queue_idle_ms")));
+    ASSERT_TRUE(frames.at(1).toObject().contains(QStringLiteral("writer_completion_lag_ms")));
 
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
     qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");

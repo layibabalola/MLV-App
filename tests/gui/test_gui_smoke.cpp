@@ -849,6 +849,9 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
                   GpuPlaybackPipelineStatus::Cpu ) ),
               QStringLiteral( "CPU" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::Cpu ) ),
+              QStringLiteral( "CPU presentation" ) );
 
     state.gpuViewportInstalled = true;
     state.renderThreadUsing16BitPreview = true;
@@ -859,6 +862,15 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, false, false, false ) ),
               static_cast<int>( GpuPlaybackPipelineStatus::GpuPreview ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusToken(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "gpu_preview" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "GPU Preview" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::GpuPreview ) ),
+              QStringLiteral( "GPU preview processing or debayer" ) );
 
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, true, false, false ) ),
@@ -869,6 +881,9 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
                   GpuPlaybackPipelineStatus::GpuReconReadback ) ),
               QStringLiteral( "GPU RB" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::GpuReconReadback ) ),
+              QStringLiteral( "CUDA reconstruction with CPU readback" ) );
 
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, true, true, false ) ),
@@ -879,6 +894,9 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
                   GpuPlaybackPipelineStatus::GpuTextureReadback ) ),
               QStringLiteral( "GPU Tex RB" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::GpuTextureReadback ) ),
+              QStringLiteral( "GL texture presentation from a CPU-readback Bayer frame" ) );
 
     QCOMPARE( static_cast<int>( mainWindowGpuPlaybackPipelineStatus(
                   state, true, true, true ) ),
@@ -889,6 +907,9 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusLabel(
                   GpuPlaybackPipelineStatus::GpuTextureNoReadback ) ),
               QStringLiteral( "GPU Tex NR" ) );
+    QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
+                  GpuPlaybackPipelineStatus::GpuTextureNoReadback ) ),
+              QStringLiteral( "CUDA-to-GL texture presentation without per-frame CPU readback" ) );
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()

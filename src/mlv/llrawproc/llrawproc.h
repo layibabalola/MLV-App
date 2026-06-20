@@ -94,6 +94,7 @@ typedef struct
     int available;
     int attempted;
     int unavailable;
+    char requested_backend[128];
     char requested_path[1024];
     char resolved_path[1024];
     char description[1024];
@@ -121,9 +122,29 @@ typedef struct
     int attempted;
     int rc;
     int replaced;
+    int trusted;
     int allocated_bytes_valid;
     uint64_t allocated_bytes;
+    int skip_code;
 } llrpGpuExportTelemetry_t;
+
+typedef enum
+{
+    LLRP_GPU_EXPORT_SKIP_NONE = 0,
+    LLRP_GPU_EXPORT_SKIP_DISABLED = 1,
+    LLRP_GPU_EXPORT_SKIP_NOT_DUAL_ISO = 2,
+    LLRP_GPU_EXPORT_SKIP_EMPTY_RAW_IMAGE = 3,
+    LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE = 4,
+    LLRP_GPU_EXPORT_SKIP_INPUT_ALLOC_FAILED = 5,
+    LLRP_GPU_EXPORT_SKIP_PLAYBACK_RECON_USED = 6,
+    LLRP_GPU_EXPORT_SKIP_DUAL_ISO_RECON_FAILED = 7,
+    LLRP_GPU_EXPORT_SKIP_MISSING_INPUT = 8,
+    LLRP_GPU_EXPORT_SKIP_MISSING_RECON_STATE = 9,
+    LLRP_GPU_EXPORT_SKIP_INVALID_RECON_STATE = 10,
+    LLRP_GPU_EXPORT_SKIP_SIZE_MISMATCH = 11,
+    LLRP_GPU_EXPORT_SKIP_OUTPUT_ALLOC_FAILED = 12,
+    LLRP_GPU_EXPORT_SKIP_COUNT = 13
+} llrpGpuExportSkipCode_t;
 
 void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry);
 

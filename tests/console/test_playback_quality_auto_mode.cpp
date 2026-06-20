@@ -6,11 +6,15 @@
  *   - With cadences above frame budget, Sharp/Smooth downgrades to Fast x4.
  *   - After warmup, Aggressive Dual ISO switches to HQ x8.
  *   - With cadences above frame budget, Aggressive non-DI switches to HQ x8.
- *   - With huge headroom and a non-DI clip, sampler upgrades to HQ x2.
+ *   - With huge headroom and no validated capability, sampler holds HQ x4.
+ *   - With huge headroom plus validated capability, sampler upgrades to HQ x2.
  *   - Sharp/Smooth Dual-ISO clips never get x2; they stay at x4 even with headroom.
  *   - reset() clears the window and re-enters optimistic warmup. */
 
 #include "../common/minitest.h"
+
+#include <cstdlib>
+#include <string>
 
 #include "../../platform/qt/PlaybackQualityPolicy.h"
 
@@ -31,6 +35,39 @@ void expect_reason( const char * expected,
                std::string( playbackQualityAutoDecisionReasonName( actual ) ) );
 }
 
+void set_aggressive_preview_env( const char * value )
+{
+#ifdef _WIN32
+    static std::string env;
+    env = std::string( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=" ) + value;
+    _putenv( env.c_str() );
+#else
+    setenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW", value, 1 );
+#endif
+}
+
+void set_preview_mode_env( const char * value )
+{
+#ifdef _WIN32
+    static std::string env;
+    env = std::string( "MLVAPP_PLAYBACK_PREVIEW_MODE=" ) + value;
+    _putenv( env.c_str() );
+#else
+    setenv( "MLVAPP_PLAYBACK_PREVIEW_MODE", value, 1 );
+#endif
+}
+
+void clear_preview_mode_env()
+{
+#ifdef _WIN32
+    _putenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=" );
+    _putenv( "MLVAPP_PLAYBACK_PREVIEW_MODE=" );
+#else
+    unsetenv( "MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW" );
+    unsetenv( "MLVAPP_PLAYBACK_PREVIEW_MODE" );
+#endif
+}
+
 } // namespace
 
 TEST(PlaybackQualityModeOverride, ParsesNumbersAndNames)
@@ -39,7 +76,13 @@ TEST(PlaybackQualityModeOverride, ParsesNumbersAndNames)
     ASSERT_TRUE( playbackQualityModeParseOverride( "0", &mode ) );
     ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Fast ), mode );
 
+    ASSERT_TRUE( playbackQualityModeParseOverride( "prioritize-smoothness", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::Fast ), mode );
+
     ASSERT_TRUE( playbackQualityModeParseOverride( "HQ", &mode ) );
+    ASSERT_EQ( static_cast<int>( PlaybackQualityMode::HighQuality ), mode );
+
+    ASSERT_TRUE( playbackQualityModeParseOverride( "prioritize_quality", &mode ) );
     ASSERT_EQ( static_cast<int>( PlaybackQualityMode::HighQuality ), mode );
 
     ASSERT_TRUE( playbackQualityModeParseOverride( "auto", &mode ) );
@@ -65,6 +108,44 @@ TEST(PlaybackQualityModeOverride, RejectsInvalidValues)
     ASSERT_EQ( 123, mode );
 }
 
+TEST(PlaybackPreviewModeOverride, ParsesCaseInsensitiveEnvNames)
+{
+    clear_preview_mode_env();
+    ASSERT_EQ( -1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Aggressive" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "AGGRESSIVE-PERFORMANCE" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Sharp-Smooth" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "ON" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_preview_mode_env( "Sharp" );
+    set_aggressive_preview_env( "FAST" );
+    ASSERT_EQ( 1, playbackPreviewAggressiveEnvOverride() );
+
+    set_aggressive_preview_env( "Off" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    set_aggressive_preview_env( "not-valid" );
+    ASSERT_EQ( 0, playbackPreviewAggressiveEnvOverride() );
+
+    clear_preview_mode_env();
+}
+
+TEST(PlaybackQualityAutoTelemetry, ConvertsMillisecondsToFpsEquivalent)
+{
+    ASSERT_NEAR( 62.5, playbackQualityFpsEquivalentForFrameMs( 16.0 ), 0.001 );
+    ASSERT_NEAR( 30.0, playbackQualityFpsEquivalentForFrameMs( 1000.0 / 30.0 ), 0.001 );
+    ASSERT_NEAR( 0.0, playbackQualityFpsEquivalentForFrameMs( 0.0 ), 0.001 );
+    ASSERT_NEAR( 0.0, playbackQualityFpsEquivalentForFrameMs( -5.0 ), 0.001 );
+}
+
 TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
 {
     PlaybackQualityAutoSampler s;
@@ -73,6 +154,7 @@ TEST(PlaybackQualityAutoSampler, OptimisticUntilWindowFull)
     ASSERT_EQ( 4, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "warmup_hq", d.reason );
+    ASSERT_FALSE( d.sharperHeadroomScaleAllowed );
     ASSERT_EQ( 0u, d.sampleCount );
     ASSERT_NEAR( 1000.0 / 30.0, d.frameBudgetMs, 0.001 );
     ASSERT_NEAR( 0.0, d.averageFrameMs, 0.001 );
@@ -196,10 +278,124 @@ TEST(PlaybackQualityAutoSampler, UpgradesToHqx2OnNonDIWithHeadroom)
     PlaybackQualityAutoSampler s;
     /* 30 fps target = 33.33 ms; feed 15 ms (way under budget). */
     feed_n( s, 15.0, kWin );
-    auto d = s.decideNextSlot( 30, /*dualIsoActive*/false );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/false,
+                               /*aggressivePreviewActive*/false,
+                               /*sharperHeadroomScaleAllowed*/true );
     ASSERT_EQ( 2, d.scaleFactor );
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );
+    ASSERT_TRUE( d.sharperHeadroomScaleAllowed );
+}
+
+TEST(PlaybackQualityAutoSampler, HoldsHqx4UntilHeadroomCapabilityIsValidated)
+{
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 15.0, kWin );
+    auto d = s.decideNextSlot( 30, /*dualIsoActive*/false );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+    expect_reason( "headroom_waiting_for_validated_capability", d.reason );
+    ASSERT_FALSE( d.sharperHeadroomScaleAllowed );
+}
+
+TEST(PlaybackQualityAutoCapabilityTracker, LatchesOnlyAfterValidatedNoReadback)
+{
+    PlaybackQualityAutoCapabilityTracker tracker;
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline( false ) );
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline( false,
+                                                 /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline( true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline( false ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 15.0, kWin );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/false,
+                               /*aggressivePreviewActive*/false,
+                               tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_EQ( 2, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+    expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline(
+        false, /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_TRUE( tracker.lastObservationDemotedCapability() );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline( true,
+                                                /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+
+    tracker.reset();
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+}
+
+TEST(PlaybackQualityAutoCapabilityTracker, ResetClearsRunScopedProof)
+{
+    PlaybackQualityAutoCapabilityTracker tracker;
+    ASSERT_TRUE( tracker.notePresentedPipeline( true,
+                                                /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
+
+    ASSERT_FALSE( tracker.notePresentedPipeline(
+        false, /*gpuTextureNoReadbackCandidate*/true ) );
+    ASSERT_TRUE( tracker.lastObservationDemotedCapability() );
+
+    tracker.reset();
+    ASSERT_FALSE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_FALSE( tracker.lastObservationDemotedCapability() );
+}
+
+TEST(PlaybackQualityAutoCapabilityTracker, DualIsoObservationDoesNotAllowNonDualIsoHeadroom)
+{
+    PlaybackQualityAutoCapabilityTracker tracker;
+    ASSERT_TRUE( tracker.notePresentedPipeline(
+        true,
+        /*gpuTextureNoReadbackCandidate*/true,
+        /*dualIsoActive*/true ) );
+    ASSERT_TRUE( tracker.validatedNoReadbackObserved() );
+    ASSERT_FALSE( tracker.sharperHeadroomScaleAllowed() );
+
+    PlaybackQualityAutoSampler s;
+    feed_n( s, 15.0, kWin );
+    auto d = s.decideNextSlot( 30,
+                               /*dualIsoActive*/false,
+                               /*aggressivePreviewActive*/false,
+                               tracker.sharperHeadroomScaleAllowed() );
+    ASSERT_EQ( 4, d.scaleFactor );
+    ASSERT_TRUE( d.useHqMean23 );
+    expect_reason( "headroom_waiting_for_validated_capability", d.reason );
+
+    ASSERT_TRUE( tracker.notePresentedPipeline(
+        true,
+        /*gpuTextureNoReadbackCandidate*/true,
+        /*dualIsoActive*/false ) );
+    ASSERT_TRUE( tracker.sharperHeadroomScaleAllowed() );
 }
 
 TEST(PlaybackQualityAutoSampler, DualIsoNeverDowngradesToHqx2)
@@ -252,7 +448,10 @@ TEST(PlaybackQualityAutoSampler, SlidingWindowEvictsOldSamples)
 
     /* ... then feed 16 fast frames; the slow ones should be fully evicted. */
     feed_n( s, 15.0, kWin );
-    d = s.decideNextSlot( 30, false );
+    d = s.decideNextSlot( 30,
+                          /*dualIsoActive*/false,
+                          /*aggressivePreviewActive*/false,
+                          /*sharperHeadroomScaleAllowed*/true );
     ASSERT_EQ( 2, d.scaleFactor ); /* upgrade to HQ x2 */
     ASSERT_TRUE( d.useHqMean23 );
     expect_reason( "headroom_non_dual_iso_sharper_hq", d.reason );

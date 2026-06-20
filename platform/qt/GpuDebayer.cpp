@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QLibrary>
+#include <QMutex>
 #include <QOffscreenSurface>
 #include <QOpenGLContext>
 #include <QOpenGLFramebufferObject>
@@ -299,6 +300,16 @@ typedef int (*GpuAmazeRunPostWbGlTextureFn)(igpu_amaze_debayer_backend *,
                                             double,
                                             double,
                                             double);
+typedef int (*GpuAmazeRunPostWbGlTextureFromR16GlTextureFn)(
+    igpu_amaze_debayer_backend *,
+    unsigned int,
+    unsigned int,
+    int,
+    int,
+    int,
+    double,
+    double,
+    double);
 typedef int (*GpuAmazeLastTimingFn)(igpu_amaze_debayer_backend *,
                                     igpu_amaze_debayer_timing_t *);
 
@@ -311,6 +322,7 @@ struct GpuAmazeDebayerRuntime
     GpuAmazeDescribeFn describe = nullptr;
     GpuAmazeRunFn run = nullptr;
     GpuAmazeRunPostWbGlTextureFn runPostWbGlTexture = nullptr;
+    GpuAmazeRunPostWbGlTextureFromR16GlTextureFn runPostWbGlTextureFromR16GlTexture = nullptr;
     GpuAmazeLastTimingFn lastTiming = nullptr;
 };
 
@@ -444,6 +456,86 @@ void copyAmazeTiming(GpuAmazeDebayerRuntime * runtime,
     {
         *timing = GpuAmazeDebayerBackendTiming();
     }
+}
+
+struct GpuAmazeDebayerLiveTextureRuntime
+{
+    QMutex mutex;
+    GpuAmazeDebayerRuntime runtime;
+    igpu_amaze_debayer_backend *backend = nullptr;
+    bool attempted = false;
+    bool available = false;
+    QString reason;
+    QString rendererDescription;
+
+    ~GpuAmazeDebayerLiveTextureRuntime()
+    {
+        if ( backend && runtime.destroy )
+        {
+            runtime.destroy(backend);
+            backend = nullptr;
+        }
+    }
+
+    bool ensure(QString *outReason = nullptr)
+    {
+        QMutexLocker locker(&mutex);
+        if ( attempted )
+        {
+            if ( outReason ) *outReason = reason;
+            return available;
+        }
+
+        attempted = true;
+        QString loadReason;
+        if ( !loadAmazeDebayerRuntime(&runtime, &loadReason) )
+        {
+            reason = loadReason.isEmpty() ? gpuAmazeDebayerUnavailableReason() : loadReason;
+            if ( outReason ) *outReason = reason;
+            return false;
+        }
+
+        if ( !resolveAmazeDebayerSymbol(&runtime.library,
+                                        "igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture",
+                                        &runtime.runPostWbGlTextureFromR16GlTexture,
+                                        &reason) )
+        {
+            if ( outReason ) *outReason = reason;
+            return false;
+        }
+
+        backend = runtime.create("cuda");
+        if ( !backend )
+        {
+            reason = QStringLiteral("GPU AMaZE debayer backend create('cuda') failed");
+            if ( outReason ) *outReason = reason;
+            return false;
+        }
+
+        const int abiVersion = runtime.abiVersion(backend);
+        if ( abiVersion != IGPU_AMAZE_DEBAYER_ABI_VERSION )
+        {
+            reason = QStringLiteral("GPU AMaZE debayer backend ABI mismatch: got %1 expected %2")
+                .arg(abiVersion)
+                .arg(IGPU_AMAZE_DEBAYER_ABI_VERSION);
+            runtime.destroy(backend);
+            backend = nullptr;
+            if ( outReason ) *outReason = reason;
+            return false;
+        }
+
+        rendererDescription = describeAmazeBackend(&runtime, backend);
+        reason.clear();
+        available = true;
+        if ( outReason ) outReason->clear();
+        return true;
+    }
+};
+
+GpuAmazeDebayerLiveTextureRuntime & liveAmazeTextureRuntime()
+{
+    static GpuAmazeDebayerLiveTextureRuntime runtime;
+    return runtime;
 }
 }
 
@@ -793,6 +885,88 @@ bool gpuAmazeDebayerRenderPostWbGlTexture(const float * inputRawFrame,
     if ( rendererDescription ) *rendererDescription = backendDescription;
     copyAmazeTiming(&runtime, backend, timing);
     runtime.destroy(backend);
+    if ( reason ) reason->clear();
+    return true;
+}
+
+GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeR16TextureBackend(void)
+{
+    GpuAmazeDebayerBackendAvailability availability;
+    QString reason;
+    GpuAmazeDebayerLiveTextureRuntime & live = liveAmazeTextureRuntime();
+    if ( !live.ensure(&reason) )
+    {
+        availability.reason = reason;
+        return availability;
+    }
+
+    QMutexLocker locker(&live.mutex);
+    availability.available = live.available;
+    availability.reason = live.reason;
+    availability.rendererDescription = live.rendererDescription;
+    return availability;
+}
+
+bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
+    unsigned int inputR16GlTexture,
+    unsigned int outputRgba16GlTexture,
+    int width,
+    int height,
+    int blackLevel,
+    const double wbMultipliers[3],
+    QString * reason,
+    QString * rendererDescription,
+    GpuAmazeDebayerBackendTiming * timing)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        if ( rendererDescription ) rendererDescription->clear();
+        if ( timing ) *timing = GpuAmazeDebayerBackendTiming();
+        return false;
+    };
+
+    if ( inputR16GlTexture == 0 || outputRgba16GlTexture == 0 || width <= 32 || height <= 32 )
+    {
+        return fail(QStringLiteral("GPU AMaZE R16 texture-present input/output GL texture is invalid"));
+    }
+    if ( !validWbMultipliers(wbMultipliers) )
+    {
+        return fail(QStringLiteral("GPU AMaZE R16 texture-present WB multipliers are invalid"));
+    }
+
+    GpuAmazeDebayerLiveTextureRuntime & live = liveAmazeTextureRuntime();
+    QString ensureReason;
+    if ( !live.ensure(&ensureReason) )
+    {
+        return fail(ensureReason.isEmpty()
+            ? QStringLiteral("GPU AMaZE R16 texture-present backend is unavailable")
+            : ensureReason);
+    }
+
+    QMutexLocker locker(&live.mutex);
+    const int rc =
+        live.runtime.runPostWbGlTextureFromR16GlTexture(
+            live.backend,
+            inputR16GlTexture,
+            outputRgba16GlTexture,
+            width,
+            height,
+            blackLevel,
+            wbMultipliers[0],
+            wbMultipliers[1],
+            wbMultipliers[2]);
+    if ( rc != 0 )
+    {
+        return fail(QStringLiteral("GPU AMaZE R16 texture-present run failed rc=%1 renderer=%2")
+            .arg(rc)
+            .arg(live.rendererDescription.isEmpty()
+                ? QStringLiteral("unknown")
+                : live.rendererDescription));
+    }
+
+    if ( rendererDescription ) *rendererDescription = live.rendererDescription;
+    copyAmazeTiming(&live.runtime, live.backend, timing);
     if ( reason ) reason->clear();
     return true;
 }

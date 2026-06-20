@@ -12,6 +12,7 @@ param(
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
+    [string]$GpuPlaybackReconBackend = "",
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -19,7 +20,10 @@ param(
     [string]$EvidencePacketPath = "",
     [string]$ImportEvidencePacket = "",
     [string]$ImportOutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present\imported",
-    [switch]$AllowRepoHeadMismatch
+    [switch]$AllowRepoHeadMismatch,
+    [string]$EvidenceRepoHead = "",
+    [string]$EvidenceBranch = "",
+    [string[]]$EvidenceGitStatus = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,7 +105,11 @@ function Get-GitScalar {
         [Parameter(Mandatory = $true)][string]$Repo,
         [Parameter(Mandatory = $true)][string[]]$Args
     )
-    $output = & git -C $Repo @Args 2>$null
+    $git = Resolve-GitExecutable
+    if (-not $git) {
+        return $null
+    }
+    $output = & $git -C $Repo @Args 2>$null
     if ($LASTEXITCODE -ne 0) {
         return $null
     }
@@ -110,11 +118,40 @@ function Get-GitScalar {
 
 function Get-GitStatusLines {
     param([Parameter(Mandatory = $true)][string]$Repo)
-    $output = & git -C $Repo status --short --branch 2>$null
+    $git = Resolve-GitExecutable
+    if (-not $git) {
+        return @()
+    }
+    $output = & $git -C $Repo status --short --branch 2>$null
     if ($LASTEXITCODE -ne 0) {
         return @()
     }
     return @($output | ForEach-Object { [string]$_ })
+}
+
+function Resolve-GitExecutable {
+    $git = Get-Command git.exe -ErrorAction SilentlyContinue
+    if ($git) {
+        return $git.Source
+    }
+
+    $candidateRoots = @(
+        ${env:ProgramFiles},
+        ${env:ProgramFiles(x86)},
+        "C:\Program Files",
+        "C:\Program Files (x86)"
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($root in $candidateRoots) {
+        foreach ($relative in @("Git\cmd\git.exe", "Git\bin\git.exe")) {
+            $candidate = Join-Path $root $relative
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    return $null
 }
 
 function Get-GpuPreferenceValue {
@@ -169,7 +206,10 @@ function New-EvidencePacket {
         [Parameter(Mandatory = $true)]$Summary,
         [Parameter(Mandatory = $true)][string]$Repo,
         [Parameter(Mandatory = $true)][string]$ExpectedHostName,
-        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern
+        [Parameter(Mandatory = $true)][string]$RequiredGpuNamePattern,
+        [string]$EvidenceRepoHead = "",
+        [string]$EvidenceBranch = "",
+        [string[]]$EvidenceGitStatus = @()
     )
 
     $runRootResolved = (Resolve-Path -LiteralPath $RunRoot).Path
@@ -204,6 +244,15 @@ function New-EvidencePacket {
             validationOk = $_.validationOk
         }
     })
+    $sourceRepoHead =
+        if (![string]::IsNullOrWhiteSpace($EvidenceRepoHead)) { $EvidenceRepoHead }
+        else { Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD") }
+    $sourceBranch =
+        if (![string]::IsNullOrWhiteSpace($EvidenceBranch)) { $EvidenceBranch }
+        else { Get-GitScalar -Repo $Repo -Args @("rev-parse", "--abbrev-ref", "HEAD") }
+    $sourceGitStatus =
+        if (@($EvidenceGitStatus).Count -gt 0) { @($EvidenceGitStatus | ForEach-Object { [string]$_ }) }
+        else { @(Get-GitStatusLines -Repo $Repo) }
 
     $manifest = [pscustomobject]@{
         schema = "mlvapp-ultramagnus-p3-evidence-packet.v1"
@@ -213,9 +262,9 @@ function New-EvidencePacket {
             expectedHost = $ExpectedHostName
             requiredGpuNamePattern = $RequiredGpuNamePattern
             repoRoot = $Repo
-            repoHead = Get-GitScalar -Repo $Repo -Args @("rev-parse", "HEAD")
-            branch = Get-GitScalar -Repo $Repo -Args @("rev-parse", "--abbrev-ref", "HEAD")
-            gitStatus = Get-GitStatusLines -Repo $Repo
+            repoHead = $sourceRepoHead
+            branch = $sourceBranch
+            gitStatus = $sourceGitStatus
         }
         proof = [pscustomobject]@{
             summaryStatus = $Summary.status
@@ -321,7 +370,11 @@ function Import-EvidencePacket {
         if (!$AllowRepoHeadMismatch -and $currentHead -and $manifest.source.repoHead -and $currentHead -ne $manifest.source.repoHead) {
             Add-Failure $importFailures "Current repo HEAD $currentHead does not match evidence repo HEAD $($manifest.source.repoHead)."
         }
-        $sourceDirtyEntries = @($manifest.source.gitStatus | Where-Object { !([string]$_).StartsWith("## ") })
+        $sourceGitStatus = @()
+        if ($null -ne $manifest.source.gitStatus) {
+            $sourceGitStatus = @($manifest.source.gitStatus | Where-Object { ![string]::IsNullOrWhiteSpace([string]$_) })
+        }
+        $sourceDirtyEntries = @($sourceGitStatus | Where-Object { !([string]$_).StartsWith("## ") })
         if ($sourceDirtyEntries.Count -gt 0) {
             Add-Failure $importFailures "Evidence source worktree was dirty: $($sourceDirtyEntries -join '; ')"
         }
@@ -625,6 +678,7 @@ else {
 
 $clipResults = @()
 $plannedCommands = @()
+$gpuPlaybackReconBackendLiteral = "'" + (($GpuPlaybackReconBackend -replace "'", "''")) + "'"
 
 if ($failures.Count -eq 0) {
     New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
@@ -647,6 +701,8 @@ if ($failures.Count -eq 0) {
         # the temporal artifact/cadence detector sees real (un-instrumented)
         # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
         $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
+        $expectedScaleRequest = -1
+        [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -669,6 +725,9 @@ if ($failures.Count -eq 0) {
     GpuPreviewProcessing = 'gpu'
     ScaleFactor = '$ScaleFactor'
     QualityMode = '$QualityMode'
+    GpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
+    ExpectedScaleRequest = $expectedScaleRequest
+    ExpectedVisualScaleRequest = $expectedScaleRequest
     ExpectedQualityMode = ([int]'$QualityMode')
     RequireLookAssist = `$false
     PreserveExperimentalEnvironment = `$true
@@ -995,6 +1054,7 @@ $summary = [pscustomobject]@{
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
         validationSampleEvery = $ValidationSampleEvery
+        gpuPlaybackReconBackend = $GpuPlaybackReconBackend
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
@@ -1031,7 +1091,10 @@ if ($status -eq "success" -or $status -eq "planned") {
         -Summary $summary `
         -Repo $repo `
         -ExpectedHostName $ExpectedHostName `
-        -RequiredGpuNamePattern $RequiredGpuNamePattern
+        -RequiredGpuNamePattern $RequiredGpuNamePattern `
+        -EvidenceRepoHead $EvidenceRepoHead `
+        -EvidenceBranch $EvidenceBranch `
+        -EvidenceGitStatus $EvidenceGitStatus
     Write-JsonFile -Value $summary -Path $summaryPath
 }
 

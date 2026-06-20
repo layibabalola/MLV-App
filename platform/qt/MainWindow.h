@@ -17,6 +17,7 @@
 #include <QThreadPool>
 #include <QProcess>
 #include <QVector>
+#include <QJsonObject>
 #include <QImage>
 #include <QPixmap>
 #include <QGraphicsPixmapItem>
@@ -115,6 +116,7 @@ public:
         bool showWindow = false;
         bool waitForPaint = false;
         bool exercisePlayAction = false;
+        bool exerciseLookAssistSettle = false;
         bool exerciseLookAssistToggle = false;
         bool exerciseScaleFactorToggle = false;
         int exerciseScaleFactorToggleFrom = 2;
@@ -833,6 +835,8 @@ private:
     double m_playbackQualityAutoDecisionAverageMs = 0.0;
     double m_playbackQualityAutoDecisionBudgetMs = 1000.0 / 30.0;
     size_t m_playbackQualityAutoDecisionSampleCount = 0;
+    bool m_playbackQualityAutoHeadroomCapability = false;
+    PlaybackQualityAutoCapabilityTracker m_playbackQualityAutoCapabilityTracker;
     bool m_playbackQualityIndicatorVisible = true;
     struct PlaybackQualityIndicatorCache
     {
@@ -845,6 +849,9 @@ private:
         double playbackQualityAutoDecisionAverageMs = -1.0;
         double playbackQualityAutoDecisionBudgetMs = -1.0;
         size_t playbackQualityAutoDecisionSampleCount = static_cast<size_t>( -1 );
+        bool playbackQualityAutoHeadroomCapability = false;
+        bool playbackQualityAutoValidatedNoReadbackCapability = false;
+        bool playbackQualityAutoValidatedNoReadbackDemoted = false;
         int envScale = -2;
         bool envHq = false;
         int envPreviewOverride = -2;
@@ -905,6 +912,7 @@ private:
     double m_lastLookAssistAutoWhiteBalanceLuma = 0.0;
     double m_lastLookAssistAutoWhiteBalanceChroma = 0.0;
     QString m_lastLookAssistColorCastWarning;
+    bool m_lastLookAssistSafetyFallback = false;
     bool m_lastLookAssistPostBalanceValid = false;
     double m_lastLookAssistPostBalanceR = 0.0;
     double m_lastLookAssistPostBalanceG = 0.0;
@@ -1214,6 +1222,8 @@ private:
     int m_playbackSmokeGpuStatusReconReadbackFrames = 0;
     int m_playbackSmokeGpuStatusTextureReadbackFrames = 0;
     int m_playbackSmokeGpuStatusTextureNoReadbackFrames = 0;
+    int m_playbackSmokeFallbackCount = 0;
+    QJsonObject m_playbackSmokeFallbackReasonCounts;
     uint64_t m_playbackSmokeQueuedPlaybackDropSum = 0;
     uint64_t m_playbackSmokeQueuedPlaybackDropMax = 0;
     int m_playbackSmokeLastWorkerThreads = 0;
@@ -1344,6 +1354,7 @@ private:
     int openMlv(QString fileName);
     void playbackHandling( int timeDiff );
     void initGui( void );
+    void showPerformanceProfilingDialog( void );
     void initLib( void );
     void readSettings( void );
     void writeSettings( void );
@@ -1362,6 +1373,8 @@ private:
     void initPlaybackPreviewResolutionFromSettings( void );
     void drainLookAssistWorkers( const char *reason );
     void initPlaybackScaleFactorFromSettings( void );
+    void seedPlaybackQualityActiveStateForCurrentContext( void );
+    void resetPlaybackQualityAutoRunState( void );
     void applyPlaybackQualityMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackPreviewMode( int mode, bool persist, bool forceRefresh );
     void applyPlaybackPreviewResolution( int res, bool persist, bool forceRefresh );

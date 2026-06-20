@@ -20,9 +20,16 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QList>
+#include <QMap>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QString>
+#include <QStringList>
 #include <QTemporaryDir>
+#include <QVariant>
+
+#include <string>
 
 namespace {
 
@@ -40,6 +47,72 @@ public:
     {
         QStandardPaths::setTestModeEnabled(false);
     }
+};
+
+class PerformanceSettingsSnapshot {
+public:
+    PerformanceSettingsSnapshot()
+    {
+        QSettings set(QSettings::UserScope,
+                      QStringLiteral("magiclantern.MLVApp"),
+                      QStringLiteral("MLVApp"));
+        set.beginGroup(QStringLiteral("PerformanceProfiling"));
+        const QStringList keys = set.allKeys();
+        for (const QString & key : keys) {
+            m_values.insert(key, set.value(key));
+        }
+        set.endGroup();
+    }
+
+    ~PerformanceSettingsSnapshot()
+    {
+        QSettings set(QSettings::UserScope,
+                      QStringLiteral("magiclantern.MLVApp"),
+                      QStringLiteral("MLVApp"));
+        set.beginGroup(QStringLiteral("PerformanceProfiling"));
+        set.remove(QString());
+        for (auto it = m_values.constBegin(); it != m_values.constEnd(); ++it) {
+            set.setValue(it.key(), it.value());
+        }
+        set.endGroup();
+        set.sync();
+    }
+
+private:
+    QMap<QString, QVariant> m_values;
+};
+
+class EnvSnapshot {
+public:
+    explicit EnvSnapshot(const QList<QByteArray> &names)
+    {
+        for (const QByteArray & name : names) {
+            Entry entry;
+            entry.name = name;
+            entry.wasSet = qEnvironmentVariableIsSet(name.constData());
+            entry.value = qgetenv(name.constData());
+            m_entries.append(entry);
+        }
+    }
+
+    ~EnvSnapshot()
+    {
+        for (const Entry &entry : m_entries) {
+            if (entry.wasSet) {
+                qputenv(entry.name.constData(), entry.value);
+            } else {
+                qunsetenv(entry.name.constData());
+            }
+        }
+    }
+
+private:
+    struct Entry {
+        QByteArray name;
+        bool wasSet = false;
+        QByteArray value;
+    };
+    QList<Entry> m_entries;
 };
 
 } // namespace
@@ -132,6 +205,89 @@ TEST(CrashForensics, RunMetadataContainsExpectedFields)
     const QString qtVersion = obj.value(QStringLiteral("qt_version")).toString();
     ASSERT_FALSE(qtVersion.isEmpty());
     ASSERT_TRUE(qtVersion.contains(QLatin1Char('.')));
+}
+
+TEST(CrashForensics, GuiProfilingPresetsManageOnlyOwnedEnvironment)
+{
+    PerformanceSettingsSnapshot settingsSnapshot;
+    EnvSnapshot envSnapshot(QList<QByteArray>()
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PROCESSING_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON")
+        << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_PHASE3_UNATTENDED_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_QUALITY_MODE")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_QUALITY_MODE_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR")
+        << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS")
+        << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPORT_STAGE_PROFILER")
+        << QByteArrayLiteral("MLVAPP_EXPORT_STAGE_PROFILER_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPORT_STAGE_PROFILE_FILE")
+        << QByteArrayLiteral("MLVAPP_EXPORT_STAGE_PROFILE_FILE_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_PERF_FIELD_LOG"));
+
+    QSettings set(QSettings::UserScope,
+                  QStringLiteral("magiclantern.MLVApp"),
+                  QStringLiteral("MLVApp"));
+    set.beginGroup(QStringLiteral("PerformanceProfiling"));
+    set.remove(QString());
+    set.endGroup();
+    set.sync();
+
+    CrashForensics::setCudaPlaybackProfilingSettingsEnabled(true);
+    ASSERT_TRUE(CrashForensics::cudaPlaybackProfilingSettingsEnabled());
+    CrashForensics::applyCudaPlaybackProfilingEnvironment(true);
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_PROCESSING").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_PHASE3_UNATTENDED").toStdString());
+    ASSERT_EQ(std::string("phase3_hq"), qgetenv("MLVAPP_PLAYBACK_QUALITY_MODE").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_SCALE_FACTOR").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED").toStdString());
+
+    CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_GPU_PLAYBACK_RECON"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_QUALITY_MODE"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_SCALE_FACTOR"));
+
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED");
+    CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON").toStdString());
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+
+    CrashForensics::setDngAsyncCompressionProfilingSettings(true, 99, -4);
+    ASSERT_TRUE(CrashForensics::dngAsyncCompressionProfilingSettingsEnabled());
+    ASSERT_EQ(8, CrashForensics::dngAsyncCompressionQueueDepthSettingsValue());
+    ASSERT_EQ(1, CrashForensics::dngAsyncCompressionThreadCountSettingsValue());
+    CrashForensics::applyDngAsyncCompressionProfilingEnvironment(true, 8, 1);
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS").toStdString());
+    ASSERT_EQ(std::string("8"), qgetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPORT_STAGE_PROFILER").toStdString());
+
+    CrashForensics::setDngAsyncCompressionProfilingSettings(false, 2, 2);
+    CrashForensics::applyDngAsyncCompressionProfilingEnvironment(false, 2, 2);
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_CDNG_EXPORT_ASYNC_WRITER"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS"));
+    ASSERT_EQ(std::string("0"), qgetenv("MLVAPP_EXPORT_STAGE_PROFILER").toStdString());
 }
 
 TEST(CrashForensics, MinidumpHandlerIsInstalledOnWindows)

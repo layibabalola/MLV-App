@@ -14,14 +14,124 @@
 /* MainWindow.h gives us the static exportCdngSequence helper
  * and pulls in mlv_include.h (C API) transitively. */
 #include "../../platform/qt/MainWindow.h"
-#include "../../platform/qt/ExportSettingsDialog.h"
+#include "../../platform/qt/ExportCodecIds.h"
 #include "../../platform/qt/StretchFactors.h"
 #include "../../platform/qt/ReceiptSettings.h"
+
+static QString batchCdngCodecName(int offset)
+{
+    switch(offset)
+    {
+        case 1:  return QStringLiteral("lossless");
+        case 2:  return QStringLiteral("fast-pass");
+        default: return QStringLiteral("uncompressed");
+    }
+}
+
+static int normalizedBatchCdngCodecOffset(int offset)
+{
+    return (offset >= 0 && offset <= 2) ? offset : 0;
+}
+
+static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromOpenMlv(
+    mlvObject_t *mlvObject,
+    ReceiptSettings &receipt)
+{
+    return BatchRunner::renderedVideoSourceMetadataFromClipState(
+        static_cast<int>(getMlvWidth( mlvObject )),
+        static_cast<int>(getMlvHeight( mlvObject )),
+        getMlvFramerate( mlvObject ),
+        receipt.stretchFactorX(),
+        receipt.stretchFactorY(),
+        static_cast<int>(getMlvFrames( mlvObject )));
+}
+
+static BatchRenderedVideoSourceAudioPlan renderedVideoSourceAudioPlanFromOpenMlv(
+    mlvObject_t *mlvObject,
+    const QString &clipPath)
+{
+    const bool sourceAudioPresent = doesMlvHaveAudio( mlvObject );
+    return batchRenderedVideoSourceAudioPlanFromDiscoveredAudio(
+        clipPath,
+        sourceAudioPresent,
+        sourceAudioPresent ? static_cast<int>(getMlvAudioChannels( mlvObject )) : 0,
+        sourceAudioPresent ? static_cast<int>(getMlvSampleRate( mlvObject )) : 0,
+        sourceAudioPresent ? static_cast<int>(getMlvAudioBitsPerSample( mlvObject )) : 0,
+        sourceAudioPresent
+            ? static_cast<qulonglong>(getMlvAudioSize( mlvObject ))
+            : 0);
+}
 
 int BatchRunner::run(const QString &inputPath, const QString &outputPath)
 {
     QElapsedTimer totalTimer;
     totalTimer.start();
+
+    const BatchExportFormatRequest exportRequest =
+        BatchContext::exportFormatRequest();
+    const BatchRenderedVideoRenderSettings renderSettings =
+        BatchContext::renderedVideoRenderSettings();
+    const QString requestedFfmpegExecutable =
+        BatchContext::renderedVideoFfmpegExecutable();
+    const bool renderedVideoRequested =
+        exportRequest.format == BatchExportFormat::RenderedVideo;
+    const BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan =
+        renderedVideoRequested
+            ? batchRenderedVideoFfmpegBinaryPlanFromCurrentEnvironment(
+                requestedFfmpegExecutable)
+            : BatchRenderedVideoFfmpegBinaryPlan();
+    const BatchRenderedVideoMediaProbeBinaryPlan mediaProbeBinaryPlan =
+        renderedVideoRequested
+            ? batchRenderedVideoMediaProbeBinaryPlanFromCurrentEnvironment()
+            : BatchRenderedVideoMediaProbeBinaryPlan();
+    if( exportRequest.format == BatchExportFormat::RenderedVideo )
+    {
+        const BatchRenderedVideoJobPlan renderedPlan =
+            batchRenderedVideoJobPlanFromRequest(
+                inputPath,
+                outputPath,
+                exportRequest,
+                renderSettings,
+                ffmpegBinaryPlan,
+                mediaProbeBinaryPlan);
+        if( !renderedPlan.requestValid )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner invalid rendered-video request. %1. %2.\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoRequestShapeError(renderedPlan.request)));
+            return 2;
+        }
+        if( !renderedPlan.targetReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video target is incomplete. %1. %2. Choose a rendered codec or container before runner work.\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target)));
+            return 2;
+        }
+        if( !renderedPlan.encoderReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video encoder preset is unavailable. %1. %2. %3.\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoEncoderPresetSummary(renderedPlan.encoderPreset)));
+            return 2;
+        }
+        if( !renderedPlan.outputReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video output path is invalid. %1. %2. %3. Choose an output directory or an explicit rendered file path ending in %4.\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoOutputPlanSummary(renderedPlan.outputPlan))
+                .arg(renderedPlan.target.extension));
+            return 2;
+        }
+    }
+    if( !renderedVideoRequested && exportRequest.format != BatchExportFormat::Cdng )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner unsupported export format. %1. Supported now: cdng.\n")
+            .arg(batchExportFormatRequestSummary(exportRequest)));
+        return 2;
+    }
 
     /* --- Receipt resolution (4-way priority) ---
      * 1. --receipt <file>       → explicit, exit 5 on failure
@@ -147,6 +257,80 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         return 3;
     }
 
+    if( renderedVideoRequested )
+    {
+        const QString mlvPath = mlvFiles.first();
+        const QString baseName = QFileInfo(mlvPath).completeBaseName();
+        const BatchRenderedVideoJobPlan basePlan =
+            batchRenderedVideoJobPlanFromRequest(
+                mlvPath,
+                outputPath,
+                exportRequest,
+                mlvFiles.size(),
+                renderSettings,
+                ffmpegBinaryPlan,
+                mediaProbeBinaryPlan);
+
+        if( !basePlan.preflightReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video input/output preflight failed. clip=%1 planned-clips=%2 %3.\n")
+                .arg(baseName)
+                .arg(mlvFiles.size())
+                .arg(batchRenderedVideoJobPlanSummary(basePlan)));
+            return 2;
+        }
+
+        int mlvErr = MLV_ERR_NONE;
+        char mlvErrMsg[256] = { 0 };
+
+#ifdef Q_OS_UNIX
+        mlvObject_t *mlvObject = initMlvObjectWithClip(
+            mlvPath.toUtf8().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#else
+        mlvObject_t *mlvObject = initMlvObjectWithClip(
+            mlvPath.toLatin1().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#endif
+
+        if( mlvErr )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner cannot open rendered-video metadata source: %1. %2\n")
+                .arg(mlvPath, QString(mlvErrMsg)));
+            if( mlvObject ) freeMlvObject( mlvObject );
+            return 3;
+        }
+
+        const BatchRenderedVideoSourceMetadata metadata =
+            renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
+        const BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+            renderedVideoSourceAudioPlanFromOpenMlv( mlvObject, mlvPath );
+        const BatchRenderedVideoJobPlan audioDiscoveredPlan =
+            batchRenderedVideoJobPlanWithSourceAudio(
+                basePlan,
+                sourceAudioPlan);
+        const BatchRenderedVideoJobPlan renderedPlan =
+            batchRenderedVideoJobPlanWithMetadata(
+                audioDiscoveredPlan,
+                metadata,
+                renderSettings);
+        freeMlvObject( mlvObject );
+
+        if( !renderedPlan.preflightReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video metadata preflight failed. clip=%1 planned-clips=%2 %3.\n")
+                .arg(baseName)
+                .arg(mlvFiles.size())
+                .arg(batchRenderedVideoJobPlanSummary(renderedPlan)));
+            return 2;
+        }
+
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. clip=%1 planned-clips=%2 %3. Lane A E4 remains blocked until %4; use --export-format cdng.\n")
+            .arg(baseName)
+            .arg(mlvFiles.size())
+            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
+            .arg(renderedPlan.runnerPrerequisites.reason));
+        return 2;
+    }
+
     /* Ensure output directory exists */
     QDir outDir(outputPath);
     if( !outDir.exists() )
@@ -158,12 +342,22 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
         }
     }
 
-    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4\n")
-               .arg( inputPath, outputPath,
-                     BatchContext::skipErrors() ? QStringLiteral("true")
-                                               : QStringLiteral("false"),
-                     BatchContext::resumeEnabled() ? QStringLiteral("true")
-                                                   : QStringLiteral("false") ));
+    const uint32_t maxFrames = BatchContext::maxFrames();
+    const int cdngCodecOffset =
+        normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
+    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5 cdng-codec=%6 export-format=%7 rendered-codec=%8 rendered-container=%9\n")
+               .arg( inputPath )
+               .arg( outputPath )
+               .arg( BatchContext::skipErrors() ? QStringLiteral("true")
+                                                 : QStringLiteral("false") )
+               .arg( BatchContext::resumeEnabled() ? QStringLiteral("true")
+                                                    : QStringLiteral("false") )
+               .arg( maxFrames > 0 ? QString::number( maxFrames )
+                                    : QStringLiteral("all") )
+               .arg( batchCdngCodecName( cdngCodecOffset ) )
+               .arg( batchExportFormatName( exportRequest.format ) )
+               .arg( batchRenderedVideoCodecName( exportRequest.renderedCodec ) )
+               .arg( batchRenderedVideoContainerName( exportRequest.renderedContainer ) ));
 
     int succeeded = 0;
     int failed = 0;
@@ -261,6 +455,19 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     uint32_t cutOut = receipt->cutOut();
     if( cutIn == 0 )  cutIn  = 1;
     if( cutOut == 0 || cutOut > totalFrames ) cutOut = totalFrames;
+
+    const uint32_t unclampedCutOut = cutOut;
+    cutOut = BatchRunner::cutOutClampedForMaxFrames(
+        cutIn, cutOut, BatchContext::maxFrames() );
+    if( cutOut != unclampedCutOut )
+    {
+        BatchLogger::out(QStringLiteral("[BATCH] MAX_FRAMES %1 max=%2 cutIn=%3 cutOut=%4 originalCutOut=%5\n")
+                   .arg( baseName )
+                   .arg( BatchContext::maxFrames() )
+                   .arg( cutIn )
+                   .arg( cutOut )
+                   .arg( unclampedCutOut ));
+    }
 
     uint32_t effectiveCutIn = cutIn;  /* may be adjusted by resume */
 
@@ -400,12 +607,15 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     /* Print runtime FINGERPRINT — proves settings reached the pipeline */
     ReceiptApplier::printFingerprint( mlvObject, processingObject );
 
+    const int cdngCodecProfile =
+        CODEC_CDNG + normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
+
     /* Export CDNG sequence */
     result = MainWindow::exportCdngSequence(
         mlvObject,
         outputRoot,
         baseName,
-        CODEC_CDNG,           /* uncompressed CDNG */
+        cdngCodecProfile,     /* selected headless CDNG codec */
         CODEC_CNDG_DEFAULT,   /* standard folder/file naming */
         effectiveCutIn,       /* from receipt, possibly advanced by --resume */
         cutOut,               /* from receipt or totalFrames */

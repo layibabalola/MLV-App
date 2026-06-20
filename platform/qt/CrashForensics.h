@@ -22,6 +22,7 @@
 #ifndef CRASH_FORENSICS_H
 #define CRASH_FORENSICS_H
 
+#include <QJsonObject>
 #include <QString>
 
 namespace CrashForensics {
@@ -58,6 +59,52 @@ QString logsDirectoryPath();
  * Keys: build_sha, app_version, qt_version, os, cpu_features, command_line.
  */
 QString runMetadataJson();
+
+/*!
+ * Build the opt-in perf identity block used by playback/export telemetry.
+ * Schema: machine-fingerprint.v1.
+ */
+QJsonObject machineFingerprintObject();
+
+/*!
+ * Compact JSON form of machineFingerprintObject().
+ */
+QString machineFingerprintJson();
+
+/*!
+ * Publish the machine fingerprint as environment variables for C-only
+ * telemetry writers. Safe to call more than once; values are cached.
+ */
+void publishMachineFingerprintEnvironment();
+
+/*!
+ * Persistent GUI-facing opt-in for the compact playback/export perf JSONL log.
+ * Environment flags remain supported for script-driven profiling.
+ */
+bool performanceFieldLogSettingsEnabled();
+void setPerformanceFieldLogSettingsEnabled(bool enabled);
+bool performanceFieldLogRuntimeEnabled();
+QString performanceFieldLogPath();
+void applyPerformanceFieldLogEnvironment(bool enabled);
+
+/*! GUI-owned opt-in presets for normal dogfooding. These remain off by
+ * default and only manage environment variables marked with matching
+ * *_GUI_MANAGED sentinels, so script-provided profiling environments are not
+ * overwritten by the dialog.
+ */
+bool cudaPlaybackProfilingSettingsEnabled();
+void setCudaPlaybackProfilingSettingsEnabled(bool enabled);
+void applyCudaPlaybackProfilingEnvironment(bool enabled);
+
+bool dngAsyncCompressionProfilingSettingsEnabled();
+int dngAsyncCompressionQueueDepthSettingsValue();
+int dngAsyncCompressionThreadCountSettingsValue();
+void setDngAsyncCompressionProfilingSettings(bool enabled,
+                                             int queueDepth,
+                                             int threadCount);
+void applyDngAsyncCompressionProfilingEnvironment(bool enabled,
+                                                  int queueDepth,
+                                                  int threadCount);
 
 /*!
  * Emit the startup metadata line through qInfo() so it is captured in

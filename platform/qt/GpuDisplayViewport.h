@@ -91,6 +91,16 @@ public:
                                                const PresentationOptions &options,
                                                QString *reason = nullptr,
                                                llrpGpuPlaybackReconTiming_t *timing = nullptr);
+    static bool presentGpuPlaybackReconAmazePostWbTexture(QGraphicsView *view,
+                                                          QGraphicsPixmapItem *fallbackItem,
+                                                          const uint16_t *rawInputBayer14,
+                                                          size_t rawInputBayer14Words,
+                                                          const llrpGpuPlaybackReconState_t *state,
+                                                          int blackLevel,
+                                                          const double wbMultipliers[3],
+                                                          const PresentationOptions &options,
+                                                          QString *reason = nullptr,
+                                                          llrpGpuPlaybackReconTiming_t *timing = nullptr);
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -125,6 +135,14 @@ private:
                                              const PresentationOptions &options,
                                              QString *reason,
                                              llrpGpuPlaybackReconTiming_t *timing);
+    bool setPresentedGpuPlaybackReconAmazePostWbTexture(const uint16_t *rawInputBayer14,
+                                                        size_t rawInputBayer14Words,
+                                                        const llrpGpuPlaybackReconState_t *state,
+                                                        int blackLevel,
+                                                        const double wbMultipliers[3],
+                                                        const PresentationOptions &options,
+                                                        QString *reason,
+                                                        llrpGpuPlaybackReconTiming_t *timing);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,
@@ -168,6 +186,7 @@ private:
     QString m_rendererDescription;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;
+    QOpenGLTexture *m_gpuReconSourceTexture;
     QOpenGLTexture *m_levelsLutTexture;
     QOpenGLTexture *m_matrixLutRTexture;
     QOpenGLTexture *m_matrixLutGTexture;

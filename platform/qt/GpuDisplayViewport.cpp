@@ -228,6 +228,7 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_pendingTextureHeight(0)
     , m_program(nullptr)
     , m_texture(nullptr)
+    , m_gpuReconSourceTexture(nullptr)
     , m_levelsLutTexture(nullptr)
     , m_matrixLutRTexture(nullptr)
     , m_matrixLutGTexture(nullptr)
@@ -497,6 +498,53 @@ bool GpuDisplayViewport::presentGpuPlaybackReconTexture(
                                                          options,
                                                          reason,
                                                          timing);
+}
+
+bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
+    QGraphicsView *view,
+    QGraphicsPixmapItem *fallbackItem,
+    const uint16_t *rawInputBayer14,
+    size_t rawInputBayer14Words,
+    const llrpGpuPlaybackReconState_t *state,
+    int blackLevel,
+    const double wbMultipliers[3],
+    const PresentationOptions &options,
+    QString *reason,
+    llrpGpuPlaybackReconTiming_t *timing)
+{
+    GpuDisplayViewport *viewport = from(view);
+    if ( !viewport
+      || !rawInputBayer14
+      || !state
+      || !state->valid
+      || state->width <= 0
+      || state->height <= 0
+      || !wbMultipliers )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU playback recon AMaZE texture-present viewport or input is invalid");
+        if ( fallbackItem ) fallbackItem->setVisible(true);
+        return false;
+    }
+
+    const size_t expectedWords =
+        static_cast<size_t>(state->width) * static_cast<size_t>(state->height);
+    if ( rawInputBayer14Words < expectedWords )
+    {
+        if ( reason ) *reason = QStringLiteral("GPU playback recon AMaZE texture-present input is shorter than the frame geometry");
+        if ( fallbackItem ) fallbackItem->setVisible(true);
+        return false;
+    }
+
+    viewport->setFallbackItem(fallbackItem);
+    return viewport->setPresentedGpuPlaybackReconAmazePostWbTexture(
+        rawInputBayer14,
+        rawInputBayer14Words,
+        state,
+        blackLevel,
+        wbMultipliers,
+        options,
+        reason,
+        timing);
 }
 
 bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
@@ -966,6 +1014,174 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
     return true;
 }
 
+bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
+    const uint16_t *rawInputBayer14,
+    size_t rawInputBayer14Words,
+    const llrpGpuPlaybackReconState_t *state,
+    int blackLevel,
+    const double wbMultipliers[3],
+    const PresentationOptions &options,
+    QString *reason,
+    llrpGpuPlaybackReconTiming_t *timing)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        m_pendingTextureFromGpuAmaze = false;
+        m_pendingTextureFromGpuRecon = false;
+        m_texturePresentationActive = false;
+        return false;
+    };
+
+    if ( !rawInputBayer14
+      || !state
+      || !state->valid
+      || state->width <= 0
+      || state->height <= 0
+      || !wbMultipliers )
+    {
+        return fail(QStringLiteral("GPU playback recon AMaZE texture-present input is invalid"));
+    }
+
+    const int width = state->width;
+    const int height = state->height;
+    const size_t expectedWords =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    if ( rawInputBayer14Words < expectedWords )
+    {
+        return fail(QStringLiteral("GPU playback recon AMaZE texture-present Bayer input is incomplete"));
+    }
+
+    QOpenGLContext *glContext = context();
+    if ( !glContext )
+    {
+        return fail(QStringLiteral("GPU playback recon AMaZE texture-present requires an initialized viewport OpenGL context"));
+    }
+
+    const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
+    const bool madeCurrent = needsCurrent ? (makeCurrent(), true) : false;
+
+    ensureProgram();
+    if ( !m_program )
+    {
+        if ( madeCurrent ) doneCurrent();
+        return fail(QStringLiteral("GPU playback recon AMaZE texture-present shader setup failed"));
+    }
+
+    m_presentationOptions = options;
+    m_processingTexturesDirty = true;
+    updateProcessingTexturesIfNeeded();
+
+    if ( !m_texture
+      || m_texture->width() != width
+      || m_texture->height() != height
+      || !m_textureIs16Bit
+      || m_textureIsBayer16 )
+    {
+        destroyTexture();
+        m_texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+        m_texture->setFormat(QOpenGLTexture::RGBA16_UNorm);
+        m_texture->setSize(width, height);
+        m_texture->setMipLevels(1);
+        m_texture->allocateStorage(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16);
+        m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
+        m_textureIs16Bit = true;
+        m_textureIsBayer16 = false;
+    }
+    if ( !m_gpuReconSourceTexture
+      || m_gpuReconSourceTexture->width() != width
+      || m_gpuReconSourceTexture->height() != height )
+    {
+        delete m_gpuReconSourceTexture;
+        m_gpuReconSourceTexture = new QOpenGLTexture(QOpenGLTexture::Target2D);
+        m_gpuReconSourceTexture->setFormat(QOpenGLTexture::R16_UNorm);
+        m_gpuReconSourceTexture->setSize(width, height);
+        m_gpuReconSourceTexture->setMipLevels(1);
+        m_gpuReconSourceTexture->allocateStorage(QOpenGLTexture::Red, QOpenGLTexture::UInt16);
+        m_gpuReconSourceTexture->setWrapMode(QOpenGLTexture::ClampToEdge);
+    }
+    applySamplingMode();
+
+    int rc = -1;
+    llrpGpuPlaybackReconTiming_t reconTiming;
+    memset(&reconTiming, 0, sizeof(reconTiming));
+    GpuAmazeDebayerBackendTiming amazeTiming;
+    QString amazeReason;
+    QString amazeRenderer;
+    const bool reconOk =
+        llrpGpuPlaybackReconRunGlTexture(state,
+                                         rawInputBayer14,
+                                         expectedWords * sizeof(uint16_t),
+                                         m_gpuReconSourceTexture->textureId(),
+                                         &rc,
+                                         &reconTiming) != 0;
+    const bool amazeOk =
+        reconOk
+        && gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
+            m_gpuReconSourceTexture->textureId(),
+            m_texture->textureId(),
+            width,
+            height,
+            blackLevel,
+            wbMultipliers,
+            &amazeReason,
+            &amazeRenderer,
+            &amazeTiming);
+    const bool ok = reconOk && amazeOk;
+    if ( timing )
+    {
+        memset(timing, 0, sizeof(*timing));
+        timing->available = reconTiming.available || amazeTiming.available;
+        timing->upload_ms =
+            (reconTiming.available ? reconTiming.upload_ms : 0.0)
+            + (amazeTiming.available ? amazeTiming.uploadMs : 0.0);
+        timing->kernel_ms =
+            (reconTiming.available ? reconTiming.kernel_ms : 0.0)
+            + (amazeTiming.available ? amazeTiming.kernelMs : 0.0);
+        timing->interop_ms =
+            (reconTiming.available ? reconTiming.interop_ms : 0.0)
+            + (amazeTiming.available ? amazeTiming.downloadMs : 0.0);
+        timing->total_ms =
+            (reconTiming.available ? reconTiming.total_ms : 0.0)
+            + (amazeTiming.available ? amazeTiming.totalMs : 0.0);
+    }
+    if ( !ok )
+    {
+        destroyTexture();
+        m_pendingTextureFromGpuAmaze = false;
+        m_pendingTextureFromGpuRecon = false;
+        m_pendingTextureIsBayer16 = false;
+        if ( madeCurrent ) doneCurrent();
+        if ( rc == LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE )
+        {
+            return fail(QStringLiteral(
+                "GPU playback recon AMaZE texture handoff skipped for unsupported live Dual ISO state (rc=%1)").arg(rc));
+        }
+        if ( reconOk && !amazeReason.isEmpty() )
+        {
+            return fail(amazeReason);
+        }
+        return fail(QStringLiteral(
+            "GPU playback recon AMaZE texture handoff failed (recon_rc=%1)").arg(rc));
+    }
+
+    m_pendingImage = QImage();
+    m_pendingTextureBytes.clear();
+    m_pendingTextureWidth = width;
+    m_pendingTextureHeight = height;
+    m_pendingTextureIs16Bit = true;
+    m_pendingTextureIsBayer16 = false;
+    m_pendingTextureFromGpuAmaze = false;
+    m_pendingTextureFromGpuRecon = true;
+    m_textureDirty = false;
+    m_samplingModeDirty = false;
+    m_texturePresentationActive = false;
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
+    if ( madeCurrent ) doneCurrent();
+    update();
+    return true;
+}
+
 bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
                                                         int width,
                                                         int height,
@@ -1188,9 +1404,16 @@ void GpuDisplayViewport::ensureProgram()
 
 void GpuDisplayViewport::destroyTexture()
 {
-    if ( !m_texture ) return;
-    delete m_texture;
-    m_texture = nullptr;
+    if ( m_texture )
+    {
+        delete m_texture;
+        m_texture = nullptr;
+    }
+    if ( m_gpuReconSourceTexture )
+    {
+        delete m_gpuReconSourceTexture;
+        m_gpuReconSourceTexture = nullptr;
+    }
     m_texturePresentationActive = false;
     m_samplingModeDirty = false;
     m_textureIs16Bit = false;

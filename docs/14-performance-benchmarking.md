@@ -11,9 +11,286 @@ This document covers:
 1. The `perf_tests` harness — what it measures, options, and JSON output.
 2. The local no-intervention `run_runtime_profile.ps1` wrapper.
 3. The app-backed `MLVApp.exe --profile-playback` headless mode.
-4. The full telemetry key list emitted by playback-profile JSON.
-5. Baselines (`tests/perf/baselines.json`).
-6. Interpretation notes (single-thread vs multithread; cold-8bit; LJ92).
+4. Release-tree CDNG export profiling and matrix A/B bundles.
+5. The full telemetry key list emitted by playback-profile JSON.
+6. Baselines (`tests/perf/baselines.json`).
+7. Interpretation notes (single-thread vs multithread; cold-8bit; LJ92).
+
+## Release CDNG export profile matrix
+
+For Lane A E3 export pipeline work, prefer the release-tree matrix wrapper
+instead of hand-running one-off baseline/candidate pairs. It launches the
+existing paired A/B runner for each named case and repeat, then writes one
+`matrix-summary.json` under `.claude-state/profiling/<run>/`.
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\run-release-cdng-export-profile-matrix.ps1 `
+  -RepoRoot . `
+  -CasesPath .claude-state\profiling\cdng-export-cases.json `
+  -OutputDir .claude-state\profiling\2026-06-19-cdng-export-matrix `
+  -CdngCodec lossless `
+  -CandidateUsePayloadHandoff `
+  -CandidateUseAsyncWriter `
+  -CandidateAsyncWriterQueueDepth 2 `
+  -CandidateAsyncWriterThreadCount 2 `
+  -CandidateEnableGpuExport `
+  -CandidateGpuExportDll C:\path\to\igpu_recon_cuda.dll `
+  -CandidateGpuExportBackend cuda `
+  -RequireBaselineNoGpuExportAttempt `
+  -RequireCandidateGpuExportAttempt `
+  -RequireCandidateGpuExportReplacement `
+  -RequireDngHashMatch `
+  -MaxFrames 16 `
+  -Repeats 3 `
+  -FailOnRegression
+```
+
+Cases are JSON objects with repo-relative or absolute paths:
+
+```json
+{
+  "cases": [
+    {
+      "name": "m16-1210-master",
+      "clipPath": "C:/temp/MLV/M16-1210.MLV",
+      "receipt": "C:/temp/MLV/master.marxml",
+      "cdngCodec": "lossless",
+      "maxFrames": 16,
+      "repeats": 3
+    }
+  ]
+}
+```
+
+The matrix summary records case/run verdicts, selected CDNG codec,
+baseline/candidate frame counts, baseline/candidate wrapper elapsed
+milliseconds, elapsed deltas, candidate async queue capacity/max-queued,
+candidate async worker count/jobs started/jobs finished/max-active,
+baseline/candidate GPU-export intent plus attempt/replacement/trusted/allocation counters,
+frame-total avg/p95 deltas, producer-frame deltas, producer-queue-idle deltas,
+writer-completion-lag deltas, writer-queue-wait deltas, payload handoff
+(`payload_clone_ms`) deltas, key `llrawproc_*` / `dng_compress_ms` bottleneck
+deltas, compression substage deltas, compression byte totals, and comparator
+failures. Full `llrawproc_*` substage timing remains in each run's export
+profile JSON. The per-run profile also records
+`dng_compress_encode_ms`, `dng_compress_copy_ms`,
+`dng_compress_cleanup_ms`, `dng_compress_bytes_valid_frames`,
+`dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
+per-frame compression input/output byte counts. Default runs record
+`dng_compress_placement=producer_before_payload` and
+`async_writer_can_overlap_dng_compress=false`; opt-in async-writer compression
+runs (`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS=1` / wrapper
+`-UseAsyncWriterCompression`) can instead record
+`dng_compress_placement=async_writer_after_payload` and
+`async_writer_can_overlap_dng_compress=true`. E3 compression-placement
+experiments can therefore compare throughput and placement, not just elapsed
+milliseconds. The stage profile comparator emits those root counters under
+`compression`, including input/output MiB/s deltas, output-ratio deltas, and
+placement/overlap changes; A/B `summary.json` and matrix `runs[]` rows copy the
+same fields plus
+`dngCompressEncodeAvgDeltaMs`, `dngCompressCopyAvgDeltaMs`, and
+`dngCompressCleanupAvgDeltaMs` forward for direct promotion review.
+Treat
+`candidateAsyncWriterMaxActive=1` on a multi-worker candidate as evidence that
+extra workers did not overlap actual writes in that run, even if the configured
+thread count is higher. A tiny
+checked-in fixture matrix is only a schema/tooling smoke; E3 promotion needs a
+bounded real-footage matrix whose clips, receipts, frame caps, and repeats match
+the export scenario being judged.
+
+For UltraMagnus CPU-vs-GPU export proof, leave the baseline on CPU and enable
+only the candidate with `-CandidateEnableGpuExport` plus
+`-CandidateGpuExportDll`. `-CandidateGpuExportBackend <name>` can pin the
+loader's requested backend name for candidate proof packets; leaving it unset
+preserves the loader default of `cuda`. Add `-RequireBaselineNoGpuExportAttempt`,
+`-RequireCandidateGpuExportAttempt`, and
+`-RequireCandidateGpuExportReplacement` when the run is meant to promote GPU
+export; those gates fail the A/B or matrix verdict if the baseline attempts GPU
+work or if the candidate does not attempt/replace every profiled frame. Add
+`-RequireDngHashMatch` to fold the DNG SHA256 companion into the wrapper verdict
+instead of relying on a separate manual step. The legacy `-EnableGpuExport`
+switch remains valid, but it enables both sides and is therefore better suited
+to same-mode A/A or GPU-vs-GPU profiling. When a GPU proof gate fails, inspect
+`gpuExportSkipReasonCounts` in `summary.json` / `matrix-summary.json`; the
+UltraMagnus wrapper also includes a compact `skip_counts=...` rollup in proof
+failure text.
+
+For a throughput-only candidate after the scoped RTX 4090 parity proof is
+accepted, add `-CandidateGpuExportTrusted` and
+`-RequireCandidateGpuExportTrusted`. That sets
+`MLVAPP_GPU_EXPORT_TRUSTED=1` only for the candidate leg, bypasses the CPU
+Dual-ISO shadow oracle, and requires `gpuExportTrustedFrames == frameCount`.
+The default GPU export path stays CPU-authoritative; trusted mode is a proof
+surface for measuring the candidate without the shadow-validation cost, not a
+default export behavior change.
+
+Use `tools\profiling\invoke-ultramagnus-cdng-export-evidence.ps1` for the
+authoritative RTX 4090 export proof path. It refuses dirty local staging,
+mirrors the clean repo to `\\ultra-magnus\G\Temp\mlvapp-cdng-export-evidence`,
+builds/deploys `igpu_recon_cuda.dll` on UltraMagnus, rebuilds the release tree,
+runs the matrix wrapper with the GPU replacement and DNG hash gates above, and
+imports a compact JSON/log evidence packet under
+`.claude-state\profiling\ultramagnus-cdng-export\`. The wrapper generates an
+effective proof receipt from `-Receipt` by forcing the GPU-supported Dual ISO
+export gate (`dualIsoInterpolation=1`, alias-map on, full-res blending on, and
+chroma-smooth off); use `-UseReceiptAsIs` only when intentionally debugging the
+raw source receipt. The packet records both `sourceReceipt` and the effective
+receipt. The default proof uses `G:\Temp\mlv-gpu-profile\clips\M16-1327.MLV`,
+`receipts\FastProxy.marxml`, both `uncompressed` and `lossless` CDNG,
+`maxFrames=4`, and `repeats=1`; widen only when the proof question requires it.
+Pass `-TrustedGpuExport` only when deliberately generating the trusted
+throughput packet described above; that adds the candidate trusted gate to the
+remote matrix and records `trustedGpuExport=true` in the packet summary.
+Use `-CandidateGpuExportBackend <name>` when the packet must prove a non-default
+or explicitly pinned backend request; the remote summary records the value and
+passes it through to the matrix as `MLVAPP_GPU_EXPORT_BACKEND`.
+For the E3 lossless/compression-overlap follow-up, the wrapper can also pass
+candidate-only async writer controls to the same remote proof path:
+`-CandidateUseAsyncWriter`, `-CandidateUseAsyncWriterCompression`,
+`-CandidateAsyncWriterQueueDepth`, and `-CandidateAsyncWriterThreadCount`.
+Add `-RequireElapsedImprovement` and optionally
+`-MinElapsedImprovementPercent <n>` when the packet must fail unless the
+candidate improves wrapper wall-clock elapsed time; keep `-FailOnRegression`
+for the separate frame-total avg/p95 attribution gate. The baseline remains the
+plain CPU export path; use these switches only for bounded candidate
+experiments that still require GPU attempt/replacement, trusted-frame, and DNG
+hash gates. When passing more than one clip through a native `pwsh.exe -File`
+invocation, either use a child `pwsh -Command` with an explicit PowerShell array
+or pass a comma-separated `-ClipNames` value; the wrapper normalizes
+comma-separated clip names before staging the remote job.
+The accepted 2026-06-19 proof packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T172721\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T172721-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `68260EFC52BFDF6D372866D0E1119BBD9FEAA1C4271764315E248A82F82243D2`).
+It records `ULTRA-MAGNUS`, RTX 4090, release SHA256
+`FA8B20D51113B50AA77331E77604852375B5061357017F29CC0669349E4DB8FD`, backend
+DLL SHA256 `A63212BDA5C6439257D2100F9EA1A5F490A25F740FD9961325F5683552CE3D65`,
+candidate GPU attempts/replacements 4/4 for both uncompressed and lossless,
+zero candidate skips, and DNG hash PASS 8/8. Treat this as scoped export
+replacement and byte-identity proof, not as a broad throughput claim.
+The larger 2026-06-19 throughput probe is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T173809\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T173809-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `F2CF60E1B600D30551AA91B04D3972CF859B0788C4ABE1F1E514602ECCC2C56E`).
+It used `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96, but CPU baseline
+was faster in every repeat. Keep it classified as a negative throughput probe,
+not an E3 promotion packet; it measured the default shadow validator, which
+still pays the CPU Dual-ISO oracle plus the GPU run and byte comparison.
+The trusted E3 measurement packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T180606\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T180606-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `8B4A455CC4AB2434A9D4B7C37309C516A719183037A746F8D7E6283CF82FB971`).
+It used commit `2ba1c2e596fd1b8cda2a8add44d397f3792aafaf`, release SHA256
+`E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`,
+`-TrustedGpuExport`, `maxFrames=16`, `repeats=3`, and DNG hash PASS 96/96.
+Candidate trusted/attempted/replaced frames were 96/96/96. Uncompressed
+`M16-1327` improved from 5682.102 ms to 4602.206 ms average wall time
+(-1079.896 ms, -15.705%), with average `frameTotalAvgDeltaMs=-31.004` and
+`llrawprocDualIsoAvgDeltaMs=-22.625`. Lossless stayed byte-identical and
+trusted, but moved from 6468.414 ms to 6775.267 ms average wall time
+(+306.853 ms, +5.113%) despite `llrawprocDualIsoAvgDeltaMs=-8.563`, so treat
+the packet as promotion for the trusted measurement gate and as the next
+lossless/compression-overlap bottleneck, not as broad E3 pipeline completion.
+The three-clip trusted GPU plus async-writer-compression packet is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T181722\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T181722-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `380717DC753CFD7B01DDFE1E5348DBD402F5CF259DDC00D16D27B4D72AAD2155`).
+It used commit `7367ed8bb80e5bbe7105b6ff618ac775bae5ee3c`, release SHA256
+`E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`, clips
+`M16-1210`, `M16-1327`, and `M16-1347`, `lossless`, `maxFrames=16`,
+`repeats=3`, queue depth 2, two candidate writer threads, and the trusted GPU
+gates. Result: 9/9 runs PASS, DNG hash PASS 144/144, candidate
+trusted/attempted/replaced frames 144/144/144, and writer overlap
+`candidateAsyncWriterMaxActive=2` in every run. Average wall-clock elapsed
+improved from 5706.215 ms to 4445.874 ms (-1260.341 ms, -22.048%); per-clip
+elapsed deltas were M16-1210 -1403.277 ms (-22.768%), M16-1327 -1247.415 ms
+(-22.598%), and M16-1347 -1130.333 ms (-20.779%). Keep it classified as an
+opt-in candidate, not default policy: frame-total attribution still averaged
++19.773 ms and p95 +61.750 ms because the producer-frame win (-102.715 ms) is
+paid back as writer-completion lag (+122.487 ms), with writer-side compression
++11.200 ms on average. Promotion needs an explicit async-pipeline gate that
+separates wall-clock export throughput from completion-lag attribution.
+That gate is now available as `-RequireElapsedImprovement` /
+`-MinElapsedImprovementPercent` on the A/B, matrix, and UltraMagnus wrappers.
+The gate-enforced refresh is
+`.claude-state\profiling\ultramagnus-cdng-export\imported\packet-20260619T182703\summary.json`
+with local packet
+`.claude-state\profiling\ultramagnus-cdng-export\remote-packets\ultra-magnus-20260619T182703-mlvapp-cdng-export-evidence-latest.zip`
+(SHA256 `28A5E842F6CB277D0900317DF8B7E1FD5754912C80FE4E06CE0E54906EC32D4A`).
+It used commit `b88fb04b465a4bb8af34471afae1130f74031491`, the same release
+SHA256 `E99F592300AC8ACA00F3B238539711D3834DB1260228590A189A9532B00933A6`,
+the same three lossless clips, and `-RequireElapsedImprovement
+-MinElapsedImprovementPercent 10`. Result: 9/9 PASS, DNG hash PASS 144/144,
+candidate trusted/attempted/replaced frames 144/144/144, minimum row elapsed
+improvement 14.925%, and average wall-clock elapsed improved from 6570.353 ms
+to 4934.366 ms (-1635.987 ms, -24.687%). Frame-total attribution remained a
+separate review signal (overall avg +4.316 ms, p95 +12.605 ms), so this packet
+proves the elapsed gate and candidate throughput, not default-policy promotion.
+If UltraMagnus is acting as a runner
+without the Qt/MinGW build tree, rebuild `platform\qt\build-release\release`
+locally first, let the wrapper stage that release tree, and pass
+`-SkipRemoteBuild`; the summary records that the remote build was skipped.
+
+After any matrix or standalone A/B run that claims CDNG output correctness, run
+the DNG byte-identity companion before interpreting the timing result:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\compare-cdng-dng-output-hashes.ps1 `
+  -MatrixDir .claude-state\profiling\<matrix-run> `
+  -FailOnMismatch
+```
+
+For a single A/B bundle, use the bundle summary directly:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\compare-cdng-dng-output-hashes.ps1 `
+  -AbSummary .claude-state\profiling\<ab-run>\summary.json `
+  -FailOnMismatch
+```
+
+`-SummaryJson` is an alias for `-AbSummary`. Matrix mode follows each run's
+A/B `summary.json`; standalone A/B mode reads that file directly. Both modes
+compare every baseline/candidate DNG pair by relative path, length, and SHA256,
+then write `dng-hash-comparison.json` beside the selected summary file.
+
+When raw frame-total gates are noisy, compare a matching identity A/A matrix
+against the feature A/B matrix instead of reading the feature matrix in
+isolation:
+
+```powershell
+pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File tools\profiling\compare-cdng-export-matrices.ps1 `
+  -IdentityMatrix .claude-state\profiling\<identity-run>\matrix-summary.json `
+  -FeatureMatrix .claude-state\profiling\<feature-run>\matrix-summary.json `
+  -Output .claude-state\profiling\<calibration-run>\calibration.json
+```
+
+The calibration output uses
+`release-cdng-export-matrix-calibration.v4`. It fails closed unless the identity
+input is `comparisonMode=identity-aa`, the feature input is
+`comparisonMode=feature-ab`, both matrices use matching alternate-run-order
+settings, and case/repeat/run-order keys match exactly. The JSON records global
+and per-case metric envelopes, median/p95/positive-max summaries, and
+stage-attribution metrics from each run's `compare.json` when available. The
+`stageAttribution` object names both the dominant positive feature-average
+stage and the dominant positive-max identity-envelope excess stage, so a
+frame-total miss has a machine-readable first explanation before blame is
+assigned to a candidate scheduler or handoff. The `schedulerAttribution` object
+separates producer-frame / producer-idle deltas from writer-completion-lag /
+writer-queue-wait deltas, including p95 metrics, so async-writer runs can show
+whether the producer returned faster while completion backlog still failed the
+gate. Compression byte and MiB/s deltas are reported separately under
+`compressionThroughput`; throughput deltas are positive-good when they improve
+and do not participate in the frame-regression verdict. `blockingReasons`
+records the decisive gate; only global frame-total average and p95 envelopes
+decide `WITHIN_IDENTITY_ENVELOPE` versus `EXCEEDS_IDENTITY_ENVELOPE`.
 
 ## `perf_tests` harness
 
@@ -298,6 +575,41 @@ pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   - For scripted profiles, use `MLVAPP_PLAYBACK_AGGRESSIVE_PREVIEW=1` or
     `MLVAPP_PLAYBACK_PREVIEW_MODE=aggressive_performance`. Use `0` or
     `sharp_smooth` for the default behavior.
+
+### GUI smoke Auto proof
+
+`tools/profiling/run-release-gui-smoke.ps1` defaults to deterministic Auto
+playback validation (`-QualityMode auto`, `-ExpectedQualityMode 2`,
+`-ScaleFactor 4`, `-ExpectedScaleRequest 4`) unless
+`-UsePersistedPlaybackSettings` or explicit overrides are supplied. For default
+Auto smokes, the wrapper now requires the app's `playback_smoke.summary` Auto
+telemetry and exposes it as `visualQuality.autoDecision`: target FPS, last
+decision reason, average/budget milliseconds, FPS-equivalent cadence, sample
+count, headroom capability, validated no-readback latch state, and demotion
+state. Treat `visualQuality.autoDecision.fieldsPresent=true` as the first-line
+proof that an Auto smoke is carrying the P4 capability evidence, then inspect
+the specific values before claiming a capability-aware quality decision. The
+wrapper also emits `visualQuality.autoDecision.capabilityConsistent` and
+`validation.autoDecisionCapabilityConsistent`; default Auto smokes fail when
+headroom sharpening is reported without an active validated no-readback latch,
+when headroom capability is true but validated capability is false, or when
+validated and demoted capability are both true in the same summary. The headroom
+capability is shape-scoped: Dual ISO `GPU Tex NR` telemetry does not arm
+non-Dual-ISO `HQ x2` promotion; that promotion requires a non-Dual-ISO
+no-readback observation in the current Auto run.
+Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
+Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
+must not be cited as visual playback, Auto sampler, FPS, or color proof.
+For playback backend-selection evidence, pass `-GpuPlaybackReconBackend <name>`
+to `run-release-playback-profile.ps1`, `run-release-gui-smoke.ps1`, or the
+UltraMagnus P3 wrapper; the wrappers set `MLVAPP_GPU_PLAYBACK_RECON_BACKEND`.
+GUI smoke also clears stale inherited backend values by default when the switch
+is omitted.
+`tools/profiling/compare-release-gui-smoke-ab.ps1` preserves those Auto fields
+under `autoDecision` when comparing two smoke JSON files. Its stdout and JSON
+include Auto reason changes plus average milliseconds and FPS-equivalent deltas,
+so P4 reviews can compare sampler behavior without replaying the clip on the
+local VM; UltraMagnus remains the proof source for GPU no-readback promotion.
 
 ## Telemetry key list (playback-profile JSON)
 

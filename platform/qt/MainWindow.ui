@@ -11060,13 +11060,13 @@ QGroupBox::indicator:checked:disabled {
     <bool>true</bool>
    </property>
    <property name="text">
-    <string>Fast (preview, max cadence)</string>
+    <string>Prioritize Smoothness (preview)</string>
    </property>
    <property name="toolTip">
-    <string>Preview rowscale during playback. Fastest cadence but the structural magenta cast on Dual ISO clips remains visible.</string>
+    <string>Favor playback cadence with preview reductions when needed. Paused frames, scrubbing, and export stay full quality unless explicitly changed.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: Fast preview path; cast may be visible on Dual ISO; highest framerate.</string>
+    <string>Playback Mode: Prioritize Smoothness keeps transport responsive with named preview tradeoffs.</string>
    </property>
   </action>
   <action name="actionPlaybackQualityHQ">
@@ -11074,13 +11074,13 @@ QGroupBox::indicator:checked:disabled {
     <bool>true</bool>
    </property>
    <property name="text">
-    <string>High Quality (cast-closed, slower)</string>
+    <string>Prioritize Quality (cast-closed)</string>
    </property>
    <property name="toolTip">
-    <string>Force HQ Dual ISO + mean23 reconstruction during playback. Defaults to scale=4, or use Playback Quality &gt; Scale Factor to inspect x1/x2/x4/x8 tradeoffs.</string>
+    <string>Favor inspection quality during playback. Uses HQ Dual ISO + mean23 reconstruction and falls back to software rather than silently substituting a lower-quality path.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: HQ + mean23; cast closed; slower cadence on big sensors, especially at lower scale factors.</string>
+    <string>Playback Mode: Prioritize Quality keeps the conservative cast-closed path, accepting slower cadence when needed.</string>
    </property>
   </action>
   <action name="actionPlaybackQualityAuto">
@@ -11091,10 +11091,10 @@ QGroupBox::indicator:checked:disabled {
     <string>Auto (adapt to cadence)</string>
    </property>
    <property name="toolTip">
-    <string>Start in High Quality and adapt scale/quality based on measured cadence over a 16-frame sliding window.</string>
+    <string>Start in the quality path and adapt scale/quality based on measured cadence over a 16-frame sliding window.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: Auto. Samples cadence and falls back to Fast if the measured framerate misses the target.</string>
+    <string>Playback Mode: Auto samples cadence and uses named quality or smoothness tradeoffs to meet the target.</string>
    </property>
   </action>
   <action name="actionPlaybackQualityPhase3Fast">
@@ -11107,13 +11107,13 @@ QGroupBox::indicator:checked:disabled {
     </font>
    </property>
    <property name="text">
-    <string>Fast (Experimental - pipeline parallel)</string>
+    <string>Smoothness (Experimental - pipeline parallel)</string>
    </property>
    <property name="toolTip">
     <string>Experimental Phase 3 pipeline parallelism. Falls back to serial automatically on detected issues. Set MLVAPP_DISABLE_PHASE3=1 and restart to disable. See docs/phase3_data_model.md.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: Experimental Phase 3 Fast path.</string>
+    <string>Playback Mode: Experimental Phase 3 smoothness path.</string>
    </property>
   </action>
   <action name="actionPlaybackQualityPhase3HQ">
@@ -11126,13 +11126,13 @@ QGroupBox::indicator:checked:disabled {
     </font>
    </property>
    <property name="text">
-    <string>High Quality (Experimental - pipeline parallel)</string>
+    <string>Quality (Experimental - pipeline parallel)</string>
    </property>
    <property name="toolTip">
     <string>Experimental Phase 3 pipeline parallelism. Falls back to serial automatically on detected issues. Set MLVAPP_DISABLE_PHASE3=1 and restart to disable. See docs/phase3_data_model.md.</string>
    </property>
    <property name="statusTip">
-    <string>Playback Quality: Experimental Phase 3 High Quality path.</string>
+    <string>Playback Mode: Experimental Phase 3 quality path.</string>
    </property>
   </action>
   <action name="actionPlaybackPreviewSharpSmooth">

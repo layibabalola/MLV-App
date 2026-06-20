@@ -14,8 +14,10 @@ param(
     [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [string]$GpuPlaybackReconBackend = "",
     [int]$AgentTimeoutSec = 2700,
     [switch]$SkipRemoteBuild,
+    [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
     [string]$ImportOnlyPacket = ""
 )
@@ -266,6 +268,9 @@ $agentSubmission = $null
 $remoteJobOutput = $null
 $copiedPacket = $null
 $importResult = $null
+$localRepoHead = ""
+$localRepoBranch = ""
+$localRepoStatus = @()
 
 if (!(Test-Path -LiteralPath $validatorScript)) {
     Add-Failure $failures "Missing validator script: $validatorScript"
@@ -322,12 +327,42 @@ elseif ($failures.Count -eq 0) {
         Add-Failure $failures "RemotePacketPath '$RemotePacketPath' is not under RemoteStagingLocal '$RemoteStagingLocal'; cannot map it to SMB share '$RemoteStagingShare'."
     }
 
-    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
-        $localDirty = @(& git -C $repo status --short 2>$null | ForEach-Object { [string]$_ })
-        if ($LASTEXITCODE -ne 0) {
+    if ($failures.Count -eq 0) {
+        $localRepoHeadOutput = @(& git -C $repo rev-parse HEAD 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
+            Add-Failure $failures "Unable to inspect local git HEAD before staging."
+        }
+        else {
+            $localRepoHead = ([string]($localRepoHeadOutput | Select-Object -First 1)).Trim()
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        $localRepoBranchOutput = @(& git -C $repo rev-parse --abbrev-ref HEAD 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
+            Add-Failure $failures "Unable to inspect local git branch before staging."
+        }
+        else {
+            $localRepoBranch = ([string]($localRepoBranchOutput | Select-Object -First 1)).Trim()
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        $localRepoStatusOutput = @(& git -C $repo status --short --branch 2>$null)
+        $gitExitCode = $LASTEXITCODE
+        if ($gitExitCode -ne 0) {
             Add-Failure $failures "Unable to inspect local git status before staging."
         }
-        elseif ($localDirty.Count -gt 0) {
+        else {
+            $localRepoStatus = @($localRepoStatusOutput | ForEach-Object { [string]$_ })
+        }
+    }
+
+    if ($failures.Count -eq 0 -and !$SkipStageRepo) {
+        $localDirty = @($localRepoStatus | Where-Object { !([string]$_).StartsWith("## ") })
+        if ($localDirty.Count -gt 0) {
             Add-Failure $failures "Local repo is dirty; commit or explicitly rerun after a clean tree before producing authoritative UltraMagnus evidence: $($localDirty -join '; ')"
         }
     }
@@ -363,8 +398,13 @@ elseif ($failures.Count -eq 0) {
 
         $jobId = "mlvapp-p3-$stamp"
         $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
+        $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
         $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
         $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
+        $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
+        $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
+        $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+        $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -374,7 +414,17 @@ elseif ($failures.Count -eq 0) {
 `$clipRoot = $(Convert-ToPowerShellSingleQuotedString $ClipRoot)
 `$clipNames = $clipNamesLiteral
 `$clipPaths = $clipPathsLiteral
+`$evidenceRepoHead = $localRepoHeadLiteral
+`$evidenceBranch = $localRepoBranchLiteral
+`$evidenceGitStatus = $localRepoStatusLiteral
+`$skipBackendBuild = $skipBackendBuildLiteral
+`$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
+`$backendDir = Join-Path `$repo 'tools\gpu\backend'
+`$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
+`$backendDll = Join-Path `$backendDir 'igpu_recon_cuda.dll'
+`$backendArchSidecar = Join-Path `$backendDir 'igpu_recon_cuda.arch.json'
+`$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
 `$payload = [ordered]@{
@@ -384,12 +434,88 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     repoRoot = `$repo
     packet = `$packet
     validator = `$validator
+    backend = [ordered]@{
+        skipped = [bool]`$skipBackendBuild
+        dir = `$backendDir
+        buildScript = `$backendBuildScript
+        buildExitCode = `$null
+        deployDir = `$releaseDir
+        artifacts = @()
+        deployedArtifacts = @()
+        output = @()
+    }
+    gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     validatorExitCode = `$null
     packetInfo = `$null
 }
 try {
     if (!(Test-Path -LiteralPath `$validator)) {
         throw "Missing validator script: `$validator"
+    }
+    if (-not `$skipBackendBuild) {
+        if (!(Test-Path -LiteralPath `$backendBuildScript)) {
+            throw "Missing backend build script: `$backendBuildScript"
+        }
+        `$backendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$backendBuildScript -Dir `$backendDir 2>&1
+        `$backendExit = `$LASTEXITCODE
+        `$payload.backend.buildExitCode = `$backendExit
+        `$payload.backend.output = @(`$backendOutput | ForEach-Object { [string]`$_ })
+        `$payload.backend.artifacts = @(Get-ChildItem -LiteralPath `$backendDir -File -ErrorAction SilentlyContinue |
+            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|dll_test\.exe)$' } |
+            Sort-Object Name |
+            ForEach-Object {
+                [ordered]@{
+                    name = `$_.Name
+                    path = `$_.FullName
+                    length = `$_.Length
+                    sha256 = (Get-FileHash -LiteralPath `$_.FullName -Algorithm SHA256).Hash
+                }
+            })
+        if (`$backendExit -ne 0) {
+            throw "Backend DLL build failed with exit code `$backendExit"
+        }
+        if (!(Test-Path -LiteralPath `$backendDll)) {
+            throw "Backend DLL build did not produce `$backendDll"
+        }
+        if (!(Test-Path -LiteralPath `$backendArchSidecar)) {
+            throw "Backend DLL build did not produce architecture sidecar `$backendArchSidecar"
+        }
+        New-Item -ItemType Directory -Force -Path `$releaseDir | Out-Null
+        `$deployTargets = @()
+        `$deployTargets += [ordered]@{
+            source = `$backendDll
+            destination = (Join-Path `$releaseDir 'igpu_recon_cuda.dll')
+        }
+        `$deployTargets += [ordered]@{
+            source = `$backendArchSidecar
+            destination = (Join-Path `$releaseDir 'igpu_recon_cuda.arch.json')
+        }
+        `$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1).FullName
+        if (`$cudaRoot) {
+            `$cudart = Get-ChildItem -LiteralPath (Join-Path `$cudaRoot 'bin') -Filter 'cudart64_*.dll' -File -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First 1
+            if (`$cudart) {
+                `$deployTargets += [ordered]@{
+                    source = `$cudart.FullName
+                    destination = (Join-Path `$releaseDir `$cudart.Name)
+                }
+            }
+        }
+        foreach (`$target in `$deployTargets) {
+            Copy-Item -LiteralPath ([string]`$target.source) -Destination ([string]`$target.destination) -Force
+        }
+        `$payload.backend.deployedArtifacts = @(`$deployTargets | ForEach-Object {
+            `$item = Get-Item -LiteralPath ([string]`$_.destination)
+            [ordered]@{
+                name = `$item.Name
+                path = `$item.FullName
+                length = `$item.Length
+                sha256 = (Get-FileHash -LiteralPath `$item.FullName -Algorithm SHA256).Hash
+            }
+        })
     }
     `$args = @(
         '-NoLogo',
@@ -405,11 +531,20 @@ try {
         `$expectedHost,
         '-EvidencePacketPath',
         `$packet,
+        '-EvidenceRepoHead',
+        `$evidenceRepoHead,
+        '-EvidenceBranch',
+        `$evidenceBranch,
+        '-EvidenceGitStatus',
+        `$evidenceGitStatus,
         '-Seconds',
         '$( [string]$Seconds )',
         '-SettleMs',
         '$( [string]$SettleMs )'
     )
+    if (-not [string]::IsNullOrWhiteSpace(`$gpuPlaybackReconBackend)) {
+        `$args += @('-GpuPlaybackReconBackend', `$gpuPlaybackReconBackend)
+    }
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'
         `$args += `$clipPaths
@@ -539,6 +674,9 @@ $summary = [pscustomobject]@{
     remoteJobOutput = $remoteJobOutput
     copiedPacket = $copiedPacket
     importResult = $importResult
+    options = [pscustomobject]@{
+        gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+    }
     warnings = @($warnings)
     failures = @($failures)
 }

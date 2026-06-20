@@ -350,6 +350,7 @@ HEADERS += MainWindow.h \
     Histogram.h \
     Updater/Updater.h \
     WaveFormMonitor.h \
+    ExportCodecIds.h \
     ExportSettingsDialog.h \
     ReceiptSettings.h \
     EditSliderValueDialog.h \

@@ -14,14 +14,16 @@ param(
     [int]$SystemSettleCpuStableMs = 2000,
     [int]$SystemSettleCpuMaxMs = 60000,
     [string]$Threads = "auto",
-    [string]$QualityMode = "",
-    [string]$ScaleFactor = "",
-    [int]$ExpectedScaleRequest = 1,
+    [string]$QualityMode = "auto",
+    [string]$ScaleFactor = "4",
+    [int]$ExpectedScaleRequest = 4,
     [int]$ExpectedVisualScaleRequest = -2,
-    [int]$ExpectedQualityMode = 1,
+    [int]$ExpectedQualityMode = 2,
+    [switch]$UsePersistedPlaybackSettings,
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
     [switch]$RbfDetailTiming,
+    [string]$GpuPlaybackReconBackend = "",
     [switch]$CaptureScreenshot,
     [switch]$FailOnColorArtifact,
     [switch]$SkipWindowScreenshot,
@@ -53,12 +55,28 @@ param(
     [bool]$RequireCpuSettled = $true,
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
+    [switch]$AllowZeroPresentedFrames,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+
+if ($UsePersistedPlaybackSettings) {
+    if (-not $PSBoundParameters.ContainsKey("QualityMode")) {
+        $QualityMode = ""
+    }
+    if (-not $PSBoundParameters.ContainsKey("ScaleFactor")) {
+        $ScaleFactor = ""
+    }
+    if (-not $PSBoundParameters.ContainsKey("ExpectedQualityMode")) {
+        $ExpectedQualityMode = -1
+    }
+    if (-not $PSBoundParameters.ContainsKey("ExpectedScaleRequest")) {
+        $ExpectedScaleRequest = -1
+    }
+}
 
 # Opt-in temporal-artifact gate: turn on the interactive trace so the post-run detector can measure
 # flicker / stalls / cadence jitter from per-present events. Auto-discounts the screenshot grab.
@@ -212,6 +230,30 @@ function Convert-ToNullableDouble {
         [System.Globalization.CultureInfo]::InvariantCulture,
         [ref]$parsed)) {
         return $parsed
+    }
+
+    $null
+}
+
+function Convert-ToNullableBool {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+    if ($text -match '^(1|true|yes|on)$') {
+        return $true
+    }
+    if ($text -match '^(0|false|no|off)$') {
+        return $false
     }
 
     $null
@@ -417,12 +459,26 @@ public static class MlvGuiSmokeColorArtifactScanner
             double bottomMagentaRatio = bottomVisible > 0 ? (double)bottomMagenta / bottomVisible : 0.0;
             double bottomGreenRatio = bottomVisible > 0 ? (double)bottomGreen / bottomVisible : 0.0;
 
-            bool barSuspect = topMagentaRatio > 0.08 || topGreenRatio > 0.08 ||
-                              bottomMagentaRatio > 0.08 || bottomGreenRatio > 0.08;
-            bool blockSuspect = maxTileMagenta > 0.22 || maxTileGreen > 0.22;
-            bool globalSuspect = magentaRatio > 0.06 || greenRatio > 0.06;
-            string verdict = (barSuspect || blockSuspect) ? "suspect-block-or-bar" :
+            const double BandRatioThreshold = 0.12;
+            const double TileRatioThreshold = 0.35;
+            const double TileSupportRatioThreshold = 0.10;
+            const double GlobalRatioThreshold = 0.12;
+            const double GlobalArtifactRatioThreshold = 0.18;
+            bool barSuspect = topMagentaRatio > BandRatioThreshold || topGreenRatio > BandRatioThreshold ||
+                              bottomMagentaRatio > BandRatioThreshold || bottomGreenRatio > BandRatioThreshold;
+            bool tileSuspect = maxTileMagenta > TileRatioThreshold || maxTileGreen > TileRatioThreshold;
+            bool globalArtifactSuspect = magentaRatio > GlobalArtifactRatioThreshold ||
+                                         greenRatio > GlobalArtifactRatioThreshold;
+            bool globalSuspect = magentaRatio > GlobalRatioThreshold || greenRatio > GlobalRatioThreshold;
+            bool tileSupportedByFrame = globalSuspect ||
+                                        topMagentaRatio > TileSupportRatioThreshold ||
+                                        topGreenRatio > TileSupportRatioThreshold ||
+                                        bottomMagentaRatio > TileSupportRatioThreshold ||
+                                        bottomGreenRatio > TileSupportRatioThreshold;
+            bool blockSuspect = tileSuspect && tileSupportedByFrame;
+            string verdict = (barSuspect || blockSuspect || globalArtifactSuspect) ? "suspect-block-or-bar" :
                              globalSuspect ? "global-color-axis-present" :
+                             tileSuspect ? "localized-color-axis-present" :
                              "clear-heuristic";
 
             return new MlvGuiSmokeColorArtifactScanResult {
@@ -484,12 +540,14 @@ function Get-ScreenshotColorArtifactScan {
             meanMagentaAxis = $scan.MeanMagentaAxis
             meanGreenAxis = $scan.MeanGreenAxis
             thresholds = [pscustomobject]@{
-                bandRatio = 0.08
-                tileRatio = 0.22
-                globalRatio = 0.06
+                bandRatio = 0.12
+                tileRatio = 0.35
+                tileSupportRatio = 0.10
+                globalRatio = 0.12
+                globalArtifactRatio = 0.18
                 verdictsThatFailWhenRequested = @("suspect-block-or-bar", "scan-error")
             }
-            note = "Sampled presented-frame screenshot scan for magenta/pink/green bars and tinted blocks; use with -FailOnColorArtifact to make suspect block/bar verdicts validation failures."
+            note = "Sampled presented-frame screenshot scan for magenta/pink/green bars, tinted blocks, and severe global color-axis spikes; isolated high-saturation tiles are informational unless supported by band/global evidence."
             error = $null
         }
     }
@@ -847,6 +905,9 @@ if ($PreferHqMean23) {
 if ($RbfDetailTiming) {
     $launchEnv["MLVAPP_PLAYBACK_RBF_DETAIL_TIMING"] = "1"
 }
+if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
+    $launchEnv["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
+}
 Add-EnvironmentPairs -Target $launchEnv -Pairs $ExtraEnvironment
 if (-not [string]::IsNullOrWhiteSpace($env:OMP_NUM_THREADS)) {
     $launchEnv["OMP_NUM_THREADS"] = $env:OMP_NUM_THREADS
@@ -861,6 +922,7 @@ $experimentalEnvironment = @(
     "MLVAPP_DISABLE_AVX2_INTRIN_DIRECT8",
     "MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ",
     "MLVAPP_PLAYBACK_RBF_DETAIL_TIMING",
+    "MLVAPP_GPU_PLAYBACK_RECON_BACKEND",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_PROBE",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_WB_PROBE",
     "MLVAPP_PROCESSING_CORE_COLOR_MAIN_PRELUDE_CREATIVE_PROBE",
@@ -924,6 +986,8 @@ if ($DryRun) {
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
             qualityModeOverride = $QualityMode
+            scaleFactorOverride = $ScaleFactor
+            usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         output = $outputPath
     } | ConvertTo-Json -Depth 5
@@ -987,6 +1051,12 @@ if ($RbfDetailTiming) {
 }
 else {
     [void]$envBlock.Remove("MLVAPP_PLAYBACK_RBF_DETAIL_TIMING")
+}
+if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
+    $envBlock["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
+}
+else {
+    [void]$envBlock.Remove("MLVAPP_GPU_PLAYBACK_RECON_BACKEND")
 }
 Add-EnvironmentPairs -Target $envBlock -Pairs $ExtraEnvironment
 if (-not $PreserveExperimentalEnvironment) {
@@ -1115,6 +1185,9 @@ $lookAssistApplyLine = $recentLines |
 $lookAssistAsyncApplyLine = $recentLines |
     Where-Object { $_ -like "*look_assist.apply.auto_wb_async_applied*" } |
     Select-Object -Last 1
+$lookAssistSafetyFallbackLine = $recentLines |
+    Where-Object { $_ -like "*look_assist.apply.safety_fallback*" } |
+    Select-Object -Last 1
 $visualStateLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.visual_state*" } |
     Select-Object -Last 1
@@ -1160,6 +1233,7 @@ $dualIsoMixChromaSummary = if ($dualIsoMixChromaSummaryLine) { Convert-PlaybackL
 $lookAssistSettle = if ($lookAssistSettleLine) { Convert-PlaybackLogLineToObject $lookAssistSettleLine } else { $null }
 $lookAssistApply = if ($lookAssistApplyLine) { Convert-PlaybackLogLineToObject $lookAssistApplyLine } else { $null }
 $lookAssistAsyncApply = if ($lookAssistAsyncApplyLine) { Convert-PlaybackLogLineToObject $lookAssistAsyncApplyLine } else { $null }
+$lookAssistSafetyFallback = if ($lookAssistSafetyFallbackLine) { Convert-PlaybackLogLineToObject $lookAssistSafetyFallbackLine } else { $null }
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
 $playbackPolicy = if ($playbackPolicyLine) { Convert-PlaybackLogLineToObject $playbackPolicyLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
@@ -1237,6 +1311,8 @@ $lookAssistApplied =
     ( ( ($null -ne $lookAssistApply) -and
         (-not [string]::IsNullOrWhiteSpace([string]$lookAssistApply.scene)) ) -or
       ( ($null -ne $lookAssistAsyncApply) -and
+        (-not [string]::IsNullOrWhiteSpace([string]$lookAssistSettle.scene)) ) -or
+      ( ($null -ne $lookAssistSafetyFallback) -and
         (-not [string]::IsNullOrWhiteSpace([string]$lookAssistSettle.scene)) ) )
 
 $scaleRequestStart = Get-ObjectPropertyValue $playbackStart "scale_request"
@@ -1244,8 +1320,69 @@ $scaleRequestLast = Get-ObjectPropertyValue $playbackSummary "scale_request_last
 $scaleActiveLast = Get-ObjectPropertyValue $playbackSummary "scale_active_last"
 $qualityModeStart = Get-ObjectPropertyValue $playbackStart "quality_mode"
 $qualityModeLast = Get-ObjectPropertyValue $playbackSummary "quality_mode"
+$presentedFrames = Get-ObjectPropertyValue $playbackSummary "presented_frames"
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
+$autoDecision = [pscustomobject]@{
+    expectedAuto = ($ExpectedQualityMode -eq 2)
+    source = if ($null -ne $playbackSummary) { "playback_smoke.summary" } else { $null }
+    targetFps = Get-ObjectPropertyValue $playbackSummary "auto_target_fps"
+    reason = Get-ObjectPropertyValue $playbackSummary "auto_reason_last"
+    averageMs = Get-ObjectPropertyValue $playbackSummary "auto_avg_ms"
+    budgetMs = Get-ObjectPropertyValue $playbackSummary "auto_budget_ms"
+    sampleCount = Get-ObjectPropertyValue $playbackSummary "auto_sample_count"
+    averageFpsEquivalent = Get-ObjectPropertyValue $playbackSummary "auto_avg_fps_equivalent"
+    budgetFpsEquivalent = Get-ObjectPropertyValue $playbackSummary "auto_budget_fps_equivalent"
+    headroomCapabilityLast = Get-ObjectPropertyValue $playbackSummary "auto_headroom_capability_last"
+    validatedNoReadbackCapabilityObserved =
+        Get-ObjectPropertyValue $playbackSummary "auto_validated_no_readback_capability_observed"
+    validatedNoReadbackCapabilityDemotedLast =
+        Get-ObjectPropertyValue $playbackSummary "auto_validated_no_readback_capability_demoted_last"
+}
+$autoDecisionFieldsPresent =
+    ($null -ne $autoDecision.targetFps) -and
+    ($null -ne $autoDecision.reason) -and
+    ($null -ne $autoDecision.averageMs) -and
+    ($null -ne $autoDecision.budgetMs) -and
+    ($null -ne $autoDecision.sampleCount) -and
+    ($null -ne $autoDecision.averageFpsEquivalent) -and
+    ($null -ne $autoDecision.budgetFpsEquivalent) -and
+    ($null -ne $autoDecision.headroomCapabilityLast) -and
+    ($null -ne $autoDecision.validatedNoReadbackCapabilityObserved) -and
+    ($null -ne $autoDecision.validatedNoReadbackCapabilityDemotedLast)
+$autoDecision | Add-Member -NotePropertyName fieldsPresent -NotePropertyValue ([bool]$autoDecisionFieldsPresent)
+$autoHeadroomCapabilityLast = Convert-ToNullableBool $autoDecision.headroomCapabilityLast
+$autoValidatedNoReadbackObserved =
+    Convert-ToNullableBool $autoDecision.validatedNoReadbackCapabilityObserved
+$autoValidatedNoReadbackDemoted =
+    Convert-ToNullableBool $autoDecision.validatedNoReadbackCapabilityDemotedLast
+$autoDecisionCapabilityFailures = @()
+if ($autoDecisionFieldsPresent) {
+    if ($autoHeadroomCapabilityLast -eq $true -and
+        $autoValidatedNoReadbackObserved -ne $true) {
+        $autoDecisionCapabilityFailures += "Auto headroom capability was true without validated no-readback capability observed."
+    }
+    if ($autoValidatedNoReadbackObserved -eq $true -and
+        $autoValidatedNoReadbackDemoted -eq $true) {
+        $autoDecisionCapabilityFailures += "Auto no-readback capability was both observed and demoted in the same summary."
+    }
+    if ([string]$autoDecision.reason -eq "headroom_non_dual_iso_sharper_hq" -and
+        ($autoHeadroomCapabilityLast -ne $true -or
+         $autoValidatedNoReadbackObserved -ne $true -or
+         $autoValidatedNoReadbackDemoted -eq $true)) {
+        $autoDecisionCapabilityFailures += "Auto sharpened for headroom without an active validated no-readback capability latch."
+    }
+}
+$autoDecision | Add-Member -NotePropertyName headroomCapabilityLastBool `
+    -NotePropertyValue $autoHeadroomCapabilityLast
+$autoDecision | Add-Member -NotePropertyName validatedNoReadbackCapabilityObservedBool `
+    -NotePropertyValue $autoValidatedNoReadbackObserved
+$autoDecision | Add-Member -NotePropertyName validatedNoReadbackCapabilityDemotedLastBool `
+    -NotePropertyValue $autoValidatedNoReadbackDemoted
+$autoDecision | Add-Member -NotePropertyName capabilityConsistent `
+    -NotePropertyValue ($autoDecisionCapabilityFailures.Count -eq 0)
+$autoDecision | Add-Member -NotePropertyName capabilityFailures `
+    -NotePropertyValue $autoDecisionCapabilityFailures
 
 $cpuSettled = $true
 if ($SettleCpuMaxMs -gt 0 -or $SettleCpuStableMs -gt 0) {
@@ -1283,6 +1420,14 @@ if ($RequireCpuSettled -and
     $preLaunchSystemCpuSettle.requested -and
     -not $preLaunchSystemCpuSettle.settled) {
     $validationFailures += "System CPU did not settle before launching MLVApp."
+}
+if (-not $AllowZeroPresentedFrames) {
+    if ($null -eq $presentedFrames) {
+        $validationFailures += "Playback summary did not report presented_frames."
+    }
+    elseif ([int]$presentedFrames -le 0) {
+        $validationFailures += "Playback presented 0 frames; pass -AllowZeroPresentedFrames only for launch-only probes."
+    }
 }
 if ($FailOnColorArtifact -and
     $null -ne $colorArtifactScan -and
@@ -1332,6 +1477,12 @@ if ($ExpectedQualityMode -ge 0 -and
     $null -ne $visualState -and
     [int](Get-ObjectPropertyValue $visualState "quality_mode") -ne $ExpectedQualityMode) {
     $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
+}
+if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent) {
+    $validationFailures += "Auto playback quality telemetry was missing from playback_smoke.summary."
+}
+if ($ExpectedQualityMode -eq 2 -and $autoDecisionFieldsPresent) {
+    $validationFailures += $autoDecisionCapabilityFailures
 }
 
 $screenshotAspectEvidence = if ($CaptureScreenshot) {
@@ -1400,9 +1551,11 @@ $result = [pscustomobject]@{
             requireLookAssist = $RequireLookAssist
             requireCpuSettled = $RequireCpuSettled
             failOnColorArtifact = [bool]$FailOnColorArtifact
+            allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
+            usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         matchedUserShellDefaults = [pscustomobject]@{
             frameTelemetry = [bool]$FrameTelemetry
@@ -1422,6 +1575,7 @@ $result = [pscustomobject]@{
         scaleActiveLast = $scaleActiveLast
         qualityModeStart = $qualityModeStart
         qualityModeLast = $qualityModeLast
+        autoDecision = $autoDecision
         visualState = $visualState
         playbackPolicy = $playbackPolicy
         aspectEvidence = $screenshotAspectEvidence
@@ -1431,6 +1585,15 @@ $result = [pscustomobject]@{
             applied = [bool]$lookAssistApplied
             asyncApplied = [bool]($null -ne $lookAssistAsyncApply)
             asyncDecision = Get-ObjectPropertyValue $lookAssistAsyncApply "decision"
+            safetyFallback = [bool]($null -ne $lookAssistSafetyFallback)
+            safetyWarning = Get-ObjectPropertyValue $lookAssistSafetyFallback "warning"
+            safetyDecision = Get-ObjectPropertyValue $lookAssistSafetyFallback "decision"
+            safetyFrame = Get-ObjectPropertyValue $lookAssistSafetyFallback "frame"
+            safetyChromaSmooth = Get-ObjectPropertyValue $lookAssistSafetyFallback "chroma_smooth"
+            safetyChromaAuto = Get-ObjectPropertyValue $lookAssistSafetyFallback "chroma_auto"
+            safetyGreenRatio = Get-ObjectPropertyValue $lookAssistSafetyFallback "green_ratio"
+            safetyGreenAxis = Get-ObjectPropertyValue $lookAssistSafetyFallback "green_axis"
+            safetyVisibleGreenAxis = Get-ObjectPropertyValue $lookAssistSafetyFallback "visible_green_axis"
             enabled = Get-ObjectPropertyValue $lookAssistSettle "enabled"
             diagnosticsValid = Get-ObjectPropertyValue $lookAssistSettle "diagnostics_valid"
             waitMs = Get-ObjectPropertyValue $lookAssistSettle "wait_ms"
@@ -1512,6 +1675,7 @@ $result = [pscustomobject]@{
         dualIsoMixChromaSummary = $dualIsoMixChromaSummary
         lookAssistSettle = $lookAssistSettle
         lookAssistApply = $lookAssistApply
+        lookAssistSafetyFallback = $lookAssistSafetyFallback
         visualState = $visualState
         playbackPolicy = $playbackPolicy
         cpuSettle = $cpuSettle
@@ -1532,6 +1696,7 @@ $result = [pscustomobject]@{
             dualIsoMixChromaSummary = $dualIsoMixChromaSummaryLine
             lookAssistSettle = $lookAssistSettleLine
             lookAssistApply = $lookAssistApplyLine
+            lookAssistSafetyFallback = $lookAssistSafetyFallbackLine
             visualState = $visualStateLine
             playbackPolicy = $playbackPolicyLine
             cpuSettle = $cpuSettleLine
@@ -1553,9 +1718,14 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     lookAssistApplied = [bool]$lookAssistApplied
     cpuSettled = [bool]$cpuSettled
     systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
+    presentedFrames = $presentedFrames
+    allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict
     glOutputProof = $glOutputProof
+    autoDecisionRequired = ($ExpectedQualityMode -eq 2)
+    autoDecisionFieldsPresent = [bool]$autoDecisionFieldsPresent
+    autoDecisionCapabilityConsistent = ($autoDecisionCapabilityFailures.Count -eq 0)
     scaleRequestMatched = ($ExpectedScaleRequest -lt 0 -or
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or

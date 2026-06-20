@@ -313,6 +313,78 @@ documented mechanism for keeping the hot decode path lock-light.
 `UNCOMPRESSED_RAW=0`, `COMPRESSED_RAW=1`, `UNCOMPRESSED_ORIG=2`,
 `COMPRESSED_ORIG=3`.
 
+`dngFramePayload_t` is the immutable header+image payload produced by
+`buildDngFramePayload()` and released with `freeDngFramePayload()`. It carries
+the frame index plus raw input/output state so writer-worker experiments can
+preserve ordering and raw-mode context without rereading mutable `dngObject_t`
+state. The payload now copies the small ready header, takes ownership of the
+large ready image buffer, and leaves a fresh image work buffer on `dngObject_t`
+for the next frame, avoiding a full ready-frame image memcpy while preserving
+writer ownership. `saveDngFrameViaPayload()` provides an opt-in serial
+build-payload /
+write-payload path for Lane A E3 experiments; the default GUI/batch export loop
+still uses serial `saveDngFrame()` unless `MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF=1`
+is set. `createDngPayloadWriter()`, `saveDngFrameViaAsyncPayloadWriter()`, and
+`finishDngPayloadWriter()` provide an opt-in writer-worker path behind
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER=1`; it defaults to one worker and one queued
+payload, preserving the original bounded single-writer experiment. For E3
+release-tree experiments only, `MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH`
+may raise the bounded queue depth and
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS` may raise the worker count, both
+clamped by the DNG writer implementation. Multi-worker runs can complete files
+out of frame order and therefore remain opt-in until a real-footage promotion
+packet proves byte identity and scheduler benefit. Export-stage profiler JSON
+records
+`payload_handoff_env_enabled`, `async_writer_env_enabled`,
+`async_writer_thread_count`, `async_writer_queue_capacity`,
+`async_writer_max_queued`, `async_writer_jobs_started`,
+`async_writer_jobs_finished`, and `async_writer_max_active` so
+legacy-vs-candidate release profiles remain self-describing. If a multi-worker
+run reports `async_writer_max_active=1`, extra workers were configured but did
+not overlap actual payload writes in that run. Async-writer profiles also
+expose `payload_clone_ms`, the historical field name for the
+small header copy plus image-buffer ownership handoff/replacement cost before a
+payload is handed to the serial or async writer, and `writer_queue_wait_ms`,
+the producer time spent waiting for the bounded writer queue to accept a
+payload, distinct from the writer thread's `disk_write_ms`. The profiler also
+emits `producer_frame_ms` for caller-side save-frame occupancy and
+`producer_queue_idle_ms` for the gap between caller-side returns and the next
+save-frame entry; the older `queue_idle_ms` remains previous profiled frame
+completion to next save-frame entry, which can include async writer completion
+lag. `writer_completion_lag_ms` is derived as `frame_total_ms -
+producer_frame_ms`, making post-producer writer completion time explicit.
+Compressed-DNG output profiles also expose `dng_compress_bytes_valid_frames`,
+`dng_compress_input_bytes_total`, `dng_compress_output_bytes_total`, and
+per-frame compression input/output byte counts; these byte totals are the
+throughput denominator for deciding whether compression belongs on the producer
+side, writer side, or a later worker boundary. The `dng_compress_ms` rollup is
+split into `dng_compress_encode_ms`, `dng_compress_copy_ms`, and
+`dng_compress_cleanup_ms` so compression-placement experiments can distinguish
+LJ92 encode time from compressed-buffer copy and cleanup overhead. The
+export-stage comparator turns the byte totals into input/output MiB/s and
+output-ratio deltas, and the A/B plus matrix wrappers preserve those fields and
+the compression substage deltas in their summaries. Default profiles mark
+`dng_compress_placement=producer_before_payload` and
+`async_writer_can_overlap_dng_compress=false`, making explicit that the normal
+async writer receives already-compressed DNG image bytes. The experimental
+`MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS=1` path is available only with the
+async writer enabled; for `COMPRESSED_RAW` output it enqueues the processed
+uncompressed payload, compresses it on the writer thread, patches
+`StripByteCounts`, and may report `dng_compress_placement=async_writer_after_payload`
+with `async_writer_can_overlap_dng_compress=true`. That path remains opt-in
+proof machinery until byte identity and a bounded real-footage matrix promote a
+throughput policy.
+`tools/profiling/run-release-cdng-export-profile-matrix.ps1` is the E3
+release-tree promotion harness for these fields: it runs paired baseline and
+candidate exports across named cases/repeats and writes
+`release-cdng-export-profile-matrix.v1` with per-run frame counts, async worker
+count, async queue capacity/max-queued, per-side GPU-export intent plus
+attempt/replacement/allocation counters, wrapper wall-clock elapsed deltas,
+frame-total deltas, producer/idle deltas, writer-completion-lag deltas,
+writer-queue-wait deltas, payload-clone deltas, comparator failures, and
+optional proof-gate and DNG-hash failures for CPU-baseline/GPU-candidate
+promotion runs.
+
 ### 4.6 Audio (`mlvAudioObject_t`)
 
 MLV App does not define a dedicated `mlvAudioObject_t`. Audio state lives
@@ -717,6 +789,12 @@ double llrpGetLastDualIsoPreviewRowscaleMilliseconds(void);
 ```c
 dngObject_t * initDngObject(mlvObject_t *mlv_data, int raw_state,
                             double fps, int32_t par[4]);
+dngFramePayload_t * buildDngFramePayload(mlvObject_t *mlv_data,
+                            dngObject_t *dng_data, uint32_t frame_index,
+                            const char *props_filename);
+int           writeDngFramePayload(const dngFramePayload_t *payload,
+                            const char *dng_filename);
+void          freeDngFramePayload(dngFramePayload_t *payload);
 int           saveDngFrame (mlvObject_t *mlv_data, dngObject_t *dng_data,
                             uint32_t frame_index, char *dng_filename,
                             const char *props_filename);
@@ -751,6 +829,7 @@ public:
     static void setReceiptPath(const QString&);       static QString receiptPath();
     static void setUseDefaultReceipt(bool);           static bool useDefaultReceipt();
     static void setResumeEnabled(bool);               static bool resumeEnabled();
+    static void setMaxFrames(uint32_t);               static uint32_t maxFrames();
 };
 
 // src/batch/MlvTrim.h
@@ -1205,7 +1284,7 @@ happen pre-Qt because `--batch` and `--trim-mlv` must not bring up a
 
 | Flag | Entry point | Description |
 |---|---|---|
-| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`. |
+| `--batch` | `runBatch(QCoreApplication)` (`main.cpp:235-344`) | Headless CDNG export. Required args: `--input`, `--output`. Optional: `--skip-errors`, `--log`, `--verbose`, `--receipt`, `--default-receipt`, `--resume`, `--max-frames`, `--cdng-codec {uncompressed\|lossless\|fast-pass}`. |
 | `--trim-mlv` | `MlvTrim::run(QCoreApplication &)` | MLV segment trim / reconstruction. Stand-alone utility. |
 | `--profile-playback` | `runPlaybackProfile(QApplication)` (`main.cpp:346+`) | Headless playback profiler. Emits JSON to `--output`. Stacks arbitrary other `--*` options; see §5.8 `PlaybackProfileOptions`. |
 | `--gpu-viewport` | Passed through to `MainWindow` ctor | Forces experimental GL viewport for this run. |
@@ -1246,7 +1325,8 @@ Legend: **compile** = read at qmake/compile time;
 | `MLVAPP_EXPERIMENTAL_GPU_DEBAYER` | unset | runtime | `1` enables bilinear GPU debayer. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER` | unset | runtime | `1` enables explicit AMaZE CUDA debayer routing when the GPU preview-processing path is active. |
 | `MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT` | unset | runtime | `1` requests the non-default AMaZE CUDA-to-GL texture-present path nested under GPU preview processing and GPU AMaZE; CPU-readback fallback remains available. |
-| `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT` | unset | runtime | `1` requests the Lane B P3 playback-recon texture-present path. In the narrow x1 GPU preview-processing + `Decode/Reconstruct/Process` playback shape, the GL viewport may present the P2 CPU16-readback reconstructed Bayer frame as a Bayer16 texture; telemetry reports `source=cpu16_readback_reconstructed_bayer`, `gpu_playback_recon_texture_present_no_readback_active=false`, and playback status `gpu_texture_readback` until a GUI-thread-safe CUDA-to-GL producer exists. |
+| `MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT` | unset | runtime | `1` requests the Lane B P3 playback-recon texture-present path. In the narrow x1 GPU preview-processing + `Decode/Reconstruct/Process` playback shape, the GL viewport may present either the P2 CPU16-readback reconstructed Bayer frame as a Bayer16 texture (`source=cpu16_readback_reconstructed_bayer`, `gpu_texture_readback`) or, for the validated raw-fixes-enabled HQ Dual ISO shape, the CUDA-to-GL no-readback R16 texture path (`source=cuda_gl_r16_texture`, `gpu_playback_recon_texture_present_no_readback_active=true`, `gpu_texture_no_readback`). Unsupported states fail closed to readback/CPU and must not report no-readback. |
+| `MLVAPP_PLAYBACK_QUALITY_MODE` | unset | runtime | Overrides the Playback Mode UI setting. Accepts numeric ids `0/1/2` and legacy aliases `fast`, `hq`, `auto`; also accepts roadmap vocabulary aliases `prioritize-smoothness` / `prioritize_smoothness` and `prioritize-quality` / `prioritize_quality`. |
 | `MLVAPP_GPU_AMAZE_DEBAYER_DLL` | unset | runtime | Optional path to `igpu_amaze_debayer_cuda.dll`; otherwise app-dir/search-path lookup is used. |
 | `MLVAPP_STAGE_TIMING` | unset | runtime | Non-empty and not `"0"` → emit per-stage lines via `mlv_stage_timing_note` (`StageTiming.h:44`). |
 | `MLVAPP_STAGE_TIMING_FILE` | unset | runtime | Path to redirect stage-timing lines to a file. Default is stderr. |
@@ -1271,10 +1351,35 @@ Playback smoke GPU status is emitted separately from the CPU timing summary.
 Per-frame `playback_smoke.gpu_frame` uses:
 `cpu`, `gpu_preview`, `gpu_recon_readback`, `gpu_texture_readback`, or
 `gpu_texture_no_readback`. The session-level `playback_smoke.gpu_summary`
-counts those buckets. `gpu_texture_readback` is the current P3 presenter
-surface from a CPU16-readback Bayer frame; only a future producer that keeps the
-frame on the GPU may emit `gpu_texture_no_readback`.
+counts those buckets. `gpu_texture_readback` means GL texture presentation from
+a CPU16-readback Bayer frame. `gpu_texture_no_readback` means the scoped
+CUDA-to-GL R16 texture path actually presented the frame without per-frame CPU
+readback; unsupported or raw-fixes-off states must stay out of that bucket.
 Downstream baselines should treat the two texture statuses as distinct.
+`playback_smoke.summary` also reports Auto-mode cadence in both milliseconds and
+FPS-equivalent form: `auto_avg_ms`, `auto_avg_fps_equivalent`,
+`auto_budget_ms`, and `auto_budget_fps_equivalent`. The release GUI smoke
+wrapper promotes those summary fields plus `auto_reason_last`,
+`auto_target_fps`, `auto_sample_count`, `auto_headroom_capability_last`,
+`auto_validated_no_readback_capability_observed`, and
+`auto_validated_no_readback_capability_demoted_last` into
+`visualQuality.autoDecision`; default Auto-mode smokes fail if that telemetry is
+missing. The wrapper derives nullable boolean versions of those capability
+fields and records `visualQuality.autoDecision.capabilityConsistent` plus
+`validation.autoDecisionCapabilityConsistent`; default Auto-mode smokes also fail
+when the capability fields contradict Auto's headroom-sharpening decision or each
+other. Auto's headroom-sharpening gate is narrower than the general no-readback
+telemetry latch: a Dual ISO `GPU Tex NR` observation can report validated
+no-readback observed, but non-Dual-ISO `HQ x2` promotion requires a non-Dual-ISO
+no-readback observation in the current Auto run. `run-release-gui-smoke.ps1` also
+fails default validations when
+`presented_frames` is missing or zero; `-AllowZeroPresentedFrames` is an explicit
+launch-only opt-out and does not create playback/visual proof.
+`compare-release-gui-smoke-ab.ps1` carries the same Auto decision fields into
+its `autoDecision` comparison object, including cadence deltas in milliseconds
+and FPS-equivalent form plus the capability consistency fields. That comparator
+is a JSON artifact review surface only; it is not a replacement for
+UltraMagnus-backed no-readback evidence.
 
 ### 12.1 Cadence and render thread
 
@@ -1496,6 +1601,9 @@ Controlled by `raw_state` on `dngObject_t`:
 
 ExportSettingsDialog surfaces "Default / Resolve / Fast" flavours which
 are presets over these plus per-frame sidecar generation (`.dng.xmp`).
+Headless `--batch` defaults to `UNCOMPRESSED_RAW`; `--cdng-codec lossless`
+selects `COMPRESSED_RAW`, and `--cdng-codec fast-pass` selects the existing
+pass-through mode.
 
 ---
 
@@ -1507,6 +1615,7 @@ are presets over these plus per-frame sidecar generation (`.dng.xmp`).
 | `processingObject_t` | `initProcessingObject` | `freeProcessingObject` | Caller owns; link via `setMlvProcessing` does **not** transfer ownership. `freeMlvObject` does not free the linked processing. |
 | `llrawprocObject_t` | `initLLRawProcObject` | `freeLLRawProcObject(mlvObject_t *)` | Allocated inside `initMlvObject` and freed by `freeMlvObject`. **Never** call `freeLLRawProcObject` independently. |
 | `dngObject_t` | `initDngObject` | `freeDngObject` | Per-export; short-lived. |
+| `dngFramePayload_t` | `buildDngFramePayload` | `freeDngFramePayload` | Immutable DNG header+image payload for future writer handoff; write with `writeDngFramePayload`. |
 | Prefetch slots | Heap inside `mlvObject_t::raw_uint16_prefetch_cache` | `freeMlvObject` | Owned by the clip; not caller-visible. |
 | `FrameSlot` / `std::vector<uint8_t>` row storage | `RenderFrameThread` | `RenderFrameThread` destructor | Slot ownership tracked by `presenting` flag; consumer must call `releasePresentedFrameForRequestSerial` when done. |
 | Worker-thread copies (llrawproc) | `llrawproc_workers[]` on `mlvObject_t` | `freeMlvObject` | Copy-on-claim, version-tagged; protects the main-thread maps. |

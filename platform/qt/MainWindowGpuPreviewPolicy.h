@@ -288,6 +288,25 @@ inline const char *mainWindowGpuPlaybackPipelineStatusLabel(
     return "CPU";
 }
 
+inline const char *mainWindowGpuPlaybackPipelineStatusDescription(
+    GpuPlaybackPipelineStatus status)
+{
+    switch (status)
+    {
+    case GpuPlaybackPipelineStatus::Cpu:
+        return "CPU presentation";
+    case GpuPlaybackPipelineStatus::GpuPreview:
+        return "GPU preview processing or debayer";
+    case GpuPlaybackPipelineStatus::GpuReconReadback:
+        return "CUDA reconstruction with CPU readback";
+    case GpuPlaybackPipelineStatus::GpuTextureReadback:
+        return "GL texture presentation from a CPU-readback Bayer frame";
+    case GpuPlaybackPipelineStatus::GpuTextureNoReadback:
+        return "CUDA-to-GL texture presentation without per-frame CPU readback";
+    }
+    return "CPU presentation";
+}
+
 inline bool mainWindowUsesGpuShaderZebraProcessing(
     const MainWindowGpuPreviewPolicyState &state)
 {

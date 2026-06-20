@@ -1,0 +1,183 @@
+{
+  "schema": "mlvapp.smoke_clip_manifest.v1",
+  "createdAt": "2026-06-20T16:52:00-05:00",
+  "purpose": "Tracked, verified-only clip set for MLV-App smoke gates. Candidate intake remains in .claude-state/project-memory/ultramagnus-dual-iso-project-sampler.json.",
+  "proofBoundary": [
+    "Entries in this manifest have classification evidence only unless a gate records a later pixel-smoke or GPU parity artifact.",
+    "Dual ISO entries are suitable for release/nightly sampling after MLVApp profile confirmation, but they are not by themselves shipping proof.",
+    "A broad end-user shipping claim requires both a Dual ISO gate and a non-Dual-ISO pixel-backed guard."
+  ],
+  "requirements": {
+    "ultraMagnusReachable": true,
+    "dualIsoPromotionSignals": [
+      "dual_iso_mode_effective > 0",
+      "at least one profiled frame has dual_iso_full20_valid=true"
+    ],
+    "nonDualIsoPromotionSignals": [
+      "dual_iso_mode_effective=0",
+      "dual_iso_full20_valid=false",
+      "llrawproc_dual_iso_ms=0"
+    ]
+  },
+  "selectionPolicy": {
+    "fastGate": {
+      "dualIso": "Use the scoped Dual ISO GPU validation harness/default clip set. Cross-machine canonical path is clipSets.fastDualIsoP3[0].canonicalUncPath; UltraMagnus-local P3 default remains its G: path.",
+      "nonDualIso": "Run the nonDualIsoGuard primary clip and validate by pixels, not FPS alone."
+    },
+    "releaseNightly": {
+      "dualIso": "Sample the six verified releaseNightlyDualIso entries deterministically; rotate only after new entries are promoted with profile evidence.",
+      "nonDualIso": "Include at least one verified nonDualIsoGuard entry."
+    },
+    "deepSweep": {
+      "dualIso": "Run every releaseNightlyDualIso entry plus any later promoted Dual ISO entries.",
+      "terminalStates": [
+        "passed",
+        "failed",
+        "unreachable",
+        "no_mlv_source",
+        "ambiguous"
+      ]
+    }
+  },
+  "evidence": {
+    "dualIsoProfileSummary": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/latest-summary.json",
+    "dualIsoCandidateMemory": ".claude-state/project-memory/ultramagnus-dual-iso-project-sampler.json",
+    "dualIsoProfileNote": ".claude-state/project-memory/ultramagnus-dual-iso-profile-evidence-20260620.md",
+    "nonDualIsoMemory": ".claude-state/project-memory/ultramagnus-test-clip-locations.md"
+  },
+  "clipSets": {
+    "fastDualIsoP3": [
+      {
+        "id": "m16-1327-p3-dual-iso-recon",
+        "canonicalUncPath": "\\\\ultra-magnus\\G\\Temp\\mlv-gpu-profile\\clips\\M16-1327.MLV",
+        "ultraMagnusLocalPath": "G:\\Temp\\mlv-gpu-profile\\clips\\M16-1327.MLV",
+        "localMirrorPath": "C:\\temp\\MLV\\M16-1327.MLV",
+        "classification": "dual_iso_gpu_p3_recon_smoke",
+        "p3ValidatorDefault": "tools/profiling/run-ultramagnus-p3-validation.ps1 default ClipRoot=G:\\Temp\\mlv-gpu-profile\\clips and ClipNames=M16-1327.MLV",
+        "reachabilityVerified20260620": {
+          "canonicalUncPath": true,
+          "localMirrorPath": true,
+          "gDriveFromThisVm": false
+        },
+        "lengthBytes": 2654424576,
+        "lastWriteTime": "2025-08-16T13:28:06",
+        "notes": [
+          "Use canonicalUncPath for cross-machine manifests and references.",
+          "Use ultraMagnusLocalPath only inside UltraMagnus-local scripts where G: is the real local volume.",
+          "Use localMirrorPath only as a convenience mirror for this VM/local smoke set."
+        ]
+      }
+    ],
+    "releaseNightlyDualIso": [
+      {
+        "id": "australia-december-2024",
+        "path": "\\\\ultra-magnus\\M\\!5D3\\Australia December 2024\\Australia December 2024 7\\vids 7 redo\\M04-2307.MLV",
+        "projectRoot": "\\\\ultra-magnus\\M\\!5D3\\Australia December 2024",
+        "pathShape": "proper_unc_project_container_source_subfolder",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/australia-december-2024-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 1164,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      },
+      {
+        "id": "australia-july-2024",
+        "path": "\\\\ultra-magnus\\k\\!5D3\\Australia July 2024\\vids\\M06-1834.MLV",
+        "projectRoot": "\\\\ultra-magnus\\k\\!5D3\\Australia July 2024",
+        "pathShape": "proper_unc_project_container_vids_subfolder",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/australia-july-2024-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 270,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      },
+      {
+        "id": "brazil-march-2025-j-from-nostromo",
+        "path": "\\\\ultra-magnus\\j\\!From Nostromo\\!5D3\\Brazil March 2025\\vids\\M08-0847.MLV",
+        "projectRoot": "\\\\ultra-magnus\\j\\!From Nostromo\\!5D3\\Brazil March 2025\\vids",
+        "pathShape": "single_leading_backslash_normalized_to_unc",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/brazil-march-2025-j-from-nostromo-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 215,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      },
+      {
+        "id": "cancun-december-2025-vids",
+        "path": "\\\\ultra-magnus\\q\\!5D3\\Cancun December 2025\\vids\\M28-1216.MLV",
+        "projectRoot": "\\\\ultra-magnus\\q\\!5D3\\Cancun December 2025\\vids",
+        "pathShape": "single_leading_backslash_normalized_to_unc",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/cancun-december-2025-vids-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 390,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      },
+      {
+        "id": "disney-world-june-2025",
+        "path": "\\\\ultra-magnus\\i\\!5D3 RAW\\Disney World June 2025\\vids\\M03-0601.MLV",
+        "projectRoot": "\\\\ultra-magnus\\i\\!5D3 RAW\\Disney World June 2025\\vids",
+        "pathShape": "single_leading_backslash_normalized_to_unc",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/disney-world-june-2025-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 561,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      },
+      {
+        "id": "japan-2025",
+        "path": "\\\\ultra-magnus\\g\\Japan 2025 Inputs\\vids\\M16-1559.MLV",
+        "projectRoot": "\\\\ultra-magnus\\g\\Japan 2025 Inputs\\vids",
+        "pathShape": "proper_unc",
+        "profile": ".claude-state/profiling/20260620-dual-candidate-classification/wrapper-after-fix/japan-2025-profile.json",
+        "dual_iso_mode_effective": 1,
+        "any_dual_iso_full20_valid": true,
+        "total_frames": 4000,
+        "measured_frames": 3,
+        "raw_decode": "1808x2268",
+        "llrawproc": "904x1132",
+        "rendered": "904x1134"
+      }
+    ],
+    "nonDualIsoGuard": [
+      {
+        "id": "ben-harris-bachelor-weekend-2015-m30-1209",
+        "path": "\\\\ultra-magnus\\L\\!5D3 RAW\\!Projects\\Ben Harris Bachelor Weekend 2015\\Video\\M30-1209.MLV",
+        "projectRoot": "\\\\ultra-magnus\\L\\!5D3 RAW\\!Projects",
+        "classification": "non_dual_iso_verified",
+        "profile": ".claude-state/profiling/20260620-nondual-clip-classification/ultramagnus-L/M30-1209-profile.json",
+        "dual_iso_mode_effective": 0,
+        "dual_iso_full20_valid": false,
+        "llrawproc_dual_iso_ms": 0,
+        "width": 1920,
+        "height": 1080,
+        "frames": 398,
+        "preferred": true
+      },
+      {
+        "id": "ben-harris-bachelor-weekend-2015-m30-1340",
+        "path": "\\\\ultra-magnus\\L\\!5D3 RAW\\!Projects\\Ben Harris Bachelor Weekend 2015\\Video\\M30-1340.MLV",
+        "projectRoot": "\\\\ultra-magnus\\L\\!5D3 RAW\\!Projects",
+        "classification": "non_dual_iso_verified",
+        "profile": "prior Codex playback confirmation, session 0e1542d8-116a-43d9-b2ef-d1e0ec912f41",
+        "dual_iso_mode_effective": 0,
+        "preferred": false
+      }
+    ]
+  }
+}

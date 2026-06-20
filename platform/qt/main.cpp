@@ -15,12 +15,21 @@
 #include "../../src/batch/MlvTrim.h"
 #include "debug/ForceSingleThread.h"
 
+#include <QByteArray>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QTextStream>
 #include <cstring>
+
+#ifdef Q_OS_WIN
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
 
 /* Raw argv scan for "--batch" BEFORE QApplication is constructed.
  * QCommandLineParser needs QApplication, but we need to know the
@@ -59,6 +68,17 @@ static bool hasGuiPlaybackSmokeFlag(int argc, char *argv[])
         if (std::strcmp(argv[i], "--gui-smoke-playback") == 0) return true;
     }
     return false;
+}
+
+static bool envFlagEnabled(const char *name)
+{
+    if (!name || !qEnvironmentVariableIsSet(name)) return false;
+    const QByteArray value = qgetenv(name).trimmed().toLower();
+    return !value.isEmpty()
+        && value != QByteArrayLiteral("0")
+        && value != QByteArrayLiteral("false")
+        && value != QByteArrayLiteral("off")
+        && value != QByteArrayLiteral("no");
 }
 
 static bool argvOptionMatches(const char *arg, const char *option)
@@ -283,6 +303,41 @@ static GpuAmazeDebayerBackendRequest parsePlaybackProfileGpuAmazeDebayerBackend(
     return GpuAmazeDebayerBackendRequest::Auto;
 }
 
+static int parseBatchCdngCodecOffset(const QString & value, bool * ok)
+{
+    if (ok) *ok = true;
+
+    const QString normalized = value.trimmed().toLower();
+    if (normalized.isEmpty()
+     || normalized == QStringLiteral("uncompressed")
+     || normalized == QStringLiteral("default"))
+    {
+        return 0;
+    }
+    if (normalized == QStringLiteral("lossless")
+     || normalized == QStringLiteral("compressed"))
+    {
+        return 1;
+    }
+    if (normalized == QStringLiteral("fast")
+     || normalized == QStringLiteral("fast-pass")
+     || normalized == QStringLiteral("fastpass"))
+    {
+        return 2;
+    }
+
+    if (ok) *ok = false;
+    return 0;
+}
+
+static int parsePositiveBatchInteger(const QString & value, bool * ok)
+{
+    bool parsed = false;
+    const int result = value.trimmed().toInt(&parsed);
+    if( ok ) *ok = parsed && result > 0;
+    return parsed ? result : 0;
+}
+
 static int runBatch(QCoreApplication &app)
 {
     QCommandLineParser parser;
@@ -347,6 +402,60 @@ static int runBatch(QCoreApplication &app)
         QStringLiteral("Skip clips whose DNG output already matches expected frame count."));
     parser.addOption(resumeOpt);
 
+    QCommandLineOption maxFramesOpt(
+        QStringLiteral("max-frames"),
+        QStringLiteral("Limit each batch export to at most this many frames after receipt cut-in/cut-out resolution."),
+        QStringLiteral("count"));
+    parser.addOption(maxFramesOpt);
+
+    QCommandLineOption exportFormatOpt(
+        QStringLiteral("export-format"),
+        QStringLiteral("Batch export format. Supported now: cdng. Rendered video is reserved for Lane A E4 and fails closed until its prerequisite gates land."),
+        QStringLiteral("format"),
+        QStringLiteral("cdng"));
+    parser.addOption(exportFormatOpt);
+
+    QCommandLineOption renderedCodecOpt(
+        QStringLiteral("rendered-codec"),
+        QStringLiteral("Rendered-video codec request for the future E4 runner: h264, h265/hevc, or prores. Fails closed until rendered export lands."),
+        QStringLiteral("codec"));
+    parser.addOption(renderedCodecOpt);
+
+    QCommandLineOption renderedContainerOpt(
+        QStringLiteral("rendered-container"),
+        QStringLiteral("Rendered-video container request for the future E4 runner: mov, mp4, or mkv. Fails closed until rendered export lands."),
+        QStringLiteral("container"));
+    parser.addOption(renderedContainerOpt);
+
+    QCommandLineOption renderedResizeWidthOpt(
+        QStringLiteral("rendered-resize-width"),
+        QStringLiteral("Planned rendered-video resize width in pixels for the future E4 runner. Requires rendered-video mode and still fails closed before export."),
+        QStringLiteral("pixels"));
+    parser.addOption(renderedResizeWidthOpt);
+
+    QCommandLineOption renderedResizeHeightOpt(
+        QStringLiteral("rendered-resize-height"),
+        QStringLiteral("Planned rendered-video resize height in pixels for the future E4 runner unless --rendered-resize-height-locked is set."),
+        QStringLiteral("pixels"));
+    parser.addOption(renderedResizeHeightOpt);
+
+    QCommandLineOption renderedResizeHeightLockedOpt(
+        QStringLiteral("rendered-resize-height-locked"),
+        QStringLiteral("Derive planned rendered-video resize height from source geometry, stretch, and --rendered-resize-width."));
+    parser.addOption(renderedResizeHeightLockedOpt);
+
+    QCommandLineOption renderedFfmpegOpt(
+        QStringLiteral("rendered-ffmpeg"),
+        QStringLiteral("Planned ffmpeg executable path or command name for the future E4 runner. Fails closed before rendered export."),
+        QStringLiteral("path-or-name"));
+    parser.addOption(renderedFfmpegOpt);
+
+    QCommandLineOption cdngCodecOpt(
+        QStringLiteral("cdng-codec"),
+        QStringLiteral("CDNG codec for batch export: uncompressed, lossless, or fast-pass. Default: uncompressed."),
+        QStringLiteral("mode"));
+    parser.addOption(cdngCodecOpt);
+
     parser.process(app);
 
     /* Init log file mirror as early as possible so that --help and
@@ -379,6 +488,220 @@ static int runBatch(QCoreApplication &app)
     bool useDefaultReceipt  = parser.isSet(defaultReceiptOpt);
 
     bool resume         = parser.isSet(resumeOpt);
+    uint maxFrames      = 0;
+    int cdngCodecOffset = 0;
+    const QString exportFormatRaw = parser.value(exportFormatOpt);
+    BatchExportFormatRequest exportRequest =
+        batchExportFormatRequestFromString(exportFormatRaw);
+    const bool renderedCodecSet = parser.isSet(renderedCodecOpt);
+    const bool renderedContainerSet = parser.isSet(renderedContainerOpt);
+    const bool renderedResizeWidthSet = parser.isSet(renderedResizeWidthOpt);
+    const bool renderedResizeHeightSet = parser.isSet(renderedResizeHeightOpt);
+    const bool renderedResizeHeightLockedSet =
+        parser.isSet(renderedResizeHeightLockedOpt);
+    const bool renderedFfmpegSet = parser.isSet(renderedFfmpegOpt);
+    const bool renderedResizeOptionSet = renderedResizeWidthSet
+                                      || renderedResizeHeightSet
+                                      || renderedResizeHeightLockedSet;
+    const bool renderedOptionSet = renderedCodecSet
+                                || renderedContainerSet
+                                || renderedResizeOptionSet
+                                || renderedFfmpegSet;
+    BatchRenderedVideoRenderSettings renderedSettings =
+        batchRenderedVideoDefaultRenderSettings();
+    QString renderedFfmpegExecutable;
+    if( renderedOptionSet
+     && parser.isSet(exportFormatOpt)
+     && exportRequest.format == BatchExportFormat::Cdng )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video options require --export-format rendered-video or a rendered-video alias; omit them for cdng.\n\n"));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
+    if( renderedOptionSet && exportRequest.format == BatchExportFormat::Cdng )
+        exportRequest.format = BatchExportFormat::RenderedVideo;
+    if( renderedCodecSet )
+    {
+        bool ok = false;
+        exportRequest.renderedCodec =
+            batchRenderedVideoCodecFromString(parser.value(renderedCodecOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-codec must be one of: h264, h265, hevc, prores.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( renderedContainerSet )
+    {
+        bool ok = false;
+        exportRequest.renderedContainer =
+            batchRenderedVideoContainerFromString(parser.value(renderedContainerOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-container must be one of: mov, mp4, mkv.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( renderedResizeOptionSet )
+    {
+        if( !renderedResizeWidthSet )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-width is required when using rendered resize options.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        bool ok = false;
+        const int resizeWidth =
+            parsePositiveBatchInteger(parser.value(renderedResizeWidthOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-width must be a positive integer.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        int resizeHeight = 0;
+        if( renderedResizeHeightSet )
+        {
+            resizeHeight =
+                parsePositiveBatchInteger(parser.value(renderedResizeHeightOpt), &ok);
+            if( !ok )
+            {
+                BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-height must be a positive integer.\n\n"));
+                BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+                BatchLogger::shutdown();
+                return 2;
+            }
+        }
+        else if( !renderedResizeHeightLockedSet )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-resize-height is required unless --rendered-resize-height-locked is set.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+
+        renderedSettings = batchRenderedVideoRenderSettingsFromExplicitResize(
+            true,
+            resizeWidth,
+            resizeHeight,
+            renderedResizeHeightLockedSet);
+        if( !renderedSettings.ready )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video resize settings are invalid. %1.\n\n")
+                .arg(batchRenderedVideoRenderSettingsSummary(renderedSettings)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( renderedFfmpegSet )
+    {
+        renderedFfmpegExecutable = parser.value(renderedFfmpegOpt).trimmed();
+        if( renderedFfmpegExecutable.isEmpty() )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --rendered-ffmpeg must not be empty.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    const BatchExportFormat exportFormat =
+        exportRequest.format;
+    if( exportFormat == BatchExportFormat::Unknown )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: --export-format must be cdng. Rendered-video E4 is not implemented yet.\n\n"));
+        BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+        BatchLogger::shutdown();
+        return 2;
+    }
+    if( exportFormat == BatchExportFormat::RenderedVideo )
+    {
+        const BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan =
+            batchRenderedVideoFfmpegBinaryPlanFromRequestedName(
+                renderedFfmpegExecutable);
+        const BatchRenderedVideoJobPlan renderedPlan =
+            batchRenderedVideoJobPlanFromRequest(
+                inputPath,
+                outputPath,
+                exportRequest,
+                renderedSettings,
+                ffmpegBinaryPlan);
+        if( !renderedPlan.requestValid )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video request is invalid. %1. %2.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoRequestShapeError(renderedPlan.request)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        if( !renderedPlan.targetReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video target is incomplete. %1. %2. Choose a rendered codec or container, for example --export-format h264, --export-format mp4, or --export-format prores.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        if( !renderedPlan.encoderReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video encoder preset is unavailable. %1. %2. %3.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoEncoderPresetSummary(renderedPlan.encoderPreset)));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        if( !renderedPlan.outputReady )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video output path is invalid. %1. %2. %3. Choose an output directory or an explicit rendered file path ending in %4.\n\n")
+                .arg(batchExportFormatRequestSummary(renderedPlan.request))
+                .arg(batchRenderedVideoTargetSummary(renderedPlan.target))
+                .arg(batchRenderedVideoOutputPlanSummary(renderedPlan.outputPlan))
+                .arg(renderedPlan.target.extension));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+        /* Statically complete rendered-video requests continue into
+         * BatchRunner, which can inspect clip metadata and then fail closed
+         * before any rendered frames or output directories are produced. */
+    }
+    if( parser.isSet(maxFramesOpt) )
+    {
+        bool ok = false;
+        maxFrames = parser.value(maxFramesOpt).toUInt(&ok);
+        if( !ok || maxFrames == 0 )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --max-frames must be a positive integer.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
+    if( parser.isSet(cdngCodecOpt) && exportFormat == BatchExportFormat::Cdng )
+    {
+        bool ok = false;
+        cdngCodecOffset = parseBatchCdngCodecOffset(parser.value(cdngCodecOpt), &ok);
+        if( !ok )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: --cdng-codec must be one of: uncompressed, lossless, fast-pass.\n\n"));
+            BatchLogger::err(parser.helpText() + QStringLiteral("\n"));
+            BatchLogger::shutdown();
+            return 2;
+        }
+    }
 
     /* Store in BatchContext for global access */
     BatchContext::setBatchMode(true);
@@ -388,6 +711,11 @@ static int runBatch(QCoreApplication &app)
     BatchContext::setReceiptPath(receiptPath);
     BatchContext::setUseDefaultReceipt(useDefaultReceipt);
     BatchContext::setResumeEnabled(resume);
+    BatchContext::setMaxFrames(static_cast<uint32_t>(maxFrames));
+    BatchContext::setCdngCodecOffset(cdngCodecOffset);
+    BatchContext::setExportFormatRequest(exportRequest);
+    BatchContext::setRenderedVideoRenderSettings(renderedSettings);
+    BatchContext::setRenderedVideoFfmpegExecutable(renderedFfmpegExecutable);
 
     int exitCode = BatchRunner::run(inputPath, outputPath);
     BatchLogger::shutdown();
@@ -545,6 +873,11 @@ static int runPlaybackProfile(QApplication &app)
         QStringLiteral("exercise-look-assist-toggle"),
         QStringLiteral("When Look Assist is enabled, click it off/on and verify the re-applied look matches the load-time look."));
     parser.addOption(exerciseLookAssistToggleOpt);
+
+    const QCommandLineOption exerciseLookAssistSettleOpt(
+        QStringLiteral("exercise-look-assist-settle"),
+        QStringLiteral("When Look Assist is enabled, render the start frame and wait for Look Assist diagnostics before writing the profile JSON."));
+    parser.addOption(exerciseLookAssistSettleOpt);
 
     const QCommandLineOption exerciseScaleFactorToggleOpt(
         QStringLiteral("exercise-scale-toggle"),
@@ -765,6 +1098,7 @@ static int runPlaybackProfile(QApplication &app)
     options.showWindow = parser.isSet(showWindowOpt) || parser.isSet(waitForPaintOpt);
     options.waitForPaint = parser.isSet(waitForPaintOpt);
     options.exercisePlayAction = parser.isSet(exercisePlayActionOpt);
+    options.exerciseLookAssistSettle = parser.isSet(exerciseLookAssistSettleOpt);
     options.exerciseLookAssistToggle = parser.isSet(exerciseLookAssistToggleOpt);
     options.exerciseScaleFactorToggle = parser.isSet(exerciseScaleFactorToggleOpt);
     options.exerciseScaleFactorToggleFrom = exerciseScaleToggleFrom;
@@ -1169,6 +1503,13 @@ int main(int argc, char *argv[])
     bool trim_mlv = hasTrimMlvFlag(argc, argv);
     bool profile_playback = hasPlaybackProfileFlag(argc, argv);
     bool gui_playback_smoke = hasGuiPlaybackSmokeFlag(argc, argv);
+    const bool normal_gui =
+        !batch && !trim_mlv && !profile_playback && !gui_playback_smoke;
+
+    if (normal_gui && CrashForensics::cudaPlaybackProfilingSettingsEnabled())
+    {
+        CrashForensics::applyCudaPlaybackProfilingEnvironment(true);
+    }
 
     if (shouldPreferDesktopOpenGl(argc, argv, batch, trim_mlv, profile_playback))
     {
@@ -1182,6 +1523,29 @@ int main(int argc, char *argv[])
 #ifdef Q_OS_WIN
     a.setAttribute(Qt::AA_Use96Dpi);
 #endif
+
+    if (normal_gui && CrashForensics::dngAsyncCompressionProfilingSettingsEnabled())
+    {
+        CrashForensics::applyDngAsyncCompressionProfilingEnvironment(
+            true,
+            CrashForensics::dngAsyncCompressionQueueDepthSettingsValue(),
+            CrashForensics::dngAsyncCompressionThreadCountSettingsValue());
+    }
+
+    const bool perfFieldLogRequested =
+        envFlagEnabled("MLVAPP_PERF_FIELD_LOG")
+        || (normal_gui && CrashForensics::performanceFieldLogSettingsEnabled());
+    if (perfFieldLogRequested)
+    {
+        CrashForensics::applyPerformanceFieldLogEnvironment(true);
+    }
+    if (profile_playback
+        || gui_playback_smoke
+        || envFlagEnabled("MLVAPP_EXPORT_STAGE_PROFILER")
+        || perfFieldLogRequested)
+    {
+        CrashForensics::publishMachineFingerprintEnvironment();
+    }
 
     if (batch)
     {

@@ -2,7 +2,7 @@
 # Builds the CUDA AMaZE debayer backend DLL and verifies its exported C ABI.
 param(
     [string]$Dir = $PSScriptRoot,
-    [string]$Arch = 'sm_89',
+    [string]$Arch = 'portable',
     [switch]$RunGlTexture
 )
 $ErrorActionPreference = 'Stop'
@@ -21,18 +21,59 @@ if (-not $vsRoot) { throw "MSVC (VC tools) not found via vswhere" }
 $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
 if (-not (Test-Path $vcvars)) { throw "vcvars64 not found: $vcvars" }
 
-$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory |
+$cudaSdkRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+if (-not (Test-Path -LiteralPath $cudaSdkRoot)) {
+    throw "CUDA Toolkit root not found: $cudaSdkRoot"
+}
+$cudaRoot = (Get-ChildItem -LiteralPath $cudaSdkRoot -Directory |
     Sort-Object Name -Descending | Select-Object -First 1).FullName
+if (-not $cudaRoot) { throw "No CUDA Toolkit version directories found under $cudaSdkRoot" }
 $nvcc = Join-Path $cudaRoot 'bin\nvcc.exe'
 if (-not (Test-Path $nvcc)) { throw "nvcc not found under $cudaRoot" }
 
 $gpuRoot = (Resolve-Path (Join-Path $Dir '..')).Path
+
+function Convert-CudaArchitectureToGencode {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $clean = $Name.Trim()
+    if ([string]::IsNullOrWhiteSpace($clean)) {
+        return @()
+    }
+    if ($clean -match '^sm_([0-9]+)$') {
+        return @("-gencode=arch=compute_$($Matches[1]),code=$clean")
+    }
+    if ($clean -match '^compute_([0-9]+)$') {
+        return @("-gencode=arch=$clean,code=$clean")
+    }
+    if ($clean -match '^([0-9]+)$') {
+        return @("-gencode=arch=compute_$clean,code=sm_$clean")
+    }
+    throw "Unsupported CUDA architecture token '$Name'. Use sm_86, sm_89, compute_89, 86, or portable."
+}
+
+$requestedArchitectures = @()
+if ($Arch -and $Arch.Trim().Equals('portable', [System.StringComparison]::OrdinalIgnoreCase)) {
+    $requestedArchitectures = @('sm_86', 'sm_89', 'compute_89')
+} else {
+    $requestedArchitectures = @($Arch -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+$archFlags = @()
+foreach ($architecture in $requestedArchitectures) {
+    $archFlags += Convert-CudaArchitectureToGencode $architecture
+}
+if ($archFlags.Count -eq 0) {
+    throw "No CUDA architectures requested."
+}
+$archLabel = ($requestedArchitectures -join ',')
+$archArgLine = ($archFlags -join ' ')
+
 $cmdFile = Join-Path $env:TEMP 'amaze_debayer_dll.cmd'
 @(
     '@echo off',
     "call `"$vcvars`" >nul",
     'echo === building igpu_amaze_debayer_cuda.dll (nvcc -shared --fmad=false, exports via .def) ===',
-    "`"$nvcc`" -arch=$Arch -O3 --fmad=false -shared -allow-unsupported-compiler -Xcompiler `"/MD`" -Xlinker `"/DEF:$def`" -I `"$Dir`" -I `"$gpuRoot`" `"$src`" -o `"$dll`"",
+    "`"$nvcc`" $archArgLine -O3 --fmad=false -shared -allow-unsupported-compiler -Xcompiler `"/MD`" -Xlinker `"/DEF:$def`" -I `"$Dir`" -I `"$gpuRoot`" `"$src`" -o `"$dll`"",
     'if errorlevel 1 exit /b 11',
     'echo === building amaze_dll_test.exe (cl, LoadLibrary harness, optional WGL texture check) ===',
     "cl /nologo /EHsc /O2 /I `"$Dir`" /I `"$gpuRoot`" `"$testsrc`" /Fe:`"$testexe`" /Fo:`"$Dir\amaze_dll_test.obj`" opengl32.lib user32.lib gdi32.lib",
@@ -40,7 +81,7 @@ $cmdFile = Join-Path $env:TEMP 'amaze_debayer_dll.cmd'
     'exit /b 0'
 ) | Set-Content -Encoding ASCII $cmdFile
 
-Write-Host "build: $src -> $dll (arch=$Arch)"
+Write-Host "build: $src -> $dll (arch=$archLabel)"
 & cmd /c "`"$cmdFile`"" 2>&1 | ForEach-Object { Write-Host $_ }
 $rc = $LASTEXITCODE
 Write-Host "build exit=$rc"
@@ -74,6 +115,7 @@ $required = @(
     'igpu_amaze_debayer_run',
     'igpu_amaze_debayer_run_gl_texture',
     'igpu_amaze_debayer_run_post_wb_gl_texture',
+    'igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture',
     'igpu_amaze_debayer_last_timing'
 )
 $missing = @()
