@@ -909,6 +909,48 @@ struct BatchRenderedVideoOutputVerificationResultPlan
     bool contractReady = false;
 };
 
+struct BatchRenderedVideoOutputVerificationReportPlan
+{
+    QString source =
+        QStringLiteral("output-verification-report-artifact-contract");
+    QString expectedOutputPath;
+    QString expectedExtension;
+    QString expectedCodec;
+    QString expectedContainer;
+    int expectedFrameCount = 0;
+    double expectedDurationSeconds = 0.0;
+    QString resultState = QStringLiteral("blocked");
+    QString failureReason;
+    QString reportPath;
+    QString reportFormat = QStringLiteral("json");
+    QString reportSchema =
+        QStringLiteral("rendered-output-verification-report.v1");
+    QString reportKind = QStringLiteral("failure");
+    QString reason;
+    bool outputVerificationResultContractReady = false;
+    bool resultReportPlanned = false;
+    bool failureReportPlanned = false;
+    bool acceptedOutputReportPlanned = false;
+    bool outputAccepted = false;
+    bool reportArtifactPlanned = false;
+    bool reportPathPlanned = false;
+    bool reportPathReady = false;
+    bool reportFormatReady = false;
+    bool reportSchemaReady = false;
+    bool reportContentPlanned = false;
+    bool failureReportContentPlanned = false;
+    bool acceptedReportContentPlanned = false;
+    bool reportFileCreationPlanned = false;
+    bool reportWritePlanned = false;
+    bool reportFileCreationOwned = false;
+    bool reportWriteOwned = false;
+    bool reportFileReady = false;
+    bool reportWriteReady = false;
+    bool reportReady = false;
+    bool outputVerificationReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoRunnerPrerequisites
 {
     bool processingParityReady = false;
@@ -956,6 +998,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoReceiptHashValidationPlan receiptHashValidationPlan;
     BatchRenderedVideoOutputVerificationDecisionPlan outputVerificationDecisionPlan;
     BatchRenderedVideoOutputVerificationResultPlan outputVerificationResultPlan;
+    BatchRenderedVideoOutputVerificationReportPlan outputVerificationReportPlan;
     BatchRenderedVideoRunnerPrerequisites runnerPrerequisites;
     bool requestValid = false;
     bool targetReady = false;
@@ -990,6 +1033,7 @@ struct BatchRenderedVideoJobPlan
     bool receiptHashValidationContractReady = false;
     bool outputVerificationDecisionContractReady = false;
     bool outputVerificationResultContractReady = false;
+    bool outputVerificationReportContractReady = false;
     bool preflightReady = false;
     bool runnable = false;
 };
@@ -3812,6 +3856,91 @@ batchRenderedVideoOutputVerificationResultPlanFromDecision(
     return plan;
 }
 
+inline QString batchRenderedVideoOutputVerificationReportPathFromOutputPath(
+    const QString & outputPath)
+{
+    const QString cleaned = QDir::cleanPath(outputPath.trimmed());
+    if( cleaned.isEmpty() ) return QString();
+
+    const QFileInfo outputInfo(cleaned);
+    const QString baseName = outputInfo.completeBaseName().isEmpty()
+        ? outputInfo.fileName()
+        : outputInfo.completeBaseName();
+    if( baseName.isEmpty() ) return QString();
+
+    return QDir::cleanPath(outputInfo.dir().filePath(
+        baseName + QStringLiteral(".verification-report.json")));
+}
+
+inline BatchRenderedVideoOutputVerificationReportPlan
+batchRenderedVideoOutputVerificationReportPlanFromResult(
+    const BatchRenderedVideoOutputVerificationResultPlan & resultPlan)
+{
+    BatchRenderedVideoOutputVerificationReportPlan plan;
+    plan.expectedOutputPath = resultPlan.expectedOutputPath;
+    plan.expectedExtension = resultPlan.expectedExtension;
+    plan.expectedCodec = resultPlan.expectedCodec;
+    plan.expectedContainer = resultPlan.expectedContainer;
+    plan.expectedFrameCount = resultPlan.expectedFrameCount;
+    plan.expectedDurationSeconds = resultPlan.expectedDurationSeconds;
+    plan.resultState = resultPlan.resultState;
+    plan.failureReason = resultPlan.failureReason;
+    plan.outputVerificationResultContractReady = resultPlan.contractReady;
+    plan.resultReportPlanned = resultPlan.resultReportPlanned;
+    plan.failureReportPlanned = resultPlan.failureReportPlanned;
+    plan.acceptedOutputReportPlanned =
+        resultPlan.acceptedOutputReportPlanned;
+    plan.outputAccepted = resultPlan.outputAccepted;
+    plan.reportKind = resultPlan.outputAccepted
+        ? QStringLiteral("accepted-output")
+        : QStringLiteral("failure");
+
+    if( !resultPlan.contractReady )
+    {
+        plan.reason = resultPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification report artifact contract unavailable")
+            : resultPlan.reason;
+        return plan;
+    }
+
+    plan.reportPath =
+        batchRenderedVideoOutputVerificationReportPathFromOutputPath(
+            resultPlan.expectedOutputPath);
+    plan.reportArtifactPlanned = resultPlan.resultReportPlanned;
+    plan.reportPathPlanned = plan.reportArtifactPlanned;
+    plan.reportPathReady = plan.reportPathPlanned
+                        && !plan.reportPath.isEmpty();
+    plan.reportFormatReady = plan.reportFormat == QStringLiteral("json");
+    plan.reportSchemaReady = !plan.reportSchema.isEmpty();
+    plan.reportContentPlanned = resultPlan.resultReportPlanned;
+    plan.failureReportContentPlanned =
+        resultPlan.failureReportPlanned;
+    plan.acceptedReportContentPlanned =
+        resultPlan.acceptedOutputReportPlanned;
+    plan.reportFileReady = plan.reportFileCreationOwned
+                        && plan.reportFileCreationPlanned;
+    plan.reportWriteReady = plan.reportWriteOwned
+                         && plan.reportWritePlanned;
+    plan.reportReady = plan.reportFileReady
+                    && plan.reportWriteReady;
+    plan.outputVerificationReady = resultPlan.outputVerificationReady
+                                && plan.reportReady;
+    plan.contractReady = plan.outputVerificationResultContractReady
+                      && plan.reportArtifactPlanned
+                      && plan.reportPathReady
+                      && plan.reportFormatReady
+                      && plan.reportSchemaReady
+                      && plan.reportContentPlanned
+                      && (plan.failureReportContentPlanned
+                       || plan.acceptedReportContentPlanned);
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered output verification report artifact contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoRunnerPrerequisites
 batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
@@ -3912,6 +4041,9 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationResultPlan =
             batchRenderedVideoOutputVerificationResultPlanFromDecision(
                 plan.outputVerificationDecisionPlan);
+        plan.outputVerificationReportPlan =
+            batchRenderedVideoOutputVerificationReportPlanFromResult(
+                plan.outputVerificationResultPlan);
         plan.sourceAudioPlan =
             batchRenderedVideoSourceAudioPlanForCurrentBuild(inputPath);
         plan.sourceAudioExtractionPlan =
@@ -3988,6 +4120,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             QStringLiteral("not a rendered-video request");
         plan.outputVerificationResultPlan.reason =
             QStringLiteral("not a rendered-video request");
+        plan.outputVerificationReportPlan.reason =
+            QStringLiteral("not a rendered-video request");
     }
 
     plan.runnerPrerequisites =
@@ -4037,6 +4171,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
         plan.outputVerificationDecisionPlan.contractReady;
     plan.outputVerificationResultContractReady =
         plan.outputVerificationResultPlan.contractReady;
+    plan.outputVerificationReportContractReady =
+        plan.outputVerificationReportPlan.contractReady;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -4273,6 +4409,11 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                 plan.outputVerificationDecisionPlan);
         plan.outputVerificationResultContractReady =
             plan.outputVerificationResultPlan.contractReady;
+        plan.outputVerificationReportPlan =
+            batchRenderedVideoOutputVerificationReportPlanFromResult(
+                plan.outputVerificationResultPlan);
+        plan.outputVerificationReportContractReady =
+            plan.outputVerificationReportPlan.contractReady;
     }
 
     plan.preflightReady = plan.requestValid
@@ -4313,7 +4454,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithSourceAudio(
                            && plan.outputVerificationExecutionContractReady
                            && plan.receiptHashValidationContractReady
                            && plan.outputVerificationDecisionContractReady
-                           && plan.outputVerificationResultContractReady;
+                           && plan.outputVerificationResultContractReady
+                           && plan.outputVerificationReportContractReady;
     }
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
@@ -4437,6 +4579,11 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             plan.outputVerificationDecisionPlan);
     plan.outputVerificationResultContractReady =
         plan.outputVerificationResultPlan.contractReady;
+    plan.outputVerificationReportPlan =
+        batchRenderedVideoOutputVerificationReportPlanFromResult(
+            plan.outputVerificationResultPlan);
+    plan.outputVerificationReportContractReady =
+        plan.outputVerificationReportPlan.contractReady;
     plan.preflightReady = plan.requestValid
                        && plan.targetReady
                        && plan.encoderReady
@@ -4469,7 +4616,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.outputVerificationExecutionContractReady
                        && plan.receiptHashValidationContractReady
                        && plan.outputVerificationDecisionContractReady
-                       && plan.outputVerificationResultContractReady;
+                       && plan.outputVerificationResultContractReady
+                       && plan.outputVerificationReportContractReady;
     plan.runnable = plan.preflightReady && plan.runnerPrerequisites.ready;
     return plan;
 }
@@ -4674,6 +4822,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.outputVerificationResultPlan.reason.isEmpty()
             ? QStringLiteral("rendered output verification result report contract unavailable")
             : plan.outputVerificationResultPlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.outputVerificationReportContractReady )
+    {
+        return plan.outputVerificationReportPlan.reason.isEmpty()
+            ? QStringLiteral("rendered output verification report artifact contract unavailable")
+            : plan.outputVerificationReportPlan.reason;
     }
     if( !plan.runnerPrerequisites.ready )
         return plan.runnerPrerequisites.reason;
@@ -5612,6 +5766,50 @@ inline QString batchRenderedVideoOutputVerificationResultPlanSummary(
     return tokens.join(QLatin1Char(' '));
 }
 
+inline QString batchRenderedVideoOutputVerificationReportPlanSummary(
+    const BatchRenderedVideoOutputVerificationReportPlan & plan)
+{
+    QStringList tokens;
+    tokens
+        << QStringLiteral("output-verification-report-source=%1").arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        << QStringLiteral("output-verification-report-output-path=%1").arg(plan.expectedOutputPath.isEmpty() ? QStringLiteral("unspecified") : plan.expectedOutputPath)
+        << QStringLiteral("output-verification-report-output-extension=%1").arg(plan.expectedExtension.isEmpty() ? QStringLiteral("unspecified") : plan.expectedExtension)
+        << QStringLiteral("output-verification-report-expected-codec=%1").arg(plan.expectedCodec.isEmpty() ? QStringLiteral("unspecified") : plan.expectedCodec)
+        << QStringLiteral("output-verification-report-expected-container=%1").arg(plan.expectedContainer.isEmpty() ? QStringLiteral("unspecified") : plan.expectedContainer)
+        << QStringLiteral("output-verification-report-expected-frame-count=%1").arg(plan.expectedFrameCount)
+        << QStringLiteral("output-verification-report-expected-duration-seconds=%1").arg(QLocale::c().toString(plan.expectedDurationSeconds, 'f', 6))
+        << QStringLiteral("output-verification-report-result-state=%1").arg(plan.resultState.isEmpty() ? QStringLiteral("unspecified") : plan.resultState)
+        << QStringLiteral("output-verification-report-kind=%1").arg(plan.reportKind.isEmpty() ? QStringLiteral("unspecified") : plan.reportKind)
+        << QStringLiteral("output-verification-report-path=%1").arg(plan.reportPath.isEmpty() ? QStringLiteral("unspecified") : plan.reportPath)
+        << QStringLiteral("output-verification-report-format=%1").arg(plan.reportFormat.isEmpty() ? QStringLiteral("unspecified") : plan.reportFormat)
+        << QStringLiteral("output-verification-report-schema=%1").arg(plan.reportSchema.isEmpty() ? QStringLiteral("unspecified") : plan.reportSchema)
+        << QStringLiteral("output-verification-report-result-contract-ready=%1").arg(plan.outputVerificationResultContractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-result-report-planned=%1").arg(plan.resultReportPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-failure-report-planned=%1").arg(plan.failureReportPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-accepted-report-planned=%1").arg(plan.acceptedOutputReportPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-output-accepted=%1").arg(plan.outputAccepted ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-artifact-planned=%1").arg(plan.reportArtifactPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-path-planned=%1").arg(plan.reportPathPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-path-ready=%1").arg(plan.reportPathReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-format-ready=%1").arg(plan.reportFormatReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-schema-ready=%1").arg(plan.reportSchemaReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-content-planned=%1").arg(plan.reportContentPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-failure-content-planned=%1").arg(plan.failureReportContentPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-accepted-content-planned=%1").arg(plan.acceptedReportContentPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-file-create-planned=%1").arg(plan.reportFileCreationPlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-write-planned=%1").arg(plan.reportWritePlanned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-file-create-owned=%1").arg(plan.reportFileCreationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-write-owned=%1").arg(plan.reportWriteOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-file-ready=%1").arg(plan.reportFileReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-write-ready=%1").arg(plan.reportWriteReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-ready=%1").arg(plan.reportReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-output-verification-ready=%1").arg(plan.outputVerificationReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-failure-reason=%1").arg(plan.failureReason.isEmpty() ? QStringLiteral("none") : plan.failureReason)
+        << QStringLiteral("output-verification-report-contract-ready=%1").arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
+        << QStringLiteral("output-verification-report-reason=%1").arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+    return tokens.join(QLatin1Char(' '));
+}
+
 inline QString batchRenderedVideoOutputPlanSummary(
     const QString & inputPath,
     const QString & outputPath,
@@ -5642,7 +5840,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 %33 %34 preflight-ready=%35 runnable=%36 first-blocker=%37")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 %18 %19 %20 %21 %22 %23 %24 %25 %26 %27 %28 %29 %30 %31 %32 %33 %34 %35 preflight-ready=%36 runnable=%37 first-blocker=%38")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -5696,6 +5894,8 @@ inline QString batchRenderedVideoJobPlanSummary(
             plan.outputVerificationDecisionPlan))
         .arg(batchRenderedVideoOutputVerificationResultPlanSummary(
             plan.outputVerificationResultPlan))
+        .arg(batchRenderedVideoOutputVerificationReportPlanSummary(
+            plan.outputVerificationReportPlan))
         .arg(batchRenderedVideoRunnerPrerequisitesSummary(plan.runnerPrerequisites))
         .arg(plan.preflightReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.runnable ? QStringLiteral("true") : QStringLiteral("false"))
