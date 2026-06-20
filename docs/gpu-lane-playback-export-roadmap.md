@@ -394,6 +394,11 @@ wrappers remain authoritative and default playback/export behavior stays
 unchanged. The CUDA preset is still a request surface, not proof: Dell/UltraMagnus
 claims require the same host-local no-readback/fallback/FPS/DNG hash/timing
 evidence as the wrapper path.
+The dialog also shows the current `machine-fingerprint.v1` identity block
+directly in the GUI (GPU/driver/compute/VRAM, CPU cores/threads, RAM, OS, and
+embedded build SHA) with a copy-JSON command, so interactive Dell/UltraMagnus
+field-log runs can be visually matched to the machine/build provenance already
+written into playback/export telemetry.
 The dogfood/proof front doors now also record CUDA backend architecture proof
 from a hash-matched `igpu_recon_cuda.arch.json` sidecar or host `cuobjdump`, then
 compare those tokens to the host `nvidia-smi` compute capability before real

@@ -15,6 +15,7 @@ extern "C" {
 #include "math.h"
 
 #include <QCheckBox>
+#include <QClipboard>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -70,6 +71,31 @@ namespace
 static QString bool01( bool value )
 {
     return value ? QStringLiteral("1") : QStringLiteral("0");
+}
+
+static QString fingerprintDisplayValue( const QJsonObject &fingerprint,
+                                        const QString &key )
+{
+    const QJsonValue value = fingerprint.value( key );
+    if( value.isString() )
+    {
+        const QString text = value.toString().trimmed();
+        return text.isEmpty() ? QStringLiteral("not reported") : text;
+    }
+    if( value.isDouble() )
+    {
+        return QString::number( static_cast<qint64>( value.toDouble() ) );
+    }
+    return QStringLiteral("not reported");
+}
+
+static QString fingerprintDisplayMbValue( const QJsonObject &fingerprint,
+                                          const QString &key )
+{
+    const QJsonValue value = fingerprint.value( key );
+    if( !value.isDouble() ) return QStringLiteral("not reported");
+    return QStringLiteral("%1 MB")
+        .arg( static_cast<qint64>( value.toDouble() ) );
 }
 
 static bool interactiveTraceEnabled()
@@ -7830,6 +7856,76 @@ void MainWindow::showPerformanceProfilingDialog( void )
     dialog.setWindowTitle( tr( "Performance Profiling" ) );
 
     QVBoxLayout * layout = new QVBoxLayout( &dialog );
+
+    const QJsonObject machineFingerprint =
+        CrashForensics::machineFingerprintObject();
+    QGroupBox * machineGroup =
+        new QGroupBox( tr( "Machine fingerprint" ), &dialog );
+    QFormLayout * machineLayout = new QFormLayout( machineGroup );
+    auto addMachineRow =
+        [&dialog, machineLayout]( const QString &label, const QString &value )
+    {
+        QLabel * valueLabel = new QLabel( value, &dialog );
+        valueLabel->setWordWrap( true );
+        valueLabel->setTextInteractionFlags( Qt::TextSelectableByMouse );
+        machineLayout->addRow( label, valueLabel );
+    };
+    addMachineRow(
+        tr( "GPU" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("gpu_name") ) );
+    addMachineRow(
+        tr( "Driver" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("gpu_driver_version") ) );
+    addMachineRow(
+        tr( "Compute" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("gpu_compute_capability") ) );
+    addMachineRow(
+        tr( "VRAM" ),
+        fingerprintDisplayMbValue( machineFingerprint,
+                                   QStringLiteral("gpu_vram_total_mb") ) );
+    addMachineRow(
+        tr( "CPU" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("cpu_model") ) );
+    addMachineRow(
+        tr( "Cores / threads" ),
+        tr( "%1 / %2" )
+            .arg( fingerprintDisplayValue( machineFingerprint,
+                                           QStringLiteral("cpu_cores") ) )
+            .arg( fingerprintDisplayValue( machineFingerprint,
+                                           QStringLiteral("cpu_threads") ) ) );
+    addMachineRow(
+        tr( "RAM" ),
+        fingerprintDisplayMbValue( machineFingerprint,
+                                   QStringLiteral("ram_total_mb") ) );
+    addMachineRow(
+        tr( "OS" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("os_version") ) );
+    addMachineRow(
+        tr( "Build SHA" ),
+        fingerprintDisplayValue( machineFingerprint,
+                                 QStringLiteral("build_sha") ) );
+    QPushButton * copyFingerprint =
+        new QPushButton( tr( "Copy JSON" ), &dialog );
+    connect( copyFingerprint,
+             &QPushButton::clicked,
+             this,
+             [this]()
+             {
+                 if( QClipboard * clipboard = QApplication::clipboard() )
+                 {
+                     clipboard->setText( CrashForensics::machineFingerprintJson() );
+                     statusBar()->showMessage(
+                         tr( "Machine fingerprint copied" ),
+                         3000 );
+                 }
+             } );
+    machineLayout->addRow( copyFingerprint );
+    layout->addWidget( machineGroup );
 
     QGroupBox * fieldLogGroup =
         new QGroupBox( tr( "Session summaries" ), &dialog );
