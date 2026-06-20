@@ -204,6 +204,8 @@ $proofReportStatus = if ($proofReport) { [string]$proofReport.status } else { $n
 if ($StrictQuotable -and $proofReportStatus -ne "QUOTABLE_PASS") {
     Add-Message $failures "Strict quotable import required QUOTABLE_PASS; packet proof report status was '$proofReportStatus'."
 }
+$proofDiagnostics = if ($proofReport) { @($proofReport.diagnostics) } else { @() }
+$proofDiagnosticSummary = if ($proofReport) { $proofReport.diagnosticSummary } else { $null }
 
 $status = if ($failures.Count -eq 0) { "imported" } else { "failed" }
 $importSummaryPath = Join-Path $extractRoot "import-summary.json"
@@ -229,6 +231,11 @@ $result = [ordered]@{
             topLevelStatus = $proofReport.topLevelStatus
             blockers = @($proofReport.blockers)
             warnings = @($proofReport.warnings)
+            diagnosticSummary = $proofDiagnosticSummary
+            diagnosticCodes = @($proofDiagnostics | ForEach-Object { [string]$_.code } | Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_)
+                } | Select-Object -Unique)
+            diagnostics = $proofDiagnostics
         }
     } else { $null }
     summary = if ($summary) {

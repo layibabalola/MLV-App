@@ -243,6 +243,10 @@ $manifest = [ordered]@{
         jsonExitCode = $summarizerResult.jsonExitCode
         blockers = @($proofReport.blockers)
         warnings = @($proofReport.warnings)
+        diagnosticSummary = $proofReport.diagnosticSummary
+        diagnosticCodes = @($proofReport.diagnostics | ForEach-Object { [string]$_.code } | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            } | Select-Object -Unique)
     }
     proof = [ordered]@{
         nvidiaRows = @($summary.host.nvidiaSmi.rows)

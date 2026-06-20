@@ -240,6 +240,15 @@ the manifest schema, checks every listed artifact hash, optionally enforces host
 and repo-head matches, and writes `import-summary.json`. Import success proves
 packet integrity, not GPU success; `-StrictQuotable` additionally requires
 `proofReport.status=QUOTABLE_PASS`.
+The proof report now also emits fail-closed diagnostic classification
+(`diagnosticSummary` plus per-code `diagnostics`) for the first Dell/UltraMagnus
+packet triage. Codes distinguish dry-runs, missing NVIDIA discovery, hybrid
+GL-renderer proof gaps, no-readback/fallback playback failures, missing playback
+A/B metrics, DNG hash/export failures, and E3-relevant compression/writer
+bottlenecks. Packet manifests and import summaries carry those diagnostics
+forward so a returned `NOT_QUOTABLE` packet immediately points at the next
+implementation slice. These diagnostics are triage metadata only; they do not
+weaken the `QUOTABLE_PASS` support/speed gate.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
