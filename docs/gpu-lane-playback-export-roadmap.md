@@ -276,7 +276,15 @@ A/B and DNG runners now look for `nvidia-smi.exe` in the usual Windows NVSMI
 locations when it is not on PATH. `run-local-cuda-playback-dng-smoke.ps1` now
 invokes this A/B runner by default with a 30-second/2500-ms settled window
 (`-SkipPlaybackAb` disables it), so the preferred Dell proof packet includes the
-speed comparison unless deliberately suppressed.
+speed comparison unless deliberately suppressed. The A/B summary now also writes
+a versioned `mlvapp.playback_ab_analysis.v1` block, and the cross-machine
+comparator infers the same block for older A/B packets. The current UltraMagnus
+CPU-vs-CUDA packet is deliberately still a failed proof because the CUDA
+candidate hit cadence jitter, but its stage deltas classify the regression as
+`present-bound` with suggested optimization
+`reduce_gpu_present_draw_queue_sync`: recon/render-work got slightly cheaper
+while queue wait, draw total, and prep-before-finish grew. Treat that as the
+next playback engine optimization target, not as a CUDA playback speed claim.
 
 Update 2026-06-20 Dell laptop target note: the supplied NVIDIA rig screenshot
 identifies the laptop as Windows 11 Pro with driver `591.74`, Intel

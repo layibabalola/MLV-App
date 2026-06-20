@@ -185,6 +185,99 @@ function New-MetricDelta {
     }
 }
 
+function Get-CompareDeltaPercent {
+    param(
+        [object]$Compare,
+        [string]$Metric
+    )
+    Convert-ToNullableDouble (Get-NestedValue $Compare "$Metric.deltaPercent")
+}
+
+function Test-DeltaAtLeast {
+    param(
+        [object]$Value,
+        [double]$Threshold
+    )
+    $parsed = Convert-ToNullableDouble $Value
+    ($null -ne $parsed -and $parsed -ge $Threshold)
+}
+
+function New-PlaybackAbAnalysis {
+    param(
+        [object]$Compare,
+        [string[]]$ProofFailures
+    )
+
+    $fpsDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "presentedFps"
+    $presentIntervalDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentIntervalMs"
+    $renderWorkDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgRenderWorkMs"
+    $queueWaitDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgQueueWaitMs"
+    $llrawprocDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgLlrawprocMs"
+    $drawTotalDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgDrawTotalMs"
+    $prepBeforeFinishDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPrepBeforeFinishMs"
+
+    $dominant = "unknown"
+    $suggestion = "rerun_playback_ab_for_stage_metrics"
+    $confidence = "missing_metrics"
+
+    if ($null -ne $fpsDeltaPct) {
+        $confidence = "observed_delta"
+        if ($fpsDeltaPct -lt -1.0) {
+            if ((Test-DeltaAtLeast -Value $queueWaitDeltaPct -Threshold 25.0) -and
+                ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 10.0) -or
+                 (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 10.0) -or
+                 (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 10.0))) {
+                $dominant = "present-bound"
+                $suggestion = "reduce_gpu_present_draw_queue_sync"
+                $confidence = "observed_stage_regression"
+            }
+            elseif ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 15.0) -or
+                    (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 15.0) -or
+                    (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 15.0)) {
+                $dominant = "present-bound"
+                $suggestion = "reduce_gpu_present_jitter"
+                $confidence = "observed_stage_regression"
+            }
+            elseif ((Test-DeltaAtLeast -Value $llrawprocDeltaPct -Threshold 10.0) -or
+                    (Test-DeltaAtLeast -Value $renderWorkDeltaPct -Threshold 10.0)) {
+                $dominant = "recon-bound"
+                $suggestion = "optimize_cuda_recon_kernel_or_state_setup"
+                $confidence = "observed_stage_regression"
+            }
+            else {
+                $dominant = "cadence-bound"
+                $suggestion = "profile_playback_cadence_with_stage_timing"
+            }
+        }
+        elseif ($fpsDeltaPct -lt 10.0) {
+            $dominant = "mixed"
+            $suggestion = "profile_present_decode_and_recon_stages"
+        }
+        else {
+            $dominant = "none"
+            $suggestion = "validate_same_clip_on_second_machine"
+        }
+    }
+
+    [pscustomobject]@{
+        schema = "mlvapp.playback_ab_analysis.v1"
+        proofPassed = (@($ProofFailures).Count -eq 0)
+        dominantBottleneck = $dominant
+        suggestedOptimization = $suggestion
+        confidence = $confidence
+        evidence = [pscustomobject]@{
+            presentedFpsDeltaPercent = $fpsDeltaPct
+            presentIntervalDeltaPercent = $presentIntervalDeltaPct
+            renderWorkDeltaPercent = $renderWorkDeltaPct
+            queueWaitDeltaPercent = $queueWaitDeltaPct
+            llrawprocDeltaPercent = $llrawprocDeltaPct
+            drawTotalDeltaPercent = $drawTotalDeltaPct
+            prepBeforeFinishDeltaPercent = $prepBeforeFinishDeltaPct
+        }
+        proofFailures = @($ProofFailures)
+    }
+}
+
 function Resolve-NvidiaSmiCommand {
     $cmd = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($cmd) {
@@ -879,6 +972,7 @@ $summary["baseline"] = $baselineSummary
 $summary["candidate"] = $candidateSummary
 $summary["compare"] = $compare
 $summary["proofFailures"] = @($proofFailures)
+$summary["analysis"] = New-PlaybackAbAnalysis -Compare $compare -ProofFailures @($proofFailures)
 $summary["childOutput"] = [pscustomobject]@{
     baseline = $baselineResult.output
     candidate = $candidateResult.output

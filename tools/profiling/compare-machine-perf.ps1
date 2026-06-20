@@ -346,6 +346,9 @@ function Get-ProofSummarySuggestion {
     if ($null -eq $playbackAb -or $null -eq $playbackAb.compare) {
         return "run_playback_ab_speed_probe"
     }
+    if ($playbackAb.analysis -and $playbackAb.analysis.suggestedOptimization) {
+        return [string]$playbackAb.analysis.suggestedOptimization
+    }
     $fpsDelta = Convert-ToNullableDouble $playbackAb.compare.presentedFps.delta
     if ($null -ne $fpsDelta -and $fpsDelta -lt 0) {
         return "optimize_playback_cuda_candidate"
@@ -370,6 +373,93 @@ function Get-ProofSummarySuggestion {
         return [string]$cdng.throughputClassification.suggestedOptimization
     }
     return "quote_with_host_clip_boundaries"
+}
+
+function Get-CompareDeltaPercent {
+    param(
+        [object]$Compare,
+        [string]$Metric
+    )
+    Convert-ToNullableDouble $Compare.$Metric.deltaPercent
+}
+
+function Test-DeltaAtLeast {
+    param(
+        [object]$Value,
+        [double]$Threshold
+    )
+    $parsed = Convert-ToNullableDouble $Value
+    ($null -ne $parsed -and $parsed -ge $Threshold)
+}
+
+function Get-PlaybackAbAnalysis {
+    param([object]$Record)
+
+    if ($Record.analysis -and $Record.analysis.dominantBottleneck) {
+        return [pscustomobject]@{
+            dominantBottleneck = [string]$Record.analysis.dominantBottleneck
+            suggestedOptimization = [string]$Record.analysis.suggestedOptimization
+        }
+    }
+
+    $compare = $Record.compare
+    $fpsDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "presentedFps"
+    $presentIntervalDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPresentIntervalMs"
+    $renderWorkDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgRenderWorkMs"
+    $queueWaitDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgQueueWaitMs"
+    $llrawprocDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgLlrawprocMs"
+    $drawTotalDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgDrawTotalMs"
+    $prepBeforeFinishDeltaPct = Get-CompareDeltaPercent -Compare $compare -Metric "avgPrepBeforeFinishMs"
+
+    if ($null -eq $fpsDeltaPct) {
+        return [pscustomobject]@{
+            dominantBottleneck = "unknown"
+            suggestedOptimization = "rerun_playback_ab_for_presented_fps_delta"
+        }
+    }
+
+    if ($fpsDeltaPct -lt -1.0) {
+        if ((Test-DeltaAtLeast -Value $queueWaitDeltaPct -Threshold 25.0) -and
+            ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 10.0) -or
+             (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 10.0) -or
+             (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 10.0))) {
+            return [pscustomobject]@{
+                dominantBottleneck = "present-bound"
+                suggestedOptimization = "reduce_gpu_present_draw_queue_sync"
+            }
+        }
+        if ((Test-DeltaAtLeast -Value $drawTotalDeltaPct -Threshold 15.0) -or
+            (Test-DeltaAtLeast -Value $prepBeforeFinishDeltaPct -Threshold 15.0) -or
+            (Test-DeltaAtLeast -Value $presentIntervalDeltaPct -Threshold 15.0)) {
+            return [pscustomobject]@{
+                dominantBottleneck = "present-bound"
+                suggestedOptimization = "reduce_gpu_present_jitter"
+            }
+        }
+        if ((Test-DeltaAtLeast -Value $llrawprocDeltaPct -Threshold 10.0) -or
+            (Test-DeltaAtLeast -Value $renderWorkDeltaPct -Threshold 10.0)) {
+            return [pscustomobject]@{
+                dominantBottleneck = "recon-bound"
+                suggestedOptimization = "optimize_cuda_recon_kernel_or_state_setup"
+            }
+        }
+        return [pscustomobject]@{
+            dominantBottleneck = "cadence-bound"
+            suggestedOptimization = "profile_playback_cadence_with_stage_timing"
+        }
+    }
+
+    if ($fpsDeltaPct -lt 10.0) {
+        return [pscustomobject]@{
+            dominantBottleneck = "mixed"
+            suggestedOptimization = "profile_present_decode_and_recon_stages"
+        }
+    }
+
+    [pscustomobject]@{
+        dominantBottleneck = "none"
+        suggestedOptimization = "validate_same_clip_on_second_machine"
+    }
 }
 
 function New-RemoteP3SummaryRow {
@@ -686,16 +776,15 @@ function New-PlaybackAbSummaryRow {
     $baselinePresented = Convert-ToNullableDouble $Record.compare.presentedFps.baseline
     $candidatePresented = Convert-ToNullableDouble $Record.compare.presentedFps.candidate
     $deltaPct = Convert-ToNullableDouble $Record.compare.presentedFps.deltaPercent
-    $suggestion = if ([string]$Record.status -ne "success") {
-        "fix_playback_ab_proof_failures"
-    } elseif ($null -eq $deltaPct) {
-        "rerun_playback_ab_for_presented_fps_delta"
-    } elseif ($deltaPct -lt 0.0) {
-        "investigate_cuda_playback_regression"
-    } elseif ($deltaPct -lt 10.0) {
-        "profile_present_decode_and_recon_stages"
+    $analysis = Get-PlaybackAbAnalysis -Record $Record
+    $suggestion = if ([string]::IsNullOrWhiteSpace([string]$analysis.suggestedOptimization)) {
+        if ([string]$Record.status -ne "success") {
+            "fix_playback_ab_proof_failures"
+        } else {
+            "profile_present_decode_and_recon_stages"
+        }
     } else {
-        "validate_same_clip_on_dell"
+        [string]$analysis.suggestedOptimization
     }
 
     [pscustomobject]@{
@@ -716,7 +805,7 @@ function New-PlaybackAbSummaryRow {
         dng_elapsed_delta_pct = $null
         dng_throughput_status = $null
         dng_suggested_optimization = $null
-        dominant_bottleneck = "unknown"
+        dominant_bottleneck = if ($analysis) { [string]$analysis.dominantBottleneck } else { "unknown" }
         suggested_optimization = $suggestion
         build_status = $Record.status
         source = $Source
