@@ -230,6 +230,14 @@ inline const char * batchRenderedVideoContainerName(BatchRenderedVideoContainer 
     return "unspecified";
 }
 
+inline QString batchExportFormatRequestSummary(const BatchExportFormatRequest & request)
+{
+    return QStringLiteral("request=%1 codec=%2 container=%3")
+        .arg(batchExportFormatName(request.format))
+        .arg(batchRenderedVideoCodecName(request.renderedCodec))
+        .arg(batchRenderedVideoContainerName(request.renderedContainer));
+}
+
 /* Processing profile for batch export.
  * v1 (Phases 1-5): Uses MLV-App defaults on file open. Only receiptPath
  * and exportFormat are stored here.

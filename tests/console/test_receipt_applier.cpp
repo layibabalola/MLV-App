@@ -6,6 +6,7 @@
 #include "../../platform/qt/ReceiptSettings.h"
 #include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
+#include "../../src/batch/BatchContext.h"
 #include "../../src/batch/BatchLogger.h"
 #include "../../src/batch/BatchRunner.h"
 #include "../../platform/qt/DualIsoPatternMapping.h"
@@ -481,6 +482,28 @@ TEST(BatchExportFormat, ParsesRenderedVideoOptionAliases)
     ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Unspecified),
                static_cast<int>(batchRenderedVideoContainerFromString(QStringLiteral("avi"), &ok)) );
     ASSERT_FALSE( ok );
+}
+
+TEST(BatchExportFormat, BatchContextPreservesExportRequestIntent)
+{
+    BatchExportFormatRequest request;
+    request.format = BatchExportFormat::RenderedVideo;
+    request.renderedCodec = BatchRenderedVideoCodec::H265;
+    request.renderedContainer = BatchRenderedVideoContainer::Mkv;
+
+    BatchContext::setExportFormatRequest(request);
+
+    const BatchExportFormatRequest stored = BatchContext::exportFormatRequest();
+    ASSERT_EQ( static_cast<int>(BatchExportFormat::RenderedVideo),
+               static_cast<int>(stored.format) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoCodec::H265),
+               static_cast<int>(stored.renderedCodec) );
+    ASSERT_EQ( static_cast<int>(BatchRenderedVideoContainer::Mkv),
+               static_cast<int>(stored.renderedContainer) );
+    ASSERT_EQ( std::string("request=rendered-video codec=h265 container=mkv"),
+               std::string(batchExportFormatRequestSummary(stored).toUtf8().constData()) );
+
+    BatchContext::setExportFormatRequest(BatchExportFormatRequest());
 }
 
 TEST(BatchExportFormat, RejectsUnknownFormats)

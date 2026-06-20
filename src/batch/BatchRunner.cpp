@@ -38,6 +38,21 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
     QElapsedTimer totalTimer;
     totalTimer.start();
 
+    const BatchExportFormatRequest exportRequest =
+        BatchContext::exportFormatRequest();
+    if( exportRequest.format == BatchExportFormat::RenderedVideo )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. %1. Lane A E4 remains blocked until rendered processing parity and a headless rendered-export runner land; use --export-format cdng.\n")
+            .arg(batchExportFormatRequestSummary(exportRequest)));
+        return 2;
+    }
+    if( exportRequest.format != BatchExportFormat::Cdng )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner unsupported export format. %1. Supported now: cdng.\n")
+            .arg(batchExportFormatRequestSummary(exportRequest)));
+        return 2;
+    }
+
     /* --- Receipt resolution (4-way priority) ---
      * 1. --receipt <file>       → explicit, exit 5 on failure
      * 2. --default-receipt      → GUI default, exit 5 if not configured/missing
@@ -176,7 +191,7 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
     const uint32_t maxFrames = BatchContext::maxFrames();
     const int cdngCodecOffset =
         normalizedBatchCdngCodecOffset( BatchContext::cdngCodecOffset() );
-    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5 cdng-codec=%6\n")
+    BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 skip-errors=%3 resume=%4 max-frames=%5 cdng-codec=%6 export-format=%7 rendered-codec=%8 rendered-container=%9\n")
                .arg( inputPath )
                .arg( outputPath )
                .arg( BatchContext::skipErrors() ? QStringLiteral("true")
@@ -185,7 +200,10 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
                                                     : QStringLiteral("false") )
                .arg( maxFrames > 0 ? QString::number( maxFrames )
                                     : QStringLiteral("all") )
-               .arg( batchCdngCodecName( cdngCodecOffset ) ));
+               .arg( batchCdngCodecName( cdngCodecOffset ) )
+               .arg( batchExportFormatName( exportRequest.format ) )
+               .arg( batchRenderedVideoCodecName( exportRequest.renderedCodec ) )
+               .arg( batchRenderedVideoContainerName( exportRequest.renderedContainer ) ));
 
     int succeeded = 0;
     int failed = 0;

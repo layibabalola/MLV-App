@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <cstdint>
+#include "BatchTypes.h"
 
 /* Static singleton holding batch-mode flags.
  * Set once at startup from CLI args, read throughout the codebase.
@@ -38,6 +39,9 @@ public:
     static void setCdngCodecOffset(int offset);
     static int cdngCodecOffset();
 
+    static void setExportFormatRequest(const BatchExportFormatRequest &request);
+    static BatchExportFormatRequest exportFormatRequest();
+
 private:
     BatchContext() = delete; /* Pure static — no instances */
 
@@ -48,6 +52,7 @@ private:
     static bool s_resumeEnabled;
     static uint32_t s_maxFrames;
     static int s_cdngCodecOffset;
+    static BatchExportFormatRequest s_exportFormatRequest;
     static QString s_logPath;
     static QString s_receiptPath;
 };
