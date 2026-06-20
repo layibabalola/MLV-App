@@ -1141,6 +1141,8 @@ _Current E4 implementation note (2026-06-20 source-audio discovery contract slic
 
 _Current E4 implementation note (2026-06-20 ffmpeg execution contract slice): the central rendered job plan now carries a `BatchRenderedVideoFfmpegExecutionPlan` after the command-shape phase. Once source metadata makes the command concrete, the plan reports bound executable/command readiness and explicitly keeps process launch, stdin pipe ownership, raw-frame feeding, stderr/progress capture, exit-code validation, timeout handling, and cleanup ownership false. This is execution-boundary scaffolding only: it does not start an ffmpeg process, feed frames, create outputs, verify media, or make rendered export runnable._
 
+_Current E4 implementation note (2026-06-20 frame-processing contract slice): the central rendered job plan now carries a `BatchRenderedVideoFrameProcessingPlan` after source metadata and frame geometry are known. The plan reports the future RGB48 frame-processing contract, planned output size, and explicit false ownership for receipt application, debayer/rendering, preview processing, resize processing, RGB48 frame buffering, frame iteration, processing parity, and frame-processing readiness before the ffmpeg command/execution surfaces. This is processing-boundary scaffolding only: it does not apply receipts, render/debayer frames, allocate or feed RGB48 frames, prove processing parity, execute ffmpeg, create outputs, or make rendered export runnable._
+
 ## 4. Lane B — CUDA playback
 
 - **P-pre (quality completion):** GPU **AMaZE debayer** parity (landed behind the

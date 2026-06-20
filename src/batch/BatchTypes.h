@@ -160,6 +160,25 @@ struct BatchRenderedVideoFfmpegFramePlan
     bool ready = false;
 };
 
+struct BatchRenderedVideoFrameProcessingPlan
+{
+    QString source = QStringLiteral("headless-rendered-frame-contract");
+    QString rawFramePixelFormat = QStringLiteral("rgb48");
+    QString outputSize;
+    QString reason;
+    bool sourceMetadataReady = false;
+    bool frameGeometryReady = false;
+    bool receiptApplicationOwned = false;
+    bool debayerOwned = false;
+    bool previewProcessingOwned = false;
+    bool resizeProcessingOwned = false;
+    bool rgb48FrameBufferOwned = false;
+    bool frameIterationOwned = false;
+    bool processingParityReady = false;
+    bool frameProcessingReady = false;
+    bool contractReady = false;
+};
+
 struct BatchRenderedVideoFfmpegBinaryPlan
 {
     QString source = QStringLiteral("default-executable-name");
@@ -285,6 +304,7 @@ struct BatchRenderedVideoJobPlan
     BatchRenderedVideoSourceMetadata sourceMetadata;
     BatchRenderedVideoRenderSettings renderSettings;
     BatchRenderedVideoFfmpegFramePlan ffmpegFramePlan;
+    BatchRenderedVideoFrameProcessingPlan frameProcessingPlan;
     BatchRenderedVideoFfmpegBinaryPlan ffmpegBinaryPlan;
     BatchRenderedVideoFfmpegCommandPlan ffmpegCommandPlan;
     BatchRenderedVideoFfmpegExecutionPlan ffmpegExecutionPlan;
@@ -301,6 +321,7 @@ struct BatchRenderedVideoJobPlan
     bool metadataAttempted = false;
     bool metadataReady = false;
     bool ffmpegFrameReady = false;
+    bool frameProcessingContractReady = false;
     bool ffmpegBinaryCommandReady = false;
     bool ffmpegCommandReady = false;
     bool ffmpegExecutionContractReady = false;
@@ -1101,6 +1122,50 @@ batchRenderedVideoFfmpegFramePlanFromMetadata(
         encoderProfile);
 }
 
+inline BatchRenderedVideoFrameProcessingPlan
+batchRenderedVideoFrameProcessingPlanFromFramePlan(
+    const BatchRenderedVideoSourceMetadata & metadata,
+    const BatchRenderedVideoFfmpegFramePlan & framePlan)
+{
+    BatchRenderedVideoFrameProcessingPlan plan;
+    plan.sourceMetadataReady = metadata.ready;
+    plan.frameGeometryReady = framePlan.ready;
+    plan.outputSize = framePlan.frameSizeArgument;
+
+    if( !metadata.ready )
+    {
+        plan.reason = metadata.reason.isEmpty()
+            ? QStringLiteral("rendered source metadata unavailable")
+            : metadata.reason;
+        return plan;
+    }
+    if( !framePlan.ready )
+    {
+        plan.reason = framePlan.reason.isEmpty()
+            ? QStringLiteral("rendered frame geometry unavailable")
+            : framePlan.reason;
+        return plan;
+    }
+
+    plan.contractReady = !plan.rawFramePixelFormat.isEmpty()
+                      && !plan.outputSize.isEmpty()
+                      && plan.sourceMetadataReady
+                      && plan.frameGeometryReady;
+    plan.processingParityReady = plan.receiptApplicationOwned
+                              && plan.debayerOwned
+                              && plan.previewProcessingOwned
+                              && plan.resizeProcessingOwned;
+    plan.frameProcessingReady = plan.processingParityReady
+                             && plan.rgb48FrameBufferOwned
+                             && plan.frameIterationOwned;
+    if( !plan.contractReady )
+    {
+        plan.reason =
+            QStringLiteral("rendered frame-processing contract unavailable");
+    }
+    return plan;
+}
+
 inline BatchRenderedVideoOutputPlan batchRenderedVideoOutputPlanFromPaths(
     const QString & inputPath,
     const QString & outputPath,
@@ -1514,6 +1579,8 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanFromRequest(
             QStringLiteral("not a rendered-video request");
         plan.ffmpegAudioPlan.reason =
             QStringLiteral("not a rendered-video request");
+        plan.frameProcessingPlan.reason =
+            QStringLiteral("not a rendered-video request");
         plan.outputVerificationPlan.reason =
             QStringLiteral("not a rendered-video request");
     }
@@ -1647,6 +1714,12 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
             QStringLiteral("rendered encoder preset incomplete");
     }
     plan.ffmpegFrameReady = plan.ffmpegFramePlan.ready;
+    plan.frameProcessingPlan =
+        batchRenderedVideoFrameProcessingPlanFromFramePlan(
+            metadata,
+            plan.ffmpegFramePlan);
+    plan.frameProcessingContractReady =
+        plan.frameProcessingPlan.contractReady;
     plan.ffmpegCommandPlan =
         batchRenderedVideoFfmpegCommandPlanFromParts(
             plan.ffmpegFramePlan,
@@ -1672,6 +1745,7 @@ inline BatchRenderedVideoJobPlan batchRenderedVideoJobPlanWithMetadata(
                        && plan.renderSettings.ready
                        && plan.metadataReady
                        && plan.ffmpegFrameReady
+                       && plan.frameProcessingContractReady
                        && plan.ffmpegCommandReady
                        && plan.ffmpegExecutionContractReady
                        && plan.outputReady
@@ -1760,6 +1834,12 @@ inline QString batchRenderedVideoJobPlanFirstBlocker(
         return plan.ffmpegFramePlan.reason.isEmpty()
             ? QStringLiteral("rendered ffmpeg frame plan unavailable")
             : plan.ffmpegFramePlan.reason;
+    }
+    if( plan.metadataAttempted && !plan.frameProcessingContractReady )
+    {
+        return plan.frameProcessingPlan.reason.isEmpty()
+            ? QStringLiteral("rendered frame-processing contract unavailable")
+            : plan.frameProcessingPlan.reason;
     }
     if( plan.metadataAttempted && !plan.ffmpegCommandReady )
     {
@@ -1899,6 +1979,27 @@ inline QString batchRenderedVideoFfmpegFramePlanSummary(
         .arg(plan.codecDimensionAdjusted ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.scaled ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
+}
+
+inline QString batchRenderedVideoFrameProcessingPlanSummary(
+    const BatchRenderedVideoFrameProcessingPlan & plan)
+{
+    return QStringLiteral("render-processing-source=%1 render-processing-pix-fmt=%2 render-processing-output-size=%3 render-processing-metadata-ready=%4 render-processing-frame-geometry-ready=%5 render-processing-receipt-owned=%6 render-processing-debayer-owned=%7 render-processing-preview-owned=%8 render-processing-resize-owned=%9 render-processing-rgb48-buffer-owned=%10 render-processing-frame-iteration-owned=%11 render-processing-parity-ready=%12 render-processing-frame-ready=%13 render-processing-contract-ready=%14 render-processing-reason=%15")
+        .arg(plan.source.isEmpty() ? QStringLiteral("unspecified") : plan.source)
+        .arg(plan.rawFramePixelFormat.isEmpty() ? QStringLiteral("unspecified") : plan.rawFramePixelFormat)
+        .arg(plan.outputSize.isEmpty() ? QStringLiteral("unspecified") : plan.outputSize)
+        .arg(plan.sourceMetadataReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameGeometryReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.receiptApplicationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.debayerOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.previewProcessingOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.resizeProcessingOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.rgb48FrameBufferOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameIterationOwned ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.processingParityReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.frameProcessingReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.contractReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(plan.reason.isEmpty() ? QStringLiteral("none") : plan.reason);
 }
 
@@ -2052,7 +2153,7 @@ inline QString batchRenderedVideoJobPlanSummary(
     const BatchRenderedVideoJobPlan & plan)
 {
     const QString blocker = batchRenderedVideoJobPlanFirstBlocker(plan);
-    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 preflight-ready=%17 runnable=%18 first-blocker=%19")
+    return QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15 %16 %17 preflight-ready=%18 runnable=%19 first-blocker=%20")
         .arg(batchExportFormatRequestSummary(plan.request))
         .arg(batchRenderedVideoTargetSummary(plan.target))
         .arg(batchRenderedVideoEncoderPresetSummary(plan.encoderPreset))
@@ -2064,6 +2165,8 @@ inline QString batchRenderedVideoJobPlanSummary(
         .arg(batchRenderedVideoSourceMetadataSummary(plan))
         .arg(batchRenderedVideoRenderSettingsSummary(plan.renderSettings))
         .arg(batchRenderedVideoFfmpegFramePlanSummary(plan.ffmpegFramePlan))
+        .arg(batchRenderedVideoFrameProcessingPlanSummary(
+            plan.frameProcessingPlan))
         .arg(batchRenderedVideoFfmpegCommandPlanSummary(plan.ffmpegCommandPlan))
         .arg(batchRenderedVideoFfmpegExecutionPlanSummary(
             plan.ffmpegExecutionPlan))
