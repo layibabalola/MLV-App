@@ -234,6 +234,12 @@ quote boundaries. `RUN-CUDA-DOGFOOD.ps1` creates this packet by default after a
 proof run (`-NoProofPacket` opts out). The packet is transport/integrity
 evidence only: `proofReport.status=QUOTABLE_PASS` is still the required reader
 gate before claiming Dell/UltraMagnus support or speed.
+`tools/profiling/import-local-cuda-proof-result.ps1` is the return path for
+those packets: it expands a copied `mlvapp-local-cuda-proof-*.zip`, validates
+the manifest schema, checks every listed artifact hash, optionally enforces host
+and repo-head matches, and writes `import-summary.json`. Import success proves
+packet integrity, not GPU success; `-StrictQuotable` additionally requires
+`proofReport.status=QUOTABLE_PASS`.
 
 Update 2026-06-19 P4 default slice: clean playback settings now default to
 `Auto` instead of `Fast`, matching the user-facing mode plan below while still
