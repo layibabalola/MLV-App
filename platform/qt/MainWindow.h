@@ -209,6 +209,8 @@ private slots:
     void openMlvSet( QStringList list );
     void timerFrameEvent( bool predictivePlaybackAdvance = false );
     void on_actionOpen_triggered();
+    /* Open a folder of CinemaDNG frames as a clip (added programmatically). */
+    void openDngFolderDialog();
     void on_actionTranscodeAndImport_triggered();
     void on_actionFcpxmlImportAssistant_triggered();
     void on_actionFcpxmlSelectionAssistant_triggered();

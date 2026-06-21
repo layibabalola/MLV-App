@@ -29,6 +29,7 @@
 #define MLV_VIDEO_CLASS_JPEG         0x03
 #define MLV_VIDEO_CLASS_H264         0x04
 
+#define MLV_VIDEO_CLASS_FLAG_DNGSEQ  0x200 /* in-memory marker: CinemaDNG folder source (never written to file) */
 #define MLV_VIDEO_CLASS_FLAG_MCRAW   0x100
 #define MLV_VIDEO_CLASS_FLAG_LZMA    0x80
 #define MLV_VIDEO_CLASS_FLAG_DELTA   0x40

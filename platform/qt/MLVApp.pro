@@ -202,6 +202,7 @@ SOURCES += \
     ../../src/processing/cube_lut.c \
     ../../src/mlv/llrawproc/dualiso.c \
     ../../src/dng/dng.c \
+    ../../src/dng/dng_reader.c \
     ScopesLabel.cpp \
     InfoDialog.cpp \
     StatusDialog.cpp \
@@ -327,6 +328,7 @@ HEADERS += MainWindow.h \
     ../../src/mlv/llrawproc/dualiso.h \
     ../../src/mlv/camid/camera_id.h \
     ../../src/dng/dng.h \
+    ../../src/dng/dng_reader.h \
     ../../src/dng/dng_tag_codes.h \
     ../../src/dng/dng_tag_types.h \
     ../../src/dng/dng_tag_values.h \

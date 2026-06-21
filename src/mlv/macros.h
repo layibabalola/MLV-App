@@ -118,5 +118,8 @@
 #define doesMlvAlwaysUseAmaze(video) (video)->use_amaze
 #define getMlvVideoClass(video) (video)->MLVI.videoClass
 #define isMcrawLoaded(video) (video)->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_MCRAW ? 1 : 0
+/* CinemaDNG folder source: in-memory marker so the raw-frame decode path
+ * reads per-frame .dng files instead of an MLV/mcraw container. */
+#define isDngFolderLoaded(video) (((video)->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_DNGSEQ) ? 1 : 0)
 
 #endif

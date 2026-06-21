@@ -37,6 +37,9 @@
 /* Bitunpack and lossless compression */
 #include "../dng/dng.h"
 
+/* CinemaDNG folder source (reads per-frame .dng files for playback) */
+#include "../dng/dng_reader.h"
+
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define ROR32(v,a) ((v) >> (a) | (v) << (32-(a)))
@@ -2859,6 +2862,53 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
     int width = video->RAWI.xRes;
     int height = video->RAWI.yRes;
     int pixels_count = width * height;
+
+    /* CinemaDNG folder source: there is no MLV/mcraw file[chunk] container.
+     * Each frame is its own .dng file. Decode the requested frame's bayer
+     * payload directly into unpackedFrame (uncompressed bit-unpack OR LJ92,
+     * picked from the per-frame TIFF Compression tag) and return. The output
+     * is the same row-major uint16 bayer frame the MLV path produces, so the
+     * entire downstream llrawproc/AMaZE/processing/display pipeline is reused
+     * unchanged. */
+    if (isDngFolderLoaded(video))
+    {
+        const double disk_read_start = mlv_stage_timing_now();
+        int ret = dng_sequence_get_bayer16((const dng_sequence_t *)video->dng_sequence,
+                                            (uint32_t)frameIndex, unpackedFrame);
+        g_mlv_last_raw_uint16_disk_read_ms = (mlv_stage_timing_now() - disk_read_start) * 1000.0;
+        g_mlv_last_raw_uint16_decompress_ms = 0.0;
+        g_mlv_last_raw_uint16_unpack_ms = 0.0;
+        g_mlv_last_raw_uint16_copy_ms = 0.0;
+        if (ret != 0)
+        {
+            DEBUG( printf("DNG folder decode error for frame %llu\n", (unsigned long long)frameIndex); )
+            return 1;
+        }
+
+        /* Mirror the optional S0 pipeline-capture hook from the MLV path. */
+        if (mlv_pipeline_capture_should_capture_frame(frameIndex))
+        {
+            const int cw = (int)getMlvWidth(video);
+            const int ch = (int)getMlvHeight(video);
+            mlv_pipeline_capture_meta_t meta;
+            memset(&meta, 0, sizeof meta);
+            meta.stage = MLV_PIPELINE_STAGE_S0_RAW_UINT16;
+            meta.format = MLV_PIPELINE_FORMAT_UINT16_MONO;
+            meta.format_label = "uint16_bayer_post_unpack";
+            meta.width = cw;
+            meta.height = ch;
+            meta.bytes_per_line = cw * (int)sizeof(uint16_t);
+            meta.bytes_per_pixel = (int)sizeof(uint16_t);
+            meta.channels = 1;
+            meta.bit_depth = 16;
+            meta.dual_iso_mode = "n/a";
+            meta.debayer_mode = "n/a";
+            meta.scaler = "none";
+            meta.path_label = NULL;
+            mlv_pipeline_capture(frameIndex, unpackedFrame, &meta);
+        }
+        return 0;
+    }
 
     int chunk = video->video_index[frameIndex].chunk_num;
     uint32_t frame_size = video->video_index[frameIndex].frame_size;
@@ -7255,6 +7305,18 @@ mlvObject_t * initMlvObjectWithMcrawClip(char * mlvPath, int preview, int * err,
     return video;
 }
 
+/* Init an mlv object backed by a folder of CinemaDNG frames. Mirrors the
+ * mcraw entry point above. */
+mlvObject_t * initMlvObjectWithDngFolder(char * dirPath, int preview, int * err, char * error_message)
+{
+    mlvObject_t * video = initMlvObject();
+    char error_message_tmp[256] = {0};
+    int err_tmp =  openDngFolderClip(video, dirPath, preview, error_message_tmp);
+    if (err != NULL) *err = err_tmp;
+    if (error_message != NULL) strcpy(error_message, error_message_tmp);
+    return video;
+}
+
 /* Allocates a tiny bit of memory for everything in the structure
  * so we can always be sure there is memory, and when we need to 
  * resize it, simply do free followed by malloc */
@@ -7374,6 +7436,13 @@ void freeMlvObject(mlvObject_t * video)
 
     /* Close all MLV file chunks */
     if(video->file) close_all_chunks(video->file, video->filenum);
+    /* Free CinemaDNG folder source, if any */
+    if(video->dng_sequence)
+    {
+        dng_sequence_free((dng_sequence_t *)video->dng_sequence);
+        free(video->dng_sequence);
+        video->dng_sequence = NULL;
+    }
     /* Free all memory */
     if(video->video_index) free(video->video_index);
     if(video->audio_index) free(video->audio_index);
@@ -8524,8 +8593,184 @@ short_cut:
     return MLV_ERR_NONE;
 }
 
-/* Reads an MLV file in to a mlv object(mlvObject_t struct) 
- * only puts metadata in to the mlvObject_t, 
+/* Opens a FOLDER of CinemaDNG frames as a clip. Enumerates *.dng/*.DNG in
+ * natural order, parses frame 0's TIFF/IFD for geometry + calibration, and
+ * populates the mlvObject_t so the existing playback/render/processing path
+ * works unchanged. Per-frame decode happens in getMlvRawFrameUint16Direct via
+ * the isDngFolderLoaded() branch. Mirrors openMcrawClip(). */
+int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message)
+{
+    video->path = malloc( strlen(dirPath) + 1 );
+    memcpy(video->path, dirPath, strlen(dirPath));
+    video->path[strlen(dirPath)] = 0x0;
+
+    /* Enumerate + parse frame 0. */
+    dng_sequence_t * seq = (dng_sequence_t *)calloc(1, sizeof(dng_sequence_t));
+    if (!seq)
+    {
+        sprintf(error_message, "Out of memory opening DNG folder:  %s", video->path);
+        return MLV_ERR_OPEN;
+    }
+    if (dng_sequence_open(dirPath, seq) != 0 || !seq->info.valid)
+    {
+        free(seq);
+        sprintf(error_message, "No readable CinemaDNG frames in folder:  %s", video->path);
+        DEBUG( printf("\n%s\n", error_message); )
+        return MLV_ERR_OPEN;
+    }
+    video->dng_sequence = seq;
+
+    const dng_frame_info_t * fi = &seq->info;
+
+    /* In preview mode only the first frame is needed. */
+    uint32_t frame_count = seq->count;
+    if (open_mode == MLV_OPEN_PREVIEW) frame_count = 1;
+
+    video->frames      = frame_count;
+    /* The DNG-folder decode path does not use video_index/file[chunk], but a
+     * non-NULL video_index keeps the rest of the object consistent (some code
+     * indexes it for frame numbers / time). One entry per frame. */
+    video->video_index = (frame_index_t *)calloc(video->frames ? video->frames : 1, sizeof(frame_index_t));
+    for (uint32_t i = 0; i < video->frames; i++)
+    {
+        video->video_index[i].frame_type   = 1;
+        video->video_index[i].chunk_num    = 0;
+        video->video_index[i].frame_number = i;
+        video->video_index[i].frame_time   = i;
+    }
+
+    /* No multi-file chunk model here, but allocate a 1-element file/mutex array
+     * so any incidental file[0]/mutex[0] access stays valid. */
+    video->filenum = 1;
+    video->file = (FILE **)calloc(1, sizeof(FILE *));
+    video->main_file_mutex = calloc(sizeof(pthread_mutex_t), 1);
+    pthread_mutex_init(video->main_file_mutex, NULL);
+
+    /* RAWI geometry + calibration straight from the DNG IFD. */
+    memcpy(&video->RAWI.blockType, "RAWI", 4);
+    video->RAWI.blockSize                 = sizeof(mlv_rawi_hdr_t);
+    video->RAWI.xRes                      = fi->width;
+    video->RAWI.yRes                      = fi->height;
+    video->RAWI.raw_info.bits_per_pixel   = fi->bits_per_sample ? fi->bits_per_sample : 14;
+    video->RAWI.raw_info.black_level      = fi->black_level;
+    video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : ((1 << video->RAWI.raw_info.bits_per_pixel) - 1);
+    video->RAWI.raw_info.cfa_pattern      = (int32_t)fi->cfa_pattern;
+    video->RAWI.raw_info.exposure_bias[0] = 0;
+    video->RAWI.raw_info.exposure_bias[1] = 0;
+
+    /* Active area: use the DNG tag if present, else full frame. */
+    if (fi->active_area[2] > fi->active_area[0] && fi->active_area[3] > fi->active_area[1])
+    {
+        video->RAWI.raw_info.active_area.y1 = fi->active_area[0];
+        video->RAWI.raw_info.active_area.x1 = fi->active_area[1];
+        video->RAWI.raw_info.active_area.y2 = fi->active_area[2];
+        video->RAWI.raw_info.active_area.x2 = fi->active_area[3];
+    }
+    else
+    {
+        video->RAWI.raw_info.active_area.x1 = 0;
+        video->RAWI.raw_info.active_area.y1 = 0;
+        video->RAWI.raw_info.active_area.x2 = fi->width;
+        video->RAWI.raw_info.active_area.y2 = fi->height;
+    }
+
+    /* Color matrices: prefer the values baked into the DNG; fall back to the
+     * default camid already loaded by initMlvObject() when absent. */
+    if (fi->has_color_matrix1)
+    {
+        memcpy(video->camid.ColorMatrix1, fi->color_matrix1, 18 * sizeof(int32_t));
+        memcpy(video->RAWI.raw_info.color_matrix1, fi->color_matrix1, 18 * sizeof(int32_t));
+    }
+    else
+    {
+        memcpy(video->RAWI.raw_info.color_matrix1, video->camid.ColorMatrix1, 18 * sizeof(int32_t));
+    }
+    if (fi->has_color_matrix2)
+        memcpy(video->camid.ColorMatrix2, fi->color_matrix2, 18 * sizeof(int32_t));
+    if (fi->has_forward_matrix1)
+        memcpy(video->camid.ForwardMatrix1, fi->forward_matrix1, 18 * sizeof(int32_t));
+    if (fi->has_forward_matrix2)
+        memcpy(video->camid.ForwardMatrix2, fi->forward_matrix2, 18 * sizeof(int32_t));
+
+    /* MLVI: mark as a DNG-folder source (in-memory only). */
+    memcpy(&video->MLVI.fileMagic, "MLVI", 4);
+    video->MLVI.blockSize        = sizeof(mlv_file_hdr_t);
+    video->MLVI.videoClass       = MLV_VIDEO_CLASS_RAW | MLV_VIDEO_CLASS_FLAG_DNGSEQ;
+    video->MLVI.videoFrameCount  = frame_count;
+    /* Default to 24 fps; CinemaDNG does not reliably carry a clip frame rate
+     * in a single frame's IFD (FrameRate tag is optional). */
+    video->MLVI.sourceFpsNom     = 24;
+    video->MLVI.sourceFpsDenom   = 1;
+    video->MLVI.audioClass       = 0;
+    video->MLVI.audioFrameCount  = 0;
+
+    /* White balance: from AsShotNeutral when present (gains are 1/neutral,
+     * scaled by 1024 like the mcraw path). */
+    memcpy(&video->WBAL.blockType, "WBAL", 4);
+    video->WBAL.blockSize        = sizeof(mlv_wbal_hdr_t);
+    video->WBAL.wb_mode          = 6;     // CUSTOM
+    video->WBAL.timestamp        = 0;
+    video->WBAL.kelvin           = 0;
+    if (fi->has_as_shot_neutral &&
+        fi->as_shot_neutral[0] && fi->as_shot_neutral[2] && fi->as_shot_neutral[4])
+    {
+        double nr = (double)fi->as_shot_neutral[0] / (double)fi->as_shot_neutral[1];
+        double ng = (double)fi->as_shot_neutral[2] / (double)fi->as_shot_neutral[3];
+        double nb = (double)fi->as_shot_neutral[4] / (double)fi->as_shot_neutral[5];
+        video->WBAL.wbgain_r     = (nr != 0.0) ? (uint32_t)((1.0 / nr) * 1024) : 1024;
+        video->WBAL.wbgain_g     = (ng != 0.0) ? (uint32_t)((1.0 / ng) * 1024) : 1024;
+        video->WBAL.wbgain_b     = (nb != 0.0) ? (uint32_t)((1.0 / nb) * 1024) : 1024;
+    }
+
+    memcpy(&video->IDNT.blockType, "IDNT", 4);
+    video->IDNT.blockSize        = sizeof(mlv_idnt_hdr_t);
+    snprintf((char *)video->IDNT.cameraName, 31, "%s", fi->camera_model[0] ? fi->camera_model : "CinemaDNG");
+
+    memcpy(&video->EXPO.blockType, "EXPO", 4);
+    video->EXPO.blockSize        = sizeof(mlv_expo_hdr_t);
+    video->EXPO.isoValue         = fi->iso ? fi->iso : 100;
+    video->EXPO.shutterValue     = 1;     /* unknown; non-zero to avoid div-by-zero in UI */
+
+    /* Save original levels for reset. */
+    video->original_black_level  = getMlvBlackLevel(video);
+    video->original_white_level  = getMlvWhiteLevel(video);
+
+    /* Imaginary lossless bit depth + dual-iso validity (already-recon'd DNGs
+     * are not dual-iso from MLV-App's perspective). */
+    setMlvLosslessBpp(video);
+    video->llrawproc->diso_validity = DISO_INVALID;
+
+    /* NON compressed frame size. */
+    video->frame_size = (getMlvHeight(video) * getMlvWidth(video) * getMlvBitdepth(video)) / 8;
+
+    /* Calculate framerate. */
+    video->frame_rate = getMlvFramerateOrig(video);
+
+    /* Make sure frame cache number is up to date. */
+    setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
+
+    /* For frame cache. */
+    video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * (video->frames ? video->frames : 1) );
+    video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
+    video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
+    video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), (video->frames ? video->frames : 1) );
+
+    isMlvActive(video) = 1;
+
+    /* Start caching unless it was disabled already. */
+    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    {
+        for (int i = 0; i < video->cpu_cores; ++i)
+        {
+            add_mlv_cache_thread(video);
+        }
+    }
+
+    return MLV_ERR_NONE;
+}
+
+/* Reads an MLV file in to a mlv object(mlvObject_t struct)
+ * only puts metadata in to the mlvObject_t,
  * no debayering or bit unpacking */
 int openMlvClip(mlvObject_t * video, char * mlvPath, int open_mode, char * error_message)
 {

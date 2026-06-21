@@ -14,6 +14,8 @@
 /* All functions in one */
 mlvObject_t * initMlvObjectWithClip(char * mlvPath, int preview, int * err, char * error_message);
 mlvObject_t * initMlvObjectWithMcrawClip(char * mlvPath, int preview, int * err, char * error_message);
+/* Open a folder of CinemaDNG frames as a clip (per-frame .dng source). */
+mlvObject_t * initMlvObjectWithDngFolder(char * dirPath, int preview, int * err, char * error_message);
 
 /* Initialises an MLV object. That's all you need to know */
 mlvObject_t * initMlvObject();
@@ -26,6 +28,7 @@ void printMlvInfo(mlvObject_t * video);
  * no debayering or processing */
 int openMlvClip(mlvObject_t * video, char * mlvPath, int open_mode, char * error_message);
 int openMcrawClip(mlvObject_t * video, char * mcrawPath, int open_mode, char * error_message);
+int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message);
 
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };

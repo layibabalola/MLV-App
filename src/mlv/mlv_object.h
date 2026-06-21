@@ -102,6 +102,13 @@ typedef struct {
     int         compression_type;  /* mcraw compression type. legacy/binned: 6, default: 7 */
     frame_index_t * video_index;
 
+    /* CinemaDNG folder source: opaque pointer to a dng_sequence_t (defined in
+     * src/dng/dng_reader.h). Non-NULL only when this object was opened via
+     * openDngFolderClip(); the per-frame decode path then reads .dng files
+     * instead of an MLV/mcraw container. Kept void* so this widely-included
+     * header does not pull in dng_reader.h. */
+    void *      dng_sequence;
+
     /* Audio info */
     uint32_t    audios;          /* Number of audio blocks */
     frame_index_t * audio_index;

@@ -8106,7 +8106,16 @@ int MainWindow::openMlvForPreview(QString fileName)
 
     mlvObject_t * new_MlvObject;
 
-    if (fileName.endsWith( ".mcraw", Qt::CaseInsensitive))
+    if (QFileInfo( fileName ).isDir())
+    {
+        /* CinemaDNG folder source: a directory of per-frame .dng files. */
+#ifdef Q_OS_UNIX
+        new_MlvObject = initMlvObjectWithDngFolder( fileName.toUtf8().data(), MLV_OPEN_PREVIEW, &mlvErr, mlvErrMsg );
+#else
+        new_MlvObject = initMlvObjectWithDngFolder( fileName.toLatin1().data(), MLV_OPEN_PREVIEW, &mlvErr, mlvErrMsg );
+#endif
+    }
+    else if (fileName.endsWith( ".mcraw", Qt::CaseInsensitive))
     {
 #ifdef Q_OS_UNIX
         new_MlvObject = initMlvObjectWithMcrawClip( fileName.toUtf8().data(), MLV_OPEN_PREVIEW, &mlvErr, mlvErrMsg );
@@ -8225,6 +8234,41 @@ void MainWindow::on_actionOpen_triggered()
     selectDebayerAlgorithm();
 }
 
+//Open a folder of CinemaDNG frames and play it back as a clip.
+//A DNG folder is per-frame random-access and already dual-ISO-recon'd, so
+//playback skips MLV demux + dual-ISO recon. The frame source differs (a .dng
+//file per frame) but the bayer payload feeds the same AMaZE/processing/display
+//pipeline unchanged.
+void MainWindow::openDngFolderDialog()
+{
+    //Stop playback if active
+    ui->actionPlay->setChecked( false );
+
+    QString path = QFileInfo( m_lastMlvOpenFileName ).absolutePath();
+    if( !QDir( path ).exists() ) path = QDir::homePath();
+
+    QString dir = QFileDialog::getExistingDirectory( this, tr("Open CinemaDNG folder..."),
+                                                     path,
+                                                     QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks );
+
+    if( dir.isEmpty() ) return;
+
+    m_inOpeningProcess = true;
+
+    //importNewMlv dedupes, adds to session, and routes a directory path to the
+    //DNG-folder open branch added in openMlv()/openMlvForPreview().
+    importNewMlv( dir );
+
+    //Show last imported clip
+    if( SESSION_CLIP_COUNT ) showFileInEditor( SESSION_CLIP_COUNT - 1 );
+
+    //Caching is in which state? Set it!
+    if( ui->actionCaching->isChecked() ) on_actionCaching_triggered();
+
+    m_inOpeningProcess = false;
+    selectDebayerAlgorithm();
+}
+
 //Import MLV files to session, which were used in FCPXML project
 void MainWindow::on_actionFcpxmlImportAssistant_triggered()
 {
@@ -8285,7 +8329,16 @@ int MainWindow::openMlv( QString fileName )
 
     mlvObject_t * new_MlvObject;
 
-    if (fileName.endsWith( ".mcraw", Qt::CaseInsensitive))
+    if (QFileInfo( fileName ).isDir())
+    {
+        /* CinemaDNG folder source: a directory of per-frame .dng files. */
+#ifdef Q_OS_UNIX
+        new_MlvObject = initMlvObjectWithDngFolder( fileName.toUtf8().data(), mlvOpenMode, &mlvErr, mlvErrMsg );
+#else
+        new_MlvObject = initMlvObjectWithDngFolder( fileName.toLatin1().data(), mlvOpenMode, &mlvErr, mlvErrMsg );
+#endif
+    }
+    else if (fileName.endsWith( ".mcraw", Qt::CaseInsensitive))
     {
 #ifdef Q_OS_UNIX
         new_MlvObject = initMlvObjectWithMcrawClip( fileName.toUtf8().data(), mlvOpenMode, &mlvErr, mlvErrMsg );
@@ -8867,6 +8920,17 @@ void MainWindow::initGui( void )
 {
     //We dont want a context menu which could disable the menu bar
     setContextMenuPolicy(Qt::NoContextMenu);
+
+    //"Open CinemaDNG folder..." action, added programmatically right after the
+    //regular Open action so MainWindow.ui stays untouched. Routes to
+    //openDngFolderDialog().
+    {
+        QAction *actionOpenDngFolder = new QAction( tr("Open CinemaDNG folder..."), this );
+        ui->menuFile->insertAction( ui->actionOpen, actionOpenDngFolder );
+        //Place it directly below Open by moving Open above the new action would
+        //reorder; insertAction puts it BEFORE actionOpen, which is acceptable.
+        connect( actionOpenDngFolder, SIGNAL(triggered()), this, SLOT(openDngFolderDialog()) );
+    }
 
     //Darktheme menu
     m_darkFrameGroup = new QActionGroup( this );
