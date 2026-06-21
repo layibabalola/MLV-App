@@ -25,6 +25,7 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QMutexLocker>
+#include <QStringList>
 
 #include <algorithm>
 #include <atomic>
@@ -75,6 +76,128 @@ qint64 stagePixelCount( int width, int height )
 {
     if( width <= 0 || height <= 0 ) return 0;
     return static_cast<qint64>( width ) * static_cast<qint64>( height );
+}
+
+bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
+{
+    return key.startsWith( QStringLiteral("llrawproc_") )
+        || key.startsWith( QStringLiteral("dual_iso_full20_") )
+        || key == QStringLiteral("render_thread_recon_worker_llrawproc_total_ms")
+        || key == QStringLiteral("render_thread_recon_worker_llrawproc_dual_iso_ms");
+}
+
+void preserveGpuPlaybackReconTimingTelemetry( const QJsonObject &source,
+                                              QJsonObject &target )
+{
+    for( auto it = source.begin(); it != source.end(); ++it )
+    {
+        if( isGpuPlaybackReconTimingTelemetryKey( it.key() ) )
+        {
+            target.insert( it.key(), it.value() );
+        }
+    }
+}
+
+void restoreGpuPlaybackReconTimingTelemetry( QJsonObject &target,
+                                             const QJsonObject &preserved )
+{
+    if( preserved.isEmpty() ) return;
+
+    QStringList staleKeys;
+    for( auto it = target.begin(); it != target.end(); ++it )
+    {
+        if( isGpuPlaybackReconTimingTelemetryKey( it.key() ) )
+        {
+            staleKeys.push_back( it.key() );
+        }
+    }
+    for( const QString &key : staleKeys )
+    {
+        target.remove( key );
+    }
+    for( auto it = preserved.begin(); it != preserved.end(); ++it )
+    {
+        target.insert( it.key(), it.value() );
+    }
+}
+
+void insertLlrawprocReconTimingTelemetry( QJsonObject &target )
+{
+    const double llrawprocTotalMs = llrpGetLastTotalMilliseconds();
+    const double llrawprocDarkFrameMs = llrpGetLastDarkFrameMilliseconds();
+    const double llrawprocVerticalStripesMs = llrpGetLastVerticalStripesMilliseconds();
+    const double llrawprocFocusPixelsMs = llrpGetLastFocusPixelsMilliseconds();
+    const double llrawprocBadPixelsMs = llrpGetLastBadPixelsMilliseconds();
+    const double llrawprocPatternNoiseMs = llrpGetLastPatternNoiseMilliseconds();
+    const double llrawprocDualIsoMs = llrpGetLastDualIsoMilliseconds();
+    const double llrawprocChromaSmoothMs = llrpGetLastChromaSmoothMilliseconds();
+    const double llrawprocKnownMs =
+        llrawprocDarkFrameMs
+        + llrawprocVerticalStripesMs
+        + llrawprocFocusPixelsMs
+        + llrawprocBadPixelsMs
+        + llrawprocPatternNoiseMs
+        + llrawprocDualIsoMs
+        + llrawprocChromaSmoothMs;
+    dualiso_full20bit_timing_t dualIsoFull20 = {};
+    llrpGetLastDualIsoFull20bitTiming( &dualIsoFull20 );
+
+    target.insert( QStringLiteral("render_thread_recon_worker_llrawproc_total_ms"),
+                   llrawprocTotalMs );
+    target.insert( QStringLiteral("render_thread_recon_worker_llrawproc_dual_iso_ms"),
+                   llrawprocDualIsoMs );
+    target.insert( QStringLiteral("llrawproc_ms"), llrawprocTotalMs );
+    target.insert( QStringLiteral("llrawproc_total_ms"), llrawprocTotalMs );
+    target.insert( QStringLiteral("llrawproc_dark_frame_ms"), llrawprocDarkFrameMs );
+    target.insert( QStringLiteral("llrawproc_vertical_stripes_ms"), llrawprocVerticalStripesMs );
+    target.insert( QStringLiteral("llrawproc_focus_pixels_ms"), llrawprocFocusPixelsMs );
+    target.insert( QStringLiteral("llrawproc_bad_pixels_ms"), llrawprocBadPixelsMs );
+    target.insert( QStringLiteral("llrawproc_pattern_noise_ms"), llrawprocPatternNoiseMs );
+    target.insert( QStringLiteral("llrawproc_dual_iso_ms"), llrawprocDualIsoMs );
+    target.insert( QStringLiteral("llrawproc_chroma_smooth_ms"), llrawprocChromaSmoothMs );
+    target.insert( QStringLiteral("llrawproc_other_ms"),
+                   qMax( 0.0, llrawprocTotalMs - llrawprocKnownMs ) );
+    target.insert( QStringLiteral("dual_iso_full20_valid"),
+                   dualIsoFull20.valid != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_total_ms"), dualIsoFull20.total_ms );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_ms"), dualIsoFull20.pattern_ms );
+    target.insert( QStringLiteral("dual_iso_full20_noise_ms"), dualIsoFull20.noise_ms );
+    target.insert( QStringLiteral("dual_iso_full20_scratch_ms"), dualIsoFull20.scratch_ms );
+    target.insert( QStringLiteral("dual_iso_full20_convert20_ms"), dualIsoFull20.convert20_ms );
+    target.insert( QStringLiteral("dual_iso_full20_match_ms"), dualIsoFull20.match_ms );
+    target.insert( QStringLiteral("dual_iso_full20_interp_ms"), dualIsoFull20.interp_ms );
+    target.insert( QStringLiteral("dual_iso_full20_fullres_ms"), dualIsoFull20.fullres_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_ms"), dualIsoFull20.mix_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_curve_select_ms"),
+                   dualIsoFull20.mix_curve_select_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_curve_build_ms"),
+                   dualIsoFull20.mix_curve_build_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_curve_float_ms"),
+                   dualIsoFull20.mix_curve_float_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_ev_lut_ms"),
+                   dualIsoFull20.mix_ev_lut_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_halfres_ms"),
+                   dualIsoFull20.mix_halfres_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_alias_map_ms"),
+                   dualIsoFull20.mix_alias_map_ms );
+    target.insert( QStringLiteral("dual_iso_full20_mix_overexposed_ms"),
+                   dualIsoFull20.mix_overexposed_ms );
+    target.insert( QStringLiteral("dual_iso_full20_final_blend_ms"),
+                   dualIsoFull20.final_blend_ms );
+    target.insert( QStringLiteral("dual_iso_full20_convert16_ms"),
+                   dualIsoFull20.convert16_ms );
+    target.insert( QStringLiteral("dual_iso_full20_other_ms"), dualIsoFull20.other_ms );
+    target.insert( QStringLiteral("dual_iso_full20_interp_method"),
+                   dualIsoFull20.interp_method );
+    target.insert( QStringLiteral("dual_iso_full20_mix_halfres_probe_mode"),
+                   dualIsoFull20.mix_halfres_probe_mode );
+    target.insert( QStringLiteral("dual_iso_full20_final_blend_probe_mode"),
+                   dualIsoFull20.final_blend_probe_mode );
+    target.insert( QStringLiteral("dual_iso_full20_threads"), dualIsoFull20.threads );
+    target.insert( QStringLiteral("dual_iso_full20_use_alias_map"),
+                   dualIsoFull20.use_alias_map != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_use_fullres"),
+                   dualIsoFull20.use_fullres != 0 );
 }
 
 std::array<double, 3> normalizedWbMultipliers6500()
@@ -953,6 +1076,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                                     rawPixelCount * sizeof(uint16_t),
                                     workerState,
                                     0 );
+        insertLlrawprocReconTimingTelemetry( slot.stageTimingTelemetry );
         bool gpuPlaybackReconTextureBayerSnapshotCopied = false;
         if( wantsGpuPlaybackReconTextureNoReadback )
         {
@@ -1895,6 +2019,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     };
     if( decodedRawFrameAlreadyReconned )
     {
+        preserveGpuPlaybackReconTimingTelemetry(
+            slot.stageTimingTelemetry,
+            preservedGpuPlaybackReconTextureTelemetry );
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_recon_requested" );
         preserveGpuPlaybackReconTextureTelemetry(
@@ -3809,6 +3936,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit"), false );
         slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit_scale_factor"), 0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"), false );
+        restoreGpuPlaybackReconTimingTelemetry(
+            slot.stageTimingTelemetry,
+            preservedGpuPlaybackReconTextureTelemetry );
     }
 
     slot.processedFrame8Active =
