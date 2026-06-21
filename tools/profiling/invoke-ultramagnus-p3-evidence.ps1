@@ -19,6 +19,7 @@ param(
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
+    [switch]$GpuTexNrAcquireLatestReady,
     [int]$Phase3FrameSlots = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
@@ -423,6 +424,7 @@ elseif ($failures.Count -eq 0) {
         $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
         $cudaAmazeLiveDirectRgbaStoreLiteral = if ($CudaAmazeLiveDirectRgbaStore) { '$true' } else { '$false' }
         $gpuPlaybackReconRetainDeviceOutputLiteral = if ($GpuPlaybackReconRetainDeviceOutput) { '$true' } else { '$false' }
+        $gpuTexNrAcquireLatestReadyLiteral = if ($GpuTexNrAcquireLatestReady) { '$true' } else { '$false' }
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -443,6 +445,7 @@ elseif ($failures.Count -eq 0) {
 `$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
 `$cudaAmazeLiveDirectRgbaStore = $cudaAmazeLiveDirectRgbaStoreLiteral
 `$gpuPlaybackReconRetainDeviceOutput = $gpuPlaybackReconRetainDeviceOutputLiteral
+`$gpuTexNrAcquireLatestReady = $gpuTexNrAcquireLatestReadyLiteral
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -479,6 +482,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
     cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
     gpuPlaybackReconRetainDeviceOutput = `$gpuPlaybackReconRetainDeviceOutput
+    gpuTexNrAcquireLatestReady = `$gpuTexNrAcquireLatestReady
     phase3FrameSlots = `$phase3FrameSlots
     validatorExitCode = `$null
     packetInfo = `$null
@@ -608,6 +612,9 @@ try {
     }
     if (`$gpuPlaybackReconRetainDeviceOutput) {
         `$args += '-GpuPlaybackReconRetainDeviceOutput'
+    }
+    if (`$gpuTexNrAcquireLatestReady) {
+        `$args += '-GpuTexNrAcquireLatestReady'
     }
     if (`$phase3FrameSlots -gt 0) {
         `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
@@ -746,6 +753,7 @@ $summary = [pscustomobject]@{
     importResult = $importResult
     options = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+        gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
     }
     warnings = @($warnings)
     failures = @($failures)

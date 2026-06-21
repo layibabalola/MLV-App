@@ -20,6 +20,7 @@ param(
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
+    [switch]$GpuTexNrAcquireLatestReady,
     [int]$Phase3FrameSlots = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
@@ -823,6 +824,9 @@ if ($failures.Count -eq 0) {
         if ($GpuPlaybackReconRetainDeviceOutput) {
             $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
         }
+        if ($GpuTexNrAcquireLatestReady) {
+            $envEntries += "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY=1"
+        }
         if ($Phase3FrameSlots -gt 0) {
             $envEntries += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
         }
@@ -1296,6 +1300,7 @@ $summary = [pscustomobject]@{
         cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
         cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
         gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
+        gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     }
     outputs = [pscustomobject]@{

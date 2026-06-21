@@ -601,6 +601,30 @@ bool RenderFrameThread::acquireOldestGpuTextureNoReadbackReadyFrame(ReadyFrame *
     return acquireReadySlotLocked( frame, readySlotIndex, false );
 }
 
+bool RenderFrameThread::acquireLatestGpuTextureNoReadbackReadyFrame(ReadyFrame *frame)
+{
+    QMutexLocker locker(&m_mutex);
+    const int readySlotIndex = findLatestReadySlotLocked();
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = false;
+        return false;
+    }
+
+    const FrameSlot &slot = m_frameSlots[readySlotIndex];
+    const bool latestGpuTextureNoReadback =
+        slot.gpuPlaybackReconTextureNoReadbackCandidate
+        && slot.presentationContext.playbackActive
+        && slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+        && slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted;
+    if( !latestGpuTextureNoReadback )
+    {
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, true );
+}
+
 bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
                                                 int readySlotIndex,
                                                 bool discardOlderReady )

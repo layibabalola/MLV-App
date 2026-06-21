@@ -2616,6 +2616,14 @@ static bool mlvappPlaybackLegacyTimerRequested()
     return ok && env < 0;
 }
 
+static bool mlvappGpuTexNrAcquireLatestReadyRequested()
+{
+    bool ok = false;
+    const int env = qEnvironmentVariableIntValue(
+        "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY", &ok );
+    return ok && env != 0;
+}
+
 static int mlvappStartPlaybackTimer( QObject *owner, double framerate )
 {
     if( !owner ) return 0;
@@ -23894,11 +23902,25 @@ void MainWindow::drawFrameReady()
     bool haveReadyFrame = false;
     if( m_pRenderThread )
     {
-        haveReadyFrame =
-            m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
+        const bool latestGpuTexNrReady =
+            mlvappGpuTexNrAcquireLatestReadyRequested();
+        haveReadyFrame = latestGpuTexNrReady
+            ? m_pRenderThread->acquireLatestGpuTextureNoReadbackReadyFrame( &readyFrame )
+            : m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
         if( !haveReadyFrame )
         {
             haveReadyFrame = m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
+        }
+        if( haveReadyFrame )
+        {
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_gpu_tex_nr_acquire_latest_ready_requested"),
+                latestGpuTexNrReady );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_gpu_tex_nr_acquire_mode"),
+                latestGpuTexNrReady
+                    ? QStringLiteral("latest_ready_opt_in")
+                    : QStringLiteral("oldest_ordered_default") );
         }
     }
     if( !haveReadyFrame )
