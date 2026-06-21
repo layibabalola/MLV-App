@@ -580,6 +580,20 @@ typedef int (*llrawproc_gpu_reset_gl_texture_resources_fn)(igpu_recon_backend*);
 
 typedef struct
 {
+    const int * raw2ev;
+    const int * ev2raw;
+    const double * mix_curve;
+    const double * fullres_curve;
+    const float * randn05;
+    int black_level;
+    int white_level;
+    int apply_dither;
+    double ev_correction;
+    double dark_noise;
+} llrawprocGpuReconLutsKey_t;
+
+typedef struct
+{
     HMODULE dll;
     int attempted;
     int unavailable;
@@ -597,6 +611,10 @@ typedef struct
     llrawproc_gpu_last_timing_fn last_timing;
     llrawproc_gpu_allocated_bytes_fn allocated_bytes;
     llrawproc_gpu_reset_gl_texture_resources_fn reset_gl_texture_resources;
+    int clip_configured;
+    igpu_recon_clip_t configured_clip;
+    int luts_configured;
+    llrawprocGpuReconLutsKey_t configured_luts_key;
 } llrawprocGpuExportBackend_t;
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
@@ -833,6 +851,25 @@ static int llrawproc_gpu_recon_backend_available_guarded(int prefer_playback_dll
     return available;
 }
 
+static void llrawproc_gpu_recon_luts_key_from_state(
+    const dualiso_gpu_recon_state_t * state,
+    llrawprocGpuReconLutsKey_t * key)
+{
+    if(!key) return;
+    memset(key, 0, sizeof(*key));
+    if(!state) return;
+    key->raw2ev = state->raw2ev;
+    key->ev2raw = state->ev2raw;
+    key->mix_curve = state->mix_curve;
+    key->fullres_curve = state->fullres_curve;
+    key->randn05 = state->randn05;
+    key->black_level = state->black_level;
+    key->white_level = state->white_level;
+    key->apply_dither = state->apply_dither;
+    key->ev_correction = state->ev_correction;
+    key->dark_noise = state->dark_noise;
+}
+
 static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * state,
                                            const uint16_t * gpu_input,
                                            uint16_t * gpu_output,
@@ -849,6 +886,7 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     igpu_recon_clip_t clip;
     igpu_recon_luts_t luts;
     igpu_recon_frame_t frame;
+    llrawprocGpuReconLutsKey_t luts_key;
     int rc = 0;
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
 
@@ -880,6 +918,7 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     luts.mix_curve = state->mix_curve;
     luts.fullres_curve = state->fullres_curve;
     luts.randn05 = state->randn05;
+    llrawproc_gpu_recon_luts_key_from_state(state, &luts_key);
 
     memset(&frame, 0, sizeof(frame));
     frame.ev_correction = state->ev_correction;
@@ -898,8 +937,43 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
         pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
         return 0;
     }
-    rc = g->set_clip(g->backend, &clip);
-    if(rc == 0) rc = g->set_luts(g->backend, &luts);
+    const int clip_matches =
+        g->clip_configured
+        && memcmp(&g->configured_clip, &clip, sizeof(clip)) == 0;
+    const int luts_match =
+        g->luts_configured
+        && memcmp(&g->configured_luts_key, &luts_key, sizeof(luts_key)) == 0;
+    const int need_set_clip = !clip_matches;
+    const int need_set_luts = need_set_clip || !luts_match;
+
+    if(need_set_clip)
+    {
+        rc = g->set_clip(g->backend, &clip);
+        if(rc == 0)
+        {
+            g->configured_clip = clip;
+            g->clip_configured = 1;
+            g->luts_configured = 0;
+        }
+        else
+        {
+            g->clip_configured = 0;
+            g->luts_configured = 0;
+        }
+    }
+    if(rc == 0 && need_set_luts)
+    {
+        rc = g->set_luts(g->backend, &luts);
+        if(rc == 0)
+        {
+            g->configured_luts_key = luts_key;
+            g->luts_configured = 1;
+        }
+        else
+        {
+            g->luts_configured = 0;
+        }
+    }
     if(rc == 0) rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
     if(g->allocated_bytes && allocated_bytes_out && allocated_bytes_valid_out)
     {
