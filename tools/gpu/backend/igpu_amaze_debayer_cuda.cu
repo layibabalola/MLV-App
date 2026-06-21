@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstring>
 #include <sstream>
+#include <vector>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -40,6 +41,8 @@ struct igpu_amaze_debayer_backend
     uint16_t * liveRgb16 = nullptr;
     uint16_t * liveRgba16 = nullptr;
     DeviceBuffers liveDeviceBuffers;
+    std::vector<DeviceBuffers> liveTileDeviceBuffers;
+    std::vector<cudaStream_t> liveTileStreams;
     std::size_t livePixelCount = 0;
     int liveWidth = 0;
     int liveHeight = 0;
@@ -48,6 +51,8 @@ struct igpu_amaze_debayer_backend
 
 namespace
 {
+constexpr int kLiveTileStreamCount = 4;
+
 double now_ms()
 {
     using clock = std::chrono::steady_clock;
@@ -205,6 +210,19 @@ void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
     {
         free_device(&backend->liveDeviceBuffers);
         backend->liveDeviceBuffers = DeviceBuffers();
+        for (std::size_t index = 0; index < backend->liveTileDeviceBuffers.size(); ++index)
+        {
+            free_device(&backend->liveTileDeviceBuffers[index]);
+        }
+        backend->liveTileDeviceBuffers.clear();
+        for (std::size_t index = 0; index < backend->liveTileStreams.size(); ++index)
+        {
+            if (backend->liveTileStreams[index])
+            {
+                cudaStreamDestroy(backend->liveTileStreams[index]);
+            }
+        }
+        backend->liveTileStreams.clear();
         backend->liveDeviceBuffersAllocated = false;
     }
     backend->livePixelCount = 0;
@@ -241,6 +259,15 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
     CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
     CK(cudaMalloc(&backend->liveRgba16, pixelCount * 4u * sizeof(uint16_t)));
     allocate_device(&backend->liveDeviceBuffers, 1);
+    backend->liveTileDeviceBuffers.resize(kLiveTileStreamCount);
+    backend->liveTileStreams.resize(kLiveTileStreamCount, nullptr);
+    for (int index = 0; index < kLiveTileStreamCount; ++index)
+    {
+        allocate_device(&backend->liveTileDeviceBuffers[static_cast<std::size_t>(index)], 1);
+        CK(cudaStreamCreateWithFlags(
+            &backend->liveTileStreams[static_cast<std::size_t>(index)],
+            cudaStreamNonBlocking));
+    }
     backend->liveDeviceBuffersAllocated = true;
     backend->livePixelCount = pixelCount;
     backend->liveWidth = width;
@@ -324,7 +351,8 @@ void run_tile(const float * dRaw,
               int width,
               int height,
               int top,
-              int left)
+              int left,
+              cudaStream_t stream = 0)
 {
     const int bottom = imin_i(top + kTileSize, height + 16);
     const int right = imin_i(left + kTileSize, width + 16);
@@ -337,33 +365,33 @@ void run_tile(const float * dRaw,
     const dim3 grid((kTileSize + block.x - 1) / block.x,
                     (kTileSize + block.y - 1) / block.y);
 
-    k_tile_load_float<<<grid, block>>>(dRaw,
-                                       d.cfa,
-                                       d.rgbgreen,
-                                       width,
-                                       height,
-                                       top,
-                                       left,
-                                       rr1,
-                                       cc1);
+    k_tile_load_float<<<grid, block, 0, stream>>>(dRaw,
+                                                  d.cfa,
+                                                  d.rgbgreen,
+                                                  width,
+                                                  height,
+                                                  top,
+                                                  left,
+                                                  rr1,
+                                                  cc1);
     CK(cudaGetLastError());
-    k_gradients<<<grid, block>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
+    k_gradients<<<grid, block, 0, stream>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
     CK(cudaGetLastError());
-    k_diagonal_precursors<<<grid, block>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
+    k_diagonal_precursors<<<grid, block, 0, stream>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
     CK(cudaGetLastError());
-    k_green_interpolation<<<grid, block>>>(d.cfa,
-                                           d.dirwts0,
-                                           d.dirwts1,
-                                           d.vcd,
-                                           d.hcd,
-                                           d.vcdalt,
-                                           d.hcdalt,
-                                           d.dgintv,
-                                           d.dginth,
-                                           rr1,
-                                           cc1);
+    k_green_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                      d.dirwts0,
+                                                      d.dirwts1,
+                                                      d.vcd,
+                                                      d.hcd,
+                                                      d.vcdalt,
+                                                      d.hcdalt,
+                                                      d.dgintv,
+                                                      d.dginth,
+                                                      rr1,
+                                                      cc1);
     CK(cudaGetLastError());
-    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads>>>(
+    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
         d.cfa,
         d.vcd,
         d.hcd,
@@ -373,100 +401,100 @@ void run_tile(const float * dRaw,
         rr1,
         cc1);
     CK(cudaGetLastError());
-    k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
-                                             d.dirwts1,
-                                             d.vcd,
-                                             d.hcd,
-                                             d.dgintv,
-                                             d.dginth,
-                                             d.hvwt,
-                                             rr1,
-                                             cc1);
+    k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
+                                                        d.dirwts1,
+                                                        d.vcd,
+                                                        d.hcd,
+                                                        d.dgintv,
+                                                        d.dginth,
+                                                        d.hvwt,
+                                                        rr1,
+                                                        cc1);
     CK(cudaGetLastError());
-    k_nyquist_test<<<grid, block>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
+    k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
-    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads>>>(d.nyquist, rr1, cc1);
+    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
-    k_nyquist_area_interpolation<<<grid, block>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
+    k_nyquist_area_interpolation<<<grid, block, 0, stream>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
     CK(cudaGetLastError());
-    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(d.cfa,
-                                                                   d.vcd,
-                                                                   d.hcd,
-                                                                   d.nyquist,
-                                                                   d.hvwt,
-                                                                   d.dgrb0,
-                                                                   d.rgbgreen,
-                                                                   d.dgrb2h,
-                                                                   d.dgrb2v,
-                                                                   rr1,
-                                                                   cc1);
+    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads, 0, stream>>>(d.cfa,
+                                                                              d.vcd,
+                                                                              d.hcd,
+                                                                              d.nyquist,
+                                                                              d.hvwt,
+                                                                              d.dgrb0,
+                                                                              d.rgbgreen,
+                                                                              d.dgrb2h,
+                                                                              d.dgrb2v,
+                                                                              rr1,
+                                                                              cc1);
     CK(cudaGetLastError());
-    k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
-                                                d.vcd,
-                                                d.hcd,
-                                                d.nyquist,
-                                                d.dgrb2h,
-                                                d.dgrb2v,
-                                                d.dgrb0,
-                                                d.rgbgreen,
-                                                rr1,
-                                                cc1);
+    k_nyquist_green_refinement<<<grid, block, 0, stream>>>(d.cfa,
+                                                           d.vcd,
+                                                           d.hcd,
+                                                           d.nyquist,
+                                                           d.dgrb2h,
+                                                           d.dgrb2v,
+                                                           d.dgrb0,
+                                                           d.rgbgreen,
+                                                           rr1,
+                                                           cc1);
     CK(cudaGetLastError());
-    k_diagonal_rb_interpolation<<<grid, block>>>(d.cfa,
-                                                 d.delp,
-                                                 d.delm,
-                                                 d.dgrbsq1p,
-                                                 d.dgrbsq1m,
-                                                 d.rbm,
-                                                 d.rbp,
-                                                 d.pmwt,
-                                                 rr1,
-                                                 cc1);
+    k_diagonal_rb_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.delp,
+                                                            d.delm,
+                                                            d.dgrbsq1p,
+                                                            d.dgrbsq1m,
+                                                            d.rbm,
+                                                            d.rbp,
+                                                            d.pmwt,
+                                                            rr1,
+                                                            cc1);
     CK(cudaGetLastError());
-    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(d.cfa,
-                                                                     d.rbm,
-                                                                     d.rbp,
-                                                                     d.pmwt,
-                                                                     d.pmwtalt,
-                                                                     d.rbint,
-                                                                     rr1,
-                                                                     cc1);
+    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads, 0, stream>>>(d.cfa,
+                                                                                d.rbm,
+                                                                                d.rbp,
+                                                                                d.pmwt,
+                                                                                d.pmwtalt,
+                                                                                d.rbint,
+                                                                                rr1,
+                                                                                cc1);
     CK(cudaGetLastError());
-    k_diagonal_green_correction<<<grid, block>>>(d.cfa,
-                                                 d.dirwts0,
-                                                 d.dirwts1,
-                                                 d.hvwt,
-                                                 d.pmwt,
-                                                 d.rbint,
-                                                 d.dgrb0,
-                                                 d.rgbgreen,
-                                                 rr1,
-                                                 cc1);
+    k_diagonal_green_correction<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.dirwts0,
+                                                            d.dirwts1,
+                                                            d.hvwt,
+                                                            d.pmwt,
+                                                            d.rbint,
+                                                            d.dgrb0,
+                                                            d.rgbgreen,
+                                                            rr1,
+                                                            cc1);
     CK(cudaGetLastError());
-    k_chrominance_coset_split<<<grid, block>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    k_chrominance_coset_split<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
     CK(cudaGetLastError());
-    k_fancy_chrominance_interpolation<<<grid, block>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    k_fancy_chrominance_interpolation<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
     CK(cudaGetLastError());
-    k_final_output_planes<<<grid, block>>>(d.rgbgreen,
-                                           d.hvwt,
-                                           d.dgrb0,
-                                           d.dgrb1,
-                                           d.red,
-                                           d.green,
-                                           d.blue,
-                                           rr1,
-                                           cc1);
+    k_final_output_planes<<<grid, block, 0, stream>>>(d.rgbgreen,
+                                                      d.hvwt,
+                                                      d.dgrb0,
+                                                      d.dgrb1,
+                                                      d.red,
+                                                      d.green,
+                                                      d.blue,
+                                                      rr1,
+                                                      cc1);
     CK(cudaGetLastError());
-    k_store_tile_rgb16<<<grid, block>>>(d.red,
-                                        d.green,
-                                        d.blue,
-                                        dRgb16,
-                                        width,
-                                        height,
-                                        top,
-                                        left,
-                                        rr1,
-                                        cc1);
+    k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
+                                                   d.green,
+                                                   d.blue,
+                                                   dRgb16,
+                                                   width,
+                                                   height,
+                                                   top,
+                                                   left,
+                                                   rr1,
+                                                   cc1);
     CK(cudaGetLastError());
 }
 
@@ -482,6 +510,48 @@ void run_frame_to_device_rgb16(const float * dRaw,
         {
             run_tile(dRaw, dRgb16, d, width, height, top, left);
         }
+    }
+}
+
+void run_frame_to_device_rgb16_batched(const float * dRaw,
+                                       uint16_t * dRgb16,
+                                       std::vector<DeviceBuffers> & buffers,
+                                       const std::vector<cudaStream_t> & streams,
+                                       int width,
+                                       int height)
+{
+    const std::size_t batchSize = std::min(buffers.size(), streams.size());
+    if (batchSize == 0)
+    {
+        return;
+    }
+
+    std::size_t inFlight = 0;
+    for (int top = -16; top < height; top += kTileSize - 32)
+    {
+        for (int left = -16; left < width; left += kTileSize - 32)
+        {
+            const std::size_t slot = inFlight % batchSize;
+            if (inFlight >= batchSize)
+            {
+                CK(cudaStreamSynchronize(streams[slot]));
+            }
+            run_tile(dRaw,
+                     dRgb16,
+                     buffers[slot],
+                     width,
+                     height,
+                     top,
+                     left,
+                     streams[slot]);
+            ++inFlight;
+        }
+    }
+
+    const std::size_t active = std::min(inFlight, batchSize);
+    for (std::size_t slot = 0; slot < active; ++slot)
+    {
+        CK(cudaStreamSynchronize(streams[slot]));
     }
 }
 
@@ -977,11 +1047,12 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         backend->lastTiming.upload_ms = now_ms() - uploadStart;
 
         const double kernelStart = now_ms();
-        run_frame_to_device_rgb16(backend->liveRawFloat,
-                                  backend->liveRgb16,
-                                  backend->liveDeviceBuffers,
-                                  width,
-                                  height);
+        run_frame_to_device_rgb16_batched(backend->liveRawFloat,
+                                          backend->liveRgb16,
+                                          backend->liveTileDeviceBuffers,
+                                          backend->liveTileStreams,
+                                          width,
+                                          height);
         CK(cudaDeviceSynchronize());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 

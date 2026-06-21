@@ -159,6 +159,7 @@ private:
     void destroyTexture(void);
     void destroyProcessingTextures(void);
     void applySamplingMode(void);
+    void setPresentationOptions(const PresentationOptions &options);
     QRectF targetRectInViewport(void) const;
     int pendingWidth(void) const;
     int pendingHeight(void) const;
@@ -183,6 +184,8 @@ private:
     int m_pendingTextureWidth;
     int m_pendingTextureHeight;
     PresentationOptions m_presentationOptions;
+    uint64_t m_processingTextureSignature;
+    bool m_processingTextureSignatureValid;
     QString m_rendererDescription;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;

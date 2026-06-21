@@ -226,6 +226,8 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_fallbackItem(nullptr)
     , m_pendingTextureWidth(0)
     , m_pendingTextureHeight(0)
+    , m_processingTextureSignature(0)
+    , m_processingTextureSignatureValid(false)
     , m_program(nullptr)
     , m_texture(nullptr)
     , m_gpuReconSourceTexture(nullptr)
@@ -834,9 +836,7 @@ void GpuDisplayViewport::setPresentedImage(const QImage &image, const Presentati
     m_pendingTextureHeight = m_pendingImage.height();
     m_pendingTextureIs16Bit = false;
     m_textureDirty = true;
-    m_samplingModeDirty = m_samplingModeDirty || (m_presentationOptions.samplingMode != options.samplingMode);
-    m_processingTexturesDirty = true;
-    m_presentationOptions = options;
+    setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
@@ -870,9 +870,7 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
     m_pendingTextureHeight = height;
     m_pendingTextureIs16Bit = true;
     m_textureDirty = true;
-    m_samplingModeDirty = m_samplingModeDirty || (m_presentationOptions.samplingMode != options.samplingMode);
-    m_processingTexturesDirty = true;
-    m_presentationOptions = options;
+    setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
@@ -896,9 +894,7 @@ void GpuDisplayViewport::setPresentedBayer16(const uint16_t *imageData,
     m_pendingTextureHeight = height;
     m_pendingTextureIs16Bit = true;
     m_textureDirty = true;
-    m_samplingModeDirty = m_samplingModeDirty || (m_presentationOptions.samplingMode != options.samplingMode);
-    m_processingTexturesDirty = true;
-    m_presentationOptions = options;
+    setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
@@ -950,8 +946,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
         return fail(QStringLiteral("GPU playback recon texture-present shader setup failed"));
     }
 
-    m_presentationOptions = options;
-    m_processingTexturesDirty = true;
+    setPresentationOptions(options);
     updateProcessingTexturesIfNeeded();
 
     if ( !m_texture
@@ -1068,8 +1063,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present shader setup failed"));
     }
 
-    m_presentationOptions = options;
-    m_processingTexturesDirty = true;
+    setPresentationOptions(options);
     updateProcessingTexturesIfNeeded();
 
     if ( !m_texture
@@ -1223,8 +1217,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
         return fail(QStringLiteral("GPU AMaZE texture-present shader setup failed"));
     }
 
-    m_presentationOptions = options;
-    m_processingTexturesDirty = true;
+    setPresentationOptions(options);
     updateProcessingTexturesIfNeeded();
 
     if ( !m_texture
@@ -1447,6 +1440,24 @@ void GpuDisplayViewport::destroyProcessingTextures()
         delete m_gammaLutTexture;
         m_gammaLutTexture = nullptr;
     }
+    m_processingTextureSignature = 0;
+    m_processingTextureSignatureValid = false;
+}
+
+void GpuDisplayViewport::setPresentationOptions(const PresentationOptions &options)
+{
+    const bool samplingChanged =
+        m_presentationOptions.samplingMode != options.samplingMode;
+    const bool processingSignatureChanged =
+        m_presentationOptions.previewProcessing.enabled != options.previewProcessing.enabled
+        || m_presentationOptions.previewProcessing.signature
+            != options.previewProcessing.signature;
+    m_samplingModeDirty = m_samplingModeDirty || samplingChanged;
+    if ( processingSignatureChanged )
+    {
+        m_processingTexturesDirty = true;
+    }
+    m_presentationOptions = options;
 }
 
 void GpuDisplayViewport::updateProcessingTexturesIfNeeded()
@@ -1459,6 +1470,19 @@ void GpuDisplayViewport::updateProcessingTexturesIfNeeded()
     if ( !m_presentationOptions.previewProcessing.enabled )
     {
         destroyProcessingTextures();
+        m_processingTexturesDirty = false;
+        return;
+    }
+
+    if ( m_processingTextureSignatureValid
+      && m_processingTextureSignature
+            == m_presentationOptions.previewProcessing.signature
+      && m_levelsLutTexture
+      && m_matrixLutRTexture
+      && m_matrixLutGTexture
+      && m_matrixLutBTexture
+      && m_gammaLutTexture )
+    {
         m_processingTexturesDirty = false;
         return;
     }
@@ -1506,6 +1530,9 @@ void GpuDisplayViewport::updateProcessingTexturesIfNeeded()
     m_gammaLutTexture->setData(QOpenGLTexture::RGBA,
                                QOpenGLTexture::UInt16,
                                gammaBytes.constData());
+    m_processingTextureSignature =
+        m_presentationOptions.previewProcessing.signature;
+    m_processingTextureSignatureValid = true;
     m_processingTexturesDirty = false;
 }
 
