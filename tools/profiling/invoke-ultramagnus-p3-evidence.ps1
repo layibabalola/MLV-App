@@ -16,6 +16,7 @@ param(
     [int]$SettleMs = 1000,
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
+    [switch]$CudaAmazeFastLaunchChecks,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
@@ -413,6 +414,7 @@ elseif ($failures.Count -eq 0) {
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
+        $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -429,6 +431,7 @@ elseif ($failures.Count -eq 0) {
 `$speedLeg = $speedLegLiteral
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
+`$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -461,6 +464,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
+    cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -580,6 +584,9 @@ try {
     }
     if (`$cudaAmazeLiveTileStreams -gt 0) {
         `$args += @('-CudaAmazeLiveTileStreams', [string]`$cudaAmazeLiveTileStreams)
+    }
+    if (`$cudaAmazeFastLaunchChecks) {
+        `$args += '-CudaAmazeFastLaunchChecks'
     }
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'

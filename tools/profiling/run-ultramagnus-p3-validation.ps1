@@ -17,6 +17,7 @@ param(
     [double]$TargetPresentedFps = 30.0,
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
+    [switch]$CudaAmazeFastLaunchChecks,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -806,6 +807,9 @@ if ($failures.Count -eq 0) {
         if ($CudaAmazeLiveTileStreams -gt 0) {
             $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
         }
+        if ($CudaAmazeFastLaunchChecks) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
+        }
         $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
@@ -1267,6 +1271,7 @@ $summary = [pscustomobject]@{
         targetPresentedFps = $TargetPresentedFps
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
+        cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot

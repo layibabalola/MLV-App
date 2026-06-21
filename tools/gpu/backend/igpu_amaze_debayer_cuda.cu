@@ -79,6 +79,25 @@ int live_tile_stream_count_from_env()
     return static_cast<int>(parsed);
 }
 
+bool live_fast_launch_checks_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS");
+    if (!value || !*value) return false;
+
+    const char first = value[0];
+    if (first == '0' || first == 'f' || first == 'F'
+        || first == 'n' || first == 'N')
+    {
+        return false;
+    }
+    if ((first == 'o' || first == 'O')
+        && (value[1] == 'f' || value[1] == 'F'))
+    {
+        return false;
+    }
+    return true;
+}
+
 double now_ms()
 {
     using clock = std::chrono::steady_clock;
@@ -667,7 +686,8 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                               double wbMultiplierR,
                               double wbMultiplierG,
                               double wbMultiplierB,
-                              cudaStream_t stream = 0)
+                              cudaStream_t stream = 0,
+                              bool fastLaunchChecks = false)
 {
     const int bottom = imin_i(top + kTileSize, height + 16);
     const int right = imin_i(left + kTileSize, width + 16);
@@ -679,6 +699,11 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
     const dim3 block(16, 16);
     const dim3 grid((kTileSize + block.x - 1) / block.x,
                     (kTileSize + block.y - 1) / block.y);
+
+#define CHECK_LIVE_TILE_LAUNCH() \
+    do { \
+        if (!fastLaunchChecks) CK(cudaGetLastError()); \
+    } while (0)
 
     k_tile_load_bayer16_post_wb<<<grid, block, 0, stream>>>(dBayer16,
                                                             d.cfa,
@@ -693,11 +718,11 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                             wbMultiplierR,
                                                             wbMultiplierG,
                                                             wbMultiplierB);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_gradients<<<grid, block, 0, stream>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_diagonal_precursors<<<grid, block, 0, stream>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_green_interpolation<<<grid, block, 0, stream>>>(d.cfa,
                                                       d.dirwts0,
                                                       d.dirwts1,
@@ -709,7 +734,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                       d.dginth,
                                                       rr1,
                                                       cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
         d.cfa,
         d.vcd,
@@ -719,7 +744,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
         d.cddiffsq,
         rr1,
         cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
                                                         d.dirwts1,
                                                         d.vcd,
@@ -729,13 +754,13 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                         d.hvwt,
                                                         rr1,
                                                         cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_nyquist_area_interpolation<<<grid, block, 0, stream>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads, 0, stream>>>(d.cfa,
                                                                               d.vcd,
                                                                               d.hcd,
@@ -747,7 +772,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                                               d.dgrb2v,
                                                                               rr1,
                                                                               cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_nyquist_green_refinement<<<grid, block, 0, stream>>>(d.cfa,
                                                            d.vcd,
                                                            d.hcd,
@@ -758,7 +783,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                            d.rgbgreen,
                                                            rr1,
                                                            cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_diagonal_rb_interpolation<<<grid, block, 0, stream>>>(d.cfa,
                                                             d.delp,
                                                             d.delm,
@@ -769,7 +794,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                             d.pmwt,
                                                             rr1,
                                                             cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads, 0, stream>>>(d.cfa,
                                                                                 d.rbm,
                                                                                 d.rbp,
@@ -778,7 +803,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                                                 d.rbint,
                                                                                 rr1,
                                                                                 cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_diagonal_green_correction<<<grid, block, 0, stream>>>(d.cfa,
                                                             d.dirwts0,
                                                             d.dirwts1,
@@ -789,11 +814,11 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                             d.rgbgreen,
                                                             rr1,
                                                             cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_chrominance_coset_split<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_fancy_chrominance_interpolation<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_final_output_planes<<<grid, block, 0, stream>>>(d.rgbgreen,
                                                       d.hvwt,
                                                       d.dgrb0,
@@ -803,7 +828,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                       d.blue,
                                                       rr1,
                                                       cc1);
-    CK(cudaGetLastError());
+    CHECK_LIVE_TILE_LAUNCH();
     k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
                                                    d.green,
                                                    d.blue,
@@ -815,6 +840,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                    rr1,
                                                    cc1);
     CK(cudaGetLastError());
+#undef CHECK_LIVE_TILE_LAUNCH
 }
 
 void run_frame_to_device_rgb16(const float * dRaw,
@@ -842,7 +868,8 @@ void run_frame_to_device_rgb16_bayer16_post_wb_batched(
     int blackLevel,
     double wbMultiplierR,
     double wbMultiplierG,
-    double wbMultiplierB)
+    double wbMultiplierB,
+    bool fastLaunchChecks = false)
 {
     const std::size_t batchSize = std::min(buffers.size(), streams.size());
     if (batchSize == 0)
@@ -871,7 +898,8 @@ void run_frame_to_device_rgb16_bayer16_post_wb_batched(
                                      wbMultiplierR,
                                      wbMultiplierG,
                                      wbMultiplierB,
-                                     streams[slot]);
+                                     streams[slot],
+                                     fastLaunchChecks);
             ++inFlight;
         }
     }
@@ -1439,7 +1467,8 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
             black_level,
             wb_multiplier_r,
             wb_multiplier_g,
-            wb_multiplier_b);
+            wb_multiplier_b,
+            live_fast_launch_checks_from_env());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
@@ -1505,7 +1534,8 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
             black_level,
             wb_multiplier_r,
             wb_multiplier_g,
-            wb_multiplier_b);
+            wb_multiplier_b,
+            live_fast_launch_checks_from_env());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();

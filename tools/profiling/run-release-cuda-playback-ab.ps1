@@ -16,6 +16,7 @@ param(
     [int]$ValidationSampleEvery = 10,
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
+    [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -1175,6 +1176,9 @@ if ($backendDllExplicit) {
 if ($CudaAmazeLiveTileStreams -gt 0) {
     $candidateEnv += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
 }
+if ($CudaAmazeFastLaunchChecks) {
+    $candidateEnv += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
@@ -1187,6 +1191,9 @@ if ($backendDllExplicit) {
 }
 if ($CudaAmazeLiveTileStreams -gt 0) {
     $candidateSpeedEnv += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
+}
+if ($CudaAmazeFastLaunchChecks) {
+    $candidateSpeedEnv += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
 }
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -1287,6 +1294,7 @@ $summary = [ordered]@{
     scaleFactor = $ScaleFactor
     validationSampleEvery = $ValidationSampleEvery
     cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
+    cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {
