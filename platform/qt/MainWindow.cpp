@@ -23840,8 +23840,16 @@ void MainWindow::drawFrameReady()
 {
     RenderFrameThread::ReadyFrame readyFrame;
     PresentationRequestContext requestContext;
-    const bool haveReadyFrame =
-        m_pRenderThread && m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
+    bool haveReadyFrame = false;
+    if( m_pRenderThread )
+    {
+        haveReadyFrame =
+            m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
+        if( !haveReadyFrame )
+        {
+            haveReadyFrame = m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
+        }
+    }
     if( !haveReadyFrame )
     {
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();

@@ -559,6 +559,43 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
         return false;
     }
 
+    return acquireReadySlotLocked( frame, readySlotIndex, true );
+}
+
+bool RenderFrameThread::acquireOldestGpuTextureNoReadbackReadyFrame(ReadyFrame *frame)
+{
+    QMutexLocker locker(&m_mutex);
+    const int readySlotIndex = findOldestReadySlotLocked();
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = false;
+        return false;
+    }
+
+    const FrameSlot &slot = m_frameSlots[readySlotIndex];
+    const bool orderedGpuTextureNoReadback =
+        slot.gpuPlaybackReconTextureNoReadbackCandidate
+        && slot.presentationContext.playbackActive
+        && slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+        && slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted;
+    if( !orderedGpuTextureNoReadback )
+    {
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, false );
+}
+
+bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
+                                                int readySlotIndex,
+                                                bool discardOlderReady )
+{
+    if( readySlotIndex < 0 || readySlotIndex >= static_cast<int>(m_frameSlots.size()) )
+    {
+        m_frameReady = (findLatestReadySlotLocked() >= 0);
+        return false;
+    }
+
     FrameSlot &slot = m_frameSlots[readySlotIndex];
     slot.ready = false;
     slot.presenting = true;
@@ -573,24 +610,39 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
                              "phase3-presenting" );
     }
     m_presentingSlotIndex = readySlotIndex;
+    int preservedReadySlots = 0;
+    if( discardOlderReady )
+    {
+        for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+        {
+            if( i == readySlotIndex ) continue;
+            FrameSlot &older = m_frameSlots[i];
+            if( !older.ready ) continue;
+            if( older.requestSerial >= slot.requestSerial ) continue;
+            if( older.state.load( std::memory_order_acquire ) != SlotState::Ready ) continue;
+            transitionSlotState( i,
+                                 SlotState::Ready,
+                                 SlotState::Idle,
+                                 older.phase3Mode,
+                                 older.frameNumber,
+                                 older.requestSerial,
+                                 "phase3-stale-ready" );
+            older.ready = false;
+            older.presenting = false;
+        }
+    }
     for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
     {
         if( i == readySlotIndex ) continue;
-        FrameSlot &older = m_frameSlots[i];
-        if( !older.ready ) continue;
-        if( older.requestSerial >= slot.requestSerial ) continue;
-        if( older.state.load( std::memory_order_acquire ) != SlotState::Ready ) continue;
-        transitionSlotState( i,
-                             SlotState::Ready,
-                             SlotState::Idle,
-                             older.phase3Mode,
-                             older.frameNumber,
-                             older.requestSerial,
-                             "phase3-stale-ready" );
-        older.ready = false;
-        older.presenting = false;
+        if( m_frameSlots[i].ready ) ++preservedReadySlots;
     }
     m_frameReady = (findLatestReadySlotLocked() >= 0);
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_ready_acquire_ordered"),
+        !discardOlderReady );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_ready_acquire_preserved_ready_slots"),
+        preservedReadySlots );
     copySlotTelemetryLocked( slot );
     m_waitCondition.wakeAll();
 
@@ -1954,6 +2006,23 @@ int RenderFrameThread::findLatestReadySlotLocked() const
         {
             readySlotIndex = i;
             latestRequestSerial = slot.requestSerial;
+        }
+    }
+    return readySlotIndex;
+}
+
+int RenderFrameThread::findOldestReadySlotLocked() const
+{
+    int readySlotIndex = -1;
+    uint64_t oldestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>(m_frameSlots.size()); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( readySlotIndex < 0 || slot.requestSerial < oldestRequestSerial )
+        {
+            readySlotIndex = i;
+            oldestRequestSerial = slot.requestSerial;
         }
     }
     return readySlotIndex;

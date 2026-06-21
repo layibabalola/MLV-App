@@ -221,6 +221,7 @@ public:
     bool isFrameReady( void );
     bool isIdle( void );
     bool acquireLatestReadyFrame( ReadyFrame *frame );
+    bool acquireOldestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;
@@ -461,7 +462,11 @@ private:
     void drawFrame( int slotIndex,
                     const uint16_t *decodedRawFrame = nullptr,
                     bool decodedRawFrameAlreadyReconned = false );
+    bool acquireReadySlotLocked( ReadyFrame *frame,
+                                 int readySlotIndex,
+                                 bool discardOlderReady );
     int findLatestReadySlotLocked( void ) const;
+    int findOldestReadySlotLocked( void ) const;
     int findFreeSlotLocked( void ) const;
     void releaseSlotLocked( int slotIndex );
     void copySlotTelemetryLocked( const FrameSlot &slot );
