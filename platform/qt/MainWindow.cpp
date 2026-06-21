@@ -24080,6 +24080,92 @@ void MainWindow::drawFrameReady()
         readyFrame.gpuPlaybackReconTextureState;
     const size_t borrowedSourceImageBytes =
         (sourceImageBytes > 0 && readyFrame.rawImage8) ? sourceImageBytes : 0;
+    const size_t playbackScaledImageBytes =
+        (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
+            ? static_cast<size_t>(
+                  readyFrame.playbackScaledBytesPerLine > 0
+                      ? readyFrame.playbackScaledBytesPerLine
+                      : readyFrame.playbackScaledWidth * 3 )
+              * static_cast<size_t>( readyFrame.playbackScaledHeight )
+            : 0;
+    const size_t borrowedPlaybackScaledImageBytes =
+        (playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8)
+            ? playbackScaledImageBytes
+            : 0;
+    const auto notePlaybackPrepOwnershipTelemetry =
+        [&task, borrowedSourceImageBytes, borrowedPlaybackScaledImageBytes]()
+    {
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_rgb8_bytes"),
+            static_cast<qint64>( task.ownedSourceImage.size() ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_rgb16_bytes"),
+            static_cast<qint64>( task.ownedSourceImage16.size() * sizeof( uint16_t ) ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_amaze_texture_raw_bytes"),
+            static_cast<qint64>( task.ownedGpuAmazeTextureRawFrame.size() * sizeof( float ) ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_bayer_bytes"),
+            static_cast<qint64>( task.ownedGpuPlaybackReconTextureBayerFrame.size() * sizeof( uint16_t ) ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_input_bytes"),
+            static_cast<qint64>( task.ownedGpuPlaybackReconTextureInputBayerFrame.size() * sizeof( uint16_t ) ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
+            static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_borrowed_rgb8_bytes"),
+            static_cast<qint64>( borrowedSourceImageBytes ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_borrowed_scaled_rgb8_bytes"),
+            static_cast<qint64>( borrowedPlaybackScaledImageBytes ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_pre_enqueue_ms"),
+            task.preEnqueueMs );
+    };
+
+    const bool inlineGpuPlaybackReconTextureNoReadbackPrep =
+        ui->actionPlay->isChecked()
+        && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+        && requestContext.gpuPlaybackReconTexturePresentRequested
+        && requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+        && readyFrame.gpuPlaybackReconTextureInputBayerFrame
+        && readyFrame.gpuPlaybackReconTextureInputBayerFrameSize > 0
+        && readyFrame.gpuPlaybackReconTextureState.valid
+        && telemetryBoolValue(
+            readyFrame.stageTimingTelemetry,
+            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" );
+    const bool inlineFastPlaybackPrep =
+        ui->actionPlay->isChecked()
+        && ( inlineGpuPlaybackReconTextureNoReadbackPrep
+          || ( task.playbackFastScaleActive
+            && task.zoomFitEnabled
+            && task.transformationMode == 0
+            && !task.zebrasEnabled
+            && !task.useGpuImagePresentation
+            && !task.displayPreviewCachingAllowed
+            && task.readyFrame.playbackScaledImage8
+            && task.readyFrame.playbackScaledWidth > 0
+            && task.readyFrame.playbackScaledHeight > 0 ) );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_gpu_tex_nr_inline_present"),
+        inlineGpuPlaybackReconTextureNoReadbackPrep );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_inline_present"),
+        inlineFastPlaybackPrep );
+
+    if( inlineFastPlaybackPrep )
+    {
+        notePlaybackPrepOwnershipTelemetry();
+        m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
+        PlaybackPrepResult result = buildPlaybackPrepResult( task );
+        result.workerQueueMs = 0.0;
+        result.workerTotalMs = result.imageBuildMs;
+        result.resultReadyTime = mlv_stage_timing_now();
+        presentPlaybackPreparedFrame( result );
+        return;
+    }
+
     const bool needsOwnedRgb16 =
         gpu16PreviewActive
         || gpuPreviewProcessingActive
@@ -24120,72 +24206,8 @@ void MainWindow::drawFrameReady()
             readyFrame.gpuPlaybackReconTextureInputBayerFrame
                 + readyFrame.gpuPlaybackReconTextureInputBayerFrameSize );
     }
-    const size_t playbackScaledImageBytes =
-        (readyFrame.playbackScaledWidth > 0 && readyFrame.playbackScaledHeight > 0)
-            ? static_cast<size_t>(
-                  readyFrame.playbackScaledBytesPerLine > 0
-                      ? readyFrame.playbackScaledBytesPerLine
-                      : readyFrame.playbackScaledWidth * 3 )
-              * static_cast<size_t>( readyFrame.playbackScaledHeight )
-            : 0;
-    const size_t borrowedPlaybackScaledImageBytes =
-        (playbackScaledImageBytes > 0 && readyFrame.playbackScaledImage8)
-            ? playbackScaledImageBytes
-            : 0;
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_rgb8_bytes"),
-        static_cast<qint64>( task.ownedSourceImage.size() ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_rgb16_bytes"),
-        static_cast<qint64>( task.ownedSourceImage16.size() * sizeof( uint16_t ) ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_amaze_texture_raw_bytes"),
-        static_cast<qint64>( task.ownedGpuAmazeTextureRawFrame.size() * sizeof( float ) ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_bayer_bytes"),
-        static_cast<qint64>( task.ownedGpuPlaybackReconTextureBayerFrame.size() * sizeof( uint16_t ) ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_gpu_playback_recon_texture_input_bytes"),
-        static_cast<qint64>( task.ownedGpuPlaybackReconTextureInputBayerFrame.size() * sizeof( uint16_t ) ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_owned_scaled_rgb8_bytes"),
-        static_cast<qint64>( task.ownedPlaybackScaledImage8.size() ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_borrowed_rgb8_bytes"),
-        static_cast<qint64>( borrowedSourceImageBytes ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_borrowed_scaled_rgb8_bytes"),
-        static_cast<qint64>( borrowedPlaybackScaledImageBytes ) );
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_pre_enqueue_ms"),
-        task.preEnqueueMs );
     task.rebindOwnedImagePointers();
-
-    const bool inlineFastPlaybackPrep =
-        ui->actionPlay->isChecked()
-        && task.playbackFastScaleActive
-        && task.zoomFitEnabled
-        && task.transformationMode == 0
-        && !task.zebrasEnabled
-        && !task.useGpuImagePresentation
-        && !task.displayPreviewCachingAllowed
-        && task.readyFrame.playbackScaledImage8
-        && task.readyFrame.playbackScaledWidth > 0
-        && task.readyFrame.playbackScaledHeight > 0;
-    task.readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_prep_inline_present"),
-        inlineFastPlaybackPrep );
-
-    if( inlineFastPlaybackPrep )
-    {
-        m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
-        PlaybackPrepResult result = buildPlaybackPrepResult( task );
-        result.workerQueueMs = 0.0;
-        result.workerTotalMs = result.imageBuildMs;
-        result.resultReadyTime = mlv_stage_timing_now();
-        presentPlaybackPreparedFrame( result );
-        return;
-    }
+    notePlaybackPrepOwnershipTelemetry();
 
     enqueuePlaybackPrepTask( task );
     return;
