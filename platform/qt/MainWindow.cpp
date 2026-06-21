@@ -24245,7 +24245,31 @@ void MainWindow::drawFrameReady()
                 m_pRenderThread->releasePresentedFrameForRequestSerial(
                     readyFrame.requestSerial );
             m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
-            m_frameChanged = true;
+            if( ui->actionPlay->isChecked() && m_playbackFrameAdvancePending )
+            {
+                QTimer::singleShot( 0, this, [this, display_frame]()
+                {
+                    if( !ui->actionPlay->isChecked()
+                     || !m_playbackFrameAdvancePending )
+                    {
+                        return;
+                    }
+                    m_frameStillDrawing =
+                        m_pRenderThread && !m_pRenderThread->isIdle();
+                    if( m_frameStillDrawing ) return;
+
+                    m_skipImmediateTimecodeLabel = true;
+                    const double advance_start = mlv_stage_timing_now();
+                    timerFrameEvent();
+                    m_lastDrawFrameReadyAdvanceMs =
+                        ( mlv_stage_timing_now() - advance_start ) * 1000.0;
+                    mlv_stage_timing_note_elapsed(
+                        "drawFrameReady.lookahead_drop_advance",
+                        display_frame,
+                        m_lastDrawFrameReadyAdvanceMs );
+                    m_skipImmediateTimecodeLabel = false;
+                } );
+            }
             return;
         }
     }
