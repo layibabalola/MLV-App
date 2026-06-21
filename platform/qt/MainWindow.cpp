@@ -24250,6 +24250,21 @@ void MainWindow::drawFrameReady()
                     .arg( ui->horizontalSliderPosition->value() ),
                 true );
         }
+        if( !m_frameStillDrawing
+         && ui->actionPlay->isChecked()
+         && m_playbackFrameAdvancePending )
+        {
+            m_skipImmediateTimecodeLabel = true;
+            const double advance_start = mlv_stage_timing_now();
+            timerFrameEvent( true );
+            m_lastDrawFrameReadyAdvanceMs =
+                ( mlv_stage_timing_now() - advance_start ) * 1000.0;
+            mlv_stage_timing_note_elapsed(
+                "drawFrameReady.empty_advance",
+                static_cast<uint64_t>( ui->horizontalSliderPosition->value() ),
+                m_lastDrawFrameReadyAdvanceMs );
+            m_skipImmediateTimecodeLabel = false;
+        }
         return;
     }
 
