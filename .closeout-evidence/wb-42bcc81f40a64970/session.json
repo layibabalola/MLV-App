@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "parked/live-gpu-amaze-texture-present-20260620",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-06-21T17:36:42+00:00",
+  "detectorHash": "e57160225acea8297d013a8e87b78f70",
+  "featureHead": "12c5a82e14c5d754a150fa2c2a1233c09440e7b7",
+  "schemaVersion": "1.0",
+  "targetHead": "7fe3dfdfa1dcdfeee1e236a997cc974dbe71a9a3",
+  "workBlockId": "wb-42bcc81f40a64970",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App"
+}
