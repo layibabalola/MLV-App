@@ -21,6 +21,7 @@ param(
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
     [switch]$GpuTexNrImmediateDrainReady,
+    [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
@@ -43,6 +44,9 @@ if ($Seconds -lt 1) {
 }
 if ($SettleMs -lt 0) {
     throw "-SettleMs must be >= 0."
+}
+if ($GpuTexNrImmediateDrainMax -lt 0) {
+    throw "-GpuTexNrImmediateDrainMax must be >= 0."
 }
 if ($ValidationSampleEvery -lt 1) {
     throw "-ValidationSampleEvery must be >= 1."
@@ -1205,6 +1209,9 @@ if ($GpuTexNrAcquireLatestReady) {
 if ($GpuTexNrImmediateDrainReady) {
     $candidateEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
 }
+if ($GpuTexNrImmediateDrainMax -gt 0) {
+    $candidateEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX=$GpuTexNrImmediateDrainMax"
+}
 if ($Phase3FrameSlots -gt 0) {
     $candidateEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
 }
@@ -1235,6 +1242,9 @@ if ($GpuTexNrAcquireLatestReady) {
 }
 if ($GpuTexNrImmediateDrainReady) {
     $candidateSpeedEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
+}
+if ($GpuTexNrImmediateDrainMax -gt 0) {
+    $candidateSpeedEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX=$GpuTexNrImmediateDrainMax"
 }
 if ($Phase3FrameSlots -gt 0) {
     $candidateSpeedEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
@@ -1343,6 +1353,7 @@ $summary = [ordered]@{
     gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
     gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
     gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
+    gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
     phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate

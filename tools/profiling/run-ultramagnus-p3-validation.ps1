@@ -22,6 +22,7 @@ param(
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
     [switch]$GpuTexNrImmediateDrainReady,
+    [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
@@ -48,6 +49,9 @@ $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
 
 if ($CudaAmazeLiveTileStreams -lt 0) {
     throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($GpuTexNrImmediateDrainMax -lt 0) {
+    throw "-GpuTexNrImmediateDrainMax must be >= 0. Use 0 for default."
 }
 if ($Phase3FrameSlots -lt 0) {
     throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
@@ -831,6 +835,9 @@ if ($failures.Count -eq 0) {
         if ($GpuTexNrImmediateDrainReady) {
             $envEntries += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
         }
+        if ($GpuTexNrImmediateDrainMax -gt 0) {
+            $envEntries += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX=$GpuTexNrImmediateDrainMax"
+        }
         if ($Phase3FrameSlots -gt 0) {
             $envEntries += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
         }
@@ -1306,6 +1313,7 @@ $summary = [pscustomobject]@{
         gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
         gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
         gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
+        gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     }
     outputs = [pscustomobject]@{

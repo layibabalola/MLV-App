@@ -644,6 +644,35 @@ bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
               .toBool( false );
 }
 
+int RenderFrameThread::gpuTextureNoReadbackReadyFrameCount()
+{
+    QMutexLocker locker(&m_mutex);
+    int count = 0;
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.state.load( std::memory_order_acquire ) != SlotState::Ready )
+            continue;
+        if( !slot.gpuPlaybackReconTextureNoReadbackCandidate )
+            continue;
+        if( !slot.presentationContext.playbackActive
+         || !slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+         || !slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted )
+        {
+            continue;
+        }
+        if( !slot.stageTimingTelemetry.value(
+                QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
+                  .toBool( false ) )
+        {
+            continue;
+        }
+        ++count;
+    }
+    return count;
+}
+
 bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
                                                 int readySlotIndex,
                                                 bool discardOlderReady )

@@ -21,6 +21,7 @@ param(
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
     [switch]$GpuTexNrImmediateDrainReady,
+    [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
@@ -34,6 +35,9 @@ $ErrorActionPreference = "Stop"
 
 if ($CudaAmazeLiveTileStreams -lt 0) {
     throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($GpuTexNrImmediateDrainMax -lt 0) {
+    throw "-GpuTexNrImmediateDrainMax must be >= 0. Use 0 for default."
 }
 if ($Phase3FrameSlots -lt 0) {
     throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
@@ -427,6 +431,7 @@ elseif ($failures.Count -eq 0) {
         $gpuPlaybackReconRetainDeviceOutputLiteral = if ($GpuPlaybackReconRetainDeviceOutput) { '$true' } else { '$false' }
         $gpuTexNrAcquireLatestReadyLiteral = if ($GpuTexNrAcquireLatestReady) { '$true' } else { '$false' }
         $gpuTexNrImmediateDrainReadyLiteral = if ($GpuTexNrImmediateDrainReady) { '$true' } else { '$false' }
+        $gpuTexNrImmediateDrainMaxLiteral = [string]$GpuTexNrImmediateDrainMax
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -449,6 +454,7 @@ elseif ($failures.Count -eq 0) {
 `$gpuPlaybackReconRetainDeviceOutput = $gpuPlaybackReconRetainDeviceOutputLiteral
 `$gpuTexNrAcquireLatestReady = $gpuTexNrAcquireLatestReadyLiteral
 `$gpuTexNrImmediateDrainReady = $gpuTexNrImmediateDrainReadyLiteral
+`$gpuTexNrImmediateDrainMax = [int]'$gpuTexNrImmediateDrainMaxLiteral'
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -623,6 +629,9 @@ try {
     if (`$gpuTexNrImmediateDrainReady) {
         `$args += '-GpuTexNrImmediateDrainReady'
     }
+    if (`$gpuTexNrImmediateDrainMax -gt 0) {
+        `$args += @('-GpuTexNrImmediateDrainMax', [string]`$gpuTexNrImmediateDrainMax)
+    }
     if (`$phase3FrameSlots -gt 0) {
         `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
     }
@@ -762,6 +771,7 @@ $summary = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
         gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
+        gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
     }
     warnings = @($warnings)
     failures = @($failures)

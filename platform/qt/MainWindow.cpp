@@ -2632,6 +2632,15 @@ static bool mlvappGpuTexNrImmediateDrainRequested()
     return ok && env != 0;
 }
 
+static int mlvappGpuTexNrImmediateDrainMax()
+{
+    bool ok = false;
+    const int env = qEnvironmentVariableIntValue(
+        "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX", &ok );
+    if( !ok ) return 1;
+    return qBound( 1, env, 8 );
+}
+
 static int mlvappStartPlaybackTimer( QObject *owner, double framerate )
 {
     if( !owner ) return 0;
@@ -23922,17 +23931,30 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         && m_pRenderThread->hasGpuTextureNoReadbackReadyFrame();
     if( immediateGpuTexNrDrain )
     {
-        if( interactiveTraceEnabled() )
-        {
-            logInteractionEvent(
-                QStringLiteral("draw_frame_ready.gpu_tex_nr_immediate_drain"),
-                QStringLiteral("display_frame=%1 serial=%2")
-                    .arg( static_cast<qulonglong>( displayFrame ) )
-                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) ),
-                true );
-        }
+        const int maxDrainCount = mlvappGpuTexNrImmediateDrainMax();
         m_gpuTexNrImmediateDrainActive = true;
-        drawFrameReady();
+        int drainCount = 0;
+        while( drainCount < maxDrainCount
+            && m_pRenderThread
+            && m_pRenderThread->hasGpuTextureNoReadbackReadyFrame() )
+        {
+            const int readyBacklog =
+                m_pRenderThread->gpuTextureNoReadbackReadyFrameCount();
+            if( interactiveTraceEnabled() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("draw_frame_ready.gpu_tex_nr_immediate_drain"),
+                    QStringLiteral("display_frame=%1 serial=%2 drain=%3/%4 ready_backlog=%5")
+                        .arg( static_cast<qulonglong>( displayFrame ) )
+                        .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                        .arg( drainCount + 1 )
+                        .arg( maxDrainCount )
+                        .arg( readyBacklog ),
+                    true );
+            }
+            drawFrameReady();
+            ++drainCount;
+        }
         m_gpuTexNrImmediateDrainActive = false;
     }
 }
@@ -23945,6 +23967,8 @@ void MainWindow::drawFrameReady()
     bool haveReadyFrame = false;
     if( m_pRenderThread )
     {
+        const int gpuTexNrReadyBacklogBeforeAcquire =
+            m_pRenderThread->gpuTextureNoReadbackReadyFrameCount();
         const bool latestGpuTexNrReady =
             mlvappGpuTexNrAcquireLatestReadyRequested();
         haveReadyFrame = latestGpuTexNrReady
@@ -23961,6 +23985,14 @@ void MainWindow::drawFrameReady()
         }
         if( haveReadyFrame )
         {
+            const int gpuTexNrReadyBacklogAfterAcquire =
+                m_pRenderThread->gpuTextureNoReadbackReadyFrameCount();
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_gpu_tex_nr_ready_backlog_before_acquire"),
+                gpuTexNrReadyBacklogBeforeAcquire );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_gpu_tex_nr_ready_backlog_after_acquire"),
+                gpuTexNrReadyBacklogAfterAcquire );
             readyFrame.stageTimingTelemetry.insert(
                 QStringLiteral("playback_gpu_tex_nr_acquire_latest_ready_requested"),
                 latestGpuTexNrReady );
