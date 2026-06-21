@@ -86,6 +86,46 @@ function Add-Failure {
     [void]$Failures.Add($Message)
 }
 
+function Add-NullableDouble {
+    param(
+        [System.Collections.Generic.List[double]]$Values,
+        [AllowNull()]$Value
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        [void]$Values.Add($parsed)
+    }
+}
+
+function Get-AverageOrNull {
+    param([System.Collections.Generic.List[double]]$Values)
+
+    if ($null -eq $Values -or $Values.Count -eq 0) {
+        return $null
+    }
+
+    return [Math]::Round(($Values | Measure-Object -Average).Average, 3)
+}
+
+function Get-MaxOrNull {
+    param([System.Collections.Generic.List[double]]$Values)
+
+    if ($null -eq $Values -or $Values.Count -eq 0) {
+        return $null
+    }
+
+    return [Math]::Round(($Values | Measure-Object -Maximum).Maximum, 3)
+}
+
 function Write-JsonFile {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -236,6 +276,11 @@ function New-EvidencePacket {
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $_.cudaAmazeTextureSourceFrameCount
             fallbackFrameCount = $_.fallbackFrameCount
+            avgTextureUploadMs = $_.avgTextureUploadMs
+            avgTextureKernelMs = $_.avgTextureKernelMs
+            avgTextureInteropMs = $_.avgTextureInteropMs
+            avgTextureTotalMs = $_.avgTextureTotalMs
+            maxTextureTotalMs = $_.maxTextureTotalMs
             glProbeActiveCount = $_.glProbeActiveCount
             glTextureReadbackOkCount = $_.glTextureReadbackOkCount
             glParityCheckedCount = $_.glParityCheckedCount
@@ -805,6 +850,10 @@ exit `$LASTEXITCODE
         $glRendererDescriptions = @()
         $glBackendArtifacts = @()
         $glScreenshotMethod = $null
+        $textureUploadMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureKernelMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureInteropMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureTotalMsValues = [System.Collections.Generic.List[double]]::new()
 
         if (Test-Path -LiteralPath $clipOutput) {
             $result = Get-Content -LiteralPath $clipOutput -Raw | ConvertFrom-Json
@@ -862,6 +911,10 @@ exit `$LASTEXITCODE
                 if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture") {
                     $cudaAmazeTextureSourceFrameCount++
                 }
+                Add-NullableDouble $textureUploadMsValues $frame.texture_upload_ms
+                Add-NullableDouble $textureKernelMsValues $frame.texture_kernel_ms
+                Add-NullableDouble $textureInteropMsValues $frame.texture_interop_ms
+                Add-NullableDouble $textureTotalMsValues $frame.texture_total_ms
                 if ([string]$frame.texture_source -match "fallback") {
                     $fallbackFrameCount++
                 }
@@ -1006,6 +1059,11 @@ exit `$LASTEXITCODE
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
             fallbackFrameCount = $fallbackFrameCount
+            avgTextureUploadMs = Get-AverageOrNull $textureUploadMsValues
+            avgTextureKernelMs = Get-AverageOrNull $textureKernelMsValues
+            avgTextureInteropMs = Get-AverageOrNull $textureInteropMsValues
+            avgTextureTotalMs = Get-AverageOrNull $textureTotalMsValues
+            maxTextureTotalMs = Get-MaxOrNull $textureTotalMsValues
             noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
             glOutputProof = $glOutputProof
             glProbeActiveCount = $glProbeActiveCount

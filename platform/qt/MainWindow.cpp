@@ -21176,7 +21176,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "texture_no_readback_fallback_reason=\"%16\" "
                    "texture_no_readback_oracle_required=%17 "
                    "texture_no_readback_oracle_words=%18 "
-                   "texture_upload_ms=%19 texture_total_ms=%20" )
+                   "texture_upload_ms=%19 texture_kernel_ms=%20 "
+                   "texture_interop_ms=%21 texture_total_ms=%22" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21213,9 +21214,15 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     .arg( telemetryDoubleValue(
                         timing, "gpu_playback_recon_texture_present_upload_ms" ),
                         0, 'f', 3 )
-                   .arg( telemetryDoubleValue(
-                       timing, "gpu_playback_recon_texture_present_total_ms" ),
-                       0, 'f', 3 );
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_kernel_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_interop_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_total_ms" ),
+                        0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
