@@ -23940,28 +23940,40 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     if( immediateGpuTexNrDrain )
     {
         const int maxDrainCount = mlvappGpuTexNrImmediateDrainMax();
+        const bool gpuTexNrReadyBacklogTelemetry =
+            mlvappGpuTexNrReadyBacklogTelemetryRequested();
         m_gpuTexNrImmediateDrainActive = true;
         int drainCount = 0;
-        while( drainCount < maxDrainCount
-            && m_pRenderThread
-            && m_pRenderThread->hasGpuTextureNoReadbackReadyFrame() )
+        while( drainCount < maxDrainCount )
         {
             if( interactiveTraceEnabled() )
             {
-                const int readyBacklog =
-                    m_pRenderThread->gpuTextureNoReadbackReadyFrameCount();
-                logInteractionEvent(
-                    QStringLiteral("draw_frame_ready.gpu_tex_nr_immediate_drain"),
-                    QStringLiteral("display_frame=%1 serial=%2 drain=%3/%4 ready_backlog=%5")
+                QString drainMessage =
+                    QStringLiteral("display_frame=%1 serial=%2 drain=%3/%4")
                         .arg( static_cast<qulonglong>( displayFrame ) )
                         .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
                         .arg( drainCount + 1 )
-                        .arg( maxDrainCount )
-                        .arg( readyBacklog ),
+                        .arg( maxDrainCount );
+                if( gpuTexNrReadyBacklogTelemetry && m_pRenderThread )
+                {
+                    drainMessage.append(
+                        QStringLiteral(" ready_backlog=%1")
+                            .arg( m_pRenderThread
+                                      ->gpuTextureNoReadbackReadyFrameCount() ) );
+                }
+                logInteractionEvent(
+                    QStringLiteral("draw_frame_ready.gpu_tex_nr_immediate_drain"),
+                    drainMessage,
                     true );
             }
             drawFrameReady();
             ++drainCount;
+            if( drainCount >= maxDrainCount
+             || !m_pRenderThread
+             || !m_pRenderThread->hasGpuTextureNoReadbackReadyFrame() )
+            {
+                break;
+            }
         }
         m_gpuTexNrImmediateDrainActive = false;
     }
