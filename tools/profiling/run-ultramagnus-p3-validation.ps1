@@ -468,7 +468,13 @@ function Import-EvidencePacket {
         if (@($summary.failures).Count -gt 0) {
             Add-Failure $importFailures "Evidence summary contains failures: $((@($summary.failures) | ForEach-Object { [string]$_ }) -join '; ')"
         }
-        if (-not [bool]$summary.proof.correctnessValidated) {
+        $isSpeedProof = ([string]$summary.proofMode -eq "speed") -or [bool]$summary.inputs.speedLeg
+        if ($isSpeedProof) {
+            if (-not [bool]$summary.proof.speedValidated) {
+                Add-Failure $importFailures "Evidence summary proof.speedValidated was not true for speed proof mode."
+            }
+        }
+        elseif (-not [bool]$summary.proof.correctnessValidated) {
             Add-Failure $importFailures "Evidence summary proof.correctnessValidated was not true."
         }
         foreach ($clip in @($summary.clipResults)) {
@@ -496,39 +502,51 @@ function Import-EvidencePacket {
             if ([int]$clip.fallbackFrameCount -ne 0) {
                 Add-Failure $importFailures "$clipName had fallbackFrameCount=$($clip.fallbackFrameCount); expected 0."
             }
-            if ([int]$clip.glProbeActiveCount -le 0) {
-                Add-Failure $importFailures "$clipName had glProbeActiveCount=$($clip.glProbeActiveCount); expected > 0."
-            }
-            if ([int]$clip.glTextureReadbackOkCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glTextureReadbackOkCount=$($clip.glTextureReadbackOkCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([int]$clip.glParityCheckedCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glParityCheckedCount=$($clip.glParityCheckedCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([int]$clip.glParityMatchCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glParityMatchCount=$($clip.glParityMatchCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([long]$clip.glMismatchTotal -ne 0) {
-                Add-Failure $importFailures "$clipName had glMismatchTotal=$($clip.glMismatchTotal); expected 0."
-            }
-            if ([int]$clip.glDistinctTextureHashes -le 1) {
-                Add-Failure $importFailures "$clipName had glDistinctTextureHashes=$($clip.glDistinctTextureHashes); expected > 1."
-            }
-            if ([string]$clip.glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
-                Add-Failure $importFailures "$clipName had glScreenshotMethod='$($clip.glScreenshotMethod)'; expected app_internal_gl_viewport_grab."
-            }
-            $clipRendererMatched = $false
-            foreach ($renderer in @($clip.glRendererDescriptions | ForEach-Object { [string]$_ })) {
-                if ($renderer -match $RequiredGpuNamePattern) {
-                    $clipRendererMatched = $true
-                    break
+            if ($isSpeedProof) {
+                $minSpeedFps = if ($null -ne $summary.inputs.minPresentedFps) {
+                    [double]$summary.inputs.minPresentedFps
+                } else {
+                    24.0
+                }
+                if ([double]$clip.presentedFps -lt $minSpeedFps) {
+                    Add-Failure $importFailures "$clipName had presentedFps=$($clip.presentedFps); expected >= $minSpeedFps for speed proof mode."
                 }
             }
-            if (!$clipRendererMatched) {
-                Add-Failure $importFailures "$clipName had no GL renderer matching '$RequiredGpuNamePattern': $((@($clip.glRendererDescriptions) | ForEach-Object { [string]$_ }) -join '; ')"
-            }
-            if (@($clip.glBackendArtifacts).Count -le 0) {
-                Add-Failure $importFailures "$clipName did not include a backend DLL hash artifact."
+            else {
+                if ([int]$clip.glProbeActiveCount -le 0) {
+                    Add-Failure $importFailures "$clipName had glProbeActiveCount=$($clip.glProbeActiveCount); expected > 0."
+                }
+                if ([int]$clip.glTextureReadbackOkCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glTextureReadbackOkCount=$($clip.glTextureReadbackOkCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([int]$clip.glParityCheckedCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glParityCheckedCount=$($clip.glParityCheckedCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([int]$clip.glParityMatchCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glParityMatchCount=$($clip.glParityMatchCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([long]$clip.glMismatchTotal -ne 0) {
+                    Add-Failure $importFailures "$clipName had glMismatchTotal=$($clip.glMismatchTotal); expected 0."
+                }
+                if ([int]$clip.glDistinctTextureHashes -le 1) {
+                    Add-Failure $importFailures "$clipName had glDistinctTextureHashes=$($clip.glDistinctTextureHashes); expected > 1."
+                }
+                if ([string]$clip.glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
+                    Add-Failure $importFailures "$clipName had glScreenshotMethod='$($clip.glScreenshotMethod)'; expected app_internal_gl_viewport_grab."
+                }
+                $clipRendererMatched = $false
+                foreach ($renderer in @($clip.glRendererDescriptions | ForEach-Object { [string]$_ })) {
+                    if ($renderer -match $RequiredGpuNamePattern) {
+                        $clipRendererMatched = $true
+                        break
+                    }
+                }
+                if (!$clipRendererMatched) {
+                    Add-Failure $importFailures "$clipName had no GL renderer matching '$RequiredGpuNamePattern': $((@($clip.glRendererDescriptions) | ForEach-Object { [string]$_ }) -join '; ')"
+                }
+                if (@($clip.glBackendArtifacts).Count -le 0) {
+                    Add-Failure $importFailures "$clipName did not include a backend DLL hash artifact."
+                }
             }
         }
     }
