@@ -281,18 +281,10 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
     g_llrawproc_gpu_playback_last_input_words = 0;
 }
 
-static int llrawproc_gpu_playback_store_last_input_bayer16(const uint16_t * input,
-                                                           size_t input_words)
+static int llrawproc_gpu_playback_take_last_input_bayer16(uint16_t * owned_input,
+                                                          size_t input_words)
 {
-    uint16_t * copy = NULL;
-    const size_t bytes = input_words * sizeof(uint16_t);
-    if(!input || input_words == 0 || input_words > ((size_t)-1) / sizeof(uint16_t))
-    {
-        return 0;
-    }
-
-    copy = (uint16_t *)malloc(bytes);
-    if(!copy)
+    if(!owned_input || input_words == 0)
     {
         if(g_llrawproc_gpu_playback_last_input_bayer16)
         {
@@ -303,12 +295,11 @@ static int llrawproc_gpu_playback_store_last_input_bayer16(const uint16_t * inpu
         return 0;
     }
 
-    memcpy(copy, input, bytes);
     if(g_llrawproc_gpu_playback_last_input_bayer16)
     {
         free(g_llrawproc_gpu_playback_last_input_bayer16);
     }
-    g_llrawproc_gpu_playback_last_input_bayer16 = copy;
+    g_llrawproc_gpu_playback_last_input_bayer16 = owned_input;
     g_llrawproc_gpu_playback_last_input_words = input_words;
     return 1;
 }
@@ -2422,6 +2413,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             const double dual_iso_start = mlv_stage_timing_now();
             uint16_t * gpu_export_input = NULL;
             uint16_t * gpu_playback_input = NULL;
+            int gpu_playback_input_owned_by_last_snapshot = 0;
             const int gpu_export_requested = llrawproc_gpu_export_enabled();
             const int gpu_export_trusted_requested =
                 gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
@@ -2502,9 +2494,10 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                      * for dual-iso frames, so they need no gate here. */
                     if (g_llrawproc_gpu_playback_texture_present_preferred)
                     {
-                        (void)llrawproc_gpu_playback_store_last_input_bayer16(
-                            gpu_playback_input,
-                            raw_image_size / sizeof(uint16_t));
+                        gpu_playback_input_owned_by_last_snapshot =
+                            llrawproc_gpu_playback_take_last_input_bayer16(
+                                gpu_playback_input,
+                                raw_image_size / sizeof(uint16_t));
                     }
                 }
             }
@@ -2716,7 +2709,10 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             }
             if (gpu_playback_input)
             {
-                free(gpu_playback_input);
+                if (!gpu_playback_input_owned_by_last_snapshot)
+                {
+                    free(gpu_playback_input);
+                }
             }
             dualiso_debug_set_gpu_recon_state_capture_enabled(0);
             dualiso_debug_get_full20bit_timing(
