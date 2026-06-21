@@ -310,6 +310,7 @@ typedef int (*GpuAmazeRunPostWbGlTextureFromR16GlTextureFn)(
     double,
     double,
     double);
+typedef int (*GpuAmazeResetLiveGlTextureResourcesFn)(igpu_amaze_debayer_backend *);
 typedef int (*GpuAmazeLastTimingFn)(igpu_amaze_debayer_backend *,
                                     igpu_amaze_debayer_timing_t *);
 
@@ -323,6 +324,7 @@ struct GpuAmazeDebayerRuntime
     GpuAmazeRunFn run = nullptr;
     GpuAmazeRunPostWbGlTextureFn runPostWbGlTexture = nullptr;
     GpuAmazeRunPostWbGlTextureFromR16GlTextureFn runPostWbGlTextureFromR16GlTexture = nullptr;
+    GpuAmazeResetLiveGlTextureResourcesFn resetLiveGlTextureResources = nullptr;
     GpuAmazeLastTimingFn lastTiming = nullptr;
 };
 
@@ -503,6 +505,10 @@ struct GpuAmazeDebayerLiveTextureRuntime
             if ( outReason ) *outReason = reason;
             return false;
         }
+
+        runtime.resetLiveGlTextureResources =
+            reinterpret_cast<GpuAmazeResetLiveGlTextureResourcesFn>(
+                runtime.library.resolve("igpu_amaze_debayer_reset_live_gl_texture_resources"));
 
         backend = runtime.create("cuda");
         if ( !backend )
@@ -905,6 +911,16 @@ GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeR16TextureBackend(void)
     availability.reason = live.reason;
     availability.rendererDescription = live.rendererDescription;
     return availability;
+}
+
+void gpuAmazeDebayerResetR16TextureBackendResources(void)
+{
+    GpuAmazeDebayerLiveTextureRuntime & live = liveAmazeTextureRuntime();
+    QMutexLocker locker(&live.mutex);
+    if ( live.backend && live.runtime.resetLiveGlTextureResources )
+    {
+        live.runtime.resetLiveGlTextureResources(live.backend);
+    }
 }
 
 bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(

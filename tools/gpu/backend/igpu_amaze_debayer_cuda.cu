@@ -32,6 +32,15 @@
 #define GL_TEXTURE_2D 0x0DE1
 #endif
 
+struct CachedGlImageResource
+{
+    cudaGraphicsResource * resource = nullptr;
+    unsigned int texture = 0;
+    int width = 0;
+    int height = 0;
+    unsigned int flags = 0;
+};
+
 struct igpu_amaze_debayer_backend
 {
     std::string description;
@@ -43,6 +52,8 @@ struct igpu_amaze_debayer_backend
     DeviceBuffers liveDeviceBuffers;
     std::vector<DeviceBuffers> liveTileDeviceBuffers;
     std::vector<cudaStream_t> liveTileStreams;
+    CachedGlImageResource liveInputR16Resource;
+    CachedGlImageResource liveOutputRgba16Resource;
     std::size_t livePixelCount = 0;
     int liveWidth = 0;
     int liveHeight = 0;
@@ -58,6 +69,73 @@ double now_ms()
     using clock = std::chrono::steady_clock;
     const auto now = clock::now().time_since_epoch();
     return std::chrono::duration<double, std::milli>(now).count();
+}
+
+void reset_cached_gl_resource(CachedGlImageResource * cache)
+{
+    if (!cache) return;
+    if (cache->resource)
+    {
+        const cudaError_t rc = cudaGraphicsUnregisterResource(cache->resource);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(cached GL texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+        }
+    }
+    cache->resource = nullptr;
+    cache->texture = 0;
+    cache->width = 0;
+    cache->height = 0;
+    cache->flags = 0;
+}
+
+void reset_live_gl_resources(igpu_amaze_debayer_backend * backend)
+{
+    if (!backend) return;
+    reset_cached_gl_resource(&backend->liveInputR16Resource);
+    reset_cached_gl_resource(&backend->liveOutputRgba16Resource);
+}
+
+int ensure_cached_gl_resource(CachedGlImageResource * cache,
+                              unsigned int glTexture,
+                              int width,
+                              int height,
+                              unsigned int flags,
+                              const char * label)
+{
+    if (!cache || glTexture == 0 || width <= 0 || height <= 0) return -1;
+    if (cache->resource
+        && cache->texture == glTexture
+        && cache->width == width
+        && cache->height == height
+        && cache->flags == flags)
+    {
+        return 0;
+    }
+
+    reset_cached_gl_resource(cache);
+    cudaGraphicsResource * resource = nullptr;
+    const cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                       glTexture,
+                                                       GL_TEXTURE_2D,
+                                                       flags);
+    if (rc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(%s) failed: %s\n",
+                     label ? label : "cached GL texture",
+                     cudaGetErrorString(rc));
+        return 2;
+    }
+
+    cache->resource = resource;
+    cache->texture = glTexture;
+    cache->width = width;
+    cache->height = height;
+    cache->flags = flags;
+    return 0;
 }
 
 __global__ void k_tile_load_float(const float * raw,
@@ -198,6 +276,7 @@ __global__ void k_bayer16_to_post_wb_raw_float(const uint16_t * bayer16,
 void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
 {
     if (!backend) return;
+    reset_live_gl_resources(backend);
     cudaFree(backend->liveReconBayer16);
     cudaFree(backend->liveRawFloat);
     cudaFree(backend->liveRgb16);
@@ -277,30 +356,47 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
 int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
                                    uint16_t * dBayer16,
                                    int width,
-                                   int height)
+                                   int height,
+                                   CachedGlImageResource * cache = nullptr)
 {
     if (glTexture == 0 || !dBayer16 || width <= 0 || height <= 0) return -1;
 
     cudaGraphicsResource * resource = nullptr;
-    cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
-                                                 glTexture,
-                                                 GL_TEXTURE_2D,
-                                                 cudaGraphicsRegisterFlagsReadOnly);
-    if (rc != cudaSuccess)
+    const bool cached = cache != nullptr;
+    if (cached)
     {
-        std::fprintf(stderr,
-                     "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_R16 source texture) failed: %s\n",
-                     cudaGetErrorString(rc));
-        return 2;
+        const int cacheRc = ensure_cached_gl_resource(cache,
+                                                      glTexture,
+                                                      width,
+                                                      height,
+                                                      cudaGraphicsRegisterFlagsReadOnly,
+                                                      "cached GL_R16 source texture");
+        if (cacheRc != 0) return cacheRc;
+        resource = cache->resource;
+    }
+    else
+    {
+        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                     glTexture,
+                                                     GL_TEXTURE_2D,
+                                                     cudaGraphicsRegisterFlagsReadOnly);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_R16 source texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            return 2;
+        }
     }
 
-    rc = cudaGraphicsMapResources(1, &resource, 0);
+    cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
     if (rc != cudaSuccess)
     {
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_R16 source texture) failed: %s\n",
                      cudaGetErrorString(rc));
-        cudaGraphicsUnregisterResource(resource);
+        if (cached) reset_cached_gl_resource(cache);
+        else cudaGraphicsUnregisterResource(resource);
         return 2;
     }
 
@@ -320,12 +416,14 @@ int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
     }
 
     const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
-    const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+    const cudaError_t unregisterRc =
+        cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
     if (rc != cudaSuccess)
     {
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] GL_R16 source texture device copy failed: %s\n",
                      cudaGetErrorString(rc));
+        if (cached) reset_cached_gl_resource(cache);
         return 2;
     }
     if (unmapRc != cudaSuccess)
@@ -333,6 +431,7 @@ int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_R16 source texture) failed: %s\n",
                      cudaGetErrorString(unmapRc));
+        if (cached) reset_cached_gl_resource(cache);
         return 2;
     }
     if (unregisterRc != cudaSuccess)
@@ -685,7 +784,8 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
                                                  double wbMultiplierR,
                                                  double wbMultiplierG,
                                                  double wbMultiplierB,
-                                                 uint16_t * dRgba16Scratch = nullptr)
+                                                 uint16_t * dRgba16Scratch = nullptr,
+                                                 CachedGlImageResource * cache = nullptr)
 {
     if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
     if (wbMultiplierR <= 0.0 || wbMultiplierG <= 0.0 || wbMultiplierB <= 0.0) return -1;
@@ -698,6 +798,7 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
     uint16_t * dRgba16 = dRgba16Scratch;
     const bool ownsScratch = dRgba16 == nullptr;
     cudaGraphicsResource * resource = nullptr;
+    const bool cached = cache != nullptr;
     auto releaseScratch = [&]()
     {
         if (ownsScratch && dRgba16)
@@ -721,26 +822,45 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
                                                                  wbMultiplierB);
         CK(cudaGetLastError());
 
-        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
-                                                     glTexture,
-                                                     GL_TEXTURE_2D,
-                                                     cudaGraphicsRegisterFlagsWriteDiscard);
-        if (rc != cudaSuccess)
+        if (cached)
         {
-            std::fprintf(stderr,
-                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 post-WB texture) failed: %s\n",
-                         cudaGetErrorString(rc));
-            releaseScratch();
-            return 2;
+            const int cacheRc = ensure_cached_gl_resource(cache,
+                                                          glTexture,
+                                                          width,
+                                                          height,
+                                                          cudaGraphicsRegisterFlagsWriteDiscard,
+                                                          "cached GL_RGBA16 post-WB texture");
+            if (cacheRc != 0)
+            {
+                releaseScratch();
+                return cacheRc;
+            }
+            resource = cache->resource;
+        }
+        else
+        {
+            cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                         glTexture,
+                                                         GL_TEXTURE_2D,
+                                                         cudaGraphicsRegisterFlagsWriteDiscard);
+            if (rc != cudaSuccess)
+            {
+                std::fprintf(stderr,
+                             "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 post-WB texture) failed: %s\n",
+                             cudaGetErrorString(rc));
+                releaseScratch();
+                return 2;
+            }
         }
 
-        rc = cudaGraphicsMapResources(1, &resource, 0);
+        cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
         if (rc != cudaSuccess)
         {
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 post-WB texture) failed: %s\n",
                          cudaGetErrorString(rc));
-            cudaGraphicsUnregisterResource(resource);
+            if (cached) reset_cached_gl_resource(cache);
+            else cudaGraphicsUnregisterResource(resource);
             releaseScratch();
             return 2;
         }
@@ -761,13 +881,15 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
         }
 
         const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
-        const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+        const cudaError_t unregisterRc =
+            cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
         releaseScratch();
         if (rc != cudaSuccess)
         {
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] post-WB device-to-GL texture copy failed: %s\n",
                          cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache);
             return 2;
         }
         if (unmapRc != cudaSuccess)
@@ -775,6 +897,7 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 post-WB texture) failed: %s\n",
                          cudaGetErrorString(unmapRc));
+            if (cached) reset_cached_gl_resource(cache);
             return 2;
         }
         if (unregisterRc != cudaSuccess)
@@ -789,7 +912,8 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
     catch (const CudaStageProbeError & error)
     {
         std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
-        if (resource) cudaGraphicsUnregisterResource(resource);
+        if (cached) reset_cached_gl_resource(cache);
+        else if (resource) cudaGraphicsUnregisterResource(resource);
         releaseScratch();
         return 2;
     }
@@ -1030,7 +1154,8 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         const int copyRc = copy_gl_r16_texture_to_bayer16(in_r16_gl_texture,
                                                           backend->liveReconBayer16,
                                                           width,
-                                                          height);
+                                                          height,
+                                                          &backend->liveInputR16Resource);
         if (copyRc != 0) return copyRc;
         const int threads = 256;
         const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
@@ -1066,7 +1191,8 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                                                          wb_multiplier_r,
                                                          wb_multiplier_g,
                                                          wb_multiplier_b,
-                                                         backend->liveRgba16);
+                                                         backend->liveRgba16,
+                                                         &backend->liveOutputRgba16Resource);
         CK(cudaDeviceSynchronize());
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
@@ -1078,6 +1204,13 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return -2;
     }
+}
+
+extern "C" int igpu_amaze_debayer_reset_live_gl_texture_resources(igpu_amaze_debayer_backend * backend)
+{
+    if (!backend) return -1;
+    reset_live_gl_resources(backend);
+    return 0;
 }
 
 extern "C" int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,

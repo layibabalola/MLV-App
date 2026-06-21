@@ -1397,6 +1397,10 @@ void GpuDisplayViewport::ensureProgram()
 
 void GpuDisplayViewport::destroyTexture()
 {
+    if ( m_texture || m_gpuReconSourceTexture )
+    {
+        gpuAmazeDebayerResetR16TextureBackendResources();
+    }
     if ( m_texture )
     {
         delete m_texture;

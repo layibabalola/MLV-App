@@ -76,6 +76,14 @@ int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
     double wb_multiplier_g,
     double wb_multiplier_b);
 
+/* Optional live-playback cache reset. Newer CUDA backends may keep CUDA/GL
+ * image registrations alive across frames; callers that own the GL textures
+ * should invoke this before deleting or reallocating those textures. Older DLLs
+ * may omit this symbol.
+ */
+int igpu_amaze_debayer_reset_live_gl_texture_resources(
+    igpu_amaze_debayer_backend * backend);
+
 int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,
                                    igpu_amaze_debayer_timing_t * timing);
 
