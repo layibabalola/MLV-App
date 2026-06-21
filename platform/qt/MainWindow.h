@@ -652,6 +652,7 @@ private:
         bool betterResizerEnabled = false;
         bool displayPreviewCachingAllowed = false;
         bool playbackFastScaleActive = false;
+        bool renderSlotReleasedBeforePresent = false;
         GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
         std::vector<uint8_t> ownedSourceImage;
         std::vector<uint16_t> ownedSourceImage16;

@@ -4121,7 +4121,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const bool playbackProcessingSubsetActive =
         (gpuPreviewProcessingActive || cpuPreviewProcessingActive)
         && task.gpuPresentationOptions.previewProcessing.enabled;
-    bool releasePresentedFrameEarly = false;
+    bool releasePresentedFrameEarly = task.renderSlotReleasedBeforePresent;
 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_pre_enqueue_ms"),
@@ -5162,13 +5162,17 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             pic.setDevicePixelRatio( devicePixelRatioF() );
         }
         m_pGraphicsItem->setPixmap( pic );
-        if( !displayPreviewCachingAllowed && m_pRenderThread )
+        if( !displayPreviewCachingAllowed
+         && m_pRenderThread
+         && !releasePresentedFrameEarly )
         {
             m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
             releasePresentedFrameEarly = true;
         }
     }
-    else if( !displayPreviewCachingAllowed && m_pRenderThread )
+    else if( !displayPreviewCachingAllowed
+          && m_pRenderThread
+          && !releasePresentedFrameEarly )
     {
         m_pRenderThread->releasePresentedFrameForRequestSerial( readyFrame.requestSerial );
         releasePresentedFrameEarly = true;
@@ -21259,7 +21263,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "r16_amaze_gui_admitted=%32 r16_amaze_skip_candidate=%33 "
                     "r16_amaze_skip_input_words=%34 "
                     "r16_amaze_skip_input_borrowed=%35 "
-                    "prepare_only_allowed=%36 prepare_only_used=%37" )
+                    "prepare_only_allowed=%36 prepare_only_used=%37 "
+                    "gpu_tex_nr_owned_input=%38 "
+                    "gpu_tex_nr_owned_input_bytes=%39 "
+                    "gpu_tex_nr_release_before_present=%40" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21341,7 +21348,13 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     .arg( bool01( telemetryBoolValue(
                         timing, "gpu_playback_recon_texture_present_prepare_only_allowed" ) ) )
                     .arg( bool01( telemetryBoolValue(
-                        timing, "gpu_playback_recon_texture_present_prepare_only_used" ) ) );
+                        timing, "gpu_playback_recon_texture_present_prepare_only_used" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "playback_prep_gpu_tex_nr_owned_input_for_early_release" ) ) )
+                    .arg( telemetryIntValue(
+                        timing, "playback_prep_owned_gpu_playback_recon_texture_input_bytes" ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "playback_prep_gpu_tex_nr_release_before_present" ) ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -24256,8 +24269,119 @@ void MainWindow::drawFrameReady()
 
     if( inlineFastPlaybackPrep )
     {
+        bool inlineGpuTexNrInputOwned = false;
+        bool inlineGpuTexNrOracleOwned = false;
+        bool inlineGpuTexNrRgb8Owned = false;
+        bool inlineGpuTexNrRgb16Owned = false;
+        bool inlineGpuTexNrReleaseBeforePresent = false;
+        if( inlineGpuPlaybackReconTextureNoReadbackPrep )
+        {
+            try
+            {
+                task.ownedGpuPlaybackReconTextureInputBayerFrame.assign(
+                    readyFrame.gpuPlaybackReconTextureInputBayerFrame,
+                    readyFrame.gpuPlaybackReconTextureInputBayerFrame
+                        + readyFrame.gpuPlaybackReconTextureInputBayerFrameSize );
+                inlineGpuTexNrInputOwned =
+                    task.ownedGpuPlaybackReconTextureInputBayerFrame.size()
+                    == readyFrame.gpuPlaybackReconTextureInputBayerFrameSize;
+
+                inlineGpuTexNrOracleOwned =
+                    !readyFrame.gpuPlaybackReconTextureBayerFrame
+                    || readyFrame.gpuPlaybackReconTextureBayerFrameSize == 0;
+                if( readyFrame.gpuPlaybackReconTextureBayerFrame
+                 && readyFrame.gpuPlaybackReconTextureBayerFrameSize > 0 )
+                {
+                    task.ownedGpuPlaybackReconTextureBayerFrame.assign(
+                        readyFrame.gpuPlaybackReconTextureBayerFrame,
+                        readyFrame.gpuPlaybackReconTextureBayerFrame
+                            + readyFrame.gpuPlaybackReconTextureBayerFrameSize );
+                    inlineGpuTexNrOracleOwned =
+                        task.ownedGpuPlaybackReconTextureBayerFrame.size()
+                        == readyFrame.gpuPlaybackReconTextureBayerFrameSize;
+                }
+
+                inlineGpuTexNrRgb8Owned =
+                    !readyFrame.rawImage8 || sourceImageBytes == 0;
+                if( readyFrame.rawImage8 && sourceImageBytes > 0 )
+                {
+                    task.ownedSourceImage.assign(
+                        readyFrame.rawImage8,
+                        readyFrame.rawImage8 + sourceImageBytes );
+                    inlineGpuTexNrRgb8Owned =
+                        task.ownedSourceImage.size() == sourceImageBytes;
+                }
+
+                inlineGpuTexNrRgb16Owned =
+                    !readyFrame.rawImage16 || readyFrame.rawImage16Words == 0;
+                if( readyFrame.rawImage16 && readyFrame.rawImage16Words > 0 )
+                {
+                    task.ownedSourceImage16.assign(
+                        readyFrame.rawImage16,
+                        readyFrame.rawImage16 + readyFrame.rawImage16Words );
+                    inlineGpuTexNrRgb16Owned =
+                        task.ownedSourceImage16.size()
+                        == readyFrame.rawImage16Words;
+                }
+            }
+            catch( const std::bad_alloc & )
+            {
+                task.ownedGpuPlaybackReconTextureInputBayerFrame.clear();
+                task.ownedGpuPlaybackReconTextureBayerFrame.clear();
+                task.ownedSourceImage.clear();
+                task.ownedSourceImage16.clear();
+                inlineGpuTexNrInputOwned = false;
+                inlineGpuTexNrOracleOwned = false;
+                inlineGpuTexNrRgb8Owned = false;
+                inlineGpuTexNrRgb16Owned = false;
+            }
+            task.rebindOwnedImagePointers();
+            inlineGpuTexNrReleaseBeforePresent =
+                inlineGpuTexNrInputOwned
+                && inlineGpuTexNrOracleOwned
+                && inlineGpuTexNrRgb8Owned
+                && inlineGpuTexNrRgb16Owned;
+            task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_owned_input_for_early_release"),
+                inlineGpuTexNrInputOwned );
+            task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_owned_oracle_for_early_release"),
+                inlineGpuTexNrOracleOwned );
+            task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_owned_rgb8_for_early_release"),
+                inlineGpuTexNrRgb8Owned );
+            task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_owned_rgb16_for_early_release"),
+                inlineGpuTexNrRgb16Owned );
+            task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_release_before_present"),
+                inlineGpuTexNrReleaseBeforePresent );
+        }
         notePlaybackPrepOwnershipTelemetry();
         m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
+        if( inlineGpuTexNrReleaseBeforePresent && m_pRenderThread )
+        {
+            m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
+            task.renderSlotReleasedBeforePresent = true;
+        }
+        if( inlineGpuPlaybackReconTextureNoReadbackPrep )
+        {
+            PlaybackPrepResult result;
+            result.task = std::move( task );
+            result.task.rebindOwnedImagePointers();
+            result.preparedWidth = sourceWidth;
+            result.preparedHeight = sourceHeight;
+            result.task.readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_amaze_texture_present_prep_passthrough"),
+                true );
+            result.imageBuildMs =
+                ( mlv_stage_timing_now() - result.task.enqueueTime ) * 1000.0;
+            result.workerQueueMs = 0.0;
+            result.workerTotalMs = result.imageBuildMs;
+            result.resultReadyTime = mlv_stage_timing_now();
+            presentPlaybackPreparedFrame( result );
+            return;
+        }
         PlaybackPrepResult result = buildPlaybackPrepResult( task );
         result.workerQueueMs = 0.0;
         result.workerTotalMs = result.imageBuildMs;
