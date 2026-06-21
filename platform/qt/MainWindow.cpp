@@ -2457,7 +2457,7 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_pAudioPlayback = new AudioPlayback( this );
 
     //Set timers
-    m_timerId = startTimer( 40 ); //25fps initially only, is set after import
+    m_timerId = startTimer( 40, Qt::PreciseTimer ); //25fps initially only, is set after import
     m_timerCacheId = startTimer( 1000 ); //1fps
 
     //Connect Export Handler
@@ -2607,6 +2607,24 @@ static int mlvappPlaybackTimerIntervalMs( double framerate )
     if( ok && env < 0 ) return ( native > 0 ) ? native : 40;
     const int fastPollMs = 8;
     return qMin( fastPollMs, ( native > 0 ) ? native : 40 );
+}
+
+static bool mlvappPlaybackLegacyTimerRequested()
+{
+    bool ok = false;
+    const int env = qEnvironmentVariableIntValue( "MLVAPP_PLAYBACK_TIMER_POLL_MS", &ok );
+    return ok && env < 0;
+}
+
+static int mlvappStartPlaybackTimer( QObject *owner, double framerate )
+{
+    if( !owner ) return 0;
+    const Qt::TimerType timerType =
+        mlvappPlaybackLegacyTimerRequested()
+            ? Qt::CoarseTimer
+            : Qt::PreciseTimer;
+    return owner->startTimer( mlvappPlaybackTimerIntervalMs( framerate ),
+                              timerType );
 }
 
 void MainWindow::timerFrameEvent( bool predictivePlaybackAdvance )
@@ -8178,7 +8196,7 @@ int MainWindow::openMlv( QString fileName )
     ui->horizontalSliderPosition->setMaximum( getMlvFrames( m_pMlvObject ) - 1 );
 
     //Restart timer
-    m_timerId = startTimer( mlvappPlaybackTimerIntervalMs( getFramerate() ) );
+    m_timerId = mlvappStartPlaybackTimer( this, getFramerate() );
 
     if( ui->actionDontSwitchDebayerForPlayback->isChecked() )
     {
@@ -18800,7 +18818,7 @@ void MainWindow::on_actionExportSettings_triggered()
     {
         //Restart timer with chosen framerate
         killTimer( m_timerId );
-        m_timerId = startTimer( mlvappPlaybackTimerIntervalMs( getFramerate() ) );
+        m_timerId = mlvappStartPlaybackTimer( this, getFramerate() );
 
         //Refresh Timecode Label
         if( m_tcModeDuration )
