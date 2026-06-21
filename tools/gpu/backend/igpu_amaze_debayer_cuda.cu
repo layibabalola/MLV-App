@@ -52,6 +52,7 @@ struct igpu_amaze_debayer_backend
     DeviceBuffers liveDeviceBuffers;
     std::vector<DeviceBuffers> liveTileDeviceBuffers;
     std::vector<cudaStream_t> liveTileStreams;
+    cudaEvent_t livePrepReadyEvent = nullptr;
     CachedGlImageResource liveInputR16Resource;
     CachedGlImageResource liveOutputRgba16Resource;
     std::size_t livePixelCount = 0;
@@ -292,7 +293,10 @@ void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
     backend->liveRawFloat = nullptr;
     backend->liveRgb16 = nullptr;
     backend->liveRgba16 = nullptr;
-    if (backend->liveDeviceBuffersAllocated)
+    if (backend->liveDeviceBuffersAllocated
+        || !backend->liveTileDeviceBuffers.empty()
+        || !backend->liveTileStreams.empty()
+        || backend->livePrepReadyEvent)
     {
         free_device(&backend->liveDeviceBuffers);
         backend->liveDeviceBuffers = DeviceBuffers();
@@ -309,6 +313,11 @@ void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
             }
         }
         backend->liveTileStreams.clear();
+        if (backend->livePrepReadyEvent)
+        {
+            cudaEventDestroy(backend->livePrepReadyEvent);
+            backend->livePrepReadyEvent = nullptr;
+        }
         backend->liveDeviceBuffersAllocated = false;
     }
     backend->livePixelCount = 0;
@@ -332,6 +341,7 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
         && backend->liveRgb16
         && backend->liveRgba16
         && backend->liveDeviceBuffersAllocated
+        && backend->livePrepReadyEvent
         && backend->livePixelCount == pixelCount
         && backend->liveWidth == width
         && backend->liveHeight == height)
@@ -340,19 +350,28 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
     }
 
     free_live_texture_buffers(backend);
-    CK(cudaMalloc(&backend->liveReconBayer16, pixelCount * sizeof(uint16_t)));
-    CK(cudaMalloc(&backend->liveRawFloat, pixelCount * sizeof(float)));
-    CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
-    CK(cudaMalloc(&backend->liveRgba16, pixelCount * 4u * sizeof(uint16_t)));
-    allocate_device(&backend->liveDeviceBuffers, 1);
-    backend->liveTileDeviceBuffers.resize(kLiveTileStreamCount);
-    backend->liveTileStreams.resize(kLiveTileStreamCount, nullptr);
-    for (int index = 0; index < kLiveTileStreamCount; ++index)
+    try
     {
-        allocate_device(&backend->liveTileDeviceBuffers[static_cast<std::size_t>(index)], 1);
-        CK(cudaStreamCreateWithFlags(
-            &backend->liveTileStreams[static_cast<std::size_t>(index)],
-            cudaStreamNonBlocking));
+        CK(cudaMalloc(&backend->liveReconBayer16, pixelCount * sizeof(uint16_t)));
+        CK(cudaMalloc(&backend->liveRawFloat, pixelCount * sizeof(float)));
+        CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
+        CK(cudaMalloc(&backend->liveRgba16, pixelCount * 4u * sizeof(uint16_t)));
+        allocate_device(&backend->liveDeviceBuffers, 1);
+        backend->liveTileDeviceBuffers.resize(kLiveTileStreamCount);
+        backend->liveTileStreams.resize(kLiveTileStreamCount, nullptr);
+        for (int index = 0; index < kLiveTileStreamCount; ++index)
+        {
+            allocate_device(&backend->liveTileDeviceBuffers[static_cast<std::size_t>(index)], 1);
+            CK(cudaStreamCreateWithFlags(
+                &backend->liveTileStreams[static_cast<std::size_t>(index)],
+                cudaStreamNonBlocking));
+        }
+        CK(cudaEventCreateWithFlags(&backend->livePrepReadyEvent, cudaEventDisableTiming));
+    }
+    catch (...)
+    {
+        free_live_texture_buffers(backend);
+        throw;
     }
     backend->liveDeviceBuffersAllocated = true;
     backend->livePixelCount = pixelCount;
@@ -624,12 +643,21 @@ void run_frame_to_device_rgb16_batched(const float * dRaw,
                                        std::vector<DeviceBuffers> & buffers,
                                        const std::vector<cudaStream_t> & streams,
                                        int width,
-                                       int height)
+                                       int height,
+                                       cudaEvent_t readyEvent = nullptr)
 {
     const std::size_t batchSize = std::min(buffers.size(), streams.size());
     if (batchSize == 0)
     {
         return;
+    }
+
+    if (readyEvent)
+    {
+        for (std::size_t slot = 0; slot < batchSize; ++slot)
+        {
+            CK(cudaStreamWaitEvent(streams[slot], readyEvent, 0));
+        }
     }
 
     std::size_t inFlight = 0;
@@ -1175,7 +1203,7 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                                                             wb_multiplier_g,
                                                             wb_multiplier_b);
         CK(cudaGetLastError());
-        CK(cudaDeviceSynchronize());
+        CK(cudaEventRecord(backend->livePrepReadyEvent, 0));
         backend->lastTiming.upload_ms = now_ms() - uploadStart;
 
         const double kernelStart = now_ms();
@@ -1184,7 +1212,8 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                                           backend->liveTileDeviceBuffers,
                                           backend->liveTileStreams,
                                           width,
-                                          height);
+                                          height,
+                                          backend->livePrepReadyEvent);
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
