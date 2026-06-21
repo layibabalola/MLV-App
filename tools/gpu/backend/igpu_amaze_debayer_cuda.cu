@@ -51,7 +51,7 @@ struct igpu_amaze_debayer_backend
 
 namespace
 {
-constexpr int kLiveTileStreamCount = 4;
+constexpr int kLiveTileStreamCount = 8;
 
 double now_ms()
 {
