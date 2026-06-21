@@ -643,12 +643,17 @@ bool RenderFrameThread::acquireLatestReadyFrame(ReadyFrame *frame)
                 : 0;
         frame->gpuPlaybackReconTextureInputBayerFrame =
             slot.gpuPlaybackReconTextureNoReadbackCandidate
-            && !slot.gpuPlaybackReconTextureInputBayerFrame.empty()
-                ? slot.gpuPlaybackReconTextureInputBayerFrame.data()
+                ? ( slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16
+                    ? ( slot.rawImage16.empty() ? nullptr : slot.rawImage16.data() )
+                    : ( slot.gpuPlaybackReconTextureInputBayerFrame.empty()
+                        ? nullptr
+                        : slot.gpuPlaybackReconTextureInputBayerFrame.data() ) )
                 : nullptr;
         frame->gpuPlaybackReconTextureInputBayerFrameSize =
             frame->gpuPlaybackReconTextureInputBayerFrame
-                ? slot.gpuPlaybackReconTextureInputBayerFrame.size()
+                ? ( slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16
+                    ? slot.rawImage16.size()
+                    : slot.gpuPlaybackReconTextureInputBayerFrame.size() )
                 : 0;
         frame->gpuPlaybackReconTextureWidth = slot.gpuPlaybackReconTextureWidth;
         frame->gpuPlaybackReconTextureHeight = slot.gpuPlaybackReconTextureHeight;
@@ -1051,13 +1056,15 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             wantsGpuPlaybackReconTextureNoReadback
             && entry.request.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted
             && !gpuPlaybackReconNoReadbackOutputValidationEnabled();
-        bool gpuPlaybackReconTextureInputSnapshotCopied = false;
+        bool gpuPlaybackReconTextureInputAvailable = false;
+        bool gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
         bool gpuPlaybackReconTexturePreparedStateValid = false;
         bool gpuPlaybackReconTextureStateSnapshotOk = false;
         QString gpuPlaybackReconTextureNoReadbackFallbackReason;
         if( !wantsGpuPlaybackReconTextureNoReadback )
         {
             slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+            slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
             slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
             slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
             gpuPlaybackReconTextureNoReadbackFallbackReason =
@@ -1110,6 +1117,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             {
                 slot.gpuPlaybackReconTextureBayerFrame.clear();
             }
+            const bool prepareOnlyUsed =
+                llrpGpuPlaybackReconLastPrepareOnlyForTesting() != 0;
             const size_t preparedInputWords =
                 llrpGpuPlaybackReconGetLastInputBayer16( nullptr, 0 );
             if( preparedInputWords == rawPixelCount )
@@ -1123,21 +1132,34 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                         llrpGpuPlaybackReconGetLastInputBayer16(
                             slot.gpuPlaybackReconTextureInputBayerFrame.data(),
                             slot.gpuPlaybackReconTextureInputBayerFrame.size() );
-                    gpuPlaybackReconTextureInputSnapshotCopied =
+                    gpuPlaybackReconTextureInputAvailable =
                         copiedWords == rawPixelCount;
+                    slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
                 }
                 catch( const std::bad_alloc & )
                 {
                     slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                    slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
                     slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
                     slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
                     gpuPlaybackReconTextureNoReadbackFallbackReason =
                         QStringLiteral("GPU playback recon prepared input snapshot allocation failed");
                 }
             }
+            else if( prepareOnlyUsed
+                  && allowGpuPlaybackReconTexturePrepareOnly
+                  && !outputValidationRequired
+                  && slot.rawImage16.size() >= rawPixelCount )
+            {
+                slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = true;
+                gpuPlaybackReconTextureInputBorrowedFromRawImage16 = true;
+                gpuPlaybackReconTextureInputAvailable = true;
+            }
             else
             {
                 slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
                 gpuPlaybackReconTextureNoReadbackFallbackReason =
                     QStringLiteral("GPU playback recon prepared input snapshot was unavailable");
             }
@@ -1151,7 +1173,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 preparedStateAvailable
                 && assignGpuPlaybackReconTextureState( slot.gpuPlaybackReconTextureState,
                                                        preparedState );
-            if( gpuPlaybackReconTextureInputSnapshotCopied
+            if( gpuPlaybackReconTextureInputAvailable
              && gpuPlaybackReconTextureStateSnapshotOk
              && gpuPlaybackReconTextureBayerSnapshotCopied )
             {
@@ -1161,6 +1183,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             {
                 slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
                 slot.gpuPlaybackReconTextureInputBayerFrame.clear();
+                slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
                 slot.gpuPlaybackReconTextureBayerFrame.clear();
                 slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
                 if( gpuPlaybackReconTextureNoReadbackFallbackReason.isEmpty() )
@@ -1185,7 +1208,13 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             llrpGpuPlaybackReconLastPrepareOnlyForTesting() != 0 );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_input_words"),
-            static_cast<qint64>( slot.gpuPlaybackReconTextureInputBayerFrame.size() ) );
+            static_cast<qint64>(
+                slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16
+                    ? slot.rawImage16.size()
+                    : slot.gpuPlaybackReconTextureInputBayerFrame.size() ) );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_no_readback_input_borrowed"),
+            slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_oracle_required"),
             gpuPlaybackReconNoReadbackOutputValidationEnabled() );
@@ -2001,6 +2030,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
         decodedRawFrameAlreadyReconned
         && slot.gpuPlaybackReconTextureNoReadbackCandidate;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureInputBayerFrame;
+    bool preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureBayerFrame;
     GpuPlaybackReconTextureState preservedGpuPlaybackReconTextureState;
     int preservedGpuPlaybackReconTextureBlackLevel = 0;
@@ -2031,6 +2061,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_input_words" );
         preserveGpuPlaybackReconTextureTelemetry(
+            "gpu_playback_recon_texture_present_no_readback_input_borrowed" );
+        preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_oracle_required" );
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_oracle_words" );
@@ -2045,6 +2077,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
     {
         preservedGpuPlaybackReconTextureInputBayerFrame =
             std::move( slot.gpuPlaybackReconTextureInputBayerFrame );
+        preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16 =
+            slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16;
         preservedGpuPlaybackReconTextureBayerFrame =
             std::move( slot.gpuPlaybackReconTextureBayerFrame );
         preservedGpuPlaybackReconTextureState =
@@ -2064,6 +2098,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuPlaybackReconTextureNoReadbackCandidate = true;
         slot.gpuPlaybackReconTextureInputBayerFrame =
             std::move( preservedGpuPlaybackReconTextureInputBayerFrame );
+        slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 =
+            preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16;
         slot.gpuPlaybackReconTextureBayerFrame =
             std::move( preservedGpuPlaybackReconTextureBayerFrame );
         slot.gpuPlaybackReconTextureState =
@@ -2206,8 +2242,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const bool gpuTexNrSkipScaleEligible = playbackScaleFactor == 1;
     const bool gpuTexNrSkipCandidate =
         slot.gpuPlaybackReconTextureNoReadbackCandidate;
+    const size_t gpuTexNrInputWords =
+        slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16
+            ? slot.rawImage16.size()
+            : slot.gpuPlaybackReconTextureInputBayerFrame.size();
     const bool gpuTexNrSkipInputAvailable =
-        !slot.gpuPlaybackReconTextureInputBayerFrame.empty();
+        gpuTexNrInputWords > 0;
     const bool gpuTexNrSkipStateMatches =
         slot.gpuPlaybackReconTextureState.valid
         && slot.gpuPlaybackReconTextureState.width == m_imageWidth
@@ -2243,7 +2283,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
         gpuTexNrSkipCandidate );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_input_words"),
-        static_cast<qint64>( slot.gpuPlaybackReconTextureInputBayerFrame.size() ) );
+        static_cast<qint64>( gpuTexNrInputWords ) );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_input_borrowed"),
+        slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_state_matches"),
         gpuTexNrSkipStateMatches );
@@ -2631,7 +2674,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
             && m_imageWidth > 0
             && m_imageHeight > 0
             && slot.gpuPlaybackReconTextureNoReadbackCandidate
-            && slot.gpuPlaybackReconTextureInputBayerFrame.size() >= fullResPixelCount
+            && ( slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16
+                 ? slot.rawImage16.size()
+                 : slot.gpuPlaybackReconTextureInputBayerFrame.size() ) >= fullResPixelCount
             && outputOracleAvailable
             && slot.gpuPlaybackReconTextureState.valid
             && slot.gpuPlaybackReconTextureState.width == m_imageWidth

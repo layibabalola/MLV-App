@@ -2414,6 +2414,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             uint16_t * gpu_export_input = NULL;
             uint16_t * gpu_playback_input = NULL;
             int gpu_playback_input_owned_by_last_snapshot = 0;
+            int gpu_playback_input_borrowed_from_raw_image = 0;
             const int gpu_export_requested = llrawproc_gpu_export_enabled();
             const int gpu_export_trusted_requested =
                 gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
@@ -2472,10 +2473,23 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
              && raw_image_size > 0)
             {
                 llrawproc_gpu_playback_reset_last_run_state();
-                gpu_playback_input = (uint16_t *)malloc(raw_image_size);
+                if (g_llrawproc_gpu_playback_texture_prepare_only_allowed
+                 && g_llrawproc_gpu_playback_texture_present_preferred
+                 && !gpu_export_input)
+                {
+                    gpu_playback_input = raw_image_buff;
+                    gpu_playback_input_borrowed_from_raw_image = 1;
+                }
+                else
+                {
+                    gpu_playback_input = (uint16_t *)malloc(raw_image_size);
+                }
                 if (gpu_playback_input)
                 {
-                    memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    if (!gpu_playback_input_borrowed_from_raw_image)
+                    {
+                        memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    }
                     /* No-readback eligibility (effectiveness-based, fail-closed):
                      * the CUDA->GL R16 texture the no-readback path presents is
                      * the RECON-ONLY Dual ISO bayer. The post-recon focus-pixel /
@@ -2492,7 +2506,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                      * staying fail-closed when it would change pixels. NOTE:
                      * vertical_stripes is PRE-recon and pattern_noise does not run
                      * for dual-iso frames, so they need no gate here. */
-                    if (g_llrawproc_gpu_playback_texture_present_preferred)
+                    if (g_llrawproc_gpu_playback_texture_present_preferred
+                     && !gpu_playback_input_borrowed_from_raw_image)
                     {
                         gpu_playback_input_owned_by_last_snapshot =
                             llrawproc_gpu_playback_take_last_input_bayer16(
@@ -2709,7 +2724,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             }
             if (gpu_playback_input)
             {
-                if (!gpu_playback_input_owned_by_last_snapshot)
+                if (!gpu_playback_input_owned_by_last_snapshot
+                 && !gpu_playback_input_borrowed_from_raw_image)
                 {
                     free(gpu_playback_input);
                 }
