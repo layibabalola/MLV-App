@@ -63,7 +63,7 @@ struct igpu_amaze_debayer_backend
 
 namespace
 {
-constexpr int kDefaultLiveTileStreamCount = 16;
+constexpr int kDefaultLiveTileStreamCount = 64;
 constexpr int kMaxLiveTileStreamCount = 64;
 
 int live_tile_stream_count_from_env()
@@ -82,7 +82,7 @@ int live_tile_stream_count_from_env()
 bool live_fast_launch_checks_from_env()
 {
     const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS");
-    if (!value || !*value) return false;
+    if (!value || !*value) return true;
 
     const char first = value[0];
     if (first == '0' || first == 'f' || first == 'F'
@@ -101,7 +101,7 @@ bool live_fast_launch_checks_from_env()
 bool live_direct_rgba_store_from_env()
 {
     const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE");
-    if (!value || !*value) return false;
+    if (!value || !*value) return true;
 
     const char first = value[0];
     if (first == '0' || first == 'f' || first == 'F'
