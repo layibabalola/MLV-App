@@ -4931,6 +4931,28 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                            ? gpuCpuReplayTiming.total_ms
                            : 0.0, 0, 'f', 3 );
         }
+        const bool gpuTexNrDirectTexturePresented =
+            gpuPlaybackReconNoReadbackPresented
+            && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16");
+        const bool gpuTexNrCanReleaseSlotAfterTexturePresent =
+            framePresentedByViewport
+            && gpuTexNrDirectTexturePresented
+            && !releasePresentedFrameEarly
+            && m_pRenderThread
+            && !m_headlessPlaybackProfileActive
+            && !ui->actionShowEditArea->isChecked();
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_gpu_tex_nr_release_safe_after_texture"),
+            gpuTexNrCanReleaseSlotAfterTexturePresent );
+        if( gpuTexNrCanReleaseSlotAfterTexturePresent )
+        {
+            m_pRenderThread->releasePresentedFrameForRequestSerial(
+                readyFrame.requestSerial );
+            releasePresentedFrameEarly = true;
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_prep_gpu_tex_nr_release_before_present"),
+                true );
+        }
         if( !gpuPlaybackReconNoReadbackPresented )
         {
             readyFrame.stageTimingTelemetry.insert(
@@ -24275,6 +24297,12 @@ void MainWindow::drawFrameReady()
         task.readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_borrowed_scaled_rgb8_bytes"),
             static_cast<qint64>( borrowedPlaybackScaledImageBytes ) );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_gpu_tex_nr_owned_input_for_early_release"),
+            !task.ownedGpuPlaybackReconTextureInputBayerFrame.empty() );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_gpu_tex_nr_release_before_present"),
+            false );
         task.readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_pre_enqueue_ms"),
             task.preEnqueueMs );
