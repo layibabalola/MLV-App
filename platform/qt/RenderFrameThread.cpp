@@ -525,7 +525,8 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
     {
         for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
         {
-            if( it->presentationContext.dropFramePlaybackActive
+            if( ( it->presentationContext.dropFramePlaybackActive
+               || it->presentationContext.playbackLookaheadRequest )
              && it->presentationContext.presentationGeneration
                 == request.presentationContext.presentationGeneration )
             {

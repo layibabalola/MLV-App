@@ -117,6 +117,9 @@ public:
             QString gpuPlaybackReconTexturePresentFallbackReason;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
+            bool playbackLookaheadRequest = false;
+            uint32_t playbackLookaheadOriginFrame = 0;
+            int playbackLookaheadDepth = 0;
         };
 
         const uint8_t *rawImage8 = nullptr;

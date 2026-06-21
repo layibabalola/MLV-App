@@ -24,6 +24,7 @@ param(
     [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [int]$PlaybackTimerPollMs = 0,
+    [int]$PlaybackRenderLookaheadFrames = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -60,6 +61,9 @@ if ($Phase3FrameSlots -lt 0) {
 }
 if ($PlaybackTimerPollMs -lt 0) {
     throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackRenderLookaheadFrames -lt 0 -or $PlaybackRenderLookaheadFrames -gt 3) {
+    throw "-PlaybackRenderLookaheadFrames must be between 0 and 3. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -1222,6 +1226,9 @@ if ($Phase3FrameSlots -gt 0) {
 if ($PlaybackTimerPollMs -gt 0) {
     $candidateEnv += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
 }
+if ($PlaybackRenderLookaheadFrames -gt 0) {
+    $candidateEnv += "MLVAPP_PLAYBACK_RENDER_LOOKAHEAD_FRAMES=$PlaybackRenderLookaheadFrames"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
@@ -1258,6 +1265,9 @@ if ($Phase3FrameSlots -gt 0) {
 }
 if ($PlaybackTimerPollMs -gt 0) {
     $candidateSpeedEnv += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
+}
+if ($PlaybackRenderLookaheadFrames -gt 0) {
+    $candidateSpeedEnv += "MLVAPP_PLAYBACK_RENDER_LOOKAHEAD_FRAMES=$PlaybackRenderLookaheadFrames"
 }
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -1366,6 +1376,7 @@ $summary = [ordered]@{
     gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
     phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
+    playbackRenderLookaheadFrames = if ($PlaybackRenderLookaheadFrames -gt 0) { $PlaybackRenderLookaheadFrames } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {
