@@ -237,6 +237,9 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_matrixLutBTexture(nullptr)
     , m_gammaLutTexture(nullptr)
 {
+    QSurfaceFormat requestedFormat = format();
+    requestedFormat.setSwapInterval(0);
+    setFormat(requestedFormat);
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     setAutoFillBackground(false);
 }

@@ -1185,7 +1185,6 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                                           backend->liveTileStreams,
                                           width,
                                           height);
-        CK(cudaDeviceSynchronize());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
@@ -1200,7 +1199,6 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
                                                          wb_multiplier_b,
                                                          backend->liveRgba16,
                                                          &backend->liveOutputRgba16Resource);
-        CK(cudaDeviceSynchronize());
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;
