@@ -18,7 +18,6 @@ param(
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
-    [switch]$CudaAmazeLiveGlSurfaceStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
     [switch]$GpuTexNrImmediateDrainReady,
@@ -425,7 +424,6 @@ elseif ($failures.Count -eq 0) {
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
         $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
         $cudaAmazeLiveDirectRgbaStoreLiteral = if ($CudaAmazeLiveDirectRgbaStore) { '$true' } else { '$false' }
-        $cudaAmazeLiveGlSurfaceStoreLiteral = if ($CudaAmazeLiveGlSurfaceStore) { '$true' } else { '$false' }
         $gpuPlaybackReconRetainDeviceOutputLiteral = if ($GpuPlaybackReconRetainDeviceOutput) { '$true' } else { '$false' }
         $gpuTexNrAcquireLatestReadyLiteral = if ($GpuTexNrAcquireLatestReady) { '$true' } else { '$false' }
         $gpuTexNrImmediateDrainReadyLiteral = if ($GpuTexNrImmediateDrainReady) { '$true' } else { '$false' }
@@ -448,7 +446,6 @@ elseif ($failures.Count -eq 0) {
 `$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
 `$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
 `$cudaAmazeLiveDirectRgbaStore = $cudaAmazeLiveDirectRgbaStoreLiteral
-`$cudaAmazeLiveGlSurfaceStore = $cudaAmazeLiveGlSurfaceStoreLiteral
 `$gpuPlaybackReconRetainDeviceOutput = $gpuPlaybackReconRetainDeviceOutputLiteral
 `$gpuTexNrAcquireLatestReady = $gpuTexNrAcquireLatestReadyLiteral
 `$gpuTexNrImmediateDrainReady = $gpuTexNrImmediateDrainReadyLiteral
@@ -487,7 +484,6 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
     cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
     cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
-    cudaAmazeLiveGlSurfaceStore = `$cudaAmazeLiveGlSurfaceStore
     gpuPlaybackReconRetainDeviceOutput = `$gpuPlaybackReconRetainDeviceOutput
     gpuTexNrAcquireLatestReady = `$gpuTexNrAcquireLatestReady
     gpuTexNrImmediateDrainReady = `$gpuTexNrImmediateDrainReady
@@ -617,9 +613,6 @@ try {
     }
     if (`$cudaAmazeLiveDirectRgbaStore) {
         `$args += '-CudaAmazeLiveDirectRgbaStore'
-    }
-    if (`$cudaAmazeLiveGlSurfaceStore) {
-        `$args += '-CudaAmazeLiveGlSurfaceStore'
     }
     if (`$gpuPlaybackReconRetainDeviceOutput) {
         `$args += '-GpuPlaybackReconRetainDeviceOutput'
@@ -767,7 +760,6 @@ $summary = [pscustomobject]@{
     importResult = $importResult
     options = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
-        cudaAmazeLiveGlSurfaceStore = [bool]$CudaAmazeLiveGlSurfaceStore
         gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
         gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
     }
