@@ -2033,7 +2033,7 @@ void RenderFrameThread::drawFrame( int slotIndex,
 
     GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability;
     bool skipCpuDebayerForGpuTextureNoReadback = false;
-    if( outputMode == OutputDebayered16
+    if( ( outputMode == OutputDebayered16 || outputMode == OutputProcessed8 )
      && !slot.rawImage16.empty()
      && m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
      && playbackScaleFactor == 1
@@ -2080,7 +2080,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr"),
             true );
-        mlv_stage_timing_note_elapsed("render_thread_draw16_debayered",
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_processed8_skipped_for_gpu_tex_nr"),
+            outputMode == OutputProcessed8 );
+        mlv_stage_timing_note_elapsed(outputMode == OutputProcessed8
+                                          ? "render_thread_draw"
+                                          : "render_thread_draw16_debayered",
                                       frameNumber,
                                       0.0);
     }
@@ -3703,6 +3708,19 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processed8CacheHitScale );
     slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"),
                                       processed8PrefetchHit );
+    if( skipCpuDebayerForGpuTextureNoReadback )
+    {
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed16_total_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed16_for_8bit_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed16_to_8bit_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed16_cache_store_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_total_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_store_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_direct_path_active"), false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit"), false );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_cache_hit_scale_factor"), 0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("processed8_prefetch_hit"), false );
+    }
 
     slot.processedFrame8Active =
         m_pMlvObject && m_pMlvObject->current_processed_frame_8bit_active;
