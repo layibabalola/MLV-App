@@ -132,6 +132,22 @@ static bool shouldPreferDesktopOpenGl(int argc,
     return false;
 }
 
+static bool shouldShareOpenGlContexts(int argc,
+                                      char *argv[],
+                                      bool batch,
+                                      bool trim_mlv)
+{
+    if (batch || trim_mlv) return false;
+    if (hasGpuRelatedFlag(argc, argv)) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")) return true;
+    return false;
+}
+
 static MainWindow::PlaybackProfileScope parsePlaybackProfileScope(const QString & value, bool * ok)
 {
     if (ok) *ok = true;
@@ -1515,8 +1531,18 @@ int main(int argc, char *argv[])
     {
         qputenv("QT_OPENGL", QByteArrayLiteral("desktop"));
     }
+    const bool sharedOpenGlContexts =
+        shouldShareOpenGlContexts(argc, argv, batch, trim_mlv);
+    if (sharedOpenGlContexts)
+    {
+        QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    }
 
     MyApplication a(argc, argv);
+    if (sharedOpenGlContexts)
+    {
+        qInfo() << "GPU OpenGL context sharing enabled for opt-in GPU presentation paths.";
+    }
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     a.setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
