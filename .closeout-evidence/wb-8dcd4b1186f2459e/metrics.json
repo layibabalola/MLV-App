@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/gpu-amaze-p1-single-block-kernels-20260621",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 7,
+  "createdAt": "2026-06-21T21:46:58+00:00",
+  "detectorHash": "d589b4ce42ccce36717f4a30ad3f94b4",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "ce7990ebbc295cbef8d0ee8ac6566f064e979391",
+  "schemaVersion": "1.0",
+  "targetHead": "b8dae274468b4c2f64533d08a2b60d5bf8405256",
+  "workBlockId": "wb-8dcd4b1186f2459e"
+}
