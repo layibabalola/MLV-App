@@ -14,6 +14,7 @@ param(
     [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [int]$ValidationSampleEvery = 10,
     [ValidateSet("persisted", "on", "off")]
     [string]$DropFrameMode = "on",
     [string]$GpuPlaybackReconBackend = "",
@@ -51,6 +52,9 @@ if ($PlaybackTimerPollMs -lt 0) {
 }
 if ($PlaybackRenderLookaheadFrames -lt 0 -or $PlaybackRenderLookaheadFrames -gt 3) {
     throw "-PlaybackRenderLookaheadFrames must be between 0 and 3. Use 0 for renderer default."
+}
+if ($ValidationSampleEvery -lt 1) {
+    throw "-ValidationSampleEvery must be >= 1."
 }
 
 function Resolve-RepoPath {
@@ -446,6 +450,7 @@ elseif ($failures.Count -eq 0) {
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $playbackTimerPollMsLiteral = [string]$PlaybackTimerPollMs
         $playbackRenderLookaheadFramesLiteral = [string]$PlaybackRenderLookaheadFrames
+        $validationSampleEveryLiteral = [string]$ValidationSampleEvery
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -472,6 +477,7 @@ elseif ($failures.Count -eq 0) {
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$playbackTimerPollMs = [int]'$playbackTimerPollMsLiteral'
 `$playbackRenderLookaheadFrames = [int]'$playbackRenderLookaheadFramesLiteral'
+`$validationSampleEvery = [int]'$validationSampleEveryLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -625,7 +631,9 @@ try {
         '-Seconds',
         '$( [string]$Seconds )',
         '-SettleMs',
-        '$( [string]$SettleMs )'
+        '$( [string]$SettleMs )',
+        '-ValidationSampleEvery',
+        [string]`$validationSampleEvery
     )
     if (-not [string]::IsNullOrWhiteSpace(`$gpuPlaybackReconBackend)) {
         `$args += @('-GpuPlaybackReconBackend', `$gpuPlaybackReconBackend)
@@ -801,6 +809,7 @@ $summary = [pscustomobject]@{
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
         playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
         playbackRenderLookaheadFrames = if ($PlaybackRenderLookaheadFrames -gt 0) { $PlaybackRenderLookaheadFrames } else { $null }
+        validationSampleEvery = $ValidationSampleEvery
     }
     warnings = @($warnings)
     failures = @($failures)
