@@ -230,8 +230,19 @@ public:
     bool acquireLatestReadyFrame( ReadyFrame *frame );
     bool acquireOldestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
     bool acquireLatestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
+    bool acquireOldestGpuTextureNoReadbackReadyFrameForPlaybackTarget(
+        ReadyFrame *frame,
+        int activePlaybackTarget,
+        uint64_t activeGeneration );
+    bool acquireLatestReadyFrameForPlaybackTarget( ReadyFrame *frame,
+                                                   int activePlaybackTarget,
+                                                   uint64_t activeGeneration );
     bool hasGpuTextureNoReadbackReadyFrame( void );
     int gpuTextureNoReadbackReadyFrameCount( void );
+    bool hasPlaybackLookaheadRequest( uint32_t frameNumber,
+                                      uint64_t activeGeneration );
+    bool hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
+                                         uint64_t activeGeneration );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;

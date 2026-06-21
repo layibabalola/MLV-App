@@ -629,6 +629,87 @@ bool RenderFrameThread::acquireLatestGpuTextureNoReadbackReadyFrame(ReadyFrame *
     return acquireReadySlotLocked( frame, readySlotIndex, true );
 }
 
+bool RenderFrameThread::acquireOldestGpuTextureNoReadbackReadyFrameForPlaybackTarget(
+    ReadyFrame *frame,
+    int activePlaybackTarget,
+    uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int readySlotIndex = -1;
+    uint64_t oldestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( !slot.gpuPlaybackReconTextureNoReadbackCandidate ) continue;
+        if( !slot.presentationContext.playbackActive
+         || !slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+         || !slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted )
+        {
+            continue;
+        }
+        if( !slot.stageTimingTelemetry.value(
+                QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
+                  .toBool( false ) )
+        {
+            continue;
+        }
+        if( slot.presentationContext.playbackLookaheadRequest
+         && ( activePlaybackTarget < 0
+           || slot.presentationContext.presentationGeneration != activeGeneration
+           || static_cast<int>( slot.frameNumber ) != activePlaybackTarget ) )
+        {
+            continue;
+        }
+        if( readySlotIndex < 0 || slot.requestSerial < oldestRequestSerial )
+        {
+            readySlotIndex = i;
+            oldestRequestSerial = slot.requestSerial;
+        }
+    }
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = (findLatestReadySlotLocked() >= 0);
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, false );
+}
+
+bool RenderFrameThread::acquireLatestReadyFrameForPlaybackTarget(
+    ReadyFrame *frame,
+    int activePlaybackTarget,
+    uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int readySlotIndex = -1;
+    uint64_t latestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.presentationContext.playbackLookaheadRequest
+         && ( activePlaybackTarget < 0
+           || slot.presentationContext.presentationGeneration != activeGeneration
+           || static_cast<int>( slot.frameNumber ) != activePlaybackTarget ) )
+        {
+            continue;
+        }
+        if( readySlotIndex < 0 || slot.requestSerial >= latestRequestSerial )
+        {
+            readySlotIndex = i;
+            latestRequestSerial = slot.requestSerial;
+        }
+    }
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = (findLatestReadySlotLocked() >= 0);
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, false );
+}
+
 bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
 {
     QMutexLocker locker(&m_mutex);
@@ -643,6 +724,54 @@ bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
         && slot.stageTimingTelemetry.value(
             QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
               .toBool( false );
+}
+
+bool RenderFrameThread::hasPlaybackLookaheadRequest( uint32_t frameNumber,
+                                                     uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    for( const RenderRequest &request : m_renderRequests )
+    {
+        if( request.frameNumber == frameNumber
+         && request.presentationContext.playbackLookaheadRequest
+         && request.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        const SlotState state = slot.state.load( std::memory_order_acquire );
+        if( state == SlotState::Idle && !slot.ready && !slot.presenting ) continue;
+        if( slot.frameNumber == frameNumber
+         && slot.presentationContext.playbackLookaheadRequest
+         && slot.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RenderFrameThread::hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
+                                                        uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.state.load( std::memory_order_acquire ) != SlotState::Ready )
+            continue;
+        if( slot.frameNumber == frameNumber
+         && slot.presentationContext.playbackLookaheadRequest
+         && slot.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 int RenderFrameThread::gpuTextureNoReadbackReadyFrameCount()

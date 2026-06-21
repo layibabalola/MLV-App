@@ -3548,6 +3548,24 @@ void MainWindow::queuePlaybackLookaheadRequests(
         }
         if( lookaheadFrame < 0 || lookaheadFrame >= totalFrames ) break;
         if( lookaheadFrame == requestedFrame ) continue;
+        if( m_pRenderThread->hasPlaybackLookaheadRequest(
+                static_cast<uint32_t>( lookaheadFrame ),
+                baseContext.presentationGeneration ) )
+        {
+            if( interactiveTraceEnabled() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("draw_frame.lookahead_skip_existing"),
+                    QStringLiteral("origin=%1 frame=%2 depth=%3 generation=%4")
+                        .arg( requestedFrame )
+                        .arg( lookaheadFrame )
+                        .arg( offset )
+                        .arg( static_cast<qulonglong>(
+                            baseContext.presentationGeneration ) ),
+                    true );
+            }
+            continue;
+        }
 
         PresentationRequestContext lookaheadContext = baseContext;
         lookaheadContext.requestSerial = m_nextRenderRequestSerial++;
@@ -5746,6 +5764,44 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pRenderThread->setPhase3Mode(
             phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) ) );
     }
+    requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
+    const bool playbackLookaheadCoversCurrent =
+        ui->actionPlay->isChecked()
+        && m_pRenderThread
+        && m_pRenderThread->hasPlaybackLookaheadRequest(
+            static_cast<uint32_t>( requestedFrame ),
+            requestContext.presentationGeneration );
+    if( playbackLookaheadCoversCurrent )
+    {
+        const bool playbackLookaheadReady =
+            m_pRenderThread->hasReadyPlaybackLookaheadFrame(
+                static_cast<uint32_t>( requestedFrame ),
+                requestContext.presentationGeneration );
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("draw_frame.lookahead_reuse"),
+                QStringLiteral("requested_frame=%1 ready=%2 generation=%3")
+                    .arg( requestedFrame )
+                    .arg( bool01( playbackLookaheadReady ) )
+                    .arg( static_cast<qulonglong>(
+                        requestContext.presentationGeneration ) ),
+                true );
+        }
+        queuePlaybackLookaheadRequests( requestContext,
+                                        renderOutputMode,
+                                        m_renderThreadUsingGpuBilinearDebayer,
+                                        m_renderThreadUsingGpuAmazeDebayer,
+                                        presentationPreparation,
+                                        requestedFrame );
+        if( playbackLookaheadReady )
+        {
+            QTimer::singleShot( 0, this, &MainWindow::drawFrameReady );
+        }
+        if( updateTimecodeLabel && !m_tcModeDuration )
+            updateTimeCodeLabelForFrame( requestedFrame );
+        return;
+    }
 
     if( interactiveTraceEnabled() )
     {
@@ -5776,7 +5832,6 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
         //If we are in playback, dropmode, we calculated the exact frame to sync the timeline
-        requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
         queuePresentationRequest( requestContext );
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
@@ -5798,7 +5853,6 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     else
     {
         //Else we render the frame which is selected by the slider
-        requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
         queuePresentationRequest( requestContext );
         m_pRenderThread->renderFrame( requestedFrame,
                                       renderOutputMode,
@@ -24110,6 +24164,14 @@ void MainWindow::drawFrameReady()
     RenderFrameThread::ReadyFrame readyFrame;
     PresentationRequestContext requestContext;
     bool haveReadyFrame = false;
+    const uint64_t activeGeneration =
+        m_playbackPresentationGeneration.load( std::memory_order_acquire );
+    const int activePlaybackTarget =
+        ui->actionDropFrameMode->isChecked()
+            ? static_cast<int>( m_newPosDropMode )
+            : ui->horizontalSliderPosition->value();
+    const bool targetAwareLookaheadAcquire =
+        mlvappPlaybackRenderLookaheadFrames() > 0 && ui->actionPlay->isChecked();
     if( m_pRenderThread )
     {
         const bool gpuTexNrReadyBacklogTelemetry =
@@ -24122,17 +24184,34 @@ void MainWindow::drawFrameReady()
         }
         const bool latestGpuTexNrReady =
             mlvappGpuTexNrAcquireLatestReadyRequested();
-        haveReadyFrame = latestGpuTexNrReady
-            ? m_pRenderThread->acquireLatestGpuTextureNoReadbackReadyFrame( &readyFrame )
-            : m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
-        if( latestGpuTexNrReady && !haveReadyFrame )
+        if( targetAwareLookaheadAcquire )
+        {
+            haveReadyFrame =
+                m_pRenderThread
+                    ->acquireOldestGpuTextureNoReadbackReadyFrameForPlaybackTarget(
+                        &readyFrame,
+                        activePlaybackTarget,
+                        activeGeneration );
+        }
+        else
+        {
+            haveReadyFrame = latestGpuTexNrReady
+                ? m_pRenderThread->acquireLatestGpuTextureNoReadbackReadyFrame( &readyFrame )
+                : m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
+        }
+        if( !targetAwareLookaheadAcquire && latestGpuTexNrReady && !haveReadyFrame )
         {
             haveReadyFrame =
                 m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
         }
         if( !haveReadyFrame )
         {
-            haveReadyFrame = m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
+            haveReadyFrame = targetAwareLookaheadAcquire
+                ? m_pRenderThread->acquireLatestReadyFrameForPlaybackTarget(
+                    &readyFrame,
+                    activePlaybackTarget,
+                    activeGeneration )
+                : m_pRenderThread->acquireLatestReadyFrame( &readyFrame );
         }
         if( haveReadyFrame )
         {
@@ -24176,8 +24255,6 @@ void MainWindow::drawFrameReady()
 
     consumePresentationRequest( readyFrame.requestSerial, nullptr );
     requestContext = readyFrame.presentationContext;
-    const uint64_t activeGeneration =
-        m_playbackPresentationGeneration.load( std::memory_order_acquire );
     if( requestContext.presentationGeneration != activeGeneration )
     {
         m_playbackPrepStaleDropCount.fetch_add( 1, std::memory_order_acq_rel );
@@ -24209,10 +24286,6 @@ void MainWindow::drawFrameReady()
     const uint64_t display_frame = readyFrame.frameNumber;
     if( requestContext.playbackLookaheadRequest )
     {
-        const int activePlaybackTarget =
-            ui->actionDropFrameMode->isChecked()
-                ? static_cast<int>( m_newPosDropMode )
-                : ui->horizontalSliderPosition->value();
         const bool targetReached =
             ui->actionPlay->isChecked()
             && static_cast<int>( display_frame ) == activePlaybackTarget;
