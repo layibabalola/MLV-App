@@ -23,6 +23,7 @@ param(
     [switch]$GpuTexNrImmediateDrainReady,
     [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
+    [int]$PlaybackTimerPollMs = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -56,6 +57,9 @@ if ($CudaAmazeLiveTileStreams -lt 0) {
 }
 if ($Phase3FrameSlots -lt 0) {
     throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackTimerPollMs -lt 0) {
+    throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -1215,6 +1219,9 @@ if ($GpuTexNrImmediateDrainMax -gt 0) {
 if ($Phase3FrameSlots -gt 0) {
     $candidateEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
 }
+if ($PlaybackTimerPollMs -gt 0) {
+    $candidateEnv += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
@@ -1248,6 +1255,9 @@ if ($GpuTexNrImmediateDrainMax -gt 0) {
 }
 if ($Phase3FrameSlots -gt 0) {
     $candidateSpeedEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
+}
+if ($PlaybackTimerPollMs -gt 0) {
+    $candidateSpeedEnv += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
 }
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -1355,6 +1365,7 @@ $summary = [ordered]@{
     gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
     gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
     phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
+    playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {
