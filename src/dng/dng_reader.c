@@ -233,8 +233,9 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
 
     const int w   = (int)info->width;
     const int h   = (int)info->height;
-    const uint32_t bpp = info->bits_per_sample;
+    uint32_t bpp = info->bits_per_sample;
     const size_t pixels = (size_t)w * (size_t)h;
+    if(pixels == 0) return 1;
 
     if(info->compression == DNG_READER_COMPRESSION_LJ92)
     {
@@ -247,12 +248,26 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
      *   (a) true 16-bit pass-through (UNCOMPRESSED_ORIG): byteCount == w*h*2,
      *       payload is plain 16-bit samples byte-swapped to big-endian.
      *   (b) bit-packed at `bpp`, big-endian within 16-bit words (the common
-     *       14-bit case). We must (1) byte-swap each 16-bit word back to
-     *       little-endian, then (2) apply the dng_unpack_image_bits algorithm
-     *       which expects little-endian 16-bit words. */
+     *       14-bit case). The MLV-App writer emits this via
+     *       dng_pack_image_bits(..., big_endian=1) (src/dng/dng.c). Its proven
+     *       inverse is dng_unpack_image_bits(), which expects little-endian
+     *       16-bit words, so we first byte-swap each word back BE->LE and then
+     *       call that exact helper -- making the round-trip bit-identical to the
+     *       writer instead of re-deriving the rotate math by hand. */
     const size_t bytes_16bit = pixels * 2;
 
-    if(strip_size >= bytes_16bit && bpp >= 16)
+    /* Recover bits-per-sample when the BitsPerSample(258) tag is absent or zero
+     * (some writer paths fill the IFD before the per-frame bit depth is known
+     * and emit 0). The packed strip size unambiguously encodes the real bit
+     * depth: bpp = strip_byte_count * 8 / pixels. Without this, bpp==0 makes the
+     * unpack mask 0 and every output pixel becomes zero (the all-zeros bug). */
+    if((bpp == 0 || bpp > 16) && strip_size < bytes_16bit)
+    {
+        uint32_t derived = (uint32_t)((uint64_t)strip_size * 8u / pixels);
+        if(derived >= 8 && derived <= 16) bpp = derived;
+    }
+
+    if(strip_size >= bytes_16bit && (bpp == 0 || bpp >= 16))
     {
         /* (a) 16-bit pass-through: byte-swap each sample. */
         const uint8_t * src = strip;
@@ -261,16 +276,17 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
         return 0;
     }
 
-    /* (b) bit-packed. Build a little-endian word buffer then unpack inline.
-     * We replicate dng_unpack_image_bits's math but fold the per-word
-     * big-endian -> little-endian swap into the fetch so no second pass /
-     * dependency on dng.c packing endianness is needed. */
+    if(bpp == 0 || bpp > 16) return 1; /* cannot determine packing */
+
+    /* (b) bit-packed. Byte-swap each 16-bit word from the DNG's big-endian
+     * layout back to little-endian, then delegate to the proven inverse of the
+     * writer (dng_unpack_image_bits). The +2 word tail guards the 32-bit fetch
+     * dng_unpack_image_bits performs on the final word. */
     const size_t packed_bytes = ((size_t)pixels * bpp + 7) / 8;
     if(strip_size < packed_bytes) return 1;
 
-    /* Allocate a byte-swapped copy (pad to a 4-byte tail for the 32-bit fetch). */
-    size_t swap_words = (packed_bytes + 1) / 2 + 2;
-    uint16_t * le = (uint16_t *)calloc(swap_words, sizeof(uint16_t));
+    size_t le_words = (packed_bytes + 1) / 2 + 2;
+    uint16_t * le = (uint16_t *)calloc(le_words, sizeof(uint16_t));
     if(!le) return 1;
     const uint8_t * sp = strip;
     size_t src_words = packed_bytes / 2;
@@ -279,19 +295,8 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
     if(packed_bytes & 1) /* trailing odd byte (rare) */
         le[src_words] = (uint16_t)(sp[packed_bytes - 1] << 8);
 
-    const uint32_t mask = (bpp >= 32) ? 0xFFFFFFFFu : ((1u << bpp) - 1u);
-    for(size_t pix = 0; pix < pixels; pix++)
-    {
-        uint32_t bits_offset  = (uint32_t)(pix * bpp);
-        uint32_t bits_address = bits_offset / 16;
-        uint32_t bits_shift   = bits_offset % 16;
-        uint32_t rotate_value = 16 + ((32 - bpp) - bits_shift);
-        uint32_t raw = (uint32_t)le[bits_address] | ((uint32_t)le[bits_address + 1] << 16);
-        /* ROR32(raw, rotate_value) */
-        rotate_value &= 31;
-        uint32_t data = (raw >> rotate_value) | (raw << ((32 - rotate_value) & 31));
-        out16[pix] = (uint16_t)(data & mask);
-    }
+    /* dng_unpack_image_bits signature is (output, input, w, h, bpp). */
+    dng_unpack_image_bits(out16, le, w, h, bpp);
 
     free(le);
     return 0;
