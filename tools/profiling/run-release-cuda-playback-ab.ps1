@@ -622,6 +622,7 @@ function Write-SmokeInvokeScript {
         [Parameter(Mandatory = $true)][int]$StartFrameValue,
         [Parameter(Mandatory = $true)][string]$GpuPreviewProcessing,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$GpuBackend,
+        [Parameter(Mandatory = $true)][bool]$GpuAmazeTexturePresentValue,
         [Parameter(Mandatory = $true)][string[]]$ExtraEnvironment,
         [Parameter(Mandatory = $true)][bool]$CaptureScreenshot,
         [Parameter(Mandatory = $true)][bool]$FailOnColorArtifactValue,
@@ -678,6 +679,9 @@ if (`$$DetectPlaybackArtifactsValue) {
 }
 if (-not [string]::IsNullOrWhiteSpace($gpuBackendLiteral)) {
     `$smokeParams['GpuPlaybackReconBackend'] = $gpuBackendLiteral
+}
+if (`$$GpuAmazeTexturePresentValue) {
+    `$smokeParams['GpuAmazeTexturePresent'] = `$true
 }
 if (`$$CaptureScreenshot) {
     `$smokeParams['CaptureScreenshot'] = `$true
@@ -817,6 +821,7 @@ $baselineCommand = Write-SmokeInvokeScript `
     -StartFrameValue $StartFrame `
     -GpuPreviewProcessing "cpu" `
     -GpuBackend "" `
+    -GpuAmazeTexturePresentValue $false `
     -ExtraEnvironment $baselineEnv `
     -CaptureScreenshot $captureScreenshot `
     -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
@@ -840,6 +845,7 @@ $candidateCommand = Write-SmokeInvokeScript `
     -StartFrameValue $StartFrame `
     -GpuPreviewProcessing "gpu" `
     -GpuBackend $GpuPlaybackReconBackend `
+    -GpuAmazeTexturePresentValue $true `
     -ExtraEnvironment $candidateEnv `
     -CaptureScreenshot $captureScreenshot `
     -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
@@ -865,6 +871,7 @@ if ($SeparateCandidateSpeedRun) {
         -StartFrameValue $StartFrame `
         -GpuPreviewProcessing "gpu" `
         -GpuBackend $GpuPlaybackReconBackend `
+        -GpuAmazeTexturePresentValue $true `
         -ExtraEnvironment $candidateSpeedEnv `
         -CaptureScreenshot $captureScreenshot `
         -FailOnColorArtifactValue ([bool]$FailOnColorArtifact) `
