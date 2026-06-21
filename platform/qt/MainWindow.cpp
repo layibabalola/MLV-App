@@ -4361,6 +4361,25 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
          && gpuPlaybackReconAmazeTextureExtensionAvailable )
         {
             gpuPlaybackReconAmazeTextureAttempted = true;
+            const bool canReleaseSlotBeforeGpuAmazeTexturePresent =
+                !displayPreviewCachingAllowed
+                && m_pRenderThread
+                && !releasePresentedFrameEarly
+                && cpuAmazeSkippedForGpuTextureNoReadback
+                && task.gpuPlaybackReconTextureInputBayerFrame
+                && task.gpuPlaybackReconTextureInputBayerFrameSize > 0
+                && !task.ownedGpuPlaybackReconTextureInputBayerFrame.empty()
+                && task.gpuPlaybackReconTextureInputBayerFrame
+                    == task.ownedGpuPlaybackReconTextureInputBayerFrame.data();
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_amaze_texture_present_slot_release_before_present"),
+                canReleaseSlotBeforeGpuAmazeTexturePresent );
+            if( canReleaseSlotBeforeGpuAmazeTexturePresent )
+            {
+                m_pRenderThread->releasePresentedFrameForRequestSerial(
+                    task.requestSerial );
+                releasePresentedFrameEarly = true;
+            }
             framePresentedByViewport =
                 GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
                     ui->graphicsView,
@@ -24156,6 +24175,14 @@ void MainWindow::drawFrameReady()
 
     if( inlineFastPlaybackPrep )
     {
+        if( inlineGpuPlaybackReconTextureNoReadbackPrep )
+        {
+            task.ownedGpuPlaybackReconTextureInputBayerFrame.assign(
+                readyFrame.gpuPlaybackReconTextureInputBayerFrame,
+                readyFrame.gpuPlaybackReconTextureInputBayerFrame
+                    + readyFrame.gpuPlaybackReconTextureInputBayerFrameSize );
+            task.rebindOwnedImagePointers();
+        }
         notePlaybackPrepOwnershipTelemetry();
         m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
         PlaybackPrepResult result = buildPlaybackPrepResult( task );
