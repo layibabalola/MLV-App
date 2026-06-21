@@ -14,6 +14,8 @@ param(
     [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "on",
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
@@ -428,6 +430,7 @@ elseif ($failures.Count -eq 0) {
         $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
         $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+        $dropFrameModeLiteral = Convert-ToPowerShellSingleQuotedString $DropFrameMode
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
         $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
@@ -450,6 +453,7 @@ elseif ($failures.Count -eq 0) {
 `$evidenceRepoHead = $localRepoHeadLiteral
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
+`$dropFrameMode = $dropFrameModeLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$speedLeg = $speedLegLiteral
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
@@ -496,6 +500,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
     cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
     cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
+    dropFrameMode = `$dropFrameMode
     gpuPlaybackReconRetainDeviceOutput = `$gpuPlaybackReconRetainDeviceOutput
     gpuTexNrAcquireLatestReady = `$gpuTexNrAcquireLatestReady
     gpuTexNrImmediateDrainReady = `$gpuTexNrImmediateDrainReady
@@ -645,6 +650,7 @@ try {
     if (`$playbackTimerPollMs -gt 0) {
         `$args += @('-PlaybackTimerPollMs', [string]`$playbackTimerPollMs)
     }
+    `$args += @('-DropFrameMode', `$dropFrameMode)
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'
         `$args += `$clipPaths

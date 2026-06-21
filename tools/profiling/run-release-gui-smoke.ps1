@@ -6,6 +6,8 @@ param(
     [string]$Output = "",
     [int]$Seconds = 8,
     [int]$StartFrame = 0,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "persisted",
     [int]$SettleMs = 2500,
     [double]$SettleCpuPercent = 10,
     [int]$SettleCpuStableMs = 1000,
@@ -823,6 +825,7 @@ $arguments = @(
     "--input", $inputPath,
     "--seconds", [string]$Seconds,
     "--start-frame", [string]$StartFrame,
+    "--drop-frame-mode", $DropFrameMode,
     "--settle-ms", [string]$SettleMs,
     "--settle-cpu-percent", ([string]::Format(
         [System.Globalization.CultureInfo]::InvariantCulture,

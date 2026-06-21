@@ -9,6 +9,8 @@ param(
     [string]$OutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present",
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "on",
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
@@ -851,6 +853,7 @@ if ($failures.Count -eq 0) {
         $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
+        $dropFrameModeLiteral = "'" + (($DropFrameMode -replace "'", "''")) + "'"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -861,6 +864,7 @@ if ($failures.Count -eq 0) {
     Output = '$clipOutput'
     Receipt = '$receiptPath'
     Seconds = $Seconds
+    DropFrameMode = $dropFrameModeLiteral
     SettleMs = $SettleMs
     FrameTelemetry = `$true
     CaptureScreenshot = `$true

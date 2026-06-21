@@ -1175,6 +1175,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("0"));
     parser.addOption(startFrameOpt);
 
+    const QCommandLineOption dropFrameModeOpt(
+        QStringLiteral("drop-frame-mode"),
+        QStringLiteral("Force timeline pacing during GUI smoke playback: persisted, on, or off."),
+        QStringLiteral("mode"),
+        QStringLiteral("persisted"));
+    parser.addOption(dropFrameModeOpt);
+
     const QCommandLineOption settleOpt(
         QStringLiteral("settle-ms"),
         QStringLiteral("Milliseconds to let the GUI settle after opening the clip and before pressing Play."),
@@ -1329,6 +1336,16 @@ static int runGuiPlaybackSmoke(QApplication &app)
     if (!ok || startFrame < 0)
     {
         err << "[GUI-SMOKE] ERROR: --start-frame must be 0 or greater.\n";
+        return 2;
+    }
+
+    const QString dropFrameMode =
+        parser.value(dropFrameModeOpt).trimmed().toLower();
+    if (dropFrameMode != QStringLiteral("persisted")
+     && dropFrameMode != QStringLiteral("on")
+     && dropFrameMode != QStringLiteral("off"))
+    {
+        err << "[GUI-SMOKE] ERROR: --drop-frame-mode must be one of persisted, on, off.\n";
         return 2;
     }
 
@@ -1488,6 +1505,8 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.disableLookAssist = parser.isSet(noLookAssistOpt);
     options.zebras = parser.isSet(zebrasOpt);
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
+    options.dropFrame = dropFrameMode == QStringLiteral("on");
+    options.forceDropFrame = dropFrameMode != QStringLiteral("persisted");
 
     QByteArray appName = QCoreApplication::applicationFilePath().toLocal8Bit();
     char *smokeArgv[] = { appName.data(), nullptr };

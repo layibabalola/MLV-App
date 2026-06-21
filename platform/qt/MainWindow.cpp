@@ -4995,9 +4995,10 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                            ? gpuCpuReplayTiming.total_ms
                            : 0.0, 0, 'f', 3 );
         }
-        const bool gpuTexNrDirectTexturePresented =
+        const bool gpuTexNrTexturePresentedByViewportOwnedTexture =
             gpuPlaybackReconNoReadbackPresented
-            && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16");
+            && ( texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
+              || texturePresentHandoffMode == QStringLiteral("retained_device_bayer16") );
         const bool scopeDisplayNeedsPresentedPixels =
             ui->actionShowEditArea->isChecked()
             && ( ui->actionShowHistogram->isChecked()
@@ -5006,7 +5007,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
               || ui->actionShowVectorScope->isChecked() );
         const bool gpuTexNrCanReleaseSlotAfterTexturePresent =
             framePresentedByViewport
-            && gpuTexNrDirectTexturePresented
+            && gpuTexNrTexturePresentedByViewportOwnedTexture
             && !releasePresentedFrameEarly
             && m_pRenderThread
             && !m_headlessPlaybackProfileActive
@@ -7387,6 +7388,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         ui->actionShowZebras->setChecked( options.zebras );
         m_frameChanged = true;
     }
+    if( options.forceDropFrame )
+    {
+        ui->actionDropFrameMode->setChecked( options.dropFrame );
+        m_frameChanged = true;
+    }
 
     /* Visible GUI smoke is supposed to exercise the real playback lane, not
      * the receipt-only fallback. Opt the smoke into the playback policy so
@@ -7407,7 +7413,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             "playback_debayer_effective=%3 playback_processing_request=%4 "
             "playback_processing_selected=%5 gpu_preview_processing_request=%6 "
             "gpu_bilinear_debayer_request=%7 gpu_amaze_debayer_request=%8 "
-            "gpu_amaze_texture_present_environment=%9 playback_policy_active=%10" )
+            "gpu_amaze_texture_present_environment=%9 playback_policy_active=%10 "
+            "drop_frame_forced=%11 drop_frame=%12" )
             .arg( bool01( options.forcePlaybackDebayer ) )
             .arg( QString::fromLatin1(
                       playback_profile_debayer_request_name(
@@ -7427,7 +7434,9 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                       playback_profile_gpu_amaze_debayer_backend_name(
                           options.gpuAmazeDebayerBackend ) ) )
             .arg( bool01( gpuAmazeTexturePresentRequestedByEnvironment() ) )
-            .arg( bool01( m_headlessPlaybackProfileUsePlaybackPolicy ) ) );
+            .arg( bool01( m_headlessPlaybackProfileUsePlaybackPolicy ) )
+            .arg( bool01( options.forceDropFrame ) )
+            .arg( bool01( ui->actionDropFrameMode->isChecked() ) ) );
 
     const int totalFrames = getMlvFrames( m_pMlvObject );
     if( totalFrames < 2 )

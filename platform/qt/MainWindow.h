@@ -161,6 +161,8 @@ public:
         bool disableLookAssist = false;
         bool zebras = false;
         bool forceZebras = false;
+        bool dropFrame = true;
+        bool forceDropFrame = false;
     };
 
     /* Progress-only callback for exportCdngSequence.

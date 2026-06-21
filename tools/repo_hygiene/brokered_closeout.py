@@ -1461,6 +1461,37 @@ def auto_branch_from_protected_target(repo_root: Path, config: Dict[str, Any], p
     }
 
 
+def resolve_work_block_start_head(
+    repo_root: Path,
+    config: Dict[str, Any],
+    requested_start_head: Optional[str],
+    current_head: str,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    if not requested_start_head:
+        return current_head, None
+    start_head = rev_parse(repo_root, requested_start_head)
+    if not is_ancestor(repo_root, start_head, current_head):
+        raise HygieneError(
+            "work block startHead override must be an ancestor of current HEAD: %s" % start_head
+        )
+    target = target_ref_for(repo_root, config)
+    target_head = str(target.get("head") or "")
+    if not target_head:
+        raise HygieneError("work block startHead override requires a resolved target head")
+    if not is_ancestor(repo_root, start_head, target_head):
+        raise HygieneError(
+            "work block startHead override must be contained in target %s: %s"
+            % (target.get("ref") or target.get("targetBranch") or "target", start_head)
+        )
+    return start_head, {
+        "requested": requested_start_head,
+        "resolved": start_head,
+        "currentHead": current_head,
+        "targetRef": target.get("ref"),
+        "targetHead": target_head,
+    }
+
+
 def target_ref_for(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     git_config = config.get("git", {})
     target_branch = str(git_config.get("targetBranch", "master"))
@@ -3125,6 +3156,7 @@ def start_work_block(
     path_claims: Optional[Sequence[str]] = None,
     lease_seconds: int = 3600,
     summary: Optional[str] = None,
+    start_head: Optional[str] = None,
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
@@ -3146,6 +3178,9 @@ def start_work_block(
             protected_bootstrap = auto_branch_from_protected_target(repo_root, config, branch, block_id)
             branch = protected_bootstrap["createdBranch"]
         head = rev_parse(repo_root, "HEAD")
+        manifest_start_head, start_head_override = resolve_work_block_start_head(
+            repo_root, config, start_head, head
+        )
         dirty_baseline = dirty_baseline_snapshot(repo_root)
         manifest = {
             "schemaVersion": BROKER_SCHEMA_VERSION,
@@ -3164,9 +3199,11 @@ def start_work_block(
                 "seconds": lease_seconds,
                 "createdAt": utc_now(),
             },
-            "startHead": head,
+            "startHead": manifest_start_head,
             "dirtyBaseline": dirty_baseline,
         }
+        if start_head_override:
+            manifest["startHeadOverride"] = start_head_override
         if commit_subject:
             manifest["commitSubject"] = commit_subject
         if protected_bootstrap:
@@ -3180,6 +3217,8 @@ def start_work_block(
                 "event": "work_block_started",
                 "branch": branch,
                 "head": head,
+                "startHead": manifest_start_head,
+                "startHeadOverride": start_head_override,
                 "pathClaims": claims,
                 "dirtyBaselinePaths": dirty_baseline["paths"],
                 "commitSubject": commit_subject or None,
