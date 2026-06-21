@@ -282,6 +282,13 @@ function New-EvidencePacket {
             avgTextureInteropMs = $_.avgTextureInteropMs
             avgTextureTotalMs = $_.avgTextureTotalMs
             maxTextureTotalMs = $_.maxTextureTotalMs
+            avgTextureWallMs = $_.avgTextureWallMs
+            avgTextureHostGapMs = $_.avgTextureHostGapMs
+            avgTextureContextMs = $_.avgTextureContextMs
+            avgTextureSetupMs = $_.avgTextureSetupMs
+            avgTextureReconWallMs = $_.avgTextureReconWallMs
+            avgTextureAmazeWallMs = $_.avgTextureAmazeWallMs
+            avgTexturePostMs = $_.avgTexturePostMs
             glProbeActiveCount = $_.glProbeActiveCount
             glTextureReadbackOkCount = $_.glTextureReadbackOkCount
             glParityCheckedCount = $_.glParityCheckedCount
@@ -857,6 +864,13 @@ exit `$LASTEXITCODE
         $textureKernelMsValues = [System.Collections.Generic.List[double]]::new()
         $textureInteropMsValues = [System.Collections.Generic.List[double]]::new()
         $textureTotalMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureHostGapMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureContextMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureSetupMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureReconWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureAmazeWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $texturePostMsValues = [System.Collections.Generic.List[double]]::new()
 
         if (Test-Path -LiteralPath $clipOutput) {
             $result = Get-Content -LiteralPath $clipOutput -Raw | ConvertFrom-Json
@@ -921,6 +935,13 @@ exit `$LASTEXITCODE
                 Add-NullableDouble $textureKernelMsValues $frame.texture_kernel_ms
                 Add-NullableDouble $textureInteropMsValues $frame.texture_interop_ms
                 Add-NullableDouble $textureTotalMsValues $frame.texture_total_ms
+                Add-NullableDouble $textureWallMsValues $frame.texture_wall_ms
+                Add-NullableDouble $textureHostGapMsValues $frame.texture_host_gap_ms
+                Add-NullableDouble $textureContextMsValues $frame.texture_context_ms
+                Add-NullableDouble $textureSetupMsValues $frame.texture_setup_ms
+                Add-NullableDouble $textureReconWallMsValues $frame.texture_recon_wall_ms
+                Add-NullableDouble $textureAmazeWallMsValues $frame.texture_amaze_wall_ms
+                Add-NullableDouble $texturePostMsValues $frame.texture_post_ms
                 if ([string]$frame.texture_source -match "fallback") {
                     $fallbackFrameCount++
                 }
@@ -1074,6 +1095,13 @@ exit `$LASTEXITCODE
             avgTextureInteropMs = Get-AverageOrNull $textureInteropMsValues
             avgTextureTotalMs = Get-AverageOrNull $textureTotalMsValues
             maxTextureTotalMs = Get-MaxOrNull $textureTotalMsValues
+            avgTextureWallMs = Get-AverageOrNull $textureWallMsValues
+            avgTextureHostGapMs = Get-AverageOrNull $textureHostGapMsValues
+            avgTextureContextMs = Get-AverageOrNull $textureContextMsValues
+            avgTextureSetupMs = Get-AverageOrNull $textureSetupMsValues
+            avgTextureReconWallMs = Get-AverageOrNull $textureReconWallMsValues
+            avgTextureAmazeWallMs = Get-AverageOrNull $textureAmazeWallMsValues
+            avgTexturePostMs = Get-AverageOrNull $texturePostMsValues
             noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
             glOutputProof = $glOutputProof
             glProbeActiveCount = $glProbeActiveCount

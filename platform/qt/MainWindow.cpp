@@ -4574,6 +4574,29 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             texturePresentTiming.available
                 ? texturePresentTiming.total_ms
                 : texturePresentMs );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_wall_ms"),
+            texturePresentTiming.wall_ms > 0.0
+                ? texturePresentTiming.wall_ms
+                : texturePresentMs );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_host_gap_ms"),
+            texturePresentTiming.host_gap_ms );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_context_ms"),
+            texturePresentTiming.context_ms );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_setup_ms"),
+            texturePresentTiming.setup_ms );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_recon_wall_ms"),
+            texturePresentTiming.recon_wall_ms );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_amaze_wall_ms"),
+            texturePresentTiming.amaze_wall_ms );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_post_ms"),
+            texturePresentTiming.post_ms );
         // Sample the heavy GL-vs-oracle parity check on every Nth presented
         // no-readback frame so the cadence/artifact detector measures real
         // (un-instrumented) playback while the sampled frames still prove
@@ -21224,15 +21247,19 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "texture_no_readback_candidate=%12 texture_active=%13 "
                    "texture_no_readback_active=%14 texture_source=%15 "
                    "texture_no_readback_fallback_reason=\"%16\" "
-                   "texture_no_readback_oracle_required=%17 "
-                   "texture_no_readback_oracle_words=%18 "
-                   "texture_upload_ms=%19 texture_kernel_ms=%20 "
-                   "texture_interop_ms=%21 texture_total_ms=%22 "
-                   "cpu_amaze_skip=%23 r16_amaze_preflight=%24 "
-                   "r16_amaze_gui_admitted=%25 r16_amaze_skip_candidate=%26 "
-                   "r16_amaze_skip_input_words=%27 "
-                   "r16_amaze_skip_input_borrowed=%28 "
-                   "prepare_only_allowed=%29 prepare_only_used=%30" )
+                    "texture_no_readback_oracle_required=%17 "
+                    "texture_no_readback_oracle_words=%18 "
+                    "texture_upload_ms=%19 texture_kernel_ms=%20 "
+                    "texture_interop_ms=%21 texture_total_ms=%22 "
+                    "texture_wall_ms=%23 texture_host_gap_ms=%24 "
+                    "texture_context_ms=%25 texture_setup_ms=%26 "
+                    "texture_recon_wall_ms=%27 texture_amaze_wall_ms=%28 "
+                    "texture_post_ms=%29 "
+                    "cpu_amaze_skip=%30 r16_amaze_preflight=%31 "
+                    "r16_amaze_gui_admitted=%32 r16_amaze_skip_candidate=%33 "
+                    "r16_amaze_skip_input_words=%34 "
+                    "r16_amaze_skip_input_borrowed=%35 "
+                    "prepare_only_allowed=%36 prepare_only_used=%37" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21277,6 +21304,27 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         0, 'f', 3 )
                     .arg( telemetryDoubleValue(
                         timing, "gpu_playback_recon_texture_present_total_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_wall_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_host_gap_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_context_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_setup_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_recon_wall_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_amaze_wall_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_texture_present_post_ms" ),
                         0, 'f', 3 )
                     .arg( bool01( telemetryBoolValue(
                         timing, "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) ) )

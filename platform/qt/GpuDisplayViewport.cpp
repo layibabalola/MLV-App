@@ -18,6 +18,7 @@
 #include <QPalette>
 #include <QPolygonF>
 #include <QSurfaceFormat>
+#include <QElapsedTimer>
 #include <QVector2D>
 #include <QVector3D>
 #include <QtDebug>
@@ -1026,15 +1027,29 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
         return fail(QStringLiteral("GPU playback recon texture-present Bayer input is incomplete"));
     }
 
+    QElapsedTimer wallTimer;
+    wallTimer.start();
+    auto elapsedMs = [&wallTimer]() -> double
+    {
+        return static_cast<double>(wallTimer.nsecsElapsed()) / 1000000.0;
+    };
+    double contextMs = 0.0;
+    double setupMs = 0.0;
+    double reconWallMs = 0.0;
+    double postMs = 0.0;
+
     QOpenGLContext *glContext = context();
     if ( !glContext )
     {
         return fail(QStringLiteral("GPU playback recon texture-present requires an initialized viewport OpenGL context"));
     }
 
+    const double contextStartMs = elapsedMs();
     const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
     const bool madeCurrent = needsCurrent ? (makeCurrent(), true) : false;
+    contextMs = elapsedMs() - contextStartMs;
 
+    const double setupStartMs = elapsedMs();
     ensureProgram();
     if ( !m_program )
     {
@@ -1062,11 +1077,13 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
         m_textureIsBayer16 = true;
     }
     applySamplingMode();
+    setupMs = elapsedMs() - setupStartMs;
 
     int rc = -1;
     llrpGpuPlaybackReconTiming_t localTiming;
     memset(&localTiming, 0, sizeof(localTiming));
     llrpGpuPlaybackReconTiming_t *timingTarget = timing ? timing : &localTiming;
+    const double reconStartMs = elapsedMs();
     const bool ok =
         llrpGpuPlaybackReconRunGlTexture(state,
                                          rawInputBayer14,
@@ -1074,6 +1091,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
                                          m_texture->textureId(),
                                          &rc,
                                          timingTarget) != 0;
+    reconWallMs = elapsedMs() - reconStartMs;
     if ( !ok )
     {
         destroyTexture();
@@ -1088,6 +1106,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
             "GPU playback recon CUDA-to-GL texture handoff failed (rc=%1)").arg(rc));
     }
 
+    const double postStartMs = elapsedMs();
     m_pendingImage = QImage();
     m_pendingTextureBytes.clear();
     m_pendingTextureWidth = width;
@@ -1102,6 +1121,17 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( madeCurrent ) doneCurrent();
     update();
+    postMs = elapsedMs() - postStartMs;
+    if ( timingTarget )
+    {
+        timingTarget->wall_ms = elapsedMs();
+        timingTarget->host_gap_ms = timingTarget->wall_ms - timingTarget->total_ms;
+        timingTarget->context_ms = contextMs;
+        timingTarget->setup_ms = setupMs;
+        timingTarget->recon_wall_ms = reconWallMs;
+        timingTarget->amaze_wall_ms = 0.0;
+        timingTarget->post_ms = postMs;
+    }
     return true;
 }
 
@@ -1143,15 +1173,30 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present Bayer input is incomplete"));
     }
 
+    QElapsedTimer wallTimer;
+    wallTimer.start();
+    auto elapsedMs = [&wallTimer]() -> double
+    {
+        return static_cast<double>(wallTimer.nsecsElapsed()) / 1000000.0;
+    };
+    double contextMs = 0.0;
+    double setupMs = 0.0;
+    double reconWallMs = 0.0;
+    double amazeWallMs = 0.0;
+    double postMs = 0.0;
+
     QOpenGLContext *glContext = context();
     if ( !glContext )
     {
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present requires an initialized viewport OpenGL context"));
     }
 
+    const double contextStartMs = elapsedMs();
     const bool needsCurrent = QOpenGLContext::currentContext() != glContext;
     const bool madeCurrent = needsCurrent ? (makeCurrent(), true) : false;
+    contextMs = elapsedMs() - contextStartMs;
 
+    const double setupStartMs = elapsedMs();
     ensureProgram();
     if ( !m_program )
     {
@@ -1191,6 +1236,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         m_gpuReconSourceTexture->setWrapMode(QOpenGLTexture::ClampToEdge);
     }
     applySamplingMode();
+    setupMs = elapsedMs() - setupStartMs;
 
     int rc = -1;
     llrpGpuPlaybackReconTiming_t reconTiming;
@@ -1198,6 +1244,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     GpuAmazeDebayerBackendTiming amazeTiming;
     QString amazeReason;
     QString amazeRenderer;
+    const double reconStartMs = elapsedMs();
     const bool reconOk =
         llrpGpuPlaybackReconRunGlTexture(state,
                                          rawInputBayer14,
@@ -1205,6 +1252,8 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
                                          m_gpuReconSourceTexture->textureId(),
                                          &rc,
                                          &reconTiming) != 0;
+    reconWallMs = elapsedMs() - reconStartMs;
+    const double amazeStartMs = elapsedMs();
     const bool amazeOk =
         reconOk
         && gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
@@ -1217,6 +1266,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
             &amazeReason,
             &amazeRenderer,
             &amazeTiming);
+    amazeWallMs = elapsedMs() - amazeStartMs;
     const bool ok = reconOk && amazeOk;
     if ( timing )
     {
@@ -1255,6 +1305,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
             "GPU playback recon AMaZE texture handoff failed (recon_rc=%1)").arg(rc));
     }
 
+    const double postStartMs = elapsedMs();
     m_pendingImage = QImage();
     m_pendingTextureBytes.clear();
     m_pendingTextureWidth = width;
@@ -1269,6 +1320,17 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( madeCurrent ) doneCurrent();
     update();
+    postMs = elapsedMs() - postStartMs;
+    if ( timing )
+    {
+        timing->wall_ms = elapsedMs();
+        timing->host_gap_ms = timing->wall_ms - timing->total_ms;
+        timing->context_ms = contextMs;
+        timing->setup_ms = setupMs;
+        timing->recon_wall_ms = reconWallMs;
+        timing->amaze_wall_ms = amazeWallMs;
+        timing->post_ms = postMs;
+    }
     return true;
 }
 

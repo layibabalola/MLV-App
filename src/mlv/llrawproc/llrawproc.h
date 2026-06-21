@@ -89,6 +89,13 @@ typedef struct
     double kernel_ms;
     double interop_ms;
     double total_ms;
+    double wall_ms;
+    double host_gap_ms;
+    double context_ms;
+    double setup_ms;
+    double recon_wall_ms;
+    double amaze_wall_ms;
+    double post_ms;
 } llrpGpuPlaybackReconTiming_t;
 
 typedef struct
