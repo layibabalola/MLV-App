@@ -26,6 +26,7 @@ param(
     [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [int]$PlaybackTimerPollMs = 0,
+    [int]$PlaybackRenderLookaheadFrames = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
@@ -47,6 +48,9 @@ if ($Phase3FrameSlots -lt 0) {
 }
 if ($PlaybackTimerPollMs -lt 0) {
     throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackRenderLookaheadFrames -lt 0 -or $PlaybackRenderLookaheadFrames -gt 3) {
+    throw "-PlaybackRenderLookaheadFrames must be between 0 and 3. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -441,6 +445,7 @@ elseif ($failures.Count -eq 0) {
         $gpuTexNrImmediateDrainMaxLiteral = [string]$GpuTexNrImmediateDrainMax
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $playbackTimerPollMsLiteral = [string]$PlaybackTimerPollMs
+        $playbackRenderLookaheadFramesLiteral = [string]$PlaybackRenderLookaheadFrames
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -466,6 +471,7 @@ elseif ($failures.Count -eq 0) {
 `$gpuTexNrImmediateDrainMax = [int]'$gpuTexNrImmediateDrainMaxLiteral'
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$playbackTimerPollMs = [int]'$playbackTimerPollMsLiteral'
+`$playbackRenderLookaheadFrames = [int]'$playbackRenderLookaheadFramesLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -506,6 +512,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     gpuTexNrImmediateDrainReady = `$gpuTexNrImmediateDrainReady
     phase3FrameSlots = `$phase3FrameSlots
     playbackTimerPollMs = `$playbackTimerPollMs
+    playbackRenderLookaheadFrames = `$playbackRenderLookaheadFrames
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -650,6 +657,9 @@ try {
     if (`$playbackTimerPollMs -gt 0) {
         `$args += @('-PlaybackTimerPollMs', [string]`$playbackTimerPollMs)
     }
+    if (`$playbackRenderLookaheadFrames -gt 0) {
+        `$args += @('-PlaybackRenderLookaheadFrames', [string]`$playbackRenderLookaheadFrames)
+    }
     `$args += @('-DropFrameMode', `$dropFrameMode)
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'
@@ -790,6 +800,7 @@ $summary = [pscustomobject]@{
         gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
         playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
+        playbackRenderLookaheadFrames = if ($PlaybackRenderLookaheadFrames -gt 0) { $PlaybackRenderLookaheadFrames } else { $null }
     }
     warnings = @($warnings)
     failures = @($failures)

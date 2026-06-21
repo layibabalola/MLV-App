@@ -78,6 +78,48 @@ qint64 stagePixelCount( int width, int height )
     return static_cast<qint64>( width ) * static_cast<qint64>( height );
 }
 
+bool playbackFrameWithinLookaheadWindow( uint32_t frameNumber,
+                                         int activePlaybackTarget,
+                                         int cutInFrame,
+                                         int cutOutFrame,
+                                         int lookaheadDepth,
+                                         bool loopEnabled )
+{
+    if( activePlaybackTarget < 0 || lookaheadDepth < 0 ) return true;
+
+    const int frame = static_cast<int>( frameNumber );
+    const int depth = std::max( 0, lookaheadDepth );
+    if( frame == activePlaybackTarget ) return true;
+
+    if( cutOutFrame < cutInFrame )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= activePlaybackTarget + depth;
+    }
+
+    const int cutIn = std::max( 0, cutInFrame );
+    const int cutOut = std::max( cutIn, cutOutFrame );
+    if( activePlaybackTarget < cutIn || activePlaybackTarget > cutOut
+     || frame < cutIn || frame > cutOut )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= activePlaybackTarget + depth;
+    }
+
+    if( !loopEnabled )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= std::min( cutOut, activePlaybackTarget + depth );
+    }
+
+    const int loopSpan = cutOut - cutIn + 1;
+    if( loopSpan <= 0 ) return frame == activePlaybackTarget;
+
+    int distance = frame - activePlaybackTarget;
+    if( distance < 0 ) distance += loopSpan;
+    return distance >= 0 && distance <= depth;
+}
+
 bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
 {
     return key.startsWith( QStringLiteral("llrawproc_") )
@@ -525,7 +567,8 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
     {
         for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
         {
-            if( it->presentationContext.dropFramePlaybackActive
+            if( ( it->presentationContext.dropFramePlaybackActive
+               || it->presentationContext.playbackLookaheadRequest )
              && it->presentationContext.presentationGeneration
                 == request.presentationContext.presentationGeneration )
             {
@@ -628,6 +671,87 @@ bool RenderFrameThread::acquireLatestGpuTextureNoReadbackReadyFrame(ReadyFrame *
     return acquireReadySlotLocked( frame, readySlotIndex, true );
 }
 
+bool RenderFrameThread::acquireOldestGpuTextureNoReadbackReadyFrameForPlaybackTarget(
+    ReadyFrame *frame,
+    int activePlaybackTarget,
+    uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int readySlotIndex = -1;
+    uint64_t oldestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( !slot.gpuPlaybackReconTextureNoReadbackCandidate ) continue;
+        if( !slot.presentationContext.playbackActive
+         || !slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+         || !slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted )
+        {
+            continue;
+        }
+        if( !slot.stageTimingTelemetry.value(
+                QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
+                  .toBool( false ) )
+        {
+            continue;
+        }
+        if( slot.presentationContext.playbackLookaheadRequest
+         && ( activePlaybackTarget < 0
+           || slot.presentationContext.presentationGeneration != activeGeneration
+           || static_cast<int>( slot.frameNumber ) != activePlaybackTarget ) )
+        {
+            continue;
+        }
+        if( readySlotIndex < 0 || slot.requestSerial < oldestRequestSerial )
+        {
+            readySlotIndex = i;
+            oldestRequestSerial = slot.requestSerial;
+        }
+    }
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = (findLatestReadySlotLocked() >= 0);
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, false );
+}
+
+bool RenderFrameThread::acquireLatestReadyFrameForPlaybackTarget(
+    ReadyFrame *frame,
+    int activePlaybackTarget,
+    uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int readySlotIndex = -1;
+    uint64_t latestRequestSerial = 0;
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.presentationContext.playbackLookaheadRequest
+         && ( activePlaybackTarget < 0
+           || slot.presentationContext.presentationGeneration != activeGeneration
+           || static_cast<int>( slot.frameNumber ) != activePlaybackTarget ) )
+        {
+            continue;
+        }
+        if( readySlotIndex < 0 || slot.requestSerial >= latestRequestSerial )
+        {
+            readySlotIndex = i;
+            latestRequestSerial = slot.requestSerial;
+        }
+    }
+    if( readySlotIndex < 0 )
+    {
+        m_frameReady = (findLatestReadySlotLocked() >= 0);
+        return false;
+    }
+
+    return acquireReadySlotLocked( frame, readySlotIndex, false );
+}
+
 bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
 {
     QMutexLocker locker(&m_mutex);
@@ -642,6 +766,157 @@ bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
         && slot.stageTimingTelemetry.value(
             QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
               .toBool( false );
+}
+
+bool RenderFrameThread::hasPlaybackLookaheadRequest( uint32_t frameNumber,
+                                                     uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    for( const RenderRequest &request : m_renderRequests )
+    {
+        if( request.frameNumber == frameNumber
+         && request.presentationContext.playbackLookaheadRequest
+         && request.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        const SlotState state = slot.state.load( std::memory_order_acquire );
+        if( state == SlotState::Idle && !slot.ready && !slot.presenting ) continue;
+        if( slot.frameNumber == frameNumber
+         && slot.presentationContext.playbackLookaheadRequest
+         && slot.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool RenderFrameThread::hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
+                                                        uint64_t activeGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        const FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.state.load( std::memory_order_acquire ) != SlotState::Ready )
+            continue;
+        if( slot.frameNumber == frameNumber
+         && slot.presentationContext.playbackLookaheadRequest
+         && slot.presentationContext.presentationGeneration == activeGeneration )
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int RenderFrameThread::prunePlaybackLookaheadOutsideForwardWindow(
+    int activePlaybackTarget,
+    uint64_t activeGeneration,
+    int cutInFrame,
+    int cutOutFrame,
+    int lookaheadDepth,
+    bool loopEnabled )
+{
+    QMutexLocker locker(&m_mutex);
+    int pruned = 0;
+    for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
+    {
+        const ReadyFrame::PresentationContext &context = it->presentationContext;
+        if( context.playbackLookaheadRequest
+         && context.presentationGeneration == activeGeneration
+         && !playbackFrameWithinLookaheadWindow( it->frameNumber,
+                                                 activePlaybackTarget,
+                                                 cutInFrame,
+                                                 cutOutFrame,
+                                                 lookaheadDepth,
+                                                 loopEnabled ) )
+        {
+            it = m_renderRequests.erase( it );
+            ++pruned;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    m_renderFrame = !m_renderRequests.empty();
+
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.state.load( std::memory_order_acquire ) != SlotState::Ready )
+            continue;
+        if( !slot.presentationContext.playbackLookaheadRequest
+         || slot.presentationContext.presentationGeneration != activeGeneration )
+        {
+            continue;
+        }
+        if( playbackFrameWithinLookaheadWindow( slot.frameNumber,
+                                                activePlaybackTarget,
+                                                cutInFrame,
+                                                cutOutFrame,
+                                                lookaheadDepth,
+                                                loopEnabled ) )
+        {
+            continue;
+        }
+        releaseSlotLocked( i );
+        ++pruned;
+    }
+
+    m_frameReady = (findLatestReadySlotLocked() >= 0);
+    if( pruned > 0 ) m_waitCondition.wakeAll();
+    return pruned;
+}
+
+int RenderFrameThread::cancelPlaybackPresentationRequests( uint64_t presentationGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int cancelled = 0;
+    for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
+    {
+        if( it->presentationContext.playbackActive
+         && it->presentationContext.presentationGeneration == presentationGeneration )
+        {
+            it = m_renderRequests.erase( it );
+            ++cancelled;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    m_renderFrame = !m_renderRequests.empty();
+
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        FrameSlot &slot = m_frameSlots[i];
+        if( !slot.presentationContext.playbackActive
+         || slot.presentationContext.presentationGeneration != presentationGeneration )
+        {
+            continue;
+        }
+        const SlotState state = slot.state.load( std::memory_order_acquire );
+        if( state != SlotState::Ready && state != SlotState::Presenting )
+        {
+            continue;
+        }
+        releaseSlotLocked( i );
+        if( m_presentingSlotIndex == i ) m_presentingSlotIndex = -1;
+        ++cancelled;
+    }
+
+    m_frameReady = (findLatestReadySlotLocked() >= 0);
+    m_waitCondition.wakeAll();
+    return cancelled;
 }
 
 int RenderFrameThread::gpuTextureNoReadbackReadyFrameCount()
@@ -1696,11 +1971,7 @@ void RenderFrameThread::runPhase3( void )
             const int slotIndex = findFreeSlotLocked();
             const RenderRequest request = m_renderRequests.front();
             m_renderRequests.pop_front();
-            m_renderFrame = !m_renderRequests.empty()
-                         || !m_decodeRequests.empty()
-                         || !m_reconRequests.empty()
-                         || !m_decodeReadySlots.empty()
-                         || !m_processReadySlots.empty();
+            m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( slotIndex, request );
             queuedPhase3Request = true;
         }
@@ -1786,6 +2057,7 @@ void RenderFrameThread::runPhase3( void )
             const int nextSlotIndex = findFreeSlotLocked();
             const RenderRequest nextRequest = m_renderRequests.front();
             m_renderRequests.pop_front();
+            m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( nextSlotIndex, nextRequest );
         }
 
@@ -2211,6 +2483,16 @@ void RenderFrameThread::releaseSlotLocked( int slotIndex )
                              slot.frameNumber,
                              slot.requestSerial,
                              "phase3-released" );
+    }
+    else if( state == SlotState::Ready )
+    {
+        transitionSlotState( slotIndex,
+                             SlotState::Ready,
+                             SlotState::Idle,
+                             slot.phase3Mode,
+                             slot.frameNumber,
+                             slot.requestSerial,
+                             "phase3-released-ready" );
     }
     else if( state != SlotState::Idle )
     {

@@ -959,6 +959,7 @@ private:
     bool m_playToFirstFrameTargetFrameValid = false;
     bool m_lastPlayToFirstFrameValid = false;
     bool m_lastPlayStartPrerollRequested = false;
+    bool m_playbackInternalSliderAdvance = false;
     bool m_inClipDeleteProcess;
     bool m_renderThreadUsing16BitPreview;
     bool m_renderThreadUsingGpuPreviewProcessing;
@@ -1316,6 +1317,13 @@ private:
     void queuePresentationRequest( const PresentationRequestContext &context );
     bool consumePresentationRequest( uint64_t requestSerial,
                                      PresentationRequestContext *context );
+    void queuePlaybackLookaheadRequests(
+        const PresentationRequestContext &baseContext,
+        RenderFrameThread::OutputMode renderOutputMode,
+        bool useGpuBilinearDebayer,
+        bool useGpuAmazeDebayer,
+        const RenderFrameThread::PresentationPreparationOptions &presentationPreparation,
+        int requestedFrame );
     void computeDisplaySceneGeometry( int sourceWidth,
                                       int sourceHeight,
                                       bool zoomFitEnabled,

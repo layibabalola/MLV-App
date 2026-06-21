@@ -27,6 +27,7 @@ param(
     [int]$GpuTexNrImmediateDrainMax = 0,
     [int]$Phase3FrameSlots = 0,
     [int]$PlaybackTimerPollMs = 0,
+    [int]$PlaybackRenderLookaheadFrames = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -61,6 +62,9 @@ if ($Phase3FrameSlots -lt 0) {
 }
 if ($PlaybackTimerPollMs -lt 0) {
     throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackRenderLookaheadFrames -lt 0 -or $PlaybackRenderLookaheadFrames -gt 3) {
+    throw "-PlaybackRenderLookaheadFrames must be between 0 and 3. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -850,6 +854,9 @@ if ($failures.Count -eq 0) {
         if ($PlaybackTimerPollMs -gt 0) {
             $envEntries += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
         }
+        if ($PlaybackRenderLookaheadFrames -gt 0) {
+            $envEntries += "MLVAPP_PLAYBACK_RENDER_LOOKAHEAD_FRAMES=$PlaybackRenderLookaheadFrames"
+        }
         $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
@@ -1327,6 +1334,7 @@ $summary = [pscustomobject]@{
         gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
         playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
+        playbackRenderLookaheadFrames = if ($PlaybackRenderLookaheadFrames -gt 0) { $PlaybackRenderLookaheadFrames } else { $null }
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot

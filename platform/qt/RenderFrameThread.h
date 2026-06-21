@@ -117,6 +117,9 @@ public:
             QString gpuPlaybackReconTexturePresentFallbackReason;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
+            bool playbackLookaheadRequest = false;
+            uint32_t playbackLookaheadOriginFrame = 0;
+            int playbackLookaheadDepth = 0;
         };
 
         const uint8_t *rawImage8 = nullptr;
@@ -227,8 +230,26 @@ public:
     bool acquireLatestReadyFrame( ReadyFrame *frame );
     bool acquireOldestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
     bool acquireLatestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
+    bool acquireOldestGpuTextureNoReadbackReadyFrameForPlaybackTarget(
+        ReadyFrame *frame,
+        int activePlaybackTarget,
+        uint64_t activeGeneration );
+    bool acquireLatestReadyFrameForPlaybackTarget( ReadyFrame *frame,
+                                                   int activePlaybackTarget,
+                                                   uint64_t activeGeneration );
     bool hasGpuTextureNoReadbackReadyFrame( void );
     int gpuTextureNoReadbackReadyFrameCount( void );
+    bool hasPlaybackLookaheadRequest( uint32_t frameNumber,
+                                      uint64_t activeGeneration );
+    bool hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
+                                         uint64_t activeGeneration );
+    int prunePlaybackLookaheadOutsideForwardWindow( int activePlaybackTarget,
+                                                    uint64_t activeGeneration,
+                                                    int cutInFrame,
+                                                    int cutOutFrame,
+                                                    int lookaheadDepth,
+                                                    bool loopEnabled );
+    int cancelPlaybackPresentationRequests( uint64_t presentationGeneration );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;
