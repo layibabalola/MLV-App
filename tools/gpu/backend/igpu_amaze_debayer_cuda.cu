@@ -249,34 +249,6 @@ __global__ void k_pack_rgb16_to_rgba16_post_wb_undo(const uint16_t * rgb,
     rgba[rgbaIndex + 3u] = 65535u;
 }
 
-__global__ void k_pack_rgb16_to_rgba16_post_wb_undo_surface(
-    const uint16_t * rgb,
-    cudaSurfaceObject_t surface,
-    int width,
-    std::size_t pixelCount,
-    int blackLevel,
-    double wbMultiplierR,
-    double wbMultiplierG,
-    double wbMultiplierB)
-{
-    const std::size_t pixel =
-        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (pixel >= pixelCount) return;
-
-    const std::size_t rgbIndex = pixel * 3u;
-    const int y = static_cast<int>(pixel / static_cast<std::size_t>(width));
-    const int x = static_cast<int>(pixel - static_cast<std::size_t>(y) * width);
-    const ushort4 rgba = make_ushort4(
-        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 0u]) / wbMultiplierR)
-                            + static_cast<double>(blackLevel)),
-        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 1u]) / wbMultiplierG)
-                            + static_cast<double>(blackLevel)),
-        clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 2u]) / wbMultiplierB)
-                            + static_cast<double>(blackLevel)),
-        65535u);
-    surf2Dwrite(rgba, surface, x * static_cast<int>(sizeof(ushort4)), y);
-}
-
 __device__ __forceinline__ int fc_rggb_absolute(int row, int col)
 {
     const int row2 = row & 1;
@@ -1058,17 +1030,16 @@ extern "C" igpu_amaze_debayer_backend * igpu_amaze_debayer_create(const char * b
     }
 }
 
-int copy_rgb16_to_gl_rgba16_texture_post_wb_undo_staged(
-    const uint16_t * dRgb16,
-    int width,
-    int height,
-    unsigned int glTexture,
-    int blackLevel,
-    double wbMultiplierR,
-    double wbMultiplierG,
-    double wbMultiplierB,
-    uint16_t * dRgba16Scratch = nullptr,
-    CachedGlImageResource * cache = nullptr)
+int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
+                                                 int width,
+                                                 int height,
+                                                 unsigned int glTexture,
+                                                 int blackLevel,
+                                                 double wbMultiplierR,
+                                                 double wbMultiplierG,
+                                                 double wbMultiplierB,
+                                                 uint16_t * dRgba16Scratch = nullptr,
+                                                 CachedGlImageResource * cache = nullptr)
 {
     if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
     if (wbMultiplierR <= 0.0 || wbMultiplierG <= 0.0 || wbMultiplierB <= 0.0) return -1;
@@ -1199,131 +1170,6 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo_staged(
         else if (resource) cudaGraphicsUnregisterResource(resource);
         releaseScratch();
         return 2;
-    }
-}
-
-int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
-                                                 int width,
-                                                 int height,
-                                                 unsigned int glTexture,
-                                                 int blackLevel,
-                                                 double wbMultiplierR,
-                                                 double wbMultiplierG,
-                                                 double wbMultiplierB,
-                                                 uint16_t * dRgba16Scratch = nullptr,
-                                                 CachedGlImageResource * cache = nullptr)
-{
-    auto stagedFallback = [&]() -> int
-    {
-        return copy_rgb16_to_gl_rgba16_texture_post_wb_undo_staged(
-            dRgb16,
-            width,
-            height,
-            glTexture,
-            blackLevel,
-            wbMultiplierR,
-            wbMultiplierG,
-            wbMultiplierB,
-            dRgba16Scratch,
-            cache);
-    };
-
-    if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
-    if (wbMultiplierR <= 0.0 || wbMultiplierG <= 0.0 || wbMultiplierB <= 0.0) return -1;
-
-    if (blackLevel < 1000) blackLevel = -1000;
-
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    cudaGraphicsResource * resource = nullptr;
-    cudaSurfaceObject_t surface = 0;
-    const bool cached = cache != nullptr;
-
-    try
-    {
-        if (cached)
-        {
-            const int cacheRc = ensure_cached_gl_resource(
-                cache,
-                glTexture,
-                width,
-                height,
-                cudaGraphicsRegisterFlagsSurfaceLoadStore,
-                "cached GL_RGBA16 post-WB texture surface");
-            if (cacheRc != 0) return stagedFallback();
-            resource = cache->resource;
-        }
-        else
-        {
-            const cudaError_t registerRc = cudaGraphicsGLRegisterImage(
-                &resource,
-                glTexture,
-                GL_TEXTURE_2D,
-                cudaGraphicsRegisterFlagsSurfaceLoadStore);
-            if (registerRc != cudaSuccess)
-            {
-                return stagedFallback();
-            }
-        }
-
-        cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
-        if (rc != cudaSuccess)
-        {
-            if (cached) reset_cached_gl_resource(cache, false);
-            else cudaGraphicsUnregisterResource(resource);
-            return stagedFallback();
-        }
-
-        cudaArray_t mappedArray = nullptr;
-        rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
-        if (rc == cudaSuccess)
-        {
-            cudaResourceDesc resourceDesc;
-            std::memset(&resourceDesc, 0, sizeof(resourceDesc));
-            resourceDesc.resType = cudaResourceTypeArray;
-            resourceDesc.res.array.array = mappedArray;
-            rc = cudaCreateSurfaceObject(&surface, &resourceDesc);
-        }
-        if (rc == cudaSuccess)
-        {
-            const int threads = 256;
-            const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
-            k_pack_rgb16_to_rgba16_post_wb_undo_surface<<<blocks, threads>>>(
-                dRgb16,
-                surface,
-                width,
-                pixelCount,
-                blackLevel,
-                wbMultiplierR,
-                wbMultiplierG,
-                wbMultiplierB);
-            rc = cudaGetLastError();
-            if (rc == cudaSuccess)
-            {
-                rc = cudaDeviceSynchronize();
-            }
-        }
-
-        const cudaError_t destroyRc =
-            surface ? cudaDestroySurfaceObject(surface) : cudaSuccess;
-        surface = 0;
-        const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
-        const cudaError_t unregisterRc =
-            cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
-        if (rc != cudaSuccess || destroyRc != cudaSuccess || unmapRc != cudaSuccess
-            || unregisterRc != cudaSuccess)
-        {
-            if (cached) reset_cached_gl_resource(cache, false);
-            return stagedFallback();
-        }
-        return 0;
-    }
-    catch (const CudaStageProbeError &)
-    {
-        if (surface) cudaDestroySurfaceObject(surface);
-        if (cached) reset_cached_gl_resource(cache, false);
-        else if (resource) cudaGraphicsUnregisterResource(resource);
-        return stagedFallback();
     }
 }
 
