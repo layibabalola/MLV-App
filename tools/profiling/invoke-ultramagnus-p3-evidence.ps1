@@ -15,6 +15,7 @@ param(
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
     [string]$GpuPlaybackReconBackend = "",
+    [int]$CudaAmazeLiveTileStreams = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
@@ -24,6 +25,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($CudaAmazeLiveTileStreams -lt 0) {
+    throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
 
 function Resolve-RepoPath {
     param(
@@ -407,6 +412,7 @@ elseif ($failures.Count -eq 0) {
         $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
+        $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -422,6 +428,7 @@ elseif ($failures.Count -eq 0) {
 `$skipBackendBuild = $skipBackendBuildLiteral
 `$speedLeg = $speedLegLiteral
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
+`$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -453,6 +460,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
         amazeOutput = @()
     }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
+    cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -569,6 +577,9 @@ try {
     )
     if (-not [string]::IsNullOrWhiteSpace(`$gpuPlaybackReconBackend)) {
         `$args += @('-GpuPlaybackReconBackend', `$gpuPlaybackReconBackend)
+    }
+    if (`$cudaAmazeLiveTileStreams -gt 0) {
+        `$args += @('-CudaAmazeLiveTileStreams', [string]`$cudaAmazeLiveTileStreams)
     }
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'

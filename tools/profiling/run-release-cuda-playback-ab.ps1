@@ -15,6 +15,7 @@ param(
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
     [string]$GpuPlaybackReconBackend = "",
+    [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -39,6 +40,9 @@ if ($SettleMs -lt 0) {
 }
 if ($ValidationSampleEvery -lt 1) {
     throw "-ValidationSampleEvery must be >= 1."
+}
+if ($CudaAmazeLiveTileStreams -lt 0) {
+    throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
 }
 
 function Resolve-RepoPath {
@@ -1168,6 +1172,9 @@ $candidateEnv = @(
 if ($backendDllExplicit) {
     $candidateEnv += "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
 }
+if ($CudaAmazeLiveTileStreams -gt 0) {
+    $candidateEnv += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
@@ -1177,6 +1184,9 @@ $candidateSpeedEnv = @(
 )
 if ($backendDllExplicit) {
     $candidateSpeedEnv += "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
+}
+if ($CudaAmazeLiveTileStreams -gt 0) {
+    $candidateSpeedEnv += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
 }
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -1276,6 +1286,7 @@ $summary = [ordered]@{
     qualityMode = $QualityMode
     scaleFactor = $ScaleFactor
     validationSampleEvery = $ValidationSampleEvery
+    cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {

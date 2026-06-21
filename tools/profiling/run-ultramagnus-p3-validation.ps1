@@ -16,6 +16,7 @@ param(
     [double]$MinPresentedFps = 24.0,
     [double]$TargetPresentedFps = 30.0,
     [string]$GpuPlaybackReconBackend = "",
+    [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -38,6 +39,10 @@ $ErrorActionPreference = "Stop"
 # the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT -- stay fatal. Inherited by the
 # smoke runner and the detector subprocess. See detect-playback-artifacts.ps1.
 $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
+
+if ($CudaAmazeLiveTileStreams -lt 0) {
+    throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
 
 function Resolve-RepoPath {
     param(
@@ -798,6 +803,9 @@ if ($failures.Count -eq 0) {
             $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1"
             $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery"
         }
+        if ($CudaAmazeLiveTileStreams -gt 0) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
+        }
         $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
@@ -1258,6 +1266,7 @@ $summary = [pscustomobject]@{
         minPresentedFps = $MinPresentedFps
         targetPresentedFps = $TargetPresentedFps
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+        cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot

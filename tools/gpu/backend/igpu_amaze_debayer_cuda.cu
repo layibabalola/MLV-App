@@ -13,6 +13,7 @@
 #include "../cuda_amaze_debayer_stage_probe.cu"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
 #include <vector>
@@ -62,7 +63,21 @@ struct igpu_amaze_debayer_backend
 
 namespace
 {
-constexpr int kLiveTileStreamCount = 16;
+constexpr int kDefaultLiveTileStreamCount = 16;
+constexpr int kMaxLiveTileStreamCount = 64;
+
+int live_tile_stream_count_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS");
+    if (!value || !*value) return kDefaultLiveTileStreamCount;
+
+    char * end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value) return kDefaultLiveTileStreamCount;
+    if (parsed < 1) return 1;
+    if (parsed > kMaxLiveTileStreamCount) return kMaxLiveTileStreamCount;
+    return static_cast<int>(parsed);
+}
 
 double now_ms()
 {
@@ -362,6 +377,7 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
 
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const int streamCount = live_tile_stream_count_from_env();
     if (backend->liveReconBayer16
         && backend->liveRawFloat
         && backend->liveRgb16
@@ -369,7 +385,8 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
         && backend->liveDeviceBuffersAllocated
         && backend->livePixelCount == pixelCount
         && backend->liveWidth == width
-        && backend->liveHeight == height)
+        && backend->liveHeight == height
+        && backend->liveTileStreams.size() == static_cast<std::size_t>(streamCount))
     {
         return;
     }
@@ -380,9 +397,9 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
     CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
     CK(cudaMalloc(&backend->liveRgba16, pixelCount * 4u * sizeof(uint16_t)));
     allocate_device(&backend->liveDeviceBuffers, 1);
-    backend->liveTileDeviceBuffers.resize(kLiveTileStreamCount);
-    backend->liveTileStreams.resize(kLiveTileStreamCount, nullptr);
-    for (int index = 0; index < kLiveTileStreamCount; ++index)
+    backend->liveTileDeviceBuffers.resize(static_cast<std::size_t>(streamCount));
+    backend->liveTileStreams.resize(static_cast<std::size_t>(streamCount), nullptr);
+    for (int index = 0; index < streamCount; ++index)
     {
         allocate_device(&backend->liveTileDeviceBuffers[static_cast<std::size_t>(index)], 1);
         CK(cudaStreamCreateWithFlags(
