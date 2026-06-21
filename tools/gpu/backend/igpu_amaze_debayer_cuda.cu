@@ -98,6 +98,25 @@ bool live_fast_launch_checks_from_env()
     return true;
 }
 
+bool live_direct_rgba_store_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE");
+    if (!value || !*value) return false;
+
+    const char first = value[0];
+    if (first == '0' || first == 'f' || first == 'F'
+        || first == 'n' || first == 'N')
+    {
+        return false;
+    }
+    if ((first == 'o' || first == 'O')
+        && (value[1] == 'f' || value[1] == 'F'))
+    {
+        return false;
+    }
+    return true;
+}
+
 double now_ms()
 {
     using clock = std::chrono::steady_clock;
@@ -281,6 +300,47 @@ __global__ void k_pack_rgb16_to_rgba16_post_wb_undo(const uint16_t * rgb,
         clamp_double_to_u16((static_cast<double>(rgb[rgbIndex + 2u]) / wbMultiplierB)
                             + static_cast<double>(blackLevel));
     rgba[rgbaIndex + 3u] = 65535u;
+}
+
+__global__ void k_store_tile_rgba16_post_wb_undo(const float * red,
+                                                 const float * green,
+                                                 const float * blue,
+                                                 uint16_t * outRgba16,
+                                                 int width,
+                                                 int height,
+                                                 int top,
+                                                 int left,
+                                                 int rr1,
+                                                 int cc1,
+                                                 int blackLevel,
+                                                 double wbMultiplierR,
+                                                 double wbMultiplierG,
+                                                 double wbMultiplierB)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 16 || rr >= rr1 - 16 || cc < 16 || cc >= cc1 - 16) return;
+
+    const int row = top + rr;
+    const int col = left + cc;
+    if (row < 0 || row >= height || col < 0 || col >= width) return;
+
+    const int tileIndex = rr * kTileSize + cc;
+    const std::size_t outIndex =
+        (static_cast<std::size_t>(row) * width + col) * 4u;
+    const uint16_t r = truncate_amaze_float_to_u16(red[tileIndex]);
+    const uint16_t g = truncate_amaze_float_to_u16(green[tileIndex]);
+    const uint16_t b = truncate_amaze_float_to_u16(blue[tileIndex]);
+    outRgba16[outIndex + 0u] =
+        clamp_double_to_u16((static_cast<double>(r) / wbMultiplierR)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 1u] =
+        clamp_double_to_u16((static_cast<double>(g) / wbMultiplierG)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 2u] =
+        clamp_double_to_u16((static_cast<double>(b) / wbMultiplierB)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 3u] = 65535u;
 }
 
 __device__ __forceinline__ int fc_rggb_absolute(int row, int col)
@@ -677,6 +737,7 @@ void run_tile(const float * dRaw,
 
 void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                               uint16_t * dRgb16,
+                              uint16_t * dRgba16,
                               DeviceBuffers & d,
                               int width,
                               int height,
@@ -829,16 +890,37 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                       rr1,
                                                       cc1);
     CHECK_LIVE_TILE_LAUNCH();
-    k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
-                                                   d.green,
-                                                   d.blue,
-                                                   dRgb16,
-                                                   width,
-                                                   height,
-                                                   top,
-                                                   left,
-                                                   rr1,
-                                                   cc1);
+    if (dRgba16)
+    {
+        k_store_tile_rgba16_post_wb_undo<<<grid, block, 0, stream>>>(
+            d.red,
+            d.green,
+            d.blue,
+            dRgba16,
+            width,
+            height,
+            top,
+            left,
+            rr1,
+            cc1,
+            blackLevel,
+            wbMultiplierR,
+            wbMultiplierG,
+            wbMultiplierB);
+    }
+    else
+    {
+        k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
+                                                       d.green,
+                                                       d.blue,
+                                                       dRgb16,
+                                                       width,
+                                                       height,
+                                                       top,
+                                                       left,
+                                                       rr1,
+                                                       cc1);
+    }
     CK(cudaGetLastError());
 #undef CHECK_LIVE_TILE_LAUNCH
 }
@@ -861,6 +943,7 @@ void run_frame_to_device_rgb16(const float * dRaw,
 void run_frame_to_device_rgb16_bayer16_post_wb_batched(
     const uint16_t * dBayer16,
     uint16_t * dRgb16,
+    uint16_t * dRgba16,
     std::vector<DeviceBuffers> & buffers,
     const std::vector<cudaStream_t> & streams,
     int width,
@@ -889,6 +972,7 @@ void run_frame_to_device_rgb16_bayer16_post_wb_batched(
             }
             run_tile_bayer16_post_wb(dBayer16,
                                      dRgb16,
+                                     dRgba16,
                                      buffers[slot],
                                      width,
                                      height,
@@ -1047,6 +1131,112 @@ int copy_rgb16_to_gl_rgba16_texture(const uint16_t * dRgb16,
     }
 
     return 0;
+}
+
+int copy_rgba16_to_gl_rgba16_texture(const uint16_t * dRgba16,
+                                     int width,
+                                     int height,
+                                     unsigned int glTexture,
+                                     CachedGlImageResource * cache = nullptr)
+{
+    if (!dRgba16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
+
+    cudaGraphicsResource * resource = nullptr;
+    const bool cached = cache != nullptr;
+
+    try
+    {
+        if (cached)
+        {
+            const int cacheRc = ensure_cached_gl_resource(cache,
+                                                          glTexture,
+                                                          width,
+                                                          height,
+                                                          cudaGraphicsRegisterFlagsWriteDiscard,
+                                                          "cached GL_RGBA16 direct texture");
+            if (cacheRc != 0)
+            {
+                return cacheRc;
+            }
+            resource = cache->resource;
+        }
+        else
+        {
+            cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                         glTexture,
+                                                         GL_TEXTURE_2D,
+                                                         cudaGraphicsRegisterFlagsWriteDiscard);
+            if (rc != cudaSuccess)
+            {
+                std::fprintf(stderr,
+                             "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 direct texture) failed: %s\n",
+                             cudaGetErrorString(rc));
+                return 2;
+            }
+        }
+
+        cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            else cudaGraphicsUnregisterResource(resource);
+            return 2;
+        }
+
+        cudaArray_t mappedArray = nullptr;
+        rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
+        if (rc == cudaSuccess)
+        {
+            const std::size_t rowBytes =
+                static_cast<std::size_t>(width) * 4u * sizeof(uint16_t);
+            rc = cudaMemcpy2DToArray(mappedArray,
+                                     0,
+                                     0,
+                                     dRgba16,
+                                     rowBytes,
+                                     rowBytes,
+                                     static_cast<std::size_t>(height),
+                                     cudaMemcpyDeviceToDevice);
+        }
+
+        const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
+        const cudaError_t unregisterRc =
+            cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] direct RGBA16 device-to-GL texture copy failed: %s\n",
+                         cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            return 2;
+        }
+        if (unmapRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(unmapRc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            return 2;
+        }
+        if (unregisterRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(unregisterRc));
+            return 2;
+        }
+        return 0;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        if (cached) reset_cached_gl_resource(cache, false);
+        else if (resource) cudaGraphicsUnregisterResource(resource);
+        return 2;
+    }
 }
 } // namespace
 
@@ -1457,9 +1647,11 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         backend->lastTiming.upload_ms = now_ms() - uploadStart;
 
         const double kernelStart = now_ms();
+        const bool directRgbaStore = live_direct_rgba_store_from_env();
         run_frame_to_device_rgb16_bayer16_post_wb_batched(
             backend->liveReconBayer16,
-            backend->liveRgb16,
+            directRgbaStore ? nullptr : backend->liveRgb16,
+            directRgbaStore ? backend->liveRgba16 : nullptr,
             backend->liveTileDeviceBuffers,
             backend->liveTileStreams,
             width,
@@ -1473,16 +1665,24 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
 
         const double handoffStart = now_ms();
         const int rc =
-            copy_rgb16_to_gl_rgba16_texture_post_wb_undo(backend->liveRgb16,
-                                                         width,
-                                                         height,
-                                                         out_rgba16_gl_texture,
-                                                         black_level,
-                                                         wb_multiplier_r,
-                                                         wb_multiplier_g,
-                                                         wb_multiplier_b,
-                                                         backend->liveRgba16,
-                                                         &backend->liveOutputRgba16Resource);
+            directRgbaStore
+                ? copy_rgba16_to_gl_rgba16_texture(
+                    backend->liveRgba16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    &backend->liveOutputRgba16Resource)
+                : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
+                    backend->liveRgb16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    black_level,
+                    wb_multiplier_r,
+                    wb_multiplier_g,
+                    wb_multiplier_b,
+                    backend->liveRgba16,
+                    &backend->liveOutputRgba16Resource);
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;
@@ -1524,9 +1724,11 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
         backend->lastTiming.upload_ms = 0.0;
 
         const double kernelStart = now_ms();
+        const bool directRgbaStore = live_direct_rgba_store_from_env();
         run_frame_to_device_rgb16_bayer16_post_wb_batched(
             device_bayer16,
-            backend->liveRgb16,
+            directRgbaStore ? nullptr : backend->liveRgb16,
+            directRgbaStore ? backend->liveRgba16 : nullptr,
             backend->liveTileDeviceBuffers,
             backend->liveTileStreams,
             width,
@@ -1540,16 +1742,24 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
 
         const double handoffStart = now_ms();
         const int rc =
-            copy_rgb16_to_gl_rgba16_texture_post_wb_undo(backend->liveRgb16,
-                                                         width,
-                                                         height,
-                                                         out_rgba16_gl_texture,
-                                                         black_level,
-                                                         wb_multiplier_r,
-                                                         wb_multiplier_g,
-                                                         wb_multiplier_b,
-                                                         backend->liveRgba16,
-                                                         &backend->liveOutputRgba16Resource);
+            directRgbaStore
+                ? copy_rgba16_to_gl_rgba16_texture(
+                    backend->liveRgba16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    &backend->liveOutputRgba16Resource)
+                : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
+                    backend->liveRgb16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    black_level,
+                    wb_multiplier_r,
+                    wb_multiplier_g,
+                    wb_multiplier_b,
+                    backend->liveRgba16,
+                    &backend->liveOutputRgba16Resource);
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;

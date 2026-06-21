@@ -17,6 +17,7 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
+    [switch]$CudaAmazeLiveDirectRgbaStore,
     [int]$Phase3FrameSlots = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
@@ -419,6 +420,7 @@ elseif ($failures.Count -eq 0) {
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
         $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
+        $cudaAmazeLiveDirectRgbaStoreLiteral = if ($CudaAmazeLiveDirectRgbaStore) { '$true' } else { '$false' }
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -437,6 +439,7 @@ elseif ($failures.Count -eq 0) {
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
 `$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
+`$cudaAmazeLiveDirectRgbaStore = $cudaAmazeLiveDirectRgbaStoreLiteral
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -471,6 +474,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
     cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
+    cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
     phase3FrameSlots = `$phase3FrameSlots
     validatorExitCode = `$null
     packetInfo = `$null
@@ -594,6 +598,9 @@ try {
     }
     if (`$cudaAmazeFastLaunchChecks) {
         `$args += '-CudaAmazeFastLaunchChecks'
+    }
+    if (`$cudaAmazeLiveDirectRgbaStore) {
+        `$args += '-CudaAmazeLiveDirectRgbaStore'
     }
     if (`$phase3FrameSlots -gt 0) {
         `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
