@@ -1697,11 +1697,7 @@ void RenderFrameThread::runPhase3( void )
             const int slotIndex = findFreeSlotLocked();
             const RenderRequest request = m_renderRequests.front();
             m_renderRequests.pop_front();
-            m_renderFrame = !m_renderRequests.empty()
-                         || !m_decodeRequests.empty()
-                         || !m_reconRequests.empty()
-                         || !m_decodeReadySlots.empty()
-                         || !m_processReadySlots.empty();
+            m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( slotIndex, request );
             queuedPhase3Request = true;
         }
@@ -1787,6 +1783,7 @@ void RenderFrameThread::runPhase3( void )
             const int nextSlotIndex = findFreeSlotLocked();
             const RenderRequest nextRequest = m_renderRequests.front();
             m_renderRequests.pop_front();
+            m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( nextSlotIndex, nextRequest );
         }
 
