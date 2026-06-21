@@ -17,6 +17,7 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
+    [int]$Phase3FrameSlots = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -44,6 +45,9 @@ if ($ValidationSampleEvery -lt 1) {
 }
 if ($CudaAmazeLiveTileStreams -lt 0) {
     throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($Phase3FrameSlots -lt 0) {
+    throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -1179,6 +1183,9 @@ if ($CudaAmazeLiveTileStreams -gt 0) {
 if ($CudaAmazeFastLaunchChecks) {
     $candidateEnv += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
 }
+if ($Phase3FrameSlots -gt 0) {
+    $candidateEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
@@ -1194,6 +1201,9 @@ if ($CudaAmazeLiveTileStreams -gt 0) {
 }
 if ($CudaAmazeFastLaunchChecks) {
     $candidateSpeedEnv += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
+}
+if ($Phase3FrameSlots -gt 0) {
+    $candidateSpeedEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
 }
 
 $baselineCommand = Write-SmokeInvokeScript `
@@ -1295,6 +1305,7 @@ $summary = [ordered]@{
     validationSampleEvery = $ValidationSampleEvery
     cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
     cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
+    phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {

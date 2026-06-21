@@ -369,7 +369,28 @@ private:
 
     mutable QMutex m_mutex;
     QWaitCondition m_waitCondition;
-    static constexpr int kFrameSlotCount = 4;
+    struct FrameSlotStorage
+    {
+        std::unique_ptr<FrameSlot[]> frames;
+        int slotCount = 0;
+
+        void reset( int count )
+        {
+            frames.reset( new FrameSlot[count] );
+            slotCount = count;
+        }
+
+        int size( void ) const { return slotCount; }
+        FrameSlot *begin( void ) { return frames.get(); }
+        FrameSlot *end( void ) { return frames ? frames.get() + slotCount : nullptr; }
+        const FrameSlot *begin( void ) const { return frames.get(); }
+        const FrameSlot *end( void ) const { return frames ? frames.get() + slotCount : nullptr; }
+        FrameSlot &operator[]( int index ) { return frames[index]; }
+        const FrameSlot &operator[]( int index ) const { return frames[index]; }
+    };
+
+    static constexpr int kDefaultFrameSlotCount = 4;
+    static constexpr int kMaxFrameSlotCount = 12;
     static constexpr int kRenderRequestQueueDepth = 4;
     mlvObject_t *m_pMlvObject;
     bool m_initialized;
@@ -410,7 +431,7 @@ private:
     int m_renderingSlotIndex;
     int m_presentingSlotIndex;
     std::atomic<Phase3Mode> m_phase3Mode;
-    std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
+    FrameSlotStorage m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     CubicPlaybackScaleCache m_playbackCubicScaleCache;
@@ -427,6 +448,7 @@ private:
     QWaitCondition m_decodeWaitCondition;
     QWaitCondition m_reconWaitCondition;
 
+    static int configuredFrameSlotCount( void );
     void run( void );
     void runSerial( void );
     void runPhase3( void );

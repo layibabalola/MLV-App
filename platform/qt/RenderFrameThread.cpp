@@ -374,6 +374,15 @@ bool assignGpuPlaybackReconTextureState(
 
 } // namespace
 
+int RenderFrameThread::configuredFrameSlotCount( void )
+{
+    bool ok = false;
+    const int requested =
+        qEnvironmentVariableIntValue( "MLVAPP_PHASE3_FRAME_SLOT_COUNT", &ok );
+    if( !ok || requested <= 0 ) return kDefaultFrameSlotCount;
+    return qBound( 1, requested, kMaxFrameSlotCount );
+}
+
 //Constructor
 RenderFrameThread::RenderFrameThread()
 {
@@ -412,6 +421,7 @@ RenderFrameThread::RenderFrameThread()
     m_reconWorker = nullptr;
     m_decodeWorkerStop = false;
     m_reconWorkerStop = false;
+    m_frameSlots.reset( configuredFrameSlotCount() );
 }
 
 //Destructor
@@ -471,6 +481,11 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     m_lastRenderThreadWorkMs = 0.0;
     m_lastRenderThreadTotalMs = 0.0;
     m_lastFrameReadyEmitStageTime = 0.0;
+    const int configuredSlots = configuredFrameSlotCount();
+    if( m_frameSlots.size() != configuredSlots )
+    {
+        m_frameSlots.reset( configuredSlots );
+    }
     m_gpuBilinearDebayerRawFrame.clear();
     m_gpuAmazeDebayerRawFrame.clear();
     const size_t pixelCount =
@@ -2294,6 +2309,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("render_thread_openmp_thread_cap_active"),
         openMpThreads < generalWorkerThreads );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_frame_slot_count"),
+        m_frameSlots.size() );
 
     GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability;
     r16AmazeTextureAvailability.available =

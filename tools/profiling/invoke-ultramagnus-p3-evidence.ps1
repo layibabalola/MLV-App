@@ -17,6 +17,7 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
+    [int]$Phase3FrameSlots = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
@@ -29,6 +30,9 @@ $ErrorActionPreference = "Stop"
 
 if ($CudaAmazeLiveTileStreams -lt 0) {
     throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($Phase3FrameSlots -lt 0) {
+    throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -415,6 +419,7 @@ elseif ($failures.Count -eq 0) {
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
         $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
         $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
+        $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -432,6 +437,7 @@ elseif ($failures.Count -eq 0) {
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
 `$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
+`$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
@@ -465,6 +471,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
     cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
     cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
+    phase3FrameSlots = `$phase3FrameSlots
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -587,6 +594,9 @@ try {
     }
     if (`$cudaAmazeFastLaunchChecks) {
         `$args += '-CudaAmazeFastLaunchChecks'
+    }
+    if (`$phase3FrameSlots -gt 0) {
+        `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
     }
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'

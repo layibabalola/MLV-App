@@ -18,6 +18,7 @@ param(
     [string]$GpuPlaybackReconBackend = "",
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
+    [int]$Phase3FrameSlots = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -43,6 +44,9 @@ $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
 
 if ($CudaAmazeLiveTileStreams -lt 0) {
     throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($Phase3FrameSlots -lt 0) {
+    throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
 }
 
 function Resolve-RepoPath {
@@ -810,6 +814,9 @@ if ($failures.Count -eq 0) {
         if ($CudaAmazeFastLaunchChecks) {
             $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
         }
+        if ($Phase3FrameSlots -gt 0) {
+            $envEntries += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
+        }
         $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
@@ -1272,6 +1279,7 @@ $summary = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
         cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
+        phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
