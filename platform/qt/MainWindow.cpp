@@ -23907,6 +23907,11 @@ void MainWindow::drawFrameReady()
         haveReadyFrame = latestGpuTexNrReady
             ? m_pRenderThread->acquireLatestGpuTextureNoReadbackReadyFrame( &readyFrame )
             : m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
+        if( latestGpuTexNrReady && !haveReadyFrame )
+        {
+            haveReadyFrame =
+                m_pRenderThread->acquireOldestGpuTextureNoReadbackReadyFrame( &readyFrame );
+        }
         if( !haveReadyFrame )
         {
             haveReadyFrame = m_pRenderThread->acquireLatestReadyFrame( &readyFrame );

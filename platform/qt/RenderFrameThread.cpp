@@ -616,7 +616,10 @@ bool RenderFrameThread::acquireLatestGpuTextureNoReadbackReadyFrame(ReadyFrame *
         slot.gpuPlaybackReconTextureNoReadbackCandidate
         && slot.presentationContext.playbackActive
         && slot.presentationContext.gpuPlaybackReconTexturePresentRequested
-        && slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted;
+        && slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+        && slot.stageTimingTelemetry.value(
+            QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
+              .toBool( false );
     if( !latestGpuTextureNoReadback )
     {
         return false;
