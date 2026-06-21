@@ -113,6 +113,7 @@ int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state
 size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
                                                size_t output_words);
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
+int llrpGpuPlaybackReconResetGlTextureResources(void);
 int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      const uint16_t * raw_input_bayer14,
                                      size_t raw_image_size,

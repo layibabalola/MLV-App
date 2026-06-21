@@ -1558,6 +1558,7 @@ void GpuDisplayViewport::destroyTexture()
     if ( m_texture || m_gpuReconSourceTexture )
     {
         gpuAmazeDebayerResetR16TextureBackendResources();
+        llrpGpuPlaybackReconResetGlTextureResources();
     }
     if ( m_texture )
     {

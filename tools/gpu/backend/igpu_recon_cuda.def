@@ -7,6 +7,7 @@ LIBRARY igpu_recon_cuda
 EXPORTS
     igpu_recon_create
     igpu_recon_destroy
+    igpu_recon_reset_gl_texture_resources
     igpu_recon_abi_version
     igpu_recon_describe
     igpu_recon_set_clip

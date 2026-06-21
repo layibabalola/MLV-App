@@ -558,6 +558,14 @@ __global__ void k_final_blend16_avx2(uint16_t* __restrict out,
  *  BACKEND HANDLE + ABI                                                  *
  * ===================================================================== */
 
+struct CachedGlImageResource {
+    cudaGraphicsResource* resource;
+    unsigned int texture;
+    int width;
+    int height;
+    unsigned int flags;
+};
+
 struct igpu_recon_backend {
     int   device;
     char  describe[256];
@@ -583,31 +591,95 @@ struct igpu_recon_backend {
     /* timing */
     igpu_recon_timing_t last_timing;
 
+    /* cached CUDA-GL interop resource for the live no-readback R16 output */
+    CachedGlImageResource gl_r16_resource;
+
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
+
+static int reset_cached_gl_resource(CachedGlImageResource* cache,
+                                    int tolerate_invalid_graphics_context)
+{
+    int status = 0;
+    if (!cache) return status;
+    if (cache->resource) {
+        const cudaError_t rc = cudaGraphicsUnregisterResource(cache->resource);
+        if (rc != cudaSuccess) {
+            if (!(tolerate_invalid_graphics_context
+                  && rc == cudaErrorInvalidGraphicsContext)) {
+                fprintf(stderr,
+                        "[igpu_recon_cuda] cudaGraphicsUnregisterResource(cached GL_R16 texture) failed: %s\n",
+                        cudaGetErrorString(rc));
+            }
+            status = 2;
+        }
+    }
+    cache->resource = NULL;
+    cache->texture = 0;
+    cache->width = 0;
+    cache->height = 0;
+    cache->flags = 0;
+    return status;
+}
+
+static int ensure_cached_gl_resource(CachedGlImageResource* cache,
+                                     unsigned int gl_texture,
+                                     int width,
+                                     int height,
+                                     unsigned int flags,
+                                     const char* label)
+{
+    if (!cache || gl_texture == 0 || width <= 0 || height <= 0) return -1;
+    if (cache->resource
+        && cache->texture == gl_texture
+        && cache->width == width
+        && cache->height == height
+        && cache->flags == flags) {
+        return 0;
+    }
+    const int reset_rc = reset_cached_gl_resource(cache, 0);
+    if (reset_rc != 0) return reset_rc;
+    cudaGraphicsResource* resource = NULL;
+    cudaError_t e = cudaGraphicsGLRegisterImage(&resource,
+                                                gl_texture,
+                                                GL_TEXTURE_2D,
+                                                flags);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsGLRegisterImage(%s) failed: %s\n",
+                label ? label : "cached GL texture",
+                cudaGetErrorString(e));
+        return 2;
+    }
+    cache->resource = resource;
+    cache->texture = gl_texture;
+    cache->width = width;
+    cache->height = height;
+    cache->flags = flags;
+    return 0;
+}
 
 static int copy_bayer16_to_gl_r16_texture(igpu_recon_backend* b, unsigned int gl_texture)
 {
     if (!b || gl_texture == 0) return -1;
 
-    cudaGraphicsResource* resource = NULL;
-    cudaError_t e = cudaGraphicsGLRegisterImage(&resource,
-                                                gl_texture,
-                                                GL_TEXTURE_2D,
-                                                cudaGraphicsRegisterFlagsWriteDiscard);
-    if (e != cudaSuccess) {
-        fprintf(stderr,
-                "[igpu_recon_cuda] cudaGraphicsGLRegisterImage(GL_R16 texture) failed: %s\n",
-                cudaGetErrorString(e));
-        return 2;
-    }
+    const unsigned int flags = cudaGraphicsRegisterFlagsWriteDiscard;
+    const int cache_rc = ensure_cached_gl_resource(&b->gl_r16_resource,
+                                                   gl_texture,
+                                                   b->width,
+                                                   b->height,
+                                                   flags,
+                                                   "GL_R16 texture");
+    if (cache_rc != 0) return cache_rc;
 
-    e = cudaGraphicsMapResources(1, &resource, 0);
+    cudaGraphicsResource* resource = b->gl_r16_resource.resource;
+    cudaError_t e = cudaGraphicsMapResources(1, &resource, 0);
+
     if (e != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] cudaGraphicsMapResources(GL_R16 texture) failed: %s\n",
                 cudaGetErrorString(e));
-        cudaGraphicsUnregisterResource(resource);
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
 
@@ -626,23 +698,18 @@ static int copy_bayer16_to_gl_r16_texture(igpu_recon_backend* b, unsigned int gl
     }
 
     const cudaError_t unmap_error = cudaGraphicsUnmapResources(1, &resource, 0);
-    const cudaError_t unregister_error = cudaGraphicsUnregisterResource(resource);
     if (e != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] device-to-GL texture copy failed: %s\n",
                 cudaGetErrorString(e));
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
     if (unmap_error != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] cudaGraphicsUnmapResources(GL_R16 texture) failed: %s\n",
                 cudaGetErrorString(unmap_error));
-        return 2;
-    }
-    if (unregister_error != cudaSuccess) {
-        fprintf(stderr,
-                "[igpu_recon_cuda] cudaGraphicsUnregisterResource(GL_R16 texture) failed: %s\n",
-                cudaGetErrorString(unregister_error));
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
 
@@ -724,6 +791,8 @@ IGPU_API
 void igpu_recon_destroy(igpu_recon_backend* b)
 {
     if (!b) return;
+    cudaSetDevice(b->device);
+    reset_cached_gl_resource(&b->gl_r16_resource, 1);
     free_clip_buffers(b);
     free_lut_buffers(b);
     if (b->ev_start)        cudaEventDestroy(b->ev_start);
@@ -731,6 +800,20 @@ void igpu_recon_destroy(igpu_recon_backend* b)
     if (b->ev_after_kernel) cudaEventDestroy(b->ev_after_kernel);
     if (b->ev_after_dl)     cudaEventDestroy(b->ev_after_dl);
     free(b);
+}
+
+IGPU_API
+int igpu_recon_reset_gl_texture_resources(igpu_recon_backend* b)
+{
+    if (!b) return -1;
+    const cudaError_t e = cudaSetDevice(b->device);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaSetDevice(reset GL texture resources) failed: %s\n",
+                cudaGetErrorString(e));
+        return 2;
+    }
+    return reset_cached_gl_resource(&b->gl_r16_resource, 1);
 }
 
 IGPU_API

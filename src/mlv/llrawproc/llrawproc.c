@@ -576,6 +576,7 @@ typedef int (*llrawproc_gpu_run_fn)(igpu_recon_backend*,
                                     unsigned int);
 typedef int (*llrawproc_gpu_last_timing_fn)(igpu_recon_backend*, igpu_recon_timing_t*);
 typedef int (*llrawproc_gpu_allocated_bytes_fn)(igpu_recon_backend*, uint64_t*);
+typedef int (*llrawproc_gpu_reset_gl_texture_resources_fn)(igpu_recon_backend*);
 
 typedef struct
 {
@@ -595,6 +596,7 @@ typedef struct
     llrawproc_gpu_run_fn run;
     llrawproc_gpu_last_timing_fn last_timing;
     llrawproc_gpu_allocated_bytes_fn allocated_bytes;
+    llrawproc_gpu_reset_gl_texture_resources_fn reset_gl_texture_resources;
 } llrawprocGpuExportBackend_t;
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
@@ -792,6 +794,11 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
         resolved.raw = GetProcAddress(g->dll, "igpu_recon_allocated_bytes");
         g->allocated_bytes = resolved.typed;
     }
+    {
+        union { FARPROC raw; llrawproc_gpu_reset_gl_texture_resources_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_reset_gl_texture_resources");
+        g->reset_gl_texture_resources = resolved.typed;
+    }
 
 #undef LLRAWPROC_GPU_RESOLVE_TYPED
 
@@ -920,6 +927,20 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
 
     if(rc_out) *rc_out = rc;
     return rc == 0;
+}
+
+int llrpGpuPlaybackReconResetGlTextureResources(void);
+int llrpGpuPlaybackReconResetGlTextureResources(void)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    int ok = 1;
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    if(g->backend && g->reset_gl_texture_resources)
+    {
+        ok = (g->reset_gl_texture_resources(g->backend) == 0) ? 1 : 0;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+    return ok;
 }
 
 static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state,
@@ -1348,6 +1369,12 @@ int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
              "%s",
              "cuda");
     return 1;
+}
+
+int llrpGpuPlaybackReconResetGlTextureResources(void);
+int llrpGpuPlaybackReconResetGlTextureResources(void)
+{
+    return 0;
 }
 #endif
 
