@@ -67,6 +67,11 @@ public:
                                             int *width,
                                             int *height,
                                             QString *reason = nullptr);
+    static bool readGpuReconSourceBayer16Texture(QGraphicsView *view,
+                                                 QByteArray *textureBytes,
+                                                 int *width,
+                                                 int *height,
+                                                 QString *reason = nullptr);
     static bool presentImage(QGraphicsView *view,
                              QGraphicsPixmapItem *fallbackItem,
                              const QImage &image,

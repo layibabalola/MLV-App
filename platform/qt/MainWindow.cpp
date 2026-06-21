@@ -4582,7 +4582,6 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         bool runNoReadbackOutputValidationThisFrame = false;
         if( framePresentedByViewport
          && gpuPlaybackReconNoReadbackPresented
-         && !gpuPlaybackReconAmazeTextureActive
          && playbackGpuNoReadbackOutputValidationEnabled() )
         {
             static unsigned long long s_noReadbackValidationFrameCounter = 0ULL;
@@ -4601,12 +4600,27 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             int glTextureHeight = 0;
             QString glTextureReason;
             const bool glTextureReadbackOk =
-                GpuDisplayViewport::readPresentedBayer16Texture(
-                    ui->graphicsView,
-                    &glTextureBytes,
-                    &glTextureWidth,
-                    &glTextureHeight,
-                    &glTextureReason );
+                gpuPlaybackReconAmazeTextureActive
+                    ? GpuDisplayViewport::readGpuReconSourceBayer16Texture(
+                        ui->graphicsView,
+                        &glTextureBytes,
+                        &glTextureWidth,
+                        &glTextureHeight,
+                        &glTextureReason )
+                    : GpuDisplayViewport::readPresentedBayer16Texture(
+                        ui->graphicsView,
+                        &glTextureBytes,
+                        &glTextureWidth,
+                        &glTextureHeight,
+                        &glTextureReason );
+            const QString glProbeSurface =
+                gpuPlaybackReconAmazeTextureActive
+                    ? QStringLiteral("gl_texture_r16_recon_source")
+                    : QStringLiteral("gl_texture_r16");
+            const QString glProbeSource =
+                gpuPlaybackReconAmazeTextureActive
+                    ? QStringLiteral("cuda_gl_r16_recon_source_for_amaze_texture")
+                    : QStringLiteral("cuda_gl_r16_texture");
             const size_t glTextureWords =
                 static_cast<size_t>( glTextureBytes.size() ) / sizeof( uint16_t );
             const QString glTextureHash =
@@ -4742,22 +4756,24 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                 << QStringLiteral(
                        "playback_smoke.gl_probe session=%1 index=%2 "
                        "display_frame=%3 play_checked=%4 position=%5 "
-                       "active=1 surface=gl_texture_r16 source=cuda_gl_r16_texture "
-                       "renderer=\"%6\" texture_readback_ok=%7 "
-                       "texture_width=%8 texture_height=%9 texture_words=%10 "
-                       "texture_hash=%11 oracle=cpu_dual_iso_recon_frame "
-                       "oracle_available=%12 oracle_words=%13 oracle_hash=%14 "
-                       "parity_checked=%15 parity_match=%16 mismatch_count=%17 "
-                        "mismatch_first_index=%18 mismatch_first_gl=%19 "
-                        "mismatch_first_oracle=%20 mismatch_max_abs=%21 "
-                        "backend_available=%22 backend_requested_name=\"%23\" "
-                        "backend_requested_path=\"%24\" backend_resolved_path=\"%25\" "
-                        "backend_description=\"%26\" reason=\"%27\"" )
+                       "active=1 surface=%6 source=%7 "
+                       "renderer=\"%8\" texture_readback_ok=%9 "
+                       "texture_width=%10 texture_height=%11 texture_words=%12 "
+                       "texture_hash=%13 oracle=cpu_dual_iso_recon_frame "
+                       "oracle_available=%14 oracle_words=%15 oracle_hash=%16 "
+                       "parity_checked=%17 parity_match=%18 mismatch_count=%19 "
+                        "mismatch_first_index=%20 mismatch_first_gl=%21 "
+                        "mismatch_first_oracle=%22 mismatch_max_abs=%23 "
+                        "backend_available=%24 backend_requested_name=\"%25\" "
+                        "backend_requested_path=\"%26\" backend_resolved_path=\"%27\" "
+                        "backend_description=\"%28\" reason=\"%29\"" )
                        .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                        .arg( m_playbackSmokePresentedFrames + 1 )
                        .arg( static_cast<qulonglong>( display_frame ) )
                        .arg( bool01( ui->actionPlay->isChecked() ) )
                        .arg( ui->horizontalSliderPosition->value() )
+                       .arg( glProbeSurface )
+                       .arg( glProbeSource )
                        .arg( renderer )
                        .arg( bool01( glTextureReadbackOk ) )
                        .arg( glTextureWidth )
