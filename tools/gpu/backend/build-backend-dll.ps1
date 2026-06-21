@@ -24,6 +24,7 @@ $archSidecar = Join-Path $Dir 'igpu_recon_cuda.arch.json'
 $def     = Join-Path $Dir 'igpu_recon_cuda.def'
 $testsrc = Join-Path $Dir 'dll_test.cpp'
 $testexe = Join-Path $Dir 'dll_test.exe'
+$gpuRoot = (Resolve-Path (Join-Path $Dir '..')).Path
 
 # locate MSVC vcvars64 + nvcc (same discovery as build-cuda.ps1)
 $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -153,10 +154,10 @@ $cmdFile = Join-Path $env:TEMP 'build_backend_dll.cmd'
     '@echo off',
     "call `"$vcvars`" >nul",
     'echo === building igpu_recon_cuda.dll (nvcc -shared --fmad=false, exports via .def) ===',
-    "`"$nvcc`" $archArgLine -O3 --fmad=false -shared -allow-unsupported-compiler -Xcompiler `"/MD`" -Xlinker `"/DEF:$def`" -I `"$Dir`" `"$src`" -o `"$dll`"",
+    "`"$nvcc`" $archArgLine -O3 --fmad=false -shared -allow-unsupported-compiler -Xcompiler `"/MD`" -Xlinker `"/DEF:$def`" -I `"$Dir`" -I `"$gpuRoot`" `"$src`" -o `"$dll`"",
     'if errorlevel 1 exit /b 11',
     'echo === building dll_test.exe (cl, LoadLibrary harness, no CUDA link) ===',
-    "cl /nologo /EHsc /O2 /I `"$Dir`" `"$testsrc`" /Fe:`"$testexe`" /Fo:`"$Dir\dll_test.obj`" opengl32.lib user32.lib gdi32.lib",
+    "cl /nologo /EHsc /O2 /I `"$Dir`" /I `"$gpuRoot`" `"$testsrc`" /Fe:`"$testexe`" /Fo:`"$Dir\dll_test.obj`" opengl32.lib user32.lib gdi32.lib",
     'if errorlevel 1 exit /b 12',
     'exit /b 0'
 ) | Set-Content -Encoding ASCII $cmdFile

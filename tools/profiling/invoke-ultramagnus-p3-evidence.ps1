@@ -14,8 +14,20 @@ param(
     [string[]]$ClipPaths = @(),
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "on",
     [string]$GpuPlaybackReconBackend = "",
+    [int]$CudaAmazeLiveTileStreams = 0,
+    [switch]$CudaAmazeFastLaunchChecks,
+    [switch]$CudaAmazeLiveDirectRgbaStore,
+    [switch]$GpuPlaybackReconRetainDeviceOutput,
+    [switch]$GpuTexNrAcquireLatestReady,
+    [switch]$GpuTexNrImmediateDrainReady,
+    [int]$GpuTexNrImmediateDrainMax = 0,
+    [int]$Phase3FrameSlots = 0,
+    [int]$PlaybackTimerPollMs = 0,
     [int]$AgentTimeoutSec = 2700,
+    [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
     [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
@@ -23,6 +35,19 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($CudaAmazeLiveTileStreams -lt 0) {
+    throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($GpuTexNrImmediateDrainMax -lt 0) {
+    throw "-GpuTexNrImmediateDrainMax must be >= 0. Use 0 for default."
+}
+if ($Phase3FrameSlots -lt 0) {
+    throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackTimerPollMs -lt 0) {
+    throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
+}
 
 function Resolve-RepoPath {
     param(
@@ -399,12 +424,23 @@ elseif ($failures.Count -eq 0) {
         $jobId = "mlvapp-p3-$stamp"
         $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
         $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
+        $speedLegLiteral = if ($SpeedLeg) { '$true' } else { '$false' }
         $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
         $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
         $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
         $localRepoBranchLiteral = Convert-ToPowerShellSingleQuotedString $localRepoBranch
         $localRepoStatusLiteral = Convert-ToPowerShellArrayLiteral $localRepoStatus
+        $dropFrameModeLiteral = Convert-ToPowerShellSingleQuotedString $DropFrameMode
         $gpuPlaybackReconBackendLiteral = Convert-ToPowerShellSingleQuotedString $GpuPlaybackReconBackend
+        $cudaAmazeLiveTileStreamsLiteral = [string]$CudaAmazeLiveTileStreams
+        $cudaAmazeFastLaunchChecksLiteral = if ($CudaAmazeFastLaunchChecks) { '$true' } else { '$false' }
+        $cudaAmazeLiveDirectRgbaStoreLiteral = if ($CudaAmazeLiveDirectRgbaStore) { '$true' } else { '$false' }
+        $gpuPlaybackReconRetainDeviceOutputLiteral = if ($GpuPlaybackReconRetainDeviceOutput) { '$true' } else { '$false' }
+        $gpuTexNrAcquireLatestReadyLiteral = if ($GpuTexNrAcquireLatestReady) { '$true' } else { '$false' }
+        $gpuTexNrImmediateDrainReadyLiteral = if ($GpuTexNrImmediateDrainReady) { '$true' } else { '$false' }
+        $gpuTexNrImmediateDrainMaxLiteral = [string]$GpuTexNrImmediateDrainMax
+        $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
+        $playbackTimerPollMsLiteral = [string]$PlaybackTimerPollMs
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
 `$repo = $(Convert-ToPowerShellSingleQuotedString $RemoteRepoRoot)
@@ -417,13 +453,26 @@ elseif ($failures.Count -eq 0) {
 `$evidenceRepoHead = $localRepoHeadLiteral
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
+`$dropFrameMode = $dropFrameModeLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
+`$speedLeg = $speedLegLiteral
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
+`$cudaAmazeLiveTileStreams = [int]'$cudaAmazeLiveTileStreamsLiteral'
+`$cudaAmazeFastLaunchChecks = $cudaAmazeFastLaunchChecksLiteral
+`$cudaAmazeLiveDirectRgbaStore = $cudaAmazeLiveDirectRgbaStoreLiteral
+`$gpuPlaybackReconRetainDeviceOutput = $gpuPlaybackReconRetainDeviceOutputLiteral
+`$gpuTexNrAcquireLatestReady = $gpuTexNrAcquireLatestReadyLiteral
+`$gpuTexNrImmediateDrainReady = $gpuTexNrImmediateDrainReadyLiteral
+`$gpuTexNrImmediateDrainMax = [int]'$gpuTexNrImmediateDrainMaxLiteral'
+`$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
+`$playbackTimerPollMs = [int]'$playbackTimerPollMsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
 `$backendBuildScript = Join-Path `$backendDir 'build-backend-dll.ps1'
+`$amazeBackendBuildScript = Join-Path `$backendDir 'amaze-debayer-dll.ps1'
 `$backendDll = Join-Path `$backendDir 'igpu_recon_cuda.dll'
 `$backendArchSidecar = Join-Path `$backendDir 'igpu_recon_cuda.arch.json'
+`$amazeBackendDll = Join-Path `$backendDir 'igpu_amaze_debayer_cuda.dll'
 `$releaseDir = Join-Path `$repo 'platform\qt\build-release\release'
 `$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not `$psExe) { `$psExe = 'powershell.exe' }
@@ -439,12 +488,24 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
         dir = `$backendDir
         buildScript = `$backendBuildScript
         buildExitCode = `$null
+        amazeBuildScript = `$amazeBackendBuildScript
+        amazeBuildExitCode = `$null
         deployDir = `$releaseDir
         artifacts = @()
         deployedArtifacts = @()
         output = @()
+        amazeOutput = @()
     }
     gpuPlaybackReconBackend = `$gpuPlaybackReconBackend
+    cudaAmazeLiveTileStreams = `$cudaAmazeLiveTileStreams
+    cudaAmazeFastLaunchChecks = `$cudaAmazeFastLaunchChecks
+    cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
+    dropFrameMode = `$dropFrameMode
+    gpuPlaybackReconRetainDeviceOutput = `$gpuPlaybackReconRetainDeviceOutput
+    gpuTexNrAcquireLatestReady = `$gpuTexNrAcquireLatestReady
+    gpuTexNrImmediateDrainReady = `$gpuTexNrImmediateDrainReady
+    phase3FrameSlots = `$phase3FrameSlots
+    playbackTimerPollMs = `$playbackTimerPollMs
     validatorExitCode = `$null
     packetInfo = `$null
 }
@@ -456,12 +517,19 @@ try {
         if (!(Test-Path -LiteralPath `$backendBuildScript)) {
             throw "Missing backend build script: `$backendBuildScript"
         }
+        if (!(Test-Path -LiteralPath `$amazeBackendBuildScript)) {
+            throw "Missing AMaZE backend build script: `$amazeBackendBuildScript"
+        }
         `$backendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$backendBuildScript -Dir `$backendDir 2>&1
         `$backendExit = `$LASTEXITCODE
         `$payload.backend.buildExitCode = `$backendExit
         `$payload.backend.output = @(`$backendOutput | ForEach-Object { [string]`$_ })
+        `$amazeBackendOutput = & `$psExe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$amazeBackendBuildScript -Dir `$backendDir -Arch portable 2>&1
+        `$amazeBackendExit = `$LASTEXITCODE
+        `$payload.backend.amazeBuildExitCode = `$amazeBackendExit
+        `$payload.backend.amazeOutput = @(`$amazeBackendOutput | ForEach-Object { [string]`$_ })
         `$payload.backend.artifacts = @(Get-ChildItem -LiteralPath `$backendDir -File -ErrorAction SilentlyContinue |
-            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|dll_test\.exe)$' } |
+            Where-Object { `$_.Name -match '^(igpu_recon_cuda\.(dll|lib|exp|arch\.json)|igpu_amaze_debayer_cuda\.(dll|lib|exp)|dll_test\.exe|amaze_dll_test\.exe)$' } |
             Sort-Object Name |
             ForEach-Object {
                 [ordered]@{
@@ -474,11 +542,17 @@ try {
         if (`$backendExit -ne 0) {
             throw "Backend DLL build failed with exit code `$backendExit"
         }
+        if (`$amazeBackendExit -ne 0) {
+            throw "AMaZE backend DLL build failed with exit code `$amazeBackendExit"
+        }
         if (!(Test-Path -LiteralPath `$backendDll)) {
             throw "Backend DLL build did not produce `$backendDll"
         }
         if (!(Test-Path -LiteralPath `$backendArchSidecar)) {
             throw "Backend DLL build did not produce architecture sidecar `$backendArchSidecar"
+        }
+        if (!(Test-Path -LiteralPath `$amazeBackendDll)) {
+            throw "AMaZE backend DLL build did not produce `$amazeBackendDll"
         }
         New-Item -ItemType Directory -Force -Path `$releaseDir | Out-Null
         `$deployTargets = @()
@@ -489,6 +563,10 @@ try {
         `$deployTargets += [ordered]@{
             source = `$backendArchSidecar
             destination = (Join-Path `$releaseDir 'igpu_recon_cuda.arch.json')
+        }
+        `$deployTargets += [ordered]@{
+            source = `$amazeBackendDll
+            destination = (Join-Path `$releaseDir 'igpu_amaze_debayer_cuda.dll')
         }
         `$cudaRoot = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -Directory -ErrorAction SilentlyContinue |
             Sort-Object Name -Descending |
@@ -545,6 +623,34 @@ try {
     if (-not [string]::IsNullOrWhiteSpace(`$gpuPlaybackReconBackend)) {
         `$args += @('-GpuPlaybackReconBackend', `$gpuPlaybackReconBackend)
     }
+    if (`$cudaAmazeLiveTileStreams -gt 0) {
+        `$args += @('-CudaAmazeLiveTileStreams', [string]`$cudaAmazeLiveTileStreams)
+    }
+    if (`$cudaAmazeFastLaunchChecks) {
+        `$args += '-CudaAmazeFastLaunchChecks'
+    }
+    if (`$cudaAmazeLiveDirectRgbaStore) {
+        `$args += '-CudaAmazeLiveDirectRgbaStore'
+    }
+    if (`$gpuPlaybackReconRetainDeviceOutput) {
+        `$args += '-GpuPlaybackReconRetainDeviceOutput'
+    }
+    if (`$gpuTexNrAcquireLatestReady) {
+        `$args += '-GpuTexNrAcquireLatestReady'
+    }
+    if (`$gpuTexNrImmediateDrainReady) {
+        `$args += '-GpuTexNrImmediateDrainReady'
+    }
+    if (`$gpuTexNrImmediateDrainMax -gt 0) {
+        `$args += @('-GpuTexNrImmediateDrainMax', [string]`$gpuTexNrImmediateDrainMax)
+    }
+    if (`$phase3FrameSlots -gt 0) {
+        `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
+    }
+    if (`$playbackTimerPollMs -gt 0) {
+        `$args += @('-PlaybackTimerPollMs', [string]`$playbackTimerPollMs)
+    }
+    `$args += @('-DropFrameMode', `$dropFrameMode)
     if (`$clipPaths.Count -gt 0) {
         `$args += '-ClipPaths'
         `$args += `$clipPaths
@@ -557,6 +663,9 @@ try {
     }
     if ($skipBuildLiteral) {
         `$args += '-SkipBuild'
+    }
+    if (`$speedLeg) {
+        `$args += '-SpeedLeg'
     }
     `$output = & `$psExe @args 2>&1
     `$exitCode = `$LASTEXITCODE
@@ -676,6 +785,11 @@ $summary = [pscustomobject]@{
     importResult = $importResult
     options = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+        gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
+        gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
+        gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
+        phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
+        playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
     }
     warnings = @($warnings)
     failures = @($failures)

@@ -76,6 +76,30 @@ int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
     double wb_multiplier_g,
     double wb_multiplier_b);
 
+/* Optional live-playback direct-device extension: consume a CUDA device pointer
+ * to reconstructed Bayer16 from the recon backend and write post-WB GL_RGBA16.
+ * Older DLLs may omit this symbol; callers must fail closed to the R16 texture
+ * bridge or CPU/readback fallback.
+ */
+int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
+    igpu_amaze_debayer_backend * backend,
+    const uint16_t * device_bayer16,
+    unsigned int out_rgba16_gl_texture,
+    int width,
+    int height,
+    int black_level,
+    double wb_multiplier_r,
+    double wb_multiplier_g,
+    double wb_multiplier_b);
+
+/* Optional live-playback cache reset. Newer CUDA backends may keep CUDA/GL
+ * image registrations alive across frames; callers that own the GL textures
+ * should invoke this before deleting or reallocating those textures. Older DLLs
+ * may omit this symbol.
+ */
+int igpu_amaze_debayer_reset_live_gl_texture_resources(
+    igpu_amaze_debayer_backend * backend);
+
 int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,
                                    igpu_amaze_debayer_timing_t * timing);
 

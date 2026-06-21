@@ -59,6 +59,7 @@ bool gpuAmazeDebayerRenderPostWbGlTexture(const float * inputRawFrame,
                                           QString * rendererDescription = nullptr,
                                           GpuAmazeDebayerBackendTiming * timing = nullptr);
 GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeR16TextureBackend(void);
+void gpuAmazeDebayerResetR16TextureBackendResources(void);
 bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(unsigned int inputR16GlTexture,
                                                           unsigned int outputRgba16GlTexture,
                                                           int width,
@@ -68,6 +69,15 @@ bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(unsigned int inputR16G
                                                           QString * reason = nullptr,
                                                           QString * rendererDescription = nullptr,
                                                           GpuAmazeDebayerBackendTiming * timing = nullptr);
+bool gpuAmazeDebayerRenderPostWbGlTextureFromDeviceBayer16(const uint16_t *deviceBayer16,
+                                                           unsigned int outputRgba16GlTexture,
+                                                           int width,
+                                                           int height,
+                                                           int blackLevel,
+                                                           const double wbMultipliers[3],
+                                                           QString * reason = nullptr,
+                                                           QString * rendererDescription = nullptr,
+                                                           GpuAmazeDebayerBackendTiming * timing = nullptr);
 bool gpuAmazeDebayerApplyGpuOffscreenPostWb(const float * inputRawFrame,
                                            uint16_t * outputRgb16,
                                            int width,

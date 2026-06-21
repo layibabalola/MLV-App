@@ -3,7 +3,8 @@ param(
     [string]$WorkBlockId,
     [string]$Actor = "codex",
     [string[]]$Claim = @(),
-    [string]$Summary
+    [string]$Summary,
+    [string]$StartHead
 )
 
 $argsList = @("start", "--actor", $Actor)
@@ -12,6 +13,9 @@ if ($WorkBlockId) {
 }
 if ($Summary) {
     $argsList += @("--summary", $Summary)
+}
+if ($StartHead) {
+    $argsList += @("--start-head", $StartHead)
 }
 foreach ($item in $Claim) {
     $argsList += @("--claim", $item)

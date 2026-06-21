@@ -132,6 +132,22 @@ static bool shouldPreferDesktopOpenGl(int argc,
     return false;
 }
 
+static bool shouldShareOpenGlContexts(int argc,
+                                      char *argv[],
+                                      bool batch,
+                                      bool trim_mlv)
+{
+    if (batch || trim_mlv) return false;
+    if (hasGpuRelatedFlag(argc, argv)) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")) return true;
+    return false;
+}
+
 static MainWindow::PlaybackProfileScope parsePlaybackProfileScope(const QString & value, bool * ok)
 {
     if (ok) *ok = true;
@@ -1159,6 +1175,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("0"));
     parser.addOption(startFrameOpt);
 
+    const QCommandLineOption dropFrameModeOpt(
+        QStringLiteral("drop-frame-mode"),
+        QStringLiteral("Force timeline pacing during GUI smoke playback: persisted, on, or off."),
+        QStringLiteral("mode"),
+        QStringLiteral("persisted"));
+    parser.addOption(dropFrameModeOpt);
+
     const QCommandLineOption settleOpt(
         QStringLiteral("settle-ms"),
         QStringLiteral("Milliseconds to let the GUI settle after opening the clip and before pressing Play."),
@@ -1313,6 +1336,16 @@ static int runGuiPlaybackSmoke(QApplication &app)
     if (!ok || startFrame < 0)
     {
         err << "[GUI-SMOKE] ERROR: --start-frame must be 0 or greater.\n";
+        return 2;
+    }
+
+    const QString dropFrameMode =
+        parser.value(dropFrameModeOpt).trimmed().toLower();
+    if (dropFrameMode != QStringLiteral("persisted")
+     && dropFrameMode != QStringLiteral("on")
+     && dropFrameMode != QStringLiteral("off"))
+    {
+        err << "[GUI-SMOKE] ERROR: --drop-frame-mode must be one of persisted, on, off.\n";
         return 2;
     }
 
@@ -1472,6 +1505,8 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.disableLookAssist = parser.isSet(noLookAssistOpt);
     options.zebras = parser.isSet(zebrasOpt);
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
+    options.dropFrame = dropFrameMode == QStringLiteral("on");
+    options.forceDropFrame = dropFrameMode != QStringLiteral("persisted");
 
     QByteArray appName = QCoreApplication::applicationFilePath().toLocal8Bit();
     char *smokeArgv[] = { appName.data(), nullptr };
@@ -1515,8 +1550,18 @@ int main(int argc, char *argv[])
     {
         qputenv("QT_OPENGL", QByteArrayLiteral("desktop"));
     }
+    const bool sharedOpenGlContexts =
+        shouldShareOpenGlContexts(argc, argv, batch, trim_mlv);
+    if (sharedOpenGlContexts)
+    {
+        QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    }
 
     MyApplication a(argc, argv);
+    if (sharedOpenGlContexts)
+    {
+        qInfo() << "GPU OpenGL context sharing enabled for opt-in GPU presentation paths.";
+    }
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     a.setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif

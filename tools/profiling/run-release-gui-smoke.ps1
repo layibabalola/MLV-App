@@ -6,6 +6,8 @@ param(
     [string]$Output = "",
     [int]$Seconds = 8,
     [int]$StartFrame = 0,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "persisted",
     [int]$SettleMs = 2500,
     [double]$SettleCpuPercent = 10,
     [int]$SettleCpuStableMs = 1000,
@@ -779,7 +781,14 @@ $exe = (Resolve-Path -LiteralPath $ExePath).Path
 if ([string]::IsNullOrWhiteSpace($ClipPath)) {
     throw "Missing -Input <clip.mlv>."
 }
-$inputPath = (Resolve-Path -LiteralPath $ClipPath).Path
+$resolvedClipPath = Resolve-Path -LiteralPath $ClipPath
+$inputPath =
+    if ($resolvedClipPath.ProviderPath) {
+        $resolvedClipPath.ProviderPath
+    }
+    else {
+        $resolvedClipPath.Path
+    }
 
 if ([string]::IsNullOrWhiteSpace($Output)) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -816,6 +825,7 @@ $arguments = @(
     "--input", $inputPath,
     "--seconds", [string]$Seconds,
     "--start-frame", [string]$StartFrame,
+    "--drop-frame-mode", $DropFrameMode,
     "--settle-ms", [string]$SettleMs,
     "--settle-cpu-percent", ([string]::Format(
         [System.Globalization.CultureInfo]::InvariantCulture,

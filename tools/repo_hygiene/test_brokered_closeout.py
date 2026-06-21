@@ -455,6 +455,48 @@ class BrokeredCloseoutTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["commitSubject"], "closeout: require human commit subjects")
 
+    def test_start_work_block_can_record_target_contained_start_head(self) -> None:
+        repo = self.init_repo(remote=False)
+        base_head = git(repo, "rev-parse", "master").stdout.strip()
+        git(repo, "checkout", "-b", "codex/target-base-start")
+        (repo / "work.txt").write_text("feature work\n", encoding="utf-8")
+        git(repo, "add", "work.txt")
+        git(repo, "commit", "-m", "feature work")
+        feature_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        result = start_work_block(
+            repo,
+            work_block_id="wb-target-base-start",
+            actor="local-test",
+            start_head="master",
+        )
+
+        manifest = result["manifest"]
+        self.assertEqual(manifest["startHead"], base_head)
+        self.assertEqual(manifest["startHeadOverride"]["requested"], "master")
+        self.assertEqual(manifest["startHeadOverride"]["resolved"], base_head)
+        self.assertEqual(manifest["startHeadOverride"]["currentHead"], feature_head)
+        self.assertEqual(manifest["startHeadOverride"]["targetHead"], base_head)
+
+    def test_start_work_block_rejects_mid_lane_start_head_override(self) -> None:
+        repo = self.init_repo(remote=False)
+        git(repo, "checkout", "-b", "codex/mid-lane-start")
+        (repo / "one.txt").write_text("one\n", encoding="utf-8")
+        git(repo, "add", "one.txt")
+        git(repo, "commit", "-m", "feature one")
+        mid_lane_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        (repo / "two.txt").write_text("two\n", encoding="utf-8")
+        git(repo, "add", "two.txt")
+        git(repo, "commit", "-m", "feature two")
+
+        with self.assertRaisesRegex(HygieneError, "contained in target"):
+            start_work_block(
+                repo,
+                work_block_id="wb-mid-lane-start",
+                actor="local-test",
+                start_head=mid_lane_head,
+            )
+
     def test_start_work_block_rejects_generic_commit_subject(self) -> None:
         repo = self.init_repo()
 

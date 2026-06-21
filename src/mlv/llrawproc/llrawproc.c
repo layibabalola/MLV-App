@@ -189,6 +189,7 @@ static int llrawproc_gpu_export_trusted_enabled(void)
 
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_recon_allowed = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_texture_present_preferred = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_texture_prepare_only_allowed = 0;
 
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled)
@@ -202,10 +203,22 @@ void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled)
     g_llrawproc_gpu_playback_texture_present_preferred = enabled != 0;
 }
 
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled);
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled)
+{
+    g_llrawproc_gpu_playback_texture_prepare_only_allowed = enabled != 0;
+}
+
 static int llrawproc_gpu_playback_recon_enabled(void)
 {
     return g_llrawproc_gpu_playback_recon_allowed
         && llrawproc_env_truthy_value(getenv("MLVAPP_GPU_PLAYBACK_RECON"));
+}
+
+static int llrawproc_gpu_playback_retain_device_output_enabled(void)
+{
+    return llrawproc_env_truthy_value(
+        getenv("MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT"));
 }
 
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_attempted = 0;
@@ -226,9 +239,12 @@ static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_run_attempted = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_used = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_state_valid = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_prepare_only = 0;
 static MLV_THREAD_LOCAL dualiso_gpu_recon_state_t g_llrawproc_gpu_playback_last_prepared_state = {0};
 static MLV_THREAD_LOCAL uint16_t *g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
 static MLV_THREAD_LOCAL size_t g_llrawproc_gpu_playback_last_input_words = 0;
+static MLV_THREAD_LOCAL llrpGpuPlaybackRetainedDeviceBayer16_t
+    g_llrawproc_gpu_playback_last_retained_device_bayer16 = {0};
 
 static void llrawproc_gpu_export_reset_last_run_state(void)
 {
@@ -262,6 +278,7 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
     g_llrawproc_gpu_playback_last_run_rc = 0;
     g_llrawproc_gpu_playback_last_used = 0;
     g_llrawproc_gpu_playback_last_state_valid = 0;
+    g_llrawproc_gpu_playback_last_prepare_only = 0;
     memset(&g_llrawproc_gpu_playback_last_prepared_state, 0,
            sizeof(g_llrawproc_gpu_playback_last_prepared_state));
     if(g_llrawproc_gpu_playback_last_input_bayer16)
@@ -270,20 +287,15 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
         g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
     }
     g_llrawproc_gpu_playback_last_input_words = 0;
+    memset(&g_llrawproc_gpu_playback_last_retained_device_bayer16,
+           0,
+           sizeof(g_llrawproc_gpu_playback_last_retained_device_bayer16));
 }
 
-static int llrawproc_gpu_playback_store_last_input_bayer16(const uint16_t * input,
-                                                           size_t input_words)
+static int llrawproc_gpu_playback_take_last_input_bayer16(uint16_t * owned_input,
+                                                          size_t input_words)
 {
-    uint16_t * copy = NULL;
-    const size_t bytes = input_words * sizeof(uint16_t);
-    if(!input || input_words == 0 || input_words > ((size_t)-1) / sizeof(uint16_t))
-    {
-        return 0;
-    }
-
-    copy = (uint16_t *)malloc(bytes);
-    if(!copy)
+    if(!owned_input || input_words == 0)
     {
         if(g_llrawproc_gpu_playback_last_input_bayer16)
         {
@@ -294,12 +306,11 @@ static int llrawproc_gpu_playback_store_last_input_bayer16(const uint16_t * inpu
         return 0;
     }
 
-    memcpy(copy, input, bytes);
     if(g_llrawproc_gpu_playback_last_input_bayer16)
     {
         free(g_llrawproc_gpu_playback_last_input_bayer16);
     }
-    g_llrawproc_gpu_playback_last_input_bayer16 = copy;
+    g_llrawproc_gpu_playback_last_input_bayer16 = owned_input;
     g_llrawproc_gpu_playback_last_input_words = input_words;
     return 1;
 }
@@ -412,6 +423,12 @@ int llrpGpuPlaybackReconLastStateValidForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void)
 {
     return g_llrawproc_gpu_playback_last_state_valid;
+}
+
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void);
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void)
+{
+    return g_llrawproc_gpu_playback_last_prepare_only;
 }
 
 static void llrawproc_gpu_playback_public_state_from_dualiso(
@@ -541,6 +558,20 @@ size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
     return words;
 }
 
+int llrpGpuPlaybackReconGetLastRetainedDeviceBayer16(
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out);
+int llrpGpuPlaybackReconGetLastRetainedDeviceBayer16(
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out)
+{
+    if(!retained_out) return 0;
+    *retained_out = g_llrawproc_gpu_playback_last_retained_device_bayer16;
+    return retained_out->valid
+        && retained_out->device_bayer16
+        && retained_out->width > 0
+        && retained_out->height > 0
+        && retained_out->token != 0;
+}
+
 void llrpGetLastGpuExportTelemetry(llrpGpuExportTelemetry_t * telemetry)
 {
     if(!telemetry) return;
@@ -569,7 +600,36 @@ typedef int (*llrawproc_gpu_run_fn)(igpu_recon_backend*,
                                     uint16_t*,
                                     unsigned int);
 typedef int (*llrawproc_gpu_last_timing_fn)(igpu_recon_backend*, igpu_recon_timing_t*);
+typedef int (*llrawproc_gpu_last_device_output_fn)(igpu_recon_backend*,
+                                                   const uint16_t**,
+                                                   int*,
+                                                   int*);
+typedef int (*llrawproc_gpu_retain_last_device_output_fn)(igpu_recon_backend*,
+                                                          const uint16_t**,
+                                                          int*,
+                                                          int*,
+                                                          uint64_t*);
+typedef int (*llrawproc_gpu_release_retained_device_output_fn)(igpu_recon_backend*,
+                                                               uint64_t);
+typedef int (*llrawproc_gpu_copy_last_device_output_to_gl_texture_fn)(
+    igpu_recon_backend*,
+    unsigned int);
 typedef int (*llrawproc_gpu_allocated_bytes_fn)(igpu_recon_backend*, uint64_t*);
+typedef int (*llrawproc_gpu_reset_gl_texture_resources_fn)(igpu_recon_backend*);
+
+typedef struct
+{
+    const int * raw2ev;
+    const int * ev2raw;
+    const double * mix_curve;
+    const double * fullres_curve;
+    const float * randn05;
+    int black_level;
+    int white_level;
+    int apply_dither;
+    double ev_correction;
+    double dark_noise;
+} llrawprocGpuReconLutsKey_t;
 
 typedef struct
 {
@@ -588,7 +648,16 @@ typedef struct
     llrawproc_gpu_set_luts_fn set_luts;
     llrawproc_gpu_run_fn run;
     llrawproc_gpu_last_timing_fn last_timing;
+    llrawproc_gpu_last_device_output_fn last_device_output;
+    llrawproc_gpu_retain_last_device_output_fn retain_last_device_output;
+    llrawproc_gpu_release_retained_device_output_fn release_retained_device_output;
+    llrawproc_gpu_copy_last_device_output_to_gl_texture_fn copy_last_device_output_to_gl_texture;
     llrawproc_gpu_allocated_bytes_fn allocated_bytes;
+    llrawproc_gpu_reset_gl_texture_resources_fn reset_gl_texture_resources;
+    int clip_configured;
+    igpu_recon_clip_t configured_clip;
+    int luts_configured;
+    llrawprocGpuReconLutsKey_t configured_luts_key;
 } llrawprocGpuExportBackend_t;
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
@@ -782,9 +851,34 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
     LLRAWPROC_GPU_RESOLVE_TYPED(run, llrawproc_gpu_run_fn, "igpu_recon_run");
     LLRAWPROC_GPU_RESOLVE_TYPED(last_timing, llrawproc_gpu_last_timing_fn, "igpu_recon_last_timing");
     {
+        union { FARPROC raw; llrawproc_gpu_last_device_output_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_last_device_output");
+        g->last_device_output = resolved.typed;
+    }
+    {
+        union { FARPROC raw; llrawproc_gpu_retain_last_device_output_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_retain_last_device_output");
+        g->retain_last_device_output = resolved.typed;
+    }
+    {
+        union { FARPROC raw; llrawproc_gpu_release_retained_device_output_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_release_retained_device_output");
+        g->release_retained_device_output = resolved.typed;
+    }
+    {
+        union { FARPROC raw; llrawproc_gpu_copy_last_device_output_to_gl_texture_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_copy_last_device_output_to_gl_texture");
+        g->copy_last_device_output_to_gl_texture = resolved.typed;
+    }
+    {
         union { FARPROC raw; llrawproc_gpu_allocated_bytes_fn typed; } resolved;
         resolved.raw = GetProcAddress(g->dll, "igpu_recon_allocated_bytes");
         g->allocated_bytes = resolved.typed;
+    }
+    {
+        union { FARPROC raw; llrawproc_gpu_reset_gl_texture_resources_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_reset_gl_texture_resources");
+        g->reset_gl_texture_resources = resolved.typed;
     }
 
 #undef LLRAWPROC_GPU_RESOLVE_TYPED
@@ -820,6 +914,25 @@ static int llrawproc_gpu_recon_backend_available_guarded(int prefer_playback_dll
     return available;
 }
 
+static void llrawproc_gpu_recon_luts_key_from_state(
+    const dualiso_gpu_recon_state_t * state,
+    llrawprocGpuReconLutsKey_t * key)
+{
+    if(!key) return;
+    memset(key, 0, sizeof(*key));
+    if(!state) return;
+    key->raw2ev = state->raw2ev;
+    key->ev2raw = state->ev2raw;
+    key->mix_curve = state->mix_curve;
+    key->fullres_curve = state->fullres_curve;
+    key->randn05 = state->randn05;
+    key->black_level = state->black_level;
+    key->white_level = state->white_level;
+    key->apply_dither = state->apply_dither;
+    key->ev_correction = state->ev_correction;
+    key->dark_noise = state->dark_noise;
+}
+
 static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * state,
                                            const uint16_t * gpu_input,
                                            uint16_t * gpu_output,
@@ -830,12 +943,17 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
                                            int * rc_out,
                                            uint64_t * allocated_bytes_out,
                                            int * allocated_bytes_valid_out,
-                                           llrpGpuPlaybackReconTiming_t * timing_out)
+                                           llrpGpuPlaybackReconTiming_t * timing_out,
+                                           const uint16_t ** device_bayer16_out,
+                                           int * device_width_out,
+                                           int * device_height_out,
+                                           llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out)
 {
     llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
     igpu_recon_clip_t clip;
     igpu_recon_luts_t luts;
     igpu_recon_frame_t frame;
+    llrawprocGpuReconLutsKey_t luts_key;
     int rc = 0;
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
 
@@ -843,6 +961,10 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     if(allocated_bytes_out) *allocated_bytes_out = 0;
     if(allocated_bytes_valid_out) *allocated_bytes_valid_out = 0;
     if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    if(device_bayer16_out) *device_bayer16_out = NULL;
+    if(device_width_out) *device_width_out = 0;
+    if(device_height_out) *device_height_out = 0;
+    if(retained_out) memset(retained_out, 0, sizeof(*retained_out));
     if(!state || !state->valid || !gpu_input || raw_image_size == 0) return 0;
     if(out_kind == IGPU_OUT_CPU16 && !gpu_output) return 0;
     if(out_kind == IGPU_OUT_GL_TEXTURE && gl_texture_id == 0) return 0;
@@ -867,6 +989,7 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     luts.mix_curve = state->mix_curve;
     luts.fullres_curve = state->fullres_curve;
     luts.randn05 = state->randn05;
+    llrawproc_gpu_recon_luts_key_from_state(state, &luts_key);
 
     memset(&frame, 0, sizeof(frame));
     frame.ev_correction = state->ev_correction;
@@ -885,9 +1008,121 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
         pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
         return 0;
     }
-    rc = g->set_clip(g->backend, &clip);
-    if(rc == 0) rc = g->set_luts(g->backend, &luts);
+    if(out_kind == IGPU_OUT_DEVICE_BAYER16 && !g->last_device_output)
+    {
+        pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+        if(rc_out) *rc_out = -3;
+        return 0;
+    }
+    const int clip_matches =
+        g->clip_configured
+        && memcmp(&g->configured_clip, &clip, sizeof(clip)) == 0;
+    const int luts_match =
+        g->luts_configured
+        && memcmp(&g->configured_luts_key, &luts_key, sizeof(luts_key)) == 0;
+    const int need_set_clip = !clip_matches;
+    const int need_set_luts = need_set_clip || !luts_match;
+
+    if(need_set_clip)
+    {
+        rc = g->set_clip(g->backend, &clip);
+        if(rc == 0)
+        {
+            g->configured_clip = clip;
+            g->clip_configured = 1;
+            g->luts_configured = 0;
+        }
+        else
+        {
+            g->clip_configured = 0;
+            g->luts_configured = 0;
+        }
+    }
+    if(rc == 0 && need_set_luts)
+    {
+        rc = g->set_luts(g->backend, &luts);
+        if(rc == 0)
+        {
+            g->configured_luts_key = luts_key;
+            g->luts_configured = 1;
+        }
+        else
+        {
+            g->luts_configured = 0;
+        }
+    }
     if(rc == 0) rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
+    if(rc == 0
+     && out_kind == IGPU_OUT_DEVICE_BAYER16
+     && g->last_device_output
+     && device_bayer16_out
+     && device_width_out
+     && device_height_out)
+    {
+        const uint16_t * device_bayer16 = NULL;
+        int device_width = 0;
+        int device_height = 0;
+        const int device_rc =
+            g->last_device_output(g->backend,
+                                  &device_bayer16,
+                                  &device_width,
+                                  &device_height);
+        if(device_rc == 0
+        && device_bayer16
+        && device_width == state->width
+        && device_height == state->height)
+        {
+            *device_bayer16_out = device_bayer16;
+            *device_width_out = device_width;
+            *device_height_out = device_height;
+        }
+        else
+        {
+            rc = device_rc != 0 ? device_rc : -4;
+        }
+    }
+    if(rc == 0
+     && out_kind == IGPU_OUT_DEVICE_BAYER16
+     && retained_out
+     && !g->retain_last_device_output)
+    {
+        rc = -6;
+    }
+    if(rc == 0
+     && out_kind == IGPU_OUT_DEVICE_BAYER16
+     && retained_out
+     && g->retain_last_device_output)
+    {
+        const uint16_t * retained_device_bayer16 = NULL;
+        int retained_width = 0;
+        int retained_height = 0;
+        uint64_t retained_token = 0;
+        const int retained_rc =
+            g->retain_last_device_output(g->backend,
+                                         &retained_device_bayer16,
+                                         &retained_width,
+                                         &retained_height,
+                                         &retained_token);
+        if(retained_rc == 0
+        && retained_device_bayer16
+        && retained_width == state->width
+        && retained_height == state->height
+        && retained_token != 0)
+        {
+            retained_out->valid = 1;
+            retained_out->device_bayer16 = retained_device_bayer16;
+            retained_out->width = retained_width;
+            retained_out->height = retained_height;
+            retained_out->token = retained_token;
+            if(device_bayer16_out) *device_bayer16_out = retained_device_bayer16;
+            if(device_width_out) *device_width_out = retained_width;
+            if(device_height_out) *device_height_out = retained_height;
+        }
+        else
+        {
+            rc = retained_rc != 0 ? retained_rc : -5;
+        }
+    }
     if(g->allocated_bytes && allocated_bytes_out && allocated_bytes_valid_out)
     {
         uint64_t allocated_bytes = 0;
@@ -916,6 +1151,20 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     return rc == 0;
 }
 
+int llrpGpuPlaybackReconResetGlTextureResources(void);
+int llrpGpuPlaybackReconResetGlTextureResources(void)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    int ok = 1;
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    if(g->backend && g->reset_gl_texture_resources)
+    {
+        ok = (g->reset_gl_texture_resources(g->backend) == 0) ? 1 : 0;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+    return ok;
+}
+
 static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state,
                                          const uint16_t * gpu_input,
                                          uint16_t * gpu_output,
@@ -932,10 +1181,14 @@ static int llrawproc_gpu_recon_run_cpu16(const dualiso_gpu_recon_state_t * state
                                           IGPU_OUT_CPU16,
                                           raw_image_size,
                                           prefer_playback_dll,
-                                          rc_out,
-                                          allocated_bytes_out,
-                                          allocated_bytes_valid_out,
-                                          NULL);
+                                           rc_out,
+                                           allocated_bytes_out,
+                                           allocated_bytes_valid_out,
+                                           NULL,
+                                           NULL,
+                                           NULL,
+                                           NULL,
+                                           NULL);
 }
 
 static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,
@@ -1181,10 +1434,149 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                           IGPU_OUT_GL_TEXTURE,
                                           raw_image_size,
                                           1,
+                                           rc_out,
+                                           NULL,
+                                           NULL,
+                                           timing_out,
+                                           NULL,
+                                           NULL,
+                                           NULL,
+                                           NULL);
+}
+
+int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * state,
+                                         const uint16_t * raw_input_bayer14,
+                                         size_t raw_image_size,
+                                         const uint16_t ** device_bayer16_out,
+                                         int * width_out,
+                                         int * height_out,
+                                         int * rc_out,
+                                         llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * state,
+                                         const uint16_t * raw_input_bayer14,
+                                         size_t raw_image_size,
+                                         const uint16_t ** device_bayer16_out,
+                                         int * width_out,
+                                         int * height_out,
+                                         int * rc_out,
+                                         llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    dualiso_gpu_recon_state_t private_state;
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    if(device_bayer16_out) *device_bayer16_out = NULL;
+    if(width_out) *width_out = 0;
+    if(height_out) *height_out = 0;
+    if(!device_bayer16_out || !width_out || !height_out) return 0;
+    if(!llrawproc_gpu_playback_dualiso_state_from_public(state, &private_state))
+    {
+        return 0;
+    }
+    return llrawproc_gpu_recon_run_backend(&private_state,
+                                          raw_input_bayer14,
+                                          NULL,
+                                          0,
+                                          IGPU_OUT_DEVICE_BAYER16,
+                                          raw_image_size,
+                                          1,
                                           rc_out,
                                           NULL,
                                           NULL,
-                                          timing_out);
+                                          timing_out,
+                                          device_bayer16_out,
+                                          width_out,
+                                          height_out,
+                                          NULL);
+}
+
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    dualiso_gpu_recon_state_t private_state;
+    const uint16_t * device_bayer16 = NULL;
+    int width = 0;
+    int height = 0;
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    if(retained_out) memset(retained_out, 0, sizeof(*retained_out));
+    if(!retained_out) return 0;
+    if(!llrawproc_gpu_playback_dualiso_state_from_public(state, &private_state))
+    {
+        return 0;
+    }
+    return llrawproc_gpu_recon_run_backend(&private_state,
+                                          raw_input_bayer14,
+                                          NULL,
+                                          0,
+                                          IGPU_OUT_DEVICE_BAYER16,
+                                          raw_image_size,
+                                          1,
+                                          rc_out,
+                                          NULL,
+                                          NULL,
+                                          timing_out,
+                                          &device_bayer16,
+                                          &width,
+                                          &height,
+                                          retained_out);
+}
+
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    int rc = -1;
+    if(rc_out) *rc_out = -1;
+    if(gl_texture_id == 0) return 0;
+
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    if(g->backend && !g->unavailable && g->copy_last_device_output_to_gl_texture)
+    {
+        rc = g->copy_last_device_output_to_gl_texture(g->backend, gl_texture_id);
+    }
+    else
+    {
+        rc = -3;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+
+    if(rc_out) *rc_out = rc;
+    return rc == 0;
+}
+
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token);
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    int rc = -1;
+    if(token == 0) return 1;
+
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    if(g->backend && !g->unavailable && g->release_retained_device_output)
+    {
+        rc = g->release_retained_device_output(g->backend, token);
+    }
+    else
+    {
+        rc = -3;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+
+    return rc == 0 || rc == 1;
 }
 
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
@@ -1215,10 +1607,14 @@ int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
                                           IGPU_OUT_CPU16,
                                           raw_image_size,
                                           1,
-                                          rc_out,
-                                          NULL,
-                                          NULL,
-                                          timing_out);
+                                           rc_out,
+                                           NULL,
+                                           NULL,
+                                           timing_out,
+                                           NULL,
+                                           NULL,
+                                           NULL,
+                                           NULL);
 }
 #else
 static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
@@ -1309,6 +1705,75 @@ int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
     return 0;
 }
 
+int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * state,
+                                         const uint16_t * raw_input_bayer14,
+                                         size_t raw_image_size,
+                                         const uint16_t ** device_bayer16_out,
+                                         int * width_out,
+                                         int * height_out,
+                                         int * rc_out,
+                                         llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * state,
+                                         const uint16_t * raw_input_bayer14,
+                                         size_t raw_image_size,
+                                         const uint16_t ** device_bayer16_out,
+                                         int * width_out,
+                                         int * height_out,
+                                         int * rc_out,
+                                         llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    (void)state;
+    (void)raw_input_bayer14;
+    (void)raw_image_size;
+    if(device_bayer16_out) *device_bayer16_out = NULL;
+    if(width_out) *width_out = 0;
+    if(height_out) *height_out = 0;
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    return 0;
+}
+
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out)
+{
+    (void)state;
+    (void)raw_input_bayer14;
+    (void)raw_image_size;
+    if(retained_out) memset(retained_out, 0, sizeof(*retained_out));
+    if(rc_out) *rc_out = -1;
+    if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    return 0;
+}
+
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token);
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token)
+{
+    (void)token;
+    return 1;
+}
+
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out)
+{
+    (void)gl_texture_id;
+    if(rc_out) *rc_out = -1;
+    return 0;
+}
+
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
                                       const uint16_t * raw_input_bayer14,
                                       size_t raw_image_size,
@@ -1342,6 +1807,12 @@ int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
              "%s",
              "cuda");
     return 1;
+}
+
+int llrpGpuPlaybackReconResetGlTextureResources(void);
+int llrpGpuPlaybackReconResetGlTextureResources(void)
+{
+    return 0;
 }
 #endif
 
@@ -2407,6 +2878,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             const double dual_iso_start = mlv_stage_timing_now();
             uint16_t * gpu_export_input = NULL;
             uint16_t * gpu_playback_input = NULL;
+            int gpu_playback_input_owned_by_last_snapshot = 0;
+            int gpu_playback_input_borrowed_from_raw_image = 0;
             const int gpu_export_requested = llrawproc_gpu_export_enabled();
             const int gpu_export_trusted_requested =
                 gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
@@ -2416,6 +2889,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             int dual_iso_recon_ok = 0;
             int capture_gpu_recon_state = 0;
             int gpu_playback_no_readback_post_recon_fix_ran = 0;
+            int gpu_playback_prepare_only_used = 0;
             int explicit_auto_correction = 0;
             double explicit_ev_correction = worker->diso_ev_correction;
             int explicit_black_delta = worker->diso_black_delta;
@@ -2464,10 +2938,23 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
              && raw_image_size > 0)
             {
                 llrawproc_gpu_playback_reset_last_run_state();
-                gpu_playback_input = (uint16_t *)malloc(raw_image_size);
+                if (g_llrawproc_gpu_playback_texture_prepare_only_allowed
+                 && g_llrawproc_gpu_playback_texture_present_preferred
+                 && !gpu_export_input)
+                {
+                    gpu_playback_input = raw_image_buff;
+                    gpu_playback_input_borrowed_from_raw_image = 1;
+                }
+                else
+                {
+                    gpu_playback_input = (uint16_t *)malloc(raw_image_size);
+                }
                 if (gpu_playback_input)
                 {
-                    memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    if (!gpu_playback_input_borrowed_from_raw_image)
+                    {
+                        memcpy(gpu_playback_input, raw_image_buff, raw_image_size);
+                    }
                     /* No-readback eligibility (effectiveness-based, fail-closed):
                      * the CUDA->GL R16 texture the no-readback path presents is
                      * the RECON-ONLY Dual ISO bayer. The post-recon focus-pixel /
@@ -2484,11 +2971,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                      * staying fail-closed when it would change pixels. NOTE:
                      * vertical_stripes is PRE-recon and pattern_noise does not run
                      * for dual-iso frames, so they need no gate here. */
-                    if (g_llrawproc_gpu_playback_texture_present_preferred)
+                    if (g_llrawproc_gpu_playback_texture_present_preferred
+                     && !gpu_playback_input_borrowed_from_raw_image)
                     {
-                        (void)llrawproc_gpu_playback_store_last_input_bayer16(
-                            gpu_playback_input,
-                            raw_image_size / sizeof(uint16_t));
+                        gpu_playback_input_owned_by_last_snapshot =
+                            llrawproc_gpu_playback_take_last_input_bayer16(
+                                gpu_playback_input,
+                                raw_image_size / sizeof(uint16_t));
                     }
                 }
             }
@@ -2521,15 +3010,76 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     g_llrawproc_gpu_playback_last_prepared_state =
                         gpu_playback_state;
                 }
-                if (gpu_playback_state.valid
-                 && !g_llrawproc_gpu_playback_texture_present_preferred
-                 && llrawproc_gpu_playback_try_reconstruct(&gpu_playback_state,
-                                                           gpu_playback_input,
-                                                           raw_image_buff,
-                                                           raw_image_size))
                 {
-                    dual_iso_recon_ok = 1;
-                    gpu_playback_recon_used = 1;
+                    const int gpu_playback_post_recon_fix_would_run =
+                        (focus_pixels && focus_interpolate_outside_lock
+                         && focus_status_snapshot == 2 && focus_map_for_interpolation)
+                     || (bad_pixels && bad_interpolate_outside_lock
+                         && bad_status_snapshot == 2 && bad_map_for_interpolation);
+                    const int gpu_playback_prepare_only_allowed =
+                        g_llrawproc_gpu_playback_texture_prepare_only_allowed
+                        && g_llrawproc_gpu_playback_texture_present_preferred
+                        && !gpu_export_input
+                        && gpu_playback_state.valid
+                        && llrawproc_gpu_playback_recon_state_matches_validated_config(
+                            &gpu_playback_state)
+                        && !gpu_playback_post_recon_fix_would_run;
+                    if (gpu_playback_prepare_only_allowed)
+                    {
+                        if (llrawproc_gpu_playback_retain_device_output_enabled())
+                        {
+                            llrpGpuPlaybackReconState_t public_gpu_playback_state;
+                            llrpGpuPlaybackRetainedDeviceBayer16_t retained_device;
+                            llrpGpuPlaybackReconTiming_t retained_timing;
+                            int retained_rc = -1;
+                            memset(&public_gpu_playback_state,
+                                   0,
+                                   sizeof(public_gpu_playback_state));
+                            memset(&retained_device, 0, sizeof(retained_device));
+                            memset(&retained_timing, 0, sizeof(retained_timing));
+                            llrawproc_gpu_playback_public_state_from_dualiso(
+                                &gpu_playback_state,
+                                &public_gpu_playback_state);
+                            if (llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+                                    &public_gpu_playback_state,
+                                    gpu_playback_input,
+                                    raw_image_size,
+                                    &retained_device,
+                                    &retained_rc,
+                                    &retained_timing)
+                             && retained_device.valid)
+                            {
+                                g_llrawproc_gpu_playback_last_retained_device_bayer16 =
+                                    retained_device;
+                            }
+                            else
+                            {
+                                memset(
+                                    &g_llrawproc_gpu_playback_last_retained_device_bayer16,
+                                    0,
+                                    sizeof(g_llrawproc_gpu_playback_last_retained_device_bayer16));
+                                g_llrawproc_gpu_playback_last_run_rc = retained_rc;
+                            }
+                        }
+                        dual_iso_recon_ok = 1;
+                        gpu_playback_prepare_only_used = 1;
+                        g_llrawproc_gpu_playback_last_prepare_only = 1;
+                        if (!llrawproc_gpu_playback_retain_device_output_enabled()
+                         || g_llrawproc_gpu_playback_last_retained_device_bayer16.valid)
+                        {
+                            g_llrawproc_gpu_playback_last_run_rc = 0;
+                        }
+                    }
+                    else if (gpu_playback_state.valid
+                     && !g_llrawproc_gpu_playback_texture_present_preferred
+                     && llrawproc_gpu_playback_try_reconstruct(&gpu_playback_state,
+                                                               gpu_playback_input,
+                                                               raw_image_buff,
+                                                               raw_image_size))
+                    {
+                        dual_iso_recon_ok = 1;
+                        gpu_playback_recon_used = 1;
+                    }
                 }
             }
 
@@ -2575,7 +3125,9 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 }
             }
 
-            if (!gpu_playback_recon_used && !gpu_export_trusted_used)
+            if (!gpu_playback_recon_used
+             && !gpu_export_trusted_used
+             && !gpu_playback_prepare_only_used)
             {
                 capture_gpu_recon_state =
                     (gpu_export_input != NULL && !gpu_export_trusted_requested)
@@ -2606,6 +3158,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
              * offline triad isolate a recon state-capture desync (recon_only vs
              * backend_cpu) from post-recon stages (recon_only vs out.u16). */
             if (!gpu_playback_recon_used
+             && !gpu_playback_prepare_only_used
              && dual_iso_recon_ok
              && g_llrawproc_gpu_playback_texture_present_preferred)
             {
@@ -2628,6 +3181,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 }
             }
             if (!gpu_playback_recon_used
+             && !gpu_playback_prepare_only_used
              && dual_iso_recon_ok
              && gpu_playback_input
              && g_llrawproc_gpu_playback_texture_present_preferred
@@ -2674,7 +3228,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             }
             if (gpu_playback_input)
             {
-                free(gpu_playback_input);
+                if (!gpu_playback_input_owned_by_last_snapshot
+                 && !gpu_playback_input_borrowed_from_raw_image)
+                {
+                    free(gpu_playback_input);
+                }
             }
             dualiso_debug_set_gpu_recon_state_capture_enabled(0);
             dualiso_debug_get_full20bit_timing(
@@ -2692,6 +3250,17 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 worker->dng_black_level = raw_info.black_level << bits_shift;
                 worker->dng_white_level = raw_info.white_level << bits_shift;
                 worker->dng_bit_depth = 16;
+            }
+
+            if (gpu_playback_prepare_only_used)
+            {
+                /* The CPU recon/display buffer is intentionally not produced in
+                 * this admitted no-readback mode; skip post-recon CPU-only raw
+                 * fixes after proving above that they would not run for this
+                 * frame. If they would run, prepare-only is not admitted and the
+                 * existing CPU/readback path remains the fallback. */
+                focus_pixels = 0;
+                bad_pixels = 0;
             }
 
             const double refine_lock_start = mlv_stage_timing_now();

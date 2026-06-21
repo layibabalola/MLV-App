@@ -45,11 +45,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 int stop_before_dual_iso);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled);
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled);
 int llrpResetGpuPlaybackReconRunForTesting(void);
 int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
 int llrpGpuPlaybackReconLastRunRcForTesting(void);
 int llrpGpuPlaybackReconLastUsedForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void);
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void);
 
 #define LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT (1u << 20)
 #define LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT (24u * 65536u)
@@ -87,7 +89,23 @@ typedef struct
     double kernel_ms;
     double interop_ms;
     double total_ms;
+    double wall_ms;
+    double host_gap_ms;
+    double context_ms;
+    double setup_ms;
+    double recon_wall_ms;
+    double amaze_wall_ms;
+    double post_ms;
 } llrpGpuPlaybackReconTiming_t;
+
+typedef struct
+{
+    int valid;
+    const uint16_t * device_bayer16;
+    int width;
+    int height;
+    uint64_t token;
+} llrpGpuPlaybackRetainedDeviceBayer16_t;
 
 typedef struct
 {
@@ -104,12 +122,33 @@ int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state
 size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
                                                size_t output_words);
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
+int llrpGpuPlaybackReconResetGlTextureResources(void);
 int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      const uint16_t * raw_input_bayer14,
                                      size_t raw_image_size,
                                      unsigned int gl_texture_id,
                                      int * rc_out,
                                      llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * state,
+                                         const uint16_t * raw_input_bayer14,
+                                         size_t raw_image_size,
+                                         const uint16_t ** device_bayer16_out,
+                                         int * width_out,
+                                         int * height_out,
+                                         int * rc_out,
+                                         llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconGetLastRetainedDeviceBayer16(
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out);
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
                                       const uint16_t * raw_input_bayer14,
                                       size_t raw_image_size,

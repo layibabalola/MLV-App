@@ -13,8 +13,10 @@
 #include "../cuda_amaze_debayer_stage_probe.cu"
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <vector>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -31,6 +33,15 @@
 #define GL_TEXTURE_2D 0x0DE1
 #endif
 
+struct CachedGlImageResource
+{
+    cudaGraphicsResource * resource = nullptr;
+    unsigned int texture = 0;
+    int width = 0;
+    int height = 0;
+    unsigned int flags = 0;
+};
+
 struct igpu_amaze_debayer_backend
 {
     std::string description;
@@ -38,7 +49,12 @@ struct igpu_amaze_debayer_backend
     uint16_t * liveReconBayer16 = nullptr;
     float * liveRawFloat = nullptr;
     uint16_t * liveRgb16 = nullptr;
+    uint16_t * liveRgba16 = nullptr;
     DeviceBuffers liveDeviceBuffers;
+    std::vector<DeviceBuffers> liveTileDeviceBuffers;
+    std::vector<cudaStream_t> liveTileStreams;
+    CachedGlImageResource liveInputR16Resource;
+    CachedGlImageResource liveOutputRgba16Resource;
     std::size_t livePixelCount = 0;
     int liveWidth = 0;
     int liveHeight = 0;
@@ -47,11 +63,139 @@ struct igpu_amaze_debayer_backend
 
 namespace
 {
+constexpr int kDefaultLiveTileStreamCount = 64;
+constexpr int kMaxLiveTileStreamCount = 64;
+
+int live_tile_stream_count_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS");
+    if (!value || !*value) return kDefaultLiveTileStreamCount;
+
+    char * end = nullptr;
+    const long parsed = std::strtol(value, &end, 10);
+    if (end == value) return kDefaultLiveTileStreamCount;
+    if (parsed < 1) return 1;
+    if (parsed > kMaxLiveTileStreamCount) return kMaxLiveTileStreamCount;
+    return static_cast<int>(parsed);
+}
+
+bool live_fast_launch_checks_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS");
+    if (!value || !*value) return true;
+
+    const char first = value[0];
+    if (first == '0' || first == 'f' || first == 'F'
+        || first == 'n' || first == 'N')
+    {
+        return false;
+    }
+    if ((first == 'o' || first == 'O')
+        && (value[1] == 'f' || value[1] == 'F'))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool live_direct_rgba_store_from_env()
+{
+    const char * value = std::getenv("MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE");
+    if (!value || !*value) return true;
+
+    const char first = value[0];
+    if (first == '0' || first == 'f' || first == 'F'
+        || first == 'n' || first == 'N')
+    {
+        return false;
+    }
+    if ((first == 'o' || first == 'O')
+        && (value[1] == 'f' || value[1] == 'F'))
+    {
+        return false;
+    }
+    return true;
+}
+
 double now_ms()
 {
     using clock = std::chrono::steady_clock;
     const auto now = clock::now().time_since_epoch();
     return std::chrono::duration<double, std::milli>(now).count();
+}
+
+int reset_cached_gl_resource(CachedGlImageResource * cache, bool tolerateInvalidGraphicsContext)
+{
+    int status = 0;
+    if (!cache) return status;
+    if (cache->resource)
+    {
+        const cudaError_t rc = cudaGraphicsUnregisterResource(cache->resource);
+        if (rc != cudaSuccess)
+        {
+            if (!(tolerateInvalidGraphicsContext && rc == cudaErrorInvalidGraphicsContext))
+            {
+                std::fprintf(stderr,
+                             "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(cached GL texture) failed: %s\n",
+                             cudaGetErrorString(rc));
+            }
+            status = 2;
+        }
+    }
+    cache->resource = nullptr;
+    cache->texture = 0;
+    cache->width = 0;
+    cache->height = 0;
+    cache->flags = 0;
+    return status;
+}
+
+void reset_live_gl_resources(igpu_amaze_debayer_backend * backend)
+{
+    if (!backend) return;
+    reset_cached_gl_resource(&backend->liveInputR16Resource, true);
+    reset_cached_gl_resource(&backend->liveOutputRgba16Resource, true);
+}
+
+int ensure_cached_gl_resource(CachedGlImageResource * cache,
+                              unsigned int glTexture,
+                              int width,
+                              int height,
+                              unsigned int flags,
+                              const char * label)
+{
+    if (!cache || glTexture == 0 || width <= 0 || height <= 0) return -1;
+    if (cache->resource
+        && cache->texture == glTexture
+        && cache->width == width
+        && cache->height == height
+        && cache->flags == flags)
+    {
+        return 0;
+    }
+
+    const int resetRc = reset_cached_gl_resource(cache, false);
+    if (resetRc != 0) return resetRc;
+    cudaGraphicsResource * resource = nullptr;
+    const cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                       glTexture,
+                                                       GL_TEXTURE_2D,
+                                                       flags);
+    if (rc != cudaSuccess)
+    {
+        std::fprintf(stderr,
+                     "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(%s) failed: %s\n",
+                     label ? label : "cached GL texture",
+                     cudaGetErrorString(rc));
+        return 2;
+    }
+
+    cache->resource = resource;
+    cache->texture = glTexture;
+    cache->width = width;
+    cache->height = height;
+    cache->flags = flags;
+    return 0;
 }
 
 __global__ void k_tile_load_float(const float * raw,
@@ -158,6 +302,47 @@ __global__ void k_pack_rgb16_to_rgba16_post_wb_undo(const uint16_t * rgb,
     rgba[rgbaIndex + 3u] = 65535u;
 }
 
+__global__ void k_store_tile_rgba16_post_wb_undo(const float * red,
+                                                 const float * green,
+                                                 const float * blue,
+                                                 uint16_t * outRgba16,
+                                                 int width,
+                                                 int height,
+                                                 int top,
+                                                 int left,
+                                                 int rr1,
+                                                 int cc1,
+                                                 int blackLevel,
+                                                 double wbMultiplierR,
+                                                 double wbMultiplierG,
+                                                 double wbMultiplierB)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 16 || rr >= rr1 - 16 || cc < 16 || cc >= cc1 - 16) return;
+
+    const int row = top + rr;
+    const int col = left + cc;
+    if (row < 0 || row >= height || col < 0 || col >= width) return;
+
+    const int tileIndex = rr * kTileSize + cc;
+    const std::size_t outIndex =
+        (static_cast<std::size_t>(row) * width + col) * 4u;
+    const uint16_t r = truncate_amaze_float_to_u16(red[tileIndex]);
+    const uint16_t g = truncate_amaze_float_to_u16(green[tileIndex]);
+    const uint16_t b = truncate_amaze_float_to_u16(blue[tileIndex]);
+    outRgba16[outIndex + 0u] =
+        clamp_double_to_u16((static_cast<double>(r) / wbMultiplierR)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 1u] =
+        clamp_double_to_u16((static_cast<double>(g) / wbMultiplierG)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 2u] =
+        clamp_double_to_u16((static_cast<double>(b) / wbMultiplierB)
+                            + static_cast<double>(blackLevel));
+    outRgba16[outIndex + 3u] = 65535u;
+}
+
 __device__ __forceinline__ int fc_rggb_absolute(int row, int col)
 {
     const int row2 = row & 1;
@@ -189,19 +374,70 @@ __global__ void k_bayer16_to_post_wb_raw_float(const uint16_t * bayer16,
         static_cast<float>((static_cast<double>(bayer16[pixel]) - static_cast<double>(blackLevel)) * wb);
 }
 
+__global__ void k_tile_load_bayer16_post_wb(const uint16_t * bayer16,
+                                            float * cfa,
+                                            float * rgbgreen,
+                                            int width,
+                                            int height,
+                                            int top,
+                                            int left,
+                                            int rr1,
+                                            int cc1,
+                                            int blackLevel,
+                                            double wbMultiplierR,
+                                            double wbMultiplierG,
+                                            double wbMultiplierB)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr >= rr1 || cc >= cc1) return;
+
+    const int row = reflect_index(top + rr, height);
+    const int col = reflect_index(left + cc, width);
+    const int channel = fc_rggb_absolute(row, col);
+    const double wb =
+        (channel == 0) ? wbMultiplierR : ((channel == 2) ? wbMultiplierB : wbMultiplierG);
+    const std::size_t sourceIndex =
+        static_cast<std::size_t>(row) * static_cast<std::size_t>(width)
+        + static_cast<std::size_t>(col);
+    const float normalized =
+        static_cast<float>(
+            (static_cast<double>(bayer16[sourceIndex]) - static_cast<double>(blackLevel)) * wb)
+        / 65535.0f;
+    const int idx = rr * kTileSize + cc;
+    cfa[idx] = normalized;
+    rgbgreen[idx] = (fc_rggb(rr, cc) == 1) ? normalized : 0.0f;
+}
+
 void free_live_texture_buffers(igpu_amaze_debayer_backend * backend)
 {
     if (!backend) return;
+    reset_live_gl_resources(backend);
     cudaFree(backend->liveReconBayer16);
     cudaFree(backend->liveRawFloat);
     cudaFree(backend->liveRgb16);
+    cudaFree(backend->liveRgba16);
     backend->liveReconBayer16 = nullptr;
     backend->liveRawFloat = nullptr;
     backend->liveRgb16 = nullptr;
+    backend->liveRgba16 = nullptr;
     if (backend->liveDeviceBuffersAllocated)
     {
         free_device(&backend->liveDeviceBuffers);
         backend->liveDeviceBuffers = DeviceBuffers();
+        for (std::size_t index = 0; index < backend->liveTileDeviceBuffers.size(); ++index)
+        {
+            free_device(&backend->liveTileDeviceBuffers[index]);
+        }
+        backend->liveTileDeviceBuffers.clear();
+        for (std::size_t index = 0; index < backend->liveTileStreams.size(); ++index)
+        {
+            if (backend->liveTileStreams[index])
+            {
+                cudaStreamDestroy(backend->liveTileStreams[index]);
+            }
+        }
+        backend->liveTileStreams.clear();
         backend->liveDeviceBuffersAllocated = false;
     }
     backend->livePixelCount = 0;
@@ -220,13 +456,16 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
 
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const int streamCount = live_tile_stream_count_from_env();
     if (backend->liveReconBayer16
         && backend->liveRawFloat
         && backend->liveRgb16
+        && backend->liveRgba16
         && backend->liveDeviceBuffersAllocated
         && backend->livePixelCount == pixelCount
         && backend->liveWidth == width
-        && backend->liveHeight == height)
+        && backend->liveHeight == height
+        && backend->liveTileStreams.size() == static_cast<std::size_t>(streamCount))
     {
         return;
     }
@@ -235,7 +474,17 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
     CK(cudaMalloc(&backend->liveReconBayer16, pixelCount * sizeof(uint16_t)));
     CK(cudaMalloc(&backend->liveRawFloat, pixelCount * sizeof(float)));
     CK(cudaMalloc(&backend->liveRgb16, pixelCount * 3u * sizeof(uint16_t)));
+    CK(cudaMalloc(&backend->liveRgba16, pixelCount * 4u * sizeof(uint16_t)));
     allocate_device(&backend->liveDeviceBuffers, 1);
+    backend->liveTileDeviceBuffers.resize(static_cast<std::size_t>(streamCount));
+    backend->liveTileStreams.resize(static_cast<std::size_t>(streamCount), nullptr);
+    for (int index = 0; index < streamCount; ++index)
+    {
+        allocate_device(&backend->liveTileDeviceBuffers[static_cast<std::size_t>(index)], 1);
+        CK(cudaStreamCreateWithFlags(
+            &backend->liveTileStreams[static_cast<std::size_t>(index)],
+            cudaStreamNonBlocking));
+    }
     backend->liveDeviceBuffersAllocated = true;
     backend->livePixelCount = pixelCount;
     backend->liveWidth = width;
@@ -245,30 +494,47 @@ void ensure_live_texture_buffers(igpu_amaze_debayer_backend * backend,
 int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
                                    uint16_t * dBayer16,
                                    int width,
-                                   int height)
+                                   int height,
+                                   CachedGlImageResource * cache = nullptr)
 {
     if (glTexture == 0 || !dBayer16 || width <= 0 || height <= 0) return -1;
 
     cudaGraphicsResource * resource = nullptr;
-    cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
-                                                 glTexture,
-                                                 GL_TEXTURE_2D,
-                                                 cudaGraphicsRegisterFlagsReadOnly);
-    if (rc != cudaSuccess)
+    const bool cached = cache != nullptr;
+    if (cached)
     {
-        std::fprintf(stderr,
-                     "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_R16 source texture) failed: %s\n",
-                     cudaGetErrorString(rc));
-        return 2;
+        const int cacheRc = ensure_cached_gl_resource(cache,
+                                                      glTexture,
+                                                      width,
+                                                      height,
+                                                      cudaGraphicsRegisterFlagsReadOnly,
+                                                      "cached GL_R16 source texture");
+        if (cacheRc != 0) return cacheRc;
+        resource = cache->resource;
+    }
+    else
+    {
+        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                     glTexture,
+                                                     GL_TEXTURE_2D,
+                                                     cudaGraphicsRegisterFlagsReadOnly);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_R16 source texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            return 2;
+        }
     }
 
-    rc = cudaGraphicsMapResources(1, &resource, 0);
+    cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
     if (rc != cudaSuccess)
     {
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_R16 source texture) failed: %s\n",
                      cudaGetErrorString(rc));
-        cudaGraphicsUnregisterResource(resource);
+        if (cached) reset_cached_gl_resource(cache, false);
+        else cudaGraphicsUnregisterResource(resource);
         return 2;
     }
 
@@ -288,12 +554,14 @@ int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
     }
 
     const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
-    const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
+    const cudaError_t unregisterRc =
+        cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
     if (rc != cudaSuccess)
     {
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] GL_R16 source texture device copy failed: %s\n",
                      cudaGetErrorString(rc));
+        if (cached) reset_cached_gl_resource(cache, false);
         return 2;
     }
     if (unmapRc != cudaSuccess)
@@ -301,6 +569,7 @@ int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
         std::fprintf(stderr,
                      "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_R16 source texture) failed: %s\n",
                      cudaGetErrorString(unmapRc));
+        if (cached) reset_cached_gl_resource(cache, false);
         return 2;
     }
     if (unregisterRc != cudaSuccess)
@@ -319,7 +588,8 @@ void run_tile(const float * dRaw,
               int width,
               int height,
               int top,
-              int left)
+              int left,
+              cudaStream_t stream = 0)
 {
     const int bottom = imin_i(top + kTileSize, height + 16);
     const int right = imin_i(left + kTileSize, width + 16);
@@ -332,136 +602,327 @@ void run_tile(const float * dRaw,
     const dim3 grid((kTileSize + block.x - 1) / block.x,
                     (kTileSize + block.y - 1) / block.y);
 
-    k_tile_load_float<<<grid, block>>>(dRaw,
-                                       d.cfa,
-                                       d.rgbgreen,
-                                       width,
-                                       height,
-                                       top,
-                                       left,
-                                       rr1,
-                                       cc1);
+    k_tile_load_float<<<grid, block, 0, stream>>>(dRaw,
+                                                  d.cfa,
+                                                  d.rgbgreen,
+                                                  width,
+                                                  height,
+                                                  top,
+                                                  left,
+                                                  rr1,
+                                                  cc1);
     CK(cudaGetLastError());
-    k_gradients<<<grid, block>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
+    k_gradients<<<grid, block, 0, stream>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
     CK(cudaGetLastError());
-    k_diagonal_precursors<<<grid, block>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
+    k_diagonal_precursors<<<grid, block, 0, stream>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
     CK(cudaGetLastError());
-    k_green_interpolation<<<grid, block>>>(d.cfa,
-                                           d.dirwts0,
-                                           d.dirwts1,
-                                           d.vcd,
-                                           d.hcd,
-                                           d.vcdalt,
-                                           d.hcdalt,
-                                           d.dgintv,
-                                           d.dginth,
-                                           rr1,
-                                           cc1);
+    k_green_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                      d.dirwts0,
+                                                      d.dirwts1,
+                                                      d.vcd,
+                                                      d.hcd,
+                                                      d.vcdalt,
+                                                      d.hcdalt,
+                                                      d.dgintv,
+                                                      d.dginth,
+                                                      rr1,
+                                                      cc1);
     CK(cudaGetLastError());
-    k_variance_selection_wavefront<<<1, kVarianceWavefrontThreads>>>(d.cfa,
-                                                                     d.vcd,
-                                                                     d.hcd,
-                                                                     d.vcdalt,
-                                                                     d.hcdalt,
-                                                                     d.cddiffsq,
-                                                                     rr1,
-                                                                     cc1);
+    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
+        d.cfa,
+        d.vcd,
+        d.hcd,
+        d.vcdalt,
+        d.hcdalt,
+        d.cddiffsq,
+        rr1,
+        cc1);
     CK(cudaGetLastError());
-    k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
-                                             d.dirwts1,
-                                             d.vcd,
-                                             d.hcd,
-                                             d.dgintv,
-                                             d.dginth,
-                                             d.hvwt,
-                                             rr1,
-                                             cc1);
+    k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
+                                                        d.dirwts1,
+                                                        d.vcd,
+                                                        d.hcd,
+                                                        d.dgintv,
+                                                        d.dginth,
+                                                        d.hvwt,
+                                                        rr1,
+                                                        cc1);
     CK(cudaGetLastError());
-    k_nyquist_test<<<grid, block>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
+    k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
-    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads>>>(d.nyquist, rr1, cc1);
+    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
-    k_nyquist_area_interpolation<<<grid, block>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
+    k_nyquist_area_interpolation<<<grid, block, 0, stream>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
     CK(cudaGetLastError());
-    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(d.cfa,
-                                                                   d.vcd,
-                                                                   d.hcd,
-                                                                   d.nyquist,
-                                                                   d.hvwt,
-                                                                   d.dgrb0,
-                                                                   d.rgbgreen,
-                                                                   d.dgrb2h,
-                                                                   d.dgrb2v,
-                                                                   rr1,
-                                                                   cc1);
+    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads, 0, stream>>>(d.cfa,
+                                                                              d.vcd,
+                                                                              d.hcd,
+                                                                              d.nyquist,
+                                                                              d.hvwt,
+                                                                              d.dgrb0,
+                                                                              d.rgbgreen,
+                                                                              d.dgrb2h,
+                                                                              d.dgrb2v,
+                                                                              rr1,
+                                                                              cc1);
     CK(cudaGetLastError());
-    k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
-                                                d.vcd,
-                                                d.hcd,
-                                                d.nyquist,
-                                                d.dgrb2h,
-                                                d.dgrb2v,
-                                                d.dgrb0,
-                                                d.rgbgreen,
-                                                rr1,
-                                                cc1);
+    k_nyquist_green_refinement<<<grid, block, 0, stream>>>(d.cfa,
+                                                           d.vcd,
+                                                           d.hcd,
+                                                           d.nyquist,
+                                                           d.dgrb2h,
+                                                           d.dgrb2v,
+                                                           d.dgrb0,
+                                                           d.rgbgreen,
+                                                           rr1,
+                                                           cc1);
     CK(cudaGetLastError());
-    k_diagonal_rb_interpolation<<<grid, block>>>(d.cfa,
-                                                 d.delp,
-                                                 d.delm,
-                                                 d.dgrbsq1p,
-                                                 d.dgrbsq1m,
-                                                 d.rbm,
-                                                 d.rbp,
-                                                 d.pmwt,
-                                                 rr1,
-                                                 cc1);
+    k_diagonal_rb_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.delp,
+                                                            d.delm,
+                                                            d.dgrbsq1p,
+                                                            d.dgrbsq1m,
+                                                            d.rbm,
+                                                            d.rbp,
+                                                            d.pmwt,
+                                                            rr1,
+                                                            cc1);
     CK(cudaGetLastError());
-    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(d.cfa,
-                                                                     d.rbm,
-                                                                     d.rbp,
-                                                                     d.pmwt,
-                                                                     d.pmwtalt,
-                                                                     d.rbint,
-                                                                     rr1,
-                                                                     cc1);
+    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads, 0, stream>>>(d.cfa,
+                                                                                d.rbm,
+                                                                                d.rbp,
+                                                                                d.pmwt,
+                                                                                d.pmwtalt,
+                                                                                d.rbint,
+                                                                                rr1,
+                                                                                cc1);
     CK(cudaGetLastError());
-    k_diagonal_green_correction<<<grid, block>>>(d.cfa,
-                                                 d.dirwts0,
-                                                 d.dirwts1,
-                                                 d.hvwt,
-                                                 d.pmwt,
-                                                 d.rbint,
-                                                 d.dgrb0,
-                                                 d.rgbgreen,
-                                                 rr1,
-                                                 cc1);
+    k_diagonal_green_correction<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.dirwts0,
+                                                            d.dirwts1,
+                                                            d.hvwt,
+                                                            d.pmwt,
+                                                            d.rbint,
+                                                            d.dgrb0,
+                                                            d.rgbgreen,
+                                                            rr1,
+                                                            cc1);
     CK(cudaGetLastError());
-    k_chrominance_coset_split<<<grid, block>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    k_chrominance_coset_split<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
     CK(cudaGetLastError());
-    k_fancy_chrominance_interpolation<<<grid, block>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    k_fancy_chrominance_interpolation<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
     CK(cudaGetLastError());
-    k_final_output_planes<<<grid, block>>>(d.rgbgreen,
-                                           d.hvwt,
-                                           d.dgrb0,
-                                           d.dgrb1,
-                                           d.red,
-                                           d.green,
-                                           d.blue,
-                                           rr1,
-                                           cc1);
+    k_final_output_planes<<<grid, block, 0, stream>>>(d.rgbgreen,
+                                                      d.hvwt,
+                                                      d.dgrb0,
+                                                      d.dgrb1,
+                                                      d.red,
+                                                      d.green,
+                                                      d.blue,
+                                                      rr1,
+                                                      cc1);
     CK(cudaGetLastError());
-    k_store_tile_rgb16<<<grid, block>>>(d.red,
-                                        d.green,
-                                        d.blue,
-                                        dRgb16,
-                                        width,
-                                        height,
-                                        top,
-                                        left,
-                                        rr1,
-                                        cc1);
+    k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
+                                                   d.green,
+                                                   d.blue,
+                                                   dRgb16,
+                                                   width,
+                                                   height,
+                                                   top,
+                                                   left,
+                                                   rr1,
+                                                   cc1);
     CK(cudaGetLastError());
+}
+
+void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
+                              uint16_t * dRgb16,
+                              uint16_t * dRgba16,
+                              DeviceBuffers & d,
+                              int width,
+                              int height,
+                              int top,
+                              int left,
+                              int blackLevel,
+                              double wbMultiplierR,
+                              double wbMultiplierG,
+                              double wbMultiplierB,
+                              cudaStream_t stream = 0,
+                              bool fastLaunchChecks = false)
+{
+    const int bottom = imin_i(top + kTileSize, height + 16);
+    const int right = imin_i(left + kTileSize, width + 16);
+    const int rr1 = bottom - top;
+    const int cc1 = right - left;
+
+    clear_device_stages(d);
+
+    const dim3 block(16, 16);
+    const dim3 grid((kTileSize + block.x - 1) / block.x,
+                    (kTileSize + block.y - 1) / block.y);
+
+#define CHECK_LIVE_TILE_LAUNCH() \
+    do { \
+        if (!fastLaunchChecks) CK(cudaGetLastError()); \
+    } while (0)
+
+    k_tile_load_bayer16_post_wb<<<grid, block, 0, stream>>>(dBayer16,
+                                                            d.cfa,
+                                                            d.rgbgreen,
+                                                            width,
+                                                            height,
+                                                            top,
+                                                            left,
+                                                            rr1,
+                                                            cc1,
+                                                            blackLevel,
+                                                            wbMultiplierR,
+                                                            wbMultiplierG,
+                                                            wbMultiplierB);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_gradients<<<grid, block, 0, stream>>>(d.cfa, d.dirwts0, d.dirwts1, d.delhvsqsum, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_diagonal_precursors<<<grid, block, 0, stream>>>(d.cfa, d.delp, d.delm, d.dgrbsq1p, d.dgrbsq1m, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_green_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                      d.dirwts0,
+                                                      d.dirwts1,
+                                                      d.vcd,
+                                                      d.hcd,
+                                                      d.vcdalt,
+                                                      d.hcdalt,
+                                                      d.dgintv,
+                                                      d.dginth,
+                                                      rr1,
+                                                      cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
+        d.cfa,
+        d.vcd,
+        d.hcd,
+        d.vcdalt,
+        d.hcdalt,
+        d.cddiffsq,
+        rr1,
+        cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
+                                                        d.dirwts1,
+                                                        d.vcd,
+                                                        d.hcd,
+                                                        d.dgintv,
+                                                        d.dginth,
+                                                        d.hvwt,
+                                                        rr1,
+                                                        cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_nyquist_area_interpolation<<<grid, block, 0, stream>>>(d.cfa, d.nyquist, d.hvwt, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads, 0, stream>>>(d.cfa,
+                                                                              d.vcd,
+                                                                              d.hcd,
+                                                                              d.nyquist,
+                                                                              d.hvwt,
+                                                                              d.dgrb0,
+                                                                              d.rgbgreen,
+                                                                              d.dgrb2h,
+                                                                              d.dgrb2v,
+                                                                              rr1,
+                                                                              cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_nyquist_green_refinement<<<grid, block, 0, stream>>>(d.cfa,
+                                                           d.vcd,
+                                                           d.hcd,
+                                                           d.nyquist,
+                                                           d.dgrb2h,
+                                                           d.dgrb2v,
+                                                           d.dgrb0,
+                                                           d.rgbgreen,
+                                                           rr1,
+                                                           cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_diagonal_rb_interpolation<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.delp,
+                                                            d.delm,
+                                                            d.dgrbsq1p,
+                                                            d.dgrbsq1m,
+                                                            d.rbm,
+                                                            d.rbp,
+                                                            d.pmwt,
+                                                            rr1,
+                                                            cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads, 0, stream>>>(d.cfa,
+                                                                                d.rbm,
+                                                                                d.rbp,
+                                                                                d.pmwt,
+                                                                                d.pmwtalt,
+                                                                                d.rbint,
+                                                                                rr1,
+                                                                                cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_diagonal_green_correction<<<grid, block, 0, stream>>>(d.cfa,
+                                                            d.dirwts0,
+                                                            d.dirwts1,
+                                                            d.hvwt,
+                                                            d.pmwt,
+                                                            d.rbint,
+                                                            d.dgrb0,
+                                                            d.rgbgreen,
+                                                            rr1,
+                                                            cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_chrominance_coset_split<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_fancy_chrominance_interpolation<<<grid, block, 0, stream>>>(d.dgrb0, d.dgrb1, rr1, cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    k_final_output_planes<<<grid, block, 0, stream>>>(d.rgbgreen,
+                                                      d.hvwt,
+                                                      d.dgrb0,
+                                                      d.dgrb1,
+                                                      d.red,
+                                                      d.green,
+                                                      d.blue,
+                                                      rr1,
+                                                      cc1);
+    CHECK_LIVE_TILE_LAUNCH();
+    if (dRgba16)
+    {
+        k_store_tile_rgba16_post_wb_undo<<<grid, block, 0, stream>>>(
+            d.red,
+            d.green,
+            d.blue,
+            dRgba16,
+            width,
+            height,
+            top,
+            left,
+            rr1,
+            cc1,
+            blackLevel,
+            wbMultiplierR,
+            wbMultiplierG,
+            wbMultiplierB);
+    }
+    else
+    {
+        k_store_tile_rgb16<<<grid, block, 0, stream>>>(d.red,
+                                                       d.green,
+                                                       d.blue,
+                                                       dRgb16,
+                                                       width,
+                                                       height,
+                                                       top,
+                                                       left,
+                                                       rr1,
+                                                       cc1);
+    }
+    CK(cudaGetLastError());
+#undef CHECK_LIVE_TILE_LAUNCH
 }
 
 void run_frame_to_device_rgb16(const float * dRaw,
@@ -476,6 +937,103 @@ void run_frame_to_device_rgb16(const float * dRaw,
         {
             run_tile(dRaw, dRgb16, d, width, height, top, left);
         }
+    }
+}
+
+void run_frame_to_device_rgb16_bayer16_post_wb_batched(
+    const uint16_t * dBayer16,
+    uint16_t * dRgb16,
+    uint16_t * dRgba16,
+    std::vector<DeviceBuffers> & buffers,
+    const std::vector<cudaStream_t> & streams,
+    int width,
+    int height,
+    int blackLevel,
+    double wbMultiplierR,
+    double wbMultiplierG,
+    double wbMultiplierB,
+    bool fastLaunchChecks = false)
+{
+    const std::size_t batchSize = std::min(buffers.size(), streams.size());
+    if (batchSize == 0)
+    {
+        return;
+    }
+
+    std::size_t inFlight = 0;
+    for (int top = -16; top < height; top += kTileSize - 32)
+    {
+        for (int left = -16; left < width; left += kTileSize - 32)
+        {
+            const std::size_t slot = inFlight % batchSize;
+            if (inFlight >= batchSize)
+            {
+                CK(cudaStreamSynchronize(streams[slot]));
+            }
+            run_tile_bayer16_post_wb(dBayer16,
+                                     dRgb16,
+                                     dRgba16,
+                                     buffers[slot],
+                                     width,
+                                     height,
+                                     top,
+                                     left,
+                                     blackLevel,
+                                     wbMultiplierR,
+                                     wbMultiplierG,
+                                     wbMultiplierB,
+                                     streams[slot],
+                                     fastLaunchChecks);
+            ++inFlight;
+        }
+    }
+
+    const std::size_t active = std::min(inFlight, batchSize);
+    for (std::size_t slot = 0; slot < active; ++slot)
+    {
+        CK(cudaStreamSynchronize(streams[slot]));
+    }
+}
+
+void run_frame_to_device_rgb16_batched(const float * dRaw,
+                                       uint16_t * dRgb16,
+                                       std::vector<DeviceBuffers> & buffers,
+                                       const std::vector<cudaStream_t> & streams,
+                                       int width,
+                                       int height)
+{
+    const std::size_t batchSize = std::min(buffers.size(), streams.size());
+    if (batchSize == 0)
+    {
+        return;
+    }
+
+    std::size_t inFlight = 0;
+    for (int top = -16; top < height; top += kTileSize - 32)
+    {
+        for (int left = -16; left < width; left += kTileSize - 32)
+        {
+            const std::size_t slot = inFlight % batchSize;
+            if (inFlight >= batchSize)
+            {
+                CK(cudaStreamSynchronize(streams[slot]));
+            }
+            run_tile(dRaw,
+                     dRgb16,
+                     buffers[slot],
+                     width,
+                     height,
+                     top,
+                     left,
+                     streams[slot]);
+            ++inFlight;
+        }
+    }
+
+    const std::size_t active = std::min(inFlight, batchSize);
+    for (std::size_t slot = 0; slot < active; ++slot)
+    {
+        CK(cudaStreamSynchronize(streams[slot]));
     }
 }
 
@@ -574,6 +1132,112 @@ int copy_rgb16_to_gl_rgba16_texture(const uint16_t * dRgb16,
 
     return 0;
 }
+
+int copy_rgba16_to_gl_rgba16_texture(const uint16_t * dRgba16,
+                                     int width,
+                                     int height,
+                                     unsigned int glTexture,
+                                     CachedGlImageResource * cache = nullptr)
+{
+    if (!dRgba16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
+
+    cudaGraphicsResource * resource = nullptr;
+    const bool cached = cache != nullptr;
+
+    try
+    {
+        if (cached)
+        {
+            const int cacheRc = ensure_cached_gl_resource(cache,
+                                                          glTexture,
+                                                          width,
+                                                          height,
+                                                          cudaGraphicsRegisterFlagsWriteDiscard,
+                                                          "cached GL_RGBA16 direct texture");
+            if (cacheRc != 0)
+            {
+                return cacheRc;
+            }
+            resource = cache->resource;
+        }
+        else
+        {
+            cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                         glTexture,
+                                                         GL_TEXTURE_2D,
+                                                         cudaGraphicsRegisterFlagsWriteDiscard);
+            if (rc != cudaSuccess)
+            {
+                std::fprintf(stderr,
+                             "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 direct texture) failed: %s\n",
+                             cudaGetErrorString(rc));
+                return 2;
+            }
+        }
+
+        cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            else cudaGraphicsUnregisterResource(resource);
+            return 2;
+        }
+
+        cudaArray_t mappedArray = nullptr;
+        rc = cudaGraphicsSubResourceGetMappedArray(&mappedArray, resource, 0, 0);
+        if (rc == cudaSuccess)
+        {
+            const std::size_t rowBytes =
+                static_cast<std::size_t>(width) * 4u * sizeof(uint16_t);
+            rc = cudaMemcpy2DToArray(mappedArray,
+                                     0,
+                                     0,
+                                     dRgba16,
+                                     rowBytes,
+                                     rowBytes,
+                                     static_cast<std::size_t>(height),
+                                     cudaMemcpyDeviceToDevice);
+        }
+
+        const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
+        const cudaError_t unregisterRc =
+            cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
+        if (rc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] direct RGBA16 device-to-GL texture copy failed: %s\n",
+                         cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            return 2;
+        }
+        if (unmapRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(unmapRc));
+            if (cached) reset_cached_gl_resource(cache, false);
+            return 2;
+        }
+        if (unregisterRc != cudaSuccess)
+        {
+            std::fprintf(stderr,
+                         "[igpu_amaze_debayer_cuda] cudaGraphicsUnregisterResource(GL_RGBA16 direct texture) failed: %s\n",
+                         cudaGetErrorString(unregisterRc));
+            return 2;
+        }
+        return 0;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        if (cached) reset_cached_gl_resource(cache, false);
+        else if (resource) cudaGraphicsUnregisterResource(resource);
+        return 2;
+    }
+}
 } // namespace
 
 extern "C" igpu_amaze_debayer_backend * igpu_amaze_debayer_create(const char * backend_name)
@@ -608,7 +1272,9 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
                                                  int blackLevel,
                                                  double wbMultiplierR,
                                                  double wbMultiplierG,
-                                                 double wbMultiplierB)
+                                                 double wbMultiplierB,
+                                                 uint16_t * dRgba16Scratch = nullptr,
+                                                 CachedGlImageResource * cache = nullptr)
 {
     if (!dRgb16 || width <= 0 || height <= 0 || glTexture == 0) return -1;
     if (wbMultiplierR <= 0.0 || wbMultiplierG <= 0.0 || wbMultiplierB <= 0.0) return -1;
@@ -618,12 +1284,22 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     const std::size_t rgbaBytes = pixelCount * 4u * sizeof(uint16_t);
-    uint16_t * dRgba16 = nullptr;
+    uint16_t * dRgba16 = dRgba16Scratch;
+    const bool ownsScratch = dRgba16 == nullptr;
     cudaGraphicsResource * resource = nullptr;
+    const bool cached = cache != nullptr;
+    auto releaseScratch = [&]()
+    {
+        if (ownsScratch && dRgba16)
+        {
+            cudaFree(dRgba16);
+            dRgba16 = nullptr;
+        }
+    };
 
     try
     {
-        CK(cudaMalloc(&dRgba16, rgbaBytes));
+        if (ownsScratch) CK(cudaMalloc(&dRgba16, rgbaBytes));
         const int threads = 256;
         const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
         k_pack_rgb16_to_rgba16_post_wb_undo<<<blocks, threads>>>(dRgb16,
@@ -635,27 +1311,46 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
                                                                  wbMultiplierB);
         CK(cudaGetLastError());
 
-        cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
-                                                     glTexture,
-                                                     GL_TEXTURE_2D,
-                                                     cudaGraphicsRegisterFlagsWriteDiscard);
-        if (rc != cudaSuccess)
+        if (cached)
         {
-            std::fprintf(stderr,
-                         "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 post-WB texture) failed: %s\n",
-                         cudaGetErrorString(rc));
-            cudaFree(dRgba16);
-            return 2;
+            const int cacheRc = ensure_cached_gl_resource(cache,
+                                                          glTexture,
+                                                          width,
+                                                          height,
+                                                          cudaGraphicsRegisterFlagsWriteDiscard,
+                                                          "cached GL_RGBA16 post-WB texture");
+            if (cacheRc != 0)
+            {
+                releaseScratch();
+                return cacheRc;
+            }
+            resource = cache->resource;
+        }
+        else
+        {
+            cudaError_t rc = cudaGraphicsGLRegisterImage(&resource,
+                                                         glTexture,
+                                                         GL_TEXTURE_2D,
+                                                         cudaGraphicsRegisterFlagsWriteDiscard);
+            if (rc != cudaSuccess)
+            {
+                std::fprintf(stderr,
+                             "[igpu_amaze_debayer_cuda] cudaGraphicsGLRegisterImage(GL_RGBA16 post-WB texture) failed: %s\n",
+                             cudaGetErrorString(rc));
+                releaseScratch();
+                return 2;
+            }
         }
 
-        rc = cudaGraphicsMapResources(1, &resource, 0);
+        cudaError_t rc = cudaGraphicsMapResources(1, &resource, 0);
         if (rc != cudaSuccess)
         {
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] cudaGraphicsMapResources(GL_RGBA16 post-WB texture) failed: %s\n",
                          cudaGetErrorString(rc));
-            cudaGraphicsUnregisterResource(resource);
-            cudaFree(dRgba16);
+            if (cached) reset_cached_gl_resource(cache, false);
+            else cudaGraphicsUnregisterResource(resource);
+            releaseScratch();
             return 2;
         }
 
@@ -675,13 +1370,15 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
         }
 
         const cudaError_t unmapRc = cudaGraphicsUnmapResources(1, &resource, 0);
-        const cudaError_t unregisterRc = cudaGraphicsUnregisterResource(resource);
-        cudaFree(dRgba16);
+        const cudaError_t unregisterRc =
+            cached ? cudaSuccess : cudaGraphicsUnregisterResource(resource);
+        releaseScratch();
         if (rc != cudaSuccess)
         {
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] post-WB device-to-GL texture copy failed: %s\n",
                          cudaGetErrorString(rc));
+            if (cached) reset_cached_gl_resource(cache, false);
             return 2;
         }
         if (unmapRc != cudaSuccess)
@@ -689,6 +1386,7 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
             std::fprintf(stderr,
                          "[igpu_amaze_debayer_cuda] cudaGraphicsUnmapResources(GL_RGBA16 post-WB texture) failed: %s\n",
                          cudaGetErrorString(unmapRc));
+            if (cached) reset_cached_gl_resource(cache, false);
             return 2;
         }
         if (unregisterRc != cudaSuccess)
@@ -703,8 +1401,9 @@ int copy_rgb16_to_gl_rgba16_texture_post_wb_undo(const uint16_t * dRgb16,
     catch (const CudaStageProbeError & error)
     {
         std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
-        if (resource) cudaGraphicsUnregisterResource(resource);
-        cudaFree(dRgba16);
+        if (cached) reset_cached_gl_resource(cache, false);
+        else if (resource) cudaGraphicsUnregisterResource(resource);
+        releaseScratch();
         return 2;
     }
 }
@@ -751,8 +1450,6 @@ extern "C" int igpu_amaze_debayer_run(igpu_amaze_debayer_backend * backend,
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -811,8 +1508,6 @@ extern "C" int igpu_amaze_debayer_run_gl_texture(igpu_amaze_debayer_backend * ba
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -876,8 +1571,6 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_back
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -938,57 +1631,58 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
 
     if (black_level < 1000) black_level = -1000;
 
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    const std::size_t rgbBytes = pixelCount * 3u * sizeof(uint16_t);
     std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
 
     const double totalStart = now_ms();
     try
     {
         ensure_live_texture_buffers(backend, width, height);
-        CK(cudaMemset(backend->liveRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         const int copyRc = copy_gl_r16_texture_to_bayer16(in_r16_gl_texture,
                                                           backend->liveReconBayer16,
                                                           width,
-                                                          height);
+                                                          height,
+                                                          &backend->liveInputR16Resource);
         if (copyRc != 0) return copyRc;
-        const int threads = 256;
-        const int blocks = static_cast<int>((pixelCount + threads - 1u) / threads);
-        k_bayer16_to_post_wb_raw_float<<<blocks, threads>>>(backend->liveReconBayer16,
-                                                            backend->liveRawFloat,
-                                                            pixelCount,
-                                                            width,
-                                                            black_level,
-                                                            wb_multiplier_r,
-                                                            wb_multiplier_g,
-                                                            wb_multiplier_b);
-        CK(cudaGetLastError());
-        CK(cudaDeviceSynchronize());
         backend->lastTiming.upload_ms = now_ms() - uploadStart;
 
         const double kernelStart = now_ms();
-        run_frame_to_device_rgb16(backend->liveRawFloat,
-                                  backend->liveRgb16,
-                                  backend->liveDeviceBuffers,
-                                  width,
-                                  height);
-        CK(cudaDeviceSynchronize());
+        const bool directRgbaStore = live_direct_rgba_store_from_env();
+        run_frame_to_device_rgb16_bayer16_post_wb_batched(
+            backend->liveReconBayer16,
+            directRgbaStore ? nullptr : backend->liveRgb16,
+            directRgbaStore ? backend->liveRgba16 : nullptr,
+            backend->liveTileDeviceBuffers,
+            backend->liveTileStreams,
+            width,
+            height,
+            black_level,
+            wb_multiplier_r,
+            wb_multiplier_g,
+            wb_multiplier_b,
+            live_fast_launch_checks_from_env());
         backend->lastTiming.kernel_ms = now_ms() - kernelStart;
 
         const double handoffStart = now_ms();
         const int rc =
-            copy_rgb16_to_gl_rgba16_texture_post_wb_undo(backend->liveRgb16,
-                                                         width,
-                                                         height,
-                                                         out_rgba16_gl_texture,
-                                                         black_level,
-                                                         wb_multiplier_r,
-                                                         wb_multiplier_g,
-                                                         wb_multiplier_b);
-        CK(cudaDeviceSynchronize());
+            directRgbaStore
+                ? copy_rgba16_to_gl_rgba16_texture(
+                    backend->liveRgba16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    &backend->liveOutputRgba16Resource)
+                : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
+                    backend->liveRgb16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    black_level,
+                    wb_multiplier_r,
+                    wb_multiplier_g,
+                    wb_multiplier_b,
+                    backend->liveRgba16,
+                    &backend->liveOutputRgba16Resource);
         backend->lastTiming.download_ms = now_ms() - handoffStart;
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return rc;
@@ -999,6 +1693,90 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
         backend->lastTiming.total_ms = now_ms() - totalStart;
         return -2;
     }
+}
+
+extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16(
+    igpu_amaze_debayer_backend * backend,
+    const uint16_t * device_bayer16,
+    unsigned int out_rgba16_gl_texture,
+    int width,
+    int height,
+    int black_level,
+    double wb_multiplier_r,
+    double wb_multiplier_g,
+    double wb_multiplier_b)
+{
+    if (!backend || !device_bayer16 || out_rgba16_gl_texture == 0
+        || width <= 32 || height <= 32
+        || wb_multiplier_r <= 0.0 || wb_multiplier_g <= 0.0 || wb_multiplier_b <= 0.0)
+    {
+        return -1;
+    }
+
+    if (black_level < 1000) black_level = -1000;
+
+    std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
+
+    const double totalStart = now_ms();
+    try
+    {
+        ensure_live_texture_buffers(backend, width, height);
+        backend->lastTiming.upload_ms = 0.0;
+
+        const double kernelStart = now_ms();
+        const bool directRgbaStore = live_direct_rgba_store_from_env();
+        run_frame_to_device_rgb16_bayer16_post_wb_batched(
+            device_bayer16,
+            directRgbaStore ? nullptr : backend->liveRgb16,
+            directRgbaStore ? backend->liveRgba16 : nullptr,
+            backend->liveTileDeviceBuffers,
+            backend->liveTileStreams,
+            width,
+            height,
+            black_level,
+            wb_multiplier_r,
+            wb_multiplier_g,
+            wb_multiplier_b,
+            live_fast_launch_checks_from_env());
+        backend->lastTiming.kernel_ms = now_ms() - kernelStart;
+
+        const double handoffStart = now_ms();
+        const int rc =
+            directRgbaStore
+                ? copy_rgba16_to_gl_rgba16_texture(
+                    backend->liveRgba16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    &backend->liveOutputRgba16Resource)
+                : copy_rgb16_to_gl_rgba16_texture_post_wb_undo(
+                    backend->liveRgb16,
+                    width,
+                    height,
+                    out_rgba16_gl_texture,
+                    black_level,
+                    wb_multiplier_r,
+                    wb_multiplier_g,
+                    wb_multiplier_b,
+                    backend->liveRgba16,
+                    &backend->liveOutputRgba16Resource);
+        backend->lastTiming.download_ms = now_ms() - handoffStart;
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return rc;
+    }
+    catch (const CudaStageProbeError & error)
+    {
+        std::fprintf(stderr, "[igpu_amaze_debayer_cuda] %s\n", error.what());
+        backend->lastTiming.total_ms = now_ms() - totalStart;
+        return -2;
+    }
+}
+
+extern "C" int igpu_amaze_debayer_reset_live_gl_texture_resources(igpu_amaze_debayer_backend * backend)
+{
+    if (!backend) return -1;
+    reset_live_gl_resources(backend);
+    return 0;
 }
 
 extern "C" int igpu_amaze_debayer_last_timing(igpu_amaze_debayer_backend * backend,

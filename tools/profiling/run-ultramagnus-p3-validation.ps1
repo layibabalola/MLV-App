@@ -9,10 +9,24 @@ param(
     [string]$OutputRoot = ".claude-state\profiling\ultramagnus-p3-texture-present",
     [int]$Seconds = 30,
     [int]$SettleMs = 1000,
+    [ValidateSet("persisted", "on", "off")]
+    [string]$DropFrameMode = "on",
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
+    [switch]$SpeedLeg,
+    [double]$MinPresentedFps = 24.0,
+    [double]$TargetPresentedFps = 30.0,
     [string]$GpuPlaybackReconBackend = "",
+    [int]$CudaAmazeLiveTileStreams = 0,
+    [switch]$CudaAmazeFastLaunchChecks,
+    [switch]$CudaAmazeLiveDirectRgbaStore,
+    [switch]$GpuPlaybackReconRetainDeviceOutput,
+    [switch]$GpuTexNrAcquireLatestReady,
+    [switch]$GpuTexNrImmediateDrainReady,
+    [int]$GpuTexNrImmediateDrainMax = 0,
+    [int]$Phase3FrameSlots = 0,
+    [int]$PlaybackTimerPollMs = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -35,6 +49,19 @@ $ErrorActionPreference = "Stop"
 # the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT -- stay fatal. Inherited by the
 # smoke runner and the detector subprocess. See detect-playback-artifacts.ps1.
 $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY = "1"
+
+if ($CudaAmazeLiveTileStreams -lt 0) {
+    throw "-CudaAmazeLiveTileStreams must be >= 0. Use 0 for backend default."
+}
+if ($GpuTexNrImmediateDrainMax -lt 0) {
+    throw "-GpuTexNrImmediateDrainMax must be >= 0. Use 0 for default."
+}
+if ($Phase3FrameSlots -lt 0) {
+    throw "-Phase3FrameSlots must be >= 0. Use 0 for renderer default."
+}
+if ($PlaybackTimerPollMs -lt 0) {
+    throw "-PlaybackTimerPollMs must be >= 0. Use 0 for renderer default."
+}
 
 function Resolve-RepoPath {
     param(
@@ -81,6 +108,46 @@ function Add-Failure {
         [string]$Message
     )
     [void]$Failures.Add($Message)
+}
+
+function Add-NullableDouble {
+    param(
+        [System.Collections.Generic.List[double]]$Values,
+        [AllowNull()]$Value
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        [void]$Values.Add($parsed)
+    }
+}
+
+function Get-AverageOrNull {
+    param([System.Collections.Generic.List[double]]$Values)
+
+    if ($null -eq $Values -or $Values.Count -eq 0) {
+        return $null
+    }
+
+    return [Math]::Round(($Values | Measure-Object -Average).Average, 3)
+}
+
+function Get-MaxOrNull {
+    param([System.Collections.Generic.List[double]]$Values)
+
+    if ($null -eq $Values -or $Values.Count -eq 0) {
+        return $null
+    }
+
+    return [Math]::Round(($Values | Measure-Object -Maximum).Maximum, 3)
 }
 
 function Write-JsonFile {
@@ -231,7 +298,26 @@ function New-EvidencePacket {
             gpuTextureNoReadbackFrames = $_.gpuTextureNoReadbackFrames
             activeNoReadbackFrameCount = $_.activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
+            cudaAmazeTextureSourceFrameCount = $_.cudaAmazeTextureSourceFrameCount
+            cudaAmazeDirectTextureSourceFrameCount = $_.cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeRetainedTextureSourceFrameCount = $_.cudaAmazeRetainedTextureSourceFrameCount
+            cudaAmazeAcceptedTextureSourceFrameCount = $_.cudaAmazeAcceptedTextureSourceFrameCount
+            borrowedNoReadbackInputFrameCount = $_.borrowedNoReadbackInputFrameCount
+            ownedNoReadbackInputFrameCount = $_.ownedNoReadbackInputFrameCount
+            earlyReleasedNoReadbackInputFrameCount = $_.earlyReleasedNoReadbackInputFrameCount
             fallbackFrameCount = $_.fallbackFrameCount
+            avgTextureUploadMs = $_.avgTextureUploadMs
+            avgTextureKernelMs = $_.avgTextureKernelMs
+            avgTextureInteropMs = $_.avgTextureInteropMs
+            avgTextureTotalMs = $_.avgTextureTotalMs
+            maxTextureTotalMs = $_.maxTextureTotalMs
+            avgTextureWallMs = $_.avgTextureWallMs
+            avgTextureHostGapMs = $_.avgTextureHostGapMs
+            avgTextureContextMs = $_.avgTextureContextMs
+            avgTextureSetupMs = $_.avgTextureSetupMs
+            avgTextureReconWallMs = $_.avgTextureReconWallMs
+            avgTextureAmazeWallMs = $_.avgTextureAmazeWallMs
+            avgTexturePostMs = $_.avgTexturePostMs
             glProbeActiveCount = $_.glProbeActiveCount
             glTextureReadbackOkCount = $_.glTextureReadbackOkCount
             glParityCheckedCount = $_.glParityCheckedCount
@@ -272,6 +358,9 @@ function New-EvidencePacket {
             releaseSha256 = $Summary.release.sha256
             clipCount = @($Summary.clipResults).Count
             totalGpuTextureNoReadbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.gpuTextureNoReadbackFrames }) | Measure-Object -Sum).Sum
+            totalBorrowedNoReadbackInputFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.borrowedNoReadbackInputFrameCount }) | Measure-Object -Sum).Sum
+            totalOwnedNoReadbackInputFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.ownedNoReadbackInputFrameCount }) | Measure-Object -Sum).Sum
+            totalEarlyReleasedNoReadbackInputFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.earlyReleasedNoReadbackInputFrameCount }) | Measure-Object -Sum).Sum
             totalFallbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.fallbackFrameCount }) | Measure-Object -Sum).Sum
             correctnessValidated = [bool]$Summary.proof.correctnessValidated
             totalGlProbeActiveFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.glProbeActiveCount }) | Measure-Object -Sum).Sum
@@ -404,7 +493,13 @@ function Import-EvidencePacket {
         if (@($summary.failures).Count -gt 0) {
             Add-Failure $importFailures "Evidence summary contains failures: $((@($summary.failures) | ForEach-Object { [string]$_ }) -join '; ')"
         }
-        if (-not [bool]$summary.proof.correctnessValidated) {
+        $isSpeedProof = ([string]$summary.proofMode -eq "speed") -or [bool]$summary.inputs.speedLeg
+        if ($isSpeedProof) {
+            if (-not [bool]$summary.proof.speedValidated) {
+                Add-Failure $importFailures "Evidence summary proof.speedValidated was not true for speed proof mode."
+            }
+        }
+        elseif (-not [bool]$summary.proof.correctnessValidated) {
             Add-Failure $importFailures "Evidence summary proof.correctnessValidated was not true."
         }
         foreach ($clip in @($summary.clipResults)) {
@@ -421,45 +516,62 @@ function Import-EvidencePacket {
             if ([int]$clip.activeNoReadbackFrameCount -le 0) {
                 Add-Failure $importFailures "$clipName had activeNoReadbackFrameCount=$($clip.activeNoReadbackFrameCount); expected > 0."
             }
-            if ([int]$clip.cudaTextureSourceFrameCount -le 0) {
-                Add-Failure $importFailures "$clipName had cudaTextureSourceFrameCount=$($clip.cudaTextureSourceFrameCount); expected > 0."
+            $acceptedAmazeSourceFrames = if ($null -ne $clip.cudaAmazeAcceptedTextureSourceFrameCount) {
+                [int]$clip.cudaAmazeAcceptedTextureSourceFrameCount
+            } else {
+                [int]$clip.cudaAmazeTextureSourceFrameCount
+            }
+            if ($acceptedAmazeSourceFrames -le 0) {
+                Add-Failure $importFailures "$clipName had accepted AMaZE texture source frames=$acceptedAmazeSourceFrames; expected > 0."
             }
             if ([int]$clip.fallbackFrameCount -ne 0) {
                 Add-Failure $importFailures "$clipName had fallbackFrameCount=$($clip.fallbackFrameCount); expected 0."
             }
-            if ([int]$clip.glProbeActiveCount -le 0) {
-                Add-Failure $importFailures "$clipName had glProbeActiveCount=$($clip.glProbeActiveCount); expected > 0."
-            }
-            if ([int]$clip.glTextureReadbackOkCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glTextureReadbackOkCount=$($clip.glTextureReadbackOkCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([int]$clip.glParityCheckedCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glParityCheckedCount=$($clip.glParityCheckedCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([int]$clip.glParityMatchCount -ne [int]$clip.glProbeActiveCount) {
-                Add-Failure $importFailures "$clipName had glParityMatchCount=$($clip.glParityMatchCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
-            }
-            if ([long]$clip.glMismatchTotal -ne 0) {
-                Add-Failure $importFailures "$clipName had glMismatchTotal=$($clip.glMismatchTotal); expected 0."
-            }
-            if ([int]$clip.glDistinctTextureHashes -le 1) {
-                Add-Failure $importFailures "$clipName had glDistinctTextureHashes=$($clip.glDistinctTextureHashes); expected > 1."
-            }
-            if ([string]$clip.glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
-                Add-Failure $importFailures "$clipName had glScreenshotMethod='$($clip.glScreenshotMethod)'; expected app_internal_gl_viewport_grab."
-            }
-            $clipRendererMatched = $false
-            foreach ($renderer in @($clip.glRendererDescriptions | ForEach-Object { [string]$_ })) {
-                if ($renderer -match $RequiredGpuNamePattern) {
-                    $clipRendererMatched = $true
-                    break
+            if ($isSpeedProof) {
+                $minSpeedFps = if ($null -ne $summary.inputs.minPresentedFps) {
+                    [double]$summary.inputs.minPresentedFps
+                } else {
+                    24.0
+                }
+                if ([double]$clip.presentedFps -lt $minSpeedFps) {
+                    Add-Failure $importFailures "$clipName had presentedFps=$($clip.presentedFps); expected >= $minSpeedFps for speed proof mode."
                 }
             }
-            if (!$clipRendererMatched) {
-                Add-Failure $importFailures "$clipName had no GL renderer matching '$RequiredGpuNamePattern': $((@($clip.glRendererDescriptions) | ForEach-Object { [string]$_ }) -join '; ')"
-            }
-            if (@($clip.glBackendArtifacts).Count -le 0) {
-                Add-Failure $importFailures "$clipName did not include a backend DLL hash artifact."
+            else {
+                if ([int]$clip.glProbeActiveCount -le 0) {
+                    Add-Failure $importFailures "$clipName had glProbeActiveCount=$($clip.glProbeActiveCount); expected > 0."
+                }
+                if ([int]$clip.glTextureReadbackOkCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glTextureReadbackOkCount=$($clip.glTextureReadbackOkCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([int]$clip.glParityCheckedCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glParityCheckedCount=$($clip.glParityCheckedCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([int]$clip.glParityMatchCount -ne [int]$clip.glProbeActiveCount) {
+                    Add-Failure $importFailures "$clipName had glParityMatchCount=$($clip.glParityMatchCount) for glProbeActiveCount=$($clip.glProbeActiveCount)."
+                }
+                if ([long]$clip.glMismatchTotal -ne 0) {
+                    Add-Failure $importFailures "$clipName had glMismatchTotal=$($clip.glMismatchTotal); expected 0."
+                }
+                if ([int]$clip.glDistinctTextureHashes -le 1) {
+                    Add-Failure $importFailures "$clipName had glDistinctTextureHashes=$($clip.glDistinctTextureHashes); expected > 1."
+                }
+                if ([string]$clip.glScreenshotMethod -ne "app_internal_gl_viewport_grab") {
+                    Add-Failure $importFailures "$clipName had glScreenshotMethod='$($clip.glScreenshotMethod)'; expected app_internal_gl_viewport_grab."
+                }
+                $clipRendererMatched = $false
+                foreach ($renderer in @($clip.glRendererDescriptions | ForEach-Object { [string]$_ })) {
+                    if ($renderer -match $RequiredGpuNamePattern) {
+                        $clipRendererMatched = $true
+                        break
+                    }
+                }
+                if (!$clipRendererMatched) {
+                    Add-Failure $importFailures "$clipName had no GL renderer matching '$RequiredGpuNamePattern': $((@($clip.glRendererDescriptions) | ForEach-Object { [string]$_ }) -join '; ')"
+                }
+                if (@($clip.glBackendArtifacts).Count -le 0) {
+                    Add-Failure $importFailures "$clipName did not include a backend DLL hash artifact."
+                }
             }
         }
     }
@@ -696,13 +808,52 @@ if ($failures.Count -eq 0) {
         # MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE diagnostic env (that env is
         # now a no-op superset and is intentionally NOT set here).
         #
-        # MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=N samples the heavy
-        # GL-vs-CPU-oracle parity check on every Nth presented no-readback frame so
-        # the temporal artifact/cadence detector sees real (un-instrumented)
-        # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
+        # Correctness mode samples the heavy GL-vs-CPU-oracle parity check. Speed-leg mode
+        # disables that oracle so cadence/FPS reflects the no-readback path itself.
+        $envEntries = @(
+            "MLVAPP_GPU_PLAYBACK_RECON=1",
+            "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1",
+            "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1",
+            "QT_OPENGL=desktop"
+        )
+        if ($SpeedLeg) {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=0"
+        }
+        else {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1"
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery"
+        }
+        if ($CudaAmazeLiveTileStreams -gt 0) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_TILE_STREAMS=$CudaAmazeLiveTileStreams"
+        }
+        if ($CudaAmazeFastLaunchChecks) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_FAST_LAUNCH_CHECKS=1"
+        }
+        if ($CudaAmazeLiveDirectRgbaStore) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE=1"
+        }
+        if ($GpuPlaybackReconRetainDeviceOutput) {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
+        }
+        if ($GpuTexNrAcquireLatestReady) {
+            $envEntries += "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY=1"
+        }
+        if ($GpuTexNrImmediateDrainReady) {
+            $envEntries += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
+        }
+        if ($GpuTexNrImmediateDrainMax -gt 0) {
+            $envEntries += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX=$GpuTexNrImmediateDrainMax"
+        }
+        if ($Phase3FrameSlots -gt 0) {
+            $envEntries += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
+        }
+        if ($PlaybackTimerPollMs -gt 0) {
+            $envEntries += "MLVAPP_PLAYBACK_TIMER_POLL_MS=$PlaybackTimerPollMs"
+        }
+        $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
+        $dropFrameModeLiteral = "'" + (($DropFrameMode -replace "'", "''")) + "'"
         $invokeText = @"
 `$ErrorActionPreference = 'Stop'
 `$envList = $envListLiteral
@@ -713,6 +864,7 @@ if ($failures.Count -eq 0) {
     Output = '$clipOutput'
     Receipt = '$receiptPath'
     Seconds = $Seconds
+    DropFrameMode = $dropFrameModeLiteral
     SettleMs = $SettleMs
     FrameTelemetry = `$true
     CaptureScreenshot = `$true
@@ -723,6 +875,7 @@ if ($failures.Count -eq 0) {
     PlaybackDebayer = 'amaze'
     PlaybackProcessing = 'subset'
     GpuPreviewProcessing = 'gpu'
+    GpuAmazeTexturePresent = `$true
     ScaleFactor = '$ScaleFactor'
     QualityMode = '$QualityMode'
     GpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
@@ -776,6 +929,13 @@ exit `$LASTEXITCODE
         $activeNoReadbackFrameCount = 0
         $cudaTextureSourceFrameCount = 0
         $fallbackFrameCount = 0
+        $cudaAmazeTextureSourceFrameCount = 0
+        $cudaAmazeDirectTextureSourceFrameCount = 0
+        $cudaAmazeRetainedTextureSourceFrameCount = 0
+        $cudaAmazeAcceptedTextureSourceFrameCount = 0
+        $borrowedNoReadbackInputFrameCount = 0
+        $ownedNoReadbackInputFrameCount = 0
+        $earlyReleasedNoReadbackInputFrameCount = 0
         $noReadbackFallbackReasons = [ordered]@{}
         $logPath = $null
         $glOutputProof = $null
@@ -788,6 +948,17 @@ exit `$LASTEXITCODE
         $glRendererDescriptions = @()
         $glBackendArtifacts = @()
         $glScreenshotMethod = $null
+        $textureUploadMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureKernelMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureInteropMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureTotalMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureHostGapMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureContextMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureSetupMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureReconWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $textureAmazeWallMsValues = [System.Collections.Generic.List[double]]::new()
+        $texturePostMsValues = [System.Collections.Generic.List[double]]::new()
 
         if (Test-Path -LiteralPath $clipOutput) {
             $result = Get-Content -LiteralPath $clipOutput -Raw | ConvertFrom-Json
@@ -842,6 +1013,40 @@ exit `$LASTEXITCODE
                 if ([string]$frame.texture_source -eq "cuda_gl_r16_texture") {
                     $cudaTextureSourceFrameCount++
                 }
+                if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture") {
+                    $cudaAmazeTextureSourceFrameCount++
+                }
+                if ([string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeDirectTextureSourceFrameCount++
+                }
+                if ([string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeRetainedTextureSourceFrameCount++
+                }
+                if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture" -or
+                    [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture" -or
+                    [string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeAcceptedTextureSourceFrameCount++
+                }
+                if ([int]$frame.r16_amaze_skip_input_borrowed -eq 1) {
+                    $borrowedNoReadbackInputFrameCount++
+                }
+                if ([int]$frame.gpu_tex_nr_owned_input -eq 1) {
+                    $ownedNoReadbackInputFrameCount++
+                }
+                if ([int]$frame.gpu_tex_nr_release_before_present -eq 1) {
+                    $earlyReleasedNoReadbackInputFrameCount++
+                }
+                Add-NullableDouble $textureUploadMsValues $frame.texture_upload_ms
+                Add-NullableDouble $textureKernelMsValues $frame.texture_kernel_ms
+                Add-NullableDouble $textureInteropMsValues $frame.texture_interop_ms
+                Add-NullableDouble $textureTotalMsValues $frame.texture_total_ms
+                Add-NullableDouble $textureWallMsValues $frame.texture_wall_ms
+                Add-NullableDouble $textureHostGapMsValues $frame.texture_host_gap_ms
+                Add-NullableDouble $textureContextMsValues $frame.texture_context_ms
+                Add-NullableDouble $textureSetupMsValues $frame.texture_setup_ms
+                Add-NullableDouble $textureReconWallMsValues $frame.texture_recon_wall_ms
+                Add-NullableDouble $textureAmazeWallMsValues $frame.texture_amaze_wall_ms
+                Add-NullableDouble $texturePostMsValues $frame.texture_post_ms
                 if ([string]$frame.texture_source -match "fallback") {
                     $fallbackFrameCount++
                 }
@@ -880,11 +1085,26 @@ exit `$LASTEXITCODE
             if ($activeNoReadbackFrameCount -le 0) {
                 Add-Failure $clipFailures "No per-frame telemetry reported texture_no_readback_active=1."
             }
-            if ($cudaTextureSourceFrameCount -le 0) {
-                Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_r16_texture."
+            if ($cudaTextureSourceFrameCount -gt 0) {
+                Add-Failure $clipFailures "Observed $cudaTextureSourceFrameCount legacy texture_source=cuda_gl_r16_texture frame(s); expected AMaZE RGBA texture source only."
+            }
+            if ($cudaAmazeAcceptedTextureSourceFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported an accepted AMaZE texture source (cuda_gl_rgba16_amaze_texture, cuda_device_bayer16_rgba16_amaze_texture, or cuda_retained_device_bayer16_rgba16_amaze_texture)."
+            }
+            if ($activeNoReadbackFrameCount -gt 0 -and $cudaAmazeAcceptedTextureSourceFrameCount -ne $activeNoReadbackFrameCount) {
+                Add-Failure $clipFailures "Only $cudaAmazeAcceptedTextureSourceFrameCount/$activeNoReadbackFrameCount active no-readback frame(s) used an accepted AMaZE texture source."
             }
             if ($fallbackFrameCount -gt 0) {
                 Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
+            }
+            if ($SpeedLeg) {
+                $presentedFpsValue = if ($result) { [double]$result.log.summary.presented_fps } else { 0.0 }
+                if ($presentedFpsValue -lt $MinPresentedFps) {
+                    Add-Failure $clipFailures ("Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps." -f $presentedFpsValue, $MinPresentedFps)
+                }
+                if (($borrowedNoReadbackInputFrameCount + $ownedNoReadbackInputFrameCount) -le 0) {
+                    Add-Failure $clipFailures "Speed leg did not report borrowed or owned no-readback input frames; expected r16_amaze_skip_input_borrowed=1 or gpu_tex_nr_owned_input=1."
+                }
             }
         }
         else {
@@ -908,7 +1128,7 @@ exit `$LASTEXITCODE
             }
             [void]$warnings.Add("rawFixesEnabled=0: no-readback correctly not armed (Dual ISO recon disabled); no-readback arming and GL no-readback proof assertions skipped. Use a raw-fixes-on receipt (e.g. FastProxy.marxml) to validate the no-readback path.")
         }
-        if ($receiptRawFixesEnabled) {
+        if ($receiptRawFixesEnabled -and -not $SpeedLeg) {
             if ($null -eq $glOutputProof) {
                 Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
             }
@@ -972,7 +1192,26 @@ exit `$LASTEXITCODE
             readbackCandidateFrameCount = $readbackCandidateFrameCount
             activeNoReadbackFrameCount = $activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
+            cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
+            cudaAmazeDirectTextureSourceFrameCount = $cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeRetainedTextureSourceFrameCount = $cudaAmazeRetainedTextureSourceFrameCount
+            cudaAmazeAcceptedTextureSourceFrameCount = $cudaAmazeAcceptedTextureSourceFrameCount
+            borrowedNoReadbackInputFrameCount = $borrowedNoReadbackInputFrameCount
+            ownedNoReadbackInputFrameCount = $ownedNoReadbackInputFrameCount
+            earlyReleasedNoReadbackInputFrameCount = $earlyReleasedNoReadbackInputFrameCount
             fallbackFrameCount = $fallbackFrameCount
+            avgTextureUploadMs = Get-AverageOrNull $textureUploadMsValues
+            avgTextureKernelMs = Get-AverageOrNull $textureKernelMsValues
+            avgTextureInteropMs = Get-AverageOrNull $textureInteropMsValues
+            avgTextureTotalMs = Get-AverageOrNull $textureTotalMsValues
+            maxTextureTotalMs = Get-MaxOrNull $textureTotalMsValues
+            avgTextureWallMs = Get-AverageOrNull $textureWallMsValues
+            avgTextureHostGapMs = Get-AverageOrNull $textureHostGapMsValues
+            avgTextureContextMs = Get-AverageOrNull $textureContextMsValues
+            avgTextureSetupMs = Get-AverageOrNull $textureSetupMsValues
+            avgTextureReconWallMs = Get-AverageOrNull $textureReconWallMsValues
+            avgTextureAmazeWallMs = Get-AverageOrNull $textureAmazeWallMsValues
+            avgTexturePostMs = Get-AverageOrNull $texturePostMsValues
             noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
             glOutputProof = $glOutputProof
             glProbeActiveCount = $glProbeActiveCount
@@ -1005,6 +1244,7 @@ $status =
 
 $correctnessValidated =
     $receiptRawFixesEnabled -and
+    (-not [bool]$SpeedLeg) -and
     ($status -eq "success") -and
     (-not [bool]$DryRun) -and
     (@($clipResults).Count -gt 0) -and
@@ -1019,10 +1259,30 @@ $correctnessValidated =
         [string]$_.glScreenshotMethod -ne "app_internal_gl_viewport_grab"
     }).Count -eq 0)
 
+$speedValidated =
+    $receiptRawFixesEnabled -and
+    [bool]$SpeedLeg -and
+    ($status -eq "success") -and
+    (-not [bool]$DryRun) -and
+    (@($clipResults).Count -gt 0) -and
+    (@($clipResults | Where-Object {
+        $acceptedAmazeFrameCount = if ($null -ne $_.cudaAmazeAcceptedTextureSourceFrameCount) {
+            [int]$_.cudaAmazeAcceptedTextureSourceFrameCount
+        } else {
+            [int]$_.cudaAmazeTextureSourceFrameCount
+        }
+        $_.status -ne "success" -or
+        [double]$_.presentedFps -lt $MinPresentedFps -or
+        [int]$_.gpuTextureNoReadbackFrames -le 0 -or
+        [int]$_.fallbackFrameCount -ne 0 -or
+        $acceptedAmazeFrameCount -ne [int]$_.activeNoReadbackFrameCount
+    }).Count -eq 0)
+
 $summary = [pscustomobject]@{
     schema = "mlvapp-ultramagnus-p3-validation.v1"
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     status = $status
+    proofMode = if ($SpeedLeg) { "speed" } else { "correctness" }
     dryRun = [bool]$DryRun
     repoRoot = $repo
     host = [pscustomobject]@{
@@ -1054,7 +1314,19 @@ $summary = [pscustomobject]@{
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
         validationSampleEvery = $ValidationSampleEvery
+        speedLeg = [bool]$SpeedLeg
+        minPresentedFps = $MinPresentedFps
+        targetPresentedFps = $TargetPresentedFps
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
+        cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
+        cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
+        cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
+        gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
+        gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
+        gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
+        gpuTexNrImmediateDrainMax = if ($GpuTexNrImmediateDrainMax -gt 0) { $GpuTexNrImmediateDrainMax } else { $null }
+        phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
+        playbackTimerPollMs = if ($PlaybackTimerPollMs -gt 0) { $PlaybackTimerPollMs } else { $null }
     }
     outputs = [pscustomobject]@{
         runRoot = $runRoot
@@ -1065,7 +1337,10 @@ $summary = [pscustomobject]@{
     }
     proof = [pscustomobject]@{
         correctnessValidated = [bool]$correctnessValidated
+        speedValidated = [bool]$speedValidated
         noReadbackValidationApplicable = [bool]$receiptRawFixesEnabled
+        minPresentedFps = $MinPresentedFps
+        targetPresentedFps = $TargetPresentedFps
         validationSurface = "gl_texture_r16_readback_vs_cpu_dual_iso_recon_frame"
         frameAdvanceSurface = "playback_smoke.gl_probe texture_hash parsed by detect-playback-artifacts.ps1"
         colorScanSurface = "app_internal_gl_viewport_grab"

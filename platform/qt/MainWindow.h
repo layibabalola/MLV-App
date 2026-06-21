@@ -161,6 +161,8 @@ public:
         bool disableLookAssist = false;
         bool zebras = false;
         bool forceZebras = false;
+        bool dropFrame = true;
+        bool forceDropFrame = false;
     };
 
     /* Progress-only callback for exportCdngSequence.
@@ -205,7 +207,7 @@ signals:
 
 private slots:
     void openMlvSet( QStringList list );
-    void timerFrameEvent( void );
+    void timerFrameEvent( bool predictivePlaybackAdvance = false );
     void on_actionOpen_triggered();
     void on_actionTranscodeAndImport_triggered();
     void on_actionFcpxmlImportAssistant_triggered();
@@ -641,6 +643,10 @@ private:
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         RenderFrameThread::GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;
@@ -675,6 +681,7 @@ private:
                 sourceImage16 = ownedSourceImage16.data();
                 sourceImage16Size = ownedSourceImage16.size() * sizeof( uint16_t );
                 readyFrame.rawImage16 = sourceImage16;
+                readyFrame.rawImage16Words = ownedSourceImage16.size();
             }
             if( !ownedGpuAmazeTextureRawFrame.empty() )
             {
@@ -962,6 +969,7 @@ private:
     int m_playToFirstFrameTargetFrame = -1;
     double m_playToFirstFrameStartSeconds = 0.0;
     double m_lastPlayToFirstFrameMs = 0.0;
+    bool m_gpuTexNrImmediateDrainActive = false;
     double m_lastDrawFrameReadyQueueMs = 0.0;
     double m_lastDrawFrameReadyAdvanceMs = 0.0;
     double m_lastDrawFrameReadySceneMs = 0.0;

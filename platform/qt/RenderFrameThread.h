@@ -111,6 +111,9 @@ public:
             bool renderThreadUsingGpuAmazeDebayer = false;
             bool gpuAmazeTexturePresentRequested = false;
             bool gpuPlaybackReconTexturePresentRequested = false;
+            bool gpuPlaybackReconAmazeTexturePresentAdmitted = false;
+            QString gpuPlaybackReconAmazeTexturePresentFallbackReason;
+            QString gpuPlaybackReconAmazeTexturePresentRenderer;
             QString gpuPlaybackReconTexturePresentFallbackReason;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;
@@ -118,6 +121,7 @@ public:
 
         const uint8_t *rawImage8 = nullptr;
         const uint16_t *rawImage16 = nullptr;
+        size_t rawImage16Words = 0;
         const uint8_t *playbackScaledImage8 = nullptr;
         uint32_t frameNumber = 0;
         uint64_t requestSerial = 0;
@@ -148,6 +152,10 @@ public:
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
         int gpuPlaybackReconTextureBlackLevel = 0;
@@ -217,6 +225,10 @@ public:
     bool isFrameReady( void );
     bool isIdle( void );
     bool acquireLatestReadyFrame( ReadyFrame *frame );
+    bool acquireOldestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
+    bool acquireLatestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
+    bool hasGpuTextureNoReadbackReadyFrame( void );
+    int gpuTextureNoReadbackReadyFrameCount( void );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;
@@ -274,6 +286,14 @@ private:
         bool gpuPlaybackReconTexturePresentCandidate = false;
         bool gpuPlaybackReconTextureNoReadbackCandidate = false;
         std::vector<uint16_t> gpuPlaybackReconTextureInputBayerFrame;
+        /* Normal admitted no-readback playback can borrow rawImage16 instead of
+         * keeping a duplicate input snapshot; validation/fallback paths still use
+         * the owned vector so proof and CPU-readback behavior stay fail-closed. */
+        bool gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         /* Recon-output Dual ISO bayer, snapshotted right after the recon stage.
          * The slot's rawImage16 buffer is later overwritten by the process stage
          * (getMlvProcessedFrame16Scaled), so the recon bayer that the no-readback
@@ -333,6 +353,11 @@ private:
             gpuPlaybackReconTexturePresentCandidate = false;
             gpuPlaybackReconTextureNoReadbackCandidate = false;
             gpuPlaybackReconTextureInputBayerFrame.clear();
+            gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+            gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+            gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+            gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+            gpuPlaybackReconTextureRetainedDeviceToken = 0;
             gpuPlaybackReconTextureBayerFrame.clear();
             gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
             gpuPlaybackReconTextureWidth = 0;
@@ -359,7 +384,28 @@ private:
 
     mutable QMutex m_mutex;
     QWaitCondition m_waitCondition;
-    static constexpr int kFrameSlotCount = 4;
+    struct FrameSlotStorage
+    {
+        std::unique_ptr<FrameSlot[]> frames;
+        int slotCount = 0;
+
+        void reset( int count )
+        {
+            frames.reset( new FrameSlot[count] );
+            slotCount = count;
+        }
+
+        int size( void ) const { return slotCount; }
+        FrameSlot *begin( void ) { return frames.get(); }
+        FrameSlot *end( void ) { return frames ? frames.get() + slotCount : nullptr; }
+        const FrameSlot *begin( void ) const { return frames.get(); }
+        const FrameSlot *end( void ) const { return frames ? frames.get() + slotCount : nullptr; }
+        FrameSlot &operator[]( int index ) { return frames[index]; }
+        const FrameSlot &operator[]( int index ) const { return frames[index]; }
+    };
+
+    static constexpr int kDefaultFrameSlotCount = 4;
+    static constexpr int kMaxFrameSlotCount = 12;
     static constexpr int kRenderRequestQueueDepth = 4;
     mlvObject_t *m_pMlvObject;
     bool m_initialized;
@@ -400,7 +446,7 @@ private:
     int m_renderingSlotIndex;
     int m_presentingSlotIndex;
     std::atomic<Phase3Mode> m_phase3Mode;
-    std::array<FrameSlot, kFrameSlotCount> m_frameSlots;
+    FrameSlotStorage m_frameSlots;
     FastPlaybackScaleCache m_playbackScaleCache;
     BilinearPlaybackScaleCache m_playbackBilinearScaleCache;
     CubicPlaybackScaleCache m_playbackCubicScaleCache;
@@ -417,6 +463,7 @@ private:
     QWaitCondition m_decodeWaitCondition;
     QWaitCondition m_reconWaitCondition;
 
+    static int configuredFrameSlotCount( void );
     void run( void );
     void runSerial( void );
     void runPhase3( void );
@@ -452,7 +499,11 @@ private:
     void drawFrame( int slotIndex,
                     const uint16_t *decodedRawFrame = nullptr,
                     bool decodedRawFrameAlreadyReconned = false );
+    bool acquireReadySlotLocked( ReadyFrame *frame,
+                                 int readySlotIndex,
+                                 bool discardOlderReady );
     int findLatestReadySlotLocked( void ) const;
+    int findOldestReadySlotLocked( void ) const;
     int findFreeSlotLocked( void ) const;
     void releaseSlotLocked( int slotIndex );
     void copySlotTelemetryLocked( const FrameSlot &slot );

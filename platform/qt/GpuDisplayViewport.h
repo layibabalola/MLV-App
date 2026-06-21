@@ -67,6 +67,11 @@ public:
                                             int *width,
                                             int *height,
                                             QString *reason = nullptr);
+    static bool readGpuReconSourceBayer16Texture(QGraphicsView *view,
+                                                 QByteArray *textureBytes,
+                                                 int *width,
+                                                 int *height,
+                                                 QString *reason = nullptr);
     static bool presentImage(QGraphicsView *view,
                              QGraphicsPixmapItem *fallbackItem,
                              const QImage &image,
@@ -100,7 +105,12 @@ public:
                                                           const double wbMultipliers[3],
                                                           const PresentationOptions &options,
                                                           QString *reason = nullptr,
-                                                          llrpGpuPlaybackReconTiming_t *timing = nullptr);
+                                                          llrpGpuPlaybackReconTiming_t *timing = nullptr,
+                                                          QString *handoffMode = nullptr,
+                                                          bool validationProbeTexture = false,
+                                                          const uint16_t *retainedDeviceBayer16 = nullptr,
+                                                          int retainedDeviceWidth = 0,
+                                                          int retainedDeviceHeight = 0);
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -142,7 +152,12 @@ private:
                                                         const double wbMultipliers[3],
                                                         const PresentationOptions &options,
                                                         QString *reason,
-                                                        llrpGpuPlaybackReconTiming_t *timing);
+                                                        llrpGpuPlaybackReconTiming_t *timing,
+                                                        QString *handoffMode,
+                                                        bool validationProbeTexture,
+                                                        const uint16_t *retainedDeviceBayer16,
+                                                        int retainedDeviceWidth,
+                                                        int retainedDeviceHeight);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,
@@ -159,6 +174,7 @@ private:
     void destroyTexture(void);
     void destroyProcessingTextures(void);
     void applySamplingMode(void);
+    void setPresentationOptions(const PresentationOptions &options);
     QRectF targetRectInViewport(void) const;
     int pendingWidth(void) const;
     int pendingHeight(void) const;
@@ -176,6 +192,7 @@ private:
     bool m_pendingTextureFromGpuRecon;
     bool m_textureIs16Bit;
     bool m_textureIsBayer16;
+    bool m_gpuReconSourceTextureCurrent;
     QGraphicsView *m_view;
     QGraphicsPixmapItem *m_fallbackItem;
     QImage m_pendingImage;
@@ -183,6 +200,8 @@ private:
     int m_pendingTextureWidth;
     int m_pendingTextureHeight;
     PresentationOptions m_presentationOptions;
+    uint64_t m_processingTextureSignature;
+    bool m_processingTextureSignatureValid;
     QString m_rendererDescription;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;

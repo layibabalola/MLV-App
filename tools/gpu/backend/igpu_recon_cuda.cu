@@ -67,6 +67,7 @@
 #define HOST_FULLRES_THR 0.8   /* fullres_thr (dualiso.c:1678) */
 #define HOST_FACTOR   0.125    /* pow(2,-3); fixed for the 3 EV / 8x ISO ratio */
 #define CUDA_CONTEXT_RESERVE_BYTES (410ull * 1024ull * 1024ull)
+#define RETAINED_DEVICE_OUTPUT_SLOTS 12
 
 /* Device constants are set per set_clip()/set_luts(); kept in __constant__ so
  * the verbatim kernels reference them exactly as the parity probe did. */
@@ -558,6 +559,14 @@ __global__ void k_final_blend16_avx2(uint16_t* __restrict out,
  *  BACKEND HANDLE + ABI                                                  *
  * ===================================================================== */
 
+struct CachedGlImageResource {
+    cudaGraphicsResource* resource;
+    unsigned int texture;
+    int width;
+    int height;
+    unsigned int flags;
+};
+
 struct igpu_recon_backend {
     int   device;
     char  describe[256];
@@ -583,31 +592,105 @@ struct igpu_recon_backend {
     /* timing */
     igpu_recon_timing_t last_timing;
 
+    /* cached CUDA-GL interop resource for the live no-readback R16 output */
+    CachedGlImageResource gl_r16_resource;
+
+    /* Optional retained device outputs for cross-thread live playback handoff.
+     * Each slot is backend-owned CUDA memory holding a copy of d_out. */
+    uint16_t* retained_device_output[RETAINED_DEVICE_OUTPUT_SLOTS];
+    uint64_t retained_device_output_token[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_in_use[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_width[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_height[RETAINED_DEVICE_OUTPUT_SLOTS];
+    uint64_t retained_device_output_allocated_bytes;
+    uint64_t next_retained_device_output_token;
+
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
+
+static int reset_cached_gl_resource(CachedGlImageResource* cache,
+                                    int tolerate_invalid_graphics_context)
+{
+    int status = 0;
+    if (!cache) return status;
+    if (cache->resource) {
+        const cudaError_t rc = cudaGraphicsUnregisterResource(cache->resource);
+        if (rc != cudaSuccess) {
+            if (!(tolerate_invalid_graphics_context
+                  && rc == cudaErrorInvalidGraphicsContext)) {
+                fprintf(stderr,
+                        "[igpu_recon_cuda] cudaGraphicsUnregisterResource(cached GL_R16 texture) failed: %s\n",
+                        cudaGetErrorString(rc));
+            }
+            status = 2;
+        }
+    }
+    cache->resource = NULL;
+    cache->texture = 0;
+    cache->width = 0;
+    cache->height = 0;
+    cache->flags = 0;
+    return status;
+}
+
+static int ensure_cached_gl_resource(CachedGlImageResource* cache,
+                                     unsigned int gl_texture,
+                                     int width,
+                                     int height,
+                                     unsigned int flags,
+                                     const char* label)
+{
+    if (!cache || gl_texture == 0 || width <= 0 || height <= 0) return -1;
+    if (cache->resource
+        && cache->texture == gl_texture
+        && cache->width == width
+        && cache->height == height
+        && cache->flags == flags) {
+        return 0;
+    }
+    const int reset_rc = reset_cached_gl_resource(cache, 0);
+    if (reset_rc != 0) return reset_rc;
+    cudaGraphicsResource* resource = NULL;
+    cudaError_t e = cudaGraphicsGLRegisterImage(&resource,
+                                                gl_texture,
+                                                GL_TEXTURE_2D,
+                                                flags);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaGraphicsGLRegisterImage(%s) failed: %s\n",
+                label ? label : "cached GL texture",
+                cudaGetErrorString(e));
+        return 2;
+    }
+    cache->resource = resource;
+    cache->texture = gl_texture;
+    cache->width = width;
+    cache->height = height;
+    cache->flags = flags;
+    return 0;
+}
 
 static int copy_bayer16_to_gl_r16_texture(igpu_recon_backend* b, unsigned int gl_texture)
 {
     if (!b || gl_texture == 0) return -1;
 
-    cudaGraphicsResource* resource = NULL;
-    cudaError_t e = cudaGraphicsGLRegisterImage(&resource,
-                                                gl_texture,
-                                                GL_TEXTURE_2D,
-                                                cudaGraphicsRegisterFlagsWriteDiscard);
-    if (e != cudaSuccess) {
-        fprintf(stderr,
-                "[igpu_recon_cuda] cudaGraphicsGLRegisterImage(GL_R16 texture) failed: %s\n",
-                cudaGetErrorString(e));
-        return 2;
-    }
+    const unsigned int flags = cudaGraphicsRegisterFlagsWriteDiscard;
+    const int cache_rc = ensure_cached_gl_resource(&b->gl_r16_resource,
+                                                   gl_texture,
+                                                   b->width,
+                                                   b->height,
+                                                   flags,
+                                                   "GL_R16 texture");
+    if (cache_rc != 0) return cache_rc;
 
-    e = cudaGraphicsMapResources(1, &resource, 0);
+    cudaGraphicsResource* resource = b->gl_r16_resource.resource;
+    cudaError_t e = cudaGraphicsMapResources(1, &resource, 0);
+
     if (e != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] cudaGraphicsMapResources(GL_R16 texture) failed: %s\n",
                 cudaGetErrorString(e));
-        cudaGraphicsUnregisterResource(resource);
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
 
@@ -626,23 +709,18 @@ static int copy_bayer16_to_gl_r16_texture(igpu_recon_backend* b, unsigned int gl
     }
 
     const cudaError_t unmap_error = cudaGraphicsUnmapResources(1, &resource, 0);
-    const cudaError_t unregister_error = cudaGraphicsUnregisterResource(resource);
     if (e != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] device-to-GL texture copy failed: %s\n",
                 cudaGetErrorString(e));
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
     if (unmap_error != cudaSuccess) {
         fprintf(stderr,
                 "[igpu_recon_cuda] cudaGraphicsUnmapResources(GL_R16 texture) failed: %s\n",
                 cudaGetErrorString(unmap_error));
-        return 2;
-    }
-    if (unregister_error != cudaSuccess) {
-        fprintf(stderr,
-                "[igpu_recon_cuda] cudaGraphicsUnregisterResource(GL_R16 texture) failed: %s\n",
-                cudaGetErrorString(unregister_error));
+        reset_cached_gl_resource(&b->gl_r16_resource, 0);
         return 2;
     }
 
@@ -665,6 +743,21 @@ static void free_clip_buffers(igpu_recon_backend* b) {
     b->d_in=b->d_out=b->d_alias=b->d_aliasaux=b->d_over=b->d_overaux=NULL;
     b->d_raw32=b->d_dark=b->d_bright=b->d_fullres=b->d_halfres=NULL;
     b->clip_allocated_bytes = 0;
+}
+
+static void free_retained_device_outputs(igpu_recon_backend* b) {
+    if (!b) return;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (b->retained_device_output[i]) {
+            cudaFree(b->retained_device_output[i]);
+        }
+        b->retained_device_output[i] = NULL;
+        b->retained_device_output_token[i] = 0;
+        b->retained_device_output_in_use[i] = 0;
+        b->retained_device_output_width[i] = 0;
+        b->retained_device_output_height[i] = 0;
+    }
+    b->retained_device_output_allocated_bytes = 0;
 }
 
 static void free_lut_buffers(igpu_recon_backend* b) {
@@ -706,6 +799,7 @@ igpu_recon_backend* igpu_recon_create(const char* backend_name)
     igpu_recon_backend* b = (igpu_recon_backend*)calloc(1, sizeof(igpu_recon_backend));
     if (!b) return NULL;
     b->device = dev;
+    b->next_retained_device_output_token = 1;
     snprintf(b->describe, sizeof(b->describe), "CUDA / %s", prop.name);
 
     /* timing events */
@@ -724,6 +818,9 @@ IGPU_API
 void igpu_recon_destroy(igpu_recon_backend* b)
 {
     if (!b) return;
+    cudaSetDevice(b->device);
+    reset_cached_gl_resource(&b->gl_r16_resource, 1);
+    free_retained_device_outputs(b);
     free_clip_buffers(b);
     free_lut_buffers(b);
     if (b->ev_start)        cudaEventDestroy(b->ev_start);
@@ -731,6 +828,20 @@ void igpu_recon_destroy(igpu_recon_backend* b)
     if (b->ev_after_kernel) cudaEventDestroy(b->ev_after_kernel);
     if (b->ev_after_dl)     cudaEventDestroy(b->ev_after_dl);
     free(b);
+}
+
+IGPU_API
+int igpu_recon_reset_gl_texture_resources(igpu_recon_backend* b)
+{
+    if (!b) return -1;
+    const cudaError_t e = cudaSetDevice(b->device);
+    if (e != cudaSuccess) {
+        fprintf(stderr,
+                "[igpu_recon_cuda] cudaSetDevice(reset GL texture resources) failed: %s\n",
+                cudaGetErrorString(e));
+        return 2;
+    }
+    return reset_cached_gl_resource(&b->gl_r16_resource, 1);
 }
 
 IGPU_API
@@ -756,6 +867,7 @@ int igpu_recon_set_clip(igpu_recon_backend* b, const igpu_recon_clip_t* clip)
     CK(cudaSetDevice(b->device));
 
     /* (re)allocate device buffers sized to the clip */
+    free_retained_device_outputs(b);
     free_clip_buffers(b);
     b->width  = clip->width;
     b->height = clip->height;
@@ -890,9 +1002,12 @@ int igpu_recon_run(igpu_recon_backend* b,
         return 3;
     }
     const int output_to_gl_texture = (out_kind == IGPU_OUT_GL_TEXTURE);
+    const int output_to_device_bayer16 = (out_kind == IGPU_OUT_DEVICE_BAYER16);
     if (output_to_gl_texture) {
         if (gl_texture == 0) return -1;
-    } else if (out_kind != IGPU_OUT_CPU16 || !out_bayer16) {
+    } else if (out_kind == IGPU_OUT_CPU16) {
+        if (!out_bayer16) return -1;
+    } else if (!output_to_device_bayer16) {
         return -1;
     }
 
@@ -1005,7 +1120,7 @@ int igpu_recon_run(igpu_recon_backend* b,
     if (output_to_gl_texture) {
         const int rc = copy_bayer16_to_gl_r16_texture(b, gl_texture);
         if (rc != 0) return rc;
-    } else {
+    } else if (out_kind == IGPU_OUT_CPU16) {
         CK(cudaMemcpy(out_bayer16, b->d_out, n*sizeof(uint16_t), cudaMemcpyDeviceToHost));
     }
     CK(cudaEventRecord(b->ev_after_dl, 0));
@@ -1034,10 +1149,115 @@ int igpu_recon_last_timing(igpu_recon_backend* b, igpu_recon_timing_t* t)
 }
 
 IGPU_API
+int igpu_recon_last_device_output(igpu_recon_backend* b,
+                                  const uint16_t** device_bayer16,
+                                  int* width,
+                                  int* height)
+{
+    if (!b || !device_bayer16 || !width || !height || !b->d_out || !b->have_clip) {
+        return -1;
+    }
+    *device_bayer16 = b->d_out;
+    *width = b->width;
+    *height = b->height;
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_retain_last_device_output(igpu_recon_backend* b,
+                                         const uint16_t** device_bayer16,
+                                         int* width,
+                                         int* height,
+                                         uint64_t* token)
+{
+    if (!b || !device_bayer16 || !width || !height || !token ||
+        !b->d_out || !b->have_clip) {
+        return -1;
+    }
+    CK(cudaSetDevice(b->device));
+
+    int slot = -1;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (!b->retained_device_output_in_use[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return 4;
+    }
+
+    const size_t n = (size_t)b->width * (size_t)b->height;
+    const size_t bytes = n * sizeof(uint16_t);
+    if (!b->retained_device_output[slot] ||
+        b->retained_device_output_width[slot] != b->width ||
+        b->retained_device_output_height[slot] != b->height) {
+        if (b->retained_device_output[slot]) {
+            cudaFree(b->retained_device_output[slot]);
+            b->retained_device_output_allocated_bytes -=
+                (uint64_t)b->retained_device_output_width[slot] *
+                (uint64_t)b->retained_device_output_height[slot] *
+                (uint64_t)sizeof(uint16_t);
+            b->retained_device_output[slot] = NULL;
+        }
+        CK(cudaMalloc(&b->retained_device_output[slot], bytes));
+        b->retained_device_output_width[slot] = b->width;
+        b->retained_device_output_height[slot] = b->height;
+        b->retained_device_output_allocated_bytes += (uint64_t)bytes;
+    }
+
+    CK(cudaMemcpy(b->retained_device_output[slot],
+                  b->d_out,
+                  bytes,
+                  cudaMemcpyDeviceToDevice));
+    uint64_t next = b->next_retained_device_output_token++;
+    if (next == 0) {
+        next = b->next_retained_device_output_token++;
+    }
+    b->retained_device_output_token[slot] = next;
+    b->retained_device_output_in_use[slot] = 1;
+    *device_bayer16 = b->retained_device_output[slot];
+    *width = b->width;
+    *height = b->height;
+    *token = next;
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_release_retained_device_output(igpu_recon_backend* b,
+                                              uint64_t token)
+{
+    if (!b || token == 0) return -1;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (b->retained_device_output_in_use[i] &&
+            b->retained_device_output_token[i] == token) {
+            b->retained_device_output_in_use[i] = 0;
+            b->retained_device_output_token[i] = 0;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+IGPU_API
+int igpu_recon_copy_last_device_output_to_gl_texture(igpu_recon_backend* b,
+                                                     unsigned int gl_texture)
+{
+    if (!b || !b->d_out || !b->have_clip || gl_texture == 0) {
+        return -1;
+    }
+    CK(cudaSetDevice(b->device));
+    return copy_bayer16_to_gl_r16_texture(b, gl_texture);
+}
+
+IGPU_API
 int igpu_recon_allocated_bytes(igpu_recon_backend* b, uint64_t* bytes)
 {
     if (!b || !bytes) return -1;
-    const uint64_t tracked = b->clip_allocated_bytes + b->lut_allocated_bytes;
+    const uint64_t tracked =
+        b->clip_allocated_bytes +
+        b->lut_allocated_bytes +
+        b->retained_device_output_allocated_bytes;
     *bytes = tracked ? tracked + CUDA_CONTEXT_RESERVE_BYTES : 0;
     return 0;
 }

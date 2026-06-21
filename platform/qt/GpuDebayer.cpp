@@ -310,6 +310,17 @@ typedef int (*GpuAmazeRunPostWbGlTextureFromR16GlTextureFn)(
     double,
     double,
     double);
+typedef int (*GpuAmazeRunPostWbGlTextureFromDeviceBayer16Fn)(
+    igpu_amaze_debayer_backend *,
+    const uint16_t *,
+    unsigned int,
+    int,
+    int,
+    int,
+    double,
+    double,
+    double);
+typedef int (*GpuAmazeResetLiveGlTextureResourcesFn)(igpu_amaze_debayer_backend *);
 typedef int (*GpuAmazeLastTimingFn)(igpu_amaze_debayer_backend *,
                                     igpu_amaze_debayer_timing_t *);
 
@@ -323,6 +334,8 @@ struct GpuAmazeDebayerRuntime
     GpuAmazeRunFn run = nullptr;
     GpuAmazeRunPostWbGlTextureFn runPostWbGlTexture = nullptr;
     GpuAmazeRunPostWbGlTextureFromR16GlTextureFn runPostWbGlTextureFromR16GlTexture = nullptr;
+    GpuAmazeRunPostWbGlTextureFromDeviceBayer16Fn runPostWbGlTextureFromDeviceBayer16 = nullptr;
+    GpuAmazeResetLiveGlTextureResourcesFn resetLiveGlTextureResources = nullptr;
     GpuAmazeLastTimingFn lastTiming = nullptr;
 };
 
@@ -503,6 +516,13 @@ struct GpuAmazeDebayerLiveTextureRuntime
             if ( outReason ) *outReason = reason;
             return false;
         }
+
+        runtime.resetLiveGlTextureResources =
+            reinterpret_cast<GpuAmazeResetLiveGlTextureResourcesFn>(
+                runtime.library.resolve("igpu_amaze_debayer_reset_live_gl_texture_resources"));
+        runtime.runPostWbGlTextureFromDeviceBayer16 =
+            reinterpret_cast<GpuAmazeRunPostWbGlTextureFromDeviceBayer16Fn>(
+                runtime.library.resolve("igpu_amaze_debayer_run_post_wb_gl_texture_from_device_bayer16"));
 
         backend = runtime.create("cuda");
         if ( !backend )
@@ -907,6 +927,16 @@ GpuAmazeDebayerBackendAvailability gpuAmazeDebayerProbeR16TextureBackend(void)
     return availability;
 }
 
+void gpuAmazeDebayerResetR16TextureBackendResources(void)
+{
+    GpuAmazeDebayerLiveTextureRuntime & live = liveAmazeTextureRuntime();
+    QMutexLocker locker(&live.mutex);
+    if ( live.backend && live.runtime.resetLiveGlTextureResources )
+    {
+        live.runtime.resetLiveGlTextureResources(live.backend);
+    }
+}
+
 bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
     unsigned int inputR16GlTexture,
     unsigned int outputRgba16GlTexture,
@@ -959,6 +989,75 @@ bool gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
     if ( rc != 0 )
     {
         return fail(QStringLiteral("GPU AMaZE R16 texture-present run failed rc=%1 renderer=%2")
+            .arg(rc)
+            .arg(live.rendererDescription.isEmpty()
+                ? QStringLiteral("unknown")
+                : live.rendererDescription));
+    }
+
+    if ( rendererDescription ) *rendererDescription = live.rendererDescription;
+    copyAmazeTiming(&live.runtime, live.backend, timing);
+    if ( reason ) reason->clear();
+    return true;
+}
+
+bool gpuAmazeDebayerRenderPostWbGlTextureFromDeviceBayer16(
+    const uint16_t *deviceBayer16,
+    unsigned int outputRgba16GlTexture,
+    int width,
+    int height,
+    int blackLevel,
+    const double wbMultipliers[3],
+    QString * reason,
+    QString * rendererDescription,
+    GpuAmazeDebayerBackendTiming * timing)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        if ( rendererDescription ) rendererDescription->clear();
+        if ( timing ) *timing = GpuAmazeDebayerBackendTiming();
+        return false;
+    };
+
+    if ( !deviceBayer16 || outputRgba16GlTexture == 0 || width <= 32 || height <= 32 )
+    {
+        return fail(QStringLiteral("GPU AMaZE direct device texture-present input/output is invalid"));
+    }
+    if ( !validWbMultipliers(wbMultipliers) )
+    {
+        return fail(QStringLiteral("GPU AMaZE direct device texture-present WB multipliers are invalid"));
+    }
+
+    GpuAmazeDebayerLiveTextureRuntime & live = liveAmazeTextureRuntime();
+    QString ensureReason;
+    if ( !live.ensure(&ensureReason) )
+    {
+        return fail(ensureReason.isEmpty()
+            ? QStringLiteral("GPU AMaZE direct device texture-present backend is unavailable")
+            : ensureReason);
+    }
+
+    QMutexLocker locker(&live.mutex);
+    if ( !live.runtime.runPostWbGlTextureFromDeviceBayer16 )
+    {
+        return fail(QStringLiteral("GPU AMaZE direct device texture-present symbol is unavailable"));
+    }
+
+    const int rc =
+        live.runtime.runPostWbGlTextureFromDeviceBayer16(
+            live.backend,
+            deviceBayer16,
+            outputRgba16GlTexture,
+            width,
+            height,
+            blackLevel,
+            wbMultipliers[0],
+            wbMultipliers[1],
+            wbMultipliers[2]);
+    if ( rc != 0 )
+    {
+        return fail(QStringLiteral("GPU AMaZE direct device texture-present run failed rc=%1 renderer=%2")
             .arg(rc)
             .arg(live.rendererDescription.isEmpty()
                 ? QStringLiteral("unknown")
