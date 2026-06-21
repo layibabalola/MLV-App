@@ -147,6 +147,21 @@ public:
     }
 };
 
+class GpuPlaybackReconTexturePrepareOnlyScope
+{
+public:
+    explicit GpuPlaybackReconTexturePrepareOnlyScope( bool enabled )
+    {
+        llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(
+            enabled ? 1 : 0 );
+    }
+
+    ~GpuPlaybackReconTexturePrepareOnlyScope()
+    {
+        llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread( 0 );
+    }
+};
+
 bool gpuPlaybackReconEnvRequested()
 {
     const QByteArray value = qgetenv("MLVAPP_GPU_PLAYBACK_RECON");
@@ -909,6 +924,10 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             && entry.request.presentationContext.playbackScaleFactor == 1
             && m_imageWidth > 0
             && m_imageHeight > 0;
+        const bool allowGpuPlaybackReconTexturePrepareOnly =
+            wantsGpuPlaybackReconTextureNoReadback
+            && entry.request.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+            && !gpuPlaybackReconNoReadbackOutputValidationEnabled();
         bool gpuPlaybackReconTextureInputSnapshotCopied = false;
         bool gpuPlaybackReconTexturePreparedStateValid = false;
         bool gpuPlaybackReconTextureStateSnapshotOk = false;
@@ -925,6 +944,9 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             entry.request.presentationContext.playbackActive );
         const GpuPlaybackReconTexturePresentScope gpuPlaybackReconTexturePresentScope(
             wantsGpuPlaybackReconTextureNoReadback );
+        const GpuPlaybackReconTexturePrepareOnlyScope
+            gpuPlaybackReconTexturePrepareOnlyScope(
+                allowGpuPlaybackReconTexturePrepareOnly );
         mlv_pipeline_capture_set_current_frame( entry.request.frameNumber );
         applyLLRawProcObjectWorker( m_pMlvObject,
                                     slot.rawImage16.data(),
@@ -1031,6 +1053,12 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_recon_requested"),
             wantsGpuPlaybackReconTextureNoReadback );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_prepare_only_allowed"),
+            allowGpuPlaybackReconTexturePrepareOnly );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_prepare_only_used"),
+            llrpGpuPlaybackReconLastPrepareOnlyForTesting() != 0 );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_input_words"),
             static_cast<qint64>( slot.gpuPlaybackReconTextureInputBayerFrame.size() ) );
@@ -1869,6 +1897,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
     {
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_recon_requested" );
+        preserveGpuPlaybackReconTextureTelemetry(
+            "gpu_playback_recon_texture_present_prepare_only_allowed" );
+        preserveGpuPlaybackReconTextureTelemetry(
+            "gpu_playback_recon_texture_present_prepare_only_used" );
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_input_words" );
         preserveGpuPlaybackReconTextureTelemetry(
@@ -3754,6 +3786,19 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       processed8PrefetchHit );
     if( skipCpuDebayerForGpuTextureNoReadback )
     {
+        // The no-readback GPU AMaZE texture path does not run the CPU debayer, so the
+        // getMlvLast*Milliseconds() debayer-detail getters return stale carryover from the
+        // last frame that did (e.g. warmup). Zero them here so the proof artifact reflects
+        // the live path instead of a phantom ~240ms CPU debayer. Cross-check is render_work_ms;
+        // render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr distinguishes this from a true 0.
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayered_frame_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_exclusive_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("raw_float_convert_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_wb_prepare_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_ca_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_kernel_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_wb_undo_ms"), 0.0 );
+        slot.stageTimingTelemetry.insert( QStringLiteral("debayer_pipeline_other_ms"), 0.0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("processed16_total_ms"), 0.0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("processed16_for_8bit_ms"), 0.0 );
         slot.stageTimingTelemetry.insert( QStringLiteral("processed16_to_8bit_ms"), 0.0 );

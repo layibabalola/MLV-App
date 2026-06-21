@@ -189,6 +189,7 @@ static int llrawproc_gpu_export_trusted_enabled(void)
 
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_recon_allowed = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_texture_present_preferred = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_texture_prepare_only_allowed = 0;
 
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled)
@@ -200,6 +201,12 @@ void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled)
 void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled)
 {
     g_llrawproc_gpu_playback_texture_present_preferred = enabled != 0;
+}
+
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled);
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled)
+{
+    g_llrawproc_gpu_playback_texture_prepare_only_allowed = enabled != 0;
 }
 
 static int llrawproc_gpu_playback_recon_enabled(void)
@@ -226,6 +233,7 @@ static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_run_attempted = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_run_rc = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_used = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_state_valid = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_gpu_playback_last_prepare_only = 0;
 static MLV_THREAD_LOCAL dualiso_gpu_recon_state_t g_llrawproc_gpu_playback_last_prepared_state = {0};
 static MLV_THREAD_LOCAL uint16_t *g_llrawproc_gpu_playback_last_input_bayer16 = NULL;
 static MLV_THREAD_LOCAL size_t g_llrawproc_gpu_playback_last_input_words = 0;
@@ -262,6 +270,7 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
     g_llrawproc_gpu_playback_last_run_rc = 0;
     g_llrawproc_gpu_playback_last_used = 0;
     g_llrawproc_gpu_playback_last_state_valid = 0;
+    g_llrawproc_gpu_playback_last_prepare_only = 0;
     memset(&g_llrawproc_gpu_playback_last_prepared_state, 0,
            sizeof(g_llrawproc_gpu_playback_last_prepared_state));
     if(g_llrawproc_gpu_playback_last_input_bayer16)
@@ -412,6 +421,12 @@ int llrpGpuPlaybackReconLastStateValidForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void)
 {
     return g_llrawproc_gpu_playback_last_state_valid;
+}
+
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void);
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void)
+{
+    return g_llrawproc_gpu_playback_last_prepare_only;
 }
 
 static void llrawproc_gpu_playback_public_state_from_dualiso(
@@ -2416,6 +2431,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             int dual_iso_recon_ok = 0;
             int capture_gpu_recon_state = 0;
             int gpu_playback_no_readback_post_recon_fix_ran = 0;
+            int gpu_playback_prepare_only_used = 0;
             int explicit_auto_correction = 0;
             double explicit_ev_correction = worker->diso_ev_correction;
             int explicit_black_delta = worker->diso_black_delta;
@@ -2521,15 +2537,37 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     g_llrawproc_gpu_playback_last_prepared_state =
                         gpu_playback_state;
                 }
-                if (gpu_playback_state.valid
-                 && !g_llrawproc_gpu_playback_texture_present_preferred
-                 && llrawproc_gpu_playback_try_reconstruct(&gpu_playback_state,
-                                                           gpu_playback_input,
-                                                           raw_image_buff,
-                                                           raw_image_size))
                 {
-                    dual_iso_recon_ok = 1;
-                    gpu_playback_recon_used = 1;
+                    const int gpu_playback_post_recon_fix_would_run =
+                        (focus_pixels && focus_interpolate_outside_lock
+                         && focus_status_snapshot == 2 && focus_map_for_interpolation)
+                     || (bad_pixels && bad_interpolate_outside_lock
+                         && bad_status_snapshot == 2 && bad_map_for_interpolation);
+                    const int gpu_playback_prepare_only_allowed =
+                        g_llrawproc_gpu_playback_texture_prepare_only_allowed
+                        && g_llrawproc_gpu_playback_texture_present_preferred
+                        && !gpu_export_input
+                        && gpu_playback_state.valid
+                        && llrawproc_gpu_playback_recon_state_matches_validated_config(
+                            &gpu_playback_state)
+                        && !gpu_playback_post_recon_fix_would_run;
+                    if (gpu_playback_prepare_only_allowed)
+                    {
+                        dual_iso_recon_ok = 1;
+                        gpu_playback_prepare_only_used = 1;
+                        g_llrawproc_gpu_playback_last_prepare_only = 1;
+                        g_llrawproc_gpu_playback_last_run_rc = 0;
+                    }
+                    else if (gpu_playback_state.valid
+                     && !g_llrawproc_gpu_playback_texture_present_preferred
+                     && llrawproc_gpu_playback_try_reconstruct(&gpu_playback_state,
+                                                               gpu_playback_input,
+                                                               raw_image_buff,
+                                                               raw_image_size))
+                    {
+                        dual_iso_recon_ok = 1;
+                        gpu_playback_recon_used = 1;
+                    }
                 }
             }
 
@@ -2575,7 +2613,9 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 }
             }
 
-            if (!gpu_playback_recon_used && !gpu_export_trusted_used)
+            if (!gpu_playback_recon_used
+             && !gpu_export_trusted_used
+             && !gpu_playback_prepare_only_used)
             {
                 capture_gpu_recon_state =
                     (gpu_export_input != NULL && !gpu_export_trusted_requested)
@@ -2606,6 +2646,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
              * offline triad isolate a recon state-capture desync (recon_only vs
              * backend_cpu) from post-recon stages (recon_only vs out.u16). */
             if (!gpu_playback_recon_used
+             && !gpu_playback_prepare_only_used
              && dual_iso_recon_ok
              && g_llrawproc_gpu_playback_texture_present_preferred)
             {
@@ -2628,6 +2669,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 }
             }
             if (!gpu_playback_recon_used
+             && !gpu_playback_prepare_only_used
              && dual_iso_recon_ok
              && gpu_playback_input
              && g_llrawproc_gpu_playback_texture_present_preferred
@@ -2692,6 +2734,17 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 worker->dng_black_level = raw_info.black_level << bits_shift;
                 worker->dng_white_level = raw_info.white_level << bits_shift;
                 worker->dng_bit_depth = 16;
+            }
+
+            if (gpu_playback_prepare_only_used)
+            {
+                /* The CPU recon/display buffer is intentionally not produced in
+                 * this admitted no-readback mode; skip post-recon CPU-only raw
+                 * fixes after proving above that they would not run for this
+                 * frame. If they would run, prepare-only is not admitted and the
+                 * existing CPU/readback path remains the fallback. */
+                focus_pixels = 0;
+                bad_pixels = 0;
             }
 
             const double refine_lock_start = mlv_stage_timing_now();

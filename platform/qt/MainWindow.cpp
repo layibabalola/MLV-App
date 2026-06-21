@@ -4361,25 +4361,6 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
          && gpuPlaybackReconAmazeTextureExtensionAvailable )
         {
             gpuPlaybackReconAmazeTextureAttempted = true;
-            const bool canReleaseSlotBeforeGpuAmazeTexturePresent =
-                !displayPreviewCachingAllowed
-                && m_pRenderThread
-                && !releasePresentedFrameEarly
-                && cpuAmazeSkippedForGpuTextureNoReadback
-                && task.gpuPlaybackReconTextureInputBayerFrame
-                && task.gpuPlaybackReconTextureInputBayerFrameSize > 0
-                && !task.ownedGpuPlaybackReconTextureInputBayerFrame.empty()
-                && task.gpuPlaybackReconTextureInputBayerFrame
-                    == task.ownedGpuPlaybackReconTextureInputBayerFrame.data();
-            readyFrame.stageTimingTelemetry.insert(
-                QStringLiteral("gpu_playback_recon_amaze_texture_present_slot_release_before_present"),
-                canReleaseSlotBeforeGpuAmazeTexturePresent );
-            if( canReleaseSlotBeforeGpuAmazeTexturePresent )
-            {
-                m_pRenderThread->releasePresentedFrameForRequestSerial(
-                    task.requestSerial );
-                releasePresentedFrameEarly = true;
-            }
             framePresentedByViewport =
                 GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
                     ui->graphicsView,
@@ -21216,7 +21197,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "texture_interop_ms=%21 texture_total_ms=%22 "
                    "cpu_amaze_skip=%23 r16_amaze_preflight=%24 "
                    "r16_amaze_gui_admitted=%25 r16_amaze_skip_candidate=%26 "
-                   "r16_amaze_skip_input_words=%27" )
+                   "r16_amaze_skip_input_words=%27 "
+                   "prepare_only_allowed=%28 prepare_only_used=%29" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21271,7 +21253,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     .arg( bool01( telemetryBoolValue(
                         timing, "gpu_playback_recon_amaze_texture_present_skip_gate_no_readback_candidate" ) ) )
                     .arg( telemetryIntValue(
-                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_input_words" ) );
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_input_words" ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_prepare_only_allowed" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_texture_present_prepare_only_used" ) ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -24175,14 +24161,6 @@ void MainWindow::drawFrameReady()
 
     if( inlineFastPlaybackPrep )
     {
-        if( inlineGpuPlaybackReconTextureNoReadbackPrep )
-        {
-            task.ownedGpuPlaybackReconTextureInputBayerFrame.assign(
-                readyFrame.gpuPlaybackReconTextureInputBayerFrame,
-                readyFrame.gpuPlaybackReconTextureInputBayerFrame
-                    + readyFrame.gpuPlaybackReconTextureInputBayerFrameSize );
-            task.rebindOwnedImagePointers();
-        }
         notePlaybackPrepOwnershipTelemetry();
         m_latestRequestedSerial.store( task.requestSerial, std::memory_order_release );
         PlaybackPrepResult result = buildPlaybackPrepResult( task );

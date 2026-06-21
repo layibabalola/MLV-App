@@ -45,11 +45,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                 int stop_before_dual_iso);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled);
+void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled);
 int llrpResetGpuPlaybackReconRunForTesting(void);
 int llrpGpuPlaybackReconLastRunAttemptedForTesting(void);
 int llrpGpuPlaybackReconLastRunRcForTesting(void);
 int llrpGpuPlaybackReconLastUsedForTesting(void);
 int llrpGpuPlaybackReconLastStateValidForTesting(void);
+int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void);
 
 #define LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT (1u << 20)
 #define LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT (24u * 65536u)
