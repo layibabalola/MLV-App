@@ -579,6 +579,9 @@ typedef int (*llrawproc_gpu_last_device_output_fn)(igpu_recon_backend*,
                                                    const uint16_t**,
                                                    int*,
                                                    int*);
+typedef int (*llrawproc_gpu_copy_last_device_output_to_gl_texture_fn)(
+    igpu_recon_backend*,
+    unsigned int);
 typedef int (*llrawproc_gpu_allocated_bytes_fn)(igpu_recon_backend*, uint64_t*);
 typedef int (*llrawproc_gpu_reset_gl_texture_resources_fn)(igpu_recon_backend*);
 
@@ -614,6 +617,7 @@ typedef struct
     llrawproc_gpu_run_fn run;
     llrawproc_gpu_last_timing_fn last_timing;
     llrawproc_gpu_last_device_output_fn last_device_output;
+    llrawproc_gpu_copy_last_device_output_to_gl_texture_fn copy_last_device_output_to_gl_texture;
     llrawproc_gpu_allocated_bytes_fn allocated_bytes;
     llrawproc_gpu_reset_gl_texture_resources_fn reset_gl_texture_resources;
     int clip_configured;
@@ -816,6 +820,11 @@ static int llrawproc_gpu_export_backend_available(int prefer_playback_dll)
         union { FARPROC raw; llrawproc_gpu_last_device_output_fn typed; } resolved;
         resolved.raw = GetProcAddress(g->dll, "igpu_recon_last_device_output");
         g->last_device_output = resolved.typed;
+    }
+    {
+        union { FARPROC raw; llrawproc_gpu_copy_last_device_output_to_gl_texture_fn typed; } resolved;
+        resolved.raw = GetProcAddress(g->dll, "igpu_recon_copy_last_device_output_to_gl_texture");
+        g->copy_last_device_output_to_gl_texture = resolved.typed;
     }
     {
         union { FARPROC raw; llrawproc_gpu_allocated_bytes_fn typed; } resolved;
@@ -1389,6 +1398,31 @@ int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * sta
                                           height_out);
 }
 
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out)
+{
+    llrawprocGpuExportBackend_t * g = &g_llrawproc_gpu_export_backend;
+    int rc = -1;
+    if(rc_out) *rc_out = -1;
+    if(gl_texture_id == 0) return 0;
+
+    pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
+    if(g->backend && !g->unavailable && g->copy_last_device_output_to_gl_texture)
+    {
+        rc = g->copy_last_device_output_to_gl_texture(g->backend, gl_texture_id);
+    }
+    else
+    {
+        rc = -3;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+
+    if(rc_out) *rc_out = rc;
+    return rc == 0;
+}
+
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
                                       const uint16_t * raw_input_bayer14,
                                       size_t raw_image_size,
@@ -1539,6 +1573,16 @@ int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * sta
     if(height_out) *height_out = 0;
     if(rc_out) *rc_out = -1;
     if(timing_out) memset(timing_out, 0, sizeof(*timing_out));
+    return 0;
+}
+
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out)
+{
+    (void)gl_texture_id;
+    if(rc_out) *rc_out = -1;
     return 0;
 }
 

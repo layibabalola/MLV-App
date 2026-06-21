@@ -128,6 +128,8 @@ int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * sta
                                          int * height_out,
                                          int * rc_out,
                                          llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
+                                                         int * rc_out);
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
                                       const uint16_t * raw_input_bayer14,
                                       size_t raw_image_size,

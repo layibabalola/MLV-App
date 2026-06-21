@@ -4391,7 +4391,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                     task.gpuPresentationOptions,
                     &texturePresentReason,
                     &texturePresentTiming,
-                    &texturePresentHandoffMode );
+                    &texturePresentHandoffMode,
+                    playbackGpuNoReadbackOutputValidationEnabled() );
             gpuPlaybackReconAmazeTextureActive = framePresentedByViewport;
             if( framePresentedByViewport )
             {
@@ -4653,10 +4654,16 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                         &glTextureReason );
             const QString glProbeSurface =
                 gpuPlaybackReconAmazeTextureActive
+                    && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
+                    ? QStringLiteral("gl_texture_r16_direct_device_bayer16_probe")
+                : gpuPlaybackReconAmazeTextureActive
                     ? QStringLiteral("gl_texture_r16_recon_source")
                     : QStringLiteral("gl_texture_r16");
             const QString glProbeSource =
                 gpuPlaybackReconAmazeTextureActive
+                    && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
+                    ? QStringLiteral("cuda_device_bayer16_for_amaze_texture_probe")
+                : gpuPlaybackReconAmazeTextureActive
                     ? QStringLiteral("cuda_gl_r16_recon_source_for_amaze_texture")
                     : QStringLiteral("cuda_gl_r16_texture");
             const size_t glTextureWords =

@@ -1135,6 +1135,17 @@ int igpu_recon_last_device_output(igpu_recon_backend* b,
 }
 
 IGPU_API
+int igpu_recon_copy_last_device_output_to_gl_texture(igpu_recon_backend* b,
+                                                     unsigned int gl_texture)
+{
+    if (!b || !b->d_out || !b->have_clip || gl_texture == 0) {
+        return -1;
+    }
+    CK(cudaSetDevice(b->device));
+    return copy_bayer16_to_gl_r16_texture(b, gl_texture);
+}
+
+IGPU_API
 int igpu_recon_allocated_bytes(igpu_recon_backend* b, uint64_t* bytes)
 {
     if (!b || !bytes) return -1;

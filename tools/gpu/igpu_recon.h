@@ -133,6 +133,14 @@ int igpu_recon_last_device_output(igpu_recon_backend* b,
                                   int* height);
 
 /* Optional extension, resolved by name by MLVApp rather than required by ABI v1.
+ * Copies the most recent IGPU_OUT_DEVICE_BAYER16 output into a caller-owned
+ * GL_R16 texture in the current CUDA-compatible OpenGL context. This is a
+ * validation/proof surface for live CUDA->AMaZE texture-present: it does not
+ * rerun reconstruction, and older DLLs may omit this symbol. */
+int igpu_recon_copy_last_device_output_to_gl_texture(igpu_recon_backend* b,
+                                                     unsigned int gl_texture);
+
+/* Optional extension, resolved by name by MLVApp rather than required by ABI v1.
  * Returns the backend's current per-worker VRAM working-set budget in bytes.
  * CUDA backends include their tracked device buffers plus a conservative context
  * reserve; older DLLs may omit this symbol and callers must treat it as unknown. */

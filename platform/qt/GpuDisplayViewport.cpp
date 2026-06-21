@@ -612,7 +612,8 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
     const PresentationOptions &options,
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
-    QString *handoffMode)
+    QString *handoffMode,
+    bool validationProbeTexture)
 {
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport
@@ -647,7 +648,8 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
         options,
         reason,
         timing,
-        handoffMode);
+        handoffMode,
+        validationProbeTexture);
 }
 
 bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
@@ -1150,7 +1152,8 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     const PresentationOptions &options,
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
-    QString *handoffMode)
+    QString *handoffMode,
+    bool validationProbeTexture)
 {
     auto fail = [&](const QString & why) -> bool
     {
@@ -1300,16 +1303,33 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
             const double directAmazeWallMs = elapsedMs() - directAmazeStartMs;
             if ( directAmazeOk )
             {
-                rc = directRc;
-                reconTiming = directReconTiming;
-                amazeTiming = directAmazeTiming;
-                amazeReason = directAmazeReason;
-                amazeRenderer = directAmazeRenderer;
-                reconWallMs = directReconWallMs;
-                amazeWallMs = directAmazeWallMs;
-                reconOk = true;
-                amazeOk = true;
-                handoffModeValue = QStringLiteral("direct_device_bayer16");
+                int validationCopyRc = 0;
+                const bool validationCopyOk =
+                    !validationProbeTexture
+                    || llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(
+                        m_gpuReconSourceTexture->textureId(),
+                        &validationCopyRc ) != 0;
+                if ( validationCopyOk )
+                {
+                    rc = directRc;
+                    reconTiming = directReconTiming;
+                    amazeTiming = directAmazeTiming;
+                    amazeReason = directAmazeReason;
+                    amazeRenderer = directAmazeRenderer;
+                    reconWallMs = directReconWallMs;
+                    amazeWallMs = directAmazeWallMs;
+                    reconOk = true;
+                    amazeOk = true;
+                    handoffModeValue = QStringLiteral("direct_device_bayer16");
+                    m_gpuReconSourceTextureCurrent = validationProbeTexture;
+                }
+                else
+                {
+                    directFailureReason =
+                        QStringLiteral(
+                            "GPU playback recon direct device proof texture copy failed (rc=%1)")
+                            .arg(validationCopyRc);
+                }
             }
             else
             {

@@ -15,4 +15,5 @@ EXPORTS
     igpu_recon_run
     igpu_recon_last_timing
     igpu_recon_last_device_output
+    igpu_recon_copy_last_device_output_to_gl_texture
     igpu_recon_allocated_bytes
