@@ -20,6 +20,7 @@ param(
     [switch]$CudaAmazeLiveDirectRgbaStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
+    [switch]$GpuTexNrImmediateDrainReady,
     [int]$Phase3FrameSlots = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
@@ -1201,6 +1202,9 @@ if ($GpuPlaybackReconRetainDeviceOutput) {
 if ($GpuTexNrAcquireLatestReady) {
     $candidateEnv += "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY=1"
 }
+if ($GpuTexNrImmediateDrainReady) {
+    $candidateEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
+}
 if ($Phase3FrameSlots -gt 0) {
     $candidateEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
 }
@@ -1228,6 +1232,9 @@ if ($GpuPlaybackReconRetainDeviceOutput) {
 }
 if ($GpuTexNrAcquireLatestReady) {
     $candidateSpeedEnv += "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY=1"
+}
+if ($GpuTexNrImmediateDrainReady) {
+    $candidateSpeedEnv += "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY=1"
 }
 if ($Phase3FrameSlots -gt 0) {
     $candidateSpeedEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
@@ -1335,6 +1342,7 @@ $summary = [ordered]@{
     cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
     gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
     gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
+    gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
     phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
