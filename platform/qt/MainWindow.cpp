@@ -2624,6 +2624,14 @@ static bool mlvappGpuTexNrAcquireLatestReadyRequested()
     return ok && env != 0;
 }
 
+static bool mlvappGpuTexNrImmediateDrainRequested()
+{
+    bool ok = false;
+    const int env = qEnvironmentVariableIntValue(
+        "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY", &ok );
+    return ok && env != 0;
+}
+
 static int mlvappStartPlaybackTimer( QObject *owner, double framerate )
 {
     if( !owner ) return 0;
@@ -23900,6 +23908,33 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             true );
     }
     emit frameReady();
+    const bool immediateGpuTexNrDrain =
+        mlvappGpuTexNrImmediateDrainRequested()
+        && !m_gpuTexNrImmediateDrainActive
+        && ui->actionPlay->isChecked()
+        && m_pRenderThread
+        && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+        && requestContext.gpuPlaybackReconTexturePresentRequested
+        && requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+        && telemetryBoolValue(
+            readyFrame.stageTimingTelemetry,
+            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" )
+        && m_pRenderThread->hasGpuTextureNoReadbackReadyFrame();
+    if( immediateGpuTexNrDrain )
+    {
+        if( interactiveTraceEnabled() )
+        {
+            logInteractionEvent(
+                QStringLiteral("draw_frame_ready.gpu_tex_nr_immediate_drain"),
+                QStringLiteral("display_frame=%1 serial=%2")
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) ),
+                true );
+        }
+        m_gpuTexNrImmediateDrainActive = true;
+        drawFrameReady();
+        m_gpuTexNrImmediateDrainActive = false;
+    }
 }
 
 //Draw the frame when render thread is ready

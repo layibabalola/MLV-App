@@ -227,6 +227,7 @@ public:
     bool acquireLatestReadyFrame( ReadyFrame *frame );
     bool acquireOldestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
     bool acquireLatestGpuTextureNoReadbackReadyFrame( ReadyFrame *frame );
+    bool hasGpuTextureNoReadbackReadyFrame( void );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;

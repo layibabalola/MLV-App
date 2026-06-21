@@ -967,6 +967,7 @@ private:
     int m_playToFirstFrameTargetFrame = -1;
     double m_playToFirstFrameStartSeconds = 0.0;
     double m_lastPlayToFirstFrameMs = 0.0;
+    bool m_gpuTexNrImmediateDrainActive = false;
     double m_lastDrawFrameReadyQueueMs = 0.0;
     double m_lastDrawFrameReadyAdvanceMs = 0.0;
     double m_lastDrawFrameReadySceneMs = 0.0;

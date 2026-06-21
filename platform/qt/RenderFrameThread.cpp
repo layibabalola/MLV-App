@@ -628,6 +628,22 @@ bool RenderFrameThread::acquireLatestGpuTextureNoReadbackReadyFrame(ReadyFrame *
     return acquireReadySlotLocked( frame, readySlotIndex, true );
 }
 
+bool RenderFrameThread::hasGpuTextureNoReadbackReadyFrame()
+{
+    QMutexLocker locker(&m_mutex);
+    const int readySlotIndex = findOldestReadySlotLocked();
+    if( readySlotIndex < 0 ) return false;
+
+    const FrameSlot &slot = m_frameSlots[readySlotIndex];
+    return slot.gpuPlaybackReconTextureNoReadbackCandidate
+        && slot.presentationContext.playbackActive
+        && slot.presentationContext.gpuPlaybackReconTexturePresentRequested
+        && slot.presentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+        && slot.stageTimingTelemetry.value(
+            QStringLiteral("render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr") )
+              .toBool( false );
+}
+
 bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
                                                 int readySlotIndex,
                                                 bool discardOlderReady )

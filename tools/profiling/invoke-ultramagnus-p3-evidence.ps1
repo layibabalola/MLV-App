@@ -20,6 +20,7 @@ param(
     [switch]$CudaAmazeLiveDirectRgbaStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
+    [switch]$GpuTexNrImmediateDrainReady,
     [int]$Phase3FrameSlots = 0,
     [int]$AgentTimeoutSec = 2700,
     [switch]$SpeedLeg,
@@ -425,6 +426,7 @@ elseif ($failures.Count -eq 0) {
         $cudaAmazeLiveDirectRgbaStoreLiteral = if ($CudaAmazeLiveDirectRgbaStore) { '$true' } else { '$false' }
         $gpuPlaybackReconRetainDeviceOutputLiteral = if ($GpuPlaybackReconRetainDeviceOutput) { '$true' } else { '$false' }
         $gpuTexNrAcquireLatestReadyLiteral = if ($GpuTexNrAcquireLatestReady) { '$true' } else { '$false' }
+        $gpuTexNrImmediateDrainReadyLiteral = if ($GpuTexNrImmediateDrainReady) { '$true' } else { '$false' }
         $phase3FrameSlotsLiteral = [string]$Phase3FrameSlots
         $jobScript = @"
 `$ErrorActionPreference = 'Stop'
@@ -446,6 +448,7 @@ elseif ($failures.Count -eq 0) {
 `$cudaAmazeLiveDirectRgbaStore = $cudaAmazeLiveDirectRgbaStoreLiteral
 `$gpuPlaybackReconRetainDeviceOutput = $gpuPlaybackReconRetainDeviceOutputLiteral
 `$gpuTexNrAcquireLatestReady = $gpuTexNrAcquireLatestReadyLiteral
+`$gpuTexNrImmediateDrainReady = $gpuTexNrImmediateDrainReadyLiteral
 `$phase3FrameSlots = [int]'$phase3FrameSlotsLiteral'
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -483,6 +486,7 @@ if (-not `$psExe) { `$psExe = 'powershell.exe' }
     cudaAmazeLiveDirectRgbaStore = `$cudaAmazeLiveDirectRgbaStore
     gpuPlaybackReconRetainDeviceOutput = `$gpuPlaybackReconRetainDeviceOutput
     gpuTexNrAcquireLatestReady = `$gpuTexNrAcquireLatestReady
+    gpuTexNrImmediateDrainReady = `$gpuTexNrImmediateDrainReady
     phase3FrameSlots = `$phase3FrameSlots
     validatorExitCode = `$null
     packetInfo = `$null
@@ -615,6 +619,9 @@ try {
     }
     if (`$gpuTexNrAcquireLatestReady) {
         `$args += '-GpuTexNrAcquireLatestReady'
+    }
+    if (`$gpuTexNrImmediateDrainReady) {
+        `$args += '-GpuTexNrImmediateDrainReady'
     }
     if (`$phase3FrameSlots -gt 0) {
         `$args += @('-Phase3FrameSlots', [string]`$phase3FrameSlots)
@@ -754,6 +761,7 @@ $summary = [pscustomobject]@{
     options = [pscustomobject]@{
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
+        gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
     }
     warnings = @($warnings)
     failures = @($failures)
