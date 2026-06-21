@@ -2032,21 +2032,65 @@ void RenderFrameThread::drawFrame( int slotIndex,
         openMpThreads < generalWorkerThreads );
 
     GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability;
+    r16AmazeTextureAvailability.available =
+        m_activePresentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted;
+    r16AmazeTextureAvailability.reason =
+        m_activePresentationContext.gpuPlaybackReconAmazeTexturePresentFallbackReason;
+    r16AmazeTextureAvailability.rendererDescription =
+        m_activePresentationContext.gpuPlaybackReconAmazeTexturePresentRenderer;
     bool skipCpuDebayerForGpuTextureNoReadback = false;
-    if( ( outputMode == OutputDebayered16 || outputMode == OutputProcessed8 )
-     && !slot.rawImage16.empty()
-     && m_activePresentationContext.gpuPlaybackReconTexturePresentRequested
-     && playbackScaleFactor == 1
-     && slot.gpuPlaybackReconTextureNoReadbackCandidate
-     && !slot.gpuPlaybackReconTextureInputBayerFrame.empty()
-     && slot.gpuPlaybackReconTextureState.valid
-     && slot.gpuPlaybackReconTextureState.width == m_imageWidth
-     && slot.gpuPlaybackReconTextureState.height == m_imageHeight )
+    const bool gpuTexNrSkipOutputModeEligible =
+        ( outputMode == OutputDebayered16 || outputMode == OutputProcessed8 );
+    const bool gpuTexNrSkipRawAvailable = !slot.rawImage16.empty();
+    const bool gpuTexNrSkipTextureRequested =
+        m_activePresentationContext.gpuPlaybackReconTexturePresentRequested;
+    const bool gpuTexNrSkipScaleEligible = playbackScaleFactor == 1;
+    const bool gpuTexNrSkipCandidate =
+        slot.gpuPlaybackReconTextureNoReadbackCandidate;
+    const bool gpuTexNrSkipInputAvailable =
+        !slot.gpuPlaybackReconTextureInputBayerFrame.empty();
+    const bool gpuTexNrSkipStateMatches =
+        slot.gpuPlaybackReconTextureState.valid
+        && slot.gpuPlaybackReconTextureState.width == m_imageWidth
+        && slot.gpuPlaybackReconTextureState.height == m_imageHeight;
+    if( gpuTexNrSkipOutputModeEligible
+     && gpuTexNrSkipRawAvailable
+     && gpuTexNrSkipTextureRequested
+     && gpuTexNrSkipScaleEligible
+     && gpuTexNrSkipCandidate
+     && gpuTexNrSkipInputAvailable
+     && gpuTexNrSkipStateMatches )
     {
-        r16AmazeTextureAvailability = gpuAmazeDebayerProbeR16TextureBackend();
         skipCpuDebayerForGpuTextureNoReadback =
             r16AmazeTextureAvailability.available;
     }
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_output_mode"),
+        static_cast<int>( outputMode ) );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_output_mode_eligible"),
+        gpuTexNrSkipOutputModeEligible );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_raw_available"),
+        gpuTexNrSkipRawAvailable );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_texture_requested"),
+        gpuTexNrSkipTextureRequested );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_scale_eligible"),
+        gpuTexNrSkipScaleEligible );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_no_readback_candidate"),
+        gpuTexNrSkipCandidate );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_input_words"),
+        static_cast<qint64>( slot.gpuPlaybackReconTextureInputBayerFrame.size() ) );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_state_matches"),
+        gpuTexNrSkipStateMatches );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_gui_admitted"),
+        m_activePresentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_amaze_texture_present_preflight_available"),
         r16AmazeTextureAvailability.available );

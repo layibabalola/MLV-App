@@ -111,6 +111,9 @@ public:
             bool renderThreadUsingGpuAmazeDebayer = false;
             bool gpuAmazeTexturePresentRequested = false;
             bool gpuPlaybackReconTexturePresentRequested = false;
+            bool gpuPlaybackReconAmazeTexturePresentAdmitted = false;
+            QString gpuPlaybackReconAmazeTexturePresentFallbackReason;
+            QString gpuPlaybackReconAmazeTexturePresentRenderer;
             QString gpuPlaybackReconTexturePresentFallbackReason;
             bool renderThreadUsingCpuPreviewProcessing = false;
             bool renderThreadUsingPlaybackPreviewProcessing = false;

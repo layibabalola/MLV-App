@@ -2,7 +2,8 @@
 # Builds and runs the first CUDA stage probe for generic AMaZE debayering.
 # This is a development parity probe only; it does not enable GPU AMaZE in MLVApp.
 param(
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [string[]]$ProbeArgs = @()
 )
 $ErrorActionPreference = 'Stop'
 $dir = $PSScriptRoot
@@ -23,6 +24,6 @@ $cudaBin = (Get-ChildItem 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA' -
 $env:PATH = "$cudaBin;$env:PATH"
 
 Write-Host "`n========== GENERIC AMaZE DEBAYER CUDA STAGE PROBE =========="
-& $out
+& $out @ProbeArgs
 Write-Host "amaze debayer stage probe exit=$LASTEXITCODE"
 exit $LASTEXITCODE

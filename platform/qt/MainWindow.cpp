@@ -5395,6 +5395,21 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         mainWindowUsesGpuAmazeTexturePresentation( renderPolicy );
     requestContext.gpuPlaybackReconTexturePresentRequested =
         mainWindowUsesGpuPlaybackReconTexturePresentation( renderPolicy );
+    if( requestContext.gpuPlaybackReconTexturePresentRequested )
+    {
+        const GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability =
+            gpuAmazeDebayerProbeR16TextureBackend();
+        requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted =
+            r16AmazeTextureAvailability.available;
+        requestContext.gpuPlaybackReconAmazeTexturePresentRenderer =
+            r16AmazeTextureAvailability.rendererDescription;
+        requestContext.gpuPlaybackReconAmazeTexturePresentFallbackReason =
+            r16AmazeTextureAvailability.available
+                ? QString()
+                : ( r16AmazeTextureAvailability.reason.isEmpty()
+                    ? QStringLiteral("GPU playback recon AMaZE texture-present backend was not admitted on the GUI thread")
+                    : r16AmazeTextureAvailability.reason );
+    }
     if( renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested
      && !requestContext.gpuPlaybackReconTexturePresentRequested )
     {
@@ -5476,7 +5491,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     {
         logInteractionEvent(
             QStringLiteral("draw_frame.request"),
-            QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 gpu_amaze=%10 frame_changed=%11 requested_scale=%12 generation=%13 target=%14x%15")
+            QStringLiteral("serial=%1 requested_frame=%2 play_checked=%3 drop_frame=%4 output_mode=%5 gpu16=%6 gpu_processing=%7 cpu_processing=%8 gpu_bilinear=%9 gpu_amaze=%10 frame_changed=%11 requested_scale=%12 generation=%13 target=%14x%15 gpu_recon_texture=%16 gpu_recon_amaze_texture_admitted=%17")
                 .arg( static_cast<qulonglong>( requestSerial ) )
                 .arg( requestedFrame )
                 .arg( bool01( ui->actionPlay->isChecked() ) )
@@ -5491,7 +5506,9 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                 .arg( requestContext.playbackScaleFactor )
                 .arg( static_cast<qulonglong>( requestContext.presentationGeneration ) )
                 .arg( requestContext.imageWidth )
-                .arg( requestContext.imageHeight ),
+                .arg( requestContext.imageHeight )
+                .arg( bool01( requestContext.gpuPlaybackReconTexturePresentRequested ) )
+                .arg( bool01( requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted ) ),
             true );
     }
 
@@ -21177,7 +21194,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "texture_no_readback_oracle_required=%17 "
                    "texture_no_readback_oracle_words=%18 "
                    "texture_upload_ms=%19 texture_kernel_ms=%20 "
-                   "texture_interop_ms=%21 texture_total_ms=%22" )
+                   "texture_interop_ms=%21 texture_total_ms=%22 "
+                   "cpu_amaze_skip=%23 r16_amaze_preflight=%24 "
+                   "r16_amaze_gui_admitted=%25 r16_amaze_skip_candidate=%26 "
+                   "r16_amaze_skip_input_words=%27" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21222,7 +21242,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         0, 'f', 3 )
                     .arg( telemetryDoubleValue(
                         timing, "gpu_playback_recon_texture_present_total_ms" ),
-                        0, 'f', 3 );
+                        0, 'f', 3 )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_preflight_available" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_gui_admitted" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_no_readback_candidate" ) ) )
+                    .arg( telemetryIntValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_input_words" ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "

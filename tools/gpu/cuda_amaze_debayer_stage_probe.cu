@@ -37,8 +37,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <stdexcept>
 #include <iomanip>
+#include <stdexcept>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -180,6 +180,52 @@ struct CompareStats
     float maxAbs = 0.0f;
     std::size_t maxIndex = 0;
 };
+
+struct TimedStageTotals
+{
+    int iterations = 0;
+    int tiles = 0;
+    double clearMs = 0.0;
+    double loadMs = 0.0;
+    double gradientsMs = 0.0;
+    double diagonalPrecursorsMs = 0.0;
+    double greenInterpolationMs = 0.0;
+    double varianceSelectionMs = 0.0;
+    double hvwtAdaptiveMs = 0.0;
+    double nyquistTestMs = 0.0;
+    double nyquistRefineMs = 0.0;
+    double nyquistAreaMs = 0.0;
+    double greenPlaneMs = 0.0;
+    double nyquistGreenMs = 0.0;
+    double diagonalRbMs = 0.0;
+    double pmwtRbintMs = 0.0;
+    double diagonalGreenMs = 0.0;
+    double chromaCosetMs = 0.0;
+    double fancyChromaMs = 0.0;
+    double finalOutputMs = 0.0;
+};
+
+double timed_total_ms(const TimedStageTotals & totals)
+{
+    return totals.clearMs
+        + totals.loadMs
+        + totals.gradientsMs
+        + totals.diagonalPrecursorsMs
+        + totals.greenInterpolationMs
+        + totals.varianceSelectionMs
+        + totals.hvwtAdaptiveMs
+        + totals.nyquistTestMs
+        + totals.nyquistRefineMs
+        + totals.nyquistAreaMs
+        + totals.greenPlaneMs
+        + totals.nyquistGreenMs
+        + totals.diagonalRbMs
+        + totals.pmwtRbintMs
+        + totals.diagonalGreenMs
+        + totals.chromaCosetMs
+        + totals.fancyChromaMs
+        + totals.finalOutputMs;
+}
 
 struct ByteCompareStats
 {
@@ -1604,59 +1650,55 @@ __device__ void variance_selection_update_pixel(const float * cfa,
 
 // Preserve the serial pass's same-parity left/up dependencies while exposing
 // each anti-diagonal inside a tile to parallel threads.
-__global__ void k_variance_selection_wavefront(float * cfa,
-                                               float * vcd,
-                                               float * hcd,
-                                               const float * vcdalt,
-                                               const float * hcdalt,
-                                               float * cddiffsq,
-                                               int rr1,
-                                               int cc1)
+__global__ void k_variance_selection_wavefront_parity_blocks(float * cfa,
+                                                             float * vcd,
+                                                             float * hcd,
+                                                             const float * vcdalt,
+                                                             const float * hcdalt,
+                                                             float * cddiffsq,
+                                                             int rr1,
+                                                             int cc1)
 {
-    if (blockIdx.x != 0 || blockIdx.y != 0) return;
+    if (blockIdx.y != 0 || blockIdx.x >= 4) return;
 
     const int tid = threadIdx.y * blockDim.x + threadIdx.x;
     const int threadCount = blockDim.x * blockDim.y;
+    const int rrParity = static_cast<int>(blockIdx.x >> 1);
+    const int ccParity = static_cast<int>(blockIdx.x & 1);
 
-    for (int rrParity = 0; rrParity < 2; ++rrParity)
+    int rrStart = 4;
+    if ((rrStart & 1) != rrParity) ++rrStart;
+    if (rrStart >= rr1 - 4) return;
+    const int rrCount = ((rr1 - 5 - rrStart) / 2) + 1;
+
+    int ccStart = 4;
+    if ((ccStart & 1) != ccParity) ++ccStart;
+    if (ccStart >= cc1 - 4) return;
+    const int ccCount = ((cc1 - 5 - ccStart) / 2) + 1;
+    const int maxDiag = rrCount + ccCount - 2;
+
+    for (int diag = 0; diag <= maxDiag; ++diag)
     {
-        int rrStart = 4;
-        if ((rrStart & 1) != rrParity) ++rrStart;
-        if (rrStart >= rr1 - 4) continue;
-        const int rrCount = ((rr1 - 5 - rrStart) / 2) + 1;
-
-        for (int ccParity = 0; ccParity < 2; ++ccParity)
+        const int prMinCandidate = diag - (ccCount - 1);
+        const int prMin = prMinCandidate > 0 ? prMinCandidate : 0;
+        const int prMax = diag < rrCount ? diag : rrCount - 1;
+        const int diagCount = prMax - prMin + 1;
+        for (int i = tid; i < diagCount; i += threadCount)
         {
-            int ccStart = 4;
-            if ((ccStart & 1) != ccParity) ++ccStart;
-            if (ccStart >= cc1 - 4) continue;
-            const int ccCount = ((cc1 - 5 - ccStart) / 2) + 1;
-            const int maxDiag = rrCount + ccCount - 2;
-
-            for (int diag = 0; diag <= maxDiag; ++diag)
-            {
-                const int prMinCandidate = diag - (ccCount - 1);
-                const int prMin = prMinCandidate > 0 ? prMinCandidate : 0;
-                const int prMax = diag < rrCount ? diag : rrCount - 1;
-                const int diagCount = prMax - prMin + 1;
-                for (int i = tid; i < diagCount; i += threadCount)
-                {
-                    const int pr = prMin + i;
-                    const int pc = diag - pr;
-                    const int rr = rrStart + 2 * pr;
-                    const int cc = ccStart + 2 * pc;
-                    variance_selection_update_pixel(cfa,
-                                                    vcd,
-                                                    hcd,
-                                                    vcdalt,
-                                                    hcdalt,
-                                                    cddiffsq,
-                                                    rr,
-                                                    cc);
-                }
-                __syncthreads();
-            }
+            const int pr = prMin + i;
+            const int pc = diag - pr;
+            const int rr = rrStart + 2 * pr;
+            const int cc = ccStart + 2 * pc;
+            variance_selection_update_pixel(cfa,
+                                            vcd,
+                                            hcd,
+                                            vcdalt,
+                                            hcdalt,
+                                            cddiffsq,
+                                            rr,
+                                            cc);
         }
+        __syncthreads();
     }
 }
 
@@ -2506,6 +2548,15 @@ void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 
 #define CK(call) check_cuda((call), #call, __FILE__, __LINE__)
 
+void add_elapsed_ms(cudaEvent_t start, cudaEvent_t stop, double * total)
+{
+    CK(cudaEventRecord(stop));
+    CK(cudaEventSynchronize(stop));
+    float elapsed = 0.0f;
+    CK(cudaEventElapsedTime(&elapsed, start, stop));
+    *total += static_cast<double>(elapsed);
+}
+
 void allocate_device(DeviceBuffers * d, std::size_t rawCount)
 {
     CK(cudaMalloc(&d->raw, rawCount * sizeof(uint16_t)));
@@ -2788,14 +2839,15 @@ bool run_case(const CaseSpec & spec)
                                            rr1,
                                            cc1);
     CK(cudaGetLastError());
-    k_variance_selection_wavefront<<<1, kVarianceWavefrontThreads>>>(d.cfa,
-                                                                     d.vcd,
-                                                                     d.hcd,
-                                                                     d.vcdalt,
-                                                                     d.hcdalt,
-                                                                     d.cddiffsq,
-                                                                     rr1,
-                                                                     cc1);
+    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads>>>(
+        d.cfa,
+        d.vcd,
+        d.hcd,
+        d.vcdalt,
+        d.hcdalt,
+        d.cddiffsq,
+        rr1,
+        cc1);
     CK(cudaGetLastError());
     k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
                                              d.dirwts1,
@@ -2938,11 +2990,327 @@ bool run_case(const CaseSpec & spec)
     ok = report_compare(spec.name, "rbint", cpu.rbint, gpu.rbint) && ok;
     return ok;
 }
+
+void run_timed_frame_once(const CaseSpec & spec,
+                          const uint16_t * dRaw,
+                          DeviceBuffers & d,
+                          TimedStageTotals * totals)
+{
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+    CK(cudaEventCreate(&start));
+    CK(cudaEventCreate(&stop));
+
+#define RUN_TIMED_STAGE(memberName, ...) \
+    do { \
+        CK(cudaEventRecord(start)); \
+        __VA_ARGS__; \
+        CK(cudaGetLastError()); \
+        add_elapsed_ms(start, stop, &totals->memberName); \
+    } while (0)
+
+#define RUN_TIMED_HOST_STAGE(memberName, ...) \
+    do { \
+        CK(cudaEventRecord(start)); \
+        __VA_ARGS__; \
+        add_elapsed_ms(start, stop, &totals->memberName); \
+    } while (0)
+
+    for (int top = -16; top < spec.height; top += kTileSize - 32)
+    {
+        for (int left = -16; left < spec.width; left += kTileSize - 32)
+        {
+            const int bottom = imin_i(top + kTileSize, spec.height + 16);
+            const int right = imin_i(left + kTileSize, spec.width + 16);
+            const int rr1 = bottom - top;
+            const int cc1 = right - left;
+            const dim3 block(16, 16);
+            const dim3 grid((kTileSize + block.x - 1) / block.x,
+                            (kTileSize + block.y - 1) / block.y);
+
+            RUN_TIMED_HOST_STAGE(clearMs, clear_device_stages(d));
+            RUN_TIMED_STAGE(loadMs,
+                            k_tile_load<<<grid, block>>>(dRaw,
+                                                         d.cfa,
+                                                         d.rgbgreen,
+                                                         spec.width,
+                                                         spec.height,
+                                                         top,
+                                                         left,
+                                                         rr1,
+                                                         cc1));
+            RUN_TIMED_STAGE(gradientsMs,
+                            k_gradients<<<grid, block>>>(d.cfa,
+                                                         d.dirwts0,
+                                                         d.dirwts1,
+                                                         d.delhvsqsum,
+                                                         rr1,
+                                                         cc1));
+            RUN_TIMED_STAGE(diagonalPrecursorsMs,
+                            k_diagonal_precursors<<<grid, block>>>(d.cfa,
+                                                                   d.delp,
+                                                                   d.delm,
+                                                                   d.dgrbsq1p,
+                                                                   d.dgrbsq1m,
+                                                                   rr1,
+                                                                   cc1));
+            RUN_TIMED_STAGE(greenInterpolationMs,
+                            k_green_interpolation<<<grid, block>>>(d.cfa,
+                                                                   d.dirwts0,
+                                                                   d.dirwts1,
+                                                                   d.vcd,
+                                                                   d.hcd,
+                                                                   d.vcdalt,
+                                                                   d.hcdalt,
+                                                                   d.dgintv,
+                                                                   d.dginth,
+                                                                   rr1,
+                                                                   cc1));
+            RUN_TIMED_STAGE(varianceSelectionMs,
+                            k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads>>>(
+                                d.cfa,
+                                d.vcd,
+                                d.hcd,
+                                d.vcdalt,
+                                d.hcdalt,
+                                d.cddiffsq,
+                                rr1,
+                                cc1));
+            RUN_TIMED_STAGE(hvwtAdaptiveMs,
+                            k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
+                                                                     d.dirwts1,
+                                                                     d.vcd,
+                                                                     d.hcd,
+                                                                     d.dgintv,
+                                                                     d.dginth,
+                                                                     d.hvwt,
+                                                                     rr1,
+                                                                     cc1));
+            RUN_TIMED_STAGE(nyquistTestMs,
+                            k_nyquist_test<<<grid, block>>>(d.cddiffsq,
+                                                            d.delhvsqsum,
+                                                            d.nyquist,
+                                                            rr1,
+                                                            cc1));
+            RUN_TIMED_STAGE(nyquistRefineMs,
+                            k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads>>>(
+                                d.nyquist,
+                                rr1,
+                                cc1));
+            RUN_TIMED_STAGE(nyquistAreaMs,
+                            k_nyquist_area_interpolation<<<grid, block>>>(d.cfa,
+                                                                          d.nyquist,
+                                                                          d.hvwt,
+                                                                          rr1,
+                                                                          cc1));
+            RUN_TIMED_STAGE(greenPlaneMs,
+                            k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(
+                                d.cfa,
+                                d.vcd,
+                                d.hcd,
+                                d.nyquist,
+                                d.hvwt,
+                                d.dgrb0,
+                                d.rgbgreen,
+                                d.dgrb2h,
+                                d.dgrb2v,
+                                rr1,
+                                cc1));
+            RUN_TIMED_STAGE(nyquistGreenMs,
+                            k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
+                                                                        d.vcd,
+                                                                        d.hcd,
+                                                                        d.nyquist,
+                                                                        d.dgrb2h,
+                                                                        d.dgrb2v,
+                                                                        d.dgrb0,
+                                                                        d.rgbgreen,
+                                                                        rr1,
+                                                                        cc1));
+            RUN_TIMED_STAGE(diagonalRbMs,
+                            k_diagonal_rb_interpolation<<<grid, block>>>(d.cfa,
+                                                                         d.delp,
+                                                                         d.delm,
+                                                                         d.dgrbsq1p,
+                                                                         d.dgrbsq1m,
+                                                                         d.rbm,
+                                                                         d.rbp,
+                                                                         d.pmwt,
+                                                                         rr1,
+                                                                         cc1));
+            RUN_TIMED_STAGE(pmwtRbintMs,
+                            k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(
+                                d.cfa,
+                                d.rbm,
+                                d.rbp,
+                                d.pmwt,
+                                d.pmwtalt,
+                                d.rbint,
+                                rr1,
+                                cc1));
+            RUN_TIMED_STAGE(diagonalGreenMs,
+                            k_diagonal_green_correction<<<grid, block>>>(d.cfa,
+                                                                         d.dirwts0,
+                                                                         d.dirwts1,
+                                                                         d.hvwt,
+                                                                         d.pmwt,
+                                                                         d.rbint,
+                                                                         d.dgrb0,
+                                                                         d.rgbgreen,
+                                                                         rr1,
+                                                                         cc1));
+            RUN_TIMED_STAGE(chromaCosetMs,
+                            k_chrominance_coset_split<<<grid, block>>>(d.dgrb0,
+                                                                       d.dgrb1,
+                                                                       rr1,
+                                                                       cc1));
+            RUN_TIMED_STAGE(fancyChromaMs,
+                            k_fancy_chrominance_interpolation<<<grid, block>>>(d.dgrb0,
+                                                                              d.dgrb1,
+                                                                              rr1,
+                                                                              cc1));
+            RUN_TIMED_STAGE(finalOutputMs,
+                            k_final_output_planes<<<grid, block>>>(d.rgbgreen,
+                                                                   d.hvwt,
+                                                                   d.dgrb0,
+                                                                   d.dgrb1,
+                                                                   d.red,
+                                                                   d.green,
+                                                                   d.blue,
+                                                                   rr1,
+                                                                   cc1));
+            ++totals->tiles;
+        }
+    }
+
+#undef RUN_TIMED_HOST_STAGE
+#undef RUN_TIMED_STAGE
+
+    CK(cudaEventDestroy(stop));
+    CK(cudaEventDestroy(start));
+}
+
+void print_timing_stage(const char * name,
+                        double ms,
+                        const TimedStageTotals & totals,
+                        double totalMs,
+                        double * dominantMs,
+                        const char ** dominantName)
+{
+    const double frameMs =
+        totals.iterations > 0 ? ms / static_cast<double>(totals.iterations) : 0.0;
+    const double tileMs =
+        totals.tiles > 0 ? ms / static_cast<double>(totals.tiles) : 0.0;
+    const double percent = totalMs > 0.0 ? (100.0 * ms / totalMs) : 0.0;
+    const double fpsEquivalent = frameMs > 0.0 ? (1000.0 / frameMs) : 0.0;
+    std::cout << "[amaze-stage-timing] stage=" << name
+              << " total_ms=" << std::fixed << std::setprecision(3) << ms
+              << " avg_frame_ms=" << frameMs
+              << " avg_tile_ms=" << tileMs
+              << " pct=" << percent
+              << " fps_equiv=" << fpsEquivalent << "\n";
+    if (ms > *dominantMs)
+    {
+        *dominantMs = ms;
+        *dominantName = name;
+    }
+}
+
+bool run_timing_profile(int iterations)
+{
+    if (iterations < 1) iterations = 1;
+    const CaseSpec spec = {"synthetic_full_frame", 1808, 2268, -16, -16};
+    const std::vector<uint16_t> raw = make_raw_pattern(spec.width,
+                                                       spec.height,
+                                                       0xC0DA5120u);
+
+    DeviceBuffers d;
+    allocate_device(&d, raw.size());
+    CK(cudaMemcpy(d.raw,
+                  raw.data(),
+                  raw.size() * sizeof(uint16_t),
+                  cudaMemcpyHostToDevice));
+
+    TimedStageTotals warmup;
+    run_timed_frame_once(spec, d.raw, d, &warmup);
+
+    TimedStageTotals totals;
+    totals.iterations = iterations;
+    for (int i = 0; i < iterations; ++i)
+    {
+        run_timed_frame_once(spec, d.raw, d, &totals);
+    }
+    CK(cudaDeviceSynchronize());
+    free_device(&d);
+
+    const double totalMs = timed_total_ms(totals);
+    const double avgFrameMs =
+        iterations > 0 ? totalMs / static_cast<double>(iterations) : 0.0;
+    const double fpsEquivalent = avgFrameMs > 0.0 ? (1000.0 / avgFrameMs) : 0.0;
+    double dominantMs = -1.0;
+    const char * dominantName = "none";
+
+    std::cout << "\n[amaze-stage-timing] schema=mlvapp.cuda_amaze_stage_timing.v1"
+              << " image=" << spec.width << "x" << spec.height
+              << " iterations=" << iterations
+              << " tiles_per_iteration=" << (totals.tiles / iterations)
+              << " total_tiles=" << totals.tiles
+              << " avg_frame_stage_ms=" << std::fixed << std::setprecision(3)
+              << avgFrameMs
+              << " fps_equiv=" << fpsEquivalent << "\n";
+    print_timing_stage("clear", totals.clearMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("tile_load", totals.loadMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("gradients", totals.gradientsMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("diagonal_precursors", totals.diagonalPrecursorsMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("green_interpolation", totals.greenInterpolationMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("variance_selection", totals.varianceSelectionMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("hvwt_adaptive", totals.hvwtAdaptiveMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("nyquist_test", totals.nyquistTestMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("nyquist_refine", totals.nyquistRefineMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("nyquist_area", totals.nyquistAreaMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("green_plane", totals.greenPlaneMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("nyquist_green", totals.nyquistGreenMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("diagonal_rb", totals.diagonalRbMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("pmwt_rbint", totals.pmwtRbintMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("diagonal_green", totals.diagonalGreenMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("chroma_coset", totals.chromaCosetMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("fancy_chroma", totals.fancyChromaMs, totals, totalMs, &dominantMs, &dominantName);
+    print_timing_stage("final_output", totals.finalOutputMs, totals, totalMs, &dominantMs, &dominantName);
+    std::cout << "[amaze-stage-timing] dominant_stage=" << dominantName
+              << " dominant_total_ms=" << dominantMs
+              << " dominant_avg_frame_ms="
+              << (dominantMs / static_cast<double>(iterations))
+              << "\n";
+    return true;
+}
 }
 
 #ifndef CUDA_AMAZE_DEBAYER_STAGE_PROBE_NO_MAIN
-int main()
+int main(int argc, char ** argv)
 {
+    bool timing = false;
+    int timingIterations = 3;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string arg = argv[i] ? argv[i] : "";
+        const std::string prefix = "--timing-iterations=";
+        if (arg == "--timing")
+        {
+            timing = true;
+        }
+        else if (arg.find(prefix) == 0)
+        {
+            timingIterations = std::atoi(arg.c_str() + prefix.size());
+            if (timingIterations < 1) timingIterations = 1;
+        }
+        else
+        {
+            std::fprintf(stderr,
+                         "usage: cuda_amaze_debayer_stage_probe.exe [--timing] [--timing-iterations=N]\n");
+            return 2;
+        }
+    }
+
     int deviceCount = 0;
     CK(cudaGetDeviceCount(&deviceCount));
     if (deviceCount < 1)
@@ -2969,6 +3337,11 @@ int main()
     for (const CaseSpec & spec : cases)
     {
         ok = run_case(spec) && ok;
+    }
+
+    if (ok && timing)
+    {
+        ok = run_timing_profile(timingIterations) && ok;
     }
 
     std::cout << "\n[amaze-stage-probe] RESULT: "
