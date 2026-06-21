@@ -4402,6 +4402,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         bool gpuPlaybackReconAmazeTextureAttempted = false;
         bool gpuPlaybackReconAmazeTextureActive = false;
         bool gpuPlaybackReconNoReadbackPresented = false;
+        const bool noReadbackOutputValidationEnabled =
+            playbackGpuNoReadbackOutputValidationEnabled();
         QString texturePresentHandoffMode;
         QString texturePresentSource =
             QStringLiteral("cuda_gl_r16_texture_failed");
@@ -4658,7 +4660,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         bool runNoReadbackOutputValidationThisFrame = false;
         if( framePresentedByViewport
          && gpuPlaybackReconNoReadbackPresented
-         && playbackGpuNoReadbackOutputValidationEnabled() )
+         && noReadbackOutputValidationEnabled )
         {
             static unsigned long long s_noReadbackValidationFrameCounter = 0ULL;
             const int sampleInterval =
@@ -4971,13 +4973,19 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         const bool gpuTexNrDirectTexturePresented =
             gpuPlaybackReconNoReadbackPresented
             && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16");
+        const bool scopeDisplayNeedsPresentedPixels =
+            ui->actionShowEditArea->isChecked()
+            && ( ui->actionShowHistogram->isChecked()
+              || ui->actionShowWaveFormMonitor->isChecked()
+              || ui->actionShowParade->isChecked()
+              || ui->actionShowVectorScope->isChecked() );
         const bool gpuTexNrCanReleaseSlotAfterTexturePresent =
             framePresentedByViewport
             && gpuTexNrDirectTexturePresented
             && !releasePresentedFrameEarly
             && m_pRenderThread
             && !m_headlessPlaybackProfileActive
-            && !ui->actionShowEditArea->isChecked();
+            && !scopeDisplayNeedsPresentedPixels;
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_gpu_tex_nr_release_safe_after_texture"),
             gpuTexNrCanReleaseSlotAfterTexturePresent );
