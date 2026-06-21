@@ -78,6 +78,48 @@ qint64 stagePixelCount( int width, int height )
     return static_cast<qint64>( width ) * static_cast<qint64>( height );
 }
 
+bool playbackFrameWithinLookaheadWindow( uint32_t frameNumber,
+                                         int activePlaybackTarget,
+                                         int cutInFrame,
+                                         int cutOutFrame,
+                                         int lookaheadDepth,
+                                         bool loopEnabled )
+{
+    if( activePlaybackTarget < 0 || lookaheadDepth < 0 ) return true;
+
+    const int frame = static_cast<int>( frameNumber );
+    const int depth = std::max( 0, lookaheadDepth );
+    if( frame == activePlaybackTarget ) return true;
+
+    if( cutOutFrame < cutInFrame )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= activePlaybackTarget + depth;
+    }
+
+    const int cutIn = std::max( 0, cutInFrame );
+    const int cutOut = std::max( cutIn, cutOutFrame );
+    if( activePlaybackTarget < cutIn || activePlaybackTarget > cutOut
+     || frame < cutIn || frame > cutOut )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= activePlaybackTarget + depth;
+    }
+
+    if( !loopEnabled )
+    {
+        return frame >= activePlaybackTarget
+            && frame <= std::min( cutOut, activePlaybackTarget + depth );
+    }
+
+    const int loopSpan = cutOut - cutIn + 1;
+    if( loopSpan <= 0 ) return frame == activePlaybackTarget;
+
+    int distance = frame - activePlaybackTarget;
+    if( distance < 0 ) distance += loopSpan;
+    return distance >= 0 && distance <= depth;
+}
+
 bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
 {
     return key.startsWith( QStringLiteral("llrawproc_") )
@@ -772,6 +814,67 @@ bool RenderFrameThread::hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
         }
     }
     return false;
+}
+
+int RenderFrameThread::prunePlaybackLookaheadOutsideForwardWindow(
+    int activePlaybackTarget,
+    uint64_t activeGeneration,
+    int cutInFrame,
+    int cutOutFrame,
+    int lookaheadDepth,
+    bool loopEnabled )
+{
+    QMutexLocker locker(&m_mutex);
+    int pruned = 0;
+    for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
+    {
+        const ReadyFrame::PresentationContext &context = it->presentationContext;
+        if( context.playbackLookaheadRequest
+         && context.presentationGeneration == activeGeneration
+         && !playbackFrameWithinLookaheadWindow( it->frameNumber,
+                                                 activePlaybackTarget,
+                                                 cutInFrame,
+                                                 cutOutFrame,
+                                                 lookaheadDepth,
+                                                 loopEnabled ) )
+        {
+            it = m_renderRequests.erase( it );
+            ++pruned;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    m_renderFrame = !m_renderRequests.empty();
+
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        FrameSlot &slot = m_frameSlots[i];
+        if( !slot.ready ) continue;
+        if( slot.state.load( std::memory_order_acquire ) != SlotState::Ready )
+            continue;
+        if( !slot.presentationContext.playbackLookaheadRequest
+         || slot.presentationContext.presentationGeneration != activeGeneration )
+        {
+            continue;
+        }
+        if( playbackFrameWithinLookaheadWindow( slot.frameNumber,
+                                                activePlaybackTarget,
+                                                cutInFrame,
+                                                cutOutFrame,
+                                                lookaheadDepth,
+                                                loopEnabled ) )
+        {
+            continue;
+        }
+        releaseSlotLocked( i );
+        ++pruned;
+    }
+
+    m_frameReady = (findLatestReadySlotLocked() >= 0);
+    if( pruned > 0 ) m_waitCondition.wakeAll();
+    return pruned;
 }
 
 int RenderFrameThread::cancelPlaybackPresentationRequests( uint64_t presentationGeneration )

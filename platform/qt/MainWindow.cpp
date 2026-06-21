@@ -5770,6 +5770,44 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) ) );
     }
     requestContext.frameNumber = static_cast<uint32_t>( requestedFrame );
+    if( mlvappPlaybackRenderLookaheadFrames() > 0
+     && ui->actionPlay->isChecked()
+     && m_pRenderThread
+     && m_pMlvObject
+     && m_fileLoaded )
+    {
+        const int totalFrames = getMlvFrames( m_pMlvObject );
+        if( totalFrames > 0 )
+        {
+            const int cutInFrame =
+                qBound( 0, ui->spinBoxCutIn->value() - 1, totalFrames - 1 );
+            const int cutOutFrame =
+                qBound( cutInFrame, ui->spinBoxCutOut->value() - 1, totalFrames - 1 );
+            const int prunedPlaybackLookahead =
+                m_pRenderThread->prunePlaybackLookaheadOutsideForwardWindow(
+                    requestedFrame,
+                    requestContext.presentationGeneration,
+                    cutInFrame,
+                    cutOutFrame,
+                    mlvappPlaybackRenderLookaheadFrames(),
+                    ui->actionLoop->isChecked() );
+            if( prunedPlaybackLookahead > 0 && interactiveTraceEnabled() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("draw_frame.prune_lookahead"),
+                    QStringLiteral("target=%1 generation=%2 cut_in=%3 cut_out=%4 depth=%5 loop=%6 pruned=%7")
+                        .arg( requestedFrame )
+                        .arg( static_cast<qulonglong>(
+                            requestContext.presentationGeneration ) )
+                        .arg( cutInFrame )
+                        .arg( cutOutFrame )
+                        .arg( mlvappPlaybackRenderLookaheadFrames() )
+                        .arg( bool01( ui->actionLoop->isChecked() ) )
+                        .arg( prunedPlaybackLookahead ),
+                    true );
+            }
+        }
+    }
     const bool playbackLookaheadCoversCurrent =
         ui->actionPlay->isChecked()
         && m_pRenderThread
@@ -24177,6 +24215,40 @@ void MainWindow::drawFrameReady()
             : ui->horizontalSliderPosition->value();
     const bool targetAwareLookaheadAcquire =
         mlvappPlaybackRenderLookaheadFrames() > 0 && ui->actionPlay->isChecked();
+    int prunedPlaybackLookaheadBeforeAcquire = 0;
+    if( targetAwareLookaheadAcquire && m_pRenderThread && m_pMlvObject && m_fileLoaded )
+    {
+        const int totalFrames = getMlvFrames( m_pMlvObject );
+        if( totalFrames > 0 )
+        {
+            const int cutInFrame =
+                qBound( 0, ui->spinBoxCutIn->value() - 1, totalFrames - 1 );
+            const int cutOutFrame =
+                qBound( cutInFrame, ui->spinBoxCutOut->value() - 1, totalFrames - 1 );
+            prunedPlaybackLookaheadBeforeAcquire =
+                m_pRenderThread->prunePlaybackLookaheadOutsideForwardWindow(
+                    activePlaybackTarget,
+                    activeGeneration,
+                    cutInFrame,
+                    cutOutFrame,
+                    mlvappPlaybackRenderLookaheadFrames(),
+                    ui->actionLoop->isChecked() );
+            if( prunedPlaybackLookaheadBeforeAcquire > 0 && interactiveTraceEnabled() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("draw_frame_ready.prune_lookahead"),
+                    QStringLiteral("target=%1 generation=%2 cut_in=%3 cut_out=%4 depth=%5 loop=%6 pruned=%7")
+                        .arg( activePlaybackTarget )
+                        .arg( static_cast<qulonglong>( activeGeneration ) )
+                        .arg( cutInFrame )
+                        .arg( cutOutFrame )
+                        .arg( mlvappPlaybackRenderLookaheadFrames() )
+                        .arg( bool01( ui->actionLoop->isChecked() ) )
+                        .arg( prunedPlaybackLookaheadBeforeAcquire ),
+                    true );
+            }
+        }
+    }
     if( m_pRenderThread )
     {
         const bool gpuTexNrReadyBacklogTelemetry =
@@ -24239,6 +24311,9 @@ void MainWindow::drawFrameReady()
                 latestGpuTexNrReady
                     ? QStringLiteral("latest_ready_opt_in")
                     : QStringLiteral("oldest_ordered_default") );
+            readyFrame.stageTimingTelemetry.insert(
+                QStringLiteral("playback_lookahead_pruned_before_acquire"),
+                prunedPlaybackLookaheadBeforeAcquire );
         }
     }
     if( !haveReadyFrame )

@@ -243,6 +243,12 @@ public:
                                       uint64_t activeGeneration );
     bool hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
                                          uint64_t activeGeneration );
+    int prunePlaybackLookaheadOutsideForwardWindow( int activePlaybackTarget,
+                                                    uint64_t activeGeneration,
+                                                    int cutInFrame,
+                                                    int cutOutFrame,
+                                                    int lookaheadDepth,
+                                                    bool loopEnabled );
     int cancelPlaybackPresentationRequests( uint64_t presentationGeneration );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
