@@ -3650,12 +3650,14 @@ void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
 {
     const uint64_t newGeneration =
         m_playbackPresentationGeneration.fetch_add( 1, std::memory_order_acq_rel ) + 1;
+    const uint64_t oldGeneration = newGeneration - 1;
     // A display change re-renders the current frame; clear the forward-only present
     // guard so the next (correct) frame is shown regardless of the previous run.
     m_lastPresentedPlaybackFrame = -1;
     std::vector<uint64_t> serialsToRelease;
     bool droppedPending = false;
     size_t droppedResults = 0;
+    int cancelledRenderRequests = 0;
 
     {
         std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
@@ -3688,6 +3690,8 @@ void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
         {
             m_pRenderThread->releasePresentedFrameForRequestSerial( serial );
         }
+        cancelledRenderRequests =
+            m_pRenderThread->cancelPlaybackPresentationRequests( oldGeneration );
         m_frameStillDrawing = !m_pRenderThread->isIdle();
     }
     else
@@ -3697,12 +3701,13 @@ void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
 
     logInteractionEvent(
         QStringLiteral("playback_prep.invalidate_generation"),
-        QStringLiteral("reason=%1 new_generation=%2 dropped_pending=%3 dropped_results=%4 released_serials=%5 latest_serial=%6 still_drawing=%7")
+        QStringLiteral("reason=%1 new_generation=%2 dropped_pending=%3 dropped_results=%4 released_serials=%5 cancelled_render=%6 latest_serial=%7 still_drawing=%8")
             .arg( reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified") )
             .arg( static_cast<qulonglong>( newGeneration ) )
             .arg( bool01( droppedPending ) )
             .arg( static_cast<qulonglong>( droppedResults ) )
             .arg( static_cast<qulonglong>( serialsToRelease.size() ) )
+            .arg( cancelledRenderRequests )
             .arg( static_cast<qulonglong>( m_latestRequestedSerial.load( std::memory_order_acquire ) ) )
             .arg( bool01( m_frameStillDrawing ) ),
         true );

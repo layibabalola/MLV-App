@@ -243,6 +243,7 @@ public:
                                       uint64_t activeGeneration );
     bool hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
                                          uint64_t activeGeneration );
+    int cancelPlaybackPresentationRequests( uint64_t presentationGeneration );
     void releasePresentedFrame( void );
     void releasePresentedFrameForRequestSerial( uint64_t requestSerial );
     bool lastFrameUsedGpuBilinearDebayer( void ) const;

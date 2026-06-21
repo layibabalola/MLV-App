@@ -774,6 +774,48 @@ bool RenderFrameThread::hasReadyPlaybackLookaheadFrame( uint32_t frameNumber,
     return false;
 }
 
+int RenderFrameThread::cancelPlaybackPresentationRequests( uint64_t presentationGeneration )
+{
+    QMutexLocker locker(&m_mutex);
+    int cancelled = 0;
+    for( auto it = m_renderRequests.begin(); it != m_renderRequests.end(); )
+    {
+        if( it->presentationContext.playbackActive
+         && it->presentationContext.presentationGeneration == presentationGeneration )
+        {
+            it = m_renderRequests.erase( it );
+            ++cancelled;
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    m_renderFrame = !m_renderRequests.empty();
+
+    for( int i = 0; i < static_cast<int>( m_frameSlots.size() ); ++i )
+    {
+        FrameSlot &slot = m_frameSlots[i];
+        if( !slot.presentationContext.playbackActive
+         || slot.presentationContext.presentationGeneration != presentationGeneration )
+        {
+            continue;
+        }
+        const SlotState state = slot.state.load( std::memory_order_acquire );
+        if( state != SlotState::Ready && state != SlotState::Presenting )
+        {
+            continue;
+        }
+        releaseSlotLocked( i );
+        if( m_presentingSlotIndex == i ) m_presentingSlotIndex = -1;
+        ++cancelled;
+    }
+
+    m_frameReady = (findLatestReadySlotLocked() >= 0);
+    m_waitCondition.wakeAll();
+    return cancelled;
+}
+
 int RenderFrameThread::gpuTextureNoReadbackReadyFrameCount()
 {
     QMutexLocker locker(&m_mutex);
@@ -2338,6 +2380,16 @@ void RenderFrameThread::releaseSlotLocked( int slotIndex )
                              slot.frameNumber,
                              slot.requestSerial,
                              "phase3-released" );
+    }
+    else if( state == SlotState::Ready )
+    {
+        transitionSlotState( slotIndex,
+                             SlotState::Ready,
+                             SlotState::Idle,
+                             slot.phase3Mode,
+                             slot.frameNumber,
+                             slot.requestSerial,
+                             "phase3-released-ready" );
     }
     else if( state != SlotState::Idle )
     {
