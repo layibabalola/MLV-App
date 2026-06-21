@@ -107,7 +107,10 @@ public:
                                                           QString *reason = nullptr,
                                                           llrpGpuPlaybackReconTiming_t *timing = nullptr,
                                                           QString *handoffMode = nullptr,
-                                                          bool validationProbeTexture = false);
+                                                          bool validationProbeTexture = false,
+                                                          const uint16_t *retainedDeviceBayer16 = nullptr,
+                                                          int retainedDeviceWidth = 0,
+                                                          int retainedDeviceHeight = 0);
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -151,7 +154,10 @@ private:
                                                         QString *reason,
                                                         llrpGpuPlaybackReconTiming_t *timing,
                                                         QString *handoffMode,
-                                                        bool validationProbeTexture);
+                                                        bool validationProbeTexture,
+                                                        const uint16_t *retainedDeviceBayer16,
+                                                        int retainedDeviceWidth,
+                                                        int retainedDeviceHeight);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,

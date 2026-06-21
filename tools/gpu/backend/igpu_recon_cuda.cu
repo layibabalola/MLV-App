@@ -67,6 +67,7 @@
 #define HOST_FULLRES_THR 0.8   /* fullres_thr (dualiso.c:1678) */
 #define HOST_FACTOR   0.125    /* pow(2,-3); fixed for the 3 EV / 8x ISO ratio */
 #define CUDA_CONTEXT_RESERVE_BYTES (410ull * 1024ull * 1024ull)
+#define RETAINED_DEVICE_OUTPUT_SLOTS 12
 
 /* Device constants are set per set_clip()/set_luts(); kept in __constant__ so
  * the verbatim kernels reference them exactly as the parity probe did. */
@@ -594,6 +595,16 @@ struct igpu_recon_backend {
     /* cached CUDA-GL interop resource for the live no-readback R16 output */
     CachedGlImageResource gl_r16_resource;
 
+    /* Optional retained device outputs for cross-thread live playback handoff.
+     * Each slot is backend-owned CUDA memory holding a copy of d_out. */
+    uint16_t* retained_device_output[RETAINED_DEVICE_OUTPUT_SLOTS];
+    uint64_t retained_device_output_token[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_in_use[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_width[RETAINED_DEVICE_OUTPUT_SLOTS];
+    int retained_device_output_height[RETAINED_DEVICE_OUTPUT_SLOTS];
+    uint64_t retained_device_output_allocated_bytes;
+    uint64_t next_retained_device_output_token;
+
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
 
@@ -734,6 +745,21 @@ static void free_clip_buffers(igpu_recon_backend* b) {
     b->clip_allocated_bytes = 0;
 }
 
+static void free_retained_device_outputs(igpu_recon_backend* b) {
+    if (!b) return;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (b->retained_device_output[i]) {
+            cudaFree(b->retained_device_output[i]);
+        }
+        b->retained_device_output[i] = NULL;
+        b->retained_device_output_token[i] = 0;
+        b->retained_device_output_in_use[i] = 0;
+        b->retained_device_output_width[i] = 0;
+        b->retained_device_output_height[i] = 0;
+    }
+    b->retained_device_output_allocated_bytes = 0;
+}
+
 static void free_lut_buffers(igpu_recon_backend* b) {
     if (!b) return;
     if (b->dd_raw2ev) cudaFree(b->dd_raw2ev);
@@ -773,6 +799,7 @@ igpu_recon_backend* igpu_recon_create(const char* backend_name)
     igpu_recon_backend* b = (igpu_recon_backend*)calloc(1, sizeof(igpu_recon_backend));
     if (!b) return NULL;
     b->device = dev;
+    b->next_retained_device_output_token = 1;
     snprintf(b->describe, sizeof(b->describe), "CUDA / %s", prop.name);
 
     /* timing events */
@@ -793,6 +820,7 @@ void igpu_recon_destroy(igpu_recon_backend* b)
     if (!b) return;
     cudaSetDevice(b->device);
     reset_cached_gl_resource(&b->gl_r16_resource, 1);
+    free_retained_device_outputs(b);
     free_clip_buffers(b);
     free_lut_buffers(b);
     if (b->ev_start)        cudaEventDestroy(b->ev_start);
@@ -839,6 +867,7 @@ int igpu_recon_set_clip(igpu_recon_backend* b, const igpu_recon_clip_t* clip)
     CK(cudaSetDevice(b->device));
 
     /* (re)allocate device buffers sized to the clip */
+    free_retained_device_outputs(b);
     free_clip_buffers(b);
     b->width  = clip->width;
     b->height = clip->height;
@@ -1135,6 +1164,82 @@ int igpu_recon_last_device_output(igpu_recon_backend* b,
 }
 
 IGPU_API
+int igpu_recon_retain_last_device_output(igpu_recon_backend* b,
+                                         const uint16_t** device_bayer16,
+                                         int* width,
+                                         int* height,
+                                         uint64_t* token)
+{
+    if (!b || !device_bayer16 || !width || !height || !token ||
+        !b->d_out || !b->have_clip) {
+        return -1;
+    }
+    CK(cudaSetDevice(b->device));
+
+    int slot = -1;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (!b->retained_device_output_in_use[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return 4;
+    }
+
+    const size_t n = (size_t)b->width * (size_t)b->height;
+    const size_t bytes = n * sizeof(uint16_t);
+    if (!b->retained_device_output[slot] ||
+        b->retained_device_output_width[slot] != b->width ||
+        b->retained_device_output_height[slot] != b->height) {
+        if (b->retained_device_output[slot]) {
+            cudaFree(b->retained_device_output[slot]);
+            b->retained_device_output_allocated_bytes -=
+                (uint64_t)b->retained_device_output_width[slot] *
+                (uint64_t)b->retained_device_output_height[slot] *
+                (uint64_t)sizeof(uint16_t);
+            b->retained_device_output[slot] = NULL;
+        }
+        CK(cudaMalloc(&b->retained_device_output[slot], bytes));
+        b->retained_device_output_width[slot] = b->width;
+        b->retained_device_output_height[slot] = b->height;
+        b->retained_device_output_allocated_bytes += (uint64_t)bytes;
+    }
+
+    CK(cudaMemcpy(b->retained_device_output[slot],
+                  b->d_out,
+                  bytes,
+                  cudaMemcpyDeviceToDevice));
+    uint64_t next = b->next_retained_device_output_token++;
+    if (next == 0) {
+        next = b->next_retained_device_output_token++;
+    }
+    b->retained_device_output_token[slot] = next;
+    b->retained_device_output_in_use[slot] = 1;
+    *device_bayer16 = b->retained_device_output[slot];
+    *width = b->width;
+    *height = b->height;
+    *token = next;
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_release_retained_device_output(igpu_recon_backend* b,
+                                              uint64_t token)
+{
+    if (!b || token == 0) return -1;
+    for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
+        if (b->retained_device_output_in_use[i] &&
+            b->retained_device_output_token[i] == token) {
+            b->retained_device_output_in_use[i] = 0;
+            b->retained_device_output_token[i] = 0;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+IGPU_API
 int igpu_recon_copy_last_device_output_to_gl_texture(igpu_recon_backend* b,
                                                      unsigned int gl_texture)
 {
@@ -1149,7 +1254,10 @@ IGPU_API
 int igpu_recon_allocated_bytes(igpu_recon_backend* b, uint64_t* bytes)
 {
     if (!b || !bytes) return -1;
-    const uint64_t tracked = b->clip_allocated_bytes + b->lut_allocated_bytes;
+    const uint64_t tracked =
+        b->clip_allocated_bytes +
+        b->lut_allocated_bytes +
+        b->retained_device_output_allocated_bytes;
     *bytes = tracked ? tracked + CUDA_CONTEXT_RESERVE_BYTES : 0;
     return 0;
 }

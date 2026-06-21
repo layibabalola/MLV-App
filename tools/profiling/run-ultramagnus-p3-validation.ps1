@@ -19,6 +19,7 @@ param(
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
+    [switch]$GpuPlaybackReconRetainDeviceOutput,
     [int]$Phase3FrameSlots = 0,
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
@@ -287,6 +288,7 @@ function New-EvidencePacket {
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $_.cudaAmazeTextureSourceFrameCount
             cudaAmazeDirectTextureSourceFrameCount = $_.cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeRetainedTextureSourceFrameCount = $_.cudaAmazeRetainedTextureSourceFrameCount
             cudaAmazeAcceptedTextureSourceFrameCount = $_.cudaAmazeAcceptedTextureSourceFrameCount
             borrowedNoReadbackInputFrameCount = $_.borrowedNoReadbackInputFrameCount
             ownedNoReadbackInputFrameCount = $_.ownedNoReadbackInputFrameCount
@@ -818,6 +820,9 @@ if ($failures.Count -eq 0) {
         if ($CudaAmazeLiveDirectRgbaStore) {
             $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE=1"
         }
+        if ($GpuPlaybackReconRetainDeviceOutput) {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
+        }
         if ($Phase3FrameSlots -gt 0) {
             $envEntries += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
         }
@@ -900,6 +905,7 @@ exit `$LASTEXITCODE
         $fallbackFrameCount = 0
         $cudaAmazeTextureSourceFrameCount = 0
         $cudaAmazeDirectTextureSourceFrameCount = 0
+        $cudaAmazeRetainedTextureSourceFrameCount = 0
         $cudaAmazeAcceptedTextureSourceFrameCount = 0
         $borrowedNoReadbackInputFrameCount = 0
         $ownedNoReadbackInputFrameCount = 0
@@ -987,8 +993,12 @@ exit `$LASTEXITCODE
                 if ([string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
                     $cudaAmazeDirectTextureSourceFrameCount++
                 }
+                if ([string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeRetainedTextureSourceFrameCount++
+                }
                 if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture" -or
-                    [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                    [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture" -or
+                    [string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
                     $cudaAmazeAcceptedTextureSourceFrameCount++
                 }
                 if ([int]$frame.r16_amaze_skip_input_borrowed -eq 1) {
@@ -1053,7 +1063,7 @@ exit `$LASTEXITCODE
                 Add-Failure $clipFailures "Observed $cudaTextureSourceFrameCount legacy texture_source=cuda_gl_r16_texture frame(s); expected AMaZE RGBA texture source only."
             }
             if ($cudaAmazeAcceptedTextureSourceFrameCount -le 0) {
-                Add-Failure $clipFailures "No per-frame telemetry reported an accepted AMaZE texture source (cuda_gl_rgba16_amaze_texture or cuda_device_bayer16_rgba16_amaze_texture)."
+                Add-Failure $clipFailures "No per-frame telemetry reported an accepted AMaZE texture source (cuda_gl_rgba16_amaze_texture, cuda_device_bayer16_rgba16_amaze_texture, or cuda_retained_device_bayer16_rgba16_amaze_texture)."
             }
             if ($activeNoReadbackFrameCount -gt 0 -and $cudaAmazeAcceptedTextureSourceFrameCount -ne $activeNoReadbackFrameCount) {
                 Add-Failure $clipFailures "Only $cudaAmazeAcceptedTextureSourceFrameCount/$activeNoReadbackFrameCount active no-readback frame(s) used an accepted AMaZE texture source."
@@ -1158,6 +1168,7 @@ exit `$LASTEXITCODE
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
             cudaAmazeDirectTextureSourceFrameCount = $cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeRetainedTextureSourceFrameCount = $cudaAmazeRetainedTextureSourceFrameCount
             cudaAmazeAcceptedTextureSourceFrameCount = $cudaAmazeAcceptedTextureSourceFrameCount
             borrowedNoReadbackInputFrameCount = $borrowedNoReadbackInputFrameCount
             ownedNoReadbackInputFrameCount = $ownedNoReadbackInputFrameCount
@@ -1284,6 +1295,7 @@ $summary = [pscustomobject]@{
         cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
         cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
         cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
+        gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
         phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     }
     outputs = [pscustomobject]@{

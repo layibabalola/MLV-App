@@ -641,6 +641,10 @@ private:
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         RenderFrameThread::GpuPlaybackReconTextureState gpuPlaybackReconTextureState;
         bool gpu16PreviewActive = false;
         bool gpuPreviewProcessingActive = false;

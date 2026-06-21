@@ -613,16 +613,26 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
     QString *handoffMode,
-    bool validationProbeTexture)
+    bool validationProbeTexture,
+    const uint16_t *retainedDeviceBayer16,
+    int retainedDeviceWidth,
+    int retainedDeviceHeight)
 {
     GpuDisplayViewport *viewport = from(view);
+    const bool retainedDeviceValid =
+        retainedDeviceBayer16
+        && state
+        && state->valid
+        && retainedDeviceWidth == state->width
+        && retainedDeviceHeight == state->height
+        && !validationProbeTexture;
     if ( !viewport
-      || !rawInputBayer14
       || !state
       || !state->valid
       || state->width <= 0
       || state->height <= 0
-      || !wbMultipliers )
+      || !wbMultipliers
+      || ( !rawInputBayer14 && !retainedDeviceValid ) )
     {
         if ( reason ) *reason = QStringLiteral("GPU playback recon AMaZE texture-present viewport or input is invalid");
         if ( fallbackItem ) fallbackItem->setVisible(true);
@@ -631,7 +641,7 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
 
     const size_t expectedWords =
         static_cast<size_t>(state->width) * static_cast<size_t>(state->height);
-    if ( rawInputBayer14Words < expectedWords )
+    if ( !retainedDeviceValid && rawInputBayer14Words < expectedWords )
     {
         if ( reason ) *reason = QStringLiteral("GPU playback recon AMaZE texture-present input is shorter than the frame geometry");
         if ( fallbackItem ) fallbackItem->setVisible(true);
@@ -649,7 +659,10 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
         reason,
         timing,
         handoffMode,
-        validationProbeTexture);
+        validationProbeTexture,
+        retainedDeviceBayer16,
+        retainedDeviceWidth,
+        retainedDeviceHeight);
 }
 
 bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
@@ -1153,7 +1166,10 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     QString *reason,
     llrpGpuPlaybackReconTiming_t *timing,
     QString *handoffMode,
-    bool validationProbeTexture)
+    bool validationProbeTexture,
+    const uint16_t *retainedDeviceBayer16,
+    int retainedDeviceWidth,
+    int retainedDeviceHeight)
 {
     auto fail = [&](const QString & why) -> bool
     {
@@ -1165,8 +1181,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         return false;
     };
 
-    if ( !rawInputBayer14
-      || !state
+    if ( !state
       || !state->valid
       || state->width <= 0
       || state->height <= 0
@@ -1177,9 +1192,18 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
 
     const int width = state->width;
     const int height = state->height;
+    const bool retainedDeviceValid =
+        retainedDeviceBayer16
+        && retainedDeviceWidth == width
+        && retainedDeviceHeight == height
+        && !validationProbeTexture;
     const size_t expectedWords =
         static_cast<size_t>(width) * static_cast<size_t>(height);
-    if ( rawInputBayer14Words < expectedWords )
+    if ( !rawInputBayer14 && !retainedDeviceValid )
+    {
+        return fail(QStringLiteral("GPU playback recon AMaZE texture-present input is invalid"));
+    }
+    if ( !retainedDeviceValid && rawInputBayer14Words < expectedWords )
     {
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present Bayer input is incomplete"));
     }
@@ -1273,15 +1297,27 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
         int deviceHeight = 0;
         int directRc = -1;
         const double directReconStartMs = elapsedMs();
-        const bool directReconOk =
-            llrpGpuPlaybackReconRunDeviceBayer16(state,
-                                                 rawInputBayer14,
-                                                 expectedWords * sizeof(uint16_t),
-                                                 &deviceBayer16,
-                                                 &deviceWidth,
-                                                 &deviceHeight,
-                                                 &directRc,
-                                                 &directReconTiming) != 0;
+        bool directReconOk = false;
+        if ( retainedDeviceValid )
+        {
+            deviceBayer16 = retainedDeviceBayer16;
+            deviceWidth = retainedDeviceWidth;
+            deviceHeight = retainedDeviceHeight;
+            directRc = 0;
+            directReconOk = true;
+        }
+        else
+        {
+            directReconOk =
+                llrpGpuPlaybackReconRunDeviceBayer16(state,
+                                                     rawInputBayer14,
+                                                     expectedWords * sizeof(uint16_t),
+                                                     &deviceBayer16,
+                                                     &deviceWidth,
+                                                     &deviceHeight,
+                                                     &directRc,
+                                                     &directReconTiming) != 0;
+        }
         const double directReconWallMs = elapsedMs() - directReconStartMs;
         if ( directReconOk
           && deviceBayer16
@@ -1320,7 +1356,9 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
                     amazeWallMs = directAmazeWallMs;
                     reconOk = true;
                     amazeOk = true;
-                    handoffModeValue = QStringLiteral("direct_device_bayer16");
+                    handoffModeValue = retainedDeviceValid
+                        ? QStringLiteral("retained_device_bayer16")
+                        : QStringLiteral("direct_device_bayer16");
                     m_gpuReconSourceTextureCurrent = validationProbeTexture;
                 }
                 else

@@ -152,6 +152,10 @@ public:
         size_t gpuPlaybackReconTextureBayerFrameSize = 0;
         const uint16_t *gpuPlaybackReconTextureInputBayerFrame = nullptr;
         size_t gpuPlaybackReconTextureInputBayerFrameSize = 0;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         int gpuPlaybackReconTextureWidth = 0;
         int gpuPlaybackReconTextureHeight = 0;
         int gpuPlaybackReconTextureBlackLevel = 0;
@@ -283,6 +287,10 @@ private:
          * keeping a duplicate input snapshot; validation/fallback paths still use
          * the owned vector so proof and CPU-readback behavior stay fail-closed. */
         bool gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+        const uint16_t *gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        int gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        int gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        uint64_t gpuPlaybackReconTextureRetainedDeviceToken = 0;
         /* Recon-output Dual ISO bayer, snapshotted right after the recon stage.
          * The slot's rawImage16 buffer is later overwritten by the process stage
          * (getMlvProcessedFrame16Scaled), so the recon bayer that the no-readback
@@ -343,6 +351,10 @@ private:
             gpuPlaybackReconTextureNoReadbackCandidate = false;
             gpuPlaybackReconTextureInputBayerFrame.clear();
             gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+            gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+            gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+            gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+            gpuPlaybackReconTextureRetainedDeviceToken = 0;
             gpuPlaybackReconTextureBayerFrame.clear();
             gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
             gpuPlaybackReconTextureWidth = 0;

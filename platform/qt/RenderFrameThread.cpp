@@ -642,6 +642,15 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
                                  older.frameNumber,
                                  older.requestSerial,
                                  "phase3-stale-ready" );
+            if( older.gpuPlaybackReconTextureRetainedDeviceToken != 0 )
+            {
+                llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(
+                    older.gpuPlaybackReconTextureRetainedDeviceToken );
+                older.gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+                older.gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+                older.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+                older.gpuPlaybackReconTextureRetainedDeviceToken = 0;
+            }
             older.ready = false;
             older.presenting = false;
         }
@@ -722,6 +731,14 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
                     ? slot.rawImage16.size()
                     : slot.gpuPlaybackReconTextureInputBayerFrame.size() )
                 : 0;
+        frame->gpuPlaybackReconTextureRetainedDeviceBayer16 =
+            slot.gpuPlaybackReconTextureRetainedDeviceBayer16;
+        frame->gpuPlaybackReconTextureRetainedDeviceWidth =
+            slot.gpuPlaybackReconTextureRetainedDeviceWidth;
+        frame->gpuPlaybackReconTextureRetainedDeviceHeight =
+            slot.gpuPlaybackReconTextureRetainedDeviceHeight;
+        frame->gpuPlaybackReconTextureRetainedDeviceToken =
+            slot.gpuPlaybackReconTextureRetainedDeviceToken;
         frame->gpuPlaybackReconTextureWidth = slot.gpuPlaybackReconTextureWidth;
         frame->gpuPlaybackReconTextureHeight = slot.gpuPlaybackReconTextureHeight;
         frame->gpuPlaybackReconTextureBlackLevel = slot.gpuPlaybackReconTextureBlackLevel;
@@ -1125,6 +1142,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             && !gpuPlaybackReconNoReadbackOutputValidationEnabled();
         bool gpuPlaybackReconTextureInputAvailable = false;
         bool gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+        bool gpuPlaybackReconTextureRetainedDeviceAvailable = false;
         bool gpuPlaybackReconTexturePreparedStateValid = false;
         bool gpuPlaybackReconTextureStateSnapshotOk = false;
         QString gpuPlaybackReconTextureNoReadbackFallbackReason;
@@ -1231,6 +1249,33 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                     QStringLiteral("GPU playback recon prepared input snapshot was unavailable");
             }
 
+            llrpGpuPlaybackRetainedDeviceBayer16_t retainedDevice;
+            memset( &retainedDevice, 0, sizeof( retainedDevice ) );
+            if( !outputValidationRequired
+             && llrpGpuPlaybackReconGetLastRetainedDeviceBayer16( &retainedDevice ) != 0
+             && retainedDevice.device_bayer16
+             && retainedDevice.width == m_imageWidth
+             && retainedDevice.height == m_imageHeight
+             && retainedDevice.token != 0 )
+            {
+                slot.gpuPlaybackReconTextureRetainedDeviceBayer16 =
+                    retainedDevice.device_bayer16;
+                slot.gpuPlaybackReconTextureRetainedDeviceWidth =
+                    retainedDevice.width;
+                slot.gpuPlaybackReconTextureRetainedDeviceHeight =
+                    retainedDevice.height;
+                slot.gpuPlaybackReconTextureRetainedDeviceToken =
+                    retainedDevice.token;
+                gpuPlaybackReconTextureRetainedDeviceAvailable = true;
+            }
+            else
+            {
+                slot.gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+                slot.gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+                slot.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+                slot.gpuPlaybackReconTextureRetainedDeviceToken = 0;
+            }
+
             llrpGpuPlaybackReconState_t preparedState;
             memset( &preparedState, 0, sizeof( preparedState ) );
             const bool preparedStateAvailable =
@@ -1251,6 +1296,15 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 slot.gpuPlaybackReconTextureNoReadbackCandidate = false;
                 slot.gpuPlaybackReconTextureInputBayerFrame.clear();
                 slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+                if( slot.gpuPlaybackReconTextureRetainedDeviceToken != 0 )
+                {
+                    llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(
+                        slot.gpuPlaybackReconTextureRetainedDeviceToken );
+                }
+                slot.gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+                slot.gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+                slot.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+                slot.gpuPlaybackReconTextureRetainedDeviceToken = 0;
                 slot.gpuPlaybackReconTextureBayerFrame.clear();
                 slot.gpuPlaybackReconTextureState = GpuPlaybackReconTextureState();
                 if( gpuPlaybackReconTextureNoReadbackFallbackReason.isEmpty() )
@@ -1282,6 +1336,12 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_input_borrowed"),
             slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_retained_device_available"),
+            gpuPlaybackReconTextureRetainedDeviceAvailable );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_retained_device_token"),
+            static_cast<qint64>( slot.gpuPlaybackReconTextureRetainedDeviceToken ) );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_oracle_required"),
             gpuPlaybackReconNoReadbackOutputValidationEnabled() );
@@ -2060,6 +2120,15 @@ void RenderFrameThread::releaseSlotLocked( int slotIndex )
 {
     if( slotIndex < 0 || slotIndex >= static_cast<int>(m_frameSlots.size()) ) return;
     FrameSlot &slot = m_frameSlots[slotIndex];
+    if( slot.gpuPlaybackReconTextureRetainedDeviceToken != 0 )
+    {
+        llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(
+            slot.gpuPlaybackReconTextureRetainedDeviceToken );
+        slot.gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        slot.gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        slot.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        slot.gpuPlaybackReconTextureRetainedDeviceToken = 0;
+    }
     const SlotState state = slot.state.load( std::memory_order_acquire );
     if( state == SlotState::Presenting )
     {
@@ -2115,6 +2184,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
         && slot.gpuPlaybackReconTextureNoReadbackCandidate;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureInputBayerFrame;
     bool preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16 = false;
+    const uint16_t *preservedGpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+    int preservedGpuPlaybackReconTextureRetainedDeviceWidth = 0;
+    int preservedGpuPlaybackReconTextureRetainedDeviceHeight = 0;
+    uint64_t preservedGpuPlaybackReconTextureRetainedDeviceToken = 0;
     std::vector<uint16_t> preservedGpuPlaybackReconTextureBayerFrame;
     GpuPlaybackReconTextureState preservedGpuPlaybackReconTextureState;
     int preservedGpuPlaybackReconTextureBlackLevel = 0;
@@ -2147,6 +2220,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_input_borrowed" );
         preserveGpuPlaybackReconTextureTelemetry(
+            "gpu_playback_recon_texture_present_retained_device_available" );
+        preserveGpuPlaybackReconTextureTelemetry(
+            "gpu_playback_recon_texture_present_retained_device_token" );
+        preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_oracle_required" );
         preserveGpuPlaybackReconTextureTelemetry(
             "gpu_playback_recon_texture_present_no_readback_oracle_words" );
@@ -2163,6 +2240,18 @@ void RenderFrameThread::drawFrame( int slotIndex,
             std::move( slot.gpuPlaybackReconTextureInputBayerFrame );
         preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16 =
             slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16;
+        preservedGpuPlaybackReconTextureRetainedDeviceBayer16 =
+            slot.gpuPlaybackReconTextureRetainedDeviceBayer16;
+        preservedGpuPlaybackReconTextureRetainedDeviceWidth =
+            slot.gpuPlaybackReconTextureRetainedDeviceWidth;
+        preservedGpuPlaybackReconTextureRetainedDeviceHeight =
+            slot.gpuPlaybackReconTextureRetainedDeviceHeight;
+        preservedGpuPlaybackReconTextureRetainedDeviceToken =
+            slot.gpuPlaybackReconTextureRetainedDeviceToken;
+        slot.gpuPlaybackReconTextureRetainedDeviceBayer16 = nullptr;
+        slot.gpuPlaybackReconTextureRetainedDeviceWidth = 0;
+        slot.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
+        slot.gpuPlaybackReconTextureRetainedDeviceToken = 0;
         preservedGpuPlaybackReconTextureBayerFrame =
             std::move( slot.gpuPlaybackReconTextureBayerFrame );
         preservedGpuPlaybackReconTextureState =
@@ -2184,6 +2273,14 @@ void RenderFrameThread::drawFrame( int slotIndex,
             std::move( preservedGpuPlaybackReconTextureInputBayerFrame );
         slot.gpuPlaybackReconTextureInputBorrowedFromRawImage16 =
             preservedGpuPlaybackReconTextureInputBorrowedFromRawImage16;
+        slot.gpuPlaybackReconTextureRetainedDeviceBayer16 =
+            preservedGpuPlaybackReconTextureRetainedDeviceBayer16;
+        slot.gpuPlaybackReconTextureRetainedDeviceWidth =
+            preservedGpuPlaybackReconTextureRetainedDeviceWidth;
+        slot.gpuPlaybackReconTextureRetainedDeviceHeight =
+            preservedGpuPlaybackReconTextureRetainedDeviceHeight;
+        slot.gpuPlaybackReconTextureRetainedDeviceToken =
+            preservedGpuPlaybackReconTextureRetainedDeviceToken;
         slot.gpuPlaybackReconTextureBayerFrame =
             std::move( preservedGpuPlaybackReconTextureBayerFrame );
         slot.gpuPlaybackReconTextureState =
@@ -2803,6 +2900,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
             slot.stageTimingTelemetry.insert(
                 QStringLiteral("gpu_playback_recon_texture_present_source"),
                 noReadbackCandidate
+                    && slot.gpuPlaybackReconTextureRetainedDeviceToken != 0
+                    ? QStringLiteral("cuda_retained_device_bayer16_pending")
+                : noReadbackCandidate
                     ? QStringLiteral("cuda_gl_r16_pending")
                     : QStringLiteral("cpu16_reconstructed_bayer") );
         }

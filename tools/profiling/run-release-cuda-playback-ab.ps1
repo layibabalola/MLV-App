@@ -18,6 +18,7 @@ param(
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
+    [switch]$GpuPlaybackReconRetainDeviceOutput,
     [int]$Phase3FrameSlots = 0,
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
@@ -717,6 +718,7 @@ function Read-SmokeSummary {
     $cudaTextureSourceFrameCount = 0
     $cudaAmazeTextureSourceFrameCount = 0
     $cudaAmazeDirectTextureSourceFrameCount = 0
+    $cudaAmazeRetainedTextureSourceFrameCount = 0
     $cudaAmazeAcceptedTextureSourceFrameCount = 0
     $cpuAmazeSkippedFrameCount = 0
     $fallbackFrameCount = 0
@@ -756,8 +758,12 @@ function Read-SmokeSummary {
             if ([string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
                 $cudaAmazeDirectTextureSourceFrameCount++
             }
+            if ([string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
+                $cudaAmazeRetainedTextureSourceFrameCount++
+            }
             if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture" -or
-                [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture" -or
+                [string]$frame.texture_source -eq "cuda_retained_device_bayer16_rgba16_amaze_texture") {
                 $cudaAmazeAcceptedTextureSourceFrameCount++
             }
             if ([int]$frame.cpu_amaze_skip -eq 1) {
@@ -834,6 +840,7 @@ function Read-SmokeSummary {
         cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
         cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
         cudaAmazeDirectTextureSourceFrameCount = $cudaAmazeDirectTextureSourceFrameCount
+        cudaAmazeRetainedTextureSourceFrameCount = $cudaAmazeRetainedTextureSourceFrameCount
         cudaAmazeAcceptedTextureSourceFrameCount = $cudaAmazeAcceptedTextureSourceFrameCount
         cpuAmazeSkippedFrameCount = $cpuAmazeSkippedFrameCount
         fallbackFrameCount = $fallbackFrameCount
@@ -1187,6 +1194,9 @@ if ($CudaAmazeFastLaunchChecks) {
 if ($CudaAmazeLiveDirectRgbaStore) {
     $candidateEnv += "MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE=1"
 }
+if ($GpuPlaybackReconRetainDeviceOutput) {
+    $candidateEnv += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
+}
 if ($Phase3FrameSlots -gt 0) {
     $candidateEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
 }
@@ -1208,6 +1218,9 @@ if ($CudaAmazeFastLaunchChecks) {
 }
 if ($CudaAmazeLiveDirectRgbaStore) {
     $candidateSpeedEnv += "MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE=1"
+}
+if ($GpuPlaybackReconRetainDeviceOutput) {
+    $candidateSpeedEnv += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
 }
 if ($Phase3FrameSlots -gt 0) {
     $candidateSpeedEnv += "MLVAPP_PHASE3_FRAME_SLOT_COUNT=$Phase3FrameSlots"
@@ -1313,6 +1326,7 @@ $summary = [ordered]@{
     cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
     cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
     cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
+    gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
     phase3FrameSlots = if ($Phase3FrameSlots -gt 0) { $Phase3FrameSlots } else { $null }
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
     allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
@@ -1476,6 +1490,7 @@ foreach ($item in $candidateTextureProofSummaries) {
     $noReadbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.gpuTextureNoReadbackFrames
     $activeNoReadbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.activeNoReadbackFrameCount
     $directAmazeFrames = Convert-ToNullableInt64 $candidateTextureSummary.cudaAmazeDirectTextureSourceFrameCount
+    $retainedAmazeFrames = Convert-ToNullableInt64 $candidateTextureSummary.cudaAmazeRetainedTextureSourceFrameCount
     $acceptedAmazeFrames = Convert-ToNullableInt64 $candidateTextureSummary.cudaAmazeAcceptedTextureSourceFrameCount
     $legacyR16Frames = Convert-ToNullableInt64 $candidateTextureSummary.cudaTextureSourceFrameCount
     $fallbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.fallbackFrameCount
@@ -1491,8 +1506,8 @@ foreach ($item in $candidateTextureProofSummaries) {
         $proofFailures += "$label-fallback-frames=$fallbackFrames"
     }
     if (-not $AllowLegacyR16TextureCandidate) {
-        if ($null -eq $directAmazeFrames -or $directAmazeFrames -le 0) {
-            $proofFailures += "$label-direct-amaze-texture-frames=$directAmazeFrames"
+        if ($null -eq $acceptedAmazeFrames -or $acceptedAmazeFrames -le 0) {
+            $proofFailures += "$label-accepted-amaze-texture-frames=$acceptedAmazeFrames direct=$directAmazeFrames retained=$retainedAmazeFrames"
         }
         if ($null -ne $legacyR16Frames -and $legacyR16Frames -gt 0) {
             $proofFailures += "$label-legacy-r16-texture-frames=$legacyR16Frames"
@@ -1558,6 +1573,7 @@ function New-PlaybackCompare {
         gpuTextureNoReadbackFrames = New-MetricDelta -BaselineValue $BaselineSummary.gpuTextureNoReadbackFrames -CandidateValue $CandidateSummary.gpuTextureNoReadbackFrames
         activeNoReadbackFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.activeNoReadbackFrameCount -CandidateValue $CandidateSummary.activeNoReadbackFrameCount
         cudaAmazeDirectTextureSourceFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.cudaAmazeDirectTextureSourceFrameCount -CandidateValue $CandidateSummary.cudaAmazeDirectTextureSourceFrameCount
+        cudaAmazeRetainedTextureSourceFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.cudaAmazeRetainedTextureSourceFrameCount -CandidateValue $CandidateSummary.cudaAmazeRetainedTextureSourceFrameCount
         cpuAmazeSkippedFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.cpuAmazeSkippedFrameCount -CandidateValue $CandidateSummary.cpuAmazeSkippedFrameCount
         fallbackFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.fallbackFrameCount -CandidateValue $CandidateSummary.fallbackFrameCount
         avgTextureTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgTextureTotalMs -CandidateValue $CandidateSummary.avgTextureTotalMs

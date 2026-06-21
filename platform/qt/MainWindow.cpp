@@ -4342,8 +4342,12 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     const bool gpuPlaybackReconTextureNoReadbackCandidate =
         gpuPlaybackReconTexturePresentRequested
         && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
-        && task.gpuPlaybackReconTextureInputBayerFrame
-        && task.gpuPlaybackReconTextureInputBayerFrameSize >= expectedPlaybackReconTextureBayerPixels
+        && ( ( task.gpuPlaybackReconTextureInputBayerFrame
+            && task.gpuPlaybackReconTextureInputBayerFrameSize >= expectedPlaybackReconTextureBayerPixels )
+          || ( task.gpuPlaybackReconTextureRetainedDeviceBayer16
+            && task.gpuPlaybackReconTextureRetainedDeviceWidth == sourceWidth
+            && task.gpuPlaybackReconTextureRetainedDeviceHeight == sourceHeight
+            && task.gpuPlaybackReconTextureRetainedDeviceToken != 0 ) )
         && task.gpuPlaybackReconTextureState.valid
         && task.gpuPlaybackReconTextureState.width == sourceWidth
         && task.gpuPlaybackReconTextureState.height == sourceHeight;
@@ -4410,14 +4414,18 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                     &texturePresentReason,
                     &texturePresentTiming,
                     &texturePresentHandoffMode,
-                    playbackGpuNoReadbackOutputValidationEnabled() );
+                    playbackGpuNoReadbackOutputValidationEnabled(),
+                    task.gpuPlaybackReconTextureRetainedDeviceBayer16,
+                    task.gpuPlaybackReconTextureRetainedDeviceWidth,
+                    task.gpuPlaybackReconTextureRetainedDeviceHeight );
             gpuPlaybackReconAmazeTextureActive = framePresentedByViewport;
             if( framePresentedByViewport )
             {
                 gpuPlaybackReconNoReadbackPresented = true;
                 texturePresentSource =
-                    texturePresentHandoffMode
-                        == QStringLiteral("direct_device_bayer16")
+                    texturePresentHandoffMode == QStringLiteral("retained_device_bayer16")
+                            ? QStringLiteral("cuda_retained_device_bayer16_rgba16_amaze_texture")
+                        : texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
                             ? QStringLiteral("cuda_device_bayer16_rgba16_amaze_texture")
                             : QStringLiteral("cuda_gl_rgba16_amaze_texture");
             }
@@ -4588,6 +4596,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_direct_device_bayer16_active"),
             texturePresentHandoffMode == QStringLiteral("direct_device_bayer16") );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_playback_recon_texture_present_retained_device_bayer16_active"),
+            texturePresentHandoffMode == QStringLiteral("retained_device_bayer16") );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_upload_ms"),
             texturePresentTiming.available
@@ -24272,6 +24283,14 @@ void MainWindow::drawFrameReady()
         readyFrame.gpuPlaybackReconTextureInputBayerFrame;
     task.gpuPlaybackReconTextureInputBayerFrameSize =
         readyFrame.gpuPlaybackReconTextureInputBayerFrameSize;
+    task.gpuPlaybackReconTextureRetainedDeviceBayer16 =
+        readyFrame.gpuPlaybackReconTextureRetainedDeviceBayer16;
+    task.gpuPlaybackReconTextureRetainedDeviceWidth =
+        readyFrame.gpuPlaybackReconTextureRetainedDeviceWidth;
+    task.gpuPlaybackReconTextureRetainedDeviceHeight =
+        readyFrame.gpuPlaybackReconTextureRetainedDeviceHeight;
+    task.gpuPlaybackReconTextureRetainedDeviceToken =
+        readyFrame.gpuPlaybackReconTextureRetainedDeviceToken;
     task.gpuPlaybackReconTextureState =
         readyFrame.gpuPlaybackReconTextureState;
     const size_t borrowedSourceImageBytes =
@@ -24318,6 +24337,9 @@ void MainWindow::drawFrameReady()
         task.readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_gpu_tex_nr_owned_input_for_early_release"),
             !task.ownedGpuPlaybackReconTextureInputBayerFrame.empty() );
+        task.readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_gpu_tex_nr_retained_device_token"),
+            static_cast<qint64>( task.gpuPlaybackReconTextureRetainedDeviceToken ) );
         task.readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_gpu_tex_nr_release_before_present"),
             false );

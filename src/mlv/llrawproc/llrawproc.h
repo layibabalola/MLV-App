@@ -100,6 +100,15 @@ typedef struct
 
 typedef struct
 {
+    int valid;
+    const uint16_t * device_bayer16;
+    int width;
+    int height;
+    uint64_t token;
+} llrpGpuPlaybackRetainedDeviceBayer16_t;
+
+typedef struct
+{
     int available;
     int attempted;
     int unavailable;
@@ -128,6 +137,16 @@ int llrpGpuPlaybackReconRunDeviceBayer16(const llrpGpuPlaybackReconState_t * sta
                                          int * height_out,
                                          int * rc_out,
                                          llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconRunRetainedDeviceBayer16(
+    const llrpGpuPlaybackReconState_t * state,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size,
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out,
+    int * rc_out,
+    llrpGpuPlaybackReconTiming_t * timing_out);
+int llrpGpuPlaybackReconGetLastRetainedDeviceBayer16(
+    llrpGpuPlaybackRetainedDeviceBayer16_t * retained_out);
+int llrpGpuPlaybackReconReleaseRetainedDeviceBayer16(uint64_t token);
 int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(unsigned int gl_texture_id,
                                                          int * rc_out);
 int llrpGpuPlaybackReconRunCpu16Probe(const llrpGpuPlaybackReconState_t * state,
