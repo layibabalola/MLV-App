@@ -16,6 +16,7 @@ param(
     [int]$SettleMs = 1000,
     [string]$GpuPlaybackReconBackend = "",
     [int]$AgentTimeoutSec = 2700,
+    [switch]$SpeedLeg,
     [switch]$SkipRemoteBuild,
     [switch]$SkipBackendBuild,
     [switch]$SkipStageRepo,
@@ -399,6 +400,7 @@ elseif ($failures.Count -eq 0) {
         $jobId = "mlvapp-p3-$stamp"
         $skipBuildLiteral = if ($SkipRemoteBuild) { '$true' } else { '$false' }
         $skipBackendBuildLiteral = if ($SkipBackendBuild) { '$true' } else { '$false' }
+        $speedLegLiteral = if ($SpeedLeg) { '$true' } else { '$false' }
         $clipNamesLiteral = Convert-ToPowerShellArrayLiteral $ClipNames
         $clipPathsLiteral = Convert-ToPowerShellArrayLiteral $ClipPaths
         $localRepoHeadLiteral = Convert-ToPowerShellSingleQuotedString $localRepoHead
@@ -418,6 +420,7 @@ elseif ($failures.Count -eq 0) {
 `$evidenceBranch = $localRepoBranchLiteral
 `$evidenceGitStatus = $localRepoStatusLiteral
 `$skipBackendBuild = $skipBackendBuildLiteral
+`$speedLeg = $speedLegLiteral
 `$gpuPlaybackReconBackend = $gpuPlaybackReconBackendLiteral
 `$validator = Join-Path `$repo 'tools\profiling\run-ultramagnus-p3-validation.ps1'
 `$backendDir = Join-Path `$repo 'tools\gpu\backend'
@@ -579,6 +582,9 @@ try {
     }
     if ($skipBuildLiteral) {
         `$args += '-SkipBuild'
+    }
+    if (`$speedLeg) {
+        `$args += '-SpeedLeg'
     }
     `$output = & `$psExe @args 2>&1
     `$exitCode = `$LASTEXITCODE

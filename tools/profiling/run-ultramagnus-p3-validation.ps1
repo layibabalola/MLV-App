@@ -12,6 +12,9 @@ param(
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
+    [switch]$SpeedLeg,
+    [double]$MinPresentedFps = 24.0,
+    [double]$TargetPresentedFps = 30.0,
     [string]$GpuPlaybackReconBackend = "",
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
@@ -697,11 +700,22 @@ if ($failures.Count -eq 0) {
         # MLVAPP_GPU_PLAYBACK_RECON_ALLOW_ANY_HQ_STATE diagnostic env (that env is
         # now a no-op superset and is intentionally NOT set here).
         #
-        # MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=N samples the heavy
-        # GL-vs-CPU-oracle parity check on every Nth presented no-readback frame so
-        # the temporal artifact/cadence detector sees real (un-instrumented)
-        # playback cadence while the sampled frames still prove GL == oracle 0 LSB.
-        $envListLiteral = "@('MLVAPP_GPU_PLAYBACK_RECON=1','MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1','MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1','MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery','QT_OPENGL=desktop')"
+        # Correctness mode samples the heavy GL-vs-CPU-oracle parity check. Speed-leg mode
+        # disables that oracle so cadence/FPS reflects the no-readback path itself.
+        $envEntries = @(
+            "MLVAPP_GPU_PLAYBACK_RECON=1",
+            "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1",
+            "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1",
+            "QT_OPENGL=desktop"
+        )
+        if ($SpeedLeg) {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=0"
+        }
+        else {
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1"
+            $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery"
+        }
+        $envListLiteral = "@(" + (($envEntries | ForEach-Object { "'" + (($_ -replace "'", "''")) + "'" }) -join ",") + ")"
         $expectedScaleRequest = -1
         [void][int]::TryParse($ScaleFactor, [ref]$expectedScaleRequest)
         $invokeText = @"
@@ -898,6 +912,12 @@ exit `$LASTEXITCODE
             if ($fallbackFrameCount -gt 0) {
                 Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
             }
+            if ($SpeedLeg) {
+                $presentedFpsValue = if ($result) { [double]$result.log.summary.presented_fps } else { 0.0 }
+                if ($presentedFpsValue -lt $MinPresentedFps) {
+                    Add-Failure $clipFailures ("Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps." -f $presentedFpsValue, $MinPresentedFps)
+                }
+            }
         }
         else {
             # rawFixesEnabled=0 -> fix_raw=0 -> the LLRawProc apply early-returns BEFORE the Dual ISO
@@ -920,7 +940,7 @@ exit `$LASTEXITCODE
             }
             [void]$warnings.Add("rawFixesEnabled=0: no-readback correctly not armed (Dual ISO recon disabled); no-readback arming and GL no-readback proof assertions skipped. Use a raw-fixes-on receipt (e.g. FastProxy.marxml) to validate the no-readback path.")
         }
-        if ($receiptRawFixesEnabled) {
+        if ($receiptRawFixesEnabled -and -not $SpeedLeg) {
             if ($null -eq $glOutputProof) {
                 Add-Failure $clipFailures "Smoke result did not include visualQuality.glOutputProof."
             }
@@ -1018,6 +1038,7 @@ $status =
 
 $correctnessValidated =
     $receiptRawFixesEnabled -and
+    (-not [bool]$SpeedLeg) -and
     ($status -eq "success") -and
     (-not [bool]$DryRun) -and
     (@($clipResults).Count -gt 0) -and
@@ -1032,10 +1053,25 @@ $correctnessValidated =
         [string]$_.glScreenshotMethod -ne "app_internal_gl_viewport_grab"
     }).Count -eq 0)
 
+$speedValidated =
+    $receiptRawFixesEnabled -and
+    [bool]$SpeedLeg -and
+    ($status -eq "success") -and
+    (-not [bool]$DryRun) -and
+    (@($clipResults).Count -gt 0) -and
+    (@($clipResults | Where-Object {
+        $_.status -ne "success" -or
+        [double]$_.presentedFps -lt $MinPresentedFps -or
+        [int]$_.gpuTextureNoReadbackFrames -le 0 -or
+        [int]$_.fallbackFrameCount -ne 0 -or
+        [int]$_.cudaAmazeTextureSourceFrameCount -ne [int]$_.activeNoReadbackFrameCount
+    }).Count -eq 0)
+
 $summary = [pscustomobject]@{
     schema = "mlvapp-ultramagnus-p3-validation.v1"
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     status = $status
+    proofMode = if ($SpeedLeg) { "speed" } else { "correctness" }
     dryRun = [bool]$DryRun
     repoRoot = $repo
     host = [pscustomobject]@{
@@ -1067,6 +1103,9 @@ $summary = [pscustomobject]@{
         qualityMode = $QualityMode
         scaleFactor = $ScaleFactor
         validationSampleEvery = $ValidationSampleEvery
+        speedLeg = [bool]$SpeedLeg
+        minPresentedFps = $MinPresentedFps
+        targetPresentedFps = $TargetPresentedFps
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
     }
     outputs = [pscustomobject]@{
@@ -1078,7 +1117,10 @@ $summary = [pscustomobject]@{
     }
     proof = [pscustomobject]@{
         correctnessValidated = [bool]$correctnessValidated
+        speedValidated = [bool]$speedValidated
         noReadbackValidationApplicable = [bool]$receiptRawFixesEnabled
+        minPresentedFps = $MinPresentedFps
+        targetPresentedFps = $TargetPresentedFps
         validationSurface = "gl_texture_r16_readback_vs_cpu_dual_iso_recon_frame"
         frameAdvanceSurface = "playback_smoke.gl_probe texture_hash parsed by detect-playback-artifacts.ps1"
         colorScanSurface = "app_internal_gl_viewport_grab"
