@@ -23792,7 +23792,15 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
     if( ui->actionPlay->isChecked() )
     {
-        if( !m_frameStillDrawing )
+        const bool suppressTailAdvanceAfterGpuTexNrEarlyAdvance =
+            telemetryBoolValue(
+                readyFrame.stageTimingTelemetry,
+                "playback_predictive_gpu_tex_nr_advance_executed" );
+        if( suppressTailAdvanceAfterGpuTexNrEarlyAdvance )
+        {
+            m_playbackFrameAdvancePending = false;
+        }
+        else if( !m_frameStillDrawing )
         {
             m_skipImmediateTimecodeLabel = true;
             const double advance_start = mlv_stage_timing_now();
@@ -23946,6 +23954,7 @@ void MainWindow::drawFrameReady()
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_predictive_gpu_tex_nr_advance_requested"),
         predictiveGpuTexNrEarlyAdvance );
+    bool predictiveGpuTexNrEarlyAdvanceExecuted = false;
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
         m_frameStillDrawing = !m_pRenderThread->isIdle();
@@ -23956,12 +23965,16 @@ void MainWindow::drawFrameReady()
             timerFrameEvent( predictiveGpuTexNrEarlyAdvance );
             m_lastDrawFrameReadyAdvanceMs =
                 (mlv_stage_timing_now() - advance_start) * 1000.0;
+            predictiveGpuTexNrEarlyAdvanceExecuted = true;
             mlv_stage_timing_note_elapsed("drawFrameReady.advance_early",
                                           display_frame,
                                           m_lastDrawFrameReadyAdvanceMs);
             m_skipImmediateTimecodeLabel = false;
         }
     }
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_predictive_gpu_tex_nr_advance_executed"),
+        predictiveGpuTexNrEarlyAdvanceExecuted );
 
     const double display_start = mlv_stage_timing_now();
     if( interactiveTraceEnabled() )
