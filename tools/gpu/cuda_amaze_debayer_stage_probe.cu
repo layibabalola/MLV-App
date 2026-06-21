@@ -46,8 +46,8 @@
 
 namespace
 {
-constexpr int kTileSize = 160;
-constexpr int kTileHalf = 80;
+constexpr int kTileSize = 512;
+constexpr int kTileHalf = kTileSize / 2;
 constexpr int kTileSamples = kTileSize * kTileSize;
 constexpr int kHalfTileSamples = kTileSize * kTileHalf;
 constexpr float kEps = 1.0e-5f;
@@ -56,10 +56,10 @@ constexpr float kClipPoint = 1.0f;
 constexpr float kClipPoint8 = 0.8f;
 constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
-constexpr int kVarianceWavefrontThreads = 128;
-constexpr int kNyquistPrefixThreads = 128;
-constexpr int kGreenPlaneThreads = 128;
-constexpr int kPmwtRowThreads = 128;
+constexpr int kVarianceWavefrontThreads = 256;
+constexpr int kNyquistPrefixThreads = 256;
+constexpr int kGreenPlaneThreads = 256;
+constexpr int kPmwtRowThreads = 256;
 
 struct CaseSpec
 {
