@@ -2629,6 +2629,10 @@ void free_device(DeviceBuffers * d)
 
 void clear_device_stages(const DeviceBuffers & d)
 {
+#ifndef CUDA_AMAZE_ENABLE_DEVICE_CLEAR
+    (void)d;
+    return;
+#else
     CK(cudaMemset(d.cfa, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.rgbgreen, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.red, 0, kTileSamples * sizeof(float)));
@@ -2659,6 +2663,7 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.pmwt, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.pmwtalt, 0, kHalfTileSamples * sizeof(float)));
     CK(cudaMemset(d.rbint, 0, kHalfTileSamples * sizeof(float)));
+#endif
 }
 
 void copy_device_to_host(const DeviceBuffers & d, StageBuffers * out)

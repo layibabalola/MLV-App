@@ -767,8 +767,6 @@ extern "C" int igpu_amaze_debayer_run(igpu_amaze_debayer_backend * backend,
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -827,8 +825,6 @@ extern "C" int igpu_amaze_debayer_run_gl_texture(igpu_amaze_debayer_backend * ba
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -892,8 +888,6 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture(igpu_amaze_debayer_back
         CK(cudaMalloc(&dRaw, rawBytes));
         CK(cudaMalloc(&dRgb16, rgbBytes));
         allocate_device(&d, 1);
-        CK(cudaMemset(dRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         CK(cudaMemcpy(dRaw, in_raw_float, rawBytes, cudaMemcpyHostToDevice));
         CK(cudaDeviceSynchronize());
@@ -956,15 +950,12 @@ extern "C" int igpu_amaze_debayer_run_post_wb_gl_texture_from_r16_gl_texture(
 
     const std::size_t pixelCount =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    const std::size_t rgbBytes = pixelCount * 3u * sizeof(uint16_t);
     std::memset(&backend->lastTiming, 0, sizeof(backend->lastTiming));
 
     const double totalStart = now_ms();
     try
     {
         ensure_live_texture_buffers(backend, width, height);
-        CK(cudaMemset(backend->liveRgb16, 0, rgbBytes));
-
         const double uploadStart = now_ms();
         const int copyRc = copy_gl_r16_texture_to_bayer16(in_r16_gl_texture,
                                                           backend->liveReconBayer16,

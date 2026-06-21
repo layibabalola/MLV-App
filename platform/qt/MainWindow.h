@@ -205,7 +205,7 @@ signals:
 
 private slots:
     void openMlvSet( QStringList list );
-    void timerFrameEvent( void );
+    void timerFrameEvent( bool predictivePlaybackAdvance = false );
     void on_actionOpen_triggered();
     void on_actionTranscodeAndImport_triggered();
     void on_actionFcpxmlImportAssistant_triggered();

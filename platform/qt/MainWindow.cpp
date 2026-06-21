@@ -2609,33 +2609,42 @@ static int mlvappPlaybackTimerIntervalMs( double framerate )
     return qMin( fastPollMs, ( native > 0 ) ? native : 40 );
 }
 
-void MainWindow::timerFrameEvent( void )
+void MainWindow::timerFrameEvent( bool predictivePlaybackAdvance )
 {
     static QTime lastTime;              //Last Time a picture was rendered
     static int timeDiff = 0;            //TimeDiff between 2 rendered frames in Playback
 
     if( m_frameStillDrawing )
     {
-        if( interactiveTraceEnabled() )
+        const bool allowPredictiveBusyAdvance =
+            predictivePlaybackAdvance && ui->actionPlay->isChecked();
+        if( allowPredictiveBusyAdvance )
         {
-            logInteractionEvent(
-                QStringLiteral("timer_frame.busy"),
-                QStringLiteral("play_checked=%1 frame_changed=%2 pending_advance=%3 position=%4")
-                    .arg( bool01( ui->actionPlay->isChecked() ) )
-                    .arg( bool01( m_frameChanged ) )
-                    .arg( bool01( m_playbackFrameAdvancePending ) )
-                    .arg( ui->horizontalSliderPosition->value() ),
-                true );
+            m_playbackFrameAdvancePending = false;
         }
-        //On setup slider priority
-        if( !ui->actionPlay->isChecked() )
+        else
         {
+            if( interactiveTraceEnabled() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("timer_frame.busy"),
+                    QStringLiteral("play_checked=%1 frame_changed=%2 pending_advance=%3 position=%4")
+                        .arg( bool01( ui->actionPlay->isChecked() ) )
+                        .arg( bool01( m_frameChanged ) )
+                        .arg( bool01( m_playbackFrameAdvancePending ) )
+                        .arg( ui->horizontalSliderPosition->value() ),
+                    true );
+            }
+            //On setup slider priority
+            if( !ui->actionPlay->isChecked() )
+            {
+                return;
+            }
+            // Fast playback priority: record that we want another frame as soon as the
+            // current one is presented, without paying repeated signal connect churn.
+            m_playbackFrameAdvancePending = true;
             return;
         }
-        // Fast playback priority: record that we want another frame as soon as the
-        // current one is presented, without paying repeated signal connect churn.
-        m_playbackFrameAdvancePending = true;
-        return;
     }
     const bool hadPendingAdvance = m_playbackFrameAdvancePending;
     m_playbackFrameAdvancePending = false;
@@ -2644,13 +2653,21 @@ void MainWindow::timerFrameEvent( void )
     //Time measurement
     QTime nowTime = QTime::currentTime();
     timeDiff = lastTime.msecsTo( nowTime );
+    const double targetFrameMs = 1000.0 / qMax( getFramerate(), 1.0 );
+    const int targetFrameMsFloor = qMax( 1, static_cast<int>( targetFrameMs ) );
+    const int targetFrameMsCeil = qMax( 1, static_cast<int>( targetFrameMs + 0.999 ) );
+    if( predictivePlaybackAdvance
+     && ui->actionPlay->isChecked()
+     && timeDiff < targetFrameMs )
+    {
+        timeDiff = targetFrameMsCeil;
+    }
     if( hadPendingAdvance )
     {
-        const double targetFrameMs = 1000.0 / qMax( getFramerate(), 1.0 );
         if( timeDiff > targetFrameMs )
         {
             // Avoid turning a render-thread stall into one giant playback catch-up step.
-            timeDiff = qMax( 1, static_cast<int>( targetFrameMs ) );
+            timeDiff = predictivePlaybackAdvance ? targetFrameMsCeil : targetFrameMsFloor;
         }
     }
 
@@ -23816,6 +23833,17 @@ void MainWindow::drawFrameReady()
      * presentRenderSlotReleaseMs, which under-reported the early advance cost
      * and inflated the residual present-pacing band. */
     m_lastDrawFrameReadyAdvanceMs = 0.0;
+    const bool predictiveGpuTexNrEarlyAdvance =
+        ui->actionPlay->isChecked()
+        && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
+        && requestContext.gpuPlaybackReconTexturePresentRequested
+        && requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted
+        && telemetryBoolValue(
+            readyFrame.stageTimingTelemetry,
+            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_predictive_gpu_tex_nr_advance_requested"),
+        predictiveGpuTexNrEarlyAdvance );
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
         m_frameStillDrawing = !m_pRenderThread->isIdle();
@@ -23823,7 +23851,7 @@ void MainWindow::drawFrameReady()
         {
             m_skipImmediateTimecodeLabel = true;
             const double advance_start = mlv_stage_timing_now();
-            timerFrameEvent();
+            timerFrameEvent( predictiveGpuTexNrEarlyAdvance );
             m_lastDrawFrameReadyAdvanceMs =
                 (mlv_stage_timing_now() - advance_start) * 1000.0;
             mlv_stage_timing_note_elapsed("drawFrameReady.advance_early",
