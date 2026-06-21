@@ -21231,7 +21231,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "cpu_amaze_skip=%23 r16_amaze_preflight=%24 "
                    "r16_amaze_gui_admitted=%25 r16_amaze_skip_candidate=%26 "
                    "r16_amaze_skip_input_words=%27 "
-                   "prepare_only_allowed=%28 prepare_only_used=%29" )
+                   "r16_amaze_skip_input_borrowed=%28 "
+                   "prepare_only_allowed=%29 prepare_only_used=%30" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -21287,6 +21288,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         timing, "gpu_playback_recon_amaze_texture_present_skip_gate_no_readback_candidate" ) ) )
                     .arg( telemetryIntValue(
                         timing, "gpu_playback_recon_amaze_texture_present_skip_gate_input_words" ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_input_borrowed" ) ) )
                     .arg( bool01( telemetryBoolValue(
                         timing, "gpu_playback_recon_texture_present_prepare_only_allowed" ) ) )
                     .arg( bool01( telemetryBoolValue(

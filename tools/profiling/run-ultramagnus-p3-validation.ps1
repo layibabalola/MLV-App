@@ -275,6 +275,7 @@ function New-EvidencePacket {
             activeNoReadbackFrameCount = $_.activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $_.cudaAmazeTextureSourceFrameCount
+            borrowedNoReadbackInputFrameCount = $_.borrowedNoReadbackInputFrameCount
             fallbackFrameCount = $_.fallbackFrameCount
             avgTextureUploadMs = $_.avgTextureUploadMs
             avgTextureKernelMs = $_.avgTextureKernelMs
@@ -321,6 +322,7 @@ function New-EvidencePacket {
             releaseSha256 = $Summary.release.sha256
             clipCount = @($Summary.clipResults).Count
             totalGpuTextureNoReadbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.gpuTextureNoReadbackFrames }) | Measure-Object -Sum).Sum
+            totalBorrowedNoReadbackInputFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.borrowedNoReadbackInputFrameCount }) | Measure-Object -Sum).Sum
             totalFallbackFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.fallbackFrameCount }) | Measure-Object -Sum).Sum
             correctnessValidated = [bool]$Summary.proof.correctnessValidated
             totalGlProbeActiveFrames = (@($Summary.clipResults | ForEach-Object { [int]$_.glProbeActiveCount }) | Measure-Object -Sum).Sum
@@ -838,6 +840,7 @@ exit `$LASTEXITCODE
         $cudaTextureSourceFrameCount = 0
         $fallbackFrameCount = 0
         $cudaAmazeTextureSourceFrameCount = 0
+        $borrowedNoReadbackInputFrameCount = 0
         $noReadbackFallbackReasons = [ordered]@{}
         $logPath = $null
         $glOutputProof = $null
@@ -911,6 +914,9 @@ exit `$LASTEXITCODE
                 if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture") {
                     $cudaAmazeTextureSourceFrameCount++
                 }
+                if ([int]$frame.r16_amaze_skip_input_borrowed -eq 1) {
+                    $borrowedNoReadbackInputFrameCount++
+                }
                 Add-NullableDouble $textureUploadMsValues $frame.texture_upload_ms
                 Add-NullableDouble $textureKernelMsValues $frame.texture_kernel_ms
                 Add-NullableDouble $textureInteropMsValues $frame.texture_interop_ms
@@ -969,6 +975,9 @@ exit `$LASTEXITCODE
                 $presentedFpsValue = if ($result) { [double]$result.log.summary.presented_fps } else { 0.0 }
                 if ($presentedFpsValue -lt $MinPresentedFps) {
                     Add-Failure $clipFailures ("Speed leg presented_fps={0:N3} was below hard floor {1:N3} fps." -f $presentedFpsValue, $MinPresentedFps)
+                }
+                if ($borrowedNoReadbackInputFrameCount -le 0) {
+                    Add-Failure $clipFailures "Speed leg did not report borrowed no-readback input frames; expected r16_amaze_skip_input_borrowed=1."
                 }
             }
         }
@@ -1058,6 +1067,7 @@ exit `$LASTEXITCODE
             activeNoReadbackFrameCount = $activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
+            borrowedNoReadbackInputFrameCount = $borrowedNoReadbackInputFrameCount
             fallbackFrameCount = $fallbackFrameCount
             avgTextureUploadMs = Get-AverageOrNull $textureUploadMsValues
             avgTextureKernelMs = Get-AverageOrNull $textureKernelMsValues
