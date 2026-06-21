@@ -5,6 +5,7 @@ param(
     [string]$ClipPath = "C:\temp\MLV\M16-1327.MLV",
     [string]$Receipt = "receipts\FastProxy.marxml",
     [string]$BackendDll = "",
+    [string]$AmazeBackendDll = "",
     [string]$OutputRoot = "",
     [int]$Seconds = 30,
     [int]$SettleMs = 2500,
@@ -13,7 +14,7 @@ param(
     [string]$QualityMode = "4",
     [string]$ScaleFactor = "1",
     [int]$ValidationSampleEvery = 10,
-    [string]$GpuPlaybackReconBackend = "cuda",
+    [string]$GpuPlaybackReconBackend = "",
     [switch]$CandidateFirst,
     [switch]$NoScreenshot,
     [switch]$FailOnColorArtifact,
@@ -21,6 +22,9 @@ param(
     [switch]$RequireCandidateGlParity,
     [switch]$SeparateCandidateSpeedRun,
     [switch]$NoHighPerformancePreference,
+    [switch]$SkipBackendBuild,
+    [switch]$SkipAmazeBackendBuild,
+    [switch]$AllowLegacyR16TextureCandidate,
     [switch]$DryRun
 )
 
@@ -80,6 +84,126 @@ function Get-FileArtifact {
         lastWriteTime = $item.LastWriteTime
         sha256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash
     }
+}
+
+function Convert-PlaybackLogLineToObject {
+    param([string]$Line)
+
+    $result = [ordered]@{}
+    $matches = [regex]::Matches($Line, '(?<key>[A-Za-z0-9_]+)=(?<value>"[^"]*"|\S+)')
+    foreach ($match in $matches) {
+        $key = $match.Groups["key"].Value
+        $rawValue = $match.Groups["value"].Value.Trim('"')
+
+        $longValue = 0L
+        $doubleValue = 0.0
+        if ([long]::TryParse($rawValue, [ref]$longValue)) {
+            $result[$key] = $longValue
+        }
+        elseif ([double]::TryParse(
+            $rawValue,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$doubleValue)) {
+            $result[$key] = $doubleValue
+        }
+        else {
+            $result[$key] = $rawValue
+        }
+    }
+    [pscustomobject]$result
+}
+
+function Get-PlaybackLogTimestampUtc {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return $null
+    }
+    $match = [regex]::Match($Line, '^\[(?<ts>[^\]]+)\]')
+    if (!$match.Success) {
+        return $null
+    }
+
+    $dto = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse(
+        $match.Groups["ts"].Value,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::AssumeUniversal,
+        [ref]$dto)) {
+        return $dto.UtcDateTime
+    }
+
+    return $null
+}
+
+function Get-ScopedPlaybackLogLines {
+    param(
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [AllowNull()][object]$StartedAtUtc,
+        [AllowNull()][object]$EndedAtUtc
+    )
+
+    $startUtc = $null
+    $endUtc = $null
+    if ($StartedAtUtc) {
+        $startUtc = ([datetimeoffset]$StartedAtUtc).UtcDateTime.AddSeconds(-1)
+    }
+    if ($EndedAtUtc) {
+        $endUtc = ([datetimeoffset]$EndedAtUtc).UtcDateTime.AddSeconds(1)
+    }
+
+    $matches = @(Select-String -LiteralPath $LogPath -Pattern $Pattern)
+    if ($null -eq $startUtc -and $null -eq $endUtc) {
+        return $matches
+    }
+
+    $scoped = [System.Collections.Generic.List[object]]::new()
+    foreach ($match in $matches) {
+        $timestampUtc = Get-PlaybackLogTimestampUtc -Line $match.Line
+        if ($null -eq $timestampUtc) {
+            continue
+        }
+        if ($null -ne $startUtc -and $timestampUtc -lt $startUtc) {
+            continue
+        }
+        if ($null -ne $endUtc -and $timestampUtc -gt $endUtc) {
+            continue
+        }
+        $scoped.Add($match)
+    }
+    return @($scoped)
+}
+
+function Add-NullableDouble {
+    param(
+        [System.Collections.Generic.List[double]]$Values,
+        [AllowNull()]$Value
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    $parsed = 0.0
+    if ([double]::TryParse(
+        [string]$Value,
+        [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [ref]$parsed)) {
+        [void]$Values.Add($parsed)
+    }
+}
+
+function Get-AverageOrNull {
+    param([System.Collections.Generic.List[double]]$Values)
+
+    if ($null -eq $Values -or $Values.Count -eq 0) {
+        return $null
+    }
+
+    [Math]::Round(($Values | Measure-Object -Average).Average, 3)
 }
 
 function Get-GpuPreferenceValue {
@@ -220,6 +344,11 @@ function New-PlaybackAbAnalysis {
     $presentDrawPresentDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentDrawPresentMs"
     $presentPacingDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPresentPacingMs"
     $prepBeforeFinishDeltaPct = Get-CompareDeltaPercent -Compare $Compare -Metric "avgPrepBeforeFinishMs"
+    $candidateQueueWaitMs = Convert-ToNullableDouble (Get-NestedValue $Compare "avgQueueWaitMs.candidate")
+    $candidateDrawTotalMs = Convert-ToNullableDouble (Get-NestedValue $Compare "avgDrawTotalMs.candidate")
+    $candidateTextureTotalMs = Convert-ToNullableDouble (Get-NestedValue $Compare "avgTextureTotalMs.candidate")
+    $candidateTextureWallMs = Convert-ToNullableDouble (Get-NestedValue $Compare "avgTextureWallMs.candidate")
+    $candidatePresentIntervalMs = Convert-ToNullableDouble (Get-NestedValue $Compare "avgPresentIntervalMs.candidate")
 
     $dominant = "unknown"
     $suggestion = "rerun_playback_ab_for_stage_metrics"
@@ -271,8 +400,30 @@ function New-PlaybackAbAnalysis {
             $suggestion = "profile_present_decode_and_recon_stages"
         }
         else {
-            $dominant = "none"
-            $suggestion = "validate_same_clip_on_second_machine"
+            if ($null -ne $candidateQueueWaitMs -and
+                $candidateQueueWaitMs -ge 15.0 -and
+                ($null -eq $candidateTextureTotalMs -or $candidateQueueWaitMs -ge $candidateTextureTotalMs)) {
+                $dominant = "queue-wait-bound"
+                $suggestion = "reduce_render_queue_wait_or_pipeline_gpu_tex_nr_present"
+                $confidence = "observed_absolute_candidate_stage"
+            }
+            elseif ($null -ne $candidateDrawTotalMs -and
+                   $candidateDrawTotalMs -ge 15.0 -and
+                   ($null -eq $candidateTextureTotalMs -or $candidateDrawTotalMs -ge $candidateTextureTotalMs)) {
+                $dominant = "present-bound"
+                $suggestion = "reduce_gpu_present_draw_queue_sync"
+                $confidence = "observed_absolute_candidate_stage"
+            }
+            elseif ($null -ne $candidateTextureTotalMs -and
+                   $candidateTextureTotalMs -ge 10.0) {
+                $dominant = "gpu-texture-bound"
+                $suggestion = "optimize_direct_device_recon_amaze_texture_kernel"
+                $confidence = "observed_absolute_candidate_stage"
+            }
+            else {
+                $dominant = "none"
+                $suggestion = "validate_same_clip_on_second_machine"
+            }
         }
     }
 
@@ -294,6 +445,11 @@ function New-PlaybackAbAnalysis {
             presentDrawPresentDeltaPercent = $presentDrawPresentDeltaPct
             presentPacingDeltaPercent = $presentPacingDeltaPct
             prepBeforeFinishDeltaPercent = $prepBeforeFinishDeltaPct
+            candidateQueueWaitMs = $candidateQueueWaitMs
+            candidateDrawTotalMs = $candidateDrawTotalMs
+            candidateTextureTotalMs = $candidateTextureTotalMs
+            candidateTextureWallMs = $candidateTextureWallMs
+            candidatePresentIntervalMs = $candidatePresentIntervalMs
         }
         proofFailures = @($ProofFailures)
     }
@@ -543,6 +699,93 @@ function Read-SmokeSummary {
     if ($null -eq $presentedFrames) {
         $presentedFrames = Convert-ToNullableInt64 (Get-NestedValue $json "validation.presentedFrames")
     }
+    $logPath = Get-NestedValue $json "log.path"
+    $gpuTextureNoReadbackFrames = $null
+    $gpuTextureReadbackFrames = $null
+    $noReadbackCandidateFrameCount = 0
+    $activeNoReadbackFrameCount = 0
+    $cudaTextureSourceFrameCount = 0
+    $cudaAmazeTextureSourceFrameCount = 0
+    $cudaAmazeDirectTextureSourceFrameCount = 0
+    $cudaAmazeAcceptedTextureSourceFrameCount = 0
+    $cpuAmazeSkippedFrameCount = 0
+    $fallbackFrameCount = 0
+    $noReadbackFallbackReasons = [ordered]@{}
+    $textureUploadMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureKernelMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureInteropMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureTotalMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureWallMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureHostGapMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureReconWallMsValues = [System.Collections.Generic.List[double]]::new()
+    $textureAmazeWallMsValues = [System.Collections.Generic.List[double]]::new()
+    $texturePostMsValues = [System.Collections.Generic.List[double]]::new()
+    $processStartedAtUtc = Get-NestedValue $json "process.startedAtUtc"
+    $processEndedAtUtc = Get-NestedValue $json "process.endedAtUtc"
+
+    if ($logPath -and (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        $gpuFrameLines = Get-ScopedPlaybackLogLines `
+            -LogPath $logPath `
+            -Pattern "playback_smoke\.gpu_frame" `
+            -StartedAtUtc $processStartedAtUtc `
+            -EndedAtUtc $processEndedAtUtc
+        foreach ($line in $gpuFrameLines) {
+            $frame = Convert-PlaybackLogLineToObject -Line $line.Line
+            if ([int]$frame.texture_no_readback_candidate -eq 1) {
+                $noReadbackCandidateFrameCount++
+            }
+            if ([int]$frame.texture_no_readback_active -eq 1) {
+                $activeNoReadbackFrameCount++
+            }
+            if ([string]$frame.texture_source -eq "cuda_gl_r16_texture") {
+                $cudaTextureSourceFrameCount++
+            }
+            if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture") {
+                $cudaAmazeTextureSourceFrameCount++
+            }
+            if ([string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                $cudaAmazeDirectTextureSourceFrameCount++
+            }
+            if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture" -or
+                [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                $cudaAmazeAcceptedTextureSourceFrameCount++
+            }
+            if ([int]$frame.cpu_amaze_skip -eq 1) {
+                $cpuAmazeSkippedFrameCount++
+            }
+            if ([string]$frame.texture_source -match "fallback") {
+                $fallbackFrameCount++
+            }
+            $fallbackReason = [string]$frame.texture_no_readback_fallback_reason
+            if (![string]::IsNullOrWhiteSpace($fallbackReason) -and $fallbackReason -ne "none") {
+                if (!$noReadbackFallbackReasons.Contains($fallbackReason)) {
+                    $noReadbackFallbackReasons[$fallbackReason] = 0
+                }
+                $noReadbackFallbackReasons[$fallbackReason] = [int]$noReadbackFallbackReasons[$fallbackReason] + 1
+            }
+            Add-NullableDouble $textureUploadMsValues $frame.texture_upload_ms
+            Add-NullableDouble $textureKernelMsValues $frame.texture_kernel_ms
+            Add-NullableDouble $textureInteropMsValues $frame.texture_interop_ms
+            Add-NullableDouble $textureTotalMsValues $frame.texture_total_ms
+            Add-NullableDouble $textureWallMsValues $frame.texture_wall_ms
+            Add-NullableDouble $textureHostGapMsValues $frame.texture_host_gap_ms
+            Add-NullableDouble $textureReconWallMsValues $frame.texture_recon_wall_ms
+            Add-NullableDouble $textureAmazeWallMsValues $frame.texture_amaze_wall_ms
+            Add-NullableDouble $texturePostMsValues $frame.texture_post_ms
+        }
+
+        $gpuSummaryLine = Get-ScopedPlaybackLogLines `
+            -LogPath $logPath `
+            -Pattern "playback_smoke\.gpu_summary" `
+            -StartedAtUtc $processStartedAtUtc `
+            -EndedAtUtc $processEndedAtUtc |
+            Select-Object -Last 1
+        if ($gpuSummaryLine) {
+            $gpuSummary = Convert-PlaybackLogLineToObject -Line $gpuSummaryLine.Line
+            $gpuTextureNoReadbackFrames = Convert-ToNullableInt64 $gpuSummary.gpu_texture_no_readback_frames
+            $gpuTextureReadbackFrames = Convert-ToNullableInt64 $gpuSummary.gpu_texture_readback_frames
+        }
+    }
 
     [pscustomobject]@{
         path = (Resolve-Path -LiteralPath $Path).Path
@@ -574,6 +817,26 @@ function Read-SmokeSummary {
         avgPrepWorkerBuildMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_worker_build_ms")
         avgPrepWorkerTotalMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_worker_total_ms")
         avgPrepBeforeFinishMs = Convert-ToNullableDouble (Get-NestedValue $summary "avg_playback_prep_total_before_finish_ms")
+        gpuTextureNoReadbackFrames = $gpuTextureNoReadbackFrames
+        gpuTextureReadbackFrames = $gpuTextureReadbackFrames
+        noReadbackCandidateFrameCount = $noReadbackCandidateFrameCount
+        activeNoReadbackFrameCount = $activeNoReadbackFrameCount
+        cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
+        cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
+        cudaAmazeDirectTextureSourceFrameCount = $cudaAmazeDirectTextureSourceFrameCount
+        cudaAmazeAcceptedTextureSourceFrameCount = $cudaAmazeAcceptedTextureSourceFrameCount
+        cpuAmazeSkippedFrameCount = $cpuAmazeSkippedFrameCount
+        fallbackFrameCount = $fallbackFrameCount
+        noReadbackFallbackReasons = [pscustomobject]$noReadbackFallbackReasons
+        avgTextureUploadMs = Get-AverageOrNull $textureUploadMsValues
+        avgTextureKernelMs = Get-AverageOrNull $textureKernelMsValues
+        avgTextureInteropMs = Get-AverageOrNull $textureInteropMsValues
+        avgTextureTotalMs = Get-AverageOrNull $textureTotalMsValues
+        avgTextureWallMs = Get-AverageOrNull $textureWallMsValues
+        avgTextureHostGapMs = Get-AverageOrNull $textureHostGapMsValues
+        avgTextureReconWallMs = Get-AverageOrNull $textureReconWallMsValues
+        avgTextureAmazeWallMs = Get-AverageOrNull $textureAmazeWallMsValues
+        avgTexturePostMs = Get-AverageOrNull $texturePostMsValues
         scaleRequestLast = Convert-ToNullableInt64 (Get-NestedValue $summary "scale_request_last")
         qualityMode = Convert-ToNullableInt64 (Get-NestedValue $summary "quality_mode")
         glProof = [pscustomobject]@{
@@ -734,13 +997,111 @@ if (-not (Test-Path -LiteralPath $smokeScript -PathType Leaf)) {
     throw "Missing GUI smoke wrapper: $smokeScript"
 }
 
+$backendDir = Join-Path $root "tools\gpu\backend"
+$backendBuildScript = Join-Path $backendDir "build-backend-dll.ps1"
+$backendBuildResult = [ordered]@{
+    skipped = [bool]$SkipBackendBuild
+    attempted = $false
+    buildScript = $backendBuildScript
+    exitCode = $null
+    output = @()
+}
+$backendDllExplicit = $PSBoundParameters.ContainsKey("BackendDll") -and
+    -not [string]::IsNullOrWhiteSpace($BackendDll)
+$releaseBackendDll = Join-Path $exeDir "igpu_recon_cuda.dll"
+$releaseBackendArchSidecar = Join-Path $exeDir "igpu_recon_cuda.arch.json"
 if ([string]::IsNullOrWhiteSpace($BackendDll)) {
-    $BackendDll = Join-Path $exeDir "igpu_recon_cuda.dll"
+    $BackendDll = $releaseBackendDll
+    $toolBackendDll = Join-Path $backendDir "igpu_recon_cuda.dll"
+    $toolBackendArchSidecar = Join-Path $backendDir "igpu_recon_cuda.arch.json"
+    if (!$DryRun -and !$SkipBackendBuild) {
+        if (Test-Path -LiteralPath $backendBuildScript -PathType Leaf) {
+            $backendBuildResult.attempted = $true
+            $buildResult = Invoke-ChildPowerShell -Arguments @(
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $backendBuildScript,
+                "-Dir", $backendDir,
+                "-Arch", "portable"
+            )
+            $backendBuildResult.exitCode = $buildResult.exitCode
+            $backendBuildResult.output = @($buildResult.output)
+        }
+    }
+    if (!$DryRun -and (Test-Path -LiteralPath $toolBackendDll -PathType Leaf)) {
+        Copy-Item -LiteralPath $toolBackendDll -Destination $releaseBackendDll -Force
+        if (Test-Path -LiteralPath $toolBackendArchSidecar -PathType Leaf) {
+            Copy-Item -LiteralPath $toolBackendArchSidecar -Destination $releaseBackendArchSidecar -Force
+        }
+        $cudaRoot = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending |
+            Select-Object -First 1
+        if ($cudaRoot) {
+            $cudart = Get-ChildItem -LiteralPath (Join-Path $cudaRoot.FullName "bin") -Filter "cudart64_*.dll" -File -ErrorAction SilentlyContinue |
+                Sort-Object Name -Descending |
+                Select-Object -First 1
+            if ($cudart) {
+                Copy-Item -LiteralPath $cudart.FullName -Destination (Join-Path $exeDir $cudart.Name) -Force
+            }
+        }
+    }
 }
 else {
     $BackendDll = Resolve-RepoPath -Root $root -Path $BackendDll
 }
 $backend = (Resolve-Path -LiteralPath $BackendDll).Path
+$amazeBackendBuildScript = Join-Path $backendDir "amaze-debayer-dll.ps1"
+$amazeBackendBuildResult = [ordered]@{
+    skipped = [bool]$SkipAmazeBackendBuild
+    attempted = $false
+    buildScript = $amazeBackendBuildScript
+    exitCode = $null
+    output = @()
+}
+if ([string]::IsNullOrWhiteSpace($AmazeBackendDll)) {
+    $releaseAmazeBackendDll = Join-Path $exeDir "igpu_amaze_debayer_cuda.dll"
+    $toolAmazeBackendDll = Join-Path $backendDir "igpu_amaze_debayer_cuda.dll"
+    if (Test-Path -LiteralPath $releaseAmazeBackendDll -PathType Leaf) {
+        $AmazeBackendDll = $releaseAmazeBackendDll
+    }
+    elseif (Test-Path -LiteralPath $toolAmazeBackendDll -PathType Leaf) {
+        $AmazeBackendDll = $toolAmazeBackendDll
+    }
+    else {
+        $AmazeBackendDll = $toolAmazeBackendDll
+    }
+}
+else {
+    $AmazeBackendDll = Resolve-RepoPath -Root $root -Path $AmazeBackendDll
+}
+if (!$DryRun -and
+    !(Test-Path -LiteralPath $AmazeBackendDll -PathType Leaf) -and
+    !$SkipAmazeBackendBuild) {
+    if (Test-Path -LiteralPath $amazeBackendBuildScript -PathType Leaf) {
+        $amazeBackendBuildResult.attempted = $true
+        $buildResult = Invoke-ChildPowerShell -Arguments @(
+            "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", $amazeBackendBuildScript,
+            "-Dir", $backendDir,
+            "-Arch", "portable"
+        )
+        $amazeBackendBuildResult.exitCode = $buildResult.exitCode
+        $amazeBackendBuildResult.output = @($buildResult.output)
+    }
+}
+$amazeBackendSource = if (Test-Path -LiteralPath $AmazeBackendDll -PathType Leaf) {
+    (Resolve-Path -LiteralPath $AmazeBackendDll).Path
+} else {
+    $AmazeBackendDll
+}
+$amazeBackendLaunchPath = Join-Path $exeDir "igpu_amaze_debayer_cuda.dll"
+if (!$DryRun -and (Test-Path -LiteralPath $amazeBackendSource -PathType Leaf)) {
+    if ($amazeBackendSource -ne $amazeBackendLaunchPath) {
+        Copy-Item -LiteralPath $amazeBackendSource -Destination $amazeBackendLaunchPath -Force
+    }
+}
+if (Test-Path -LiteralPath $amazeBackendLaunchPath -PathType Leaf) {
+    $amazeBackendLaunchPath = (Resolve-Path -LiteralPath $amazeBackendLaunchPath).Path
+}
 $nvidiaSmi = Get-NvidiaSmiSnapshot
 $machineFingerprint = Get-LocalMachineFingerprint -RepoRoot $root -NvidiaSmi $nvidiaSmi
 $backendArchitecture = Get-CudaBackendArchitectureInfo -Path $backend
@@ -748,11 +1109,22 @@ $backendCompatibility = Test-CudaBackendCompatibility `
     -ArchitectureInfo $backendArchitecture `
     -NvidiaSmi $nvidiaSmi
 $preflightFailures = @()
+if (!$DryRun -and [bool]$backendBuildResult.attempted -and
+    $backendBuildResult.exitCode -ne 0) {
+    $preflightFailures += "CUDA recon backend DLL build failed with exit code $($backendBuildResult.exitCode)."
+}
 if (!$DryRun -and [bool]$nvidiaSmi.found -and $backendCompatibility.compatible -ne $true) {
     $preflightFailures += ("CUDA backend architecture is not compatible with this GPU: compute_capability={0}; backend_tokens=[{1}]; reason={2}. Rebuild/deploy igpu_recon_cuda.dll with tools\\gpu\\backend\\build-backend-dll.ps1 -Arch portable before using this run for Dell/UltraMagnus claims." -f `
         $backendCompatibility.gpu_compute_capability,
         (($backendCompatibility.backend_tokens | ForEach-Object { [string]$_ }) -join ","),
         $backendCompatibility.reason)
+}
+if (!$DryRun -and [bool]$amazeBackendBuildResult.attempted -and
+    $amazeBackendBuildResult.exitCode -ne 0) {
+    $preflightFailures += "AMaZE backend DLL build failed with exit code $($amazeBackendBuildResult.exitCode)."
+}
+if (!$DryRun -and !(Test-Path -LiteralPath $amazeBackendLaunchPath -PathType Leaf)) {
+    $preflightFailures += "AMaZE backend DLL is missing for the live texture path: $amazeBackendLaunchPath."
 }
 
 $clip = (Resolve-Path -LiteralPath (Resolve-RepoPath -Root $root -Path $ClipPath)).Path
@@ -787,22 +1159,25 @@ $baselineEnv = @(
 )
 $candidateEnv = @(
     "QT_OPENGL=desktop",
-    "MLVAPP_EXPERIMENTAL_GL_VIEWPORT=1",
-    "MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
     "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1",
-    "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend",
+    "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1",
     "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=1",
     "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT_SAMPLE_EVERY=$ValidationSampleEvery"
 )
+if ($backendDllExplicit) {
+    $candidateEnv += "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
+}
 $candidateSpeedEnv = @(
     "QT_OPENGL=desktop",
-    "MLVAPP_EXPERIMENTAL_GL_VIEWPORT=1",
-    "MLVAPP_EXPERIMENTAL_GPU_PROCESSING=1",
     "MLVAPP_GPU_PLAYBACK_RECON=1",
     "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT=1",
-    "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
+    "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT=1",
+    "MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT=0"
 )
+if ($backendDllExplicit) {
+    $candidateSpeedEnv += "MLVAPP_GPU_PLAYBACK_RECON_DLL=$backend"
+}
 
 $baselineCommand = Write-SmokeInvokeScript `
     -Path $baselineInvokeScript `
@@ -887,6 +1262,10 @@ $summary = [ordered]@{
     repoRoot = $root
     exe = Get-FileArtifact -Path $exe
     backend = Get-FileArtifact -Path $backend
+    backendBuild = [pscustomobject]$backendBuildResult
+    amazeBackend = Get-FileArtifact -Path $amazeBackendLaunchPath
+    amazeBackendSource = Get-FileArtifact -Path $amazeBackendSource
+    amazeBackendBuild = [pscustomobject]$amazeBackendBuildResult
     backendArchitecture = $backendArchitecture
     backendCompatibility = $backendCompatibility
     cudart = Get-FileArtifact -Path (Join-Path $exeDir "cudart64_12.dll")
@@ -898,6 +1277,7 @@ $summary = [ordered]@{
     scaleFactor = $ScaleFactor
     validationSampleEvery = $ValidationSampleEvery
     separateCandidateSpeedRun = [bool]$SeparateCandidateSpeedRun
+    allowLegacyR16TextureCandidate = [bool]$AllowLegacyR16TextureCandidate
     runOrder = if ($CandidateFirst) {
         if ($SeparateCandidateSpeedRun) { @("candidate", "candidate_speed", "baseline") } else { @("candidate", "baseline") }
     } else {
@@ -931,6 +1311,7 @@ $summary = [ordered]@{
         provesDellSupport = $false
         notes = @(
             "This wrapper compares CPU baseline and scoped CUDA no-readback candidate on the same release executable.",
+            "By default the CUDA candidate must use the direct-device CUDA AMaZE texture source; pass -AllowLegacyR16TextureCandidate only for legacy bridge investigations.",
             "When separateCandidateSpeedRun is true, candidate proves GL parity without the temporal detector and candidateSpeed measures cadence without heavy GL-vs-oracle readback.",
             "On Windows hybrid-GPU laptops, the wrapper sets the per-app high-performance GPU preference before real runs unless -NoHighPerformancePreference is passed.",
             "A speed gain is quotable only for the host, clip, settings, and run duration captured in this summary.",
@@ -1042,6 +1423,51 @@ if (-not $candidateSummary.validationOk) {
 if ($SeparateCandidateSpeedRun -and -not $candidateSpeedSummary.validationOk) {
     $proofFailures += "candidate-speed-validation-not-ok"
 }
+$candidateTextureProofSummaries = @(
+    [pscustomobject]@{ label = "candidate"; summary = $candidateSummary }
+)
+if ($SeparateCandidateSpeedRun) {
+    $candidateTextureProofSummaries += [pscustomobject]@{
+        label = "candidate-speed"
+        summary = $candidateSpeedSummary
+    }
+}
+foreach ($item in $candidateTextureProofSummaries) {
+    $label = [string]$item.label
+    $candidateTextureSummary = $item.summary
+    $noReadbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.gpuTextureNoReadbackFrames
+    $activeNoReadbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.activeNoReadbackFrameCount
+    $directAmazeFrames = Convert-ToNullableInt64 $candidateTextureSummary.cudaAmazeDirectTextureSourceFrameCount
+    $acceptedAmazeFrames = Convert-ToNullableInt64 $candidateTextureSummary.cudaAmazeAcceptedTextureSourceFrameCount
+    $legacyR16Frames = Convert-ToNullableInt64 $candidateTextureSummary.cudaTextureSourceFrameCount
+    $fallbackFrames = Convert-ToNullableInt64 $candidateTextureSummary.fallbackFrameCount
+    $cpuAmazeSkippedFrames = Convert-ToNullableInt64 $candidateTextureSummary.cpuAmazeSkippedFrameCount
+
+    if ($null -eq $noReadbackFrames -or $noReadbackFrames -le 0) {
+        $proofFailures += "$label-gpu-texture-no-readback-frames=$noReadbackFrames"
+    }
+    if ($null -eq $activeNoReadbackFrames -or $activeNoReadbackFrames -le 0) {
+        $proofFailures += "$label-active-no-readback-frames=$activeNoReadbackFrames"
+    }
+    if ($null -ne $fallbackFrames -and $fallbackFrames -gt 0) {
+        $proofFailures += "$label-fallback-frames=$fallbackFrames"
+    }
+    if (-not $AllowLegacyR16TextureCandidate) {
+        if ($null -eq $directAmazeFrames -or $directAmazeFrames -le 0) {
+            $proofFailures += "$label-direct-amaze-texture-frames=$directAmazeFrames"
+        }
+        if ($null -ne $legacyR16Frames -and $legacyR16Frames -gt 0) {
+            $proofFailures += "$label-legacy-r16-texture-frames=$legacyR16Frames"
+        }
+        if ($null -eq $cpuAmazeSkippedFrames -or $cpuAmazeSkippedFrames -le 0) {
+            $proofFailures += "$label-cpu-amaze-skipped-frames=$cpuAmazeSkippedFrames"
+        }
+        if ($null -ne $activeNoReadbackFrames -and $activeNoReadbackFrames -gt 0 -and
+            ($null -eq $acceptedAmazeFrames -or $acceptedAmazeFrames -ne $activeNoReadbackFrames)) {
+            $proofFailures += "$label-accepted-amaze-texture-frames=$acceptedAmazeFrames/$activeNoReadbackFrames"
+        }
+    }
+}
 if ($RequireCandidateGlParity) {
     if (-not $candidateSummary.glProof.requested) {
         $proofFailures += "candidate-gl-parity-not-requested"
@@ -1091,6 +1517,15 @@ function New-PlaybackCompare {
         avgPrepWorkerBuildMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerBuildMs -CandidateValue $CandidateSummary.avgPrepWorkerBuildMs
         avgPrepWorkerTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepWorkerTotalMs -CandidateValue $CandidateSummary.avgPrepWorkerTotalMs
         avgPrepBeforeFinishMs = New-MetricDelta -BaselineValue $BaselineSummary.avgPrepBeforeFinishMs -CandidateValue $CandidateSummary.avgPrepBeforeFinishMs
+        gpuTextureNoReadbackFrames = New-MetricDelta -BaselineValue $BaselineSummary.gpuTextureNoReadbackFrames -CandidateValue $CandidateSummary.gpuTextureNoReadbackFrames
+        activeNoReadbackFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.activeNoReadbackFrameCount -CandidateValue $CandidateSummary.activeNoReadbackFrameCount
+        cudaAmazeDirectTextureSourceFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.cudaAmazeDirectTextureSourceFrameCount -CandidateValue $CandidateSummary.cudaAmazeDirectTextureSourceFrameCount
+        cpuAmazeSkippedFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.cpuAmazeSkippedFrameCount -CandidateValue $CandidateSummary.cpuAmazeSkippedFrameCount
+        fallbackFrameCount = New-MetricDelta -BaselineValue $BaselineSummary.fallbackFrameCount -CandidateValue $CandidateSummary.fallbackFrameCount
+        avgTextureTotalMs = New-MetricDelta -BaselineValue $BaselineSummary.avgTextureTotalMs -CandidateValue $CandidateSummary.avgTextureTotalMs
+        avgTextureWallMs = New-MetricDelta -BaselineValue $BaselineSummary.avgTextureWallMs -CandidateValue $CandidateSummary.avgTextureWallMs
+        avgTextureReconWallMs = New-MetricDelta -BaselineValue $BaselineSummary.avgTextureReconWallMs -CandidateValue $CandidateSummary.avgTextureReconWallMs
+        avgTextureAmazeWallMs = New-MetricDelta -BaselineValue $BaselineSummary.avgTextureAmazeWallMs -CandidateValue $CandidateSummary.avgTextureAmazeWallMs
     }
 }
 
