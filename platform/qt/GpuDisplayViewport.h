@@ -105,7 +105,8 @@ public:
                                                           const double wbMultipliers[3],
                                                           const PresentationOptions &options,
                                                           QString *reason = nullptr,
-                                                          llrpGpuPlaybackReconTiming_t *timing = nullptr);
+                                                          llrpGpuPlaybackReconTiming_t *timing = nullptr,
+                                                          QString *handoffMode = nullptr);
     static bool presentAmazePostWbTexture(QGraphicsView *view,
                                           QGraphicsPixmapItem *fallbackItem,
                                           const float *rawFrame,
@@ -147,7 +148,8 @@ private:
                                                         const double wbMultipliers[3],
                                                         const PresentationOptions &options,
                                                         QString *reason,
-                                                        llrpGpuPlaybackReconTiming_t *timing);
+                                                        llrpGpuPlaybackReconTiming_t *timing,
+                                                        QString *handoffMode);
     bool setPresentedAmazePostWbTexture(const float *rawFrame,
                                         int width,
                                         int height,
@@ -182,6 +184,7 @@ private:
     bool m_pendingTextureFromGpuRecon;
     bool m_textureIs16Bit;
     bool m_textureIsBayer16;
+    bool m_gpuReconSourceTextureCurrent;
     QGraphicsView *m_view;
     QGraphicsPixmapItem *m_fallbackItem;
     QImage m_pendingImage;

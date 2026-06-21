@@ -973,9 +973,12 @@ int igpu_recon_run(igpu_recon_backend* b,
         return 3;
     }
     const int output_to_gl_texture = (out_kind == IGPU_OUT_GL_TEXTURE);
+    const int output_to_device_bayer16 = (out_kind == IGPU_OUT_DEVICE_BAYER16);
     if (output_to_gl_texture) {
         if (gl_texture == 0) return -1;
-    } else if (out_kind != IGPU_OUT_CPU16 || !out_bayer16) {
+    } else if (out_kind == IGPU_OUT_CPU16) {
+        if (!out_bayer16) return -1;
+    } else if (!output_to_device_bayer16) {
         return -1;
     }
 
@@ -1088,7 +1091,7 @@ int igpu_recon_run(igpu_recon_backend* b,
     if (output_to_gl_texture) {
         const int rc = copy_bayer16_to_gl_r16_texture(b, gl_texture);
         if (rc != 0) return rc;
-    } else {
+    } else if (out_kind == IGPU_OUT_CPU16) {
         CK(cudaMemcpy(out_bayer16, b->d_out, n*sizeof(uint16_t), cudaMemcpyDeviceToHost));
     }
     CK(cudaEventRecord(b->ev_after_dl, 0));
@@ -1113,6 +1116,21 @@ int igpu_recon_last_timing(igpu_recon_backend* b, igpu_recon_timing_t* t)
 {
     if (!b || !t) return -1;
     *t = b->last_timing;
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_last_device_output(igpu_recon_backend* b,
+                                  const uint16_t** device_bayer16,
+                                  int* width,
+                                  int* height)
+{
+    if (!b || !device_bayer16 || !width || !height || !b->d_out || !b->have_clip) {
+        return -1;
+    }
+    *device_bayer16 = b->d_out;
+    *width = b->width;
+    *height = b->height;
     return 0;
 }
 

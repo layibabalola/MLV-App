@@ -76,7 +76,8 @@ typedef struct {
 /* Where the reconstructed frame is delivered. */
 typedef enum {
     IGPU_OUT_CPU16      = 0, /* fill out_bayer16 (uint16[w*h]) - parity/export    */
-    IGPU_OUT_GL_TEXTURE = 1  /* write into a CUDA-GL-interop GL_R16 texture        */
+    IGPU_OUT_GL_TEXTURE = 1, /* write into a CUDA-GL-interop GL_R16 texture        */
+    IGPU_OUT_DEVICE_BAYER16 = 2 /* keep Bayer16 in backend-owned CUDA memory       */
 } igpu_recon_out_kind;
 
 /* Per-run timings (ms) for profiling against the 41.7 ms / 24 fps budget. */
@@ -108,8 +109,9 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts);
  *   in_bayer14  : const uint16_t[w*h], 14-bit RGGB (required).
  *   out_kind    : CPU16 -> out_bayer16 must be uint16_t[w*h]; GL_TEXTURE ->
  *                 gl_texture is a valid GL_TEXTURE_2D with GL_R16 storage in a
- *                 current CUDA-compatible OpenGL context. The backend registers
- *                 it for interop during the call and writes Bayer16 device-side.
+ *                 current CUDA-compatible OpenGL context. DEVICE_BAYER16 keeps
+ *                 the Bayer16 output in backend-owned CUDA memory for an
+ *                 immediate same-process GPU consumer.
  * Returns 0 on success, non-zero on error. */
 int igpu_recon_run(igpu_recon_backend* b,
                    const igpu_recon_frame_t* frame,
@@ -120,6 +122,15 @@ int igpu_recon_run(igpu_recon_backend* b,
 
 /* Fill `t` with timings from the most recent igpu_recon_run. Returns 0 on success. */
 int igpu_recon_last_timing(igpu_recon_backend* b, igpu_recon_timing_t* t);
+
+/* Optional extension, resolved by name by MLVApp rather than required by ABI v1.
+ * Returns the backend-owned device pointer produced by the most recent
+ * IGPU_OUT_DEVICE_BAYER16 run. The pointer remains valid until the next run,
+ * set_clip, or destroy call on the same backend. */
+int igpu_recon_last_device_output(igpu_recon_backend* b,
+                                  const uint16_t** device_bayer16,
+                                  int* width,
+                                  int* height);
 
 /* Optional extension, resolved by name by MLVApp rather than required by ABI v1.
  * Returns the backend's current per-worker VRAM working-set budget in bytes.

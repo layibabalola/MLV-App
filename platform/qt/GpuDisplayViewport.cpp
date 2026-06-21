@@ -223,6 +223,7 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_pendingTextureFromGpuRecon(false)
     , m_textureIs16Bit(false)
     , m_textureIsBayer16(false)
+    , m_gpuReconSourceTextureCurrent(false)
     , m_view(qobject_cast<QGraphicsView *>(parent))
     , m_fallbackItem(nullptr)
     , m_pendingTextureWidth(0)
@@ -431,6 +432,7 @@ bool GpuDisplayViewport::readGpuReconSourceBayer16Texture(QGraphicsView *view,
         return fail(QStringLiteral("GL recon-source texture readback requires an installed GPU viewport"));
     }
     if ( !viewport->m_gpuReconSourceTexture
+      || !viewport->m_gpuReconSourceTextureCurrent
       || !viewport->m_pendingTextureFromGpuRecon
       || !viewport->m_textureIs16Bit
       || viewport->m_textureIsBayer16
@@ -609,7 +611,8 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
     const double wbMultipliers[3],
     const PresentationOptions &options,
     QString *reason,
-    llrpGpuPlaybackReconTiming_t *timing)
+    llrpGpuPlaybackReconTiming_t *timing,
+    QString *handoffMode)
 {
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport
@@ -643,7 +646,8 @@ bool GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
         wbMultipliers,
         options,
         reason,
-        timing);
+        timing,
+        handoffMode);
 }
 
 bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
@@ -1078,6 +1082,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
     }
     applySamplingMode();
     setupMs = elapsedMs() - setupStartMs;
+    m_gpuReconSourceTextureCurrent = false;
 
     int rc = -1;
     llrpGpuPlaybackReconTiming_t localTiming;
@@ -1115,6 +1120,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
     m_pendingTextureIsBayer16 = true;
     m_pendingTextureFromGpuAmaze = false;
     m_pendingTextureFromGpuRecon = true;
+    m_gpuReconSourceTextureCurrent = false;
     m_textureDirty = false;
     m_samplingModeDirty = false;
     m_texturePresentationActive = false;
@@ -1143,11 +1149,13 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     const double wbMultipliers[3],
     const PresentationOptions &options,
     QString *reason,
-    llrpGpuPlaybackReconTiming_t *timing)
+    llrpGpuPlaybackReconTiming_t *timing,
+    QString *handoffMode)
 {
     auto fail = [&](const QString & why) -> bool
     {
         if ( reason ) *reason = why;
+        if ( handoffMode ) handoffMode->clear();
         m_pendingTextureFromGpuAmaze = false;
         m_pendingTextureFromGpuRecon = false;
         m_texturePresentationActive = false;
@@ -1172,6 +1180,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     {
         return fail(QStringLiteral("GPU playback recon AMaZE texture-present Bayer input is incomplete"));
     }
+    if ( handoffMode ) handoffMode->clear();
 
     QElapsedTimer wallTimer;
     wallTimer.start();
@@ -1237,6 +1246,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     }
     applySamplingMode();
     setupMs = elapsedMs() - setupStartMs;
+    m_gpuReconSourceTextureCurrent = false;
 
     int rc = -1;
     llrpGpuPlaybackReconTiming_t reconTiming;
@@ -1244,29 +1254,113 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     GpuAmazeDebayerBackendTiming amazeTiming;
     QString amazeReason;
     QString amazeRenderer;
-    const double reconStartMs = elapsedMs();
-    const bool reconOk =
-        llrpGpuPlaybackReconRunGlTexture(state,
-                                         rawInputBayer14,
-                                         expectedWords * sizeof(uint16_t),
-                                         m_gpuReconSourceTexture->textureId(),
-                                         &rc,
-                                         &reconTiming) != 0;
-    reconWallMs = elapsedMs() - reconStartMs;
-    const double amazeStartMs = elapsedMs();
-    const bool amazeOk =
-        reconOk
-        && gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
-            m_gpuReconSourceTexture->textureId(),
-            m_texture->textureId(),
-            width,
-            height,
-            blackLevel,
-            wbMultipliers,
-            &amazeReason,
-            &amazeRenderer,
-            &amazeTiming);
-    amazeWallMs = elapsedMs() - amazeStartMs;
+    QString handoffModeValue;
+    QString directFailureReason;
+    bool reconOk = false;
+    bool amazeOk = false;
+
+    {
+        llrpGpuPlaybackReconTiming_t directReconTiming;
+        memset(&directReconTiming, 0, sizeof(directReconTiming));
+        GpuAmazeDebayerBackendTiming directAmazeTiming;
+        QString directAmazeReason;
+        QString directAmazeRenderer;
+        const uint16_t *deviceBayer16 = nullptr;
+        int deviceWidth = 0;
+        int deviceHeight = 0;
+        int directRc = -1;
+        const double directReconStartMs = elapsedMs();
+        const bool directReconOk =
+            llrpGpuPlaybackReconRunDeviceBayer16(state,
+                                                 rawInputBayer14,
+                                                 expectedWords * sizeof(uint16_t),
+                                                 &deviceBayer16,
+                                                 &deviceWidth,
+                                                 &deviceHeight,
+                                                 &directRc,
+                                                 &directReconTiming) != 0;
+        const double directReconWallMs = elapsedMs() - directReconStartMs;
+        if ( directReconOk
+          && deviceBayer16
+          && deviceWidth == width
+          && deviceHeight == height )
+        {
+            const double directAmazeStartMs = elapsedMs();
+            const bool directAmazeOk =
+                gpuAmazeDebayerRenderPostWbGlTextureFromDeviceBayer16(
+                    deviceBayer16,
+                    m_texture->textureId(),
+                    width,
+                    height,
+                    blackLevel,
+                    wbMultipliers,
+                    &directAmazeReason,
+                    &directAmazeRenderer,
+                    &directAmazeTiming);
+            const double directAmazeWallMs = elapsedMs() - directAmazeStartMs;
+            if ( directAmazeOk )
+            {
+                rc = directRc;
+                reconTiming = directReconTiming;
+                amazeTiming = directAmazeTiming;
+                amazeReason = directAmazeReason;
+                amazeRenderer = directAmazeRenderer;
+                reconWallMs = directReconWallMs;
+                amazeWallMs = directAmazeWallMs;
+                reconOk = true;
+                amazeOk = true;
+                handoffModeValue = QStringLiteral("direct_device_bayer16");
+            }
+            else
+            {
+                directFailureReason = directAmazeReason.isEmpty()
+                    ? QStringLiteral("GPU AMaZE direct device texture-present failed")
+                    : directAmazeReason;
+            }
+        }
+        else
+        {
+            directFailureReason =
+                QStringLiteral("GPU playback recon direct device handoff failed (recon_rc=%1)")
+                    .arg(directRc);
+        }
+    }
+
+    if ( !reconOk || !amazeOk )
+    {
+        const double reconStartMs = elapsedMs();
+        reconOk =
+            llrpGpuPlaybackReconRunGlTexture(state,
+                                             rawInputBayer14,
+                                             expectedWords * sizeof(uint16_t),
+                                             m_gpuReconSourceTexture->textureId(),
+                                             &rc,
+                                             &reconTiming) != 0;
+        reconWallMs = elapsedMs() - reconStartMs;
+        const double amazeStartMs = elapsedMs();
+        amazeOk =
+            reconOk
+            && gpuAmazeDebayerRenderPostWbGlTextureFromR16GlTexture(
+                m_gpuReconSourceTexture->textureId(),
+                m_texture->textureId(),
+                width,
+                height,
+                blackLevel,
+                wbMultipliers,
+                &amazeReason,
+                &amazeRenderer,
+                &amazeTiming);
+        amazeWallMs = elapsedMs() - amazeStartMs;
+        if ( reconOk && amazeOk )
+        {
+            handoffModeValue = QStringLiteral("gl_r16_bridge");
+            m_gpuReconSourceTextureCurrent = true;
+        }
+        else if ( !directFailureReason.isEmpty() && amazeReason.isEmpty() )
+        {
+            amazeReason = directFailureReason;
+        }
+    }
     const bool ok = reconOk && amazeOk;
     if ( timing )
     {
@@ -1321,6 +1415,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     if ( madeCurrent ) doneCurrent();
     update();
     postMs = elapsedMs() - postStartMs;
+    if ( handoffMode ) *handoffMode = handoffModeValue;
     if ( timing )
     {
         timing->wall_ms = elapsedMs();
@@ -1570,6 +1665,7 @@ void GpuDisplayViewport::destroyTexture()
         delete m_gpuReconSourceTexture;
         m_gpuReconSourceTexture = nullptr;
     }
+    m_gpuReconSourceTextureCurrent = false;
     m_texturePresentationActive = false;
     m_samplingModeDirty = false;
     m_textureIs16Bit = false;

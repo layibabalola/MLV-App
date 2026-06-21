@@ -275,6 +275,8 @@ function New-EvidencePacket {
             activeNoReadbackFrameCount = $_.activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $_.cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $_.cudaAmazeTextureSourceFrameCount
+            cudaAmazeDirectTextureSourceFrameCount = $_.cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeAcceptedTextureSourceFrameCount = $_.cudaAmazeAcceptedTextureSourceFrameCount
             borrowedNoReadbackInputFrameCount = $_.borrowedNoReadbackInputFrameCount
             ownedNoReadbackInputFrameCount = $_.ownedNoReadbackInputFrameCount
             earlyReleasedNoReadbackInputFrameCount = $_.earlyReleasedNoReadbackInputFrameCount
@@ -483,8 +485,13 @@ function Import-EvidencePacket {
             if ([int]$clip.activeNoReadbackFrameCount -le 0) {
                 Add-Failure $importFailures "$clipName had activeNoReadbackFrameCount=$($clip.activeNoReadbackFrameCount); expected > 0."
             }
-            if ([int]$clip.cudaAmazeTextureSourceFrameCount -le 0) {
-                Add-Failure $importFailures "$clipName had cudaAmazeTextureSourceFrameCount=$($clip.cudaAmazeTextureSourceFrameCount); expected > 0."
+            $acceptedAmazeSourceFrames = if ($null -ne $clip.cudaAmazeAcceptedTextureSourceFrameCount) {
+                [int]$clip.cudaAmazeAcceptedTextureSourceFrameCount
+            } else {
+                [int]$clip.cudaAmazeTextureSourceFrameCount
+            }
+            if ($acceptedAmazeSourceFrames -le 0) {
+                Add-Failure $importFailures "$clipName had accepted AMaZE texture source frames=$acceptedAmazeSourceFrames; expected > 0."
             }
             if ([int]$clip.fallbackFrameCount -ne 0) {
                 Add-Failure $importFailures "$clipName had fallbackFrameCount=$($clip.fallbackFrameCount); expected 0."
@@ -851,6 +858,8 @@ exit `$LASTEXITCODE
         $cudaTextureSourceFrameCount = 0
         $fallbackFrameCount = 0
         $cudaAmazeTextureSourceFrameCount = 0
+        $cudaAmazeDirectTextureSourceFrameCount = 0
+        $cudaAmazeAcceptedTextureSourceFrameCount = 0
         $borrowedNoReadbackInputFrameCount = 0
         $ownedNoReadbackInputFrameCount = 0
         $earlyReleasedNoReadbackInputFrameCount = 0
@@ -934,6 +943,13 @@ exit `$LASTEXITCODE
                 if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture") {
                     $cudaAmazeTextureSourceFrameCount++
                 }
+                if ([string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeDirectTextureSourceFrameCount++
+                }
+                if ([string]$frame.texture_source -eq "cuda_gl_rgba16_amaze_texture" -or
+                    [string]$frame.texture_source -eq "cuda_device_bayer16_rgba16_amaze_texture") {
+                    $cudaAmazeAcceptedTextureSourceFrameCount++
+                }
                 if ([int]$frame.r16_amaze_skip_input_borrowed -eq 1) {
                     $borrowedNoReadbackInputFrameCount++
                 }
@@ -995,11 +1011,11 @@ exit `$LASTEXITCODE
             if ($cudaTextureSourceFrameCount -gt 0) {
                 Add-Failure $clipFailures "Observed $cudaTextureSourceFrameCount legacy texture_source=cuda_gl_r16_texture frame(s); expected AMaZE RGBA texture source only."
             }
-            if ($cudaAmazeTextureSourceFrameCount -le 0) {
-                Add-Failure $clipFailures "No per-frame telemetry reported texture_source=cuda_gl_rgba16_amaze_texture."
+            if ($cudaAmazeAcceptedTextureSourceFrameCount -le 0) {
+                Add-Failure $clipFailures "No per-frame telemetry reported an accepted AMaZE texture source (cuda_gl_rgba16_amaze_texture or cuda_device_bayer16_rgba16_amaze_texture)."
             }
-            if ($activeNoReadbackFrameCount -gt 0 -and $cudaAmazeTextureSourceFrameCount -ne $activeNoReadbackFrameCount) {
-                Add-Failure $clipFailures "Only $cudaAmazeTextureSourceFrameCount/$activeNoReadbackFrameCount active no-readback frame(s) used texture_source=cuda_gl_rgba16_amaze_texture."
+            if ($activeNoReadbackFrameCount -gt 0 -and $cudaAmazeAcceptedTextureSourceFrameCount -ne $activeNoReadbackFrameCount) {
+                Add-Failure $clipFailures "Only $cudaAmazeAcceptedTextureSourceFrameCount/$activeNoReadbackFrameCount active no-readback frame(s) used an accepted AMaZE texture source."
             }
             if ($fallbackFrameCount -gt 0) {
                 Add-Failure $clipFailures "Observed $fallbackFrameCount fallback frame(s); P3 no-readback validation requires no fallback frames."
@@ -1100,6 +1116,8 @@ exit `$LASTEXITCODE
             activeNoReadbackFrameCount = $activeNoReadbackFrameCount
             cudaTextureSourceFrameCount = $cudaTextureSourceFrameCount
             cudaAmazeTextureSourceFrameCount = $cudaAmazeTextureSourceFrameCount
+            cudaAmazeDirectTextureSourceFrameCount = $cudaAmazeDirectTextureSourceFrameCount
+            cudaAmazeAcceptedTextureSourceFrameCount = $cudaAmazeAcceptedTextureSourceFrameCount
             borrowedNoReadbackInputFrameCount = $borrowedNoReadbackInputFrameCount
             ownedNoReadbackInputFrameCount = $ownedNoReadbackInputFrameCount
             earlyReleasedNoReadbackInputFrameCount = $earlyReleasedNoReadbackInputFrameCount
@@ -1170,11 +1188,16 @@ $speedValidated =
     (-not [bool]$DryRun) -and
     (@($clipResults).Count -gt 0) -and
     (@($clipResults | Where-Object {
+        $acceptedAmazeFrameCount = if ($null -ne $_.cudaAmazeAcceptedTextureSourceFrameCount) {
+            [int]$_.cudaAmazeAcceptedTextureSourceFrameCount
+        } else {
+            [int]$_.cudaAmazeTextureSourceFrameCount
+        }
         $_.status -ne "success" -or
         [double]$_.presentedFps -lt $MinPresentedFps -or
         [int]$_.gpuTextureNoReadbackFrames -le 0 -or
         [int]$_.fallbackFrameCount -ne 0 -or
-        [int]$_.cudaAmazeTextureSourceFrameCount -ne [int]$_.activeNoReadbackFrameCount
+        $acceptedAmazeFrameCount -ne [int]$_.activeNoReadbackFrameCount
     }).Count -eq 0)
 
 $summary = [pscustomobject]@{
