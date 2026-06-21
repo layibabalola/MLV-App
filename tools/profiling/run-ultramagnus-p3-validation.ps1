@@ -19,6 +19,7 @@ param(
     [int]$CudaAmazeLiveTileStreams = 0,
     [switch]$CudaAmazeFastLaunchChecks,
     [switch]$CudaAmazeLiveDirectRgbaStore,
+    [switch]$CudaAmazeLiveGlSurfaceStore,
     [switch]$GpuPlaybackReconRetainDeviceOutput,
     [switch]$GpuTexNrAcquireLatestReady,
     [switch]$GpuTexNrImmediateDrainReady,
@@ -822,6 +823,9 @@ if ($failures.Count -eq 0) {
         if ($CudaAmazeLiveDirectRgbaStore) {
             $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_DIRECT_RGBA_STORE=1"
         }
+        if ($CudaAmazeLiveGlSurfaceStore) {
+            $envEntries += "MLVAPP_CUDA_AMAZE_LIVE_GL_SURFACE_STORE=1"
+        }
         if ($GpuPlaybackReconRetainDeviceOutput) {
             $envEntries += "MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT=1"
         }
@@ -1303,6 +1307,7 @@ $summary = [pscustomobject]@{
         cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
         cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks
         cudaAmazeLiveDirectRgbaStore = [bool]$CudaAmazeLiveDirectRgbaStore
+        cudaAmazeLiveGlSurfaceStore = [bool]$CudaAmazeLiveGlSurfaceStore
         gpuPlaybackReconRetainDeviceOutput = [bool]$GpuPlaybackReconRetainDeviceOutput
         gpuTexNrAcquireLatestReady = [bool]$GpuTexNrAcquireLatestReady
         gpuTexNrImmediateDrainReady = [bool]$GpuTexNrImmediateDrainReady
