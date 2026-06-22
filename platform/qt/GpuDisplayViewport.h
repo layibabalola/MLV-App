@@ -193,6 +193,7 @@ private:
     bool m_textureIs16Bit;
     bool m_textureIsBayer16;
     bool m_gpuReconSourceTextureCurrent;
+    bool m_abPrimed;
     QGraphicsView *m_view;
     QGraphicsPixmapItem *m_fallbackItem;
     QImage m_pendingImage;
