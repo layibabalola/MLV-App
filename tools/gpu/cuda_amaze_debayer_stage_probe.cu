@@ -1991,20 +1991,11 @@ __global__ void k_nyquist_area_interpolation(const float * cfa,
     hvwt[idx >> 1] = hcdvar / (vcdvar + hcdvar);
 }
 
-__global__ void k_green_plane_assembly_row_parallel(const float * cfa,
-                                                    const float * vcd,
-                                                    const float * hcd,
-                                                    const unsigned char * nyquist,
-                                                    float * hvwt,
-                                                    float * dgrb0,
-                                                    float * rgbgreen,
-                                                    float * dgrb2h,
-                                                    float * dgrb2v,
-                                                    int rr1,
-                                                    int cc1)
+__global__ void k_green_plane_hvwt_refinement_row_parallel(float * hvwt,
+                                                           int rr1,
+                                                           int cc1)
 {
     const int tid = threadIdx.x;
-    const int v1 = kTileSize;
     const int p1 = -kTileSize + 1;
     const int m1 = kTileSize + 1;
 
@@ -2025,24 +2016,48 @@ __global__ void k_green_plane_assembly_row_parallel(const float * cfa,
             {
                 hvwt[idx >> 1] = hvwtalt;
             }
-
-            dgrb0[idx >> 1] = hcd[idx] * (1.0f - hvwt[idx >> 1]) + vcd[idx] * hvwt[idx >> 1];
-            rgbgreen[idx] = cfa[idx] + dgrb0[idx >> 1];
-
-            if (nyquist[idx >> 1])
-            {
-                dgrb2h[idx >> 1] =
-                    sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - 1] + rgbgreen[idx + 1]));
-                dgrb2v[idx >> 1] =
-                    sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - v1] + rgbgreen[idx + v1]));
-            }
-            else
-            {
-                dgrb2h[idx >> 1] = 0.0f;
-                dgrb2v[idx >> 1] = 0.0f;
-            }
         }
         __syncthreads();
+    }
+}
+
+__global__ void k_green_plane_assembly_grid(const float * cfa,
+                                            const float * vcd,
+                                            const float * hcd,
+                                            const unsigned char * nyquist,
+                                            const float * hvwt,
+                                            float * dgrb0,
+                                            float * rgbgreen,
+                                            float * dgrb2h,
+                                            float * dgrb2v,
+                                            int rr1,
+                                            int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 8 || rr >= rr1 - 8) return;
+
+    const int ccStart = 8 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 8 || ((cc - ccStart) & 1) != 0) return;
+
+    const int v1 = kTileSize;
+    const int idx = rr * kTileSize + cc;
+    const int halfIdx = idx >> 1;
+
+    dgrb0[halfIdx] = hcd[idx] * (1.0f - hvwt[halfIdx]) + vcd[idx] * hvwt[halfIdx];
+    rgbgreen[idx] = cfa[idx] + dgrb0[halfIdx];
+
+    if (nyquist[halfIdx])
+    {
+        dgrb2h[halfIdx] =
+            sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - 1] + rgbgreen[idx + 1]));
+        dgrb2v[halfIdx] =
+            sqr_f(rgbgreen[idx] - xdiv2f_probe(rgbgreen[idx - v1] + rgbgreen[idx + v1]));
+    }
+    else
+    {
+        dgrb2h[halfIdx] = 0.0f;
+        dgrb2v[halfIdx] = 0.0f;
     }
 }
 
@@ -2219,14 +2234,10 @@ __global__ void k_diagonal_rb_interpolation(const float * cfa,
     }
 }
 
-__global__ void k_pmwt_refinement_and_rbint_row_parallel(const float * cfa,
-                                                         const float * rbm,
-                                                         const float * rbp,
-                                                         float * pmwt,
-                                                         float * pmwtalt,
-                                                         float * rbint,
-                                                         int rr1,
-                                                         int cc1)
+__global__ void k_pmwt_refinement_row_parallel(float * pmwt,
+                                               float * pmwtalt,
+                                               int rr1,
+                                               int cc1)
 {
     if (blockIdx.x != 0) return;
 
@@ -2250,14 +2261,32 @@ __global__ void k_pmwt_refinement_and_rbint_row_parallel(const float * cfa,
             {
                 pmwt[halfIdx] = pmwtalt[halfIdx];
             }
-
-            rbint[halfIdx] =
-                xdiv2f_probe(cfa[idx] +
-                             rbm[halfIdx] * (1.0f - pmwt[halfIdx]) +
-                             rbp[halfIdx] * pmwt[halfIdx]);
         }
         __syncthreads();
     }
+}
+
+__global__ void k_rbint_assembly_grid(const float * cfa,
+                                      const float * rbm,
+                                      const float * rbp,
+                                      const float * pmwt,
+                                      float * rbint,
+                                      int rr1,
+                                      int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 10 || rr >= rr1 - 10) return;
+
+    const int ccStart = 10 + (fc_rggb(rr, 2) & 1);
+    if (cc < ccStart || cc >= cc1 - 10 || ((cc - ccStart) & 1) != 0) return;
+
+    const int idx = rr * kTileSize + cc;
+    const int halfIdx = idx >> 1;
+    rbint[halfIdx] =
+        xdiv2f_probe(cfa[idx] +
+                     rbm[halfIdx] * (1.0f - pmwt[halfIdx]) +
+                     rbp[halfIdx] * pmwt[halfIdx]);
 }
 
 __global__ void k_diagonal_green_correction(const float * cfa,
@@ -2555,6 +2584,71 @@ void add_elapsed_ms(cudaEvent_t start, cudaEvent_t stop, double * total)
     float elapsed = 0.0f;
     CK(cudaEventElapsedTime(&elapsed, start, stop));
     *total += static_cast<double>(elapsed);
+}
+
+void launch_green_plane_assembly(const dim3 & grid,
+                                 const dim3 & block,
+                                 const float * cfa,
+                                 const float * vcd,
+                                 const float * hcd,
+                                 const unsigned char * nyquist,
+                                 float * hvwt,
+                                 float * dgrb0,
+                                 float * rgbgreen,
+                                 float * dgrb2h,
+                                 float * dgrb2v,
+                                 int rr1,
+                                 int cc1,
+                                 cudaStream_t stream = 0,
+                                 bool checkLaunch = true)
+{
+    k_green_plane_hvwt_refinement_row_parallel<<<1, kGreenPlaneThreads, 0, stream>>>(
+        hvwt,
+        rr1,
+        cc1);
+    if (checkLaunch) CK(cudaGetLastError());
+
+    k_green_plane_assembly_grid<<<grid, block, 0, stream>>>(cfa,
+                                                            vcd,
+                                                            hcd,
+                                                            nyquist,
+                                                            hvwt,
+                                                            dgrb0,
+                                                            rgbgreen,
+                                                            dgrb2h,
+                                                            dgrb2v,
+                                                            rr1,
+                                                            cc1);
+    if (checkLaunch) CK(cudaGetLastError());
+}
+
+void launch_pmwt_refinement_and_rbint(const dim3 & grid,
+                                      const dim3 & block,
+                                      const float * cfa,
+                                      const float * rbm,
+                                      const float * rbp,
+                                      float * pmwt,
+                                      float * pmwtalt,
+                                      float * rbint,
+                                      int rr1,
+                                      int cc1,
+                                      cudaStream_t stream = 0,
+                                      bool checkLaunch = true)
+{
+    k_pmwt_refinement_row_parallel<<<1, kPmwtRowThreads, 0, stream>>>(pmwt,
+                                                                      pmwtalt,
+                                                                      rr1,
+                                                                      cc1);
+    if (checkLaunch) CK(cudaGetLastError());
+
+    k_rbint_assembly_grid<<<grid, block, 0, stream>>>(cfa,
+                                                      rbm,
+                                                      rbp,
+                                                      pmwt,
+                                                      rbint,
+                                                      rr1,
+                                                      cc1);
+    if (checkLaunch) CK(cudaGetLastError());
 }
 
 void allocate_device(DeviceBuffers * d, std::size_t rawCount)
@@ -2878,18 +2972,19 @@ bool run_case(const CaseSpec & spec)
                                                   rr1,
                                                   cc1);
     CK(cudaGetLastError());
-    k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(d.cfa,
-                                                                   d.vcd,
-                                                                   d.hcd,
-                                                                   d.nyquist,
-                                                                   d.hvwt,
-                                                                   d.dgrb0,
-                                                                   d.rgbgreen,
-                                                                   d.dgrb2h,
-                                                                   d.dgrb2v,
-                                                                   rr1,
-                                                                   cc1);
-    CK(cudaGetLastError());
+    launch_green_plane_assembly(grid,
+                                block,
+                                d.cfa,
+                                d.vcd,
+                                d.hcd,
+                                d.nyquist,
+                                d.hvwt,
+                                d.dgrb0,
+                                d.rgbgreen,
+                                d.dgrb2h,
+                                d.dgrb2v,
+                                rr1,
+                                cc1);
     k_nyquist_green_refinement<<<grid, block>>>(d.cfa,
                                                 d.vcd,
                                                 d.hcd,
@@ -2912,15 +3007,16 @@ bool run_case(const CaseSpec & spec)
                                                  rr1,
                                                  cc1);
     CK(cudaGetLastError());
-    k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(d.cfa,
-                                                                     d.rbm,
-                                                                     d.rbp,
-                                                                     d.pmwt,
-                                                                     d.pmwtalt,
-                                                                     d.rbint,
-                                                                     rr1,
-                                                                     cc1);
-    CK(cudaGetLastError());
+    launch_pmwt_refinement_and_rbint(grid,
+                                     block,
+                                     d.cfa,
+                                     d.rbm,
+                                     d.rbp,
+                                     d.pmwt,
+                                     d.pmwtalt,
+                                     d.rbint,
+                                     rr1,
+                                     cc1);
     k_diagonal_green_correction<<<grid, block>>>(d.cfa,
                                                  d.dirwts0,
                                                  d.dirwts1,
@@ -3108,8 +3204,10 @@ void run_timed_frame_once(const CaseSpec & spec,
                                                                           d.hvwt,
                                                                           rr1,
                                                                           cc1));
-            RUN_TIMED_STAGE(greenPlaneMs,
-                            k_green_plane_assembly_row_parallel<<<1, kGreenPlaneThreads>>>(
+            RUN_TIMED_HOST_STAGE(greenPlaneMs,
+                            launch_green_plane_assembly(
+                                grid,
+                                block,
                                 d.cfa,
                                 d.vcd,
                                 d.hcd,
@@ -3143,8 +3241,10 @@ void run_timed_frame_once(const CaseSpec & spec,
                                                                          d.pmwt,
                                                                          rr1,
                                                                          cc1));
-            RUN_TIMED_STAGE(pmwtRbintMs,
-                            k_pmwt_refinement_and_rbint_row_parallel<<<1, kPmwtRowThreads>>>(
+            RUN_TIMED_HOST_STAGE(pmwtRbintMs,
+                            launch_pmwt_refinement_and_rbint(
+                                grid,
+                                block,
                                 d.cfa,
                                 d.rbm,
                                 d.rbp,
