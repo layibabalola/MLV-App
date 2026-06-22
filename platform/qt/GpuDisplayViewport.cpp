@@ -277,6 +277,12 @@ const char *GpuDisplayViewport::environmentVariableName()
     return "MLVAPP_EXPERIMENTAL_GL_VIEWPORT";
 }
 
+/* Known driver caveat: on hybrid-GPU laptops (e.g. NVIDIA Optimus, discrete GPU
+ * + Intel iGPU), this experimental GL viewport needs a recent NVIDIA driver.
+ * Driver 591.74 on an RTX 3060 Laptop silently failed the CPU image -> GL texture
+ * upload in updateTextureIfNeeded() (no error, no texture), presenting a black
+ * viewport on the CPU fallback path; updating to 596.08 fixed it. The same code
+ * uploads correctly on a desktop RTX 4090 (596.x) and on Mesa llvmpipe. */
 bool GpuDisplayViewport::installOn(QGraphicsView *view)
 {
     if ( !view || !isRequestedByEnvironment() ) return false;
@@ -793,20 +799,6 @@ void GpuDisplayViewport::paintGL()
                 << " bytesEmpty=" << m_pendingTextureBytes.isEmpty()
                 << " recon=" << m_pendingTextureFromGpuRecon << " amaze=" << m_pendingTextureFromGpuAmaze
                 << " dirty=" << m_textureDirty;
-        /* WI-1: never blank to black on a CPU fallback. If a genuine CPU
-           frame is pending (RGB8 via m_pendingImage, or 16-bit/Bayer16 via
-           m_pendingTextureBytes) but no GL texture is ready, re-show the
-           QGraphicsPixmapItem fallback so the CPU-rendered frame stays
-           visible. GPU recon/AMaZE frames are excluded so a stale CPU pixmap
-           can never be drawn over a valid GPU texture. No telemetry or
-           present flag is touched here. */
-        const bool cpuFramePendingWithoutTexture =
-            hasPendingFrame()
-            && !m_pendingTextureFromGpuRecon
-            && !m_pendingTextureFromGpuAmaze
-            && ( !m_pendingImage.isNull() || !m_pendingTextureBytes.isEmpty() );
-        if ( m_fallbackItem && cpuFramePendingWithoutTexture )
-            m_fallbackItem->setVisible(true);
         return;
     }
 
@@ -995,11 +987,7 @@ void GpuDisplayViewport::setPresentedImage(const QImage &image, const Presentati
     m_textureDirty = true;
     setPresentationOptions(options);
     m_texturePresentationActive = false;
-    /* WI-1: keep the CPU pixmap fallback visible until a real GL texture
-       exists. updateTextureIfNeeded() hides it after a successful upload;
-       paintGL re-shows it for a genuine CPU frame if no texture materializes.
-       Hiding it here (before any texture) is what blanked the viewport to
-       black on the scope-gated CPU fallback. */
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
 }
 
@@ -1033,11 +1021,7 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
     m_textureDirty = true;
     setPresentationOptions(options);
     m_texturePresentationActive = false;
-    /* WI-1: keep the CPU pixmap fallback visible until a real GL texture
-       exists. updateTextureIfNeeded() hides it after a successful upload;
-       paintGL re-shows it for a genuine CPU frame if no texture materializes.
-       Hiding it here (before any texture) is what blanked the viewport to
-       black on the scope-gated CPU fallback. */
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
 }
 
@@ -1061,11 +1045,7 @@ void GpuDisplayViewport::setPresentedBayer16(const uint16_t *imageData,
     m_textureDirty = true;
     setPresentationOptions(options);
     m_texturePresentationActive = false;
-    /* WI-1: keep the CPU pixmap fallback visible until a real GL texture
-       exists. updateTextureIfNeeded() hides it after a successful upload;
-       paintGL re-shows it for a genuine CPU frame if no texture materializes.
-       Hiding it here (before any texture) is what blanked the viewport to
-       black on the scope-gated CPU fallback. */
+    if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     update();
 }
 
