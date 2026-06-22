@@ -2329,6 +2329,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
     int ret = 0;
     double profile_stage_start = 0.0;
     dng_reset_deferred_payload_compress(dng_data);
+    llrpResetDngBWLevels(mlv_data);
 
     FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
 
