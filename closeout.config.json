@@ -18,9 +18,9 @@
   "contentReviewGate": {
     "requireClaudeApprovalForFinalize": true,
     "coordinationFile": ".claude-state/coordination/gpu-lane-impl-review-sync.md",
-    "handoffActor": "CODEX",
+    "handoffActor": "CLAUDE",
     "handoffKind": "HANDOFF",
-    "reviewActor": "CLAUDE",
+    "reviewActor": "CODEX",
     "reviewKind": "REVIEW",
     "approveTokens": ["APPROVE"],
     "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],

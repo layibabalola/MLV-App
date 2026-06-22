@@ -25,11 +25,16 @@
 
 namespace
 {
+/* Vertex layout is (x, y, u, v). The texture's first row (v=0) is the TOP of
+ * the image for both the CPU QImage upload and the CUDA-written recon texture,
+ * so screen-top must map to v=0 and screen-bottom to v=1. The previous mapping
+ * (screen-top -> v=1) sampled the last row at the top and presented every frame
+ * vertically flipped (upside down) on every GL-viewport path. */
 constexpr GLfloat kQuadVertices[16] = {
-    -1.0f,  1.0f, 0.0f, 1.0f,
-     1.0f,  1.0f, 1.0f, 1.0f,
-    -1.0f, -1.0f, 0.0f, 0.0f,
-     1.0f, -1.0f, 1.0f, 0.0f,
+    -1.0f,  1.0f, 0.0f, 0.0f,
+     1.0f,  1.0f, 1.0f, 0.0f,
+    -1.0f, -1.0f, 0.0f, 1.0f,
+     1.0f, -1.0f, 1.0f, 1.0f,
 };
 
 bool envFlagEnabled(const QByteArray &value)
@@ -41,6 +46,17 @@ bool envFlagEnabled(const QByteArray &value)
         || normalized == "true"
         || normalized == "yes"
         || normalized == "on";
+}
+
+/* Bug A diagnostic: env-gated (MLVAPP_VIEWPORT_PRESENT_DIAG=1) per-frame trace of
+ * the CPU present -> texture-upload path. Inert unless the env var is set. Used to
+ * pin why the CPU image never becomes a GL texture on the Dell 3060-hybrid (the
+ * upload happens on the 4090 and llvmpipe but not there). Stderr-only, no state. */
+bool viewportPresentDiagEnabled()
+{
+    static const bool enabled =
+        envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_PRESENT_DIAG"));
+    return enabled;
 }
 
 QOpenGLTexture * createOrResizeLookupTexture(QOpenGLTexture * texture, int width, int height)
@@ -261,6 +277,16 @@ const char *GpuDisplayViewport::environmentVariableName()
     return "MLVAPP_EXPERIMENTAL_GL_VIEWPORT";
 }
 
+/* Known hybrid-GPU limitation: on NVIDIA Optimus laptops (discrete GPU renders,
+ * Intel iGPU drives the panel), this experimental QOpenGLWidget viewport renders
+ * correctly into its offscreen framebuffer -- QWidget::grab()/--window-screenshot
+ * is correct -- but the result is NOT presented to the physical display: the panel
+ * stays solid BLACK, while the normal non-GL pixmap viewport displays fine.
+ * Observed on an RTX 3060 Laptop across NVIDIA drivers 591.74 / 596.08 / 610.62; a
+ * driver update did NOT fix the on-screen black (it only changed an offscreen
+ * CPU-texture-upload detail that grab() captures, which is why FBO screenshots
+ * looked fine). Desktop GPUs (RTX 4090) and Mesa llvmpipe present correctly.
+ * Prefer the non-GL pixmap viewport on hybrid laptops. */
 bool GpuDisplayViewport::installOn(QGraphicsView *view)
 {
     if ( !view || !isRequestedByEnvironment() ) return false;
@@ -770,6 +796,13 @@ void GpuDisplayViewport::paintGL()
     if ( !m_texture || !m_program || !m_view )
     {
         m_texturePresentationActive = false;
+        if ( viewportPresentDiagEnabled() )
+            qInfo().nospace() << "viewport_diag paintGL.skip tex=" << (m_texture ? 1 : 0)
+                << " prog=" << (m_program ? 1 : 0) << " view=" << (m_view ? 1 : 0)
+                << " hasPending=" << hasPendingFrame() << " imgNull=" << m_pendingImage.isNull()
+                << " bytesEmpty=" << m_pendingTextureBytes.isEmpty()
+                << " recon=" << m_pendingTextureFromGpuRecon << " amaze=" << m_pendingTextureFromGpuAmaze
+                << " dirty=" << m_textureDirty;
         return;
     }
 
@@ -941,6 +974,10 @@ void GpuDisplayViewport::setFallbackItem(QGraphicsPixmapItem *item)
 
 void GpuDisplayViewport::setPresentedImage(const QImage &image, const PresentationOptions &options)
 {
+    if ( viewportPresentDiagEnabled() )
+        qInfo().nospace() << "viewport_diag setPresentedImage imgNull=" << image.isNull()
+            << " w=" << image.width() << " h=" << image.height()
+            << " fmt=" << static_cast<int>(image.format());
     m_pendingImage = image.format() == QImage::Format_RGBA8888
         ? image.copy()
         : image.convertToFormat(QImage::Format_RGBA8888);
@@ -1605,14 +1642,26 @@ void GpuDisplayViewport::clearPresentedImage()
 
 void GpuDisplayViewport::updateTextureIfNeeded()
 {
+    if ( viewportPresentDiagEnabled() )
+        qInfo().nospace() << "viewport_diag updateTex.enter dirty=" << m_textureDirty
+            << " samp=" << m_samplingModeDirty << " proc=" << m_processingTexturesDirty
+            << " hasPending=" << hasPendingFrame() << " imgNull=" << m_pendingImage.isNull()
+            << " bytesEmpty=" << m_pendingTextureBytes.isEmpty()
+            << " is16=" << m_pendingTextureIs16Bit << " bayer=" << m_pendingTextureIsBayer16
+            << " recon=" << m_pendingTextureFromGpuRecon << " amaze=" << m_pendingTextureFromGpuAmaze
+            << " tex=" << (m_texture ? 1 : 0) << " prog=" << (m_program ? 1 : 0);
     if ( !m_textureDirty && !m_samplingModeDirty && !m_processingTexturesDirty )
     {
+        if ( viewportPresentDiagEnabled() )
+            qInfo() << "viewport_diag updateTex.ret not-dirty (tex=" << (m_texture ? 1 : 0) << ")";
         if ( m_fallbackItem && m_texture ) m_fallbackItem->setVisible(false);
         return;
     }
 
     if ( !hasPendingFrame() )
     {
+        if ( viewportPresentDiagEnabled() )
+            qInfo() << "viewport_diag updateTex.ret no-pending-frame";
         destroyTexture();
         m_textureDirty = false;
         m_texturePresentationActive = false;
@@ -1623,6 +1672,8 @@ void GpuDisplayViewport::updateTextureIfNeeded()
     ensureProgram();
     if ( !m_program )
     {
+        if ( viewportPresentDiagEnabled() )
+            qInfo() << "viewport_diag updateTex.ret no-program";
         m_texturePresentationActive = false;
         if ( m_fallbackItem ) m_fallbackItem->setVisible(true);
         return;
@@ -1680,6 +1731,10 @@ void GpuDisplayViewport::updateTextureIfNeeded()
     }
     m_textureDirty = false;
 
+    if ( viewportPresentDiagEnabled() )
+        qInfo().nospace() << "viewport_diag updateTex.uploaded recon=" << m_pendingTextureFromGpuRecon
+            << " amaze=" << m_pendingTextureFromGpuAmaze << " bayer=" << m_pendingTextureIsBayer16
+            << " is16=" << m_pendingTextureIs16Bit << " w=" << pendingWidth() << " h=" << pendingHeight();
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( !m_loggedTexturePath )
     {
