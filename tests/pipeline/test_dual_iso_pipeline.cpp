@@ -7,6 +7,7 @@
 #include "mlv_pipeline_fixture.h"
 
 #include "../../src/mlv/llrawproc/llrawproc.h"
+#include "../../src/dng/dng_reader.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptApplier.h"
@@ -19,6 +20,7 @@
 #include <cstring>
 #include <thread>
 #include <string>
+#include <utility>
 #include <vector>
 #include <QByteArray>
 #include <QDir>
@@ -805,6 +807,102 @@ static uint32_t dng_read_long_tag(const QByteArray &data, uint16_t tag)
     ASSERT_EQ(4, type);
     ASSERT_EQ(1u, count);
     return value;
+}
+
+static uint16_t dng_read_short_tag(const QByteArray &data, uint16_t tag)
+{
+    uint16_t type = 0;
+    uint32_t count = 0;
+    uint32_t value = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(data, tag, &type, &count, &value));
+    ASSERT_EQ(3, type);
+    ASSERT_EQ(1u, count);
+    return static_cast<uint16_t>(value & 0xffffu);
+}
+
+static std::vector<uint16_t> dng_decode_bayer16_from_file(const QString &path,
+                                                          dng_frame_info_t *info_out)
+{
+    QByteArray path_bytes = path.toLocal8Bit();
+    dng_frame_info_t info = {};
+    ASSERT_EQ(0, dng_reader_parse_file(path_bytes.constData(), &info));
+    ASSERT_TRUE(info.valid);
+
+    QFile file(path);
+    ASSERT_TRUE(file.open(QIODevice::ReadOnly));
+    ASSERT_TRUE(file.seek(static_cast<qint64>(info.strip_offset)));
+    QByteArray strip = file.read(static_cast<qint64>(info.strip_byte_count));
+    ASSERT_EQ(static_cast<int>(info.strip_byte_count), strip.size());
+
+    std::vector<uint16_t> decoded(static_cast<std::size_t>(info.width) *
+                                  static_cast<std::size_t>(info.height));
+    ASSERT_EQ(0, dng_reader_decode_strip(&info,
+                                         reinterpret_cast<const uint8_t *>(strip.constData()),
+                                         static_cast<std::size_t>(strip.size()),
+                                         decoded.data()));
+    if (info_out) {
+        *info_out = info;
+    }
+    return decoded;
+}
+
+TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUncompressedDng)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    llrpSetDualIsoMode(fixture.video(), 0);
+    ASSERT_EQ(0, llrpGetDualIsoMode(fixture.video()));
+
+    const uint16_t expected_bpp =
+        static_cast<uint16_t>(fixture.video()->RAWI.raw_info.bits_per_pixel);
+    ASSERT_TRUE(expected_bpp >= 8);
+    ASSERT_TRUE(expected_bpp <= 16);
+
+    std::vector<std::vector<uint16_t>> decoded_frames;
+    const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
+    for (int raw_state : raw_states) {
+        const QString suffix = raw_state == COMPRESSED_RAW
+            ? QStringLiteral("compressed")
+            : QStringLiteral("uncompressed");
+        const QString dng_path = temp_dir.filePath(suffix + QStringLiteral(".dng"));
+
+        pthread_mutex_lock(&fixture.video()->llrawproc_mutex);
+        fixture.video()->llrawproc->dng_bit_depth = 0;
+        fixture.video()->llrawproc->dng_black_level = 0;
+        fixture.video()->llrawproc->dng_white_level = 0;
+        pthread_mutex_unlock(&fixture.video()->llrawproc_mutex);
+
+        int32_t par[4] = { 1, 1, 1, 1 };
+        dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
+        ASSERT_TRUE(dng != nullptr);
+        QByteArray dng_path_bytes = dng_path.toLocal8Bit();
+        ASSERT_EQ(0, saveDngFrame(fixture.video(),
+                                  dng,
+                                  0,
+                                  dng_path_bytes.data(),
+                                  nullptr));
+        freeDngObject(dng);
+
+        const QByteArray data = read_all_bytes(dng_path);
+        ASSERT_EQ(expected_bpp, dng_read_short_tag(data, 258));
+
+        dng_frame_info_t info = {};
+        std::vector<uint16_t> decoded = dng_decode_bayer16_from_file(dng_path, &info);
+        ASSERT_EQ(expected_bpp, info.bits_per_sample);
+        ASSERT_EQ(static_cast<uint32_t>(fixture.width()), info.width);
+        ASSERT_EQ(static_cast<uint32_t>(fixture.height()), info.height);
+        decoded_frames.push_back(std::move(decoded));
+    }
+
+    ASSERT_EQ(static_cast<std::size_t>(2), decoded_frames.size());
+    ASSERT_EQ(decoded_frames[0].size(), decoded_frames[1].size());
+    for (std::size_t i = 0; i < decoded_frames[0].size(); ++i) {
+        ASSERT_EQ(decoded_frames[0][i], decoded_frames[1][i]);
+    }
 }
 
 TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
