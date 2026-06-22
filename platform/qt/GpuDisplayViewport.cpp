@@ -277,12 +277,16 @@ const char *GpuDisplayViewport::environmentVariableName()
     return "MLVAPP_EXPERIMENTAL_GL_VIEWPORT";
 }
 
-/* Known driver caveat: on hybrid-GPU laptops (e.g. NVIDIA Optimus, discrete GPU
- * + Intel iGPU), this experimental GL viewport needs a recent NVIDIA driver.
- * Driver 591.74 on an RTX 3060 Laptop silently failed the CPU image -> GL texture
- * upload in updateTextureIfNeeded() (no error, no texture), presenting a black
- * viewport on the CPU fallback path; updating to 596.08 fixed it. The same code
- * uploads correctly on a desktop RTX 4090 (596.x) and on Mesa llvmpipe. */
+/* Known hybrid-GPU limitation: on NVIDIA Optimus laptops (discrete GPU renders,
+ * Intel iGPU drives the panel), this experimental QOpenGLWidget viewport renders
+ * correctly into its offscreen framebuffer -- QWidget::grab()/--window-screenshot
+ * is correct -- but the result is NOT presented to the physical display: the panel
+ * stays solid BLACK, while the normal non-GL pixmap viewport displays fine.
+ * Observed on an RTX 3060 Laptop across NVIDIA drivers 591.74 / 596.08 / 610.62; a
+ * driver update did NOT fix the on-screen black (it only changed an offscreen
+ * CPU-texture-upload detail that grab() captures, which is why FBO screenshots
+ * looked fine). Desktop GPUs (RTX 4090) and Mesa llvmpipe present correctly.
+ * Prefer the non-GL pixmap viewport on hybrid laptops. */
 bool GpuDisplayViewport::installOn(QGraphicsView *view)
 {
     if ( !view || !isRequestedByEnvironment() ) return false;
