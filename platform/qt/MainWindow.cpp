@@ -3978,22 +3978,43 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         }
         else if( hqPlaybackDownscale )
         {
+            /* avir::resizeImage has NO destination-stride parameter -- it writes the
+             * output TIGHTLY PACKED (NewWidth*3 bytes/row). A QImage::Format_RGB888
+             * built straight from that packed buffer is mis-stridden: Qt rounds the
+             * scanline up to 4-byte alignment (e.g. 1197*3=3591 -> 3592), so each row
+             * is read 1 byte late, the R/G/B channels rotate per row, and you get
+             * HORIZONTAL green/magenta banding (a per-column-mean autocorr metric is
+             * blind to this -- only an eyeball/2D check catches it). So: resize into a
+             * packed temp, then copy each row into a 4-byte-aligned backing (matching
+             * the fast path's scaledBytesPerLine convention) and hand QImage that
+             * explicit stride. */
+            const int alignedBpl = ( ( hqTargetWidth * 3 ) + 3 ) & ~3;
+            std::vector<uint8_t> packed(
+                static_cast<size_t>(hqTargetWidth) * static_cast<size_t>(hqTargetHeight) * 3u );
             avir_scale_thread_pool scaling_pool;
             avir::CImageResizerParamsUltra roptions;
             avir::CImageResizer<> image_resizer( 8, 0, roptions );
-            displayImageBacking.resize(
-                static_cast<size_t>(hqTargetWidth) * static_cast<size_t>(hqTargetHeight) * 3u );
             avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
             image_resizer.resizeImage( rgb8DisplaySource,
                                        sourceWidth,
                                        sourceHeight, 0,
-                                       displayImageBacking.data(),
+                                       packed.data(),
                                        hqTargetWidth,
                                        hqTargetHeight,
                                        3, 0, &vars );
+            displayImageBacking.assign(
+                static_cast<size_t>(alignedBpl) * static_cast<size_t>(hqTargetHeight), 0 );
+            const size_t rowBytes = static_cast<size_t>(hqTargetWidth) * 3u;
+            for( int row = 0; row < hqTargetHeight; ++row )
+            {
+                memcpy( displayImageBacking.data() + static_cast<size_t>(row) * alignedBpl,
+                        packed.data() + static_cast<size_t>(row) * rowBytes,
+                        rowBytes );
+            }
             displayImage = QImage( displayImageBacking.data(),
                                    hqTargetWidth,
                                    hqTargetHeight,
+                                   alignedBpl,
                                    QImage::Format_RGB888 );
             displayImageOwnsData = false;
         }
