@@ -1879,6 +1879,7 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
 #include "DualIsoPatternMapping.h"
 #include "GpuDebayer.h"
 #include "GpuDisplayViewport.h"
+#include "GpuDisplayWindow.h"
 #include "MainWindowGpuPreviewPolicy.h"
 #include "PlaybackQualityPolicy.h"
 #include "PlaybackScaling.h"
@@ -5511,8 +5512,23 @@ void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
         }
         else
         {
-            actWidth = ui->graphicsView->width();
-            actHeight = ui->graphicsView->height();
+            // When the preview is hosted in a QOpenGLWindow (Optimus hybrid path) the
+            // QGraphicsView is hidden and collapses to a tiny size; derive the scene
+            // (and thus the playback preview resolution) from the window surface so the
+            // image is not prescaled down to a thumbnail. Fall back to the view if the
+            // window has not been sized yet.
+            QSize ds;
+            if( GpuDisplayWindow::isActive() ) ds = GpuDisplayWindow::displaySize();
+            if( ds.width() > 0 && ds.height() > 0 )
+            {
+                actWidth = ds.width();
+                actHeight = ds.height();
+            }
+            else
+            {
+                actWidth = ui->graphicsView->width();
+                actHeight = ui->graphicsView->height();
+            }
         }
 
         resolvedSceneWidth = actWidth;
@@ -5540,8 +5556,12 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
     if( !playbackPolicyActive()
      || ui->actionUseNoneDebayer->isChecked()
-     || ui->actionCaching->isChecked() )
+     || ui->actionCaching->isChecked()
+     || GpuDisplayWindow::isActive() )
     {
+        // GL-window preview (Optimus hybrid): the window does its own GPU display, so
+        // use the high-quality CPU downscale (Smooth + better-resizer = avir) instead
+        // of the during-playback Fast scaler, which otherwise renders a soft preview.
         transformationMode = Qt::SmoothTransformation;
     }
 
@@ -5577,7 +5597,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     renderPolicy.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
     renderPolicy.paradeEnabled = ui->actionShowParade->isChecked();
     renderPolicy.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
-    renderPolicy.betterResizerEnabled = ui->actionBetterResizer->isChecked();
+    renderPolicy.betterResizerEnabled =
+        ui->actionBetterResizer->isChecked() || GpuDisplayWindow::isActive();
     renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
     renderPolicy.transformationMode = transformationMode;
     renderPolicy.playbackScaleFactorActive = requestedPlaybackScaleFactor;
@@ -9138,8 +9159,15 @@ void MainWindow::initGui( void )
     m_pScene = new GraphicsPickerScene( this );
     m_pScene->addItem( m_pGraphicsItem );
     ui->graphicsView->setScene( m_pScene );
-    GpuDisplayViewport::installOn( ui->graphicsView );
+    // On NVIDIA Optimus hybrids the QOpenGLWidget viewport renders black; a
+    // QOpenGLWindow (native surface) presents fine. When requested, host the preview
+    // in a QOpenGLWindow instead of the QOpenGLWidget viewport (proven on the Dell).
+    const bool glWindowPreview = GpuDisplayWindow::isRequestedByEnvironment();
+    if ( !glWindowPreview )
+        GpuDisplayViewport::installOn( ui->graphicsView );
     ui->graphicsView->show();
+    if ( glWindowPreview )
+        GpuDisplayWindow::installInPreview( ui->graphicsView );
     connect( ui->graphicsView, SIGNAL( customContextMenuRequested(QPoint) ), this, SLOT( pictureCustomContextMenuRequested(QPoint) ) );
     connect( m_pScene, SIGNAL( wbPicked(int,int) ), this, SLOT( whiteBalancePicked(int,int) ) );
     connect( m_pScene, SIGNAL( bpPicked(int,int) ), this, SLOT( badPixelPicked(int,int) ) );

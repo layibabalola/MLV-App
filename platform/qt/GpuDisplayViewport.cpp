@@ -6,6 +6,7 @@
  */
 
 #include "GpuDisplayViewport.h"
+#include "GpuDisplayWindow.h"
 
 #include <algorithm>
 #include <cstring>
@@ -20,6 +21,7 @@
 #include <QSurfaceFormat>
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QDir>
 #include <QVector2D>
 #include <QVector3D>
 #include <QtDebug>
@@ -58,6 +60,29 @@ bool viewportPresentDiagEnabled()
     static const bool enabled =
         envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_PRESENT_DIAG"));
     return enabled;
+}
+
+/* Frame-grab telemetry: when MLVAPP_FRAME_GRAB_DIR is set, save the exact display
+ * frame (the CPU RGBA image presented to the viewport/window) to a full-resolution
+ * PNG per frame, capped. This captures the real displayed pixels for an apples-to-
+ * apples CPU-vs-GPU-window quality comparison, bypassing lossy/occluded screen grabs.
+ * Inert unless the env var is set. */
+void maybeGrabDisplayFrame(const QImage &image)
+{
+    static const QByteArray dir = qgetenv("MLVAPP_FRAME_GRAB_DIR");
+    if ( dir.isEmpty() || image.isNull() ) return;
+    static int counter = 0;
+    if ( counter >= 120 ) return;
+    static const bool dirReady = QDir().mkpath(QString::fromLocal8Bit(dir));
+    Q_UNUSED(dirReady);
+    const QString path = QString::fromLocal8Bit(dir)
+        + QStringLiteral("/grab_%1.png").arg(counter, 5, 10, QChar('0'));
+    if ( image.save(path, "PNG") )
+    {
+        qInfo().nospace() << "frame_grab saved " << path << " (" << image.width()
+                          << "x" << image.height() << " fmt=" << static_cast<int>(image.format()) << ")";
+        ++counter;
+    }
 }
 
 /* Bug A on-screen present A/B (env-selectable, ONE binary, all inert unless the
@@ -634,6 +659,20 @@ bool GpuDisplayViewport::presentImage(QGraphicsView *view,
                                       const QImage &image,
                                       const PresentationOptions &options)
 {
+    maybeGrabDisplayFrame(image);
+
+    // Hybrid (Optimus) path: when the QOpenGLWindow preview is active, route the CPU
+    // frame (or a clear, for a null image) to it -- the QOpenGLWidget viewport is not
+    // installed in that mode.
+    if ( !image.isNull() )
+    {
+        if ( GpuDisplayWindow::presentImageIfActive(image) ) return true;
+    }
+    else if ( GpuDisplayWindow::clearIfActive() )
+    {
+        return false;
+    }
+
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport || image.isNull() )
     {
@@ -826,6 +865,8 @@ bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
 void GpuDisplayViewport::clearPresentedImage(QGraphicsView *view,
                                              QGraphicsPixmapItem *fallbackItem)
 {
+    if ( GpuDisplayWindow::clearIfActive() ) return;
+
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport )
     {
