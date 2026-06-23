@@ -3910,17 +3910,91 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         displayImageOwnsData = false;
     }
 
+    if( !preScaledPlaybackImageAvailable
+     && rgb8DisplaySource
+     && mlv_pipeline_capture_should_capture_frame( task.displayFrame ) )
+    {
+        mlv_pipeline_capture_meta_t meta;
+        memset( &meta, 0, sizeof meta );
+        meta.stage = MLV_PIPELINE_STAGE_S6_DISPLAYSOURCE;
+        meta.format = MLV_PIPELINE_FORMAT_UINT8_RGB;
+        meta.format_label = "uint8_rgb_displaySource_pre_scale";
+        meta.width = sourceWidth;
+        meta.height = sourceHeight;
+        meta.bytes_per_line = sourceWidth * 3;
+        meta.bytes_per_pixel = 3;
+        meta.channels = 3;
+        meta.bit_depth = 8;
+        meta.scaler = "source";
+        meta.path_label = "displaySourceBeforeScale";
+        meta.playback_policy_active = playbackPolicyActive ? 1 : 0;
+        meta.processing_subset_active = playbackProcessingSubsetActive ? 1 : 0;
+        meta.settings_hash = task.requestSerial ^ task.displayFrame;
+        mlv_pipeline_capture( task.displayFrame,
+                              rgb8DisplaySource,
+                              &meta );
+    }
+
     if( displayImage.isNull() )
     {
         const bool playbackFastScalingActive =
             playbackPolicyActive
             && !useGpuImagePresentation
             && mode == Qt::FastTransformation;
+        /* Fix #1 (preview-side mitigation, image-pipeline-hardening): anti-alias the
+         * playback DOWNSCALE so it stops moireing the source's native period-3 column
+         * structure (3x anamorphic sensor sampling, measured present from S0_raw onward)
+         * into the visible period-4. The default playback resamplers are fixed 2-tap
+         * (NN fast path / Qt bilinear "smooth") with no support-scaling; the period-3
+         * sits right at the downscale Nyquist (~0.333 vs cutoff ~0.331) so those under-
+         * filter and beat it to period-4 -- empirically only a wide-support Lanczos-class
+         * low-pass kills it (NN/box/bilinear do not), and avir CImageResizer is the
+         * in-tree equivalent. Scope: playback only, and ONLY when the target is a
+         * horizontal REDUCTION of the source (hqTargetWidth < sourceWidth) -- so x2/x4
+         * proxy lanes that upscale-to-fit are untouched (no FPS cost there), and this
+         * fires on the x1 full-res downscale where the striping lives. This is a preview
+         * mitigation, NOT the root fix (the period-3 originates upstream in raw/recon).
+         * Env kill-switch MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE reverts to the old path. */
+        const int hqTargetWidth = zoomFitEnabled
+            ? std::max( 1, qRound( sceneWidth * devicePixelRatio ) ) : sceneWidth;
+        const int hqTargetHeight = zoomFitEnabled
+            ? std::max( 1, qRound( sceneHeight * devicePixelRatio ) ) : sceneHeight;
+        const bool hqPlaybackDownscale =
+            playbackPolicyActive
+            && !useGpuImagePresentation
+            && rgb8DisplaySource
+            && sourceWidth > 0 && sourceHeight > 0
+            && hqTargetWidth > 0 && hqTargetHeight > 0
+            && hqTargetWidth < sourceWidth
+            && !( qEnvironmentVariableIsSet( "MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE" )
+                  && qEnvironmentVariable( "MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE" ).trimmed()
+                       != QStringLiteral("0") );
         if( useGpuImagePresentation )
         {
             displayImage = playbackWrapRgb8Image( const_cast<uint8_t *>( rgb8DisplaySource ),
                                                   sourceWidth,
                                                   sourceHeight );
+            displayImageOwnsData = false;
+        }
+        else if( hqPlaybackDownscale )
+        {
+            avir_scale_thread_pool scaling_pool;
+            avir::CImageResizerParamsUltra roptions;
+            avir::CImageResizer<> image_resizer( 8, 0, roptions );
+            displayImageBacking.resize(
+                static_cast<size_t>(hqTargetWidth) * static_cast<size_t>(hqTargetHeight) * 3u );
+            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
+            image_resizer.resizeImage( rgb8DisplaySource,
+                                       sourceWidth,
+                                       sourceHeight, 0,
+                                       displayImageBacking.data(),
+                                       hqTargetWidth,
+                                       hqTargetHeight,
+                                       3, 0, &vars );
+            displayImage = QImage( displayImageBacking.data(),
+                                   hqTargetWidth,
+                                   hqTargetHeight,
+                                   QImage::Format_RGB888 );
             displayImageOwnsData = false;
         }
         else if( zoomFitEnabled && playbackFastScalingActive )
@@ -21839,6 +21913,102 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     .arg( bool01( skippedScaledBadPixels ) )
                     .arg( bool01( skippedScaledVerticalStripes ) )
                     .arg( bool01( skippedScaledPatternNoise ) );
+        /* Phase A3 (image-pipeline-hardening): ONE canonical, machine-parsable
+         * render manifest per presented frame. key=value (QStringList join), NOT
+         * positional %N -- the cpu_frame line above is already at 38 args and the
+         * QString::arg %99 ceiling already silently corrupted cpu_summary (forcing
+         * the cpu_summary_ext split). Every field has a real telemetry source; the
+         * dimension-trace surfaces src -> rendered -> scale_target plus the
+         * anamorphic stretch_x, so a consumer (and the period-4 hunt) can see at a
+         * glance whether the frame was reduced and by what, instead of trusting one
+         * overloaded path code. Intermediate decode/llrawproc/rgb stage pixels are
+         * intentionally OMITTED: those keys are not emitted into telemetry today
+         * (dead allowlist entries), and a fabricated trace is worse than an honest
+         * gap. The reduced flag feeds the A6 runtime assert (rendered<src => code!=0). */
+        const int manifestSrcWidth =
+            telemetryIntValue( timing, "render_thread_source_width" );
+        const int manifestSrcHeight =
+            telemetryIntValue( timing, "render_thread_source_height" );
+        const int manifestRenderedWidth =
+            telemetryIntValue( timing, "render_thread_rendered_width" );
+        const int manifestRenderedHeight =
+            telemetryIntValue( timing, "render_thread_rendered_height" );
+        const int manifestScaleTargetWidth =
+            telemetryIntValue( timing, "render_thread_playback_scale_target_width" );
+        const int manifestScaleTargetHeight =
+            telemetryIntValue( timing, "render_thread_playback_scale_target_height" );
+        const QString manifestPathSource =
+            timing.value( QStringLiteral("render_thread_phase4b_path_source") ).toString();
+        const int manifestYCropRows =
+            telemetryIntValue( timing, "render_thread_phase4b_y_crop_rows" );
+        const bool manifestDirect8 =
+            telemetryBoolValue( timing, "processed8_direct_path_active" );
+        const bool manifestProcessed8CacheHit =
+            telemetryBoolValue( timing, "processed8_cache_hit" );
+        const bool manifestRawPrefetch =
+            telemetryBoolValue( timing, "raw_uint16_prefetch_hit" );
+        const bool manifestAggressivePreview =
+            telemetryBoolValue( timing, "render_thread_aggressive_preview" );
+        const bool manifestDualIsoValid =
+            telemetryBoolValue( timing, "dual_iso_full20_valid" );
+        const bool manifestDualIsoUseFullres =
+            telemetryBoolValue( timing, "dual_iso_full20_use_fullres" );
+        const int manifestDualIsoInterp =
+            telemetryIntValue( timing, "dual_iso_full20_interp_method" );
+        const double manifestStretchX = getHorizontalStretchFactor( false );
+        const long long manifestSrcPixels =
+            static_cast<long long>( qMax( 0, manifestSrcWidth ) )
+                * static_cast<long long>( qMax( 0, manifestSrcHeight ) );
+        const long long manifestRenderedPixels =
+            static_cast<long long>( qMax( 0, manifestRenderedWidth ) )
+                * static_cast<long long>( qMax( 0, manifestRenderedHeight ) );
+        const bool manifestReduced =
+            manifestSrcPixels > 0
+            && manifestRenderedPixels > 0
+            && manifestRenderedPixels < manifestSrcPixels;
+        /* proxy_halvings derived from the (now injective) path code: x1 half = 1,
+         * x1/x2 quarter = 2; pre-recon full paths and full-recon = 0. */
+        int manifestProxyHalvings = 0;
+        switch( phase4bPath )
+        {
+        case 6: case 7: manifestProxyHalvings = 1; break;
+        case 5: case 9: case 10: case 11: manifestProxyHalvings = 2; break;
+        default: manifestProxyHalvings = 0; break;
+        }
+        QStringList manifestFields;
+        manifestFields
+            << QStringLiteral("session=%1").arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+            << QStringLiteral("index=%1").arg( m_playbackSmokePresentedFrames )
+            << QStringLiteral("path_code=%1").arg( phase4bPath )
+            << QStringLiteral("path_label=%1").arg(
+                   phase4bPathLabel.isEmpty() ? QStringLiteral("unknown") : phase4bPathLabel )
+            << QStringLiteral("path_source=%1").arg(
+                   manifestPathSource.isEmpty() ? QStringLiteral("render_thread") : manifestPathSource )
+            << QStringLiteral("path_fallback_reason=%1").arg(
+                   phase4bFallbackReason.isEmpty() ? QStringLiteral("none") : phase4bFallbackReason )
+            << QStringLiteral("proxy_halvings=%1").arg( manifestProxyHalvings )
+            << QStringLiteral("aggressive_preview=%1").arg( bool01( manifestAggressivePreview ) )
+            << QStringLiteral("direct8=%1").arg( bool01( manifestDirect8 ) )
+            << QStringLiteral("processed8_cache_hit=%1").arg( bool01( manifestProcessed8CacheHit ) )
+            << QStringLiteral("raw_prefetch=%1").arg( bool01( manifestRawPrefetch ) )
+            << QStringLiteral("y_crop_rows=%1").arg( manifestYCropRows )
+            << QStringLiteral("dual_iso_valid=%1").arg( bool01( manifestDualIsoValid ) )
+            << QStringLiteral("dual_iso_use_fullres=%1").arg( bool01( manifestDualIsoUseFullres ) )
+            << QStringLiteral("dual_iso_interp=%1").arg( manifestDualIsoInterp )
+            << QStringLiteral("src_w=%1").arg( manifestSrcWidth )
+            << QStringLiteral("src_h=%1").arg( manifestSrcHeight )
+            << QStringLiteral("rendered_w=%1").arg( manifestRenderedWidth )
+            << QStringLiteral("rendered_h=%1").arg( manifestRenderedHeight )
+            << QStringLiteral("scale_target_w=%1").arg( manifestScaleTargetWidth )
+            << QStringLiteral("scale_target_h=%1").arg( manifestScaleTargetHeight )
+            << QStringLiteral("reduced=%1").arg( bool01( manifestReduced ) )
+            << QStringLiteral("stretch_x=%1").arg( manifestStretchX, 0, 'f', 4 )
+            << QStringLiteral("stretched_w=%1").arg(
+                   static_cast<int>( qRound( qMax( 0, manifestRenderedWidth ) * manifestStretchX ) ) )
+            << QStringLiteral("stretched_h=%1").arg( manifestRenderedHeight );
+        qInfo().noquote()
+            << QStringLiteral("playback_smoke.render_manifest ")
+                   + manifestFields.join( QLatin1Char(' ') );
         if( dualIsoFull20Valid )
         {
             qInfo().noquote()
@@ -25238,6 +25408,13 @@ double MainWindow::getHorizontalStretchFactor( bool downScale )
     else factor = STRETCH_H_200;
 
     if( ui->comboBoxVStretch->currentIndex() == 3 && !downScale ) factor *= 3.0;
+    if( !downScale
+        && factor == 3.0
+        && qEnvironmentVariableIsSet( "MLVAPP_EXPERIMENTAL_DUALISO_SKIP_STRETCH_X3" )
+        && qEnvironmentVariable( "MLVAPP_EXPERIMENTAL_DUALISO_SKIP_STRETCH_X3" ).trimmed() != QStringLiteral("0") )
+    {
+        return 1.0;
+    }
 
     return factor;
 }
