@@ -247,3 +247,67 @@ The remaining open question is narrower than before:
   changing the raw/recon chain.
 - For root-cause ownership, the current evidence favors the combination of upstream periodic
   structure plus fork-only reduction-to-fit presentation, not a single fast-path bug.
+
+---
+
+## FIX LANDED + VERIFIED (2026-06-23 ~13:57 CDT)
+
+Fix #1 implemented and committed (`a978c8e4` + stride fix `0d30f461`): a new
+`hqPlaybackDownscale` branch in `buildPlaybackPrepResult` (`MainWindow.cpp:~3938`) routes the
+playback DOWNSCALE through the in-tree avir `CImageResizer` (Lanczos-class wide-support low-pass)
+instead of the fixed 2-tap NN/bilinear path. Scoped to playback reductions only
+(`hqTargetWidth < sourceWidth`) so x2/x4 upscale-to-fit lanes are untouched. Env kill-switch
+`MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE`.
+
+**Resampler choice (empirical, on the captured native input):** LANCZOS-class kills the period-4
+(L2 −0.95 → +0.68/+0.89); NN/box/bilinear do **not** (the period-3 sits at the downscale Nyquist
+~0.333 vs cutoff ~0.331 — needs a sharp wide-support low-pass). avir is the in-tree equivalent.
+
+**A stride bug caught by the eye, not the metric:** the first build (`a978c8e4`) built a
+`Format_RGB888` QImage straight from avir's tightly-packed output, but the QImage 4-arg ctor
+4-byte-aligns the scanline (1197×3=3591 → 3592) → per-row byte shift → **horizontal green/magenta
+banding**. The per-column-mean autocorr (averaging over rows) is **structurally blind** to a
+horizontal artifact, so it reported "clean" while the 2D crop showed banding. Fixed in `0d30f461`
+(avir → packed temp → copy into a 4-byte-aligned backing → QImage with explicit aligned stride).
+
+**Final verification (sha `227d89a5`, large.mlv scale=1 dual-ISO, S6_displayImage):**
+- VERTICAL (col-mean autocorr): (600,230) L2=+0.59, (750,280) L2=+0.81 → period-4 moiré gone.
+- HORIZONTAL (row-mean autocorr): L2/L3/L4 all positive → no banding.
+- VISUAL: 6× crop is clean (real ripple detail preserved, no moiré, no banding).
+
+**Lesson (recorded):** verify resampler/image changes with a 2D/visual check, not only a 1D
+column metric — the metric lied here; the eye caught it. (Same theme as the earlier
+direct-measurement-beats-confident-reasoning wins in this investigation.)
+
+## RETIRED CORE PROBE (2026-06-23 ~15:46 CDT): the playback-scoped full-res skip was removed
+
+Claude's later measurements closed the loop: the probe did not isolate a clean raw/recon defect, so
+the code path itself was removed and only the historical learning remains below.
+
+**Status:** the retired probe is no longer present in code. The native period-3 ROOT (present S0 →
+amplified S2) remains a separate core-side question in the history, but the striping work is now
+closed as a preview-side fix.
+
+## RESOLVED / CLOSED (2026-06-23 ~15:38 CDT)
+
+Consensus (Claude + Codex): the period-4 dual-ISO playback striping is a **preview-side** issue,
+**not** a core-side bug.
+
+- **Root mechanism:** a native **period-3** column structure (present in `S0_raw_uint16`, L3=−0.91,
+  consistent with the clip's 3× anamorphic horizontal sensor sampling; amplified to −0.99 *before*
+  the dual-ISO recon, in the pre-dualiso llrawproc fixes) is beaten into the visible **period-4** by
+  the fork's anamorphic CPU display downscale (introduced by `6303ddb3`).
+- **Fix (shipped, GUI-side):** `hqPlaybackDownscale` routes the playback downscale through avir
+  (Lanczos-class low-pass) — commits `a978c8e4` + stride fix `0d30f461`. Verified: vertical period-4
+  gone, no horizontal banding, image intact; confirmed on the combined build `DC31EA39`. Perf:
+  avir ~40ms/−18% FPS at x1 ONLY (x2/x4/x8 untouched); env kill-switch
+  `MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE`.
+- **Why no core fix:** the period-3 is real raw data (anamorphic sampling), present before any
+  processing. At full-res **export there is no downscale → no moiré**, so there is nothing to fix
+  there; a core-side "removal" would alter legitimate raw data and risk export fidelity. The recon
+  probe (`MLVAPP_EXPERIMENTAL_DUALISO_SKIP_FULLRES_RECON` / `diso_frblending=0`) was found to be the
+  **wrong knob** (it disables the dual-ISO blend and breaks the image rather than isolating the
+  stripe; S2 mean 9481→255) and is being **retired** (Claude recommended removal; Codex's call).
+
+**Outcome:** preview striping **fixed**; investigation **closed**. Remaining: Codex's formal APPROVE
+of `0d30f461` and final coordination closeout.
