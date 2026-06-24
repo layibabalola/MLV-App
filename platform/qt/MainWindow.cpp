@@ -20572,7 +20572,6 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                                                dualIsoActive );
     mlvSetPlaybackFastX4HqPathMode( fastHqPathActive ? 1 : 0 );
     const int disableAliasMapValue = ( settings.playbackDisableAliasMapAtScale && scaleGate ) ? 1 : 0;
-    const int disableFrBlendingValue = ( settings.playbackDisableFrBlendingAtScale && scaleGate ) ? 1 : 0;
 
     const bool changed = (m_dualIsoPlaybackPreviewActive != settings.previewOverrideActive)
                       || (llrpGetDualIsoMode( m_pMlvObject ) != settings.mode)
@@ -20580,8 +20579,7 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                       || (llrpGetDualIsoAliasMapMode( m_pMlvObject ) != settings.aliasMap)
                       || (llrpGetDualIsoFullResBlendingMode( m_pMlvObject ) != settings.fullResBlending)
                       || (llrpGetDualIsoPlaybackForceMean23( m_pMlvObject ) != mean23OverrideValue)
-                      || (llrpGetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject ) != disableAliasMapValue)
-                      || (llrpGetDualIsoPlaybackForceDisableFrBlending( m_pMlvObject ) != disableFrBlendingValue);
+                      || (llrpGetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject ) != disableAliasMapValue);
 
     if( !changed ) return;
 
@@ -20593,7 +20591,6 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
     llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
     llrpSetDualIsoPlaybackForceMean23( m_pMlvObject, mean23OverrideValue );
     llrpSetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject, disableAliasMapValue );
-    llrpSetDualIsoPlaybackForceDisableFrBlending( m_pMlvObject, disableFrBlendingValue );
     processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
                                      getMlvBlackLevel( m_pMlvObject ),
                                      getMlvWhiteLevel( m_pMlvObject ),

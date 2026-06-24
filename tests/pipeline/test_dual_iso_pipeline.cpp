@@ -6003,32 +6003,28 @@ TEST(DualIsoPipeline, DualIsoPlaybackOverrideRespectsMean23DisableEnv)
 extern "C" int llrpReinitKeepHeavyStagesAtScaleDispatchForTesting(void);
 
 /* ===================================================================== */
-/* Phase E5 tests: scale-aware alias_map + FR-blending downgrade.          */
+/* Phase E5 tests: scale-aware alias_map downgrade.                        */
 /* ===================================================================== */
 
-/* (a) Full-downgrade path coverage: when both override fields are on
- * (the most aggressive opt-in: alias_map AND FR blending disabled), the
- * HQ recon must skip both stages even though the receipt asks for them.
- * The path counters confirm the stages were skipped. The two override
- * fields are independent — production policy only enables alias_map
- * disable by default (FR-blending OFF breaks the recon, see SSIM probe);
- * this test exercises the full plumbing surface. */
+/* (a) Alias-map downgrade path coverage: when the override field is on,
+ * the HQ recon must skip alias_map even though the receipt asks for it.
+ * The path counter confirms the stage was skipped. Production policy only
+ * enables alias_map disable by default. */
 TEST(DualIsoPipeline, PhaseE5_AliasMapDisabledAtScale4InPlayback)
 {
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE");
     const int disable_active_initial = llrpReinitKeepHeavyStagesAtScaleDispatchForTesting();
     ASSERT_EQ(0, disable_active_initial);
 
-    /* Reference: alias_map ON + FR blending ON at scale=4. */
+    /* Reference: alias_map ON at scale=4. */
     MlvPipelineFixture ref_fixture;
     assert_fixture_ready(ref_fixture);
     ASSERT_EQ(1, llrpGetDualIsoMode(ref_fixture.video()));
-    /* Receipt asks for alias_map + FR blending. */
+    /* Receipt asks for alias_map and full-res blending. */
     ASSERT_EQ(1, llrpGetDualIsoAliasMapMode(ref_fixture.video()));
     ASSERT_EQ(1, llrpGetDualIsoFullResBlendingMode(ref_fixture.video()));
-    /* The override fields default to 0 — nothing is being suppressed. */
+    /* The override field defaults to 0 — nothing is being suppressed. */
     ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableAliasMap(ref_fixture.video()));
-    ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableFrBlending(ref_fixture.video()));
 
     const int full_w = ref_fixture.width();
     const int full_h = ref_fixture.height();
@@ -6039,23 +6035,20 @@ TEST(DualIsoPipeline, PhaseE5_AliasMapDisabledAtScale4InPlayback)
     dualiso_debug_reset_hq_path_counters();
     const std::vector<uint8_t> ref_frame = ref_fixture.renderFrame8Scaled(0, 1, 4);
     ASSERT_TRUE(!ref_frame.empty());
-    /* alias_map and FR blending must have run — this proves the override
-     * is OFF by default when the field is 0. */
+    /* alias_map must have run — this proves the override is OFF by
+     * default when the field is 0. */
     ASSERT_TRUE(dualiso_debug_alias_map_taken_count() >= 1);
-    ASSERT_TRUE(dualiso_debug_fullres_blend_taken_count() >= 1);
 
-    /* Downgraded: alias_map OFF + FR blending OFF via the override
-     * fields, simulating the scale=4 playback policy decision. The
-     * receipt-authored values must NOT be touched; the override flag
-     * is what flips the recon's effective behaviour. */
+    /* Downgraded: alias_map OFF via the override field, simulating the
+     * scale=4 playback policy decision. The receipt-authored values must
+     * NOT be touched; the override flag is what flips the recon's
+     * effective behaviour. */
     MlvPipelineFixture fast_fixture;
     assert_fixture_ready(fast_fixture);
     ASSERT_EQ(1, llrpGetDualIsoAliasMapMode(fast_fixture.video()));
     ASSERT_EQ(1, llrpGetDualIsoFullResBlendingMode(fast_fixture.video()));
     llrpSetDualIsoPlaybackForceDisableAliasMap(fast_fixture.video(), 1);
-    llrpSetDualIsoPlaybackForceDisableFrBlending(fast_fixture.video(), 1);
     ASSERT_EQ(1, llrpGetDualIsoPlaybackForceDisableAliasMap(fast_fixture.video()));
-    ASSERT_EQ(1, llrpGetDualIsoPlaybackForceDisableFrBlending(fast_fixture.video()));
     /* Receipt-authored values must remain 1 — the override is layered
      * on top of, not in place of, the receipt. */
     ASSERT_EQ(1, llrpGetDualIsoAliasMapMode(fast_fixture.video()));
@@ -6064,9 +6057,8 @@ TEST(DualIsoPipeline, PhaseE5_AliasMapDisabledAtScale4InPlayback)
     dualiso_debug_reset_hq_path_counters();
     const std::vector<uint8_t> fast_frame = fast_fixture.renderFrame8Scaled(0, 1, 4);
     ASSERT_TRUE(!fast_frame.empty());
-    /* Override active -> alias_map and FR blending must NOT have run. */
+    /* Override active -> alias_map must NOT have run. */
     ASSERT_EQ(static_cast<unsigned long long>(0), dualiso_debug_alias_map_taken_count());
-    ASSERT_EQ(static_cast<unsigned long long>(0), dualiso_debug_fullres_blend_taken_count());
 
     /* Output sizes match (same scale, same fixture). */
     ASSERT_EQ(ref_frame.size(), fast_frame.size());
@@ -6092,9 +6084,9 @@ TEST(DualIsoPipeline, PhaseE5_AliasMapDisabledAtScale4InPlayback)
 }
 
 /* (b) At scale=1, the policy gate (effective scale >= 4) is FALSE, so
- * MainWindow must NOT flip the override fields. We model that by leaving
- * the override fields at 0 and rendering scale=1 — alias_map and FR
- * blending must both run because the receipt asks for them. */
+ * MainWindow must NOT flip the override field. We model that by leaving
+ * the override field at 0 and rendering scale=1 — alias_map must run
+ * because the receipt asks for it. */
 TEST(DualIsoPipeline, PhaseE5_AliasMapKeptAtScale1)
 {
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE");
@@ -6106,26 +6098,24 @@ TEST(DualIsoPipeline, PhaseE5_AliasMapKeptAtScale1)
     ASSERT_EQ(1, llrpGetDualIsoAliasMapMode(fixture.video()));
     ASSERT_EQ(1, llrpGetDualIsoFullResBlendingMode(fixture.video()));
 
-    /* Override fields must be 0 — the fixture starts in the GUI's
-     * policy default state where playback is not active and the scale
-     * gate is not satisfied. */
+    /* Override field must be 0 — the fixture starts in the GUI's policy
+     * default state where playback is not active and the scale gate is
+     * not satisfied. */
     ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableAliasMap(fixture.video()));
-    ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableFrBlending(fixture.video()));
 
     dualiso_debug_reset_hq_path_counters();
     const std::vector<uint16_t> frame = fixture.renderFrame16Scaled(0, 1, 1);
     ASSERT_TRUE(!frame.empty());
-    /* Receipt's alias_map=1 and FR=1 must flow through unchanged. */
+    /* Receipt's alias_map=1 must flow through unchanged. */
     ASSERT_TRUE(dualiso_debug_alias_map_taken_count() >= 1);
-    ASSERT_TRUE(dualiso_debug_fullres_blend_taken_count() >= 1);
 }
 
 /* (c) The export path (getMlvProcessedFrame16, no scale, no playback)
- * MUST always honour the receipt's alias_map / FR-blending. The scale-
- * aware downgrade only fires from the GUI playback policy, which only
- * writes the override fields during active playback. With the override
- * fields untouched (0) the export path produces receipt-authored
- * quality regardless of any other state. */
+ * MUST always honour the receipt's alias_map. The scale-aware downgrade
+ * only fires from the GUI playback policy, which only writes the
+ * override field during active playback. With the override field
+ * untouched (0) the export path produces receipt-authored quality
+ * regardless of any other state. */
 TEST(DualIsoPipeline, PhaseE5_AliasMapKeptInExportPath)
 {
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE");
@@ -6134,18 +6124,16 @@ TEST(DualIsoPipeline, PhaseE5_AliasMapKeptInExportPath)
     MlvPipelineFixture fixture;
     assert_fixture_ready(fixture);
     ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
-    /* Override fields must be cleared — export never sets them. */
+    /* Override field must be cleared — export never sets it. */
     ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableAliasMap(fixture.video()));
-    ASSERT_EQ(0, llrpGetDualIsoPlaybackForceDisableFrBlending(fixture.video()));
 
     dualiso_debug_reset_hq_path_counters();
     /* renderFrame16 calls getMlvProcessedFrame16 (the non-scaled,
      * receipt-driven export entry). */
     const std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
     ASSERT_TRUE(!frame.empty());
-    /* Receipt-authored alias_map + FR blending must run. */
+    /* Receipt-authored alias_map must run. */
     ASSERT_TRUE(dualiso_debug_alias_map_taken_count() >= 1);
-    ASSERT_TRUE(dualiso_debug_fullres_blend_taken_count() >= 1);
 }
 
 /* SSIM probe (manual): gated by MLVAPP_PHASE_E5_SSIM_PROBE_CLIP=<path>.
@@ -6168,7 +6156,7 @@ TEST(DualIsoPipeline, PhaseE5_SsimProbe)
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE");
     (void)llrpReinitKeepHeavyStagesAtScaleDispatchForTesting();
 
-    enum class Variant { Reference, AliasMapOff, FrOff, BothOff };
+    enum class Variant { Reference, AliasMapOff };
     auto render_one = [&](Variant v,
                           int * out_w, int * out_h,
                           std::vector<uint8_t> * out_frame) -> bool {
@@ -6183,11 +6171,6 @@ TEST(DualIsoPipeline, PhaseE5_SsimProbe)
         switch (v) {
             case Variant::Reference: break;
             case Variant::AliasMapOff: llrpSetDualIsoPlaybackForceDisableAliasMap(fixture.video(), 1); break;
-            case Variant::FrOff:       llrpSetDualIsoPlaybackForceDisableFrBlending(fixture.video(), 1); break;
-            case Variant::BothOff:
-                llrpSetDualIsoPlaybackForceDisableAliasMap(fixture.video(), 1);
-                llrpSetDualIsoPlaybackForceDisableFrBlending(fixture.video(), 1);
-                break;
         }
         const int w = fixture.width();
         const int h = fixture.height();
@@ -6200,20 +6183,14 @@ TEST(DualIsoPipeline, PhaseE5_SsimProbe)
     };
 
     int w = 0, h = 0;
-    std::vector<uint8_t> ref_frame, alias_off_frame, fr_off_frame, both_off_frame;
+    std::vector<uint8_t> ref_frame, alias_off_frame;
     ASSERT_TRUE(render_one(Variant::Reference,    &w, &h, &ref_frame));
     ASSERT_TRUE(render_one(Variant::AliasMapOff,  &w, &h, &alias_off_frame));
-    ASSERT_TRUE(render_one(Variant::FrOff,        &w, &h, &fr_off_frame));
-    ASSERT_TRUE(render_one(Variant::BothOff,      &w, &h, &both_off_frame));
     ASSERT_EQ(ref_frame.size(), alias_off_frame.size());
-    ASSERT_EQ(ref_frame.size(), fr_off_frame.size());
-    ASSERT_EQ(ref_frame.size(), both_off_frame.size());
 
     /* The production-recommended variant is alias_map-OFF only — the SSIM
-     * probe on real footage shows ~0.9999 vs the all-on reference, while
-     * FR-blending OFF drops to ~0.0001 (broken recon). */
+     * probe on real footage shows ~0.9999 vs the all-on reference. */
     const std::vector<uint8_t> & fast_frame = alias_off_frame;
-    (void)both_off_frame; /* still rendered above for the diagnostic SSIM print */
 
     /* Whole-image SSIM (per-channel mean over RGB), single-window form:
      *   SSIM = ((2 mu_x mu_y + c1)(2 sigma_xy + c2)) /
@@ -6253,8 +6230,6 @@ TEST(DualIsoPipeline, PhaseE5_SsimProbe)
                  "PhaseE5_SsimProbe: clip=%s scale=4 size=%dx%d\n",
                  clip_env, w, h);
     report_pair("alias_map=OFF, FR=ON   (production opt-in)", alias_off_frame);
-    report_pair("alias_map=ON,  FR=OFF  (advanced/diagnostic)", fr_off_frame);
-    report_pair("alias_map=OFF, FR=OFF  (full downgrade)", both_off_frame);
 
     const double ssim_r = channel_ssim_pair(ref_frame, fast_frame, 0);
     const double ssim_g = channel_ssim_pair(ref_frame, fast_frame, 1);
@@ -6297,13 +6272,13 @@ TEST(DualIsoPipeline, PhaseE5_SsimProbe)
 }
 
 /* (d) Kill switch: with MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE=1 the
- * llrawproc layer must short-circuit the override fields even when the
- * GUI policy has flipped them on. This lets harnesses A/B with the
- * field-on cache key but without paying the recon-math change. Mirrors
- * the MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE precedent. */
+ * llrawproc layer must short-circuit the override field even when the
+ * GUI policy has flipped it on. This lets harnesses A/B with the field-on
+ * cache key but without paying the recon-math change. Mirrors the
+ * MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE precedent. */
 TEST(DualIsoPipeline, PhaseE5_KillSwitchRespectsEnvVar)
 {
-    /* Stage 1: env set, override fields ON, alias_map/FR must still run. */
+    /* Stage 1: env set, override field ON, alias_map must still run. */
     MLVAPP_TEST_SETENV("MLVAPP_DISABLE_ALIAS_MAP_DOWNGRADE_OVERRIDE", "1");
     const int env_disable_active = llrpReinitKeepHeavyStagesAtScaleDispatchForTesting();
     ASSERT_EQ(1, env_disable_active);
@@ -6315,17 +6290,15 @@ TEST(DualIsoPipeline, PhaseE5_KillSwitchRespectsEnvVar)
         ASSERT_EQ(1, llrpGetDualIsoAliasMapMode(fixture.video()));
         ASSERT_EQ(1, llrpGetDualIsoFullResBlendingMode(fixture.video()));
 
-        /* Simulate the GUI policy flipping the override fields. With
-         * the env override active, the llrawproc layer must ignore them
-         * and let the receipt-authored values flow through. */
+        /* Simulate the GUI policy flipping the override field. With the
+         * env override active, the llrawproc layer must ignore it and let
+         * the receipt-authored values flow through. */
         llrpSetDualIsoPlaybackForceDisableAliasMap(fixture.video(), 1);
-        llrpSetDualIsoPlaybackForceDisableFrBlending(fixture.video(), 1);
 
         dualiso_debug_reset_hq_path_counters();
         const std::vector<uint16_t> frame = fixture.renderFrame16Scaled(0, 1, 1);
         ASSERT_TRUE(!frame.empty());
         ASSERT_TRUE(dualiso_debug_alias_map_taken_count() >= 1);
-        ASSERT_TRUE(dualiso_debug_fullres_blend_taken_count() >= 1);
     }
 
     /* Stage 2: clear the env so subsequent tests aren't affected. */

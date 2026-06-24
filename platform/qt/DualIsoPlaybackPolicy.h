@@ -23,21 +23,19 @@ struct DualIsoPlaybackRuntimeSettings
      * receipt-driven output during playback (e.g. while exporting from
      * the timeline). */
     bool playbackForceMean23;
-    /* Phase E5: scale-aware downgrade flags. Enabled when HQ recon will
+    /* Phase E5: scale-aware alias_map downgrade. Enabled when HQ recon will
      * actually run during playback (same trigger surface as
      * playbackForceMean23). The flag itself is "policy approves" — the
      * caller (MainWindow) is responsible for combining it with the
      * runtime scale factor (>= 4) before flipping the llrawproc field.
      * At scale 4 the 1/16 pixel-count buffer is itself an anti-aliasing
-     * operation, so the alias_map suppression and full-res blending
-     * stages spend ~8-15 ms/frame producing diminishing returns on
-     * already-downsampled data. The diagnostic env var
-     * MLVAPP_PLAYBACK_KEEP_ALIAS_MAP_AT_SCALE=1 disables the downgrade
-     * for users who notice quality regressions. Receipt-authored values
-     * for diso_alias_map / diso_frblending are never modified, so
-     * paused/scrubbing/export keep the user's intended quality. */
+     * operation, so alias_map suppression spends ~4-9 ms/frame producing
+     * diminishing returns on already-downsampled data. The diagnostic env
+     * var MLVAPP_PLAYBACK_KEEP_ALIAS_MAP_AT_SCALE=1 disables the downgrade
+     * for users who notice quality regressions. Receipt-authored values for
+     * diso_alias_map are never modified, so paused/scrubbing/export keep the
+     * user's intended quality. */
     bool playbackDisableAliasMapAtScale;
-    bool playbackDisableFrBlendingAtScale;
 };
 
 /* Diagnostic-only escape hatch for the playback Dual ISO preview override.
@@ -98,54 +96,21 @@ inline bool dualIsoPlaybackMean23OverrideDisabledViaEnv()
 
 /* Phase E5: opt-in scale-aware alias_map downgrade.
  *
- * The hypothesis that alias_map and FR-blending have "diminishing returns
- * on already-downsampled data" (because the 4x4 downsample is itself an
- * anti-aliasing operation) split cleanly when measured: alias_map can be
+ * The hypothesis that alias_map has "diminishing returns on already-
+ * downsampled data" (because the 4x4 downsample is itself an anti-
+ * aliasing operation) split cleanly when measured: alias_map can be
  * safely disabled at scale 4 (SSIM 0.9999 on M16-1210, ~4-9 ms/frame
- * win), but FR-blending OFF breaks the recon (SSIM 0.0001 — the
- * halfres-only fallback produces a visually broken image, not a slightly
- * lower-quality one). So we ship alias_map disable as opt-in (default
- * OFF), and leave FR blending alone in the public-facing path. The
- * llrawproc-level FR-disable plumbing remains in place so a separate
- * advanced env var can still toggle it for benchmarking, but the
- * default GUI policy never flips it.
+ * win). So we ship alias_map disable as opt-in (default OFF) and leave
+ * the public-facing path otherwise unchanged.
  *
  * Set MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE=1 to enable the
- * alias_map downgrade. The diagnostic env var
- * MLVAPP_PLAYBACK_DOWNGRADE_FR_BLENDING_AT_SCALE=1 enables the FR-
- * blending downgrade independently (NOT recommended for daily use). */
+ * alias_map downgrade. */
 inline bool dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv()
 {
     static int cached = -1;
     if (cached < 0)
     {
         const char * v = std::getenv("MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE");
-        if (v && *v && std::strcmp(v, "0") != 0
-                  && std::strcmp(v, "false") != 0
-                  && std::strcmp(v, "FALSE") != 0
-                  && std::strcmp(v, "False") != 0)
-        {
-            cached = 1;
-        }
-        else
-        {
-            cached = 0;
-        }
-    }
-    return cached != 0;
-}
-
-/* Phase E5 advanced/diagnostic: independently toggle the FR-blending
- * downgrade. Default OFF because empirically FR-OFF produces a broken
- * image (SSIM 0.0001 on real footage at scale 4); kept for benchmark
- * harnesses that want to measure the cost of the FR stage in
- * isolation. NOT for production. */
-inline bool dualIsoPlaybackDowngradeFrBlendingAtScaleViaEnv()
-{
-    static int cached = -1;
-    if (cached < 0)
-    {
-        const char * v = std::getenv("MLVAPP_PLAYBACK_DOWNGRADE_FR_BLENDING_AT_SCALE");
         if (v && *v && std::strcmp(v, "0") != 0
                   && std::strcmp(v, "false") != 0
                   && std::strcmp(v, "FALSE") != 0
@@ -286,8 +251,6 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
         selectedAliasMap,
         selectedFullResBlending,
         previewOverrideActive,
-        false,
-        false,
         false
     };
 
@@ -314,7 +277,6 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
     {
         settings.playbackForceMean23 = true;
     }
-
     /* Phase E5 scale-aware downgrade: same trigger surface as the mean23
      * override (HQ recon will run during playback). Each stage has its
      * own opt-in env var because their visual costs differ by orders of
@@ -327,10 +289,6 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
     if( hqWillRunDuringPlayback && dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv() )
     {
         settings.playbackDisableAliasMapAtScale = true;
-    }
-    if (hqWillRunDuringPlayback && dualIsoPlaybackDowngradeFrBlendingAtScaleViaEnv())
-    {
-        settings.playbackDisableFrBlendingAtScale = true;
     }
 
     return settings;
