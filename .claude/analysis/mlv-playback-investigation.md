@@ -1,3 +1,40 @@
+# 2026-06-23 - fork comparison: playback quality loss is a staged tradeoff, not a single upstream bug
+
+### Verified locally
+
+- I refreshed the remotes with `git fetch origin --prune` and `git fetch fork --prune`. `origin/master` advanced to `9d99e53a` (`Shortcut for renaming added`), while the playback work remains on the fork history rooted at `QTv1.16` / `e4c6d7de`.
+- The useful baseline for this investigation is the fork point, not the current upstream tip. The playback lane is concentrated in `src/processing/raw_processing.c`, `src/mlv/video_mlv.c`, `platform/qt/MainWindow.cpp`, and `platform/qt/RenderFrameThread.cpp`.
+- The first explicit fidelity-for-speed tradeoff I could prove is `c7fc930e` (`playback: direct8 playback uses cheap quarter-res shadows/highlights blur; exports stay full quality`). That change keeps exports on the full-quality path, but makes playback direct8 use the cheaper quarter-res blur instead of the export-policy blur.
+- The next widening step is `b2aae7db` (`playback: keep x1/x2 quarter-res default-on`), which expands the cheaper quarter-res preview path from x4-only to x1/x2 as well. The later prefetch widening in `66fe5136` (`playback: prefetch worker learns the indirect processed16->8 render for x4/x8 Sharp (+22-35%)`) then pushes the same shared-tail overlap deeper into the playback pipeline.
+- The visible quality problem is not one thing. There are two separate failure modes:
+- `Pixel/fidelity tradeoff`: quarter-res preview and direct8 blur shortcuts make playback faster, but they are still lower-cost preview paths and should be treated as intentional quality tradeoffs unless explicitly promoted by evidence.
+- `Temporal artifact`: the flicker/stale-frame issue comes from presentation ordering, not from the decoded image itself. The fix lives in `MainWindow::drawFrameReady()` and `RenderFrameThread::findLatestReadySlotLocked()`, plus the forward-only present guard that drops backward-jumping frames while playback is active.
+- The current analysis files already show the visible symptom split: x1 is mostly compute-bound, x8 is the canary lane for corruption, and the present-order bug is temporal. That means a fork comparison is useful, but only if it separates image-quality changes from frame-ordering changes.
+
+### Cross-checked from prior analysis
+
+- Prior profiling already established that x1 is the only lane with a truly sub-real-time ceiling, while x2/x4/x8 can be real-time or near it depending on the shared-tail pressure. That makes x1 the first place where any quality-for-speed tradeoff will be noticed.
+- The earlier playback investigations also showed that single-frame screenshots miss the flicker class of bug. Temporal artifacts need trace-based analysis (`detect-playback-artifacts.ps1`) so we do not confuse stale-frame ordering with image degradation.
+- The x8 canary corruption documented later in this file is consistent with a broadened tradeoff surface, not with upstream `origin/master` behavior. In other words, the regression lives in the forked playback lane, not in the untouched upstream tip.
+
+### Needs runtime profiling
+
+- If we want the exact first bad visual checkpoint, the next useful comparison is a commit-by-commit smoke on the same clips at `c7fc930e`, `b2aae7db`, `66fe5136`, and the current head, using the same screenshot canary plus the temporal trace detector.
+- If the question is "what changed relative to GitHub upstream?", compare against the fork point and the playback commit chain, not just `origin/master` tip state. The upstream tip currently contains unrelated changes and will not explain the playback regression by itself.
+
+### Ranked checkpoints
+
+- `1.` `c7fc930e` is the first commit in the chain that is unambiguously a quality tradeoff in playback: it explicitly swaps playback direct8 to the cheap quarter-res shadows/highlights blur while keeping exports full quality. If the question is "where did visible playback quality first get intentionally cheaper?", this is the earliest hard evidence I found.
+- `2.` `b2aae7db` is the first broadening step that turns that cheaper path into the default for the important x1/x2 preview lanes. This is the strongest candidate for "where did the change become broadly user-visible?"
+- `3.` `78ca3947` and `cfbe5808` are not the same kind of regression as the blur tradeoff. They reduce x1 processing cost and restructure the GUI/present pipeline to hide work and change worker-thread accounting. These commits can make the lane feel faster, but they also make the visual behavior more sensitive to timing, stale-frame presentation, and screenshot-vs-no-screenshot measurement differences.
+- `4.` `66fe5136` is mainly a throughput/prefetch scaling commit for x4/x8. It deepens overlap and expands the indirect processed16->8 worker path, so it is more likely to affect cadence and backlog than image fidelity.
+- `5.` The temporal flicker/stale-frame class is separate from the fidelity tradeoff chain. The root cause evidence in the analysis note points to the present-order pipeline and the forward-only guard, not to the quarter-res blur or processed8 prefetch logic.
+
+### Scope note
+
+- `origin/master` is now far ahead of the forked playback history, and the fork contains thousands of unique commits relative to upstream. That makes a plain tip-vs-tip visual comparison misleading for this lane.
+- For playback regressions, the meaningful comparison is "fork baseline vs the playback commit chain" with the same clips and the same smoke method. Upstream tip is useful as context, but not as the source of truth for this specific regression.
+
 # 2026-06-18 - GPU Lane P3 no-readback validation belongs on UltraMagnus
 
 ### Verified locally
