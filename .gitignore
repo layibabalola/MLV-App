@@ -37,6 +37,9 @@ osx_installer/create-dmg-master/builder/create-dmg.builder
 80000218_2040x1268.bpm
 platform/build-*
 *build*
+# build-provenance TOOLING (source scripts, not build output) -- re-include despite *build* above
+!tools/build-release.ps1
+!tools/gen-buildinfo.ps1
 .qtcreator
 
 # Docs tree is the canonical documentation set; track it even if filenames

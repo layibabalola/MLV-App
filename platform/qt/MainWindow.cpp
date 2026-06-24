@@ -2007,6 +2007,23 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define VERSION QString("%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 #define GITVERSION QString("QTv%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 
+// P0-1 build provenance: prefer the build-TIME stamp (build_buildinfo.h, written by
+// tools/build-release.ps1 / gen-buildinfo.ps1) which carries the dirty flag; fall back to the
+// qmake-time -DMLVAPP_GIT_SHA. Surfaced in the window title so a stale/dirty build is obvious.
+#if defined(__has_include)
+#  if __has_include("build_buildinfo.h")
+#    include "build_buildinfo.h"
+#  endif
+#endif
+static QString mlvAppBuildId()
+{
+    QString id = QString::fromLatin1(MLVAPP_GIT_SHA).left(12);
+#if defined(MLVAPP_GIT_DIRTY)
+    if (MLVAPP_GIT_DIRTY) id += QStringLiteral("+dirty");
+#endif
+    return id;
+}
+
 static QString mlvAppUpdateReleasesUrl()
 {
     // Watch upstream releases so the fork gets a useful signal when there is new work to merge.
@@ -8479,7 +8496,7 @@ int MainWindow::openMlv( QString fileName )
     }
 
     //Set window title to filename
-    this->setWindowTitle( QString( "MLV App | %1" ).arg( fileName ) );
+    this->setWindowTitle( QString( "MLV App  [build %1] | %2" ).arg( mlvAppBuildId() ).arg( fileName ) );
 
     m_fileLoaded = false;
 

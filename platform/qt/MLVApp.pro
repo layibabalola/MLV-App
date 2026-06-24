@@ -115,6 +115,12 @@ else:MLVAPP_GIT_SHA_VALUE  = $$system(git -C \"$$_PRO_FILE_PWD_\" rev-parse HEAD
 isEmpty(MLVAPP_GIT_SHA_VALUE): MLVAPP_GIT_SHA_VALUE = unknown
 DEFINES += MLVAPP_GIT_SHA=\\\"$$MLVAPP_GIT_SHA_VALUE\\\"
 
+# P0-1 provenance: tools/build-release.ps1 writes a build-TIME build_buildinfo.h into the build dir
+# (OUT_PWD) before qmake; consumers #include it (guarded by __has_include) to get the accurate dirty
+# flag + build time. Adding OUT_PWD to the include path lets them find it; the -D above is the
+# fallback for plain dev builds that did not run the generator.
+INCLUDEPATH += $$OUT_PWD
+
 # Win64 static: install msys2 to the default location C:\msys64, install qt $ pacman -S mingw-w64-x86_64-qt5-static, then set up qt-creator accordingly.
 # Else comment these lines!
 #win32{
