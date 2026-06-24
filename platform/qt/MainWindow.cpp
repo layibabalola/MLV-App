@@ -2018,13 +2018,16 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #ifndef MLVAPP_BUILD_STAMP
 #  define MLVAPP_BUILD_STAMP "MLVAPP_BUILDSTAMP_v1|sha=unknown|dirty=0"
 #endif
+// Retain the uniquely-tagged provenance stamp in the binary so tools/build-release.ps1 can verify
+// THIS exact field. __attribute__((used)) forces the linker to keep it even though nothing reads it;
+// a volatile read of kMlvAppBuildStamp[0] is NOT enough (at -O3 the compiler constant-folds the read
+// and drops the array, which is exactly why the first attempt got stripped).
+#if defined(__GNUC__)
+__attribute__((used))
+#endif
+static const char kMlvAppBuildStamp[] = MLVAPP_BUILD_STAMP;
 static QString mlvAppBuildId()
 {
-    // Retain the uniquely-tagged provenance stamp in the binary (the volatile read defeats -Wl,-s /
-    // -O3 stripping) so tools/build-release.ps1 can verify THIS exact field, not just any 40-hex.
-    static const char kBuildStamp[] = MLVAPP_BUILD_STAMP;
-    volatile char keepStamp = kBuildStamp[0];
-    (void)keepStamp;
     QString id = QString::fromLatin1(MLVAPP_GIT_SHA).left(12);
 #if defined(MLVAPP_GIT_DIRTY)
     if (MLVAPP_GIT_DIRTY) id += QStringLiteral("+dirty");
