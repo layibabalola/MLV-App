@@ -14138,9 +14138,22 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                                ? ACTIVE_RECEIPT : nullptr;
                 if( !activeReceipt ) return;
 
-                // Async has only pre-apply proxy color stats; reserve hard
-                // fallback for semantic floor-lifted guards on this path.
-                if( lookAssistColorCastShouldFailClosed( r.colorCastWarning,
+                // Async has only pre-apply PROXY color stats here. The
+                // processed-floor-lifted-awb-risk guard fires on those proxy
+                // stats and was hard-restoring the whole look (exposure + WB)
+                // to baseline BEFORE the real image was ever measured -- which
+                // made Look Assist inert on bright dual-ISO clips whose black
+                // floor is lifted by blending (the analysis thumbnail mis-reads
+                // as "night"). Defer that one proxy guard to the real
+                // post-apply re-measurement below, matching the synchronous
+                // path: a genuine over-correction still restores there because
+                // it shows up in the measured image. Other semantic guards
+                // (e.g. rejected-unstable-floor-lifted) still hard-restore now.
+                const bool deferProxyFloorLiftedAwbRisk =
+                    r.colorCastWarning
+                        == QStringLiteral("processed-floor-lifted-awb-risk");
+                if( !deferProxyFloorLiftedAwbRisk
+                 && lookAssistColorCastShouldFailClosed( r.colorCastWarning,
                                                          r.postGreenArtifactRatio,
                                                          r.postGreenArtifactMeanAxis,
                                                          r.postVisibleGreenAxis,
@@ -14245,11 +14258,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                 asyncPostVisibleGreenAxis,
                                 r.temperature,
                                 asyncPostBlueAmberAxis );
+                        // We are inside the valid real-post-stats branch, so
+                        // trust the measured image: processed-floor-lifted-awb-risk
+                        // is a pre-apply PROXY guess and is intentionally NOT
+                        // preserved here -- the real post-apply warning decides
+                        // the fail-closed below, matching the synchronous path.
+                        // rejected-unstable-floor-lifted remains a hard stop.
                         const bool semanticAsyncWarning =
                             r.colorCastWarning
-                                == QStringLiteral("rejected-unstable-floor-lifted")
-                            || r.colorCastWarning
-                                == QStringLiteral("processed-floor-lifted-awb-risk");
+                                == QStringLiteral("rejected-unstable-floor-lifted");
                         if( !semanticAsyncWarning )
                         {
                             asyncSafetyWarning = asyncPostWarning;
