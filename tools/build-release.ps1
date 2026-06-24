@@ -41,11 +41,16 @@ try {
 $builtExe = Join-Path $bd "release\MLVApp.exe"
 if (-not (Test-Path $builtExe)) { throw "no exe produced" }
 
-# fail-closed: the binary must embed the commit we meant (pwsh-compatible byte->ASCII scan)
+# fail-closed: verify the EXACT uniquely-tagged provenance stamp compiled into the binary == HEAD.
+# (Strict: not "some 40-hex string in the exe matches" -- match MLVAPP_BUILDSTAMP_v1|sha=...|dirty=...)
 $exeText  = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($builtExe))
-$embedded = [regex]::Matches($exeText, '[0-9a-f]{40}') | ForEach-Object { $_.Value } | Select-Object -Unique
-$shaOk = ($embedded -contains $head)
-if (-not $shaOk) { Write-Host "WARN: embedded SHA(s) [$($embedded -join ',')] do not include HEAD $head" -ForegroundColor Yellow }
+$stamp    = [regex]::Match($exeText, 'MLVAPP_BUILDSTAMP_v1\|sha=([0-9a-f]{40})\|dirty=([01])')
+$embedded = [regex]::Matches($exeText, '[0-9a-f]{40}') | ForEach-Object { $_.Value } | Select-Object -Unique  # diagnostic only
+$stampSha = if ($stamp.Success) { $stamp.Groups[1].Value } else { '' }
+$stampDirty = if ($stamp.Success) { [int]$stamp.Groups[2].Value } else { -1 }
+$shaOk = ($stamp.Success -and $stampSha -eq $head)
+if (-not $stamp.Success) { Write-Host "FAIL: no MLVAPP_BUILDSTAMP_v1 provenance field in the exe" -ForegroundColor Red }
+elseif (-not $shaOk)     { Write-Host "FAIL: provenance stamp sha=$stampSha != HEAD $head" -ForegroundColor Red }
 
 $dest = Join-Path $OutRoot $tag
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -54,7 +59,8 @@ Copy-Item -LiteralPath $builtExe -Destination $destExe -Force
 $manifest = [ordered]@{
     head = $head; dirty = $dirty; tag = $tag
     describe = (& git -C $SourceRoot describe --always --dirty --abbrev=40).Trim()
-    embeddedShaMatchesHead = $shaOk; embeddedShas = @($embedded)
+    provenanceStampShaMatchesHead = $shaOk; provenanceStampSha = $stampSha; provenanceStampDirty = $stampDirty
+    embeddedShas = @($embedded)
     exe = (Split-Path $destExe -Leaf); sha256 = (Get-FileHash -LiteralPath $destExe -Algorithm SHA256).Hash
     qt = "6.10.2"; toolchain = "mingw1310"; builtUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     host = $env:COMPUTERNAME

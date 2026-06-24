@@ -29,6 +29,9 @@ $body = @"
 #define MLVAPP_GIT_DIRTY $dirty
 #define MLVAPP_GIT_DESCRIBE "$desc"
 #define MLVAPP_BUILD_TIME_UTC "$utc"
+/* Uniquely-tagged provenance stamp. Compiled into the binary (referenced in MainWindow) so the
+   build-release verifier can match THIS field exactly, not just any 40-hex string in the exe. */
+#define MLVAPP_BUILD_STAMP "MLVAPP_BUILDSTAMP_v1|sha=$sha|dirty=$dirty"
 #endif
 "@
 

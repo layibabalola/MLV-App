@@ -2015,8 +2015,16 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #    include "build_buildinfo.h"
 #  endif
 #endif
+#ifndef MLVAPP_BUILD_STAMP
+#  define MLVAPP_BUILD_STAMP "MLVAPP_BUILDSTAMP_v1|sha=unknown|dirty=0"
+#endif
 static QString mlvAppBuildId()
 {
+    // Retain the uniquely-tagged provenance stamp in the binary (the volatile read defeats -Wl,-s /
+    // -O3 stripping) so tools/build-release.ps1 can verify THIS exact field, not just any 40-hex.
+    static const char kBuildStamp[] = MLVAPP_BUILD_STAMP;
+    volatile char keepStamp = kBuildStamp[0];
+    (void)keepStamp;
     QString id = QString::fromLatin1(MLVAPP_GIT_SHA).left(12);
 #if defined(MLVAPP_GIT_DIRTY)
     if (MLVAPP_GIT_DIRTY) id += QStringLiteral("+dirty");
