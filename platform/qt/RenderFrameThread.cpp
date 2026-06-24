@@ -62,13 +62,26 @@ bool phase3StageCsvSinkEnsureOpen()
 
 QString phase4bPathLabel( int path )
 {
+    /* Phase A2 (image-pipeline-hardening): injective over ALL render-path
+     * codes. Previously only 8/4/3/2 were labelled and every other code
+     * (0,5,6,7,9,10,11) collapsed to one "none-or-full-recon-fallback"
+     * string, so six distinct reduced-proxy paths were indistinguishable
+     * from a genuine full-recon frame. Strings mirror the code comments at
+     * video_mlv.c:4062/4237/4266/4385/4419 (x1/x2 proxy cores). */
     switch( path )
     {
     case 8: return QStringLiteral("x8-full-xy-pre-recon");
     case 4: return QStringLiteral("x2-full-xy-pre-recon");
     case 3: return QStringLiteral("full-xy-pre-recon");
     case 2: return QStringLiteral("x-only-pre-recon");
-    default: return QStringLiteral("none-or-full-recon-fallback");
+    case 11: return QStringLiteral("x2-quarter-preview-quarter-proc");
+    case 5: return QStringLiteral("x2-quarter-preview");
+    case 10: return QStringLiteral("x1-quarter-preview-full-proc");
+    case 9: return QStringLiteral("x1-quarter-preview-quarter-proc");
+    case 7: return QStringLiteral("x1-half-preview-half-proc");
+    case 6: return QStringLiteral("x1-half-preview-full-proc");
+    case 0: return QStringLiteral("full-recon-or-none");
+    default: return QStringLiteral("unknown-path");
     }
 }
 
@@ -3282,18 +3295,34 @@ void RenderFrameThread::drawFrame( int slotIndex,
     const bool processed8CacheHit = getMlvLastProcessed8CacheHit() != 0;
     const bool processed8PrefetchHit = getMlvLastProcessed8PrefetchHit() != 0;
     const int processed8CacheHitScale = getMlvLastProcessed8CacheHitScaleFactor();
-    const int phase4bPath = playbackScaleFactorActive > 1
-                           ? mlv_phase4bv2_last_path_taken()
-                           : 0;
-    const int phase4bCropRows = playbackScaleFactorActive > 1
-                               ? mlv_phase4bv3_last_y_crop_rows()
-                               : 0;
+    /* Phase A1 (image-pipeline-hardening): read the genuine render-path tag
+     * UNCONDITIONALLY. The previous scale<=1 ternary forced this to 0, hiding
+     * the x1 half/quarter proxy paths (codes 5/6/7/9/10/11, set at scale=1 in
+     * video_mlv.c:4385/4419/4266/4237) behind a value identical to a true
+     * full-res frame -- the root cause of repeated path mis-diagnoses. The tag
+     * is freshly set on this render thread on every render (reset video_mlv.c:6021,
+     * set by the path that runs); the cache-hit case replays the cached tag
+     * (video_mlv.c:6528) and is disambiguated by render_thread_phase4b_path_source. */
+    const int phase4bPath = mlv_phase4bv2_last_path_taken();
+    const int phase4bCropRows = mlv_phase4bv3_last_y_crop_rows();
     const int sourceWidth = qMax( 0, m_imageWidth );
     const int sourceHeight = qMax( 0, m_imageHeight );
     const int renderedWidth = qMax( 0, renderedImageWidth );
     const int renderedHeight = qMax( 0, renderedImageHeight );
     const qint64 sourcePixels = stagePixelCount( sourceWidth, sourceHeight );
     const qint64 renderedPixels = stagePixelCount( renderedWidth, renderedHeight );
+    /* Phase A3 (image-pipeline-hardening): emit the SOURCE dims too. Only the
+     * rendered dims were exported (render_thread_rendered_width/height at 2748),
+     * so a consumer could not tell whether the rendered frame was a reduction
+     * of the source -- the exact discriminator the period-4 hunt needed. The
+     * render_manifest line (MainWindow) joins src vs rendered to mark reduced
+     * frames, and the A6 runtime assert keys off rendered<source => tag!=0. */
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_source_width"),
+        sourceWidth );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("render_thread_source_height"),
+        sourceHeight );
     const double llrawprocPreDualIsoFixMs =
         ( m_pMlvObject && m_pMlvObject->llrawproc )
             ? m_pMlvObject->llrawproc->playback_pre_dualiso_fix_ms
@@ -3323,7 +3352,11 @@ void RenderFrameThread::drawFrame( int slotIndex,
           || skipBadPixels
           || skipVerticalStripes
           || skipPatternNoise );
-    if( playbackScaleFactorActive > 1 && phase4bPath == 0 )
+    /* Phase A1: surface the fallback reason whenever the path fell to
+     * full-recon/none (code 0) at ANY scale, not only scale>1 -- a scale<=1
+     * fallback was previously silent. Reason defaults to "none" when no
+     * fallback occurred. */
+    if( phase4bPath == 0 )
     {
         const char *reason = mlv_phase4bv2_last_fallback_reason();
         phase4bFallbackReason =

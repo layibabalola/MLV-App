@@ -48,6 +48,8 @@
  *   S4_processing     — uint16 RGB16 packed, post processing core (matrix +
  *                       levels + gamma + curves + output)
  *   S5_processed8     — uint8 RGB8 packed, post 16-to-8 conversion
+ *   S6_displaySource  — uint8 RGB8 packed, exact native buffer fed into the
+ *                       GUI display resample
  *   S6_displayImage   — uint8 RGB8 (potentially aligned-padded stride), final
  *                       QImage just before QPixmap::fromImage
  *
@@ -78,6 +80,7 @@ extern "C" {
 #define MLV_PIPELINE_STAGE_S3_DEBAYER      "S3_debayer"
 #define MLV_PIPELINE_STAGE_S4_PROCESSING   "S4_processing"
 #define MLV_PIPELINE_STAGE_S5_PROCESSED8   "S5_processed8"
+#define MLV_PIPELINE_STAGE_S6_DISPLAYSOURCE "S6_displaySource"
 #define MLV_PIPELINE_STAGE_S6_DISPLAYIMAGE "S6_displayImage"
 
 /* Coarse format classifier. The free-form `format_label` field on the meta

@@ -91,7 +91,6 @@ TEST(DualIsoPlaybackPolicy, PhaseE5_DowngradeDefaultOffWithoutEnvOptIn)
          * already forces aliasMap=0/FR=0.) */
         ASSERT_FALSE(settings.playbackForceMean23);
         ASSERT_FALSE(settings.playbackDisableAliasMapAtScale);
-        ASSERT_FALSE(settings.playbackDisableFrBlendingAtScale);
     }
 
     /* Paused: nothing should fire. */
@@ -107,7 +106,6 @@ TEST(DualIsoPlaybackPolicy, PhaseE5_DowngradeDefaultOffWithoutEnvOptIn)
         ASSERT_FALSE(settings.previewOverrideActive);
         ASSERT_FALSE(settings.playbackForceMean23);
         ASSERT_FALSE(settings.playbackDisableAliasMapAtScale);
-        ASSERT_FALSE(settings.playbackDisableFrBlendingAtScale);
     }
 
     /* Invalid dual ISO: nothing should fire even during playback. */
@@ -123,27 +121,21 @@ TEST(DualIsoPlaybackPolicy, PhaseE5_DowngradeDefaultOffWithoutEnvOptIn)
         ASSERT_FALSE(settings.previewOverrideActive);
         ASSERT_FALSE(settings.playbackForceMean23);
         ASSERT_FALSE(settings.playbackDisableAliasMapAtScale);
-        ASSERT_FALSE(settings.playbackDisableFrBlendingAtScale);
     }
 }
 
-/* Phase E5 documents: the alias_map and FR-blending env opt-ins are
- * INDEPENDENT. alias_map OFF is visually safe (SSIM 0.9999 on the user's
- * 5K M16-1210 clip at scale 4); FR blending OFF breaks the recon (SSIM
- * 0.0001 at the same setting). The policy header reflects that split:
- * MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE only flips alias_map;
- * MLVAPP_PLAYBACK_DOWNGRADE_FR_BLENDING_AT_SCALE only flips FR blending.
- * (Both env vars are cached on first call; this test verifies the names
- * exist and the public signature compiles. Runtime behaviour is covered
- * by the pipeline tests in tests/pipeline/test_dual_iso_pipeline.cpp.) */
+/* Phase E5 documents: alias_map OFF is visually safe (SSIM 0.9999 on the
+ * user's 5K M16-1210 clip at scale 4). The policy header reflects that
+ * split: MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE only flips alias_map.
+ * (The env var is cached on first call; this test verifies the name exists
+ * and the public signature compiles. Runtime behaviour is covered by the
+ * pipeline tests in tests/pipeline/test_dual_iso_pipeline.cpp.) */
 TEST(DualIsoPlaybackPolicy, PhaseE5_EnvHelpersExist)
 {
     /* Just call them to make sure the names compile and they return a
      * deterministic result for the current process state. */
     const bool alias_env = dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv();
-    const bool fr_env = dualIsoPlaybackDowngradeFrBlendingAtScaleViaEnv();
     /* Default to OFF when no env is set in the test process (the
      * minitest harness doesn't set these). */
     ASSERT_FALSE(alias_env);
-    ASSERT_FALSE(fr_env);
 }

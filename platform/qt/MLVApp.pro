@@ -169,6 +169,7 @@ SOURCES += \
     GpuPreviewProcessing.cpp \
     GpuDebayer.cpp \
     GpuDisplayViewport.cpp \
+    GpuDisplayWindow.cpp \
         main.cpp \
         MainWindow.cpp \
     ../../src/debayer/amaze_demosaic.c \
@@ -303,6 +304,7 @@ HEADERS += MainWindow.h \
            GpuDebayer.h \
            GpuPreviewProcessing.h \
     GpuDisplayViewport.h \
+    GpuDisplayWindow.h \
     ../../src/debayer/debayer.h \
     ../../src/debayer/helpersse2.h \
     ../../src/debayer/conv.h \

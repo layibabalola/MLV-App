@@ -6,6 +6,7 @@
  */
 
 #include "GpuDisplayViewport.h"
+#include "GpuDisplayWindow.h"
 
 #include <algorithm>
 #include <cstring>
@@ -19,6 +20,8 @@
 #include <QPolygonF>
 #include <QSurfaceFormat>
 #include <QElapsedTimer>
+#include <QTimer>
+#include <QDir>
 #include <QVector2D>
 #include <QVector3D>
 #include <QtDebug>
@@ -57,6 +60,98 @@ bool viewportPresentDiagEnabled()
     static const bool enabled =
         envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_PRESENT_DIAG"));
     return enabled;
+}
+
+/* Frame-grab telemetry: when MLVAPP_FRAME_GRAB_DIR is set, save the exact display
+ * frame (the CPU RGBA image presented to the viewport/window) to a full-resolution
+ * PNG per frame, capped. This captures the real displayed pixels for an apples-to-
+ * apples CPU-vs-GPU-window quality comparison, bypassing lossy/occluded screen grabs.
+ * Inert unless the env var is set. */
+void maybeGrabDisplayFrame(const QImage &image)
+{
+    static const QByteArray dir = qgetenv("MLVAPP_FRAME_GRAB_DIR");
+    if ( dir.isEmpty() || image.isNull() ) return;
+    static int counter = 0;
+    if ( counter >= 120 ) return;
+    static const bool dirReady = QDir().mkpath(QString::fromLocal8Bit(dir));
+    Q_UNUSED(dirReady);
+    const QString path = QString::fromLocal8Bit(dir)
+        + QStringLiteral("/grab_%1.png").arg(counter, 5, 10, QChar('0'));
+    if ( image.save(path, "PNG") )
+    {
+        qInfo().nospace() << "frame_grab saved " << path << " (" << image.width()
+                          << "x" << image.height() << " fmt=" << static_cast<int>(image.format()) << ")";
+        ++counter;
+    }
+}
+
+/* Bug A on-screen present A/B (env-selectable, ONE binary, all inert unless the
+ * matching var is set, freely combinable). The Dell Optimus hybrid renders the GL
+ * viewport correctly into its offscreen FBO -- QWidget::grab()/--window-screenshot
+ * look right -- but never composites it to the iGPU-driven panel, so the physical
+ * screen stays solid BLACK while the non-GL pixmap viewport displays fine. These
+ * probe whether a different swap / flush / native-window present mode makes the
+ * cross-adapter present land on the panel. VALIDATE WITH EYES ON THE DELL SCREEN;
+ * screenshots capture the FBO and lie on hybrids. The matching global toggles
+ * (AA_ShareOpenGLContexts skip, global default QSurfaceFormat) live in main.cpp. */
+QSurfaceFormat::SwapBehavior viewportAbSwapBehavior(bool *isSet)
+{
+    const QByteArray v = qgetenv("MLVAPP_VIEWPORT_AB_SWAP").trimmed().toLower();
+    if ( isSet ) *isSet = true;
+    if ( v == "single" ) return QSurfaceFormat::SingleBuffer;
+    if ( v == "double" ) return QSurfaceFormat::DoubleBuffer;
+    if ( v == "triple" ) return QSurfaceFormat::TripleBuffer;
+    if ( isSet ) *isSet = false;
+    return QSurfaceFormat::DefaultSwapBehavior;
+}
+
+/* 0 = none, 1 = glFlush, 2 = glFinish, 3 = both. Forces the dGPU to flush/complete
+ * the frame before Qt blits the FBO and presents, in case the Optimus cross-adapter
+ * copy races an incomplete frame. */
+int viewportAbFlushMode()
+{
+    const QByteArray v = qgetenv("MLVAPP_VIEWPORT_AB_FLUSH").trimmed().toLower();
+    if ( v == "flush" ) return 1;
+    if ( v == "finish" ) return 2;
+    if ( v == "both" ) return 3;
+    return 0;
+}
+
+/* Force a native HWND for the GL viewport so it presents through its own surface
+ * rather than being redirected through the parent's backing store -- a documented
+ * Optimus cross-adapter present workaround (low-probability probe for an embedded
+ * viewport: a native QOpenGLWidget is still not a QOpenGLWindow). */
+bool viewportAbNativeWindow()
+{
+    return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_NATIVE"));
+}
+
+/* Add an alpha channel to the per-widget requested format. Qt documents that a
+ * QOpenGLWidget needs an alpha channel in the top-level backing store or its content
+ * "will not be visible" -- the exact correct-FBO-but-black symptom. The decisive part
+ * is the GLOBAL default format set before QApplication (main.cpp); this is the
+ * belt-and-suspenders per-widget half. Highest-probability cheap fix. */
+bool viewportAbAlphaEnabled()
+{
+    return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_ALPHA"));
+}
+
+/* Qt's explicit escape hatch for the QOpenGLWidget composition limitation that
+ * causes the alpha-less-backing-store black: WA_AlwaysStackOnTop presents the GL
+ * widget outside the normal flushed backing-store composite. Per-widget, so it works
+ * for an embedded viewport. Breaks sibling stacking, fine for a full-bleed viewport. */
+bool viewportAbStackTopEnabled()
+{
+    return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_STACKTOP"));
+}
+
+/* The Optimus cross-adapter swapchain is established lazily on the first present and
+ * can stay black until a geometry change re-warms it ("black until you resize"). A
+ * one-shot deferred top-level resize +/-1px after the context is live reproduces that
+ * nudge to prime the chain. One-shot, gated, distinct from the alpha/stacktop fixes. */
+bool viewportAbPrimeEnabled()
+{
+    return envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_AB_PRIME"));
 }
 
 QOpenGLTexture * createOrResizeLookupTexture(QOpenGLTexture * texture, int width, int height)
@@ -240,6 +335,7 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_textureIs16Bit(false)
     , m_textureIsBayer16(false)
     , m_gpuReconSourceTextureCurrent(false)
+    , m_abPrimed(false)
     , m_view(qobject_cast<QGraphicsView *>(parent))
     , m_fallbackItem(nullptr)
     , m_pendingTextureWidth(0)
@@ -257,9 +353,36 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
 {
     QSurfaceFormat requestedFormat = format();
     requestedFormat.setSwapInterval(0);
+    bool abSwapSet = false;
+    const QSurfaceFormat::SwapBehavior abSwap = viewportAbSwapBehavior(&abSwapSet);
+    if ( abSwapSet )
+        requestedFormat.setSwapBehavior(abSwap);
+    if ( viewportAbAlphaEnabled() )
+    {
+        // Belt-and-suspenders per-widget half of the alpha-backing-store fix; the
+        // decisive global default format is set before QApplication (main.cpp).
+        requestedFormat.setAlphaBufferSize(8);
+        requestedFormat.setDepthBufferSize(24);
+        requestedFormat.setStencilBufferSize(8);
+        if ( !abSwapSet )
+            requestedFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+    }
     setFormat(requestedFormat);
     setUpdateBehavior(QOpenGLWidget::NoPartialUpdate);
     setAutoFillBackground(false);
+    if ( viewportAbNativeWindow() )
+        setAttribute(Qt::WA_NativeWindow, true);
+    if ( viewportAbStackTopEnabled() )
+        setAttribute(Qt::WA_AlwaysStackOnTop, true);
+    if ( abSwapSet || viewportAbAlphaEnabled() || viewportAbStackTopEnabled()
+         || viewportAbNativeWindow() || viewportAbPrimeEnabled() || viewportAbFlushMode() != 0 )
+        qInfo().nospace() << "viewport_ab present probe active: swap="
+            << qgetenv("MLVAPP_VIEWPORT_AB_SWAP").constData()
+            << " alpha=" << (viewportAbAlphaEnabled() ? 1 : 0)
+            << " stacktop=" << (viewportAbStackTopEnabled() ? 1 : 0)
+            << " native=" << (viewportAbNativeWindow() ? 1 : 0)
+            << " prime=" << (viewportAbPrimeEnabled() ? 1 : 0)
+            << " flush=" << qgetenv("MLVAPP_VIEWPORT_AB_FLUSH").constData();
 }
 
 GpuDisplayViewport::~GpuDisplayViewport()
@@ -536,6 +659,20 @@ bool GpuDisplayViewport::presentImage(QGraphicsView *view,
                                       const QImage &image,
                                       const PresentationOptions &options)
 {
+    maybeGrabDisplayFrame(image);
+
+    // Hybrid (Optimus) path: when the QOpenGLWindow preview is active, route the CPU
+    // frame (or a clear, for a null image) to it -- the QOpenGLWidget viewport is not
+    // installed in that mode.
+    if ( !image.isNull() )
+    {
+        if ( GpuDisplayWindow::presentImageIfActive(image) ) return true;
+    }
+    else if ( GpuDisplayWindow::clearIfActive() )
+    {
+        return false;
+    }
+
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport || image.isNull() )
     {
@@ -728,6 +865,8 @@ bool GpuDisplayViewport::presentAmazePostWbTexture(QGraphicsView *view,
 void GpuDisplayViewport::clearPresentedImage(QGraphicsView *view,
                                              QGraphicsPixmapItem *fallbackItem)
 {
+    if ( GpuDisplayWindow::clearIfActive() ) return;
+
     GpuDisplayViewport *viewport = from(view);
     if ( !viewport )
     {
@@ -749,6 +888,25 @@ void GpuDisplayViewport::initializeGL()
         {
             cleanupGLResources();
         }, Qt::UniqueConnection);
+    }
+
+    if ( viewportAbPrimeEnabled() && !m_abPrimed )
+    {
+        m_abPrimed = true;
+        // Bug A on-screen present A/B (prime): one-shot deferred top-level resize
+        // +/-1px to warm the Optimus cross-adapter swapchain ("black until you
+        // resize"). Context object is `this`, so the timer auto-cancels if the
+        // widget is destroyed before it fires.
+        QTimer::singleShot(80, this, [this]()
+        {
+            if ( QWidget *top = window() )
+            {
+                const QSize s = top->size();
+                top->resize(s + QSize(1, 1));
+                top->resize(s);
+            }
+            update();
+        });
     }
 
     if ( m_loggedContext ) return;
@@ -919,6 +1077,17 @@ void GpuDisplayViewport::paintGL()
     if ( previewProcessingReady && m_gammaLutTexture ) m_gammaLutTexture->release();
     m_program->release();
     m_texturePresentationActive = true;
+
+    // Bug A on-screen present A/B (V4): force the dGPU to flush/complete this frame
+    // before Qt blits the FBO and presents it, in case the Optimus cross-adapter
+    // copy is racing an incomplete frame. Inert unless MLVAPP_VIEWPORT_AB_FLUSH set.
+    switch ( viewportAbFlushMode() )
+    {
+        case 1: glFlush(); break;
+        case 2: glFinish(); break;
+        case 3: glFlush(); glFinish(); break;
+        default: break;
+    }
 }
 
 void GpuDisplayViewport::resizeGL(int, int)

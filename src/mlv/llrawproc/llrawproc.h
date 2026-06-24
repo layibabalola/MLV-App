@@ -326,8 +326,6 @@ void llrpSetDualIsoFullResBlendingMode(mlvObject_t * video, int value);
  * mean23 escape hatches). */
 int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video);
 void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value);
-int llrpGetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video);
-void llrpSetDualIsoPlaybackForceDisableFrBlending(mlvObject_t * video, int value);
 
 enum { DISO_INVALID, DISO_FORCED, DISO_VALID }; // Return values
 int llrpGetDualIsoValidity(mlvObject_t * video);

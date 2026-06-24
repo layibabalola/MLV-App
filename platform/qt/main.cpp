@@ -21,6 +21,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QSurfaceFormat>
 #include <QTextStream>
 #include <cstring>
 
@@ -146,6 +147,18 @@ static bool shouldShareOpenGlContexts(int argc,
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")) return true;
     return false;
+}
+
+/* Bug A on-screen present A/B: truthy-value env flag (1/true/yes/on). Used to gate
+ * the global-level present toggles (skip AA_ShareOpenGLContexts, set a global
+ * default QSurfaceFormat) that pair with the per-widget toggles in
+ * GpuDisplayViewport.cpp. Inert unless explicitly set. */
+static bool viewportAbEnvFlag(const char *name)
+{
+    if (!qEnvironmentVariableIsSet(name)) return false;
+    const QByteArray v = qgetenv(name).trimmed().toLower();
+    if (v.isEmpty()) return false;
+    return v == "1" || v == "true" || v == "yes" || v == "on";
 }
 
 static MainWindow::PlaybackProfileScope parsePlaybackProfileScope(const QString & value, bool * ok)
@@ -1546,15 +1559,60 @@ int main(int argc, char *argv[])
         CrashForensics::applyCudaPlaybackProfilingEnvironment(true);
     }
 
-    if (shouldPreferDesktopOpenGl(argc, argv, batch, trim_mlv, profile_playback))
+    // Bug A on-screen present A/B (software-GL diagnostic): AA_UseSoftwareOpenGL loads
+    // llvmpipe, removing the dGPU cross-adapter present entirely -- a decisive test of
+    // whether that present is the cause (if the panel shows under software GL, the
+    // cross-adapter present is the culprit). Mutually exclusive with QT_OPENGL=desktop,
+    // so when requested we skip the desktop-GL env. Needs opengl32sw.dll next to exe.
+    const bool abSoftwareGl = viewportAbEnvFlag("MLVAPP_VIEWPORT_AB_SOFTWARE");
+    if (abSoftwareGl)
+    {
+        QCoreApplication::setAttribute(Qt::AA_UseSoftwareOpenGL);
+        qInfo() << "viewport_ab: AA_UseSoftwareOpenGL (llvmpipe) diagnostic present path"
+                << "(QT_OPENGL=desktop skipped).";
+    }
+    else if (shouldPreferDesktopOpenGl(argc, argv, batch, trim_mlv, profile_playback))
     {
         qputenv("QT_OPENGL", QByteArrayLiteral("desktop"));
     }
+    // Bug A on-screen present A/B (V3): probe whether shared GL contexts break the
+    // Optimus cross-adapter present by skipping the attribute when requested.
+    const bool abNoShareContexts = viewportAbEnvFlag("MLVAPP_VIEWPORT_AB_NOSHARE");
     const bool sharedOpenGlContexts =
-        shouldShareOpenGlContexts(argc, argv, batch, trim_mlv);
+        !abNoShareContexts && shouldShareOpenGlContexts(argc, argv, batch, trim_mlv);
     if (sharedOpenGlContexts)
     {
         QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
+    }
+    // Bug A on-screen present A/B: set the GLOBAL default surface format BEFORE the
+    // QApplication so the GL context AND the AA_ShareOpenGLContexts share context are
+    // created from it (per-widget setFormat after pixel-format selection is too late).
+    // ALPHA (MLVAPP_VIEWPORT_AB_ALPHA) is the highest-probability fix: Qt requires
+    // backing-store alpha or a QOpenGLWidget's content "will not be visible" -- the
+    // exact correct-FBO-but-black symptom. DEFAULTFORMAT is the no-alpha control.
+    const bool abAlpha = viewportAbEnvFlag("MLVAPP_VIEWPORT_AB_ALPHA");
+    if (abAlpha || viewportAbEnvFlag("MLVAPP_VIEWPORT_AB_DEFAULTFORMAT"))
+    {
+        QSurfaceFormat abFormat = QSurfaceFormat::defaultFormat();
+        abFormat.setSwapInterval(0);
+        const QByteArray swap = qgetenv("MLVAPP_VIEWPORT_AB_SWAP").trimmed().toLower();
+        if (swap == "single") abFormat.setSwapBehavior(QSurfaceFormat::SingleBuffer);
+        else if (swap == "triple") abFormat.setSwapBehavior(QSurfaceFormat::TripleBuffer);
+        else if (swap == "double" || abAlpha) abFormat.setSwapBehavior(QSurfaceFormat::DoubleBuffer);
+        if (abAlpha)
+        {
+            abFormat.setAlphaBufferSize(8);
+            abFormat.setDepthBufferSize(24);
+            abFormat.setStencilBufferSize(8);
+        }
+        QSurfaceFormat::setDefaultFormat(abFormat);
+        qInfo().nospace() << "viewport_ab: global default QSurfaceFormat set before "
+                             "QApplication (alpha=" << (abAlpha ? 1 : 0)
+                          << ", swap=" << swap.constData() << ", swapInterval 0).";
+    }
+    if (abNoShareContexts)
+    {
+        qInfo() << "viewport_ab: AA_ShareOpenGLContexts skipped by request.";
     }
 
     MyApplication a(argc, argv);
