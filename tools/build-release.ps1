@@ -41,9 +41,9 @@ try {
 $builtExe = Join-Path $bd "release\MLVApp.exe"
 if (-not (Test-Path $builtExe)) { throw "no exe produced" }
 
-# fail-closed: the binary must embed the commit we meant
-$embedded = (Select-String -Path $builtExe -Pattern '[0-9a-f]{40}' -AllMatches -Encoding Byte -ErrorAction SilentlyContinue |
-             ForEach-Object { $_.Matches.Value } | Select-Object -Unique)
+# fail-closed: the binary must embed the commit we meant (pwsh-compatible byte->ASCII scan)
+$exeText  = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($builtExe))
+$embedded = [regex]::Matches($exeText, '[0-9a-f]{40}') | ForEach-Object { $_.Value } | Select-Object -Unique
 $shaOk = ($embedded -contains $head)
 if (-not $shaOk) { Write-Host "WARN: embedded SHA(s) [$($embedded -join ',')] do not include HEAD $head" -ForegroundColor Yellow }
 
