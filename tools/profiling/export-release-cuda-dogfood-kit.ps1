@@ -12,6 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "cuda-backend-architecture.ps1")
+. (Join-Path $PSScriptRoot "provenance-stamp.ps1")
 
 function Resolve-RepoPath {
     param(
@@ -376,12 +377,41 @@ else {
 $exe = (Resolve-Path -LiteralPath $ExePath).Path
 $releaseDir = Split-Path -Parent $exe
 
+# P0-3: name the kit from the EXE's OWN embedded provenance stamp -- never from the
+# worktree HEAD. A kit dir whose name disagrees with the binary it ships is exactly
+# the lie this whole provenance pass exists to kill (e.g. "mlvapp-cuda-dogfood-6f6a50f4"
+# that shipped an exe embedding 3f27b7b0). Hard-fail if the stamp is missing, the
+# embedded SHA != worktree HEAD, the binary was built dirty, or the tree is dirty now.
+$buildStamp = Get-MlvAppBuildStamp -ExePath $exe
+$worktreeHead = (& git -C $root rev-parse --verify HEAD 2>$null)
+if ($worktreeHead) { $worktreeHead = $worktreeHead.Trim() }
+$worktreePorcelain = @(& git -C $root status --porcelain 2>$null | Where-Object { $_ })
+$worktreeDirty = ($worktreePorcelain.Count -gt 0)
+
+$provenanceErrors = [System.Collections.Generic.List[string]]::new()
+if (-not $buildStamp.found) {
+    [void]$provenanceErrors.Add("exe has no MLVAPP_BUILDSTAMP_v1 provenance field: $exe")
+}
+if ($buildStamp.found -and $worktreeHead -and ($buildStamp.sha -ne $worktreeHead)) {
+    [void]$provenanceErrors.Add("embedded SHA $($buildStamp.sha) != worktree HEAD $worktreeHead")
+}
+if ($buildStamp.found -and ($buildStamp.dirty -ne 0)) {
+    [void]$provenanceErrors.Add("exe was built from a DIRTY tree (embedded dirty=$($buildStamp.dirty))")
+}
+if ($worktreeDirty) {
+    [void]$provenanceErrors.Add("working tree is dirty ($($worktreePorcelain.Count) path(s)); commit/clean before packaging a kit")
+}
+if ($provenanceErrors.Count -gt 0) {
+    Write-Host "ABORT (P0-3 provenance gate): refusing to package a kit whose name could lie about its binary." -ForegroundColor Red
+    $provenanceErrors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host "  Build a trustworthy, SHA-named release first: pwsh -NoProfile -File tools\build-release.ps1" -ForegroundColor Yellow
+    exit 1
+}
+$embeddedSha = $buildStamp.sha
+$embeddedShaShort = $embeddedSha.Substring(0, 8)
+
 if ([string]::IsNullOrWhiteSpace($KitName)) {
-    $headShort = (& git -C $root rev-parse --short=8 HEAD 2>$null)
-    if ([string]::IsNullOrWhiteSpace($headShort)) {
-        $headShort = (Get-Date).ToUniversalTime().ToString("yyyyMMddHHmmss")
-    }
-    $KitName = "mlvapp-cuda-dogfood-$headShort"
+    $KitName = "mlvapp-cuda-dogfood-$embeddedShaShort"
 }
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
@@ -407,7 +437,6 @@ $missing = @($artifacts.PSObject.Properties |
     Where-Object { $_.Name -ne "backendArchitectureSidecar" -and -not [bool]$_.Value.exists } |
     ForEach-Object { $_.Name })
 
-$head = (& git -C $root rev-parse --verify HEAD 2>$null)
 $status = @(& git -C $root status --short --branch 2>$null | ForEach-Object { [string]$_ })
 $clipFullPath = ""
 if (-not [string]::IsNullOrWhiteSpace($ClipPath)) {
@@ -432,7 +461,12 @@ $manifest = [ordered]@{
     createdAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     dryRun = [bool]$DryRun
     repoRoot = $root
-    sourceHead = $head
+    sourceHead = $embeddedSha
+    embeddedSha = $embeddedSha
+    worktreeHead = $worktreeHead
+    worktreeDirty = $worktreeDirty
+    provenanceStampField = $buildStamp.stampField
+    provenanceStampShaMatchesHead = ($embeddedSha -eq $worktreeHead)
     sourceStatus = $status
     kitRoot = $kitRoot
     zipPath = if ($CreateZip) { $zipPath } else { $null }
