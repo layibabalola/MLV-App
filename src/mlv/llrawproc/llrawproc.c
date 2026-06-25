@@ -3137,9 +3137,14 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                        ev_correction_ptr,
                                        black_delta_ptr,
                                        diso_averaging,
-                                       diso_alias_map,
-                                       diso_frblending,
+                                        diso_alias_map,
+                                        diso_frblending,
                                        chroma_smooth_mode,
+                                       processingPlaybackPreviewModeEnabled()
+                                           ? ((video && video->playback_scale_factor_active > 0)
+                                               ? video->playback_scale_factor_active
+                                               : processingPlaybackPreviewScaleFactor())
+                                           : 0,
                                        video->cpu_cores,
                                        &worker->diso_full20bit_scratch);
             }
@@ -3776,11 +3781,16 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
                            ev_correction_ptr,
                            black_delta_ptr,
                            diso_averaging,
-                           diso_alias_map,
-                           diso_frblending,
-                           chroma_smooth_mode,
-                           video->cpu_cores,
-                           &worker->diso_full20bit_scratch);
+                            diso_alias_map,
+                            diso_frblending,
+                            chroma_smooth_mode,
+                            processingPlaybackPreviewModeEnabled()
+                                ? ((video && video->playback_scale_factor_active > 0)
+                                    ? video->playback_scale_factor_active
+                                    : processingPlaybackPreviewScaleFactor())
+                                : 0,
+                            video->cpu_cores,
+                            &worker->diso_full20bit_scratch);
         dualiso_debug_get_full20bit_timing(
             &g_llrawproc_last_dual_iso_full20bit_timing);
         dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
