@@ -25,6 +25,13 @@ param(
     [double]$HLineRatioThreshold = 3.0,
     [double]$VLineRatioThreshold = 4.0,
     [double]$ChromaRatioThreshold = 3.0,
+    # Absolute sanity floor on the DEFAULT (scale=2) leg. The ratio gate is blind to a
+    # fix that breaks BOTH legs equally (ratio stays ~1.0). The default playback path is
+    # expected to be clean, so if its absolute row energy is implausibly high the gate
+    # must NOT auto-pass -- it downgrades to SUSPECT and demands an eyeball. (A scalar
+    # cannot reliably tell artifact from busy detail; per the post-mortem, the eyeball is
+    # mandatory. This guard caught the 2026-06-24 false-CLEAN where both legs read HLine ~26.)
+    [double]$DefaultLegHLineCeiling = 5.0,
     [switch]$DryRun
 )
 
@@ -104,7 +111,10 @@ $ratioH = $m1.hline / [Math]::Max($eps, $m2.hline)
 $ratioV = $m1.vline / [Math]::Max($eps, $m2.vline)
 $ratioC = $m1.chromaSpeckle / [Math]::Max($eps, $m2.chromaSpeckle)
 $artifactPresent = ($ratioV -ge $VLineRatioThreshold) -or ($ratioH -ge $HLineRatioThreshold)
-$verdict = if ($artifactPresent) { "ARTIFACT_PRESENT" } else { "CLEAN" }
+$defaultLegSuspect = ($m2.hline -gt $DefaultLegHLineCeiling)
+$verdict = if ($artifactPresent) { "ARTIFACT_PRESENT" }
+           elseif ($defaultLegSuspect) { "SUSPECT_EYEBALL_REQUIRED" }
+           else { "CLEAN" }
 
 $report = [ordered]@{
     schema = "mlvapp.dualiso-fullres-review.v1"
@@ -122,8 +132,9 @@ $report = [ordered]@{
     scale2 = [ordered]@{ hline = $m2.hline; vline = $m2.vline; chromaSpeckle = $m2.chromaSpeckle; grab = $grabs["scale2"] }
     scale1 = [ordered]@{ hline = $m1.hline; vline = $m1.vline; chromaSpeckle = $m1.chromaSpeckle; grab = $grabs["scale1"] }
     ratios = [ordered]@{ hline = [Math]::Round($ratioH, 3); vline = [Math]::Round($ratioV, 3); chromaSpeckle = [Math]::Round($ratioC, 3) }
-    thresholds = [ordered]@{ hlineRatio = $HLineRatioThreshold; vlineRatio = $VLineRatioThreshold; chromaRatio = $ChromaRatioThreshold }
-    interpretation = "Ratios are full-res(scale=1) / default(scale=2) of the same frame. A correct fix collapses them toward 1.0 and flips verdict to CLEAN."
+    defaultLegSuspect = $defaultLegSuspect
+    thresholds = [ordered]@{ hlineRatio = $HLineRatioThreshold; vlineRatio = $VLineRatioThreshold; chromaRatio = $ChromaRatioThreshold; defaultLegHlineCeiling = $DefaultLegHLineCeiling }
+    interpretation = "Ratios are full-res(scale=1)/default(scale=2) of the SAME frame; a correct fix collapses them toward 1.0. The ratio gate is blind to a fix that breaks BOTH legs equally, so an absolute ceiling on the default leg downgrades CLEAN->SUSPECT_EYEBALL_REQUIRED. A scalar cannot finally certify quality -- always eyeball the grabs."
 }
 $reportPath = Join-Path $OutputRoot "review-verdict.json"
 $report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $reportPath -Encoding UTF8
@@ -134,8 +145,12 @@ Write-Host ("scale=1 (full-res): HLine {0:N2}  VLine {1:N2}  chromaSpeckle {2:N2
 Write-Host ("ratios full/def   : HLine x{0:N2}  VLine x{1:N2}  chromaSpeckle x{2:N2}" -f $ratioH, $ratioV, $ratioC)
 Write-Host ("thresholds        : HLine x{0}  VLine x{1}" -f $HLineRatioThreshold, $VLineRatioThreshold)
 if ($artifactPresent) {
-    Write-Host ("VERDICT: ARTIFACT_PRESENT -- full-res dual-ISO recon regression still here. Report: {0}" -f $reportPath) -ForegroundColor Red
+    Write-Host ("VERDICT: ARTIFACT_PRESENT -- full-res worse than default (ratio gate). Report: {0}" -f $reportPath) -ForegroundColor Red
     exit 1
 }
-Write-Host ("VERDICT: CLEAN -- full-res ~= default; no recon-regression signature. Report: {0}" -f $reportPath) -ForegroundColor Green
+if ($defaultLegSuspect) {
+    Write-Host ("VERDICT: SUSPECT_EYEBALL_REQUIRED -- ratios ~1 but default-leg HLine {0:N2} > ceiling {1}; both legs may be equally broken. EYEBALL the grabs before any CLEAN claim. Report: {2}" -f $m2.hline, $DefaultLegHLineCeiling, $reportPath) -ForegroundColor Yellow
+    exit 3
+}
+Write-Host ("VERDICT: CLEAN -- full-res ~= default AND default leg within clean ceiling. Still eyeball the grabs. Report: {0}" -f $reportPath) -ForegroundColor Green
 exit 0
