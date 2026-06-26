@@ -189,6 +189,16 @@ void findMlvWhiteBalance(mlvObject_t *, uint64_t, int, int, int * wbTemp, int * 
     }
 }
 
+void findMlvWhiteBalanceIsolated(mlvObject_t *, uint64_t, int, int, int * wbTemp, int * wbTint, int)
+{
+    if (wbTemp) {
+        *wbTemp = 6000;
+    }
+    if (wbTint) {
+        *wbTint = 0;
+    }
+}
+
 void wb_convert(wb_convert_info_t * wb_info, float *, int, int, int)
 {
     if (wb_info) {

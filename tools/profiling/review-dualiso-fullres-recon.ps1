@@ -12,6 +12,17 @@
 # CPU lane. For the CUDA path specifically, run tools\profiling\run-release-cuda-playback-ab.ps1
 # at ScaleFactor=1 on the actual 4090/3060 bench AFTER a verified deploy.
 #
+# GATE-FAIRNESS (2026-06-26): the Look Assist auto-WB is non-deterministic run-to-run
+# (.claude-state/analysis/lookassist-wb-nondeterminism.md), so running each leg with its own auto-WB
+# makes the A/B conflate the clean recon with auto-WB noise. Two opt-in modes lock the WB so the A/B
+# measures recon only (both add --no-look-assist so the auto-WB cannot diverge the legs):
+#   -LockWhiteBalance : both legs at one deterministic default WB; chroma_smooth is OFF, so absolute
+#                       row energy reads high -- trust the RATIO, which is ~1.0 when recon is scale-fair.
+#   -LockReceipt <p>  : both legs --receipt <p>, pinning WB AND chroma identically. Use
+#                       tests/fixtures/receipts/large_dual_iso_wblock_chroma.marxml (WB 5000/0,
+#                       chromaSmooth=1) for the chroma-ON gold standard -- a CLEAN verdict then means
+#                       recon+chroma are good at locked WB. (Chroma-on is heavier; give it -Seconds 20+.)
+#
 # Exit: 0 = CLEAN (no full-res regression signature) ; 1 = ARTIFACT_PRESENT ; 2 = error.
 param(
     [string]$RepoRoot = ".",
@@ -19,7 +30,9 @@ param(
     [Alias("Input")]
     [string]$ClipPath = "",
     [int]$StartFrame = 10,
-    [int]$Seconds = 3,
+    [int]$Seconds = 24,      # RULE 2026-06-26 (Layi): generous settled playback window (was 3s) when
+                             # playing MLV -- ~the recommended 30s window; chroma-on (-LockReceipt) is
+                             # heavy so this also gives the render time to settle before the grab.
     [int]$SettleMs = 3500,
     [string]$OutputRoot = "",
     [double]$HLineRatioThreshold = 3.0,
@@ -32,6 +45,20 @@ param(
     # cannot reliably tell artifact from busy detail; per the post-mortem, the eyeball is
     # mandatory. This guard caught the 2026-06-24 false-CLEAN where both legs read HLine ~26.)
     [double]$DefaultLegHLineCeiling = 5.0,
+    # GATE-FAIRNESS: the Look Assist auto-WB is non-deterministic run-to-run (proven 2026-06-26:
+    # .claude-state/analysis/lookassist-wb-nondeterminism.md), so running each leg with its own
+    # auto-WB makes the A/B conflate the (clean) recon with auto-WB noise. -LockWhiteBalance runs
+    # BOTH legs with --no-look-assist so they share one deterministic default WB, isolating the
+    # recon. The frame is already fixed (-StartFrame). Both legs identical WB => the comparison
+    # measures recon only. (Caveat: --no-look-assist also disables chroma_smooth; the chroma-on
+    # locked control is a follow-up that needs a fixed receipt.)
+    [switch]$LockWhiteBalance,
+    # GATE-FAIRNESS gold standard: run both legs with this fixed receipt + --no-look-assist, pinning
+    # WB AND chroma_smooth identically across legs. Use
+    # tests/fixtures/receipts/large_dual_iso_wblock_chroma.marxml (WB 5000/0, chromaSmooth=1) to measure
+    # the recon at a representative chroma-ON state -- a CLEAN verdict then means recon+chroma are good
+    # at locked WB. Implies locked-WB semantics; takes precedence over -LockWhiteBalance if both are set.
+    [string]$LockReceipt = "",
     [switch]$DryRun
 )
 
@@ -79,23 +106,90 @@ if ($DryRun) {
 }
 
 $grabs = [ordered]@{}
+# GATE-FAIRNESS: with -LockWhiteBalance, run both legs with --no-look-assist so they share one
+# deterministic default WB (the auto-WB is non-deterministic run-to-run). The gate computes its
+# metrics from the captured PNG, which --no-look-assist still produces, so the recon comparison is
+# isolated from auto-WB noise. (-DisableLookAssist is a [switch]; splatting an empty array is a no-op.)
+# GATE-FAIRNESS: lock the WB across both legs so the A/B measures recon, not the non-deterministic
+# Look Assist auto-WB. -LockReceipt pins a fixed receipt (WB + chroma); -LockWhiteBalance alone uses
+# --no-look-assist (default WB, chroma off). Both add --no-look-assist so auto-WB cannot diverge legs.
+$lockArgs = @()
+if ($LockReceipt) {
+    $lockReceiptPath = (Resolve-Path -LiteralPath $LockReceipt).Path
+    $lockArgs = @('-Receipt', $lockReceiptPath, '-DisableLookAssist')
+    Write-Host "[A/B] -LockReceipt: both legs run --receipt '$lockReceiptPath' --no-look-assist (locked WB + chroma per receipt) so the gate measures recon at a fixed processing state." -ForegroundColor Cyan
+}
+elseif ($LockWhiteBalance) {
+    $lockArgs = @('-DisableLookAssist')
+    Write-Host "[A/B] -LockWhiteBalance: both legs run --no-look-assist (locked default WB, chroma off) so the gate measures recon, not the non-deterministic Look Assist auto-WB." -ForegroundColor Cyan
+}
 foreach ($sf in @(2, 1)) {
     $scaleDir = Join-Path $OutputRoot "scale$sf"
     New-Item -ItemType Directory -Force -Path $scaleDir | Out-Null
     Write-Host ("[A/B] scale=$sf live autoplay grab ...")
-    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $smoke `
-        -RepoRoot $root -ExePath $exe -Input $clip `
-        -ScaleFactor $sf -ExpectedScaleRequest $sf `
-        -StartFrame $StartFrame -Seconds $Seconds -SettleMs $SettleMs `
-        -CaptureScreenshot -SkipWindowScreenshot `
-        -Output (Join-Path $scaleDir "result.json") `
-        -ScreenshotOutputDir (Join-Path $scaleDir "shots") *> (Join-Path $scaleDir "smoke.log")
+    # Build the smoke args as an array (canonical splat) so conditional flags compose cleanly with
+    # the *> redirect -- inline-splatting an array next to *> misparses (binds a stray '-').
+    $smokeArgs = @(
+        '-RepoRoot', $root, '-ExePath', $exe, '-Input', $clip,
+        '-ScaleFactor', $sf, '-ExpectedScaleRequest', $sf,
+        '-StartFrame', $StartFrame, '-Seconds', $Seconds, '-SettleMs', $SettleMs,
+        '-CaptureScreenshot', '-SkipWindowScreenshot',
+        # Frame-matched A/B: BOTH legs must stop on the SAME end frame for the ratio to be valid, so
+        # this gate opts OUT of the new default-on playback loop (the general smoke loops; this does not).
+        '-NoLoop',
+        '-Output', (Join-Path $scaleDir 'result.json'),
+        '-ScreenshotOutputDir', (Join-Path $scaleDir 'shots')
+    )
+    $smokeArgs += $lockArgs
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $smoke @smokeArgs *> (Join-Path $scaleDir 'smoke.log')
     $png = Join-Path $scaleDir "shots\$clipBase.png"
     if (-not (Test-Path -LiteralPath $png -PathType Leaf)) {
         Write-Host "ERROR: scale=$sf produced no screenshot ($png). See $scaleDir\smoke.log" -ForegroundColor Red
         exit 2
     }
     $grabs["scale$sf"] = $png
+}
+
+# SCALE -> ASPECT-RATIO CHECK (2026-06-26): the playback scale must PRESERVE the aspect ratio -- a
+# UNIFORM width/height downscale, identical between scale=1 and scale=2, and matching the clip's native
+# RAWI aspect. A one-dimensional scale (e.g. half-width/full-height) would distort the image and confound
+# the A/B. The recon ratio already catches BETWEEN-leg distortion; this also catches a both-legs-equal
+# distortion vs the native aspect. Non-fatal: warns + records in the verdict. (large_dual_iso.mlv is
+# natively PORTRAIT 1808x2268 ~0.797 -- the grabs are a uniform fit-to-display downscale to ~0.796.)
+function Get-PngAspectInfo([string]$p) {
+    $b = [System.IO.File]::ReadAllBytes($p)
+    $w = ([int]$b[16] -shl 24) -bor ([int]$b[17] -shl 16) -bor ([int]$b[18] -shl 8) -bor [int]$b[19]
+    $h = ([int]$b[20] -shl 24) -bor ([int]$b[21] -shl 16) -bor ([int]$b[22] -shl 8) -bor [int]$b[23]
+    return [ordered]@{ w = $w; h = $h; aspect = [Math]::Round($w / [Math]::Max(1, $h), 4) }
+}
+function Get-MlvNativeAspectInfo([string]$p) {
+    $fs = [System.IO.File]::OpenRead($p)
+    try {
+        $buf = New-Object byte[] 262144
+        $n = $fs.Read($buf, 0, $buf.Length)
+        for ($i = 0; $i -lt $n - 20; $i++) {
+            if ($buf[$i] -eq 0x52 -and $buf[$i+1] -eq 0x41 -and $buf[$i+2] -eq 0x57 -and $buf[$i+3] -eq 0x49) {
+                $xRes = [int]$buf[$i+16] -bor ([int]$buf[$i+17] -shl 8)
+                $yRes = [int]$buf[$i+18] -bor ([int]$buf[$i+19] -shl 8)
+                if ($xRes -gt 0 -and $yRes -gt 0) { return [ordered]@{ w = $xRes; h = $yRes; aspect = [Math]::Round($xRes / $yRes, 4) } }
+            }
+        }
+    } finally { $fs.Close() }
+    return $null
+}
+$asp2 = Get-PngAspectInfo $grabs["scale2"]
+$asp1 = Get-PngAspectInfo $grabs["scale1"]
+$aspNative = Get-MlvNativeAspectInfo $clip
+$aspectTol = 0.02
+$aspectLegMatch = ([Math]::Abs($asp2.aspect - $asp1.aspect) -le $aspectTol)
+$aspectVsNative = ($null -ne $aspNative) -and ([Math]::Abs($asp2.aspect - $aspNative.aspect) -le $aspectTol)
+$aspectOk = $aspectLegMatch -and $aspectVsNative
+$aspectCheck = [ordered]@{ scale2 = $asp2; scale1 = $asp1; native = $aspNative; toleranceAspect = $aspectTol; legMatch = $aspectLegMatch; matchesNative = $aspectVsNative; ok = $aspectOk }
+if ($aspectOk) {
+    Write-Host ("[A/B] aspect OK: scale2 {0}x{1} / scale1 {2}x{3} ~{4} == native {5}x{6} ~{7} (scale preserves aspect)." -f $asp2.w,$asp2.h,$asp1.w,$asp1.h,$asp2.aspect,$aspNative.w,$aspNative.h,$aspNative.aspect) -ForegroundColor DarkGray
+} else {
+    $nstr = if ($aspNative) { "$($aspNative.w)x$($aspNative.h) ~$($aspNative.aspect)" } else { "(native unread)" }
+    Write-Host ("ASPECT WARNING: scale2 {0}x{1} ~{2} / scale1 {3}x{4} ~{5} / native {6}  legMatch={7} matchesNative={8} -- scale must be a UNIFORM W/H downscale; a mismatch means the playback scale DISTORTED the aspect ratio." -f $asp2.w,$asp2.h,$asp2.aspect,$asp1.w,$asp1.h,$asp1.aspect,$nstr,$aspectLegMatch,$aspectVsNative) -ForegroundColor Yellow
 }
 
 $metricsJson = & py -3 $metricPy $grabs["scale2"] $grabs["scale1"]
@@ -120,6 +214,9 @@ $report = [ordered]@{
     schema = "mlvapp.dualiso-fullres-review.v1"
     verdict = $verdict
     artifactPresent = $artifactPresent
+    whiteBalanceLocked = [bool]($LockWhiteBalance -or $LockReceipt)
+    lockReceipt = $LockReceipt
+    aspectCheck = $aspectCheck
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     exe = $exe
     embeddedSha = $stampInfo.sha

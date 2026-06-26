@@ -4,11 +4,15 @@ param(
     [Alias("Input")]
     [string]$ClipPath = "",
     [string]$Output = "",
-    [int]$Seconds = 8,
+    [int]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
+                          # generous time to actually play before closing -- ~3x the old 8s, toward the
+                          # recommended 30s settled-validation window. Both lanes use a generous window.
     [int]$StartFrame = 0,
     [ValidateSet("persisted", "on", "off")]
     [string]$DropFrameMode = "persisted",
     [int]$SettleMs = 2500,
+    [switch]$NoLoop,          # default: pass --loop so a short clip plays continuously for the whole
+                              # -Seconds window. Set this to play once then stop (e.g. a frame-matched A/B).
     [double]$SettleCpuPercent = 10,
     [int]$SettleCpuStableMs = 1000,
     [int]$SettleCpuMaxMs = 45000,
@@ -834,6 +838,8 @@ $arguments = @(
     "--settle-cpu-stable-ms", [string]$SettleCpuStableMs,
     "--settle-cpu-max-ms", [string]$SettleCpuMaxMs
 )
+# RULE 2026-06-26 (Layi): loop short clips so they play the whole -Seconds window (not one pass + stop).
+if (-not $NoLoop) { $arguments += "--loop" }
 if (-not [string]::IsNullOrWhiteSpace($Receipt)) {
     $arguments += @("--receipt", (Resolve-Path -LiteralPath $Receipt).Path)
 }
