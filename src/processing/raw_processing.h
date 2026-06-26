@@ -11,6 +11,9 @@
 processingObject_t * initProcessingObject();
 /* Opposite of the first fucntion */
 void freeProcessingObject(processingObject_t * processing);
+/* Clone enough processing state for isolated analysis routines that mutate WB/search tables. */
+processingObject_t * processingCloneForAnalysis(const processingObject_t * processing);
+void processingFreeClone(processingObject_t * processing);
 
 
 /* Set processing gamut */

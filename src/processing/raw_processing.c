@@ -4802,6 +4802,136 @@ void freeProcessingObject(processingObject_t * processing)
     free(processing);
 }
 
+processingObject_t * processingCloneForAnalysis(const processingObject_t * src)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+
+    processingObject_t * clone = initProcessingObject();
+    if (!clone)
+    {
+        return NULL;
+    }
+
+    filterObject_t * clone_filter = clone->filter;
+    lut_t * clone_lut = clone->lut;
+    int32_t * clone_pre_calc_matrix[9];
+    int32_t * clone_pre_calc_matrix_gradient[9];
+    int32_t * clone_pre_calc_rgb_to_YCbCr[7];
+    int32_t * clone_pre_calc_YCbCr_to_rgb[5];
+    processing_buffer_t * clone_blur_image = clone->shadows_highlights.blur_image;
+    processing_buffer_t * clone_blur_image_half_in = clone->shadows_highlights.blur_image_half_in;
+    processing_buffer_t * clone_blur_image_half_out = clone->shadows_highlights.blur_image_half_out;
+    char * clone_transfer_function_string = clone->transfer_function_string;
+    char * clone_transfer_function_string_formatted = clone->transfer_function_string_formatted;
+    te_expr * clone_transfer_function = clone->transfer_function;
+
+    for (int i = 0; i < 9; ++i)
+    {
+        clone_pre_calc_matrix[i] = clone->pre_calc_matrix[i];
+        clone_pre_calc_matrix_gradient[i] = clone->pre_calc_matrix_gradient[i];
+    }
+    for (int i = 0; i < 7; ++i)
+    {
+        clone_pre_calc_rgb_to_YCbCr[i] = clone->cs_zone.pre_calc_rgb_to_YCbCr[i];
+    }
+    for (int i = 0; i < 5; ++i)
+    {
+        clone_pre_calc_YCbCr_to_rgb[i] = clone->cs_zone.pre_calc_YCbCr_to_rgb[i];
+    }
+
+    *clone = *src;
+
+    clone->filter = clone_filter;
+    clone->lut = clone_lut;
+    clone->shadows_highlights.blur_image = clone_blur_image;
+    clone->shadows_highlights.blur_image_half_in = clone_blur_image_half_in;
+    clone->shadows_highlights.blur_image_half_out = clone_blur_image_half_out;
+    clone->gradient_mask = NULL;
+    clone->vignette_mask = NULL;
+    clone->vignette_end = NULL;
+    clone->sharpen_mask_gray = NULL;
+    clone->sharpen_mask_sobel_h = NULL;
+    clone->sharpen_mask_sobel_v = NULL;
+    clone->sharpen_mask_contour = NULL;
+    clone->sharpen_mask_capacity = 0;
+    clone->denoiser_context = NULL;
+    clone->transfer_function_string = clone_transfer_function_string;
+    clone->transfer_function_string_formatted = clone_transfer_function_string_formatted;
+    clone->transfer_function = clone_transfer_function;
+    clone->x_variable.address = &clone->x_value;
+    clone->x_variable.name = "x";
+    clone->x_variable.context = 0;
+    clone->wbFindActive = 0;
+
+    for (int i = 0; i < 9; ++i)
+    {
+        clone->pre_calc_matrix[i] = clone_pre_calc_matrix[i];
+        clone->pre_calc_matrix_gradient[i] = clone_pre_calc_matrix_gradient[i];
+        if (!clone->pre_calc_matrix[i] || !clone->pre_calc_matrix_gradient[i]
+            || !src->pre_calc_matrix[i] || !src->pre_calc_matrix_gradient[i])
+        {
+            processingFreeClone(clone);
+            return NULL;
+        }
+        memcpy(clone->pre_calc_matrix[i],
+               src->pre_calc_matrix[i],
+               65536u * sizeof(*clone->pre_calc_matrix[i]));
+        memcpy(clone->pre_calc_matrix_gradient[i],
+               src->pre_calc_matrix_gradient[i],
+               65536u * sizeof(*clone->pre_calc_matrix_gradient[i]));
+    }
+
+    for (int i = 0; i < 7; ++i)
+    {
+        clone->cs_zone.pre_calc_rgb_to_YCbCr[i] = clone_pre_calc_rgb_to_YCbCr[i];
+        if (clone->cs_zone.pre_calc_rgb_to_YCbCr[i] && src->cs_zone.pre_calc_rgb_to_YCbCr[i])
+        {
+            memcpy(clone->cs_zone.pre_calc_rgb_to_YCbCr[i],
+                   src->cs_zone.pre_calc_rgb_to_YCbCr[i],
+                   65536u * sizeof(*clone->cs_zone.pre_calc_rgb_to_YCbCr[i]));
+        }
+    }
+    for (int i = 0; i < 5; ++i)
+    {
+        clone->cs_zone.pre_calc_YCbCr_to_rgb[i] = clone_pre_calc_YCbCr_to_rgb[i];
+        if (clone->cs_zone.pre_calc_YCbCr_to_rgb[i] && src->cs_zone.pre_calc_YCbCr_to_rgb[i])
+        {
+            memcpy(clone->cs_zone.pre_calc_YCbCr_to_rgb[i],
+                   src->cs_zone.pre_calc_YCbCr_to_rgb[i],
+                   65536u * sizeof(*clone->cs_zone.pre_calc_YCbCr_to_rgb[i]));
+        }
+    }
+
+    return clone;
+}
+
+void processingFreeClone(processingObject_t * processing)
+{
+    if (!processing)
+    {
+        return;
+    }
+    if (processing->transfer_function_string)
+    {
+        free(processing->transfer_function_string);
+        processing->transfer_function_string = NULL;
+    }
+    if (processing->transfer_function_string_formatted)
+    {
+        free(processing->transfer_function_string_formatted);
+        processing->transfer_function_string_formatted = NULL;
+    }
+    if (processing->transfer_function)
+    {
+        te_free(processing->transfer_function);
+        processing->transfer_function = NULL;
+    }
+    freeProcessingObject(processing);
+}
+
 /* Find correct white balance setting for one selected pixel */
 void processingFindWhiteBalance(processingObject_t *processing, int imageX, int imageY, uint16_t *inputImage, int posX, int posY, int *wbTemp, int *wbTint, int mode)
 {

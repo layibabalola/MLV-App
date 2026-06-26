@@ -9265,3 +9265,40 @@ void findMlvWhiteBalance(mlvObject_t *video, uint64_t frameIndex, int posX, int 
 
     free(unprocessed_frame);
 }
+
+void findMlvWhiteBalanceIsolated(mlvObject_t *video, uint64_t frameIndex, int posX, int posY, int *wbTemp, int *wbTint, int mode)
+{
+    int width = getMlvWidth(video);
+    int height = getMlvHeight(video);
+    size_t pixels = (size_t)width * (size_t)height;
+    size_t rgb_words = pixels * 3u;
+
+    float * temp_frame = malloc(pixels * sizeof(float));
+    uint16_t * unprocessed_frame = malloc(rgb_words * sizeof(uint16_t));
+    processingObject_t * analysis_processing = processingCloneForAnalysis(video->processing);
+
+    if (!temp_frame || !unprocessed_frame || !analysis_processing)
+    {
+        free(temp_frame);
+        free(unprocessed_frame);
+        processingFreeClone(analysis_processing);
+        findMlvWhiteBalance(video, frameIndex, posX, posY, wbTemp, wbTint, mode);
+        return;
+    }
+
+    get_mlv_raw_frame_debayered(video,
+                                frameIndex,
+                                temp_frame,
+                                unprocessed_frame,
+                                doesMlvAlwaysUseAmaze(video));
+
+    processingFindWhiteBalance(analysis_processing,
+                               width, height,
+                               unprocessed_frame,
+                               posX, posY,
+                               wbTemp, wbTint, mode);
+
+    processingFreeClone(analysis_processing);
+    free(temp_frame);
+    free(unprocessed_frame);
+}
