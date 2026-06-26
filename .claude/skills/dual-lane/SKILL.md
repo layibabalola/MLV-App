@@ -42,6 +42,33 @@ ROLE the config assigns you. The lane FILE is fixed by agent; the ROLE comes fro
 
 ---
 
+## Shared working tree — commit ONLY your lane (mechanical guardrails)
+
+Both lanes work in the SAME local working tree on the SAME branch, so at any moment it may hold
+BOTH lanes' uncommitted work. A blanket `git add -A` / `git commit -a` by either lane sweeps the
+OTHER lane's WIP into your commit (lane-mixing); a `git reset --hard` / `git checkout -- .` destroys
+it (the branch is local-only — no remote backup). **Never use `-A`/`-a` or destructive git here.**
+
+Guardrails make this fail-closed instead of relying on memory (`tools/dual-lane/`,
+`.dual-lane/ownership.json` — the machine-readable `path → lane` map):
+1. **Declare your lane once per session:** `$env:GIT_DUAL_LANE='claude'` (or `'codex'`).
+2. **Commit via the helper, never raw:**
+   ```
+   pwsh -File tools/dual-lane/lane-commit.ps1 -Lane claude -DryRun          # preview owned vs foreign
+   pwsh -File tools/dual-lane/lane-commit.ps1 -Lane claude -Message "..."   # stages owned paths ONLY
+   ```
+   It stages only paths `owner-of.ps1` maps to your lane (explicit pathspec), refuses unmapped
+   (`unknown`) paths, leaves the other lane's WIP untouched, prints the `parent..HEAD` range for your
+   handoff, and stamps a `Dual-Lane:` trailer for attribution.
+3. **Backstop (both-lane opt-in):** `install-hooks.ps1 -Activate` installs a pre-commit lane-guard
+   that blocks a cross-lane staged set even on a raw `git commit`. Loud override:
+   `GIT_DUAL_LANE_OVERRIDE=1`. Do not activate until both lanes set `GIT_DUAL_LANE`. See
+   `tools/dual-lane/README.md`.
+
+If you spot an `unknown` path, ADD it to `.dual-lane/ownership.json` rather than bypassing the guard.
+
+---
+
 ## REVIEWER loop (when the config assigns you REVIEWER)
 Process per the protocol's read/write order. For a Codex **HANDOFF**, run the **independent**
 review — never trust the implementer's verdict:
@@ -115,7 +142,9 @@ watcher on `claude.md` so neither side needs a manual nudge.
 ## Hard rules (all modes)
 - **The artifact is the verdict; the scalar is only a screen. Look every time** (esp. the config's
   blind spots). A CLEAN you did not look at is not a review.
-- **Commit the candidate before handoff** — a dirty stamp can't be pinned.
+- **Commit the candidate before handoff** — a dirty stamp can't be pinned. Commit with
+  `tools/dual-lane/lane-commit.ps1 -Lane <lane>` (lane-owned paths only, never `git add -A`); see
+  "Shared working tree" above.
 - Write ONLY to `claude.md` (+ `archive/`). Never edit `codex.md` or the config mid-round without an
   entry announcing it.
 - **Never go idle on an open CHANGES_REQUESTED you own** (implementer) — iterate or declare a blocker.
