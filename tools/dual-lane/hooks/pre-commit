@@ -1,0 +1,16 @@
+#!/bin/sh
+# dual-lane pre-commit lane-guard (installed via tools/dual-lane/install-hooks.ps1 -> core.hooksPath).
+# Delegates to the PowerShell lane-guard (the real check). Fail-closed: if pwsh or the guard is missing,
+# BLOCK the commit rather than allow an unchecked cross-lane commit.
+root="$(git rev-parse --show-toplevel)"
+guard="$root/tools/dual-lane/lane-guard.ps1"
+pwsh_bin="$(command -v pwsh 2>/dev/null || command -v pwsh.exe 2>/dev/null)"
+if [ -z "$pwsh_bin" ]; then
+  echo "[pre-commit] BLOCK: pwsh not found; cannot run the dual-lane lane-guard." >&2
+  exit 1
+fi
+if [ ! -f "$guard" ]; then
+  echo "[pre-commit] BLOCK: $guard missing." >&2
+  exit 1
+fi
+"$pwsh_bin" -NoProfile -NonInteractive -File "$guard"
