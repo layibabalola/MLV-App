@@ -4802,6 +4802,86 @@ void freeProcessingObject(processingObject_t * processing)
     free(processing);
 }
 
+static char * compile_ternary(char * function);
+
+static int copy_lut_for_analysis(lut_t * dst, const lut_t * src)
+{
+    if (!dst || !src)
+    {
+        return 0;
+    }
+
+    float * new_cube = NULL;
+    if (src->cube)
+    {
+        size_t values = (size_t)src->dimension * 3u;
+        if (src->is3d)
+        {
+            values = (size_t)src->dimension
+                   * (size_t)src->dimension
+                   * (size_t)src->dimension
+                   * 3u;
+        }
+
+        new_cube = malloc(values * sizeof(*new_cube));
+        if (!new_cube)
+        {
+            return 1;
+        }
+        memcpy(new_cube, src->cube, values * sizeof(*new_cube));
+    }
+
+    float * dst_cube = dst->cube;
+    *dst = *src;
+    dst->cube = new_cube;
+    if (dst_cube)
+    {
+        free(dst_cube);
+    }
+
+    return 0;
+}
+
+static int copy_transfer_function_for_analysis(processingObject_t * clone, const processingObject_t * src)
+{
+    if (!clone || !src || !src->transfer_function_string)
+    {
+        return 0;
+    }
+
+    char * transfer_function_string = malloc(strlen(src->transfer_function_string) + 1u);
+    if (!transfer_function_string)
+    {
+        return 1;
+    }
+    strcpy(transfer_function_string, src->transfer_function_string);
+
+    char * transfer_function_formatted = compile_ternary(src->transfer_function_string);
+    if (!transfer_function_formatted)
+    {
+        free(transfer_function_string);
+        return 1;
+    }
+
+    te_variable * var = &clone->x_variable;
+    te_expr * transfer_function = te_compile(transfer_function_formatted, var, 1, NULL);
+    if (!transfer_function)
+    {
+        free(transfer_function_formatted);
+        free(transfer_function_string);
+        return 1;
+    }
+
+    free(clone->transfer_function_string);
+    free(clone->transfer_function_string_formatted);
+    te_free(clone->transfer_function);
+
+    clone->transfer_function_string = transfer_function_string;
+    clone->transfer_function_string_formatted = transfer_function_formatted;
+    clone->transfer_function = transfer_function;
+    return 0;
+}
+
 processingObject_t * processingCloneForAnalysis(const processingObject_t * src)
 {
     if (!src)
@@ -4846,6 +4926,16 @@ processingObject_t * processingCloneForAnalysis(const processingObject_t * src)
 
     clone->filter = clone_filter;
     clone->lut = clone_lut;
+    if (src->filter && clone->filter)
+    {
+        filterObjectSetFilterStrength(clone->filter, src->filter->strength);
+        filterObjectSetFilter(clone->filter, src->filter->filter_option);
+    }
+    if (copy_lut_for_analysis(clone->lut, src->lut))
+    {
+        processingFreeClone(clone);
+        return NULL;
+    }
     clone->shadows_highlights.blur_image = clone_blur_image;
     clone->shadows_highlights.blur_image_half_in = clone_blur_image_half_in;
     clone->shadows_highlights.blur_image_half_out = clone_blur_image_half_out;
@@ -4865,6 +4955,11 @@ processingObject_t * processingCloneForAnalysis(const processingObject_t * src)
     clone->x_variable.name = "x";
     clone->x_variable.context = 0;
     clone->wbFindActive = 0;
+    if (copy_transfer_function_for_analysis(clone, src))
+    {
+        processingFreeClone(clone);
+        return NULL;
+    }
 
     for (int i = 0; i < 9; ++i)
     {
