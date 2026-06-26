@@ -676,21 +676,50 @@ void an_mlv_cache_thread(mlvObject_t * video)
 }
 
 /* Gets a freshly debayered frame every time ( temp memory should be Width * Height * sizeof(float) ) */
-void get_mlv_raw_frame_debayered( mlvObject_t * video, 
-                                  uint64_t frame_index,
-                                  float * temp_memory, 
-                                  uint16_t * output_frame, 
-                                  int debayer_type ) /* 0=bilinear 1=amaze ... */
+static int get_mlv_raw_frame_float_isolated_analysis(mlvObject_t * video,
+                                                     uint64_t frame_index,
+                                                     float * output_frame)
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
     const size_t frame_pixels = (size_t)width * (size_t)height;
+    uint16_t * raw_frame_u16 = (uint16_t *)output_frame;
+    int bit_shift = 0;
+
+    if (getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift))
+    {
+        memset(output_frame, 0, frame_pixels * sizeof(float));
+        return 1;
+    }
+
+    for (int64_t i = (int64_t)frame_pixels - 1; i >= 0; --i)
+    {
+        output_frame[i] = (float)((uint32_t)raw_frame_u16[i] << bit_shift);
+    }
+
+    return 0;
+}
+
+static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
+                                              uint64_t frame_index,
+                                              float * temp_memory,
+                                              uint16_t * output_frame,
+                                              int debayer_type,
+                                              int isolated_analysis ) /* 0=bilinear 1=amaze ... */
+{
+    int width = getMlvWidth(video);
+    int height = getMlvHeight(video);
+    const size_t frame_pixels = (size_t)width * (size_t)height;
+    const int debayer_threads = isolated_analysis ? 1 : getMlvCpuCores(video);
 
     if( debayer_type == 0 )
     {
         uint16_t * raw_frame_u16 = (uint16_t *)temp_memory;
         int bit_shift = 0;
-        if (getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift))
+        int raw_failed = isolated_analysis
+            ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
+            : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift);
+        if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
             return;
@@ -701,7 +730,7 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
                         raw_frame_u16,
                         width,
                         height,
-                        getMlvCpuCores(video),
+                        debayer_threads,
                         bit_shift);
         g_mlv_last_debayer_kernel_ms = (mlv_debayer_timing_now_seconds() - debayer_kernel_start) * 1000.0;
         return;
@@ -711,7 +740,10 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
     {
         uint16_t * raw_frame_u16 = (uint16_t *)temp_memory;
         int bit_shift = 0;
-        if (getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift))
+        int raw_failed = isolated_analysis
+            ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
+            : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift);
+        if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
             return;
@@ -722,14 +754,25 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
                        raw_frame_u16,
                        width,
                        height,
-                       getMlvCpuCores(video),
+                       debayer_threads,
                        bit_shift);
         g_mlv_last_debayer_kernel_ms = (mlv_debayer_timing_now_seconds() - debayer_kernel_start) * 1000.0;
         return;
     }
 
     /* Get the raw data in B&W */
-    getMlvRawFrameFloat(video, frame_index, temp_memory);
+    if (isolated_analysis)
+    {
+        if (get_mlv_raw_frame_float_isolated_analysis(video, frame_index, temp_memory))
+        {
+            memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
+            return;
+        }
+    }
+    else
+    {
+        getMlvRawFrameFloat(video, frame_index, temp_memory);
+    }
 
     wb_convert_info_t wb_info;
 
@@ -769,12 +812,12 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
     }
     else if (debayer_type == 1 )
     {
-        debayerAmaze(output_frame, temp_memory, width, height, getMlvCpuCores(video), getMlvBlackLevel(video));
+        debayerAmaze(output_frame, temp_memory, width, height, debayer_threads, getMlvBlackLevel(video));
     }
     else if(debayer_type == 2 || debayer_type == 3)
     {
         /* threaded easy types */
-        debayerEasy(output_frame, temp_memory, width, height, getMlvCpuCores(video), debayer_type);
+        debayerEasy(output_frame, temp_memory, width, height, debayer_threads, debayer_type);
     }
     else if (debayer_type == 6 )
     {
@@ -825,7 +868,37 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
         meta.dual_iso_mode = NULL;
         meta.debayer_mode = debayer_label;
         meta.scaler = "none";
-        meta.path_label = "get_mlv_raw_frame_debayered";
+        meta.path_label = isolated_analysis
+            ? "get_mlv_raw_frame_debayered_isolated_analysis"
+            : "get_mlv_raw_frame_debayered";
         mlv_pipeline_capture(frame_index, output_frame, &meta);
     }
+}
+
+void get_mlv_raw_frame_debayered( mlvObject_t * video,
+                                  uint64_t frame_index,
+                                  float * temp_memory,
+                                  uint16_t * output_frame,
+                                  int debayer_type ) /* 0=bilinear 1=amaze ... */
+{
+    get_mlv_raw_frame_debayered_impl(video,
+                                     frame_index,
+                                     temp_memory,
+                                     output_frame,
+                                     debayer_type,
+                                     0);
+}
+
+void get_mlv_raw_frame_debayered_isolated_analysis( mlvObject_t * video,
+                                                    uint64_t frame_index,
+                                                    float * temp_memory,
+                                                    uint16_t * output_frame,
+                                                    int debayer_type ) /* 0=bilinear 1=amaze ... */
+{
+    get_mlv_raw_frame_debayered_impl(video,
+                                     frame_index,
+                                     temp_memory,
+                                     output_frame,
+                                     debayer_type,
+                                     1);
 }
