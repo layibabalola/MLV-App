@@ -13993,6 +13993,38 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         autoWhiteBalanceSource.toUtf8().constData() );
                     fflush( stderr );
                 }
+                // [WB-VALUE-PROBE] read-only DECIDING-half diagnostic (dual-lane two-key; Layi-approved
+                // instrument-first). When the real path used the PROCESSED-color patch, ALSO compute (but
+                // NEVER apply) the WB the RAW-thumbnail neutral patch would give, so a cross-clip compare
+                // decides patch-SELECTION (MainWindow) vs debayer-INPUT (processing). The isolated solver
+                // uses a PRIVATE clone + caller-owned buffers, so this extra call touches no shared/applied
+                // state. Same env gate as Codex's solver trace. Logs only; the applied value is unchanged.
+                if( useProcessedColorStatsCopy
+                 && qEnvironmentVariableIsSet( "MLVAPP_LOOK_ASSIST_WB_VALUE_TRACE" ) )
+                {
+                    const LookAssistAutoWhiteBalancePatch rawProbePatch =
+                        findLookAssistAutoWhiteBalancePatch(
+                            reinterpret_cast<const unsigned char *>( thumbCopy.constData() ),
+                            widthCopy, heightCopy, downscaleFactorCopy, raw_w_copy, raw_h_copy );
+                    int rawProbeTemp = baseTemperature;
+                    int rawProbeTint = baseTint;
+                    if( rawProbePatch.valid )
+                    {
+                        findMlvWhiteBalanceIsolated( mlvObj,
+                                             static_cast<uint64_t>( analysisFrameCopy ),
+                                             rawProbePatch.rawX, rawProbePatch.rawY,
+                                             &rawProbeTemp, &rawProbeTint, 0 );
+                    }
+                    fprintf( stderr,
+                        "WB_VALUE_PROBE_RAWPATCH proc_patch=%d/%d proc_raw_temp=%d proc_raw_tint=%d raw_patch_valid=%d raw_patch=%d/%d raw_raw_temp=%d raw_raw_tint=%d frame=%d\n",
+                        autoWbPatch.rawX, autoWbPatch.rawY,
+                        autoWhiteBalanceTemperature, autoWhiteBalanceTint,
+                        rawProbePatch.valid ? 1 : 0,
+                        rawProbePatch.rawX, rawProbePatch.rawY,
+                        rawProbeTemp, rawProbeTint,
+                        analysisFrameCopy );
+                    fflush( stderr );
+                }
                 autoWhiteBalanceTemperature =
                     qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
                 autoWhiteBalanceTint =
