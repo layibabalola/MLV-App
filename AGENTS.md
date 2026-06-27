@@ -36,6 +36,40 @@
 - The Windows `console_tests` and `pipeline_tests` builds deploy Qt runtime/plugins with `windeployqt`, then copy MinGW/OpenMP runtime DLLs beside the exe through `tools\testing\deploy-windows-test-runtime.ps1`. If a modal missing-DLL popup appears, treat it as a workflow regression: stop using the bare command, rerun through `tools\testing\run-windows-test.ps1`, and update this note if the wrapper itself fails.
 - When running a nested `pwsh.exe -Command` from an already-running PowerShell shell, do not put `$env:PATH=...` inside outer double quotes; the outer shell expands `$env:PATH` too early and can corrupt the child PATH. Prefer the current-shell form above, or single-quote the child command string.
 
+## Output-Regression Prevention -- "behavior-preserving" is the HIGHEST-risk class
+
+Three output regressions (per-clip color casts, dark/flat exposure, jerky playback) shipped over
+weeks because each was reviewed as a "behavior-preserving / byte-identical / perf / refactor /
+scheduling / proxy" change, and every gate checked internals/aggregates -- never the rendered
+OUTPUT on the user's real footage versus a frozen known-good build. Full program + per-regression
+gates + residual risks: `docs/regression-prevention-program.md`. Binding rules:
+
+- A change whose intent or subject is **behavior-preserving / byte-identical / refactor / perf /
+  scheduling / proxy / no-op** is the **highest-risk** class. It may not merge without an attached
+  **baseline-A/B PASS** on the real named clips (M16-1327 museum, M16-1347 atrium, M17-1207 street,
+  M15-1320 shuttle, M16-1210 crowd, M16-1243/M02-1344 pool) versus the pinned known-good build --
+  output-equivalence **proven, not asserted**. This automates the manual June-9 A/B that was the
+  only thing that ever caught these.
+- Three altitudes: **VALUES** (applied WB + presented color + luma percentiles; the WB-locked
+  `--no-look-assist` + committed-receipt legs are BLOCKING, the Look-Assist-ON legs ADVISORY at
+  ~3x measured spread) -- **PIXELS** (settled-frame perceptual diff, human-visible backstop) --
+  **CADENCE** (p90/p99/hitch DELTA vs the frozen distribution, median-of-N, **ADVISORY only, never
+  allowed to mute the blocking color/exposure legs** -- a muted cadence gate is how the jerky
+  regression shipped).
+- Any change to a playback/processing **DEFAULT** (e.g. Preview Resolution = Auto) is a behavior
+  change and must fail a tracked `tools/gates/shipping-defaults.json` equality test until the golden
+  is re-blessed.
+- The exposure A/B must read the **8-bit present buffer** (`getMlvProcessedFrame8Scaled` /
+  `rgb8DisplaySource`), NOT `MlvPipelineFixture.renderFrame16Scaled` (it renders full-res regardless
+  of scale and is blind to the half-res proxy). Recon same-build ratio gates are blind to
+  equal-both-legs darkening -- assert an ABSOLUTE luma-mean vs golden.
+- The one corpus-independent absolute (deterministic, BLOCKING, no clips): an auto-WB
+  fixed-point property test -- a near-neutral target renders neutral AND a second measure is already
+  neutral (single-pass code cannot satisfy it; it fails the dropped refinement loop directly).
+- Bless tooling refuses dirty/unstamped exes and requires `-Reason`; re-blessing a golden needs a
+  reviewed before/after. Re-bless laundering (greenlighting a regressed build by regenerating the
+  golden) is the worst failure mode -- guard it structurally.
+
 ## GUI Release Build Verification
 - After any source, UI, receipt, playback, color, scaling, or processing change that is meant to affect the Windows GUI, rebuild the user-facing release tree before final response:
   - `pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$env:PATH='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;' + $env:PATH; & 'C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe' -C platform\qt\build-release -B release -j4"`
