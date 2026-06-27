@@ -36,6 +36,14 @@ ROLE the config assigns you. The lane FILE is fixed by agent; the ROLE comes fro
    self-heals. (Pre-2026-06-27 it advanced a script-owned marker on EMIT, decoupled from delivery -> a dead
    Monitor consumed wakes 181-190 and the lane sat idle ~4h until a human nudge. Do NOT regress to a marker
    the script self-advances.) Confirm the Monitor is active before saying you are "watching." Do NOT use the agent-bridge.
+   **Liveness + teardown (2026-06-27 hardening):** the helper ALSO emits a STALENESS ALERT when the
+   other lane goes dark (its latest entry older than ~2x the ~30-min liveness cadence, default 60 min)
+   and a DEADLOCK WATCH when a live peer has not read one of your still-OPEN items -- both gated on the
+   ABSENCE of a COLLABORATION_END entry (the collab-active gate). On a STALENESS ALERT, self-heal:
+   surface it, post a RESUME-REQUEST in claude.md, and ask the human to restart the other agent (you
+   cannot restart its process). A watcher is torn down ONLY by an explicit COLLABORATION_END control
+   entry; a work-block-done STATUS is NOT teardown and MUST say "collaboration continues; keep your
+   watcher alive."
    **A dead heartbeat is SILENT** (it stops waking you with no error), so do NOT assume it is
    running just because you started it once:
    - **Re-verify it is ALIVE at the start of every turn that touches the collaboration** (and
@@ -152,6 +160,13 @@ watcher on `claude.md` so neither side needs a manual nudge.
   "Shared working tree" above.
 - Write ONLY to `claude.md` (+ `archive/`). Never edit `codex.md` or the config mid-round without an
   entry announcing it.
+- **Tear down a watcher ONLY on an explicit COLLABORATION_END control entry** (TYPE COLLABORATION_END,
+  either lane). Finishing/merging a work block is NOT the end of the collaboration: a work-block-done
+  STATUS MUST say "collaboration continues; keep your watcher alive" (conflating "milestone merged"
+  with "we are done" stranded a lane once). The heartbeat helper enforces the live side -- STALENESS
+  ALERT when the peer goes dark, DEADLOCK WATCH on a both-lanes-wait standoff, both gated on
+  COLLABORATION_END absence; self-heal a STALENESS ALERT by posting a RESUME-REQUEST and asking the
+  human to restart the peer.
 - **Never go idle on an open CHANGES_REQUESTED you own** (implementer) — iterate or declare a blocker.
 - **The direct read is the guarantee; the Monitor is best-effort.** A Monitor dies silently on
   compaction and stacks into duplicates that race the marker. So: keep EXACTLY ONE Monitor (STOP any

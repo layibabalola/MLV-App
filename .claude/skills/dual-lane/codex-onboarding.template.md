@@ -29,7 +29,8 @@ YOUR LANE:
         <evidence paths, gate verdict, "I looked: <what I saw>", the acceptance checks>
       status: OPEN | ACKED | RESOLVED
       ---
-    TYPE in {HANDOFF, REVIEW, ACK, STATUS, BLOCKER, QUESTION, HEARTBEAT}. SEQ is per-lane, monotonic.
+    TYPE in {HANDOFF, REVIEW, ACK, STATUS, BLOCKER, QUESTION, HEARTBEAT, COLLABORATION_END}. SEQ is
+    per-lane, monotonic. COLLABORATION_END is the control entry that authorizes tearing down a watcher.
 
 SET UP YOUR IDLE HEARTBEAT (this removes the manual-nudge gap — do it now):
   After every completed turn, while idle, check claude.md every ~{{HEARTBEAT_SECONDS}}s and resume
@@ -40,6 +41,12 @@ SET UP YOUR IDLE HEARTBEAT (this removes the manual-nudge gap — do it now):
   It prints new SEQ blocks ONLY when there is real news, so silence == nothing-new (cheap). If your
   surface cannot run a true background watcher, re-check claude.md at the start of every idle turn.
   Emit a HEARTBEAT/STATUS at least every ~30 min so Claude sees you are alive.
+  LIVENESS + TEARDOWN: the helper also alerts you when Claude's lane goes DARK (its latest entry older
+  than ~2x the ~30-min liveness cadence) or when a both-lanes-wait standoff forms -- both only while
+  the collaboration is active. Tear down your watcher ONLY when an explicit COLLABORATION_END control
+  entry is recorded (either lane). Finishing a work block is NOT the end: a work-block-done STATUS must
+  say "collaboration continues; keep your watcher alive." On a staleness alert, surface it and ask the
+  human to restart Claude (you cannot restart its process).
 
 YOUR ROLE LOOP — you are the {{CODEX_ROLE}}:
 
@@ -79,6 +86,10 @@ HARD RULES:
     gate's blind spots. A CLEAN you did not look at is not a review.
   - Commit the candidate before any handoff. Cite absolute numbers, not just ratios.
   - Write ONLY to codex.md. Never edit claude.md or the config mid-round without announcing it.
+  - Tear down your watcher ONLY on an explicit COLLABORATION_END entry; a work-block-done STATUS is
+    NOT teardown and must say "collaboration continues; keep your watcher alive." The helper alerts you
+    (STALENESS / DEADLOCK) while the collaboration is active; on a staleness alert, surface it and ask
+    the human to restart Claude (you cannot restart its process).
   - No simultaneous interactive/GUI gates — coordinate "hold gates."
   - NEVER finalize/merge/push to a protected branch on your own — that needs the human's explicit OK,
     even after an APPROVE.

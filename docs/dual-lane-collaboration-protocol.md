@@ -65,8 +65,10 @@ body:
 status: OPEN | ACKED | RESOLVED
 ---
 ```
-SEQ is per-lane, monotonic. TYPE ∈ {HANDOFF, REVIEW, ACK, STATUS, BLOCKER, QUESTION, HEARTBEAT}.
+SEQ is per-lane, monotonic. TYPE ∈ {HANDOFF, REVIEW, ACK, STATUS, BLOCKER, QUESTION, HEARTBEAT, COLLABORATION_END}.
 Append at the physical end of the file (EOF) so the newest block is unambiguous.
+**COLLABORATION_END** is a control entry that authorizes tearing down a lane's idle watcher (see
+"Collaboration teardown" under the idle-heartbeat section) — it is the ONLY entry that does.
 
 A **REVIEW** entry additionally carries two dedicated lines so any downstream finalize/closeout
 gate can parse it unambiguously:
@@ -157,6 +159,28 @@ with each side thinking the other is idle. Both lanes MUST therefore:
 
 Emit a HEARTBEAT/STATUS entry at least every ~30 min so the other lane sees you are alive (the
 advancing cursor also signals liveness).
+
+**Liveness detection — the helper watches the OTHER lane for going dark.** The cursor-based WAKE
+self-heals a *dropped* wake, but it is BLIND to the peer simply going DARK: a dead/quit peer posts no
+new SEQ, so a pure-WAKE watcher stays silent forever (this happened — Codex quit after a mis-signaled
+"done" and the channel could have stalled indefinitely). So `heartbeat-check.ps1` ALSO emits, while
+the collaboration is active (no COLLABORATION_END recorded):
+- a **STALENESS ALERT** when the other lane's latest entry is older than ~2x the ~30-min liveness
+  cadence (default 60 min) — i.e. it missed two liveness heartbeats; the peer likely quit/died.
+- a **DEADLOCK WATCH** when the other lane is alive (posting heartbeats) but has not advanced its
+  cursor past one of YOUR still-OPEN items for too long — a both-lanes-wait standoff.
+Both re-alert on a throttled cadence (default 30 min) until resolved, and both are gated on the
+ABSENCE of COLLABORATION_END so they cannot false-positive after a clean shutdown. **Self-heal on a
+STALENESS ALERT:** surface it, post a RESUME-REQUEST in your lane, and ask the human to restart the
+other agent (you cannot restart its process); do not silently keep waiting.
+
+**Collaboration teardown — the ONLY authorization to stop a watcher.** A watcher/heartbeat may be
+torn down ONLY when an explicit **COLLABORATION_END** control entry has been recorded (in either
+lane). Finishing a work block is NOT the end of the collaboration: a work-block-done STATUS MUST say
+"collaboration continues; keep your watcher alive" so neither lane reads "this milestone merged" as
+"we are done" and kills its heartbeat (that exact conflation stranded a lane once). Only a deliberate
+COLLABORATION_END — typically by mutual agreement and with the human informed — ends the
+collaboration and authorizes standing the watchers down.
 
 The heartbeat interval may be overridden per collaboration in the config.
 
