@@ -163,7 +163,12 @@ watcher on `claude.md` so neither side needs a manual nudge.
   unanswered Codex QUESTION traced to exactly this + a dead Monitor; the cursor-based heartbeat now
   re-nudges while your cursor lags, but the direct read on resume is still the guarantee.)
 - **No simultaneous interactive/GUI gates** — coordinate "hold gates."
-- **Never finalize/merge without the human's explicit OK**, even on APPROVE.
+- **MERGE AUTHORITY is delegated to Claude** (standing directive, Layi 2026-06-27): on APPROVE of a
+  hardened work block, merge to master AUTOMATICALLY using best judgment -- never wait for a human merge
+  decision. "Hardened" = gates pass AND the **live/visible result is verified by eyeball** (not just
+  metrics -- the settled-grab + scalar gates are blind to cold-pass / live artifacts; validate by pixels),
+  no regression vs master, repo-state clean. If the live result is rough or a regression is suspected, do
+  NOT merge -- fix or triage first. Codex hands off + does not merge.
 - **Risky decisions use the two-key procedure** (see protocol): for broad-impact / hard-to-reverse /
   threading / shared-or-core-code / ambiguous-root-cause changes, do NOT implement on one lane's
   judgment — BOTH lanes independently produce adversarially-hardened plans (each red-teaming the code
