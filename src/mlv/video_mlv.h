@@ -230,6 +230,11 @@ int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
                                         uint64_t frameIndex,
                                         uint16_t * outputFrame,
                                         int * bit_shift);
+int getMlvRawFrameProcessedUint16DirectWithChromaSmooth(mlvObject_t * video,
+                                                        uint64_t frameIndex,
+                                                        uint16_t * outputFrame,
+                                                        int * bit_shift,
+                                                        int chroma_smooth_method);
 int getMlvRawFrameProcessedUint16(mlvObject_t * video,
                                   uint64_t frameIndex,
                                   uint16_t * outputFrame,
@@ -307,7 +312,8 @@ enum mlv_processed_thumbnail_settings_flags
     MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS         = 1u << 4,
     MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS      = 1u << 5,
     MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE        = 1u << 6,
-    MLV_PROCESSED_THUMBNAIL_APPLY_RAW_LEVELS      = 1u << 7
+    MLV_PROCESSED_THUMBNAIL_APPLY_RAW_LEVELS      = 1u << 7,
+    MLV_PROCESSED_THUMBNAIL_APPLY_CHROMA_SMOOTH   = 1u << 8
 };
 
 typedef struct mlv_processed_thumbnail_settings
@@ -324,14 +330,16 @@ typedef struct mlv_processed_thumbnail_settings
     float raw_black_level;
     int raw_white_level;
     int raw_bit_depth;
+    int source_chroma_smooth_method;
 } mlv_processed_thumbnail_settings_t;
 
 /* Same isolated source/downscale path as get_area_average_downscale_thumnail,
  * but renders through a caller-owned processing object. Returns 1 on success.
  * The optional settings are applied only to that caller-owned processing object;
  * this function never mutates video->processing, caches, receipts, or playback
- * preview globals. Chroma-smooth/raw-source state still comes from the current
- * mlvObject state and is intentionally not changed here. */
+ * preview globals. When APPLY_CHROMA_SMOOTH is set, source_chroma_smooth_method
+ * is applied only to the isolated raw-source render for this call and never
+ * stored back to the shared mlvObject. */
 int get_area_average_downscale_thumnail_with_processing(
     mlvObject_t *video,
     int frame_index,

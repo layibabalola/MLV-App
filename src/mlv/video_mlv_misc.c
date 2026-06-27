@@ -54,7 +54,9 @@ static void trace_look_assist_thumbnail(const char * kind,
 static uint16_t * get_isolated_thumbnail_source_rgb16(mlvObject_t * video,
                                                       int frame_index,
                                                       int raw_w,
-                                                      int raw_h)
+                                                      int raw_h,
+                                                      int chroma_smooth_override_enabled,
+                                                      int chroma_smooth_method)
 {
     size_t pixels = (size_t)raw_w * (size_t)raw_h;
     uint16_t * raw_frame = (uint16_t *)malloc(pixels * sizeof(uint16_t));
@@ -68,7 +70,17 @@ static uint16_t * get_isolated_thumbnail_source_rgb16(mlvObject_t * video,
     }
 
     int bit_shift = 0;
-    if (getMlvRawFrameProcessedUint16Direct(video, (uint64_t)frame_index, raw_frame, &bit_shift))
+    int raw_failed = chroma_smooth_override_enabled
+        ? getMlvRawFrameProcessedUint16DirectWithChromaSmooth(video,
+                                                              (uint64_t)frame_index,
+                                                              raw_frame,
+                                                              &bit_shift,
+                                                              chroma_smooth_method)
+        : getMlvRawFrameProcessedUint16Direct(video,
+                                              (uint64_t)frame_index,
+                                              raw_frame,
+                                              &bit_shift);
+    if (raw_failed)
     {
         free(raw_frame);
         free(rgb_frame);
@@ -305,7 +317,18 @@ int get_area_average_downscale_thumnail_with_processing(
         return 0;
     }
 
-    uint16_t *debayered_raw_frame = get_isolated_thumbnail_source_rgb16(video, frame_index, raw_w, raw_h);
+    const int chroma_smooth_override_enabled =
+        settings && (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_CHROMA_SMOOTH);
+    const int chroma_smooth_method =
+        chroma_smooth_override_enabled ? settings->source_chroma_smooth_method : 0;
+
+    uint16_t *debayered_raw_frame =
+        get_isolated_thumbnail_source_rgb16(video,
+                                            frame_index,
+                                            raw_w,
+                                            raw_h,
+                                            chroma_smooth_override_enabled,
+                                            chroma_smooth_method);
     if (!debayered_raw_frame) {
         return 0;
     }
@@ -398,7 +421,13 @@ void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index
         return;
     }
 
-    uint16_t *debayered_raw_frame = get_isolated_thumbnail_source_rgb16(video, frame_index, raw_w, raw_h);
+    uint16_t *debayered_raw_frame =
+        get_isolated_thumbnail_source_rgb16(video,
+                                            frame_index,
+                                            raw_w,
+                                            raw_h,
+                                            0,
+                                            0);
     if (!debayered_raw_frame) {
         return;
     }

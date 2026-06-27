@@ -78,6 +78,8 @@ static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_pixel_map_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_dark_frame_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_runtime_publish_count = 0;
 static MLV_THREAD_LOCAL int g_llrawproc_analysis_isolation_enabled = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_analysis_chroma_smooth_override_enabled = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_analysis_chroma_smooth_override = CS_OFF;
 
 static int llrawproc_analysis_thread_count(mlvObject_t * video, int isolated_analysis)
 {
@@ -86,6 +88,26 @@ static int llrawproc_analysis_thread_count(mlvObject_t * video, int isolated_ana
         return 1;
     }
     return video ? video->cpu_cores : 1;
+}
+
+static int llrawproc_normalize_chroma_smooth_method(int method)
+{
+    if (method < CS_OFF || method > CS_5x5)
+    {
+        return CS_OFF;
+    }
+    return method;
+}
+
+static int llrawproc_analysis_chroma_smooth_method(int shared_method,
+                                                   int isolated_analysis)
+{
+    if (isolated_analysis
+     && g_llrawproc_analysis_chroma_smooth_override_enabled)
+    {
+        return g_llrawproc_analysis_chroma_smooth_override;
+    }
+    return shared_method;
 }
 
 /* Diagnostic-only escape hatch: set MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE=1
@@ -2563,7 +2585,9 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     bad_pixels = shared->bad_pixels;
     bps_method = shared->bps_method;
     bpi_method = shared->bpi_method;
-    chroma_smooth_mode = shared->chroma_smooth;
+    chroma_smooth_mode =
+        llrawproc_analysis_chroma_smooth_method(shared->chroma_smooth,
+                                                isolated_analysis);
     pattern_noise_mode = shared->pattern_noise;
     diso_validity = shared->diso_validity;
     dual_iso_mode = shared->dual_iso;
@@ -3555,27 +3579,71 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     }
 }
 
+static void applyLLRawProcObjectWorkerIsolatedAnalysisInternal(
+    mlvObject_t * video,
+    uint16_t * raw_image_buff,
+    size_t raw_image_size,
+    llrawprocWorkerState_t * worker,
+    int stop_before_dual_iso,
+    int chroma_smooth_override_enabled,
+    int chroma_smooth_method)
+{
+    const int previous_isolation = g_llrawproc_analysis_isolation_enabled;
+    const int previous_override_enabled =
+        g_llrawproc_analysis_chroma_smooth_override_enabled;
+    const int previous_override = g_llrawproc_analysis_chroma_smooth_override;
+#ifdef _OPENMP
+    const int previous_omp_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+#endif
+    g_llrawproc_analysis_isolation_enabled = 1;
+    g_llrawproc_analysis_chroma_smooth_override_enabled =
+        chroma_smooth_override_enabled ? 1 : 0;
+    g_llrawproc_analysis_chroma_smooth_override =
+        llrawproc_normalize_chroma_smooth_method(chroma_smooth_method);
+    applyLLRawProcObjectWorker(video,
+                               raw_image_buff,
+                               raw_image_size,
+                               worker,
+                               stop_before_dual_iso);
+    g_llrawproc_analysis_chroma_smooth_override_enabled =
+        previous_override_enabled;
+    g_llrawproc_analysis_chroma_smooth_override = previous_override;
+    g_llrawproc_analysis_isolation_enabled = previous_isolation;
+#ifdef _OPENMP
+    omp_set_num_threads(previous_omp_threads);
+#endif
+}
+
 void applyLLRawProcObjectWorkerIsolatedAnalysis(mlvObject_t * video,
                                                 uint16_t * raw_image_buff,
                                                 size_t raw_image_size,
                                                 llrawprocWorkerState_t * worker,
                                                 int stop_before_dual_iso)
 {
-    const int previous = g_llrawproc_analysis_isolation_enabled;
-#ifdef _OPENMP
-    const int previous_omp_threads = omp_get_max_threads();
-    omp_set_num_threads(1);
-#endif
-    g_llrawproc_analysis_isolation_enabled = 1;
-    applyLLRawProcObjectWorker(video,
-                               raw_image_buff,
-                               raw_image_size,
-                               worker,
-                               stop_before_dual_iso);
-    g_llrawproc_analysis_isolation_enabled = previous;
-#ifdef _OPENMP
-    omp_set_num_threads(previous_omp_threads);
-#endif
+    applyLLRawProcObjectWorkerIsolatedAnalysisInternal(video,
+                                                       raw_image_buff,
+                                                       raw_image_size,
+                                                       worker,
+                                                       stop_before_dual_iso,
+                                                       0,
+                                                       CS_OFF);
+}
+
+void applyLLRawProcObjectWorkerIsolatedAnalysisWithChromaSmooth(mlvObject_t * video,
+                                                                uint16_t * raw_image_buff,
+                                                                size_t raw_image_size,
+                                                                llrawprocWorkerState_t * worker,
+                                                                int stop_before_dual_iso,
+                                                                int chroma_smooth_method)
+{
+    applyLLRawProcObjectWorkerIsolatedAnalysisInternal(video,
+                                                       raw_image_buff,
+                                                       raw_image_size,
+                                                       worker,
+                                                       stop_before_dual_iso,
+                                                       1,
+                                                       chroma_smooth_method);
 }
 
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
@@ -3785,7 +3853,9 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
         worker->seeded_runtime_state = analysis_seed;
     }
     dark_frame_mode = shared->dark_frame;
-    chroma_smooth_mode = shared->chroma_smooth;
+    chroma_smooth_mode =
+        llrawproc_analysis_chroma_smooth_method(shared->chroma_smooth,
+                                                isolated_analysis);
 
     pthread_mutex_unlock(&video->llrawproc_mutex);
     g_llrawproc_last_shared_lock_ms += (mlv_stage_timing_now() - shared_lock_start) * 1000.0;

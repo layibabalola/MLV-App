@@ -3267,10 +3267,12 @@ int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * un
     return result;
 }
 
-int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
-                                        uint64_t frameIndex,
-                                        uint16_t * outputFrame,
-                                        int * bit_shift)
+static int getMlvRawFrameProcessedUint16DirectImpl(mlvObject_t * video,
+                                                   uint64_t frameIndex,
+                                                   uint16_t * outputFrame,
+                                                   int * bit_shift,
+                                                   int chroma_smooth_override_enabled,
+                                                   int chroma_smooth_method)
 {
     int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
     size_t output_frame_size = (size_t)pixels_count * sizeof(uint16_t);
@@ -3301,11 +3303,24 @@ int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
 
     const double llraw_start = mlv_stage_timing_now();
     mlv_pipeline_capture_set_current_frame(frameIndex);
-    applyLLRawProcObjectWorkerIsolatedAnalysis(video,
-                                               outputFrame,
-                                               output_frame_size,
-                                               &analysis_worker,
-                                               0);
+    if (chroma_smooth_override_enabled)
+    {
+        applyLLRawProcObjectWorkerIsolatedAnalysisWithChromaSmooth(
+            video,
+            outputFrame,
+            output_frame_size,
+            &analysis_worker,
+            0,
+            chroma_smooth_method);
+    }
+    else
+    {
+        applyLLRawProcObjectWorkerIsolatedAnalysis(video,
+                                                   outputFrame,
+                                                   output_frame_size,
+                                                   &analysis_worker,
+                                                   0);
+    }
     llrpFreeWorkerState(&analysis_worker);
     const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
     mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
@@ -3317,6 +3332,33 @@ int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
     }
 
     return 0;
+}
+
+int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
+                                        uint64_t frameIndex,
+                                        uint16_t * outputFrame,
+                                        int * bit_shift)
+{
+    return getMlvRawFrameProcessedUint16DirectImpl(video,
+                                                   frameIndex,
+                                                   outputFrame,
+                                                   bit_shift,
+                                                   0,
+                                                   CS_OFF);
+}
+
+int getMlvRawFrameProcessedUint16DirectWithChromaSmooth(mlvObject_t * video,
+                                                        uint64_t frameIndex,
+                                                        uint16_t * outputFrame,
+                                                        int * bit_shift,
+                                                        int chroma_smooth_method)
+{
+    return getMlvRawFrameProcessedUint16DirectImpl(video,
+                                                   frameIndex,
+                                                   outputFrame,
+                                                   bit_shift,
+                                                   1,
+                                                   chroma_smooth_method);
 }
 
 int getMlvRawFrameProcessedUint16(mlvObject_t * video,

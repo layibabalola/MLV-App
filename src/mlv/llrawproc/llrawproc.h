@@ -48,6 +48,12 @@ void applyLLRawProcObjectWorkerIsolatedAnalysis(mlvObject_t * video,
                                                 size_t raw_image_size,
                                                 llrawprocWorkerState_t * worker,
                                                 int stop_before_dual_iso);
+void applyLLRawProcObjectWorkerIsolatedAnalysisWithChromaSmooth(mlvObject_t * video,
+                                                                uint16_t * raw_image_buff,
+                                                                size_t raw_image_size,
+                                                                llrawprocWorkerState_t * worker,
+                                                                int stop_before_dual_iso,
+                                                                int chroma_smooth_method);
 void llrpSetGpuPlaybackReconAllowedForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(int enabled);
 void llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(int enabled);
