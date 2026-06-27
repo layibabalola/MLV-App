@@ -13520,6 +13520,10 @@ struct LookAssistAsyncResult
     int    chromaSmoothValue         = 0;
     // Color-cast warning
     QString colorCastWarning;
+    // Worker-side refinement observability (per-pass + cleanup/chroma decisions),
+    // emitted on the UI thread so the async refinement is visible in the per-clip
+    // interaction trace the same way the sync path's post_balance lines are.
+    QString refineTrace;
 };
 
 /* Round-4 debt block: invalidate and wait out any detached look-assist
@@ -14037,14 +14041,19 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
                 autoWhiteBalanceTint =
                     qBound( tintMin, autoWhiteBalanceTint, tintMax );
-                // [GREEN-CAST FIX -- dual-lane two-key converged, Layi auto-execute policy] On the
-                // floor-lifted PROCESSED-patch LIVE (async) lane ONLY, tighten the negative tint floor
-                // -35 -> -20 so a mis-classified-night processed-color patch (which maps to a green raw
-                // coordinate) cannot drive an extreme green WB. Value-only: temperature/exposure/preset and
-                // the +18 magenta ceiling are untouched (positive-tint clips e.g. M16-1210 stay bit-for-bit),
-                // the post-green guard (postVisibleGreenAxis>=8.0) remains the fail-safe, and true-night /
-                // raw-patch lanes keep the original -35 floor. -20 == the M16-1347 accepted boundary.
-                const int awbTintFloor = ( useProcessedColorStatsCopy && floorLiftedCopy ) ? -20 : -35;
+                // [GREEN-CAST FIX v3 -- ba9dec3f -20 band-aid REVERTED to the sync-equivalent -35 floor.]
+                // ba9dec3f tightened the floor-lifted processed-patch async floor -35 -> -20 as a band-aid
+                // for the UN-refined async path. With the worker-side post-balance refinement now in place,
+                // that floor STARVES the green-artifact tint cleanup: starting at -20 (vs sync's raw -33),
+                // the cleanup gate (visible_green>3.0 && greenArtifactMeanAxis>=30) never fires and the tint
+                // never swings to the sync's neutral +22. Reverting to -35 (== the sync clamp at
+                // MainWindow.cpp ~15092) lets the refinement START at the raw AWB solve and reach the same
+                // result as MLVAPP_LOOK_ASSIST_SYNC=1. Two companion fixes keep this safe (see below): the
+                // 6-pass TEMPERATURE pass is gated by autoWhiteBalanceValid (matching the tint passes and
+                // sync's post_temp_delta=0), and the AWB BASE temp delta is carried through the refinement
+                // UNCLAMPED (only the refinement's ADDED correction is +-500 clamped), so the AWB's legit
+                // large temp delta (e.g. 1340) is preserved instead of being truncated to 500.
+                const int awbTintFloor = -35;
                 autoWhiteBalanceTint = qBound( awbTintFloor, autoWhiteBalanceTint, 18 );
                 autoWhiteBalanceCandidateTemperature = autoWhiteBalanceTemperature;
                 autoWhiteBalanceCandidateTint        = autoWhiteBalanceTint;
@@ -14110,6 +14119,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             bool chromaSmoothAutoApply = false;
             const int initialTemperatureDelta = preset.temperatureDelta;
             const int initialTintDelta = preset.tintDelta;
+            // Worker-side refinement trace (emitted on the UI thread). Append-only;
+            // mirrors the sync per-pass post_balance fields so the async refinement
+            // is observable in the per-clip interaction log.
+            QString refineTrace;
             if( useProcessedColorStatsCopy
              && colorWidthCopy > 0 && colorHeightCopy > 0
              && mlvObj && mlvObj->processing )
@@ -14122,6 +14135,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         qMax( 32, ( colorWidthCopy * colorHeightCopy ) / 100 );
                     const int postTintCap =
                         lookAssistAutoTintCap( sceneCopy, useProcessedColorStatsCopy );
+                    refineTrace += QStringLiteral(
+                        "[refine start awb_valid=%1 dualiso_chroma=%2 chroma_idx=%3 "
+                        "postTintCap=%4 init_tdelta=%5 init_tintdelta=%6]")
+                        .arg( bool01( autoWhiteBalanceValid ) )
+                        .arg( bool01( dualIsoChromaEligibleCopy ) )
+                        .arg( chromaSmoothVal )
+                        .arg( postTintCap )
+                        .arg( initialTemperatureDelta )
+                        .arg( initialTintDelta );
 
                     // True if the refinement was aborted by a clip switch; on
                     // abort we keep the current preset and stop refining.
@@ -14296,6 +14318,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                             5 );
                                 passTintDelta = qMax( passTintDelta, artifactTintDelta );
                             }
+                            // Temperature pass -- UN-gated by autoWhiteBalanceValid, EXACTLY
+                            // as sync (MainWindow.cpp ~15390): sync runs this on accepted AWB
+                            // clips too (e.g. M16-1210 post_temp_delta=+1160). The earlier v3
+                            // attempt to gate it off diverged from sync on M16-1210.
                             if( lookAssistHasNeutralBalanceSamples( postColorStats )
                              && fabs( postBlueAmberAxis ) >= ( useProcessedColorStatsCopy ? 3.0 : 6.0 ) )
                             {
@@ -14304,6 +14330,24 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                                                            * ( useProcessedColorStatsCopy ? 14.0 : 6.0 ) ),
                                                                 useProcessedColorStatsCopy ? 140 : 96 );
                             }
+                            const double passVisibleGreenAxis =
+                                postColorStats.visibleMeanG
+                                - ( ( postColorStats.visibleMeanR
+                                    + postColorStats.visibleMeanB ) * 0.5 );
+                            refineTrace += QStringLiteral(
+                                "[pass%1 green=%2 blueamber=%3 vgreen=%4 gartR=%5 gartAx=%6 "
+                                "neutral=%7 passT=%8 passTint=%9 tdelta=%10 tintdelta=%11]")
+                                .arg( pass )
+                                .arg( postGreenAxis, 0, 'f', 2 )
+                                .arg( postBlueAmberAxis, 0, 'f', 2 )
+                                .arg( passVisibleGreenAxis, 0, 'f', 2 )
+                                .arg( postColorStats.greenArtifactRatio, 0, 'f', 5 )
+                                .arg( postColorStats.greenArtifactMeanAxis, 0, 'f', 2 )
+                                .arg( bool01( lookAssistHasNeutralBalanceSamples( postColorStats ) ) )
+                                .arg( passTemperatureDelta )
+                                .arg( passTintDelta )
+                                .arg( preset.temperatureDelta )
+                                .arg( preset.tintDelta );
                             if( passTemperatureDelta == 0 && passTintDelta == 0 )
                             {
                                 break;
@@ -14311,6 +14355,10 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
                             const int previousTemperatureDelta = preset.temperatureDelta;
                             const int previousTintDelta = preset.tintDelta;
+                            // Temperature-delta clamp -- EXACTLY sync (MainWindow.cpp ~15405):
+                            // qBound(-500, total, 500). The v3 attempt to carry the AWB base
+                            // unclamped diverged from sync on M16-1210 (sync's total clamp
+                            // lands at -500; the split-clamp landed at -1160).
                             preset.temperatureDelta =
                                 qBound( -500,
                                         preset.temperatureDelta + passTemperatureDelta,
@@ -14348,103 +14396,6 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                 }
                             }
                         }
-                        // Warning-recovery search (sync ~15232). The dual-ISO gate
-                        // uses the dispatch-captured eligibility -- the
-                        // restrictedLosslessDualIsoOutputWhiteLevel() accessor is
-                        // UI-thread-only and must not be called from this worker.
-                        if( !refinementAborted
-                         && postColorStatsValid
-                         && dualIsoChromaEligibleCopy )
-                        {
-                            const int currentTemperature =
-                                qBound( tempMin,
-                                        baseTemperature + preset.temperatureDelta,
-                                        tempMax );
-                            const double postVisibleGreenAxis =
-                                postColorStats.visibleMeanG
-                                - ( ( postColorStats.visibleMeanR
-                                    + postColorStats.visibleMeanB ) * 0.5 );
-                            const double postBlueAmberAxis =
-                                postColorStats.balanceB - postColorStats.balanceR;
-                            const QString postWarning =
-                                lookAssistColorCastWarning( true,
-                                                            postColorStats,
-                                                            postVisibleGreenAxis,
-                                                            currentTemperature,
-                                                            postBlueAmberAxis );
-                            if( postWarning != QStringLiteral("none") )
-                            {
-                                auto warningAwarePostBalanceScore =
-                                    [&]( const LookAssistStats &candidate ) -> double
-                                {
-                                    const double visibleGreenAxis =
-                                        candidate.visibleMeanG
-                                        - ( ( candidate.visibleMeanR
-                                            + candidate.visibleMeanB ) * 0.5 );
-                                    const double blueAmberAxis =
-                                        candidate.balanceB - candidate.balanceR;
-                                    const QString warning =
-                                        lookAssistColorCastWarning( true,
-                                                                    candidate,
-                                                                    visibleGreenAxis,
-                                                                    currentTemperature,
-                                                                    blueAmberAxis );
-                                    return postBalanceScore( candidate )
-                                        + ( warning == QStringLiteral("none") ? 0.0 : 1000.0 );
-                                };
-
-                                const LookAssistPreset startingPreset = preset;
-                                LookAssistPreset bestPreset = preset;
-                                LookAssistStats bestPostColorStats = postColorStats;
-                                double bestScore = warningAwarePostBalanceScore( postColorStats );
-                                const QPair<int, int> recoveryCandidates[] =
-                                {
-                                    qMakePair( initialTemperatureDelta, initialTintDelta ),
-                                    qMakePair( 500, -20 ),
-                                    qMakePair( 500, -16 ),
-                                    qMakePair( 500, -23 ),
-                                    qMakePair( 250, 22 ),
-                                    qMakePair( 300, 12 ),
-                                    qMakePair( 0, 0 ),
-                                    qMakePair( 0, -20 ),
-                                    qMakePair( -500, -35 )
-                                };
-                                for( const QPair<int, int> &candidate : recoveryCandidates )
-                                {
-                                    preset = startingPreset;
-                                    preset.temperatureDelta = qBound( -1200, candidate.first, 1200 );
-                                    preset.tintDelta = qBound( -35, candidate.second, postTintCap );
-                                    if( !renderAndMeasure() )
-                                    {
-                                        if( refinementAborted ) break;
-                                        continue;
-                                    }
-                                    const double candidateScore =
-                                        warningAwarePostBalanceScore( postColorStats );
-                                    if( candidateScore + 1.0 < bestScore )
-                                    {
-                                        bestScore = candidateScore;
-                                        bestPreset = preset;
-                                        bestPostColorStats = postColorStats;
-                                    }
-                                }
-                                if( refinementAborted )
-                                {
-                                    // Aborted mid-search: fall back to the best
-                                    // candidate found so far (initialized to the
-                                    // pre-search preset/stats).
-                                    preset = bestPreset;
-                                    postColorStats = bestPostColorStats;
-                                    postColorStatsValid = true;
-                                }
-                                else
-                                {
-                                    preset = bestPreset;
-                                    postColorStats = bestPostColorStats;
-                                    postColorStatsValid = true;
-                                }
-                            }
-                        }
                     }
                     else
                     {
@@ -14454,6 +14405,22 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
 
                     // --- green-artifact tint cleanup (sync ~15174-15200) ---
                     // Secondary: nudge tint up to flatten a residual green artifact.
+                    {
+                        const double cuVisibleGreenAxis =
+                            postColorStats.visibleMeanG
+                            - ( ( postColorStats.visibleMeanR
+                                + postColorStats.visibleMeanB ) * 0.5 );
+                        refineTrace += QStringLiteral(
+                            "[cleanup-eval valid=%1 neutral=%2 gartR=%3 gartAx=%4 vgreen=%5 "
+                            "tintdelta=%6 ceil=%7]")
+                            .arg( bool01( postColorStatsValid ) )
+                            .arg( bool01( lookAssistHasNeutralBalanceSamples( postColorStats ) ) )
+                            .arg( postColorStats.greenArtifactRatio, 0, 'f', 5 )
+                            .arg( postColorStats.greenArtifactMeanAxis, 0, 'f', 2 )
+                            .arg( cuVisibleGreenAxis, 0, 'f', 2 )
+                            .arg( preset.tintDelta )
+                            .arg( qMin( postTintCap, 22 ) );
+                    }
                     if( !refinementAborted
                      && postColorStatsValid
                      && lookAssistHasNeutralBalanceSamples( postColorStats )
@@ -14473,6 +14440,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                         (int)qRound( postColorStats.greenArtifactMeanAxis * 0.20
                                                    + postColorStats.greenArtifactRatio * 180.0 ),
                                         cleanupTintCeiling );
+                            refineTrace += QStringLiteral(
+                                "[cleanup-fire target=%1 from=%2]")
+                                .arg( cleanupTintTarget ).arg( preset.tintDelta );
                             if( cleanupTintTarget > preset.tintDelta )
                             {
                                 preset.tintDelta = cleanupTintTarget;
@@ -14518,6 +14488,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                             || ( postColorStats.greenArtifactRatio >= 0.04
                                  && postColorStats.greenArtifactMeanAxis >= 20.0
                                  && postVisibleGreenAxis > 4.0 );
+                        refineTrace += QStringLiteral(
+                            "[chroma-eval warn=%1 vgreen=%2 gartR=%3 gartAx=%4 artifact=%5]")
+                            .arg( postWarning )
+                            .arg( postVisibleGreenAxis, 0, 'f', 2 )
+                            .arg( postColorStats.greenArtifactRatio, 0, 'f', 5 )
+                            .arg( postColorStats.greenArtifactMeanAxis, 0, 'f', 2 )
+                            .arg( bool01( dualIsoGreenArtifact ) );
                         if( dualIsoGreenArtifact )
                         {
                             LookAssistStats chromaOnStats;
@@ -14543,6 +14520,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                     || ( chromaOnStats.greenArtifactRatio >= 0.04
                                          && chromaOnStats.greenArtifactMeanAxis >= 20.0
                                          && chromaVisibleGreenAxis > 4.0 );
+                                refineTrace += QStringLiteral(
+                                    "[chroma-on warn=%1 vgreen=%2 gartR=%3 gartAx=%4 cleared=%5]")
+                                    .arg( chromaWarning )
+                                    .arg( chromaVisibleGreenAxis, 0, 'f', 2 )
+                                    .arg( chromaOnStats.greenArtifactRatio, 0, 'f', 5 )
+                                    .arg( chromaOnStats.greenArtifactMeanAxis, 0, 'f', 2 )
+                                    .arg( bool01( !chromaStillArtifact ) );
                                 if( !chromaStillArtifact )
                                 {
                                     chromaSmoothAutoApply = true;
@@ -14553,6 +14537,116 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                             if( refinementAborted ) postColorStatsValid = false;
                         }
                     }
+
+                    // --- warning-recovery search (sync ~15232) ---
+                    // Sync order is cleanup -> chroma -> recovery, so this runs LAST
+                    // (after the green-artifact tint cleanup + chroma auto-apply above).
+                    // Running it earlier (the v2 bug) made it fire on the raw green
+                    // pre-cleanup stats and pick a temp-truncating candidate (500,-16)
+                    // BEFORE the cleanup could swing tint to the neutral +22, leaving the
+                    // image magenta. The dual-ISO gate uses the dispatch-captured
+                    // eligibility -- restrictedLosslessDualIsoOutputWhiteLevel() is
+                    // UI-thread-only and must not be called from this worker.
+                    if( !refinementAborted
+                     && postColorStatsValid
+                     && dualIsoChromaEligibleCopy )
+                    {
+                        const int currentTemperature =
+                            qBound( tempMin,
+                                    baseTemperature + preset.temperatureDelta,
+                                    tempMax );
+                        const double postVisibleGreenAxis =
+                            postColorStats.visibleMeanG
+                            - ( ( postColorStats.visibleMeanR
+                                + postColorStats.visibleMeanB ) * 0.5 );
+                        const double postBlueAmberAxis =
+                            postColorStats.balanceB - postColorStats.balanceR;
+                        const QString postWarning =
+                            lookAssistColorCastWarning( true,
+                                                        postColorStats,
+                                                        postVisibleGreenAxis,
+                                                        currentTemperature,
+                                                        postBlueAmberAxis );
+                        refineTrace += QStringLiteral(
+                            "[recovery-eval warn=%1 vgreen=%2 tdelta=%3 tintdelta=%4]")
+                            .arg( postWarning )
+                            .arg( postVisibleGreenAxis, 0, 'f', 2 )
+                            .arg( preset.temperatureDelta )
+                            .arg( preset.tintDelta );
+                        if( postWarning != QStringLiteral("none") )
+                        {
+                            auto warningAwarePostBalanceScore =
+                                [&]( const LookAssistStats &candidate ) -> double
+                            {
+                                const double visibleGreenAxis =
+                                    candidate.visibleMeanG
+                                    - ( ( candidate.visibleMeanR
+                                        + candidate.visibleMeanB ) * 0.5 );
+                                const double blueAmberAxis =
+                                    candidate.balanceB - candidate.balanceR;
+                                const QString warning =
+                                    lookAssistColorCastWarning( true,
+                                                                candidate,
+                                                                visibleGreenAxis,
+                                                                currentTemperature,
+                                                                blueAmberAxis );
+                                return postBalanceScore( candidate )
+                                    + ( warning == QStringLiteral("none") ? 0.0 : 1000.0 );
+                            };
+
+                            const LookAssistPreset startingPreset = preset;
+                            LookAssistPreset bestPreset = preset;
+                            LookAssistStats bestPostColorStats = postColorStats;
+                            double bestScore = warningAwarePostBalanceScore( postColorStats );
+                            const QPair<int, int> recoveryCandidates[] =
+                            {
+                                qMakePair( initialTemperatureDelta, initialTintDelta ),
+                                qMakePair( 500, -20 ),
+                                qMakePair( 500, -16 ),
+                                qMakePair( 500, -23 ),
+                                qMakePair( 250, 22 ),
+                                qMakePair( 300, 12 ),
+                                qMakePair( 0, 0 ),
+                                qMakePair( 0, -20 ),
+                                qMakePair( -500, -35 )
+                            };
+                            for( const QPair<int, int> &candidate : recoveryCandidates )
+                            {
+                                preset = startingPreset;
+                                preset.temperatureDelta = qBound( -1200, candidate.first, 1200 );
+                                preset.tintDelta = qBound( -35, candidate.second, postTintCap );
+                                if( !renderAndMeasure() )
+                                {
+                                    if( refinementAborted ) break;
+                                    continue;
+                                }
+                                const double candidateScore =
+                                    warningAwarePostBalanceScore( postColorStats );
+                                if( candidateScore + 1.0 < bestScore )
+                                {
+                                    bestScore = candidateScore;
+                                    bestPreset = preset;
+                                    bestPostColorStats = postColorStats;
+                                }
+                            }
+                            preset = bestPreset;
+                            postColorStats = bestPostColorStats;
+                            postColorStatsValid = true;
+                            refineTrace += QStringLiteral(
+                                "[recovery-pick tdelta=%1 tintdelta=%2]")
+                                .arg( preset.temperatureDelta )
+                                .arg( preset.tintDelta );
+                        }
+                    }
+
+                    refineTrace += QStringLiteral(
+                        "[refine end aborted=%1 valid=%2 final_tdelta=%3 final_tintdelta=%4 "
+                        "chroma_auto=%5]")
+                        .arg( bool01( refinementAborted ) )
+                        .arg( bool01( postColorStatsValid ) )
+                        .arg( preset.temperatureDelta )
+                        .arg( preset.tintDelta )
+                        .arg( bool01( chromaSmoothAutoApply ) );
 
                     processingFreeClone( clone );
                 }
@@ -14577,6 +14671,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             r.postTintDelta         = postColorStatsValid
                                     ? ( preset.tintDelta - initialTintDelta )
                                     : 0;
+            r.refineTrace           = refineTrace;
 
             // Chroma-smooth auto-apply decision from the worker refinement (overrides
             // the dispatch-time defaults). When the isolated chroma-on render cleared
@@ -14921,6 +15016,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         QStringLiteral("processed-floor-lifted-post-invalid");
                     m_lastLookAssistColorCastWarning = asyncSafetyWarning;
                 }
+
+                logInteractionEvent(
+                    QStringLiteral("look_assist.apply.async_refine_trace"),
+                    QStringLiteral("generation=%1 post_temp_delta=%2 post_tint_delta=%3 trace=%4")
+                        .arg( dispatchGeneration )
+                        .arg( r.postTemperatureDelta )
+                        .arg( r.postTintDelta )
+                        .arg( r.refineTrace.isEmpty()
+                              ? QStringLiteral("(none)")
+                              : r.refineTrace ) );
 
                 logInteractionEvent(
                     QStringLiteral("look_assist.apply.async_post_balance"),
