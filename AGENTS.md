@@ -50,6 +50,16 @@ gates + residual risks: `docs/regression-prevention-program.md`. Binding rules:
   M15-1320 shuttle, M16-1210 crowd, M16-1243/M02-1344 pool) versus the pinned known-good build --
   output-equivalence **proven, not asserted**. This automates the manual June-9 A/B that was the
   only thing that ever caught these.
+- **The reference is the known-good BUILD, never a same-codebase proxy.** A behavioral proxy you
+  assume is equivalent-and-correct — an alternate mode/path (a "sync" fallback, a "reference"
+  render), or a scalar (FrameGreenAxis, FPS, a determinism spread) — can carry the **same** root
+  defect, so "make the candidate match the proxy" converges on the bug, not the fix. At the START of
+  any regression hunt (color, exposure, smoothness, or unknown-shape), build/locate the last-known-good
+  baseline and A/B the real OUTPUT against it FIRST, before forming a root-cause theory; "matches the
+  known-good build" is the gate, not "matches a proxy"; and treat any oracle not independently grounded
+  against that build as a suspect. (2026-06-27: a full night was lost converging the async auto-WB onto
+  `MLVAPP_LOOK_ASSIST_SYNC=1`, which shared the same isolated-render dual-ISO defect and was itself
+  magenta — the real cause only surfaced once we A/B'd against the Jun-9 build directly.)
 - Three altitudes: **VALUES** (applied WB + presented color + luma percentiles; the WB-locked
   `--no-look-assist` + committed-receipt legs are BLOCKING, the Look-Assist-ON legs ADVISORY at
   ~3x measured spread) -- **PIXELS** (settled-frame perceptual diff, human-visible backstop) --

@@ -155,6 +155,13 @@ watcher on `claude.md` so neither side needs a manual nudge.
 ## Hard rules (all modes)
 - **The artifact is the verdict; the scalar is only a screen. Look every time** (esp. the config's
   blind spots). A CLEAN you did not look at is not a review.
+- **Anchor on the known-good BUILD, never a same-codebase proxy.** When diagnosing a regression or
+  validating a fix, the reference must be the last build that actually looked right, measured directly
+  on real input — NOT an alternate mode/path you assume is equivalent (a "sync" oracle, a "reference"
+  render) and NOT a scalar. A behavioral proxy can carry the SAME root defect, so matching it
+  converges on the bug. Build/locate the known-good baseline and A/B the real output against it FIRST,
+  before forming a root-cause theory; make "matches the known-good build" the acceptance bar. (Lesson:
+  a night lost converging async WB onto SYNC mode — itself defective — instead of A/B-ing Jun-9.)
 - **Commit the candidate before handoff** — a dirty stamp can't be pinned. Commit with
   `tools/dual-lane/lane-commit.ps1 -Lane <lane>` (lane-owned paths only, never `git add -A`); see
   "Shared working tree" above.

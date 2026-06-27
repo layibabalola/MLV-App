@@ -22,6 +22,19 @@ frozen golden** (or explicitly re-blessed with a human before/after), never asse
 a thin freeze-and-diff layer over telemetry the app ALREADY emits — the gap was never measurement
 capability, it was the absence of a pinned per-clip reference plus a parity assertion.
 
+**Corollary — anchor on the known-good BUILD, never a same-codebase proxy.** The ground truth is
+the last build that actually looked right, measured directly on the user's real footage. A
+same-codebase *behavioral* proxy — an alternate mode or path you assume is equivalent-and-correct
+(a "sync" fallback, a "reference" render, a "should-match" oracle, a scalar like FrameGreenAxis) — is
+NOT ground truth: it can carry the *same* root defect, so "make the candidate match the proxy"
+converges on the bug, not the fix. (Cost, 2026-06-27: a full night spent converging the async
+auto-WB onto `MLVAPP_LOOK_ASSIST_SYNC=1` — which shared the same isolated-render dual-ISO defect and
+was *itself* magenta over-correcting; the real cause only fell out when we finally A/B'd against the
+Jun-9 build directly.) So at the **START** of any regression hunt — color, exposure, smoothness, or
+unknown — build/locate the last-known-good baseline and A/B the real OUTPUT against it FIRST, before
+forming a root-cause theory; make "matches the known-good build" the acceptance gate; and treat any
+oracle you have not independently grounded against that build as a suspect, not a reference.
+
 ## The golden-master, at three altitudes (so non-determinism is contained)
 
 1. **VALUES (deterministic, single-thread, BLOCKING on WB-locked legs).** Applied WB

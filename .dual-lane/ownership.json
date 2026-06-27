@@ -27,7 +27,7 @@
       "trailer": "Dual-Lane: claude"
     }
   },
-  "overrides": {},
+  "overrides": { "AGENTS.md": "claude" },
   "shared": [],
   "sharedNote": "Phase 2: cross-lane interface headers (src/mlv/video_mlv.h, src/mlv/llrawproc/llrawproc.h, *.pro) may be promoted to 'shared' to require a Two-Key: trailer when edited. Left empty initially to avoid friction on Codex's routine header edits."
 }
