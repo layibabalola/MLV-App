@@ -187,7 +187,10 @@ watcher on `claude.md` so neither side needs a manual nudge.
 - **Risky decisions use the two-key procedure** (see protocol): for broad-impact / hard-to-reverse /
   threading / shared-or-core-code / ambiguous-root-cause changes, do NOT implement on one lane's
   judgment — BOTH lanes independently produce adversarially-hardened plans (each red-teaming the code
-  trace + the fix with their own subagents), compare, and convene with the human before implementing.
+  trace + the fix with their own subagents) and compare. **On AGREEMENT, AUTO-EXECUTE (implement + test,
+  then review + auto-merge per the merge-authority rule) — NO human approval needed (standing directive,
+  Layi 2026-06-27); keep the human informed.** Convene with the human ONLY to break a tie when the plans
+  diverge and the lanes cannot reconcile.
 - Archive your own ACKed, resolved, >10-SEQ-old entries per the protocol.
 
 > Migration note: this supersedes the reviewer-only `/dual-lane-review`. That skill's

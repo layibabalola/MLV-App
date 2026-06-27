@@ -245,9 +245,12 @@ own judgment. BEFORE implementing:
 2. **Exchange + compare.** Each lane posts its plan to its lane file. Both compare: where the two
    plans AGREE is high-confidence; where they DIVERGE must be resolved (re-investigate the disputed
    point, don't paper over it).
-3. **Convene with the human for the final decision.** Surface the compared plans — agreements,
-   divergences, the recommended path, residual risks — to the human, who makes the final go/no-go. A
-   risky change is NOT implemented until the two adversarial plans agree, or the human breaks the tie.
+3. **Auto-execute on agreement; convene with the human only to break ties (Layi, 2026-06-27).** When the
+   two adversarial plans AGREE, that agreement IS the authorization — **AUTO-EXECUTE (implement + test);
+   do NOT wait for human approval.** Keep the human INFORMED (surface the compared plans, recommended
+   path, residual risks) but they do not gate. Convene with the human for a go/no-go ONLY when the plans
+   DIVERGE and the lanes cannot reconcile — then the human breaks the tie. (Supersedes the prior "human
+   makes the final go/no-go" gate.)
 4. Implement only then, with the agreed safeguards + regression tests, and review the result through
    the normal handoff/review loop.
 
@@ -260,8 +263,11 @@ IMPLEMENTER HANDOFF (committed candidate: real `range:` + stamped exe + gate ver
 <what I saw>" + the config's acceptance checks) → REVIEWER REVIEW (independent rebuild + gate +
 inspect + checks → `Verdict: APPROVE`). Only then is a candidate shippable.
 
-**Finalize/merge always requires the human's explicit OK** — neither lane finalizes or merges on
-its own, regardless of an APPROVE.
+**Finalize/merge is auto-authorized by two-key agreement (Layi, 2026-06-27).** When both lanes agree —
+a converged plan, or a REVIEWER `APPROVE` of a hardened candidate — the merging lane auto-merges using
+the delegated merge authority; **no human OK required.** The human breaks ties on divergence and is kept
+informed. "Hardened" still means: gates pass AND the live/visible result is eyeball-verified (validate by
+pixels, not just metrics) AND no regression vs master AND a clean repo. Always test after auto-executing.
 
 ---
 

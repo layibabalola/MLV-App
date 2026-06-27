@@ -14029,7 +14029,15 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
                 autoWhiteBalanceTint =
                     qBound( tintMin, autoWhiteBalanceTint, tintMax );
-                autoWhiteBalanceTint = qBound( -35, autoWhiteBalanceTint, 18 );
+                // [GREEN-CAST FIX -- dual-lane two-key converged, Layi auto-execute policy] On the
+                // floor-lifted PROCESSED-patch LIVE (async) lane ONLY, tighten the negative tint floor
+                // -35 -> -20 so a mis-classified-night processed-color patch (which maps to a green raw
+                // coordinate) cannot drive an extreme green WB. Value-only: temperature/exposure/preset and
+                // the +18 magenta ceiling are untouched (positive-tint clips e.g. M16-1210 stay bit-for-bit),
+                // the post-green guard (postVisibleGreenAxis>=8.0) remains the fail-safe, and true-night /
+                // raw-patch lanes keep the original -35 floor. -20 == the M16-1347 accepted boundary.
+                const int awbTintFloor = ( useProcessedColorStatsCopy && floorLiftedCopy ) ? -20 : -35;
+                autoWhiteBalanceTint = qBound( awbTintFloor, autoWhiteBalanceTint, 18 );
                 autoWhiteBalanceCandidateTemperature = autoWhiteBalanceTemperature;
                 autoWhiteBalanceCandidateTint        = autoWhiteBalanceTint;
 
