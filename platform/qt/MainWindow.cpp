@@ -13822,6 +13822,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
         const int baseTint = receipt->tint();
         const int chromaSmoothVal = toolButtonChromaSmoothCurrentIndex();
         const bool chromaSmoothAutoApplied = m_lastLookAssistChromaSmoothAutoApplied;
+        // Dual-ISO chroma-smooth auto-apply eligibility: these accessors are
+        // UI-thread-only, so capture the decision now (mirrors the sync gate
+        // restrictedLosslessDualIsoOutputWhiteLevel() > getMlvOriginalWhiteLevel()
+        // at MainWindow.cpp:15203). "chroma currently OFF" is chromaSmoothVal==0.
+        const bool dualIsoChromaEligibleCopy =
+            restrictedLosslessDualIsoOutputWhiteLevel()
+                > getMlvOriginalWhiteLevel( m_pMlvObject );
 
         // Bump generation so a stale worker result from a previous clip is discarded.
         const int dispatchGeneration = ++m_lookAssistAsyncGeneration;
@@ -13886,6 +13893,7 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                      baseTint,
                      chromaSmoothVal,
                      chromaSmoothAutoApplied,
+                     dualIsoChromaEligibleCopy,
                      dispatchGeneration,
                      receipt,
                      restoreLookAssistSafetyBaseline]() mutable
@@ -14090,12 +14098,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             //     measure-and-correct loop + final recheck + warning-recovery
             //     search, but via Codex's ISOLATED render primitive so NOTHING
             //     shared is mutated). Ported from the sync path
-            //     (MainWindow.cpp:14721-14822 + 14881-14955). The green-artifact
-            //     cleanup (sync 14823-14849) and chroma-smooth auto-apply (sync
-            //     14850-14880) are intentionally NOT ported -- the primitive has
-            //     no chroma-smooth candidate knob; see TODO(v2) below. ---
+            //     (MainWindow.cpp 6-pass + recovery search) plus the green-artifact
+            //     tint cleanup and chroma-smooth auto-apply (sync chroma block,
+            //     ~15174-15231), the latter via Codex's isolated chroma render
+            //     (APPLY_CHROMA_SMOOTH, method 1). The shared chroma toggle itself
+            //     is deferred to the UI thread at apply time. ---
             LookAssistStats postColorStats;
             bool postColorStatsValid = false;
+            // Set true if the isolated chroma-on render clears the dual-ISO green
+            // artifact; the UI thread then actually toggles shared chroma-smooth.
+            bool chromaSmoothAutoApply = false;
             const int initialTemperatureDelta = preset.temperatureDelta;
             const int initialTintDelta = preset.tintDelta;
             if( useProcessedColorStatsCopy
@@ -14133,7 +14145,16 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     //   - Raw levels are intentionally NOT set: the clone from
                     //     processingCloneForAnalysis already carries the clip's raw
                     //     black/white/floor-lift.
-                    auto renderAndMeasure = [&]() -> bool
+                    // chromaOn=true ORs in MLV_PROCESSED_THUMBNAIL_APPLY_CHROMA_SMOOTH
+                    // with source_chroma_smooth_method=1 (2x2, matches the sync toggle
+                    // setToolButtonChromaSmooth(1)). The primitive applies the chroma
+                    // override thread-locally to the isolated source and restores it
+                    // after -- nothing shared is mutated. The measured stats are written
+                    // into the caller-provided `out` (the 6-pass/recovery callers pass
+                    // postColorStats; the chroma probe passes a scratch stats object so it
+                    // can decide before adopting).
+                    auto renderAndMeasureInto =
+                        [&]( bool chromaOn, LookAssistStats &out ) -> bool
                     {
                         if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
                         {
@@ -14157,6 +14178,11 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                        | MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS
                                        | MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS
                                        | MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE;
+                        if( chromaOn )
+                        {
+                            settings.flags |= MLV_PROCESSED_THUMBNAIL_APPLY_CHROMA_SMOOTH;
+                            settings.source_chroma_smooth_method = 1;
+                        }
                         settings.white_balance_kelvin = candTemp;
                         settings.white_balance_tint   = candTint / 10.0;
                         settings.exposure_stops  = preset.exposure / 100.0 + 1.2;
@@ -14179,12 +14205,18 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         {
                             return false;
                         }
-                        postColorStats = analyzeLookAssistThumbnail(
+                        out = analyzeLookAssistThumbnail(
                             reinterpret_cast<const unsigned char *>( buf.constData() ),
                             colorWidthCopy,
                             colorHeightCopy );
-                        return postColorStats.median > 0.0
-                            && postColorStats.balanceSamples >= minColorBalanceSamples;
+                        return out.median > 0.0
+                            && out.balanceSamples >= minColorBalanceSamples;
+                    };
+                    // Chroma-OFF render into postColorStats (the 6-pass loop + recovery
+                    // search default).
+                    auto renderAndMeasure = [&]() -> bool
+                    {
+                        return renderAndMeasureInto( false, postColorStats );
                     };
 
                     auto postBalanceScore = []( const LookAssistStats &candidate ) -> double
@@ -14316,15 +14348,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                 }
                             }
                         }
-                        // TODO(v2): sync green-artifact cleanup (14823-14849) and
-                        // chroma-smooth auto-apply (14850-14880) are NOT ported --
-                        // the isolated primitive has no chroma-smooth candidate knob.
-                        // The chroma toggle must be deferred to the UI thread at apply
-                        // time if/when a chroma candidate render is added.
+                        // Warning-recovery search (sync ~15232). The dual-ISO gate
+                        // uses the dispatch-captured eligibility -- the
+                        // restrictedLosslessDualIsoOutputWhiteLevel() accessor is
+                        // UI-thread-only and must not be called from this worker.
                         if( !refinementAborted
                          && postColorStatsValid
-                         && restrictedLosslessDualIsoOutputWhiteLevel()
-                                > getMlvOriginalWhiteLevel( mlvObj ) )
+                         && dualIsoChromaEligibleCopy )
                         {
                             const int currentTemperature =
                                 qBound( tempMin,
@@ -14422,6 +14452,108 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                         if( refinementAborted ) postColorStatsValid = false;
                     }
 
+                    // --- green-artifact tint cleanup (sync ~15174-15200) ---
+                    // Secondary: nudge tint up to flatten a residual green artifact.
+                    if( !refinementAborted
+                     && postColorStatsValid
+                     && lookAssistHasNeutralBalanceSamples( postColorStats )
+                     && postColorStats.greenArtifactRatio >= 0.004
+                     && postColorStats.greenArtifactMeanAxis >= 30.0 )
+                    {
+                        const double postVisibleGreenAxis =
+                            postColorStats.visibleMeanG
+                            - ( ( postColorStats.visibleMeanR
+                                + postColorStats.visibleMeanB ) * 0.5 );
+                        const int cleanupTintCeiling = qMin( postTintCap, 22 );
+                        if( postVisibleGreenAxis > 3.0
+                         && preset.tintDelta < cleanupTintCeiling )
+                        {
+                            const int cleanupTintTarget =
+                                qBound( preset.tintDelta,
+                                        (int)qRound( postColorStats.greenArtifactMeanAxis * 0.20
+                                                   + postColorStats.greenArtifactRatio * 180.0 ),
+                                        cleanupTintCeiling );
+                            if( cleanupTintTarget > preset.tintDelta )
+                            {
+                                preset.tintDelta = cleanupTintTarget;
+                                postColorStatsValid = renderAndMeasure();
+                                if( refinementAborted ) postColorStatsValid = false;
+                            }
+                        }
+                    }
+
+                    // --- chroma-smooth auto-apply on dual-ISO green artifact
+                    //     (sync ~15201-15231), via the ISOLATED chroma render ---
+                    // Same eligibility/artifact condition as sync: dual-ISO output
+                    // (captured at dispatch), chroma currently OFF, and a green
+                    // artifact in the refined image. Render a chroma-ON candidate with
+                    // the SAME full preset; if it CLEARS the artifact, adopt those
+                    // stats (so the downstream r.post* + fail-closed see the cleared
+                    // image) and flag chromaSmoothAutoApply so the UI thread toggles
+                    // shared chroma-smooth at apply time.
+                    if( !refinementAborted
+                     && postColorStatsValid
+                     && chromaSmoothVal == 0
+                     && dualIsoChromaEligibleCopy )
+                    {
+                        const int currentTemperature =
+                            qBound( tempMin,
+                                    baseTemperature + preset.temperatureDelta,
+                                    tempMax );
+                        const double postVisibleGreenAxis =
+                            postColorStats.visibleMeanG
+                            - ( ( postColorStats.visibleMeanR
+                                + postColorStats.visibleMeanB ) * 0.5 );
+                        const double postBlueAmberAxis =
+                            postColorStats.balanceB - postColorStats.balanceR;
+                        const QString postWarning =
+                            lookAssistColorCastWarning( true,
+                                                        postColorStats,
+                                                        postVisibleGreenAxis,
+                                                        currentTemperature,
+                                                        postBlueAmberAxis );
+                        const bool dualIsoGreenArtifact =
+                            postWarning == QStringLiteral("localized-green-artifact")
+                            || postWarning == QStringLiteral("global-green-cast")
+                            || ( postColorStats.greenArtifactRatio >= 0.04
+                                 && postColorStats.greenArtifactMeanAxis >= 20.0
+                                 && postVisibleGreenAxis > 4.0 );
+                        if( dualIsoGreenArtifact )
+                        {
+                            LookAssistStats chromaOnStats;
+                            if( renderAndMeasureInto( true, chromaOnStats ) )
+                            {
+                                // Re-evaluate the SAME artifact condition on the
+                                // chroma-on image; adopt only if it is cleared.
+                                const double chromaVisibleGreenAxis =
+                                    chromaOnStats.visibleMeanG
+                                    - ( ( chromaOnStats.visibleMeanR
+                                        + chromaOnStats.visibleMeanB ) * 0.5 );
+                                const double chromaBlueAmberAxis =
+                                    chromaOnStats.balanceB - chromaOnStats.balanceR;
+                                const QString chromaWarning =
+                                    lookAssistColorCastWarning( true,
+                                                                chromaOnStats,
+                                                                chromaVisibleGreenAxis,
+                                                                currentTemperature,
+                                                                chromaBlueAmberAxis );
+                                const bool chromaStillArtifact =
+                                    chromaWarning == QStringLiteral("localized-green-artifact")
+                                    || chromaWarning == QStringLiteral("global-green-cast")
+                                    || ( chromaOnStats.greenArtifactRatio >= 0.04
+                                         && chromaOnStats.greenArtifactMeanAxis >= 20.0
+                                         && chromaVisibleGreenAxis > 4.0 );
+                                if( !chromaStillArtifact )
+                                {
+                                    chromaSmoothAutoApply = true;
+                                    postColorStats = chromaOnStats;
+                                    postColorStatsValid = true;
+                                }
+                            }
+                            if( refinementAborted ) postColorStatsValid = false;
+                        }
+                    }
+
                     processingFreeClone( clone );
                 }
             }
@@ -14445,6 +14577,13 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             r.postTintDelta         = postColorStatsValid
                                     ? ( preset.tintDelta - initialTintDelta )
                                     : 0;
+
+            // Chroma-smooth auto-apply decision from the worker refinement (overrides
+            // the dispatch-time defaults). When the isolated chroma-on render cleared
+            // the dual-ISO green artifact, request value 1 (2x2); the UI thread does
+            // the actual shared toggle at apply time.
+            r.chromaSmoothAutoApplied = chromaSmoothAutoApply;
+            r.chromaSmoothValue       = chromaSmoothAutoApply ? 1 : chromaSmoothVal;
 
             // Color-cast warning + post axes: use the REFINED post stats when the
             // worker-side refinement produced valid measurements; otherwise fall
@@ -14670,6 +14809,21 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 ui->horizontalSliderVibrance    ->setValue( r.preset.vibrance );
                 ui->horizontalSliderShadows     ->setValue( r.preset.shadows );
                 ui->horizontalSliderHighlights  ->setValue( r.preset.highlights );
+
+                // Apply the worker's chroma-smooth auto-apply decision to the SHARED
+                // state (mirrors sync setToolButtonChromaSmooth(1) + receipt) BEFORE
+                // the UI-thread post-apply re-measurement below, so that re-render
+                // reflects chroma-on and the fail-closed sees the cleared artifact.
+                // The worker only requests this when the isolated chroma-on render
+                // cleared the dual-ISO green artifact.
+                if( r.chromaSmoothAutoApplied )
+                {
+                    setToolButtonChromaSmooth( r.chromaSmoothValue );
+                    toolButtonChromaSmoothChanged();
+                    activeReceipt->setChromaSmooth( r.chromaSmoothValue );
+                    m_lastLookAssistChromaSmoothAutoApplied = true;
+                    m_lastLookAssistChromaSmooth = r.chromaSmoothValue;
+                }
 
                 LookAssistStats asyncPostColorStats;
                 bool asyncPostColorStatsValid = false;
