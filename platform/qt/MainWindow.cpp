@@ -14115,13 +14115,24 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     // abort we keep the current preset and stop refining.
                     bool refinementAborted = false;
 
-                    // Render a WB-only processed thumbnail from the BASE clone +
-                    // the CURRENT preset deltas via the isolated primitive, then
-                    // measure it into postColorStats. Returns true iff the render
-                    // produced enough samples to trust. The generation check guards
-                    // each (~tens of ms) render so a clip switch aborts cleanly.
-                    // WB-only on a base clone is intentional: the cast is
-                    // white-balance, exposure-independent.
+                    // Render a processed thumbnail from the BASE clone with the
+                    // FULL Look Assist preset applied (exposure/contrast/pivot/
+                    // shadows/highlights/vibrance + WB), exactly as the sync oracle
+                    // does (applyLookAssistValues -> receipt setters), then measure
+                    // it into postColorStats. Returns true iff the render produced
+                    // enough samples to trust. The generation check guards each
+                    // (~tens of ms) render so a clip switch aborts cleanly.
+                    //   - Only WB temp/tint vary across the refinement passes; the
+                    //     other preset values are ABSOLUTE and FIXED, but must be
+                    //     applied on EVERY render so the measured image equals
+                    //     sync's (otherwise the casts are scored on a different
+                    //     image and never neutralize).
+                    //   - Slider->native conversions copied verbatim from the GUI
+                    //     slider handlers (MainWindow.cpp:16996-17138): tint is
+                    //     sliderTint/10, exposure is sliderExp/100+1.2, etc.
+                    //   - Raw levels are intentionally NOT set: the clone from
+                    //     processingCloneForAnalysis already carries the clip's raw
+                    //     black/white/floor-lift.
                     auto renderAndMeasure = [&]() -> bool
                     {
                         if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
@@ -14139,9 +14150,23 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                     tintMax );
                         mlv_processed_thumbnail_settings_t settings;
                         memset( &settings, 0, sizeof( settings ) );
-                        settings.flags = MLV_PROCESSED_THUMBNAIL_APPLY_WHITE_BALANCE;
+                        settings.flags = MLV_PROCESSED_THUMBNAIL_APPLY_WHITE_BALANCE
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_EXPOSURE
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_SIMPLE_CONTRAST
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_PIVOT
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS
+                                       | MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE;
                         settings.white_balance_kelvin = candTemp;
-                        settings.white_balance_tint   = candTint;
+                        settings.white_balance_tint   = candTint / 10.0;
+                        settings.exposure_stops  = preset.exposure / 100.0 + 1.2;
+                        settings.simple_contrast = preset.contrast / 100.0;
+                        settings.pivot           = preset.pivot   / 100.0;
+                        settings.shadows         = preset.shadows    * 1.5 / 100.0;
+                        settings.highlights      = preset.highlights * 1.5 / 100.0;
+                        settings.vibrance        =
+                            pow( ( preset.vibrance + 100 ) / 200.0 * 2.0,
+                                 log( 3.6 ) / log( 2.0 ) );
                         QByteArray buf( colorWidthCopy * colorHeightCopy * 3, 0 );
                         if( !get_area_average_downscale_thumnail_with_processing(
                                 mlvObj,
