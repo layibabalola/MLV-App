@@ -5162,6 +5162,11 @@ void processingFreeClone(processingObject_t * processing)
 /* Find correct white balance setting for one selected pixel */
 void processingFindWhiteBalance(processingObject_t *processing, int imageX, int imageY, uint16_t *inputImage, int posX, int posY, int *wbTemp, int *wbTint, int mode)
 {
+    const char *wbValueTraceEnv = getenv("MLVAPP_LOOK_ASSIST_WB_VALUE_TRACE");
+    const int wbValueTrace = wbValueTraceEnv
+                           && wbValueTraceEnv[0] != '\0'
+                           && strcmp(wbValueTraceEnv, "0") != 0;
+
     /* Number of elements */
     int img_s = imageX * imageY * 3;
 
@@ -5206,6 +5211,10 @@ void processingFindWhiteBalance(processingObject_t *processing, int imageX, int 
     pixR /= counter;
     pixG /= counter;
     pixB /= counter;
+
+    const uint32_t patchMeanR = pixR;
+    const uint32_t patchMeanG = pixG;
+    const uint32_t patchMeanB = pixB;
 
     /* skin wb mode */
     if( mode == 1 )
@@ -5278,6 +5287,24 @@ void processingFindWhiteBalance(processingObject_t *processing, int imageX, int 
 
     /* set it back to where we began */
     processingSetWhiteBalance( processing, (double)oriTemp, (double)oriTint );
+
+    if( wbValueTrace )
+    {
+        fprintf( stderr,
+                 "WB_VALUE_TRACE_PROCESSING image=%dx%d pos=%d/%d mode=%d patch_count=%u "
+                 "black_level=%.3f white_level=%d level_range=%.3f "
+                 "post_levels_patch_mean_rgb=%u/%u/%u solver_rgb=%u/%u/%u "
+                 "candidate_temp=%d candidate_tint=%d original_temp=%.0f original_tint=%.3f\n",
+                 imageX, imageY, posX, posY, mode, counter,
+                 (double)processing->black_level,
+                 processing->white_level,
+                 (double)processing->white_level - (double)processing->black_level,
+                 patchMeanR, patchMeanG, patchMeanB,
+                 pixR, pixG, pixB,
+                 nearestTemp, nearestTint,
+                 oriTemp, oriTint );
+        fflush( stderr );
+    }
 
     /* give the GUI what it wanted */
     *wbTemp = nearestTemp;
