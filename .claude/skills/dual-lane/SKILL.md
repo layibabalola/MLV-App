@@ -28,9 +28,14 @@ ROLE the config assigns you. The lane FILE is fixed by agent; the ROLE comes fro
    `LAST_READ_CODEX_SEQ: 0` and a SEQ 1 STATUS announcing your lane+role is live.
 3. **Start the idle heartbeat Monitor** (event-driven; wakes you only on a real new Codex SEQ):
    ```
-   Monitor(persistent=True, command="pwsh -NoProfile -ExecutionPolicy Bypass -File .claude/skills/dual-lane/heartbeat-check.ps1 -OtherLaneFile .claude-state/coordination/dual-lane/codex.md -MarkerFile .claude-state/coordination/dual-lane/.claude-marker -LoopSeconds <config interval, default 180>")
+   Monitor(persistent=True, command="pwsh -NoProfile -ExecutionPolicy Bypass -File .claude/skills/dual-lane/heartbeat-check.ps1 -OtherLaneFile .claude-state/coordination/dual-lane/codex.md -MarkerFile .claude-state/coordination/dual-lane/.claude-marker -SelfLedgerFile .claude-state/coordination/dual-lane/claude.md -CursorKey LAST_READ_CODEX_SEQ -LoopSeconds <config interval, default 180>")
    ```
-   Confirm the Monitor is active before saying you are "watching." Do NOT use the agent-bridge.
+   Use RELATIVE paths (the repo path has a space; an unquoted ABSOLUTE path splits -> pwsh prints help and
+   the watch never runs). The heartbeat is CURSOR-BASED + self-healing: it wakes when codex.md's max SEQ
+   exceeds claude.md's `LAST_READ_CODEX_SEQ` and RE-FIRES until you advance that cursor, so a dropped wake
+   self-heals. (Pre-2026-06-27 it advanced a script-owned marker on EMIT, decoupled from delivery -> a dead
+   Monitor consumed wakes 181-190 and the lane sat idle ~4h until a human nudge. Do NOT regress to a marker
+   the script self-advances.) Confirm the Monitor is active before saying you are "watching." Do NOT use the agent-bridge.
    **A dead heartbeat is SILENT** (it stops waking you with no error), so do NOT assume it is
    running just because you started it once:
    - **Re-verify it is ALIVE at the start of every turn that touches the collaboration** (and
@@ -152,6 +157,11 @@ watcher on `claude.md` so neither side needs a manual nudge.
   compaction and stacks into duplicates that race the marker. So: keep EXACTLY ONE Monitor (STOP any
   existing before restart), and **directly re-read `codex.md` from your cursor at the start of every
   collaboration turn** regardless of notifications. "No notification" is never proof there is nothing new.
+- **Posting a verdict is NOT disengagement.** After a REVIEW / CHANGES_REQUESTED / STATUS, the other lane
+  may reply with a QUESTION (which is YOUR work) or a re-handoff. Keep the Monitor live and direct-read
+  `codex.md` on every resume — never treat "ball in their court" as "stop watching." (A ~4h idle on an
+  unanswered Codex QUESTION traced to exactly this + a dead Monitor; the cursor-based heartbeat now
+  re-nudges while your cursor lags, but the direct read on resume is still the guarantee.)
 - **No simultaneous interactive/GUI gates** — coordinate "hold gates."
 - **Never finalize/merge without the human's explicit OK**, even on APPROVE.
 - **Risky decisions use the two-key procedure** (see protocol): for broad-impact / hard-to-reverse /

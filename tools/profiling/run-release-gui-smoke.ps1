@@ -1201,7 +1201,20 @@ $lookAssistApplyLine = $recentLines |
 $lookAssistAsyncApplyLine = $recentLines |
     Where-Object { $_ -like "*look_assist.apply.auto_wb_async_applied*" } |
     Select-Object -Last 1
-$lookAssistSafetyFallbackLine = $recentLines |
+# RULE 2026-06-27: attribute the safety guard to the MEASURED ANALYSIS apply (the one that produced
+# visual_state), NOT a later frame=0 PLAYBACK reapply. The Look Assist analysis runs before playback
+# starts, so scan only the lines BEFORE the first play.toggled.begin. Taking the global last
+# safety_fallback conflated the playback reapply's warning (auto_wb valid=0, output-neutral) with the
+# measured analysis, which made lookassist-wb-determinism.ps1 read sync as falsely UNSTABLE
+# (codex.md SEQ182 / claude.md SEQ37).
+$playStartIdx = -1
+for ($i = 0; $i -lt $recentLines.Count; $i++) {
+    if ($recentLines[$i] -like "*play.toggled.begin*") { $playStartIdx = $i; break }
+}
+$safetyScanLines = if ($playStartIdx -gt 0) { $recentLines[0..($playStartIdx - 1)] }
+                   elseif ($playStartIdx -eq 0) { @() }
+                   else { $recentLines }
+$lookAssistSafetyFallbackLine = $safetyScanLines |
     Where-Object { $_ -like "*look_assist.apply.safety_fallback*" } |
     Select-Object -Last 1
 $visualStateLine = $recentLines |
