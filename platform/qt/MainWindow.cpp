@@ -14086,6 +14086,321 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 }
             }
 
+            // --- worker-side post-balance refinement (restores the sync 6-pass
+            //     measure-and-correct loop + final recheck + warning-recovery
+            //     search, but via Codex's ISOLATED render primitive so NOTHING
+            //     shared is mutated). Ported from the sync path
+            //     (MainWindow.cpp:14721-14822 + 14881-14955). The green-artifact
+            //     cleanup (sync 14823-14849) and chroma-smooth auto-apply (sync
+            //     14850-14880) are intentionally NOT ported -- the primitive has
+            //     no chroma-smooth candidate knob; see TODO(v2) below. ---
+            LookAssistStats postColorStats;
+            bool postColorStatsValid = false;
+            const int initialTemperatureDelta = preset.temperatureDelta;
+            const int initialTintDelta = preset.tintDelta;
+            if( useProcessedColorStatsCopy
+             && colorWidthCopy > 0 && colorHeightCopy > 0
+             && mlvObj && mlvObj->processing )
+            {
+                processingObject_t *clone =
+                    processingCloneForAnalysis( mlvObj->processing );
+                if( clone )
+                {
+                    const int minColorBalanceSamples =
+                        qMax( 32, ( colorWidthCopy * colorHeightCopy ) / 100 );
+                    const int postTintCap =
+                        lookAssistAutoTintCap( sceneCopy, useProcessedColorStatsCopy );
+
+                    // True if the refinement was aborted by a clip switch; on
+                    // abort we keep the current preset and stop refining.
+                    bool refinementAborted = false;
+
+                    // Render a WB-only processed thumbnail from the BASE clone +
+                    // the CURRENT preset deltas via the isolated primitive, then
+                    // measure it into postColorStats. Returns true iff the render
+                    // produced enough samples to trust. The generation check guards
+                    // each (~tens of ms) render so a clip switch aborts cleanly.
+                    // WB-only on a base clone is intentional: the cast is
+                    // white-balance, exposure-independent.
+                    auto renderAndMeasure = [&]() -> bool
+                    {
+                        if( m_lookAssistAsyncGeneration.load() != dispatchGeneration )
+                        {
+                            refinementAborted = true;
+                            return false;
+                        }
+                        const int candTemp =
+                            qBound( tempMin,
+                                    baseTemperature + preset.temperatureDelta,
+                                    tempMax );
+                        const int candTint =
+                            qBound( tintMin,
+                                    baseTint + preset.tintDelta,
+                                    tintMax );
+                        mlv_processed_thumbnail_settings_t settings;
+                        memset( &settings, 0, sizeof( settings ) );
+                        settings.flags = MLV_PROCESSED_THUMBNAIL_APPLY_WHITE_BALANCE;
+                        settings.white_balance_kelvin = candTemp;
+                        settings.white_balance_tint   = candTint;
+                        QByteArray buf( colorWidthCopy * colorHeightCopy * 3, 0 );
+                        if( !get_area_average_downscale_thumnail_with_processing(
+                                mlvObj,
+                                analysisFrameCopy,
+                                colorDownscaleFactorCopy,
+                                qMax( 1, mlvappEffectiveWorkerThreadCount() ),
+                                clone,
+                                &settings,
+                                reinterpret_cast<unsigned char *>( buf.data() ) ) )
+                        {
+                            return false;
+                        }
+                        postColorStats = analyzeLookAssistThumbnail(
+                            reinterpret_cast<const unsigned char *>( buf.constData() ),
+                            colorWidthCopy,
+                            colorHeightCopy );
+                        return postColorStats.median > 0.0
+                            && postColorStats.balanceSamples >= minColorBalanceSamples;
+                    };
+
+                    auto postBalanceScore = []( const LookAssistStats &candidate ) -> double
+                    {
+                        const double greenAxis =
+                            candidate.balanceG
+                            - ( ( candidate.balanceR + candidate.balanceB ) * 0.5 );
+                        const double blueAmberAxis = candidate.balanceB - candidate.balanceR;
+                        const double visibleGreenAxis =
+                            candidate.visibleMeanG
+                            - ( ( candidate.visibleMeanR + candidate.visibleMeanB ) * 0.5 );
+                        return fabs( greenAxis )
+                            + ( fabs( blueAmberAxis ) * 0.5 )
+                            + ( fabs( visibleGreenAxis ) * 0.7 )
+                            + ( candidate.greenArtifactRatio * 700.0 )
+                            + ( qMax( 0.0, candidate.greenArtifactMeanAxis - 22.0 ) * 0.7 );
+                    };
+
+                    bool adjustedPostBalance = false;
+                    // Sync gate: refine when the WB solve did not validate OR
+                    // processed-color stats are in use (worker is always the
+                    // useProcessedColorStats==true path here).
+                    const bool doRefinePostBalance =
+                        !autoWhiteBalanceValid || useProcessedColorStatsCopy;
+                    if( doRefinePostBalance )
+                    {
+                        bool lastAcceptedPostBalanceValid = false;
+                        double lastAcceptedPostBalanceScore = 1.0e9;
+                        LookAssistPreset lastAcceptedPreset = preset;
+                        LookAssistStats lastAcceptedPostColorStats;
+                        for( int pass = 0; pass < 6 && !refinementAborted; ++pass )
+                        {
+                            postColorStatsValid = renderAndMeasure();
+                            if( refinementAborted ) break;
+                            if( !postColorStatsValid ) break;
+
+                            const double currentPostBalanceScore =
+                                postBalanceScore( postColorStats );
+                            if( lastAcceptedPostBalanceValid
+                             && currentPostBalanceScore > lastAcceptedPostBalanceScore + 1.5 )
+                            {
+                                preset = lastAcceptedPreset;
+                                postColorStats = lastAcceptedPostColorStats;
+                                postColorStatsValid = true;
+                                break;
+                            }
+                            lastAcceptedPostBalanceValid = true;
+                            lastAcceptedPostBalanceScore = currentPostBalanceScore;
+                            lastAcceptedPreset = preset;
+                            lastAcceptedPostColorStats = postColorStats;
+
+                            const double postGreenAxis =
+                                postColorStats.balanceG
+                                - ( ( postColorStats.balanceR + postColorStats.balanceB ) * 0.5 );
+                            const double postBlueAmberAxis =
+                                postColorStats.balanceB - postColorStats.balanceR;
+                            int passTintDelta = 0;
+                            int passTemperatureDelta = 0;
+                            if( !autoWhiteBalanceValid
+                             && lookAssistHasNeutralBalanceSamples( postColorStats )
+                             && fabs( postGreenAxis ) >= 4.0 )
+                            {
+                                passTintDelta = qBound( -5,
+                                                         (int)qRound( postGreenAxis * 0.55 ),
+                                                         5 );
+                            }
+                            if( !autoWhiteBalanceValid
+                             && lookAssistHasNeutralBalanceSamples( postColorStats )
+                             && postGreenAxis > 2.0
+                             && postColorStats.greenArtifactRatio >= 0.004
+                             && postColorStats.greenArtifactMeanAxis >= 25.0 )
+                            {
+                                const int artifactTintDelta =
+                                    qBound( 2,
+                                            (int)qRound( postColorStats.greenArtifactMeanAxis * 0.12
+                                                       + postColorStats.greenArtifactRatio * 90.0 ),
+                                            5 );
+                                passTintDelta = qMax( passTintDelta, artifactTintDelta );
+                            }
+                            if( lookAssistHasNeutralBalanceSamples( postColorStats )
+                             && fabs( postBlueAmberAxis ) >= ( useProcessedColorStatsCopy ? 3.0 : 6.0 ) )
+                            {
+                                passTemperatureDelta = qBound( useProcessedColorStatsCopy ? -140 : -96,
+                                                                (int)qRound( postBlueAmberAxis
+                                                                           * ( useProcessedColorStatsCopy ? 14.0 : 6.0 ) ),
+                                                                useProcessedColorStatsCopy ? 140 : 96 );
+                            }
+                            if( passTemperatureDelta == 0 && passTintDelta == 0 )
+                            {
+                                break;
+                            }
+
+                            const int previousTemperatureDelta = preset.temperatureDelta;
+                            const int previousTintDelta = preset.tintDelta;
+                            preset.temperatureDelta =
+                                qBound( -500,
+                                        preset.temperatureDelta + passTemperatureDelta,
+                                        500 );
+                            if( passTintDelta != 0 )
+                            {
+                                preset.tintDelta =
+                                    qBound( -postTintCap,
+                                            preset.tintDelta + passTintDelta,
+                                            postTintCap );
+                            }
+                            const int appliedTemperatureDelta =
+                                preset.temperatureDelta - previousTemperatureDelta;
+                            const int appliedTintDelta =
+                                preset.tintDelta - previousTintDelta;
+                            if( appliedTemperatureDelta == 0 && appliedTintDelta == 0 )
+                            {
+                                break;
+                            }
+                            adjustedPostBalance = true;
+                        }
+                        if( adjustedPostBalance && !refinementAborted )
+                        {
+                            postColorStatsValid = renderAndMeasure();
+                            if( !refinementAborted
+                             && postColorStatsValid && lastAcceptedPostBalanceValid )
+                            {
+                                const double finalPostBalanceScore =
+                                    postBalanceScore( postColorStats );
+                                if( finalPostBalanceScore > lastAcceptedPostBalanceScore + 1.5 )
+                                {
+                                    preset = lastAcceptedPreset;
+                                    postColorStats = lastAcceptedPostColorStats;
+                                    postColorStatsValid = true;
+                                }
+                            }
+                        }
+                        // TODO(v2): sync green-artifact cleanup (14823-14849) and
+                        // chroma-smooth auto-apply (14850-14880) are NOT ported --
+                        // the isolated primitive has no chroma-smooth candidate knob.
+                        // The chroma toggle must be deferred to the UI thread at apply
+                        // time if/when a chroma candidate render is added.
+                        if( !refinementAborted
+                         && postColorStatsValid
+                         && restrictedLosslessDualIsoOutputWhiteLevel()
+                                > getMlvOriginalWhiteLevel( mlvObj ) )
+                        {
+                            const int currentTemperature =
+                                qBound( tempMin,
+                                        baseTemperature + preset.temperatureDelta,
+                                        tempMax );
+                            const double postVisibleGreenAxis =
+                                postColorStats.visibleMeanG
+                                - ( ( postColorStats.visibleMeanR
+                                    + postColorStats.visibleMeanB ) * 0.5 );
+                            const double postBlueAmberAxis =
+                                postColorStats.balanceB - postColorStats.balanceR;
+                            const QString postWarning =
+                                lookAssistColorCastWarning( true,
+                                                            postColorStats,
+                                                            postVisibleGreenAxis,
+                                                            currentTemperature,
+                                                            postBlueAmberAxis );
+                            if( postWarning != QStringLiteral("none") )
+                            {
+                                auto warningAwarePostBalanceScore =
+                                    [&]( const LookAssistStats &candidate ) -> double
+                                {
+                                    const double visibleGreenAxis =
+                                        candidate.visibleMeanG
+                                        - ( ( candidate.visibleMeanR
+                                            + candidate.visibleMeanB ) * 0.5 );
+                                    const double blueAmberAxis =
+                                        candidate.balanceB - candidate.balanceR;
+                                    const QString warning =
+                                        lookAssistColorCastWarning( true,
+                                                                    candidate,
+                                                                    visibleGreenAxis,
+                                                                    currentTemperature,
+                                                                    blueAmberAxis );
+                                    return postBalanceScore( candidate )
+                                        + ( warning == QStringLiteral("none") ? 0.0 : 1000.0 );
+                                };
+
+                                const LookAssistPreset startingPreset = preset;
+                                LookAssistPreset bestPreset = preset;
+                                LookAssistStats bestPostColorStats = postColorStats;
+                                double bestScore = warningAwarePostBalanceScore( postColorStats );
+                                const QPair<int, int> recoveryCandidates[] =
+                                {
+                                    qMakePair( initialTemperatureDelta, initialTintDelta ),
+                                    qMakePair( 500, -20 ),
+                                    qMakePair( 500, -16 ),
+                                    qMakePair( 500, -23 ),
+                                    qMakePair( 250, 22 ),
+                                    qMakePair( 300, 12 ),
+                                    qMakePair( 0, 0 ),
+                                    qMakePair( 0, -20 ),
+                                    qMakePair( -500, -35 )
+                                };
+                                for( const QPair<int, int> &candidate : recoveryCandidates )
+                                {
+                                    preset = startingPreset;
+                                    preset.temperatureDelta = qBound( -1200, candidate.first, 1200 );
+                                    preset.tintDelta = qBound( -35, candidate.second, postTintCap );
+                                    if( !renderAndMeasure() )
+                                    {
+                                        if( refinementAborted ) break;
+                                        continue;
+                                    }
+                                    const double candidateScore =
+                                        warningAwarePostBalanceScore( postColorStats );
+                                    if( candidateScore + 1.0 < bestScore )
+                                    {
+                                        bestScore = candidateScore;
+                                        bestPreset = preset;
+                                        bestPostColorStats = postColorStats;
+                                    }
+                                }
+                                if( refinementAborted )
+                                {
+                                    // Aborted mid-search: fall back to the best
+                                    // candidate found so far (initialized to the
+                                    // pre-search preset/stats).
+                                    preset = bestPreset;
+                                    postColorStats = bestPostColorStats;
+                                    postColorStatsValid = true;
+                                }
+                                else
+                                {
+                                    preset = bestPreset;
+                                    postColorStats = bestPostColorStats;
+                                    postColorStatsValid = true;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        postColorStatsValid = renderAndMeasure();
+                        if( refinementAborted ) postColorStatsValid = false;
+                    }
+
+                    processingFreeClone( clone );
+                }
+            }
+
             // Compute final clamped temperature and tint from preset deltas.
             const int temperature = qBound( tempMin,
                                             baseTemperature + preset.temperatureDelta,
@@ -14094,41 +14409,52 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                      baseTint + preset.tintDelta,
                                      tintMax );
 
-            // Post-balance refinement (canAnalyzeProcessedColor path): the iterative
-            // re-render loop in the sync path applies T/T deltas to the processing
-            // object between renders. In the async path we cannot modify the shared
-            // processing object from a worker thread while the UI thread renders
-            // concurrently. The refinement is therefore skipped here; the initial
-            // preset (exposure + WB) is applied unchanged. This affects only
-            // night-scene floor-lifted clips and results in at most a few kelvin
-            // difference vs the sync path.
-            r.postColorStatsValid   = false;
-            r.postTemperatureDelta  = 0;
-            r.postTintDelta         = 0;
+            // Post-balance refinement now runs worker-side above via the isolated
+            // render primitive (the sync 6-pass + recovery loop). Publish its
+            // result: deltas relative to the pre-refinement preset, and post axes
+            // measured from the REFINED post stats when valid.
+            r.postColorStatsValid   = postColorStatsValid;
+            r.postTemperatureDelta  = postColorStatsValid
+                                    ? ( preset.temperatureDelta - initialTemperatureDelta )
+                                    : 0;
+            r.postTintDelta         = postColorStatsValid
+                                    ? ( preset.tintDelta - initialTintDelta )
+                                    : 0;
 
-            // Color-cast warning using pre-capture processed stats (best available
-            // without re-renders).
+            // Color-cast warning + post axes: use the REFINED post stats when the
+            // worker-side refinement produced valid measurements; otherwise fall
+            // back to the pre-capture processed stats exactly as before.
             const double postVisibleGreenAxis =
-                processedColorStatsCopy.visibleMeanG
-                - ( ( processedColorStatsCopy.visibleMeanR
-                    + processedColorStatsCopy.visibleMeanB ) * 0.5 );
+                postColorStatsValid
+                ? ( postColorStats.visibleMeanG
+                    - ( ( postColorStats.visibleMeanR
+                        + postColorStats.visibleMeanB ) * 0.5 ) )
+                : ( processedColorStatsCopy.visibleMeanG
+                    - ( ( processedColorStatsCopy.visibleMeanR
+                        + processedColorStatsCopy.visibleMeanB ) * 0.5 ) );
             const double postBlueAmberAxis =
-                processedColorStatsCopy.balanceB - processedColorStatsCopy.balanceR;
-            r.postGreenArtifactRatio = useProcessedColorStatsCopy
-                                     ? processedColorStatsCopy.greenArtifactRatio
-                                     : 0.0;
-            r.postGreenArtifactMeanAxis = useProcessedColorStatsCopy
-                                         ? processedColorStatsCopy.greenArtifactMeanAxis
-                                         : 0.0;
-            r.postVisibleGreenAxis = useProcessedColorStatsCopy
+                postColorStatsValid
+                ? ( postColorStats.balanceB - postColorStats.balanceR )
+                : ( processedColorStatsCopy.balanceB - processedColorStatsCopy.balanceR );
+            r.postGreenArtifactRatio = postColorStatsValid
+                                     ? postColorStats.greenArtifactRatio
+                                     : ( useProcessedColorStatsCopy
+                                         ? processedColorStatsCopy.greenArtifactRatio
+                                         : 0.0 );
+            r.postGreenArtifactMeanAxis = postColorStatsValid
+                                         ? postColorStats.greenArtifactMeanAxis
+                                         : ( useProcessedColorStatsCopy
+                                             ? processedColorStatsCopy.greenArtifactMeanAxis
+                                             : 0.0 );
+            r.postVisibleGreenAxis = ( postColorStatsValid || useProcessedColorStatsCopy )
                                    ? postVisibleGreenAxis
                                    : 0.0;
-            r.postBlueAmberAxis = useProcessedColorStatsCopy
+            r.postBlueAmberAxis = ( postColorStatsValid || useProcessedColorStatsCopy )
                                 ? postBlueAmberAxis
                                 : 0.0;
             r.colorCastWarning = lookAssistColorCastWarning(
-                useProcessedColorStatsCopy,
-                processedColorStatsCopy,
+                postColorStatsValid ? true : useProcessedColorStatsCopy,
+                postColorStatsValid ? postColorStats : processedColorStatsCopy,
                 postVisibleGreenAxis,
                 temperature,
                 postBlueAmberAxis );
