@@ -192,6 +192,41 @@ if ($aspectOk) {
     Write-Host ("ASPECT WARNING: scale2 {0}x{1} ~{2} / scale1 {3}x{4} ~{5} / native {6}  legMatch={7} matchesNative={8} -- scale must be a UNIFORM W/H downscale; a mismatch means the playback scale DISTORTED the aspect ratio." -f $asp2.w,$asp2.h,$asp2.aspect,$asp1.w,$asp1.h,$asp1.aspect,$nstr,$aspectLegMatch,$aspectVsNative) -ForegroundColor Yellow
 }
 
+# DE-SQUEEZED EYEBALL COMPANION (2026-06-27, Claude tooling lane): the recon MEASUREMENT must stay on the
+# native-aspect grab -- de-squeezing vertically compresses the grab ~2.3x (1820 -> ~774 rows) and would
+# UNDERSAMPLE the dual-ISO row mesh this gate exists to catch, and it would re-anchor the established HLine
+# baseline. But a vertically-stretched portrait grab is hard to eyeball for the color cast (the gate's
+# known blind spot). So, WITHOUT touching the measurement, write a de-squeezed COMPANION per leg purely for
+# the human/agent eyeball: horizontally stretch the native grab by the SAME dual-ISO display de-squeeze
+# MLVApp itself applies for comboBoxVStretch index 3 (MainWindow.cpp:25529 getHorizontalStretchFactor:
+# factor *= 3.0). Not a clip-fit constant -- it is the app's own dual-ISO de-squeeze factor.
+$deSqueezeX = 3.0
+$desqueezed = @{}
+try {
+    Add-Type -AssemblyName System.Drawing
+    foreach ($sf in @(2, 1)) {
+        $src = $grabs["scale$sf"]
+        $dst = Join-Path (Join-Path $OutputRoot "scale$sf") "shots\$clipBase-desqueezed.png"
+        $img = [System.Drawing.Image]::FromFile($src)
+        try {
+            $nw = [int]($img.Width * $deSqueezeX); $nh = $img.Height
+            $bmp = New-Object System.Drawing.Bitmap $nw, $nh
+            try {
+                $g = [System.Drawing.Graphics]::FromImage($bmp)
+                try {
+                    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                    $g.DrawImage($img, 0, 0, $nw, $nh)
+                } finally { $g.Dispose() }
+                $bmp.Save($dst, [System.Drawing.Imaging.ImageFormat]::Png)
+            } finally { $bmp.Dispose() }
+            $desqueezed["scale$sf"] = $dst
+        } finally { $img.Dispose() }
+    }
+    Write-Host ("[A/B] de-squeezed EYEBALL companions written (correct ~{0:N2} display aspect; the MEASUREMENT below stays on the native-resolution grab): scale2 + scale1 shots\$clipBase-desqueezed.png" -f ($asp2.aspect * $deSqueezeX)) -ForegroundColor Cyan
+} catch {
+    Write-Host "WARN: could not write de-squeezed eyeball companions: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 $metricsJson = & py -3 $metricPy $grabs["scale2"] $grabs["scale1"]
 $metrics = $metricsJson | ConvertFrom-Json
 $m2 = $metrics[0]; $m1 = $metrics[1]
@@ -217,6 +252,7 @@ $report = [ordered]@{
     whiteBalanceLocked = [bool]($LockWhiteBalance -or $LockReceipt)
     lockReceipt = $LockReceipt
     aspectCheck = $aspectCheck
+    deSqueezedEyeball = [ordered]@{ note = "Correct-aspect (~x3 dual-ISO de-squeeze) companions for the EYEBALL only; the HLine/VLine/chromaSpeckle measurement uses the native-resolution grab to preserve row-mesh sensitivity."; scale2 = $desqueezed["scale2"]; scale1 = $desqueezed["scale1"] }
     capturedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     exe = $exe
     embeddedSha = $stampInfo.sha
