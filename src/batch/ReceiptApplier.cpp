@@ -1258,7 +1258,7 @@ bool ReceiptApplier::applyHeadlessLookAssist(ReceiptSettings *receipt,
                                ? QStringLiteral("processed-neutral-patch")
                                : QStringLiteral("raw-neutral-patch");
         autoWhiteBalanceDecision = QStringLiteral("candidate");
-        findMlvWhiteBalance(
+        findMlvWhiteBalanceIsolated(
             mlvObject,
             static_cast<uint64_t>( frameIndex ),
             autoWbPatch.rawX,

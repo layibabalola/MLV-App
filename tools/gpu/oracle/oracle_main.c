@@ -778,7 +778,7 @@ int main(int argc, char ** argv)
                                 &diso_pattern, &diso_auto_correction,
                                 &diso_ev_correction, &diso_black_delta,
                                 interp_method, use_alias_map, use_fullres,
-                                chroma_smooth_method, threads, &sc);
+                                chroma_smooth_method, 0, threads, &sc);
     if (!ok) {
         fprintf(stderr, "[oracle] recon FAILED (pattern/overlap). pattern=%d ev_corr=%f\n",
                 diso_pattern, diso_ev_correction);

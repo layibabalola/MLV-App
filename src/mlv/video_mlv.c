@@ -3267,6 +3267,58 @@ int getMlvRawFrameUint16(mlvObject_t * video, uint64_t frameIndex, uint16_t * un
     return result;
 }
 
+int getMlvRawFrameProcessedUint16Direct(mlvObject_t * video,
+                                        uint64_t frameIndex,
+                                        uint16_t * outputFrame,
+                                        int * bit_shift)
+{
+    int pixels_count = video->RAWI.xRes * video->RAWI.yRes;
+    size_t output_frame_size = (size_t)pixels_count * sizeof(uint16_t);
+
+    mlv_reset_last_raw_stage_telemetry();
+    g_mlv_last_llrawproc_ms = 0.0;
+    g_mlv_last_raw_float_convert_ms = 0.0;
+
+    const double unpack_start = mlv_stage_timing_now();
+    if(getMlvRawFrameUint16Direct(video, frameIndex, outputFrame))
+    {
+        memset(outputFrame, 0, output_frame_size);
+        mlv_stage_timing_note("raw_uint16", frameIndex, unpack_start);
+        return 1;
+    }
+    const double raw_uint16_ms = (mlv_stage_timing_now() - unpack_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("raw_uint16", frameIndex, raw_uint16_ms);
+    g_mlv_last_raw_uint16_ms = raw_uint16_ms;
+    mlv_stage_timing_note_elapsed("raw_uint16_disk_read", frameIndex, g_mlv_last_raw_uint16_disk_read_ms);
+    mlv_stage_timing_note_elapsed("raw_uint16_decompress", frameIndex, g_mlv_last_raw_uint16_decompress_ms);
+    mlv_stage_timing_note_elapsed("raw_uint16_decompress_prepare", frameIndex, g_mlv_last_raw_uint16_decompress_prepare_ms);
+    mlv_stage_timing_note_elapsed("raw_uint16_decompress_execute", frameIndex, g_mlv_last_raw_uint16_decompress_execute_ms);
+    mlv_stage_timing_note_elapsed("raw_uint16_unpack", frameIndex, g_mlv_last_raw_uint16_unpack_ms);
+    mlv_stage_timing_note_elapsed("raw_uint16_copy", frameIndex, g_mlv_last_raw_uint16_copy_ms);
+
+    llrawprocWorkerState_t analysis_worker;
+    llrpInitWorkerState(&analysis_worker);
+
+    const double llraw_start = mlv_stage_timing_now();
+    mlv_pipeline_capture_set_current_frame(frameIndex);
+    applyLLRawProcObjectWorkerIsolatedAnalysis(video,
+                                               outputFrame,
+                                               output_frame_size,
+                                               &analysis_worker,
+                                               0);
+    llrpFreeWorkerState(&analysis_worker);
+    const double llrawproc_ms = (mlv_stage_timing_now() - llraw_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("llrawproc", frameIndex, llrawproc_ms);
+    g_mlv_last_llrawproc_ms = llrawproc_ms;
+
+    if (bit_shift)
+    {
+        *bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
+    }
+
+    return 0;
+}
+
 int getMlvRawFrameProcessedUint16(mlvObject_t * video,
                                   uint64_t frameIndex,
                                   uint16_t * outputFrame,
@@ -9263,5 +9315,42 @@ void findMlvWhiteBalance(mlvObject_t *video, uint64_t frameIndex, int posX, int 
                                 posX, posY,
                                 wbTemp, wbTint, mode);
 
+    free(unprocessed_frame);
+}
+
+void findMlvWhiteBalanceIsolated(mlvObject_t *video, uint64_t frameIndex, int posX, int posY, int *wbTemp, int *wbTint, int mode)
+{
+    int width = getMlvWidth(video);
+    int height = getMlvHeight(video);
+    size_t pixels = (size_t)width * (size_t)height;
+    size_t rgb_words = pixels * 3u;
+
+    float * temp_frame = malloc(pixels * sizeof(float));
+    uint16_t * unprocessed_frame = malloc(rgb_words * sizeof(uint16_t));
+    processingObject_t * analysis_processing = processingCloneForAnalysis(video->processing);
+
+    if (!temp_frame || !unprocessed_frame || !analysis_processing)
+    {
+        free(temp_frame);
+        free(unprocessed_frame);
+        processingFreeClone(analysis_processing);
+        findMlvWhiteBalance(video, frameIndex, posX, posY, wbTemp, wbTint, mode);
+        return;
+    }
+
+    get_mlv_raw_frame_debayered_isolated_analysis(video,
+                                                  frameIndex,
+                                                  temp_frame,
+                                                  unprocessed_frame,
+                                                  doesMlvAlwaysUseAmaze(video));
+
+    processingFindWhiteBalance(analysis_processing,
+                               width, height,
+                               unprocessed_frame,
+                               posX, posY,
+                               wbTemp, wbTint, mode);
+
+    processingFreeClone(analysis_processing);
+    free(temp_frame);
     free(unprocessed_frame);
 }

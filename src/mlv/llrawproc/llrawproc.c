@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #include "llrawproc.h"
 #include "pixelproc.h"
@@ -74,6 +77,16 @@ static double g_llrawproc_last_preview_rowscale_ms = 0.0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_pixel_map_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_dark_frame_copy_count = 0;
 static MLV_THREAD_LOCAL uint64_t g_llrawproc_debug_runtime_publish_count = 0;
+static MLV_THREAD_LOCAL int g_llrawproc_analysis_isolation_enabled = 0;
+
+static int llrawproc_analysis_thread_count(mlvObject_t * video, int isolated_analysis)
+{
+    if (isolated_analysis)
+    {
+        return 1;
+    }
+    return video ? video->cpu_cores : 1;
+}
 
 /* Diagnostic-only escape hatch: set MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE=1
  * to make applyLLRawProcObject ignore the diso_playback_force_mean23 field
@@ -2391,12 +2404,15 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 {
     const double apply_start = mlv_stage_timing_now();
     llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+    const int isolated_analysis = g_llrawproc_analysis_isolation_enabled;
+    const int llrawproc_threads =
+        llrawproc_analysis_thread_count(video, isolated_analysis);
     llrawprocWorkerState_t stack_worker;
     llrawprocWorkerState_t * worker = supplied_worker;
     int using_stack_worker = 0;
 
     llrawproc_gpu_export_reset_last_run_state();
-    llrawproc_gpu_export_set_skip_code(llrawproc_gpu_export_enabled()
+    llrawproc_gpu_export_set_skip_code((!isolated_analysis && llrawproc_gpu_export_enabled())
         ? LLRP_GPU_EXPORT_SKIP_NOT_DUAL_ISO
         : LLRP_GPU_EXPORT_SKIP_DISABLED);
     g_llrawproc_last_shared_lock_ms = 0.0;
@@ -2567,7 +2583,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
      * differs between playback-active (override=1) and paused (override=0)
      * — the same frame index produces two cache slots, and switching from
      * playback to paused presents the AMaZE pixels not the mean23 ones. */
-    if (shared->diso_playback_force_mean23 != 0
+    if (!isolated_analysis
+        && shared->diso_playback_force_mean23 != 0
         && !dualiso_playback_mean23_override_disabled_via_env())
     {
         diso_averaging = 1; /* DISOI_MEAN23 */
@@ -2582,7 +2599,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
      * invalidation: the override field is hashed by
      * mlv_hash_llrawproc_state, so playback-active and paused produce
      * different cache slot signatures for the same frame index. */
-    if (!dualiso_playback_alias_map_downgrade_disabled_via_env())
+    if (!isolated_analysis
+        && !dualiso_playback_alias_map_downgrade_disabled_via_env())
     {
         if (shared->diso_playback_force_disable_alias_map != 0)
         {
@@ -2594,6 +2612,18 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     worker_diso_ev_correction = shared->diso_ev_correction;
     worker_diso_black_delta = shared->diso_black_delta;
     worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    if (isolated_analysis)
+    {
+        llrawproc_runtime_state_t analysis_seed = { 0 };
+        worker_diso_pattern = 0;
+        worker_diso_auto_correction = -1;
+        worker_diso_ev_correction = 1.0;
+        worker_diso_black_delta = -1;
+        analysis_seed.diso_auto_correction = -1;
+        analysis_seed.diso_ev_correction = 1.0;
+        analysis_seed.diso_black_delta = -1;
+        worker->seeded_runtime_state = analysis_seed;
+    }
     dark_frame_mode = shared->dark_frame;
     vertical_stripes_mode = shared->vertical_stripes;
 
@@ -2872,7 +2902,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             uint16_t * gpu_playback_input = NULL;
             int gpu_playback_input_owned_by_last_snapshot = 0;
             int gpu_playback_input_borrowed_from_raw_image = 0;
-            const int gpu_export_requested = llrawproc_gpu_export_enabled();
+            const int gpu_export_requested =
+                isolated_analysis ? 0 : llrawproc_gpu_export_enabled();
             const int gpu_export_trusted_requested =
                 gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
             int gpu_playback_recon_used = 0;
@@ -2926,7 +2957,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     }
                 }
             }
-            if (llrawproc_gpu_playback_recon_enabled()
+            if (!isolated_analysis
+             && llrawproc_gpu_playback_recon_enabled()
              && raw_image_size > 0)
             {
                 llrawproc_gpu_playback_reset_last_run_state();
@@ -2993,7 +3025,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                                  diso_alias_map,
                                                  diso_frblending,
                                                  chroma_smooth_mode,
-                                                 video->cpu_cores,
+                                                 llrawproc_threads,
                                                  &worker->diso_full20bit_scratch,
                                                  &gpu_playback_state))
                 {
@@ -3094,7 +3126,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                                  diso_alias_map,
                                                  diso_frblending,
                                                  chroma_smooth_mode,
-                                                 video->cpu_cores,
+                                                 llrawproc_threads,
                                                  &worker->diso_full20bit_scratch,
                                                  &gpu_export_state))
                 {
@@ -3140,7 +3172,14 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                        diso_alias_map,
                                        diso_frblending,
                                        chroma_smooth_mode,
-                                       video->cpu_cores,
+                                       isolated_analysis
+                                           ? 0
+                                           : processingPlaybackPreviewModeEnabled()
+                                           ? ((video && video->playback_scale_factor_active > 0)
+                                               ? video->playback_scale_factor_active
+                                               : processingPlaybackPreviewScaleFactor())
+                                           : 0,
+                                       llrawproc_threads,
                                        &worker->diso_full20bit_scratch);
             }
             /* P3 diagnostic (gated, one-shot): snapshot the RECON-ONLY bayer here --
@@ -3475,7 +3514,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             !llrawproc_runtime_state_equal(&runtime_state,
                                            &worker->seeded_runtime_state,
                                            publish_auto_correction);
-        if (runtime_state_changed)
+        if (!isolated_analysis && runtime_state_changed)
         {
             const double publish_lock_start = mlv_stage_timing_now();
             pthread_mutex_lock(&video->llrawproc_mutex);
@@ -3514,6 +3553,29 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     {
         llrawproc_free_worker_state(worker);
     }
+}
+
+void applyLLRawProcObjectWorkerIsolatedAnalysis(mlvObject_t * video,
+                                                uint16_t * raw_image_buff,
+                                                size_t raw_image_size,
+                                                llrawprocWorkerState_t * worker,
+                                                int stop_before_dual_iso)
+{
+    const int previous = g_llrawproc_analysis_isolation_enabled;
+#ifdef _OPENMP
+    const int previous_omp_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+#endif
+    g_llrawproc_analysis_isolation_enabled = 1;
+    applyLLRawProcObjectWorker(video,
+                               raw_image_buff,
+                               raw_image_size,
+                               worker,
+                               stop_before_dual_iso);
+    g_llrawproc_analysis_isolation_enabled = previous;
+#ifdef _OPENMP
+    omp_set_num_threads(previous_omp_threads);
+#endif
 }
 
 void applyLLRawProcObject(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw_image_size)
@@ -3556,6 +3618,9 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 {
     const double apply_start = mlv_stage_timing_now();
     llrawprocObject_t * shared = video ? video->llrawproc : NULL;
+    const int isolated_analysis = g_llrawproc_analysis_isolation_enabled;
+    const int llrawproc_threads =
+        llrawproc_analysis_thread_count(video, isolated_analysis);
     llrawprocWorkerState_t stack_worker;
     llrawprocWorkerState_t * worker = NULL;
     int using_stack_worker = 0;
@@ -3685,7 +3750,8 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     diso1 = shared->diso1;
     diso2 = shared->diso2;
     diso_averaging = shared->diso_averaging;
-    if (shared->diso_playback_force_mean23 != 0
+    if (!isolated_analysis
+        && shared->diso_playback_force_mean23 != 0
         && !dualiso_playback_mean23_override_disabled_via_env())
     {
         diso_averaging = 1; /* DISOI_MEAN23 */
@@ -3693,7 +3759,8 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     diso_alias_map = shared->diso_alias_map;
     diso_frblending = shared->diso_frblending;
     /* Phase E5 scale-aware downgrade: see note in applyLLRawProcObject. */
-    if (!dualiso_playback_alias_map_downgrade_disabled_via_env())
+    if (!isolated_analysis
+        && !dualiso_playback_alias_map_downgrade_disabled_via_env())
     {
         if (shared->diso_playback_force_disable_alias_map != 0)
         {
@@ -3705,6 +3772,18 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     worker_diso_ev_correction = shared->diso_ev_correction;
     worker_diso_black_delta = shared->diso_black_delta;
     worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    if (isolated_analysis)
+    {
+        llrawproc_runtime_state_t analysis_seed = { 0 };
+        worker_diso_pattern = 0;
+        worker_diso_auto_correction = -1;
+        worker_diso_ev_correction = 1.0;
+        worker_diso_black_delta = -1;
+        analysis_seed.diso_auto_correction = -1;
+        analysis_seed.diso_ev_correction = 1.0;
+        analysis_seed.diso_black_delta = -1;
+        worker->seeded_runtime_state = analysis_seed;
+    }
     dark_frame_mode = shared->dark_frame;
     chroma_smooth_mode = shared->chroma_smooth;
 
@@ -3776,11 +3855,18 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
                            ev_correction_ptr,
                            black_delta_ptr,
                            diso_averaging,
-                           diso_alias_map,
-                           diso_frblending,
-                           chroma_smooth_mode,
-                           video->cpu_cores,
-                           &worker->diso_full20bit_scratch);
+                            diso_alias_map,
+                            diso_frblending,
+                            chroma_smooth_mode,
+                            isolated_analysis
+                                ? 0
+                                : processingPlaybackPreviewModeEnabled()
+                                ? ((video && video->playback_scale_factor_active > 0)
+                                    ? video->playback_scale_factor_active
+                                    : processingPlaybackPreviewScaleFactor())
+                                : 0,
+                            llrawproc_threads,
+                            &worker->diso_full20bit_scratch);
         dualiso_debug_get_full20bit_timing(
             &g_llrawproc_last_dual_iso_full20bit_timing);
         dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
@@ -3827,7 +3913,7 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
             !llrawproc_runtime_state_equal(&runtime_state,
                                            &worker->seeded_runtime_state,
                                            publish_auto_correction);
-        if (runtime_state_changed)
+        if (!isolated_analysis && runtime_state_changed)
         {
             const double publish_lock_start = mlv_stage_timing_now();
             pthread_mutex_lock(&video->llrawproc_mutex);

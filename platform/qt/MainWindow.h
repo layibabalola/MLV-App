@@ -139,6 +139,8 @@ public:
         QString receiptPath;
         int startFrame = 0;
         int durationMs = 8000;
+        bool loopPlayback = false;   // --loop: loop the clip so a SHORT clip plays the whole durationMs
+                                     // window (else it plays once, stops, and the wait loop exits early).
         int settleMs = 2500;
         double settleCpuPercent = -1.0;
         int settleCpuStableMs = 1000;

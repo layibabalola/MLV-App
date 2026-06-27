@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "Machine-readable lane ownership for the dual-lane Codex<->Claude collaboration. owner-of.ps1 resolves a repo-relative path to codex|claude|shared|unknown. Resolution order: exact override > shared > lane globs > unknown. Consumers (lane-commit.ps1, the pre-commit lane-guard) MUST treat 'unknown' as a HARD BLOCK -- add the path to a lane's globs or to overrides rather than bypassing. Glob forms supported: 'prefix/**' (prefix match), '**/*.ext' (suffix match), exact path.",
+  "resolutionOrder": ["overrides", "shared", "laneGlobs", "unknown=BLOCK"],
+  "lanes": {
+    "codex": {
+      "role": "implementer (recon)",
+      "globs": [
+        "src/mlv/**",
+        "src/processing/**",
+        ".claude-state/coordination/dual-lane/codex.md"
+      ],
+      "trailer": "Dual-Lane: codex"
+    },
+    "claude": {
+      "role": "reviewer (GUI/tooling)",
+      "globs": [
+        "platform/qt/**",
+        "src/batch/**",
+        "tools/**",
+        "tests/**",
+        "docs/**",
+        ".claude/**",
+        ".dual-lane/**",
+        ".claude-state/coordination/dual-lane/claude.md"
+      ],
+      "trailer": "Dual-Lane: claude"
+    }
+  },
+  "overrides": {},
+  "shared": [],
+  "sharedNote": "Phase 2: cross-lane interface headers (src/mlv/video_mlv.h, src/mlv/llrawproc/llrawproc.h, *.pro) may be promoted to 'shared' to require a Two-Key: trailer when edited. Left empty initially to avoid friction on Codex's routine header edits."
+}

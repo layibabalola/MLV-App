@@ -2007,6 +2007,34 @@ extern const char* camidGetCameraName(uint32_t cameraModel, int camname_type);
 #define VERSION QString("%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 #define GITVERSION QString("QTv%1.%2").arg(VERSION_MAJOR).arg(VERSION_MINOR)
 
+// P0-1 build provenance: prefer the build-TIME stamp (build_buildinfo.h, written by
+// tools/build-release.ps1 / gen-buildinfo.ps1) which carries the dirty flag; fall back to the
+// qmake-time -DMLVAPP_GIT_SHA. Surfaced in the window title so a stale/dirty build is obvious.
+#if defined(__has_include)
+#  if __has_include("build_buildinfo.h")
+#    include "build_buildinfo.h"
+#  endif
+#endif
+#ifndef MLVAPP_BUILD_STAMP
+#  define MLVAPP_BUILD_STAMP "MLVAPP_BUILDSTAMP_v1|sha=unknown|dirty=0"
+#endif
+// Retain the uniquely-tagged provenance stamp in the binary so tools/build-release.ps1 can verify
+// THIS exact field. __attribute__((used)) forces the linker to keep it even though nothing reads it;
+// a volatile read of kMlvAppBuildStamp[0] is NOT enough (at -O3 the compiler constant-folds the read
+// and drops the array, which is exactly why the first attempt got stripped).
+#if defined(__GNUC__)
+__attribute__((used))
+#endif
+static const char kMlvAppBuildStamp[] = MLVAPP_BUILD_STAMP;
+static QString mlvAppBuildId()
+{
+    QString id = QString::fromLatin1(MLVAPP_GIT_SHA).left(12);
+#if defined(MLVAPP_GIT_DIRTY)
+    if (MLVAPP_GIT_DIRTY) id += QStringLiteral("+dirty");
+#endif
+    return id;
+}
+
 static QString mlvAppUpdateReleasesUrl()
 {
     // Watch upstream releases so the fork gets a useful signal when there is new work to merge.
@@ -8032,6 +8060,11 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     QElapsedTimer playbackClock;
     playbackClock.start();
+    // RULE 2026-06-26 (Layi): with --loop, check actionLoop BEFORE Play so a short clip (e.g. 16 frames)
+    // replays continuously and actionPlay stays checked for the whole durationMs window -- otherwise the
+    // clip plays once, the engine unchecks Play at clip-end, and the wait loop below exits early ("MLV
+    // playback stopping too early"). Frame-matched A/B callers omit --loop so both legs stop on the same frame.
+    if( options.loopPlayback && !ui->actionLoop->isChecked() ) ui->actionLoop->trigger();
     ui->actionPlay->trigger();
     qApp->processEvents( QEventLoop::AllEvents );
     if( !ui->actionPlay->isChecked() )
@@ -8479,7 +8512,7 @@ int MainWindow::openMlv( QString fileName )
     }
 
     //Set window title to filename
-    this->setWindowTitle( QString( "MLV App | %1" ).arg( fileName ) );
+    this->setWindowTitle( QString( "MLV App  [build %1] | %2" ).arg( mlvAppBuildId() ).arg( fileName ) );
 
     m_fileLoaded = false;
 
@@ -13747,6 +13780,27 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             processedColorStats.balanceSamples >= minColorBalanceSamples;
     }
 
+    // [WB-TRACE] env-gated, read-only diagnostic to pin the Look Assist per-scale WB divergence
+    // (dual-lane two-key plan). Logs the per-leg analysis state on the UI thread BEFORE the WB solve.
+    // Remove/leave-disabled before merge.
+    if( qEnvironmentVariableIsSet( "MLVAPP_LOOK_ASSIST_WB_TRACE" ) )
+    {
+        logInteractionEvent(
+            QStringLiteral("look_assist.wb_trace"),
+            QStringLiteral("preview_mode=%1 preview_scale=%2 play_scale_active=%3 raw_med=%4/%5/%6 proc_med=%7/%8/%9 use_proc=%10 floor_lifted=%11 scene=%12 chroma_smooth=%13 chroma_auto=%14 frame=%15")
+                .arg( processingPlaybackPreviewModeEnabled() )
+                .arg( processingPlaybackPreviewScaleFactor() )
+                .arg( m_pMlvObject ? (int)m_pMlvObject->playback_scale_factor_active : -1 )
+                .arg( stats.medianR, 0, 'f', 1 ).arg( stats.medianG, 0, 'f', 1 ).arg( stats.medianB, 0, 'f', 1 )
+                .arg( processedColorStats.medianR, 0, 'f', 1 ).arg( processedColorStats.medianG, 0, 'f', 1 ).arg( processedColorStats.medianB, 0, 'f', 1 )
+                .arg( bool01( useProcessedColorStats ) )
+                .arg( bool01( floorLiftedNightThumbnail ) )
+                .arg( lookAssistSceneName( scene ) )
+                .arg( toolButtonChromaSmoothCurrentIndex() )
+                .arg( bool01( m_lastLookAssistChromaSmoothAutoApplied ) )
+                .arg( analysisFrame ) );
+    }
+
     // ----- Async dispatch point -----
     // Capture everything the worker needs as value copies before releasing the
     // UI thread. The worker must only read m_pMlvObject (for findMlvWhiteBalance)
@@ -13912,18 +13966,33 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                          ? QStringLiteral("processed-neutral-patch")
                                          : QStringLiteral("raw-neutral-patch");
                 autoWhiteBalanceDecision = QStringLiteral("candidate");
-                // findMlvWhiteBalance renders a full-res frame from raw data only
-                // (getMlvRawFrameDebayered + processingFindWhiteBalance). It reads
-                // mlvObj and its processing object but does not write processing state.
-                // The processed8 prefetch worker already renders concurrently via the
-                // same internal file-I/O mutexes, so this is safe.
-                findMlvWhiteBalance( mlvObj,
+                // findMlvWhiteBalanceIsolated runs the WB analysis on a PRIVATE deep-cloned
+                // processingObject + caller-owned debayer buffers (cache-free get_mlv_raw_frame_debayered),
+                // so it touches NO shared mlvObject cache or shared processing state and is independent of
+                // the concurrent playback/cache threads. (The prior findMlvWhiteBalance was NOT safe: its
+                // processingFindWhiteBalance mutates the shared processing object during a ~155k-iter search.)
+                findMlvWhiteBalanceIsolated( mlvObj,
                                      static_cast<uint64_t>( analysisFrameCopy ),
                                      autoWbPatch.rawX,
                                      autoWbPatch.rawY,
                                      &autoWhiteBalanceTemperature,
                                      &autoWhiteBalanceTint,
                                      0 );
+                // [WB-TRACE] worker-thread: capture the AWB patch + RAW (pre-clamp) findMlvWhiteBalance
+                // result to localize the per-scale WB divergence. Env-gated; stderr is thread-safe and
+                // captured by the smoke. Remove/leave-disabled before merge.
+                if( qEnvironmentVariableIsSet( "MLVAPP_LOOK_ASSIST_WB_TRACE" ) )
+                {
+                    fprintf( stderr,
+                        "WB_TRACE_WORKER preview_mode=%d play_scale_active=%d patch_valid=%d patch_rawXY=%d/%d raw_wb_temp=%d raw_wb_tint=%d source=%s\n",
+                        processingPlaybackPreviewModeEnabled(),
+                        mlvObj ? (int)mlvObj->playback_scale_factor_active : -1,
+                        autoWbPatch.valid ? 1 : 0,
+                        autoWbPatch.rawX, autoWbPatch.rawY,
+                        autoWhiteBalanceTemperature, autoWhiteBalanceTint,
+                        autoWhiteBalanceSource.toUtf8().constData() );
+                    fflush( stderr );
+                }
                 autoWhiteBalanceTemperature =
                     qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
                 autoWhiteBalanceTint =
@@ -14445,13 +14514,28 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                ? QStringLiteral("processed-neutral-patch")
                                : QStringLiteral("raw-neutral-patch");
         autoWhiteBalanceDecision = QStringLiteral("candidate");
-        findMlvWhiteBalance( m_pMlvObject,
+        findMlvWhiteBalanceIsolated( m_pMlvObject,
                              analysisFrame,
                              autoWbPatch.rawX,
                              autoWbPatch.rawY,
                              &autoWhiteBalanceTemperature,
                              &autoWhiteBalanceTint,
                              0 );
+        // [WB-TRACE] sync-path (MLVAPP_LOOK_ASSIST_SYNC) mirror of the async worker trace, so the
+        // determinism gate (lookassist-wb-determinism.ps1) can measure patch + raw WB in sync mode too.
+        // Env-gated; stderr is captured by the smoke. Remove/leave-disabled before merge.
+        if( qEnvironmentVariableIsSet( "MLVAPP_LOOK_ASSIST_WB_TRACE" ) )
+        {
+            fprintf( stderr,
+                "WB_TRACE_WORKER preview_mode=%d play_scale_active=%d patch_valid=%d patch_rawXY=%d/%d raw_wb_temp=%d raw_wb_tint=%d source=%s\n",
+                processingPlaybackPreviewModeEnabled(),
+                m_pMlvObject ? (int)m_pMlvObject->playback_scale_factor_active : -1,
+                autoWbPatch.valid ? 1 : 0,
+                autoWbPatch.rawX, autoWbPatch.rawY,
+                autoWhiteBalanceTemperature, autoWhiteBalanceTint,
+                autoWhiteBalanceSource.toUtf8().constData() );
+            fflush( stderr );
+        }
         autoWhiteBalanceTemperature =
             qBound( ui->horizontalSliderTemperature->minimum(),
                     autoWhiteBalanceTemperature,

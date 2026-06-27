@@ -1291,6 +1291,11 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("Disable Look Assist during this GUI smoke run."));
     parser.addOption(noLookAssistOpt);
 
+    const QCommandLineOption loopPlaybackOpt(
+        QStringLiteral("loop"),
+        QStringLiteral("Loop the clip so a short clip plays continuously for the whole --seconds window (default: play once then stop)."));
+    parser.addOption(loopPlaybackOpt);
+
     const QCommandLineOption enablePhase3QualityModesOpt(
         QStringLiteral("enable-phase3-quality-modes"),
         QStringLiteral("Allow unattended Phase 3 quality-mode selection during this GUI smoke run."));
@@ -1516,6 +1521,7 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.forceScope = parser.isSet(scopeOpt);
     options.forcePlaybackDebayer = parser.isSet(playbackDebayerOpt);
     options.disableLookAssist = parser.isSet(noLookAssistOpt);
+    options.loopPlayback = parser.isSet(loopPlaybackOpt);
     options.zebras = parser.isSet(zebrasOpt);
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
     options.dropFrame = dropFrameMode == QStringLiteral("on");

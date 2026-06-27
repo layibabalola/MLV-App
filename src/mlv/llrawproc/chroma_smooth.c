@@ -19,6 +19,8 @@
 #define CHROMA_SMOOTH_TYPE uint16_t
 #endif
 
+#define CHROMA_SMOOTH_RAW_BLACK_MARGIN ((int)((sizeof(CHROMA_SMOOTH_TYPE) > sizeof(uint16_t)) ? (64 * 64) : 64))
+
 #ifndef LIKELY
 #if defined(__GNUC__) || defined(__clang__)
 #define LIKELY(x)   __builtin_expect(!!(x), 1)
@@ -51,22 +53,22 @@ static inline int chroma_smooth_med5(int a0, int a1, int a2, int a3, int a4)
     return a2;
 }
 
-static inline uint16_t chroma_smooth_ev2raw_lookup(const int * ev2raw, int ev)
+static inline CHROMA_SMOOTH_TYPE chroma_smooth_ev2raw_lookup(const int * ev2raw, int ev)
 {
     const int lo = -10 * EV_RESOLUTION;
     const int hi = 14 * EV_RESOLUTION - 1;
     if (LIKELY((unsigned int)(ev - lo) <= (unsigned int)(hi - lo)))
     {
-        return (uint16_t)ev2raw[ev];
+        return (CHROMA_SMOOTH_TYPE)ev2raw[ev];
     }
     ev = ev < lo ? lo : hi;
-    return (uint16_t)ev2raw[ev];
+    return (CHROMA_SMOOTH_TYPE)ev2raw[ev];
 }
 
-static inline uint16_t chroma_smooth_ev2raw_clamped(const int * ev2raw, const int lo, const int hi, const int ev)
+static inline CHROMA_SMOOTH_TYPE chroma_smooth_ev2raw_clamped(const int * ev2raw, const int lo, const int hi, const int ev)
 {
     const int clamped_ev = ev < lo ? lo : (ev > hi ? hi : ev);
-    return (uint16_t)ev2raw[clamped_ev];
+    return (CHROMA_SMOOTH_TYPE)ev2raw[clamped_ev];
 }
 
 static inline void chroma_smooth_ev2raw_clamped_pair(const int * ev2raw,
@@ -74,8 +76,8 @@ static inline void chroma_smooth_ev2raw_clamped_pair(const int * ev2raw,
                                                      const int hi,
                                                      const int ev_r,
                                                      const int ev_b,
-                                                     uint16_t * __restrict out_r,
-                                                     uint16_t * __restrict out_b)
+                                                     CHROMA_SMOOTH_TYPE * __restrict out_r,
+                                                     CHROMA_SMOOTH_TYPE * __restrict out_b)
 {
     *out_r = chroma_smooth_ev2raw_clamped(ev2raw, lo, hi, ev_r);
     *out_b = chroma_smooth_ev2raw_clamped(ev2raw, lo, hi, ev_b);
@@ -90,14 +92,14 @@ static inline void chroma_smooth_store_both_no_probe(const int * ev2raw,
                                                      CHROMA_SMOOTH_TYPE * __restrict out_y_p1,
                                                      const int x)
 {
-    uint16_t out_r = 0;
-    uint16_t out_b = 0;
+    CHROMA_SMOOTH_TYPE out_r = 0;
+    CHROMA_SMOOTH_TYPE out_b = 0;
     const unsigned int ev2raw_range = (unsigned int)(ev2raw_hi - ev2raw_lo);
     if (LIKELY((unsigned int)(out_r_ev - ev2raw_lo) <= ev2raw_range &&
                (unsigned int)(out_b_ev - ev2raw_lo) <= ev2raw_range))
     {
-        out_r = (uint16_t)ev2raw[out_r_ev];
-        out_b = (uint16_t)ev2raw[out_b_ev];
+        out_r = (CHROMA_SMOOTH_TYPE)ev2raw[out_r_ev];
+        out_b = (CHROMA_SMOOTH_TYPE)ev2raw[out_b_ev];
     }
     else
     {
@@ -121,7 +123,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
 #pragma omp parallel for
     for (y = 4; y < h-5; y += 2)
     {
-        const int black_thr = black + 64;
+        const int black_thr = black + CHROMA_SMOOTH_RAW_BLACK_MARGIN;
         const unsigned int white_u = (unsigned int)white;
         const int probe_mode = dualiso_mix_chroma_probe_mode();
         const int probe_detail = probe_mode >= 0;
@@ -356,8 +358,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
             }
             int dr = choose_ev_lt_eh ? drv : drh;
             int db = choose_ev_lt_eh ? dbv : dbh;
-            int thr = 64;
-            const int use_average = r0 < black_thr || b0 < black_thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr;
+            const int direction_ev_thr = 64;
+            const int use_average = r0 < black_thr || b0 < black_thr || ABS(drv - drh) < direction_ev_thr || ABS(grv-grh) < direction_ev_thr || ABS(gbv-gbh) < direction_ev_thr;
             if (probe_center && use_average)
             {
                 if (probe_center_fullres)
@@ -464,8 +466,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             if (LIKELY(write_r && write_b) && !use_average)
             {
-                uint16_t out_r = 0;
-                uint16_t out_b = 0;
+                CHROMA_SMOOTH_TYPE out_r = 0;
+                CHROMA_SMOOTH_TYPE out_b = 0;
                 const int out_r_ev = gr + dr;
                 const int out_b_ev = gb + db;
                 if (probe_non_average_write_both_branch)
@@ -555,8 +557,8 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             if (write_r && write_b)
             {
-                uint16_t out_r = 0;
-                uint16_t out_b = 0;
+                CHROMA_SMOOTH_TYPE out_r = 0;
+                CHROMA_SMOOTH_TYPE out_b = 0;
                 const int out_r_ev = gr + dr;
                 const int out_b_ev = gb + db;
 
@@ -668,7 +670,7 @@ chroma_mix_store_r_path:
                 {
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_r_high_clamp_count += 1.0;
                 }
-                uint16_t out_r = 0;
+                CHROMA_SMOOTH_TYPE out_r = 0;
                 if (probe_center) chroma_center_store_r_lookup_start = mlv_stage_timing_now();
                 if (probe_center)
                 {
@@ -692,7 +694,7 @@ chroma_mix_store_r_path:
                     const int out_r_ev = gr + dr;
                     const int out_r_ev_clamped =
                         out_r_ev < ev2raw_lo ? ev2raw_lo : (out_r_ev > ev2raw_hi ? ev2raw_hi : out_r_ev);
-                    out_r = (uint16_t)ev2raw[out_r_ev_clamped];
+                    out_r = (CHROMA_SMOOTH_TYPE)ev2raw[out_r_ev_clamped];
                 }
                 if (probe_average_branch && use_average)
                 {
@@ -765,7 +767,7 @@ chroma_mix_store_b_path:
                 {
                     g_dualiso_full20bit_timing.mix_chroma_halfres_center_store_b_high_clamp_count += 1.0;
                 }
-                uint16_t out_b = 0;
+                CHROMA_SMOOTH_TYPE out_b = 0;
                 if (probe_center) chroma_center_store_b_lookup_start = mlv_stage_timing_now();
                 if (probe_center)
                 {
@@ -789,7 +791,7 @@ chroma_mix_store_b_path:
                     const int out_b_ev = gb + db;
                     const int out_b_ev_clamped =
                         out_b_ev < ev2raw_lo ? ev2raw_lo : (out_b_ev > ev2raw_hi ? ev2raw_hi : out_b_ev);
-                    out_b = (uint16_t)ev2raw[out_b_ev_clamped];
+                    out_b = (CHROMA_SMOOTH_TYPE)ev2raw[out_b_ev_clamped];
                 }
                 if (probe_average_branch && use_average)
                 {
@@ -1065,8 +1067,9 @@ static void CHROMA_SMOOTH_FUNC(int w,
 
             /* if we are close to the noise floor, use both directions, beacuse otherwise it will affect the noise structure and introduce false detail */
             /* todo: smooth transition between the two methods? better thresholding condition? */
-            int thr = 64;
-            if (r0 < black+thr || b0 < black+thr || ABS(drv - drh) < thr || ABS(grv-grh) < thr || ABS(gbv-gbh) < thr)
+            const int direction_ev_thr = 64;
+            const int black_thr = black + CHROMA_SMOOTH_RAW_BLACK_MARGIN;
+            if (r0 < black_thr || b0 < black_thr || ABS(drv - drh) < direction_ev_thr || ABS(grv-grh) < direction_ev_thr || ABS(gbv-gbh) < direction_ev_thr)
             {
                 dr = (drv+drh)/2;
                 db = (dbv+dbh)/2;
@@ -1090,3 +1093,4 @@ static void CHROMA_SMOOTH_FUNC(int w,
 #undef CHROMA_SMOOTH_MAX_XY_IJ
 #undef CHROMA_SMOOTH_FILTER_SIZE
 #undef CHROMA_SMOOTH_MEDIAN
+#undef CHROMA_SMOOTH_RAW_BLACK_MARGIN

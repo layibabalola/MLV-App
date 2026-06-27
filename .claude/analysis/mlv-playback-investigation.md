@@ -963,3 +963,44 @@
 - x4 quarter-res should stay off by default unless a different candidate path proves it can improve x4 without dragging x4 or x8.
 - With x1/x2 now improved, the next bottleneck hunt should keep following the shared processing tail and related I/O pressure rather than reopening the rejected x4 lever.
 - Future probes should compare against the new `M16-1327` x2 probe result (`25.404 ms` render total) instead of the older `80.600 ms` baseline when ranking the next bottleneck.
+
+# 2026-06-24 - current screenshots: likely a stale binary plus two GUI-side confounders, not a CUDA regression
+
+### Verified locally
+
+- The current checkout is on `master` at `bb1be852` and is clean relative to `fork/master`.
+- The user-facing release executable on disk is [`platform/qt/build-release/release/MLVApp.exe`](C:/!Layi%20Wkspc/MLV-App/platform/qt/build-release/release/MLVApp.exe) with `LastWriteTime=6/23/2026 10:12:43 PM`, `Length=10630656`, `SHA256=C64F2DD8DF49D663BF674201C77C9FFCB0294C1C8FE3A42EAF9C2AC79FAC3100`.
+- That timestamp is older than the current source head commits in this checkout, including `d14139e8` and `bb1be852`, so the executable the user is likely launching is not the exact binary for the latest source state.
+- The current source already contains the x1-only HQ downscale mitigation in [`platform/qt/MainWindow.cpp`](../platform/qt/MainWindow.cpp:3957), and the code comment makes the intent explicit: it is a preview-only anti-aliasing fix for the x1 reduction case, with `MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE` as a kill switch.
+- The current source also contains the async Look Assist change in [`platform/qt/MainWindow.cpp`](../platform/qt/MainWindow.cpp:14138). That change deliberately defers the pre-apply `processed-floor-lifted-awb-risk` fallback on bright dual-ISO clips so Look Assist stays active and is decided by the real post-apply image instead.
+- The render manifest in [`platform/qt/MainWindow.cpp`](../platform/qt/MainWindow.cpp:22017) now records `path_code`, `path_label`, `path_source`, `reduced`, and the dual-ISO fields, which is useful for proving whether the frame is coming from render-thread state or a cache replay.
+- The screenshot itself shows `Playback: Smooth [env] [CPU]`, so the active path in the user report is the CPU playback path, not a CUDA presentation path.
+
+### Cross-checked from prior analysis
+
+- The visual striping/moire issue was already isolated to the x1 preview reduction path and fixed by the June 23 `a978c8e4` / `0d30f461` changes. That means a pre-fix binary can still look bad even if it is newer than the older playback work the user remembers.
+- The screenshots also show Auto Look Assist enabled. That is a separate confounder from CUDA: the look-assist policy can materially change exposure and white balance, and the recent async-path change intentionally keeps it alive on bright dual-ISO clips instead of hard-resetting immediately.
+- Because the active mode is CPU playback, swapping to a pre-CUDA build does not automatically change the visible result unless that binary also predates the relevant preview/look-assist fixes.
+
+### Needs runtime profiling
+
+- The fastest discriminating smoke is to launch the same clip with Auto Look Assist off, then with `MLVAPP_DISABLE_PLAYBACK_HQ_DOWNSCALE=1`, and compare the presented frame against the current CPU baseline. That splits "color policy" from "preview resample" cleanly.
+- If the user is still on the stale release exe above, rebuilding `platform/qt/build-release/release/MLVApp.exe` is the first prerequisite before comparing CUDA vs pre-CUDA behavior.
+- If the problem persists on a fresh post-fix build with Auto Look Assist disabled, the next suspect is the upstream raw/recon chain rather than CUDA.
+
+### Follow-up evidence from this machine
+
+- The release exe embedded build SHA is `0d30f4616b0feb632c24febc7b2faa09e5b7f491`, which is the commit that fixed the avir scanline stride bug in `hqPlaybackDownscale`.
+- The current checkout is eight commits ahead of that embedded build SHA (`d14139e8`, `bb1be852`, and the intervening closeout / viewport commits), so the executable on disk is not the current HEAD build.
+- The registry-backed playback settings on this machine are non-default even without env overrides: `HKCU\\Software\\magiclantern.MLVApp\\MLVApp\\Playback` currently holds `QualityMode=1` and `ScaleFactorOverride=2`.
+- The GUI dogfood preset key `HKCU\\Software\\magiclantern.MLVApp\\MLVApp\\PerformanceProfiling\\CudaPlaybackProfilingEnabled` is absent here, so the app is not automatically reapplying the scoped CUDA profiling preset from persisted GUI state on this profile.
+- That combination means there are at least three distinct layers to keep separate when reading a bad session: the stale build, the persisted GUI playback policy, and any launch-time `MLVAPP_*` env overrides that are strong enough to trigger the `[env]` badge.
+
+### Follow-up evidence from tooling
+
+- The env-leak hypothesis is real in this repo, but it is script-specific:
+  - [`tools/profiling/ssh-gpu-probe.ps1`](../tools/profiling/ssh-gpu-probe.ps1:8) writes `$env:MLVAPP_PLAYBACK_SCALE_FACTOR = '1'` and `$env:QT_OPENGL = 'desktop'` directly into the current session and never restores them.
+  - [`tools/profiling/run-ultra-magnus-profile.ps1`](../tools/profiling/run-ultra-magnus-profile.ps1:55) also writes `$env:MLVAPP_PLAYBACK_SCALE_FACTOR`, but it clears that variable again before exit.
+  - [`tools/profiling/run-local-gpu-capability.ps1`](../tools/profiling/run-local-gpu-capability.ps1:168) snapshots and restores the affected env vars in a `finally` block.
+- So Claude’s “my debug env vars leaked into your shell” explanation is plausible if the bad session was launched from `ssh-gpu-probe.ps1` or another direct `$env:`-mutating helper, but it is not supported by the clean shell I checked here.
+- The important distinction is now: child-process env blocks in the smoke wrappers are not the problem; direct session writes in a few ad hoc probe scripts are the real leak risk.

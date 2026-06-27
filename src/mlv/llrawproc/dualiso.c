@@ -3546,6 +3546,584 @@ static inline void fullres_reconstruction(struct raw_info raw_info, uint32_t * f
     }
 }
 
+static inline int dualiso_raw20_to_ev(const int * raw2ev, uint32_t raw)
+{
+    return raw2ev[raw > 0xFFFFF ? 0xFFFFF : (int)raw];
+}
+
+static inline uint32_t dualiso_ev_weighted_raw(const int * raw2ev,
+                                               const int * ev2raw,
+                                               uint32_t native,
+                                               uint32_t opposite,
+                                               int native_weight,
+                                               int opposite_weight)
+{
+    const int denom = native_weight + opposite_weight;
+    int ev = (dualiso_raw20_to_ev(raw2ev, native) * native_weight +
+              dualiso_raw20_to_ev(raw2ev, opposite) * opposite_weight +
+              denom / 2) / denom;
+    ev = COERCE(ev, -10 * EV_RESOLUTION, 14 * EV_RESOLUTION - 1);
+    return (uint32_t)ev2raw[ev];
+}
+
+static inline void fullres_reconstruction_phase_balance(struct raw_info raw_info,
+                                                        uint32_t * fullres,
+                                                        uint32_t * dark,
+                                                        uint32_t * bright,
+                                                        uint32_t white_darkened,
+                                                        int * is_bright,
+                                                        const int * raw2ev,
+                                                        const int * ev2raw)
+{
+    int w = raw_info.width;
+    int h = raw_info.height;
+
+#ifndef STDOUT_SILENT
+    printf("Full-res phase-balanced reconstruction...\n");
+#endif
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int bright_row = BRIGHT_ROW;
+            const uint32_t native = bright_row ? bright[idx] : dark[idx];
+            const uint32_t opposite = bright_row ? dark[idx] : bright[idx];
+
+            if (bright[idx] >= white_darkened)
+            {
+                fullres[idx] = bright_row ? MAX(native, opposite) : native;
+                continue;
+            }
+
+            if ((x ^ y) & 1)
+            {
+                fullres[idx] = dualiso_ev_weighted_raw(raw2ev, ev2raw, native, opposite, 1, 3);
+            }
+            else
+            {
+                fullres[idx] = dualiso_ev_weighted_raw(raw2ev, ev2raw, native, opposite, 1, 1);
+            }
+        }
+    }
+}
+
+static inline int dualiso_x1_playback_fullres_mesh_fix_enabled(int playback_preview_scale_factor,
+                                                               int use_alias_map,
+                                                               int use_fullres,
+                                                               int chroma_smooth_method)
+{
+    return playback_preview_scale_factor == 1 &&
+           use_fullres &&
+           !use_alias_map &&
+           chroma_smooth_method;
+}
+
+static inline void dualiso_source_mesh_stabilize(struct raw_info raw_info,
+                                                 uint32_t * plane,
+                                                 uint32_t * source,
+                                                 const int * raw2ev,
+                                                 const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const size_t plane_pixels = (size_t)w * (size_t)h;
+    const size_t plane_bytes = plane_pixels * sizeof(uint32_t);
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int same_color_edge_limit = (EV_RESOLUTION * 3) / 4;
+    const int correction_floor = EV_RESOLUTION / 32;
+
+    memcpy(source, plane, plane_bytes);
+
+#ifndef STDOUT_SILENT
+    printf("Dual ISO source mesh stabilization...\n");
+#endif
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int center_ev = dualiso_raw20_to_ev(raw2ev, source[idx]);
+            int weighted_ev = center_ev * 2;
+            int weight = 2;
+
+            if (y >= 2 && y + 2 < h)
+            {
+                const size_t up_idx = (size_t)x + (size_t)(y - 2) * (size_t)w;
+                const size_t down_idx = (size_t)x + (size_t)(y + 2) * (size_t)w;
+                const int up_ev = dualiso_raw20_to_ev(raw2ev, source[up_idx]);
+                const int down_ev = dualiso_raw20_to_ev(raw2ev, source[down_idx]);
+                if (ABS(up_ev - down_ev) <= same_color_edge_limit)
+                {
+                    weighted_ev += ((up_ev + down_ev + 1) / 2) * 2;
+                    weight += 2;
+                }
+            }
+
+            if (x >= 2 && x + 2 < w)
+            {
+                const size_t left_idx = (size_t)(x - 2) + (size_t)y * (size_t)w;
+                const size_t right_idx = (size_t)(x + 2) + (size_t)y * (size_t)w;
+                const int left_ev = dualiso_raw20_to_ev(raw2ev, source[left_idx]);
+                const int right_ev = dualiso_raw20_to_ev(raw2ev, source[right_idx]);
+                if (ABS(left_ev - right_ev) <= same_color_edge_limit)
+                {
+                    weighted_ev += ((left_ev + right_ev + 1) / 2) * 2;
+                    weight += 2;
+                }
+            }
+
+            if (weight == 2)
+            {
+                continue;
+            }
+
+            int corrected_ev = (weighted_ev + weight / 2) / weight;
+            if (ABS(center_ev - corrected_ev) < correction_floor)
+            {
+                continue;
+            }
+            corrected_ev = COERCE(corrected_ev, ev_min, ev_max);
+            plane[idx] = (uint32_t)ev2raw[corrected_ev];
+        }
+    }
+}
+
+static inline void dualiso_output_vertical_mesh_stabilize(struct raw_info raw_info,
+                                                          uint32_t * image,
+                                                          uint32_t * source,
+                                                          const int * raw2ev,
+                                                          const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const size_t pixel_count = (size_t)w * (size_t)h;
+    const size_t image_bytes = pixel_count * sizeof(uint32_t);
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int same_color_edge_limit = (EV_RESOLUTION * 3) / 4;
+    const int correction_floor = EV_RESOLUTION / 32;
+
+    memcpy(source, image, image_bytes);
+
+#ifndef STDOUT_SILENT
+    printf("Dual ISO output vertical mesh stabilization...\n");
+#endif
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 2; y < h - 2; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const size_t up_idx = (size_t)x + (size_t)(y - 2) * (size_t)w;
+            const size_t down_idx = (size_t)x + (size_t)(y + 2) * (size_t)w;
+            const int up_ev = dualiso_raw20_to_ev(raw2ev, source[up_idx]);
+            const int down_ev = dualiso_raw20_to_ev(raw2ev, source[down_idx]);
+
+            if (ABS(up_ev - down_ev) > same_color_edge_limit)
+            {
+                continue;
+            }
+
+            const int center_ev = dualiso_raw20_to_ev(raw2ev, source[idx]);
+            const int neighbor_ev = (up_ev + down_ev + 1) / 2;
+            if (ABS(center_ev - neighbor_ev) < correction_floor)
+            {
+                continue;
+            }
+
+            int corrected_ev = (center_ev + 2 * neighbor_ev + 1) / 3;
+            corrected_ev = COERCE(corrected_ev, ev_min, ev_max);
+            image[idx] = (uint32_t)ev2raw[corrected_ev];
+        }
+    }
+}
+
+static inline void dualiso_output_flat_chroma_guard(struct raw_info raw_info,
+                                                    uint32_t * image,
+                                                    const int * raw2ev,
+                                                    const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int green_edge_limit = EV_RESOLUTION * 3 / 2;
+    const int correction_floor = EV_RESOLUTION / 32;
+    const int max_chroma_correction = EV_RESOLUTION * 2;
+    const int red_green_limit = 0;
+    const int blue_green_limit = -EV_RESOLUTION / 4;
+
+#ifndef STDOUT_SILENT
+    printf("Dual ISO output flat chroma guard...\n");
+#endif
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 1; y < h - 1; y ++)
+    {
+        for (int x = 1; x < w - 1; x ++)
+        {
+            const int red_site = ((x & 1) == 0) && ((y & 1) == 0);
+            const int blue_site = ((x & 1) == 1) && ((y & 1) == 1);
+            if (!red_site && !blue_site)
+            {
+                continue;
+            }
+
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int left_green_ev = dualiso_raw20_to_ev(raw2ev, image[idx - 1]);
+            const int right_green_ev = dualiso_raw20_to_ev(raw2ev, image[idx + 1]);
+            const int up_green_ev = dualiso_raw20_to_ev(raw2ev, image[idx - (size_t)w]);
+            const int down_green_ev = dualiso_raw20_to_ev(raw2ev, image[idx + (size_t)w]);
+            const int green_min = MIN(MIN(left_green_ev, right_green_ev),
+                                      MIN(up_green_ev, down_green_ev));
+            const int green_max = MAX(MAX(left_green_ev, right_green_ev),
+                                      MAX(up_green_ev, down_green_ev));
+            if (green_max - green_min > green_edge_limit)
+            {
+                continue;
+            }
+
+            const int green_avg = (left_green_ev + right_green_ev + up_green_ev + down_green_ev + 2) / 4;
+            const int site_ev = dualiso_raw20_to_ev(raw2ev, image[idx]);
+            const int target_ev = green_avg + (red_site ? red_green_limit : blue_green_limit);
+            const int excess = site_ev - target_ev;
+            if (excess <= correction_floor)
+            {
+                continue;
+            }
+
+            const int correction = MIN(excess, max_chroma_correction);
+            const int corrected_ev = COERCE(site_ev - correction, ev_min, ev_max);
+            image[idx] = (uint32_t)ev2raw[corrected_ev];
+        }
+    }
+}
+
+static inline void dualiso_output_flat_green_cell_balance(struct raw_info raw_info,
+                                                          uint32_t * image,
+                                                          const int * raw2ev,
+                                                          const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int same_green_edge_limit = EV_RESOLUTION * 3 / 2;
+    const int correction_floor = EV_RESOLUTION / 64;
+    const int max_green_correction = EV_RESOLUTION / 2;
+
+#ifndef STDOUT_SILENT
+    printf("Dual ISO output flat green cell balance...\n");
+#endif
+
+    #pragma omp parallel for
+    for (int y = 2; y < h - 3; y += 2)
+    {
+        for (int x = 2; x < w - 3; x += 2)
+        {
+            const size_t green_red_row_idx = (size_t)(x + 1) + (size_t)y * (size_t)w;
+            const size_t green_blue_row_idx = (size_t)x + (size_t)(y + 1) * (size_t)w;
+
+            const int g_red_left_ev = dualiso_raw20_to_ev(raw2ev, image[green_red_row_idx - 2]);
+            const int g_red_right_ev = dualiso_raw20_to_ev(raw2ev, image[green_red_row_idx + 2]);
+            const int g_red_up_ev = dualiso_raw20_to_ev(raw2ev, image[green_red_row_idx - (size_t)2 * (size_t)w]);
+            const int g_red_down_ev = dualiso_raw20_to_ev(raw2ev, image[green_red_row_idx + (size_t)2 * (size_t)w]);
+            const int g_blue_left_ev = dualiso_raw20_to_ev(raw2ev, image[green_blue_row_idx - 2]);
+            const int g_blue_right_ev = dualiso_raw20_to_ev(raw2ev, image[green_blue_row_idx + 2]);
+            const int g_blue_up_ev = dualiso_raw20_to_ev(raw2ev, image[green_blue_row_idx - (size_t)2 * (size_t)w]);
+            const int g_blue_down_ev = dualiso_raw20_to_ev(raw2ev, image[green_blue_row_idx + (size_t)2 * (size_t)w]);
+            const int red_green_axis_ev = MAX(ABS(g_red_left_ev - g_red_right_ev),
+                                              ABS(g_red_up_ev - g_red_down_ev));
+            const int blue_green_axis_ev = MAX(ABS(g_blue_left_ev - g_blue_right_ev),
+                                               ABS(g_blue_up_ev - g_blue_down_ev));
+            if (MAX(red_green_axis_ev, blue_green_axis_ev) > same_green_edge_limit)
+            {
+                continue;
+            }
+
+            const int g_red_ev = dualiso_raw20_to_ev(raw2ev, image[green_red_row_idx]);
+            const int g_blue_ev = dualiso_raw20_to_ev(raw2ev, image[green_blue_row_idx]);
+            const int delta = g_red_ev - g_blue_ev;
+            if (ABS(delta) <= correction_floor)
+            {
+                continue;
+            }
+
+            int correction = delta / 2;
+            correction = COERCE(correction, -max_green_correction, max_green_correction);
+            int g_red_out_ev = COERCE(g_red_ev - correction, ev_min, ev_max);
+            int g_blue_out_ev = COERCE(g_blue_ev + correction, ev_min, ev_max);
+            image[green_red_row_idx] = (uint32_t)ev2raw[g_red_out_ev];
+            image[green_blue_row_idx] = (uint32_t)ev2raw[g_blue_out_ev];
+        }
+    }
+}
+
+static inline int dualiso_output_dc_mesh_balance(struct raw_info raw_info,
+                                                 uint32_t * image,
+                                                 const int * raw2ev,
+                                                 const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int edge_limit = EV_RESOLUTION * 2;
+    const int max_row_correction = (EV_RESOLUTION * 3) / 4;
+    const int max_col_correction = EV_RESOLUTION / 2;
+    int * row_offset = (int *)calloc((size_t)h, sizeof(int));
+    int * col_offset = (int *)calloc((size_t)w, sizeof(int));
+
+    if (!row_offset || !col_offset)
+    {
+        free(row_offset);
+        free(col_offset);
+        return 0;
+    }
+
+#ifndef STDOUT_SILENT
+    printf("Dual ISO output DC mesh balance...\n");
+#endif
+
+    #pragma omp parallel for
+    for (int y = 2; y < h - 2; y ++)
+    {
+        long long sum = 0;
+        int count = 0;
+        for (int x = (y & 1) ? 0 : 1; x < w; x += 2)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int center_ev = dualiso_raw20_to_ev(raw2ev, image[idx]);
+            const int up_ev = dualiso_raw20_to_ev(raw2ev, image[(size_t)x + (size_t)(y - 2) * (size_t)w]);
+            const int down_ev = dualiso_raw20_to_ev(raw2ev, image[(size_t)x + (size_t)(y + 2) * (size_t)w]);
+            if (ABS(up_ev - down_ev) <= edge_limit)
+            {
+                sum += center_ev - ((up_ev + down_ev + 1) / 2);
+                count ++;
+            }
+        }
+        if (count > w / 8)
+        {
+            row_offset[y] = COERCE((int)(sum / count), -max_row_correction, max_row_correction);
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const int correction = (row_offset[y] * 3) / 4;
+            if (correction)
+            {
+                const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+                int ev = dualiso_raw20_to_ev(raw2ev, image[idx]) - correction;
+                ev = COERCE(ev, ev_min, ev_max);
+                image[idx] = (uint32_t)ev2raw[ev];
+            }
+        }
+    }
+
+    #pragma omp parallel for
+    for (int x = 2; x < w - 2; x ++)
+    {
+        long long sum = 0;
+        int count = 0;
+        for (int y = (x & 1) ? 0 : 1; y < h; y += 2)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int center_ev = dualiso_raw20_to_ev(raw2ev, image[idx]);
+            const int left_ev = dualiso_raw20_to_ev(raw2ev, image[(size_t)(x - 2) + (size_t)y * (size_t)w]);
+            const int right_ev = dualiso_raw20_to_ev(raw2ev, image[(size_t)(x + 2) + (size_t)y * (size_t)w]);
+            if (ABS(left_ev - right_ev) <= edge_limit)
+            {
+                sum += center_ev - ((left_ev + right_ev + 1) / 2);
+                count ++;
+            }
+        }
+        if (count > h / 8)
+        {
+            col_offset[x] = COERCE((int)(sum / count), -max_col_correction, max_col_correction);
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const int correction = col_offset[x] / 2;
+            if (correction)
+            {
+                const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+                int ev = dualiso_raw20_to_ev(raw2ev, image[idx]) - correction;
+                ev = COERCE(ev, ev_min, ev_max);
+                image[idx] = (uint32_t)ev2raw[ev];
+            }
+        }
+    }
+
+    free(row_offset);
+    free(col_offset);
+    return 1;
+}
+
+static inline uint16_t dualiso_raw20_to_u16(uint32_t raw)
+{
+    raw = raw > 0xFFFFF ? 0xFFFFF : raw;
+    return (uint16_t)((raw + 8u) >> 4);
+}
+
+static inline void dualiso_copy_u16_to_raw20(uint16_t * image_data,
+                                             uint32_t * source,
+                                             size_t pixel_count)
+{
+    #pragma omp parallel for
+    for (int i = 0; i < (int)pixel_count; i ++)
+    {
+        source[i] = ((uint32_t)image_data[i]) << 4;
+    }
+}
+
+static inline void dualiso_output_mesh_axis_raw20(struct raw_info raw_info,
+                                                  const uint32_t * source,
+                                                  uint32_t * output,
+                                                  const int * raw2ev,
+                                                  const int * ev2raw,
+                                                  int horizontal)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    const int edge_limit = EV_RESOLUTION * 2;
+    const int correction_floor = EV_RESOLUTION / 64;
+
+    memcpy(output, source, (size_t)w * (size_t)h * sizeof(uint32_t));
+
+    if (horizontal)
+    {
+        const int x_end = w - 1;
+        #pragma omp parallel for collapse(2)
+        for (int y = 0; y < h; y ++)
+        {
+            for (int x = 1; x < x_end; x ++)
+            {
+                const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+                const int a_ev = dualiso_raw20_to_ev(raw2ev, source[idx - 1]);
+                const int b_ev = dualiso_raw20_to_ev(raw2ev, source[idx + 1]);
+                if (ABS(a_ev - b_ev) > edge_limit)
+                {
+                    continue;
+                }
+                const int center_ev = dualiso_raw20_to_ev(raw2ev, source[idx]);
+                const int neighbor_ev = (a_ev + b_ev + 1) / 2;
+                if (ABS(center_ev - neighbor_ev) < correction_floor)
+                {
+                    continue;
+                }
+                int corrected_ev = (center_ev + neighbor_ev + 1) / 2;
+                corrected_ev = COERCE(corrected_ev, ev_min, ev_max);
+                output[idx] = (uint32_t)ev2raw[corrected_ev];
+            }
+        }
+    }
+    else
+    {
+        const int y_end = h - 1;
+        #pragma omp parallel for collapse(2)
+        for (int y = 1; y < y_end; y ++)
+        {
+            for (int x = 0; x < w; x ++)
+            {
+                const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+                const int a_ev = dualiso_raw20_to_ev(raw2ev, source[idx - (size_t)w]);
+                const int b_ev = dualiso_raw20_to_ev(raw2ev, source[idx + (size_t)w]);
+                if (ABS(a_ev - b_ev) > edge_limit)
+                {
+                    continue;
+                }
+                const int center_ev = dualiso_raw20_to_ev(raw2ev, source[idx]);
+                const int neighbor_ev = (a_ev + b_ev + 1) / 2;
+                if (ABS(center_ev - neighbor_ev) < correction_floor)
+                {
+                    continue;
+                }
+                int corrected_ev = (center_ev + neighbor_ev + 1) / 2;
+                corrected_ev = COERCE(corrected_ev, ev_min, ev_max);
+                output[idx] = (uint32_t)ev2raw[corrected_ev];
+            }
+        }
+    }
+}
+
+static inline void dualiso_output_phase_preserving_mesh_stabilize(struct raw_info raw_info,
+                                                                  uint16_t * image_data,
+                                                                  uint32_t * source,
+                                                                  uint32_t * temp,
+                                                                  const int * raw2ev,
+                                                                  const int * ev2raw)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const size_t pixel_count = (size_t)w * (size_t)h;
+    const int ev_min = -10 * EV_RESOLUTION;
+    const int ev_max = 14 * EV_RESOLUTION - 1;
+    double source_sum[4] = {0.0, 0.0, 0.0, 0.0};
+    double output_sum[4] = {0.0, 0.0, 0.0, 0.0};
+    int count[4] = {0, 0, 0, 0};
+    int phase_delta[4] = {0, 0, 0, 0};
+
+#ifndef STDOUT_SILENT
+    printf("Full-res phase-preserving output mesh stabilization...\n");
+#endif
+
+    dualiso_copy_u16_to_raw20(image_data, source, pixel_count);
+    dualiso_output_mesh_axis_raw20(raw_info, source, temp, raw2ev, ev2raw, 1);
+    dualiso_output_mesh_axis_raw20(raw_info, temp, source, raw2ev, ev2raw, 0);
+
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int phase = ((y & 1) << 1) | (x & 1);
+            source_sum[phase] += dualiso_raw20_to_ev(raw2ev, ((uint32_t)image_data[idx]) << 4);
+            output_sum[phase] += dualiso_raw20_to_ev(raw2ev, source[idx]);
+            count[phase] ++;
+        }
+    }
+
+    for (int phase = 0; phase < 4; phase ++)
+    {
+        if (count[phase] > 0)
+        {
+            const double delta = (source_sum[phase] - output_sum[phase]) / (double)count[phase];
+            phase_delta[phase] = delta >= 0.0 ? (int)(delta + 0.5) : (int)(delta - 0.5);
+        }
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < h; y ++)
+    {
+        for (int x = 0; x < w; x ++)
+        {
+            const size_t idx = (size_t)x + (size_t)y * (size_t)w;
+            const int phase = ((y & 1) << 1) | (x & 1);
+            int ev = dualiso_raw20_to_ev(raw2ev, source[idx]) + phase_delta[phase];
+            ev = COERCE(ev, ev_min, ev_max);
+            image_data[idx] = dualiso_raw20_to_u16((uint32_t)ev2raw[ev]);
+        }
+    }
+}
+
 static inline void build_alias_map(struct raw_info raw_info,
                                    uint16_t* alias_map,
                                    uint32_t* fullres_smooth,
@@ -3738,8 +4316,25 @@ static inline void hdr_chroma_smooth(struct raw_info raw_info, uint32_t * input,
     int h = raw_info.height;
     int black = raw_info.black_level;
     int white = raw_info.white_level;
-    
+    int kernel_size;
+
+    /* llrawproc.h stores chroma smooth as 0=off, 1=2x2, 2=3x3, 3=5x5. */
     switch (method) {
+        case 1:
+            kernel_size = 2;
+            break;
+        case 2:
+            kernel_size = 3;
+            break;
+        case 3:
+            kernel_size = 5;
+            break;
+        default:
+            kernel_size = 0;
+            break;
+    }
+
+    switch (kernel_size) {
         case 2:
             chroma_smooth_2x2(w, h, input, output, raw2ev, ev2raw, black, white);
             break;
@@ -3760,7 +4355,85 @@ static inline void hdr_chroma_smooth(struct raw_info raw_info, uint32_t * input,
 
 static inline int dualiso_supported_chroma_smooth_method(int method)
 {
-    return (method == 2 || method == 3 || method == 5) ? method : 0;
+    switch (method) {
+        case 1:
+        case 2:
+        case 3:
+            return method;
+        default:
+            return 0;
+    }
+}
+
+static inline int smooth_matched_source_planes(struct raw_info raw_info,
+                                               uint32_t * dark,
+                                               uint32_t * bright,
+                                               uint32_t * dark_smooth,
+                                               uint32_t * bright_smooth,
+                                               int chroma_smooth_method,
+                                               int black,
+                                               int dark_white,
+                                               int bright_white,
+                                               dualiso_full20bit_scratch_t * scratch)
+{
+    if (!chroma_smooth_method)
+    {
+        return 1;
+    }
+    if (!dark || !bright || !dark_smooth || !bright_smooth || !scratch)
+    {
+        return 0;
+    }
+    g_dualiso_full20bit_timing.mix_chroma_probe_mode = dualiso_mix_chroma_probe_mode();
+
+    const size_t plane_pixels = (size_t)raw_info.width * (size_t)raw_info.height;
+    const size_t plane_bytes = plane_pixels * sizeof(uint32_t);
+
+    double stage_start = mlv_stage_timing_now();
+    memcpy(bright_smooth, bright, plane_bytes);
+    memcpy(dark_smooth, dark, plane_bytes);
+    g_dualiso_full20bit_timing.mix_chroma_copy_ms += dualiso_debug_elapsed_ms(stage_start);
+
+#ifndef STDOUT_SILENT
+    printf("Chroma smoothing matched source planes...\n");
+#endif
+    const double chroma_start = mlv_stage_timing_now();
+    int * raw2ev = NULL;
+    float * raw2ev_float = NULL;
+    int * ev2raw = NULL;
+    const double lut_start = mlv_stage_timing_now();
+    if (!ensure_scratch_ev_lut(scratch, black, dark_white, &raw2ev, &raw2ev_float, &ev2raw))
+    {
+        g_dualiso_full20bit_timing.mix_ev_lut_ms += dualiso_debug_elapsed_ms(lut_start);
+        return 0;
+    }
+    (void)raw2ev_float;
+    g_dualiso_full20bit_timing.mix_ev_lut_ms += dualiso_debug_elapsed_ms(lut_start);
+
+    stage_start = mlv_stage_timing_now();
+    g_dualiso_mix_chroma_probe_stage_cache = 1;
+    g_dualiso_full20bit_timing.mix_chroma_probe_stage = 1;
+    struct raw_info bright_info = raw_info;
+    bright_info.black_level = black;
+    bright_info.white_level = bright_white;
+    hdr_chroma_smooth(bright_info, bright, bright_smooth, chroma_smooth_method, raw2ev, ev2raw);
+    g_dualiso_mix_chroma_probe_stage_cache = 0;
+    g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
+    g_dualiso_full20bit_timing.mix_chroma_fullres_ms += dualiso_debug_elapsed_ms(stage_start);
+
+    stage_start = mlv_stage_timing_now();
+    g_dualiso_mix_chroma_probe_stage_cache = 2;
+    g_dualiso_full20bit_timing.mix_chroma_probe_stage = 2;
+    struct raw_info dark_info = raw_info;
+    dark_info.black_level = black;
+    dark_info.white_level = dark_white;
+    hdr_chroma_smooth(dark_info, dark, dark_smooth, chroma_smooth_method, raw2ev, ev2raw);
+    g_dualiso_mix_chroma_probe_stage_cache = 0;
+    g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
+    g_dualiso_full20bit_timing.mix_chroma_halfres_ms += dualiso_debug_elapsed_ms(stage_start);
+
+    g_dualiso_full20bit_timing.mix_chroma_ms += dualiso_debug_elapsed_ms(chroma_start);
+    return 1;
 }
 
 static inline int mix_curve_key_matches(const dualiso_full20bit_scratch_t * scratch,
@@ -4451,6 +5124,7 @@ static inline int final_blend(struct raw_info raw_info,
                                int white,
                                int dark_noise,
                                const float * randn_cache,
+                               int fullres_mesh_guard,
                                dualiso_full20bit_scratch_t * scratch)
 {
     double final_blend_setup_start = mlv_stage_timing_now();
@@ -4494,7 +5168,7 @@ static inline int final_blend(struct raw_info raw_info,
 
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
-    if (g_dualiso_hq_use_avx2)
+    if (g_dualiso_hq_use_avx2 && !fullres_mesh_guard)
     {
         const int x_start = w & ~7;
         const int fuse_to_16bit = 1;
@@ -4742,7 +5416,6 @@ static inline int final_blend(struct raw_info raw_info,
                 int hrev = raw2ev[hr];
                 int frev = raw2ev[fr];
                 int frsev = raw2ev[frs];
-
                 int output = 0;
 
                 /* blending factor */
@@ -4761,20 +5434,115 @@ static inline int final_blend(struct raw_info raw_info,
                 double ovf = COERCE(overexposed[x + y*w] / 200.0, 0, 1);
                 c = MAX(c, ovf);
 
-                double noisy_or_overexposed = MAX(ovf, 1-f);
+                double noisy_or_overexposed = 0.0;
+                if (fullres_mesh_guard)
+                {
+                    f = MAX(f, c);
+                    if (x > 1 && x + 2 < w && y > 1 && y + 2 < h)
+                    {
+                        const int full_left_ev = raw2ev[fullres[x - 2 + y*w]];
+                        const int full_right_ev = raw2ev[fullres[x + 2 + y*w]];
+                        const int full_up_ev = raw2ev[fullres[x + (y - 2)*w]];
+                        const int full_down_ev = raw2ev[fullres[x + (y + 2)*w]];
+                        const int half_left2_ev = raw2ev[halfres_smooth[x - 2 + y*w]];
+                        const int half_right2_ev = raw2ev[halfres_smooth[x + 2 + y*w]];
+                        const int half_up2_ev = raw2ev[halfres_smooth[x + (y - 2)*w]];
+                        const int half_down2_ev = raw2ev[halfres_smooth[x + (y + 2)*w]];
+                        const int full_axis_ev = MAX(ABS(full_left_ev - full_right_ev),
+                                                     ABS(full_up_ev - full_down_ev));
+                        const int half_axis2_ev = MAX(ABS(half_left2_ev - half_right2_ev),
+                                                      ABS(half_up2_ev - half_down2_ev));
+                        const int full_outlier_ev = MAX(ABS(frev - ((full_left_ev + full_right_ev + 1) / 2)),
+                                                        ABS(frev - ((full_up_ev + full_down_ev + 1) / 2)));
+                        const int half_outlier_ev = MAX(ABS(hrev - ((half_left2_ev + half_right2_ev + 1) / 2)),
+                                                        ABS(hrev - ((half_up2_ev + half_down2_ev + 1) / 2)));
+                        if (full_outlier_ev > half_outlier_ev + EV_RESOLUTION / 2 &&
+                            full_axis_ev > half_axis2_ev + EV_RESOLUTION / 2)
+                        {
+                            f = MIN(f, MAX(ovf, 0.005));
+                        }
+                        else if (full_outlier_ev > half_outlier_ev + EV_RESOLUTION / 4 &&
+                                 full_axis_ev > half_axis2_ev + EV_RESOLUTION / 4)
+                        {
+                            f = MIN(f, MAX(ovf, 0.015));
+                        }
+                    }
+                    if (x > 0 && x + 1 < w && y > 0 && y + 1 < h)
+                    {
+                        const int half_left_ev = raw2ev[halfres_smooth[x - 1 + y*w]];
+                        const int half_right_ev = raw2ev[halfres_smooth[x + 1 + y*w]];
+                        const int half_up_ev = raw2ev[halfres_smooth[x + (y - 1)*w]];
+                        const int half_down_ev = raw2ev[halfres_smooth[x + (y + 1)*w]];
+                        const int half_grad_ev = MAX(ABS(half_left_ev - half_right_ev),
+                                                     ABS(half_up_ev - half_down_ev));
+                        double local_cap = 1.0;
+                        if (half_grad_ev < EV_RESOLUTION / 4)
+                        {
+                            local_cap = 0.005;
+                        }
+                        else if (half_grad_ev < EV_RESOLUTION)
+                        {
+                            local_cap = 0.015;
+                        }
+                        else if (half_grad_ev < EV_RESOLUTION * 2)
+                        {
+                            local_cap = 0.04;
+                        }
+                        else if (half_grad_ev < EV_RESOLUTION * 4)
+                        {
+                            local_cap = 0.10;
+                        }
+                        f = MIN(f, MAX(ovf, local_cap));
+                    }
+                    noisy_or_overexposed = MAX(ovf, 1-f);
+                }
+                else
+                {
+                    noisy_or_overexposed = MAX(ovf, 1-f);
 
-                /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
-                f = MAX(f, c);
+                    /* use data from both ISOs in high-detail areas, even if it's noisier (less aliasing) */
+                    f = MAX(f, c);
+                }
+
+                const int anchor_ev = hrev;
 
                 /* use smoothing in noisy near-overexposed areas to hide color artifacts */
                 double fev = noisy_or_overexposed * frsev + (1-noisy_or_overexposed) * frev;
+                if (fullres_mesh_guard && x > 1 && x + 2 < w && y > 1 && y + 2 < h)
+                {
+                    const int full_left_ev = raw2ev[fullres[x - 2 + y*w]];
+                    const int full_right_ev = raw2ev[fullres[x + 2 + y*w]];
+                    const int full_up_ev = raw2ev[fullres[x + (y - 2)*w]];
+                    const int full_down_ev = raw2ev[fullres[x + (y + 2)*w]];
+                    const int full_base_ev = (full_left_ev + full_right_ev + full_up_ev + full_down_ev + 2) / 4;
+                    const int half_left_ev = raw2ev[halfres_smooth[x - 2 + y*w]];
+                    const int half_right_ev = raw2ev[halfres_smooth[x + 2 + y*w]];
+                    const int half_up_ev = raw2ev[halfres_smooth[x + (y - 2)*w]];
+                    const int half_down_ev = raw2ev[halfres_smooth[x + (y + 2)*w]];
+                    const int half_base_ev = (half_left_ev + half_right_ev + half_up_ev + half_down_ev + 2) / 4;
+                    const int half_detail_ev = MAX(MAX(ABS(hrev - half_base_ev), ABS(half_left_ev - half_right_ev)),
+                                                   ABS(half_up_ev - half_down_ev));
+                    const int green_site = ((x ^ y) & 1);
+                    const int detail_limit_ev = COERCE(half_detail_ev / 8 + EV_RESOLUTION / 32,
+                                                       EV_RESOLUTION / 64,
+                                                       EV_RESOLUTION / 4);
+                    const int full_detail_ev = green_site
+                        ? COERCE(frev - full_base_ev, -detail_limit_ev, detail_limit_ev)
+                        : 0;
+                    const int full_smooth_detail_ev = green_site
+                        ? COERCE(frsev - full_base_ev, -detail_limit_ev, detail_limit_ev)
+                        : 0;
+                    const int anchored_full_ev = anchor_ev + full_detail_ev;
+                    const int anchored_smooth_ev = anchor_ev + full_smooth_detail_ev;
+                    fev = noisy_or_overexposed * anchored_smooth_ev + (1-noisy_or_overexposed) * anchored_full_ev;
+                }
 
                 /* limit the use of fullres in dark areas (fixes some black spots, but may increase aliasing) */
                 int sig = (dark[x + y*w] + bright[x + y*w]) / 2;
                 f = MAX(0, MIN(f, (double)(sig - black) / (4*dark_noise)));
 
                 /* blend "half-res" and "full-res" images smoothly to avoid banding*/
-                output = hrev * (1-f) + fev * f;
+                output = anchor_ev * (1-f) + fev * f;
 
                 /* show full-res map (for debugging) */
                 //~ output = f * 14*EV_RESOLUTION;
@@ -5187,7 +5955,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
 #undef DUALISO_GPU_PREP_RETURN
 }
 
-int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch)
+int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int playback_preview_scale_factor, int threads, dualiso_full20bit_scratch_t * scratch)
 {
     const double full20_start = mlv_stage_timing_now();
     dualiso_debug_reset_full20bit_timing();
@@ -5325,19 +6093,13 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     /* fullres image (minimizes aliasing) */
     uint32_t* fullres = scratch->fullres;
     uint32_t* fullres_smooth = fullres;
-    
+
     /* halfres image (minimizes noise and banding) */
     uint32_t* halfres = scratch->halfres;
     uint32_t* halfres_smooth = halfres;
-    
-    if (effective_chroma_smooth_method)
-    {
-        if (use_fullres)
-        {
-            fullres_smooth = scratch->fullres_smooth;
-        }
-        halfres_smooth = scratch->halfres_smooth;
-    }
+
+    uint32_t* dark_for_mix = dark;
+    uint32_t* bright_for_mix = bright;
     
     /* overexposure map */
     uint16_t * overexposed = scratch->overexposed;
@@ -5437,17 +6199,96 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         dualiso_debug_elapsed_ms(interp_border_start);
     g_dualiso_full20bit_timing.interp_ms += dualiso_debug_elapsed_ms(stage_start);
 
+    const int fullres_mesh_guard =
+        dualiso_x1_playback_fullres_mesh_fix_enabled(playback_preview_scale_factor,
+                                                     use_alias_map,
+                                                     use_fullres,
+                                                     effective_chroma_smooth_method);
+
+    if (effective_chroma_smooth_method)
+    {
+        if (!smooth_matched_source_planes(raw_info,
+                                          dark,
+                                          bright,
+                                          scratch->halfres_smooth,
+                                          scratch->fullres_smooth,
+                                          effective_chroma_smooth_method,
+                                          black,
+                                          white,
+                                          white_darkened,
+                                          scratch))
+        {
+            DUALISO_FULL20_RETURN(0);
+        }
+        dark_for_mix = scratch->halfres_smooth;
+        bright_for_mix = scratch->fullres_smooth;
+
+    }
+
     if (use_fullres)
     {
         g_dualiso_fullres_blend_taken_count++;
         stage_start = mlv_stage_timing_now();
-        fullres_reconstruction(raw_info, fullres, dark, bright, white_darkened, is_bright);
+        if (effective_chroma_smooth_method)
+        {
+            int * fullres_raw2ev = NULL;
+            float * fullres_raw2ev_float = NULL;
+            int * fullres_ev2raw = NULL;
+            if (!ensure_scratch_ev_lut(scratch, black, white, &fullres_raw2ev, &fullres_raw2ev_float, &fullres_ev2raw))
+            {
+                DUALISO_FULL20_RETURN(0);
+            }
+            (void)fullres_raw2ev_float;
+            fullres_reconstruction_phase_balance(raw_info,
+                                                 fullres,
+                                                 dark,
+                                                 bright,
+                                                 white_darkened,
+                                                 is_bright,
+                                                 fullres_raw2ev,
+                                                 fullres_ev2raw);
+        }
+        else
+        {
+            fullres_reconstruction(raw_info, fullres, dark_for_mix, bright_for_mix, white_darkened, is_bright);
+        }
         g_dualiso_full20bit_timing.fullres_ms += dualiso_debug_elapsed_ms(stage_start);
     }
 
     stage_start = mlv_stage_timing_now();
-    int mix_ok = mix_images(raw_info, fullres, fullres_smooth, halfres, halfres_smooth, alias_map, dark, bright, overexposed, dark_noise, white_darkened, corr_ev, lowiso_dr, black, white, effective_chroma_smooth_method, scratch);
+    int mix_ok = mix_images(raw_info,
+                            fullres,
+                            fullres_smooth,
+                            halfres,
+                            halfres_smooth,
+                            alias_map,
+                            dark_for_mix,
+                            bright_for_mix,
+                            overexposed,
+                            dark_noise,
+                            white_darkened,
+                            corr_ev,
+                            lowiso_dr,
+                            black,
+                            white,
+                            0,
+                            scratch);
     g_dualiso_full20bit_timing.mix_ms += dualiso_debug_elapsed_ms(stage_start);
+
+    if (mix_ok && effective_chroma_smooth_method && use_fullres)
+    {
+        fullres_smooth = scratch->fullres_smooth;
+        stage_start = mlv_stage_timing_now();
+        fullres_reconstruction(raw_info,
+                               fullres_smooth,
+                               dark_for_mix,
+                               bright_for_mix,
+                               white_darkened,
+                               is_bright);
+        g_dualiso_full20bit_timing.mix_chroma_fullres_ms +=
+            dualiso_debug_elapsed_ms(stage_start);
+    }
+
     int final_blend_fused_to_16bit = 0;
     if (mix_ok)
     {
@@ -5456,16 +6297,63 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         //#pragma omp parallel for collapse(2)
         for (int y = 3; y < h-2; y ++)
             for (int x = 2; x < w-2; x ++)
-                raw_set_pixel32(x, y, bright[x + y*w]);
+                raw_set_pixel32(x, y, bright_for_mix[x + y*w]);
         
         compute_black_noise(raw_info, image_data, 8, raw_info.active_area.x1 - 8, raw_info.active_area.y1 + 20, raw_info.active_area.y2 - 20, 1, 1, &noise_avg, &noise_std[0]);
         double ideal_noise_std = noise_std[0];
 #endif
         stage_start = mlv_stage_timing_now();
-        final_blend_fused_to_16bit = final_blend(raw_info, image_data, raw_buffer_32, fullres, fullres_smooth, halfres_smooth, dark, bright, overexposed, alias_map, black, white, dark_noise, randn05_cache, scratch);
+        final_blend_fused_to_16bit = final_blend(raw_info,
+                                                 image_data,
+                                                 raw_buffer_32,
+                                                 fullres,
+                                                 fullres_smooth,
+                                                 halfres_smooth,
+                                                 dark,
+                                                 bright,
+                                                 overexposed,
+                                                 alias_map,
+                                                 black,
+                                                 white,
+                                                 dark_noise,
+                                                 randn05_cache,
+                                                 fullres_mesh_guard,
+                                                 scratch);
         g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
         if (!final_blend_fused_to_16bit)
         {
+            if (fullres_mesh_guard)
+            {
+                int * output_raw2ev = NULL;
+                float * output_raw2ev_float = NULL;
+                int * output_ev2raw = NULL;
+                stage_start = mlv_stage_timing_now();
+                if (!ensure_scratch_ev_lut(scratch, black, white, &output_raw2ev, &output_raw2ev_float, &output_ev2raw))
+                {
+                    DUALISO_FULL20_RETURN(0);
+                }
+                (void)output_raw2ev_float;
+                dualiso_output_vertical_mesh_stabilize(raw_info,
+                                                       raw_buffer_32,
+                                                       fullres,
+                                                       output_raw2ev,
+                                                       output_ev2raw);
+                dualiso_source_mesh_stabilize(raw_info,
+                                              raw_buffer_32,
+                                              fullres,
+                                              output_raw2ev,
+                                              output_ev2raw);
+                dualiso_output_flat_green_cell_balance(raw_info,
+                                                       raw_buffer_32,
+                                                       output_raw2ev,
+                                                       output_ev2raw);
+                dualiso_output_flat_chroma_guard(raw_info,
+                                                 raw_buffer_32,
+                                                 output_raw2ev,
+                                                 output_ev2raw);
+                g_dualiso_full20bit_timing.final_blend_ms += dualiso_debug_elapsed_ms(stage_start);
+            }
+
             stage_start = mlv_stage_timing_now();
             convert_20_to_16bit(raw_info, image_data, raw_buffer_32);
             g_dualiso_full20bit_timing.convert16_ms += dualiso_debug_elapsed_ms(stage_start);

@@ -1636,8 +1636,12 @@ void applyProcessingObject( processingObject_t * processing,
             params[t].inputImage = inputImage + offset_chunk*t;
             params[t].outputImage = outputImage + offset_chunk*t;
             params[t].blurImage = get_buffer(processing->shadows_highlights.blur_image) + offset_chunk*t;
-            params[t].gradientMask = processing->gradient_mask + (imageX * chunk_size * t);
-            params[t].vignetteMask = processing->vignette_mask + (imageX * chunk_size * t);
+            params[t].gradientMask = processing->gradient_mask
+                ? processing->gradient_mask + (imageX * chunk_size * t)
+                : NULL;
+            params[t].vignetteMask = processing->vignette_mask
+                ? processing->vignette_mask + (imageX * chunk_size * t)
+                : NULL;
             params[t].core_timing = core_timings + t;
             processing_core_timing_reset(params[t].core_timing);
         }
@@ -2711,7 +2715,9 @@ void apply_processing_object( processingObject_t * processing,
     const int allow_creative_adjustments = processing->allow_creative_adjustments;
     const int use_cam_matrix = processing->use_cam_matrix > 0;
     const int exr_mode = processing->exr_mode;
-    const int use_vignette = processing->vignette_strength != 0;
+    const int use_vignette = processing->vignette_strength != 0
+        && vm
+        && processing->vignette_end;
     const int use_highlight_reconstruction = processing->highlight_reconstruction;
     const int use_shadows_highlights =
         ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
@@ -2863,7 +2869,7 @@ void apply_processing_object( processingObject_t * processing,
         {
             uint16_t * pix = img + (px * 3);
             uint16_t * bpix = blurImage + (px * 3);
-            uint16_t * gmpix = gm + px;
+            uint16_t * gmpix = gm ? gm + px : NULL;
             int32_t * pm0 = pm[0];
             int32_t * pm4 = pm[4];
             int32_t * pm8 = pm[8];
@@ -3020,7 +3026,7 @@ void apply_processing_object( processingObject_t * processing,
 
             /* Gradient variables and part 1 */
             float pixg[3];
-            if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
+            if( processing->gradient_enable && gmpix && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* do the same for gradient as for the pic itself, but before the values are overwritten */
                 /* white balance & exposure */
@@ -3312,7 +3318,7 @@ void apply_processing_object( processingObject_t * processing,
             const double color_gradient_start =
                 (capture_breakdown && (color_cam_probe_any || color_gamma_probe_any))
                     ? omp_get_wtime() : 0.0;
-            if( processing->gradient_enable && gmpix[0] != 0 && use_gradient_adjustments )
+            if( processing->gradient_enable && gmpix && gmpix[0] != 0 && use_gradient_adjustments )
             {
                 /* WB correction gradient layer*/
                     if( use_cam_matrix )
@@ -4800,6 +4806,357 @@ void freeProcessingObject(processingObject_t * processing)
     free_image_buffer(processing->shadows_highlights.blur_image_half_out);
     denoise_2D_median_release(&processing->denoiser_context);
     free(processing);
+}
+
+static char * compile_ternary(char * function);
+
+static int copy_lut_for_analysis(lut_t * dst, const lut_t * src)
+{
+    if (!dst || !src)
+    {
+        return 0;
+    }
+
+    float * new_cube = NULL;
+    if (src->cube)
+    {
+        size_t values = (size_t)src->dimension * 3u;
+        if (src->is3d)
+        {
+            values = (size_t)src->dimension
+                   * (size_t)src->dimension
+                   * (size_t)src->dimension
+                   * 3u;
+        }
+
+        new_cube = malloc(values * sizeof(*new_cube));
+        if (!new_cube)
+        {
+            return 1;
+        }
+        memcpy(new_cube, src->cube, values * sizeof(*new_cube));
+    }
+
+    float * dst_cube = dst->cube;
+    *dst = *src;
+    dst->cube = new_cube;
+    if (dst_cube)
+    {
+        free(dst_cube);
+    }
+
+    return 0;
+}
+
+static int copy_transfer_function_for_analysis(processingObject_t * clone, const processingObject_t * src)
+{
+    if (!clone || !src || !src->transfer_function_string)
+    {
+        return 0;
+    }
+
+    char * transfer_function_string = malloc(strlen(src->transfer_function_string) + 1u);
+    if (!transfer_function_string)
+    {
+        return 1;
+    }
+    strcpy(transfer_function_string, src->transfer_function_string);
+
+    char * transfer_function_formatted = compile_ternary(src->transfer_function_string);
+    if (!transfer_function_formatted)
+    {
+        free(transfer_function_string);
+        return 1;
+    }
+
+    te_variable * var = &clone->x_variable;
+    te_expr * transfer_function = te_compile(transfer_function_formatted, var, 1, NULL);
+    if (!transfer_function)
+    {
+        free(transfer_function_formatted);
+        free(transfer_function_string);
+        return 1;
+    }
+
+    free(clone->transfer_function_string);
+    free(clone->transfer_function_string_formatted);
+    te_free(clone->transfer_function);
+
+    clone->transfer_function_string = transfer_function_string;
+    clone->transfer_function_string_formatted = transfer_function_formatted;
+    clone->transfer_function = transfer_function;
+    return 0;
+}
+
+static uint64_t processing_analysis_hash_bytes(uint64_t hash, const void * data, size_t bytes)
+{
+    const unsigned char * p = (const unsigned char *)data;
+
+    if (!data || bytes == 0)
+    {
+        return hash;
+    }
+
+    for (size_t i = 0; i < bytes; ++i)
+    {
+        hash ^= (uint64_t)p[i];
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
+}
+
+static size_t processing_lut_value_count_for_analysis(const lut_t * lut)
+{
+    if (!lut || !lut->cube || lut->dimension == 0)
+    {
+        return 0;
+    }
+
+    size_t values = (size_t)lut->dimension * 3u;
+    if (lut->is3d)
+    {
+        values = (size_t)lut->dimension
+               * (size_t)lut->dimension
+               * (size_t)lut->dimension
+               * 3u;
+    }
+
+    return values;
+}
+
+static uint64_t processing_analysis_source_fingerprint(const processingObject_t * processing)
+{
+    uint64_t hash = 1469598103934665603ULL;
+
+    if (!processing)
+    {
+        return hash;
+    }
+
+    hash = processing_analysis_hash_bytes(hash, processing, sizeof(*processing));
+
+    for (int i = 0; i < 9; ++i)
+    {
+        hash = processing_analysis_hash_bytes(hash,
+                                              processing->pre_calc_matrix[i],
+                                              65536u * sizeof(*processing->pre_calc_matrix[i]));
+        hash = processing_analysis_hash_bytes(hash,
+                                              processing->pre_calc_matrix_gradient[i],
+                                              65536u * sizeof(*processing->pre_calc_matrix_gradient[i]));
+    }
+
+    for (int i = 0; i < 7; ++i)
+    {
+        hash = processing_analysis_hash_bytes(hash,
+                                              processing->cs_zone.pre_calc_rgb_to_YCbCr[i],
+                                              65536u * sizeof(*processing->cs_zone.pre_calc_rgb_to_YCbCr[i]));
+    }
+
+    for (int i = 0; i < 5; ++i)
+    {
+        hash = processing_analysis_hash_bytes(hash,
+                                              processing->cs_zone.pre_calc_YCbCr_to_rgb[i],
+                                              65536u * sizeof(*processing->cs_zone.pre_calc_YCbCr_to_rgb[i]));
+    }
+
+    hash = processing_analysis_hash_bytes(hash,
+                                          processing->filter,
+                                          processing->filter ? sizeof(*processing->filter) : 0u);
+    hash = processing_analysis_hash_bytes(hash,
+                                          processing->lut,
+                                          processing->lut ? sizeof(*processing->lut) : 0u);
+    if (processing->lut)
+    {
+        size_t lut_values = processing_lut_value_count_for_analysis(processing->lut);
+        hash = processing_analysis_hash_bytes(hash,
+                                              processing->lut->cube,
+                                              lut_values * sizeof(*processing->lut->cube));
+    }
+
+    hash = processing_analysis_hash_bytes(hash,
+                                          processing->transfer_function_string,
+                                          processing->transfer_function_string
+                                              ? strlen(processing->transfer_function_string) + 1u
+                                              : 0u);
+    hash = processing_analysis_hash_bytes(hash,
+                                          processing->transfer_function_string_formatted,
+                                          processing->transfer_function_string_formatted
+                                              ? strlen(processing->transfer_function_string_formatted) + 1u
+                                              : 0u);
+
+    return hash;
+}
+
+static processingObject_t * processingCloneForAnalysisOnce(const processingObject_t * src)
+{
+    if (!src)
+    {
+        return NULL;
+    }
+
+    processingObject_t * clone = initProcessingObject();
+    if (!clone)
+    {
+        return NULL;
+    }
+
+    filterObject_t * clone_filter = clone->filter;
+    lut_t * clone_lut = clone->lut;
+    int32_t * clone_pre_calc_matrix[9];
+    int32_t * clone_pre_calc_matrix_gradient[9];
+    int32_t * clone_pre_calc_rgb_to_YCbCr[7];
+    int32_t * clone_pre_calc_YCbCr_to_rgb[5];
+    processing_buffer_t * clone_blur_image = clone->shadows_highlights.blur_image;
+    processing_buffer_t * clone_blur_image_half_in = clone->shadows_highlights.blur_image_half_in;
+    processing_buffer_t * clone_blur_image_half_out = clone->shadows_highlights.blur_image_half_out;
+    char * clone_transfer_function_string = clone->transfer_function_string;
+    char * clone_transfer_function_string_formatted = clone->transfer_function_string_formatted;
+    te_expr * clone_transfer_function = clone->transfer_function;
+
+    for (int i = 0; i < 9; ++i)
+    {
+        clone_pre_calc_matrix[i] = clone->pre_calc_matrix[i];
+        clone_pre_calc_matrix_gradient[i] = clone->pre_calc_matrix_gradient[i];
+    }
+    for (int i = 0; i < 7; ++i)
+    {
+        clone_pre_calc_rgb_to_YCbCr[i] = clone->cs_zone.pre_calc_rgb_to_YCbCr[i];
+    }
+    for (int i = 0; i < 5; ++i)
+    {
+        clone_pre_calc_YCbCr_to_rgb[i] = clone->cs_zone.pre_calc_YCbCr_to_rgb[i];
+    }
+
+    *clone = *src;
+
+    clone->filter = clone_filter;
+    clone->lut = clone_lut;
+    if (src->filter && clone->filter)
+    {
+        filterObjectSetFilterStrength(clone->filter, src->filter->strength);
+        filterObjectSetFilter(clone->filter, src->filter->filter_option);
+    }
+    if (copy_lut_for_analysis(clone->lut, src->lut))
+    {
+        processingFreeClone(clone);
+        return NULL;
+    }
+    clone->shadows_highlights.blur_image = clone_blur_image;
+    clone->shadows_highlights.blur_image_half_in = clone_blur_image_half_in;
+    clone->shadows_highlights.blur_image_half_out = clone_blur_image_half_out;
+    clone->gradient_mask = NULL;
+    clone->vignette_mask = NULL;
+    clone->vignette_end = NULL;
+    clone->sharpen_mask_gray = NULL;
+    clone->sharpen_mask_sobel_h = NULL;
+    clone->sharpen_mask_sobel_v = NULL;
+    clone->sharpen_mask_contour = NULL;
+    clone->sharpen_mask_capacity = 0;
+    clone->denoiser_context = NULL;
+    clone->transfer_function_string = clone_transfer_function_string;
+    clone->transfer_function_string_formatted = clone_transfer_function_string_formatted;
+    clone->transfer_function = clone_transfer_function;
+    clone->x_variable.address = &clone->x_value;
+    clone->x_variable.name = "x";
+    clone->x_variable.context = 0;
+    clone->wbFindActive = 0;
+    if (copy_transfer_function_for_analysis(clone, src))
+    {
+        processingFreeClone(clone);
+        return NULL;
+    }
+
+    for (int i = 0; i < 9; ++i)
+    {
+        clone->pre_calc_matrix[i] = clone_pre_calc_matrix[i];
+        clone->pre_calc_matrix_gradient[i] = clone_pre_calc_matrix_gradient[i];
+        if (!clone->pre_calc_matrix[i] || !clone->pre_calc_matrix_gradient[i]
+            || !src->pre_calc_matrix[i] || !src->pre_calc_matrix_gradient[i])
+        {
+            processingFreeClone(clone);
+            return NULL;
+        }
+        memcpy(clone->pre_calc_matrix[i],
+               src->pre_calc_matrix[i],
+               65536u * sizeof(*clone->pre_calc_matrix[i]));
+        memcpy(clone->pre_calc_matrix_gradient[i],
+               src->pre_calc_matrix_gradient[i],
+               65536u * sizeof(*clone->pre_calc_matrix_gradient[i]));
+    }
+
+    for (int i = 0; i < 7; ++i)
+    {
+        clone->cs_zone.pre_calc_rgb_to_YCbCr[i] = clone_pre_calc_rgb_to_YCbCr[i];
+        if (clone->cs_zone.pre_calc_rgb_to_YCbCr[i] && src->cs_zone.pre_calc_rgb_to_YCbCr[i])
+        {
+            memcpy(clone->cs_zone.pre_calc_rgb_to_YCbCr[i],
+                   src->cs_zone.pre_calc_rgb_to_YCbCr[i],
+                   65536u * sizeof(*clone->cs_zone.pre_calc_rgb_to_YCbCr[i]));
+        }
+    }
+    for (int i = 0; i < 5; ++i)
+    {
+        clone->cs_zone.pre_calc_YCbCr_to_rgb[i] = clone_pre_calc_YCbCr_to_rgb[i];
+        if (clone->cs_zone.pre_calc_YCbCr_to_rgb[i] && src->cs_zone.pre_calc_YCbCr_to_rgb[i])
+        {
+            memcpy(clone->cs_zone.pre_calc_YCbCr_to_rgb[i],
+                   src->cs_zone.pre_calc_YCbCr_to_rgb[i],
+                   65536u * sizeof(*clone->cs_zone.pre_calc_YCbCr_to_rgb[i]));
+        }
+    }
+
+    return clone;
+}
+
+processingObject_t * processingCloneForAnalysis(const processingObject_t * src)
+{
+    enum { MAX_ANALYSIS_CLONE_ATTEMPTS = 16 };
+
+    for (int attempt = 0; attempt < MAX_ANALYSIS_CLONE_ATTEMPTS; ++attempt)
+    {
+        uint64_t before = processing_analysis_source_fingerprint(src);
+        processingObject_t * clone = processingCloneForAnalysisOnce(src);
+        uint64_t after = processing_analysis_source_fingerprint(src);
+
+        if (!clone)
+        {
+            return NULL;
+        }
+
+        if (before == after)
+        {
+            return clone;
+        }
+
+        processingFreeClone(clone);
+    }
+
+    return NULL;
+}
+
+void processingFreeClone(processingObject_t * processing)
+{
+    if (!processing)
+    {
+        return;
+    }
+    if (processing->transfer_function_string)
+    {
+        free(processing->transfer_function_string);
+        processing->transfer_function_string = NULL;
+    }
+    if (processing->transfer_function_string_formatted)
+    {
+        free(processing->transfer_function_string_formatted);
+        processing->transfer_function_string_formatted = NULL;
+    }
+    if (processing->transfer_function)
+    {
+        te_free(processing->transfer_function);
+        processing->transfer_function = NULL;
+    }
+    freeProcessingObject(processing);
 }
 
 /* Find correct white balance setting for one selected pixel */
