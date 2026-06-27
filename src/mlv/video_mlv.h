@@ -298,6 +298,49 @@ int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscale
 /* Thumbnail Creation with full debayer, but downscaled image processing */
 void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, int cpu_cores, unsigned char *out_buffer);
 
+enum mlv_processed_thumbnail_settings_flags
+{
+    MLV_PROCESSED_THUMBNAIL_APPLY_WHITE_BALANCE   = 1u << 0,
+    MLV_PROCESSED_THUMBNAIL_APPLY_EXPOSURE        = 1u << 1,
+    MLV_PROCESSED_THUMBNAIL_APPLY_SIMPLE_CONTRAST = 1u << 2,
+    MLV_PROCESSED_THUMBNAIL_APPLY_PIVOT           = 1u << 3,
+    MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS         = 1u << 4,
+    MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS      = 1u << 5,
+    MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE        = 1u << 6,
+    MLV_PROCESSED_THUMBNAIL_APPLY_RAW_LEVELS      = 1u << 7
+};
+
+typedef struct mlv_processed_thumbnail_settings
+{
+    uint32_t flags;
+    double white_balance_kelvin;
+    double white_balance_tint;
+    double exposure_stops;
+    double simple_contrast;
+    double pivot;
+    double shadows;
+    double highlights;
+    double vibrance;
+    float raw_black_level;
+    int raw_white_level;
+    int raw_bit_depth;
+} mlv_processed_thumbnail_settings_t;
+
+/* Same isolated source/downscale path as get_area_average_downscale_thumnail,
+ * but renders through a caller-owned processing object. Returns 1 on success.
+ * The optional settings are applied only to that caller-owned processing object;
+ * this function never mutates video->processing, caches, receipts, or playback
+ * preview globals. Chroma-smooth/raw-source state still comes from the current
+ * mlvObject state and is intentionally not changed here. */
+int get_area_average_downscale_thumnail_with_processing(
+    mlvObject_t *video,
+    int frame_index,
+    int downscale_factor,
+    int cpu_cores,
+    processingObject_t *analysis_processing,
+    const mlv_processed_thumbnail_settings_t *settings,
+    unsigned char *out_buffer);
+
 /* Thumbnail Creation with full debayer and downscale, before color processing */
 void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, unsigned char *out_buffer);
 

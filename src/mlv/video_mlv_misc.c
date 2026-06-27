@@ -155,6 +155,47 @@ static void downscale_rgb16_average_to_rgb8(const uint16_t * input,
     }
 }
 
+static void apply_processed_thumbnail_settings(
+    processingObject_t *processing,
+    const mlv_processed_thumbnail_settings_t *settings)
+{
+    if (!processing || !settings) {
+        return;
+    }
+
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_RAW_LEVELS) {
+        if (settings->raw_bit_depth > 0) {
+            processingSetBlackAndWhiteLevel(processing,
+                                            settings->raw_black_level,
+                                            settings->raw_white_level,
+                                            settings->raw_bit_depth);
+        }
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_WHITE_BALANCE) {
+        processingSetWhiteBalance(processing,
+                                  settings->white_balance_kelvin,
+                                  settings->white_balance_tint);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_EXPOSURE) {
+        processingSetExposureStops(processing, settings->exposure_stops);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_SIMPLE_CONTRAST) {
+        processingSetSimpleContrast(processing, settings->simple_contrast);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_PIVOT) {
+        processingSetPivot(processing, settings->pivot);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS) {
+        processingSetShadows(processing, settings->shadows);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS) {
+        processingSetHighlights(processing, settings->highlights);
+    }
+    if (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE) {
+        processingSetVibrance(processing, settings->vibrance);
+    }
+}
+
 int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscaled_factor, int width, int height, int threads)
 {
     int raw_w = video->RAWI.xRes;
@@ -237,10 +278,17 @@ int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscale
     return 0;
 }
 
-void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, int cpu_cores, unsigned char *out_buffer)
+int get_area_average_downscale_thumnail_with_processing(
+    mlvObject_t *video,
+    int frame_index,
+    int downscale_factor,
+    int cpu_cores,
+    processingObject_t *analysis_processing,
+    const mlv_processed_thumbnail_settings_t *settings,
+    unsigned char *out_buffer)
 {
-    if (!video || !out_buffer) {
-        return;
+    if (!video || !analysis_processing || !out_buffer) {
+        return 0;
     }
 
     /* Get RAW frame info */
@@ -248,24 +296,18 @@ void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, in
     int raw_h = video->RAWI.yRes;
 
     if (raw_w <= 0 || raw_h <= 0 || downscale_factor <= 0) {
-        return;
+        return 0;
     }
 
     const int thumbW = raw_w / downscale_factor;
     const int thumbH = raw_h / downscale_factor;
     if (thumbW <= 0 || thumbH <= 0) {
-        return;
-    }
-
-    processingObject_t *analysis_processing = processingCloneForAnalysis(video->processing);
-    if (!analysis_processing) {
-        return;
+        return 0;
     }
 
     uint16_t *debayered_raw_frame = get_isolated_thumbnail_source_rgb16(video, frame_index, raw_w, raw_h);
     if (!debayered_raw_frame) {
-        processingFreeClone(analysis_processing);
-        return;
+        return 0;
     }
     trace_look_assist_thumbnail("processed-source16", frame_index, raw_w, raw_h, raw_w, raw_h,
                                 1, fnv1a64_bytes(debayered_raw_frame,
@@ -275,8 +317,7 @@ void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, in
         (size_t) (thumbW * thumbH * 3) * sizeof(uint16_t));
     if (!downscaled_image) {
         free(debayered_raw_frame);
-        processingFreeClone(analysis_processing);
-        return;
+        return 0;
     }
 
     downscale_rgb16_average_to_rgb16(debayered_raw_frame, raw_w, downscale_factor,
@@ -290,10 +331,10 @@ void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, in
     if (!downscaled_processed_image) {
         free(debayered_raw_frame);
         free(downscaled_image);
-        processingFreeClone(analysis_processing);
-        return;
+        return 0;
     }
 
+    apply_processed_thumbnail_settings(analysis_processing, settings);
     applyProcessingObject(analysis_processing,
                           thumbW, thumbH,
                           downscaled_image,
@@ -314,6 +355,27 @@ void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, in
     free(downscaled_processed_image);
     free(downscaled_image);
     free(debayered_raw_frame);
+    return 1;
+}
+
+void get_area_average_downscale_thumnail(mlvObject_t *video, int frame_index, int downscale_factor, int cpu_cores, unsigned char *out_buffer)
+{
+    if (!video || !out_buffer) {
+        return;
+    }
+
+    processingObject_t *analysis_processing = processingCloneForAnalysis(video->processing);
+    if (!analysis_processing) {
+        return;
+    }
+
+    get_area_average_downscale_thumnail_with_processing(video,
+                                                        frame_index,
+                                                        downscale_factor,
+                                                        cpu_cores,
+                                                        analysis_processing,
+                                                        NULL,
+                                                        out_buffer);
     processingFreeClone(analysis_processing);
 }
 
