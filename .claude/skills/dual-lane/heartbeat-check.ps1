@@ -96,7 +96,9 @@ function Get-LatestEntryMeta([string]$file) {
     $c = Get-Content -LiteralPath $file -Raw
     if ([string]::IsNullOrWhiteSpace($c)) { return $r }
     $best = -1; $bestType = ''; $bestTs = ''
-    foreach ($m in [regex]::Matches($c, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*([A-Za-z_]+)\s*\|\s*(\S+)')) {
+    # NOTE: the type token may contain '/' (e.g. "ACK/STATUS", "HEARTBEAT/STATUS") -- the class MUST include
+    # '/', else slash-typed entries are skipped and STALE falls back to an older slash-free entry (false-positive).
+    foreach ($m in [regex]::Matches($c, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*([A-Za-z_/]+)\s*\|\s*(\S+)')) {
         $s = [int]$m.Groups[1].Value
         if ($s -gt $best) { $best = $s; $bestType = $m.Groups[2].Value; $bestTs = $m.Groups[3].Value }
     }
@@ -110,7 +112,7 @@ function Get-LatestOpenMeta([string]$file) {
     $c = Get-Content -LiteralPath $file -Raw
     if ([string]::IsNullOrWhiteSpace($c)) { return $r }
     foreach ($b in [regex]::Split($c, '(?m)(?=^##\s+SEQ\s+\d+\b)')) {
-        $hm = [regex]::Match($b, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*[A-Za-z_]+\s*\|\s*(\S+)')
+        $hm = [regex]::Match($b, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*[A-Za-z_/]+\s*\|\s*(\S+)')
         if (-not $hm.Success) { continue }
         if ([regex]::IsMatch($b, '(?m)^\s*status:\s*OPEN\b')) {
             $s = [int]$hm.Groups[1].Value
