@@ -333,14 +333,28 @@ typedef struct mlv_processed_thumbnail_settings
     int source_chroma_smooth_method;
 } mlv_processed_thumbnail_settings_t;
 
-/* Same isolated source/downscale path as get_area_average_downscale_thumnail,
- * but renders through a caller-owned processing object. Returns 1 on success.
+/* Same live/cache-backed source and downscale path as
+ * get_area_average_downscale_thumnail, but renders through a caller-owned
+ * processing object. Returns 1 on success.
  * The optional settings are applied only to that caller-owned processing object;
- * this function never mutates video->processing, caches, receipts, or playback
- * preview globals. When APPLY_CHROMA_SMOOTH is set, source_chroma_smooth_method
- * is applied only to the isolated raw-source render for this call and never
- * stored back to the shared mlvObject. */
+ * this function never mutates video->processing, receipts, or playback preview
+ * globals. Use the cache-free sibling for detached analysis workers. */
 int get_area_average_downscale_thumnail_with_processing(
+    mlvObject_t *video,
+    int frame_index,
+    int downscale_factor,
+    int cpu_cores,
+    processingObject_t *analysis_processing,
+    const mlv_processed_thumbnail_settings_t *settings,
+    unsigned char *out_buffer);
+
+/* Cache-free sibling for detached analysis workers. It renders the source frame
+ * through get_mlv_raw_frame_debayered_isolated_analysis with bilinear debayering,
+ * then uses the same downscale and caller-owned processing path as
+ * get_area_average_downscale_thumnail_with_processing. Returns 1 on success and
+ * never mutates video->processing, receipts, playback preview globals, or the
+ * playback cache. */
+int get_area_average_downscale_thumnail_with_processing_cachefree(
     mlvObject_t *video,
     int frame_index,
     int downscale_factor,
