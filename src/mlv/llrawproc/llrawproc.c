@@ -2635,10 +2635,19 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     worker_diso_auto_correction = shared->diso_auto_correction;
     worker_diso_ev_correction = shared->diso_ev_correction;
     worker_diso_black_delta = shared->diso_black_delta;
-    /* Isolated analysis must see the same solved dual-ISO exposure match as
-     * preview. Keep the analysis isolation below, but do not force the dual-ISO
-     * matcher back to defaults here; that changes the image the WB solver sees. */
     worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    if (isolated_analysis)
+    {
+        llrawproc_runtime_state_t analysis_seed = { 0 };
+        worker_diso_pattern = 0;
+        worker_diso_auto_correction = -1;
+        worker_diso_ev_correction = 1.0;
+        worker_diso_black_delta = -1;
+        analysis_seed.diso_auto_correction = -1;
+        analysis_seed.diso_ev_correction = 1.0;
+        analysis_seed.diso_black_delta = -1;
+        worker->seeded_runtime_state = analysis_seed;
+    }
     dark_frame_mode = shared->dark_frame;
     vertical_stripes_mode = shared->vertical_stripes;
 
@@ -3830,9 +3839,19 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     worker_diso_auto_correction = shared->diso_auto_correction;
     worker_diso_ev_correction = shared->diso_ev_correction;
     worker_diso_black_delta = shared->diso_black_delta;
-    /* Isolated analysis must preserve the preview's solved dual-ISO exposure
-     * match; forcing default EV/black values here changes the analysis pixels. */
     worker->seeded_runtime_state = llrawproc_capture_shared_runtime_state(shared);
+    if (isolated_analysis)
+    {
+        llrawproc_runtime_state_t analysis_seed = { 0 };
+        worker_diso_pattern = 0;
+        worker_diso_auto_correction = -1;
+        worker_diso_ev_correction = 1.0;
+        worker_diso_black_delta = -1;
+        analysis_seed.diso_auto_correction = -1;
+        analysis_seed.diso_ev_correction = 1.0;
+        analysis_seed.diso_black_delta = -1;
+        worker->seeded_runtime_state = analysis_seed;
+    }
     dark_frame_mode = shared->dark_frame;
     chroma_smooth_mode =
         llrawproc_analysis_chroma_smooth_method(shared->chroma_smooth,

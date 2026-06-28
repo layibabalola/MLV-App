@@ -51,52 +51,6 @@ static void trace_look_assist_thumbnail(const char * kind,
             (unsigned long long)hash);
 }
 
-static uint16_t * get_isolated_thumbnail_source_rgb16(mlvObject_t * video,
-                                                      int frame_index,
-                                                      int raw_w,
-                                                      int raw_h,
-                                                      int chroma_smooth_override_enabled,
-                                                      int chroma_smooth_method)
-{
-    size_t pixels = (size_t)raw_w * (size_t)raw_h;
-    uint16_t * raw_frame = (uint16_t *)malloc(pixels * sizeof(uint16_t));
-    uint16_t * rgb_frame = (uint16_t *)malloc(pixels * 3u * sizeof(uint16_t));
-
-    if (!raw_frame || !rgb_frame)
-    {
-        free(raw_frame);
-        free(rgb_frame);
-        return NULL;
-    }
-
-    int bit_shift = 0;
-    int raw_failed = chroma_smooth_override_enabled
-        ? getMlvRawFrameProcessedUint16DirectWithChromaSmooth(video,
-                                                              (uint64_t)frame_index,
-                                                              raw_frame,
-                                                              &bit_shift,
-                                                              chroma_smooth_method)
-        : getMlvRawFrameProcessedUint16Direct(video,
-                                              (uint64_t)frame_index,
-                                              raw_frame,
-                                              &bit_shift);
-    if (raw_failed)
-    {
-        free(raw_frame);
-        free(rgb_frame);
-        return NULL;
-    }
-
-    debayerBasicU16(rgb_frame,
-                    raw_frame,
-                    raw_w,
-                    raw_h,
-                    1,
-                    bit_shift);
-    free(raw_frame);
-    return rgb_frame;
-}
-
 static void downscale_rgb16_average_to_rgb16(const uint16_t * input,
                                              int input_w,
                                              int downscale_factor,
@@ -317,22 +271,22 @@ int get_area_average_downscale_thumnail_with_processing(
         return 0;
     }
 
-    const int chroma_smooth_override_enabled =
-        settings && (settings->flags & MLV_PROCESSED_THUMBNAIL_APPLY_CHROMA_SMOOTH);
-    const int chroma_smooth_method =
-        chroma_smooth_override_enabled ? settings->source_chroma_smooth_method : 0;
-
-    uint16_t *debayered_raw_frame =
-        get_isolated_thumbnail_source_rgb16(video,
-                                            frame_index,
-                                            raw_w,
-                                            raw_h,
-                                            chroma_smooth_override_enabled,
-                                            chroma_smooth_method);
-    if (!debayered_raw_frame) {
+    float *raw_frame = (float *) malloc((size_t)raw_w * (size_t)raw_h * sizeof(float));
+    if (!raw_frame) {
         return 0;
     }
-    trace_look_assist_thumbnail("processed-source16", frame_index, raw_w, raw_h, raw_w, raw_h,
+
+    getMlvRawFrameFloat(video, frame_index, raw_frame);
+
+    uint16_t *debayered_raw_frame = (uint16_t *) malloc(
+        (size_t)raw_w * (size_t)raw_h * 3u * sizeof(uint16_t));
+    if (!debayered_raw_frame) {
+        free(raw_frame);
+        return 0;
+    }
+
+    debayerBasic(debayered_raw_frame, raw_frame, raw_w, raw_h, 1);
+    trace_look_assist_thumbnail("processed-source-live", frame_index, raw_w, raw_h, raw_w, raw_h,
                                 1, fnv1a64_bytes(debayered_raw_frame,
                                                  (size_t)raw_w * (size_t)raw_h * 3u * sizeof(uint16_t)));
 
@@ -340,6 +294,7 @@ int get_area_average_downscale_thumnail_with_processing(
         (size_t) (thumbW * thumbH * 3) * sizeof(uint16_t));
     if (!downscaled_image) {
         free(debayered_raw_frame);
+        free(raw_frame);
         return 0;
     }
 
@@ -354,6 +309,7 @@ int get_area_average_downscale_thumnail_with_processing(
     if (!downscaled_processed_image) {
         free(debayered_raw_frame);
         free(downscaled_image);
+        free(raw_frame);
         return 0;
     }
 
@@ -378,6 +334,7 @@ int get_area_average_downscale_thumnail_with_processing(
     free(downscaled_processed_image);
     free(downscaled_image);
     free(debayered_raw_frame);
+    free(raw_frame);
     return 1;
 }
 
@@ -421,17 +378,22 @@ void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index
         return;
     }
 
-    uint16_t *debayered_raw_frame =
-        get_isolated_thumbnail_source_rgb16(video,
-                                            frame_index,
-                                            raw_w,
-                                            raw_h,
-                                            0,
-                                            0);
-    if (!debayered_raw_frame) {
+    float *raw_frame = (float *) malloc((size_t)raw_w * (size_t)raw_h * sizeof(float));
+    if (!raw_frame) {
         return;
     }
-    trace_look_assist_thumbnail("raw-source16", frame_index, raw_w, raw_h, raw_w, raw_h,
+
+    getMlvRawFrameFloat(video, frame_index, raw_frame);
+
+    uint16_t *debayered_raw_frame = (uint16_t *) malloc(
+        (size_t)raw_w * (size_t)raw_h * 3u * sizeof(uint16_t));
+    if (!debayered_raw_frame) {
+        free(raw_frame);
+        return;
+    }
+
+    debayerBasic(debayered_raw_frame, raw_frame, raw_w, raw_h, 1);
+    trace_look_assist_thumbnail("raw-source-live", frame_index, raw_w, raw_h, raw_w, raw_h,
                                 1, fnv1a64_bytes(debayered_raw_frame,
                                                  (size_t)raw_w * (size_t)raw_h * 3u * sizeof(uint16_t)));
 
@@ -442,4 +404,5 @@ void get_area_average_downscale_raw_thumnail(mlvObject_t *video, int frame_index
                                 downscale_factor, fnv1a64_bytes(out_buffer, size));
 
     free(debayered_raw_frame);
+    free(raw_frame);
 }
