@@ -3357,8 +3357,88 @@ int getMlvRawFrameProcessedUint16DirectWithChromaSmooth(mlvObject_t * video,
                                                    frameIndex,
                                                    outputFrame,
                                                    bit_shift,
-                                                   1,
-                                                   chroma_smooth_method);
+                                                    1,
+                                                    chroma_smooth_method);
+}
+
+int get_mlv_raw_frame_debayered_isolated_analysis_scaled(mlvObject_t * video,
+                                                         uint64_t frameIndex,
+                                                         uint16_t * outputFrame,
+                                                         int scaleFactor,
+                                                         int threads,
+                                                         int * outWidth,
+                                                         int * outHeight,
+                                                         int * outScaleFactor)
+{
+    if (!video || !outputFrame)
+    {
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int normalized_scale = mlv_effective_playback_scale_factor(video, scaleFactor);
+    if (full_w <= 0 || full_h <= 0 || normalized_scale <= 1)
+    {
+        return 0;
+    }
+
+    const int out_w = full_w / normalized_scale;
+    const int out_h = full_h / normalized_scale;
+    if (out_w <= 0 || out_h <= 0)
+    {
+        return 0;
+    }
+
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t out_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
+    uint16_t * raw_frame = mlv_ensure_thread_u16_buffer(full_pixels);
+    if (!raw_frame)
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    int bit_shift = 0;
+    if (getMlvRawFrameProcessedUint16Direct(video, frameIndex, raw_frame, &bit_shift))
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    const int downsample_threads = threads > 0 ? threads : 1;
+    const double debayer_start = mlv_stage_timing_now();
+    if (normalized_scale == 8)
+    {
+        pl_downsample_bayer_to_rgb_8x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    else if (normalized_scale == 4)
+    {
+        pl_downsample_bayer_to_rgb_4x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    else
+    {
+        pl_downsample_bayer_to_rgb_2x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+
+    if (outWidth)
+    {
+        *outWidth = out_w;
+    }
+    if (outHeight)
+    {
+        *outHeight = out_h;
+    }
+    if (outScaleFactor)
+    {
+        *outScaleFactor = normalized_scale;
+    }
+    return 1;
 }
 
 int getMlvRawFrameProcessedUint16(mlvObject_t * video,

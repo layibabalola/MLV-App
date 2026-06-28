@@ -296,6 +296,17 @@ void get_mlv_raw_frame_debayered_isolated_analysis(mlvObject_t * video,
                                                    float * temp_memory,
                                                    uint16_t * output_frame,
                                                    int debayer_type ); /* Debayer type: 0=bilinear 1=amaze */
+/* Cache-free isolated-analysis source for reduced thumbnails. This decodes and
+ * runs llrawproc at full resolution through the direct path, then emits a
+ * reduced RGB16 frame via Bayer->RGB block averaging. Returns 1 on success. */
+int get_mlv_raw_frame_debayered_isolated_analysis_scaled(mlvObject_t * video,
+                                                         uint64_t frame_index,
+                                                         uint16_t * output_frame,
+                                                         int scale_factor,
+                                                         int threads,
+                                                         int * out_width,
+                                                         int * out_height,
+                                                         int * out_scale_factor);
 
 /* Thumbnail Creation with a downscaled raw image sub-sampling algorithm is used. */
 int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscaled_factor, int width, int height, int threads);
@@ -348,9 +359,10 @@ int get_area_average_downscale_thumnail_with_processing(
     const mlv_processed_thumbnail_settings_t *settings,
     unsigned char *out_buffer);
 
-/* Cache-free sibling for detached analysis workers. It renders the source frame
- * through get_mlv_raw_frame_debayered_isolated_analysis with bilinear debayering,
- * then uses the same downscale and caller-owned processing path as
+/* Cache-free sibling for detached analysis workers. It first tries the reduced
+ * direct isolated-analysis RGB16 source, then falls back to full-resolution
+ * get_mlv_raw_frame_debayered_isolated_analysis with bilinear debayering. Both
+ * paths use the same downscale and caller-owned processing path as
  * get_area_average_downscale_thumnail_with_processing. Returns 1 on success and
  * never mutates video->processing, receipts, playback preview globals, or the
  * playback cache. */
