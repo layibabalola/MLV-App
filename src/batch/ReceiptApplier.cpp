@@ -1258,7 +1258,9 @@ bool ReceiptApplier::applyHeadlessLookAssist(ReceiptSettings *receipt,
                                ? QStringLiteral("processed-neutral-patch")
                                : QStringLiteral("raw-neutral-patch");
         autoWhiteBalanceDecision = QStringLiteral("candidate");
-        findMlvWhiteBalanceIsolated(
+        // [Jun-9 WB RESTORE] live solver (was findMlvWhiteBalanceIsolated); same
+        // signature. Batch CLI is single-threaded so the live solver is safe here.
+        findMlvWhiteBalance(
             mlvObject,
             static_cast<uint64_t>( frameIndex ),
             autoWbPatch.rawX,

@@ -13579,9 +13579,17 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     // Diagnostic gate: MLVAPP_NO_LOOK_ASSIST=1 skips the auto-look analysis entirely so its
     // clip-open cost can be measured/disabled without touching the GUI checkbox.
     static const bool s_noLookAssist = qEnvironmentVariableIntValue( "MLVAPP_NO_LOOK_ASSIST" ) != 0;
-    // Kill switch: MLVAPP_LOOK_ASSIST_SYNC=1 restores the original synchronous path so the
-    // async benefit can be measured by A/B. Read once per process (static).
-    static const bool s_syncMode = qEnvironmentVariableIntValue( "MLVAPP_LOOK_ASSIST_SYNC" ) != 0;
+    // [Jun-9 WB BEHAVIOR RESTORE] The live Look Assist apply runs the ORIGINAL
+    // SYNCHRONOUS solve + 6-pass refinement path by DEFAULT (this is the Jun-9
+    // behavior the user chose to restore: live findMlvWhiteBalance + the full
+    // post-balance refinement). The later async-worker block is left compiled but
+    // DORMANT, reachable only when MLVAPP_LOOK_ASSIST_ASYNC=1 is set explicitly, so
+    // the recon-adjacent async machinery is untouched. MLVAPP_LOOK_ASSIST_SYNC=1
+    // still forces sync (kept for existing A/B tooling); sync is now the default,
+    // so the only way to reach the async path is the explicit opt-in env var.
+    static const bool s_asyncOptIn = qEnvironmentVariableIntValue( "MLVAPP_LOOK_ASSIST_ASYNC" ) != 0;
+    static const bool s_syncForced = qEnvironmentVariableIntValue( "MLVAPP_LOOK_ASSIST_SYNC" ) != 0;
+    static const bool s_syncMode = s_syncForced || !s_asyncOptIn;
     auto restoreLookAssistSafetyBaseline =
         [this]( ReceiptSettings *targetReceipt, int safeChromaSmooth, bool keepSafeChromaSmooth )
     {
@@ -14029,15 +14037,11 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                     qBound( tempMin, autoWhiteBalanceTemperature, tempMax );
                 autoWhiteBalanceTint =
                     qBound( tintMin, autoWhiteBalanceTint, tintMax );
-                // [GREEN-CAST FIX -- dual-lane two-key converged, Layi auto-execute policy] On the
-                // floor-lifted PROCESSED-patch LIVE (async) lane ONLY, tighten the negative tint floor
-                // -35 -> -20 so a mis-classified-night processed-color patch (which maps to a green raw
-                // coordinate) cannot drive an extreme green WB. Value-only: temperature/exposure/preset and
-                // the +18 magenta ceiling are untouched (positive-tint clips e.g. M16-1210 stay bit-for-bit),
-                // the post-green guard (postVisibleGreenAxis>=8.0) remains the fail-safe, and true-night /
-                // raw-patch lanes keep the original -35 floor. -20 == the M16-1347 accepted boundary.
-                const int awbTintFloor = ( useProcessedColorStatsCopy && floorLiftedCopy ) ? -20 : -35;
-                autoWhiteBalanceTint = qBound( awbTintFloor, autoWhiteBalanceTint, 18 );
+                // [Jun-9 WB RESTORE] -20 floor band-aid REMOVED -- restore the flat Jun-9
+                // clamp form so the refinement starts from the raw solve (e.g. M16-1243
+                // -33) instead of a pre-floored -20. Matches Jun-9 765ed4a3 and the sync
+                // path's qBound(-35,...,18).
+                autoWhiteBalanceTint = qBound( -35, autoWhiteBalanceTint, 18 );
                 autoWhiteBalanceCandidateTemperature = autoWhiteBalanceTemperature;
                 autoWhiteBalanceCandidateTint        = autoWhiteBalanceTint;
 
@@ -14554,7 +14558,9 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                                ? QStringLiteral("processed-neutral-patch")
                                : QStringLiteral("raw-neutral-patch");
         autoWhiteBalanceDecision = QStringLiteral("candidate");
-        findMlvWhiteBalanceIsolated( m_pMlvObject,
+        // [Jun-9 WB RESTORE] live solver (was findMlvWhiteBalanceIsolated). Same
+        // signature; this is the default path now that sync is the default apply.
+        findMlvWhiteBalance( m_pMlvObject,
                              analysisFrame,
                              autoWbPatch.rawX,
                              autoWbPatch.rawY,
