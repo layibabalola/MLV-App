@@ -162,6 +162,22 @@ watcher on `claude.md` so neither side needs a manual nudge.
   converges on the bug. Build/locate the known-good baseline and A/B the real output against it FIRST,
   before forming a root-cause theory; make "matches the known-good build" the acceptance bar. (Lesson:
   a night lost converging async WB onto SYNC mode — itself defective — instead of A/B-ing Jun-9.)
+- **SEQ TYPE is the peer's priority signal — HANDOFF when the peer must ACT; STATUS only for pure info.**
+  The peer ACTS on HANDOFF and merely PROCESSES STATUS, so an actionable directive buried in a STATUS gets
+  under-prioritized or skipped. Every entry that needs the peer to DO something (implement / review / merge /
+  decide) must be TYPE HANDOFF (or QUESTION) with an explicit `YOUR ACTION:` line and a precise, self-contained
+  scope. Reserve STATUS for FYI you do not need acted on. (Lesson 2026-06-27: an autonomy directive + an
+  auto-merge authorization were posted as STATUS; the peer nearly skipped them — *"SEQ 84 is now a live handoff,
+  not just status."*)
+- **Account for the peer's WAKE CADENCE — the loop runs at the SLOWER side, not yours.** Your Monitor polls in
+  seconds; the peer's surface (e.g. Codex Desktop) may wake only on a scheduled poll of MINUTES because it
+  cannot run a continuous background watcher. So: do NOT fire rapid sequential entries as if seen instantly, and
+  never false-alarm on the lag (it is poll cadence, not death — the staleness/deadlock helper covers real
+  silence). Instead BATCH context into FEWER, COMPLETE, self-contained handoffs; MINIMIZE round-trips (each
+  costs ~one peer-poll interval); and in an autonomous (human-out) block, FRONT-LOAD decisions + authorizations
+  into each handoff so the peer does a large chunk per wake. For a long autonomous block, ask the human up front
+  to set the peer's scheduled poll faster (e.g. 2–3 min). (Lesson 2026-06-27: rapid SEQ83/84 fired while the
+  peer's ~10-min poll lagged; the human had to hand-relay them.)
 - **Commit the candidate before handoff** — a dirty stamp can't be pinned. Commit with
   `tools/dual-lane/lane-commit.ps1 -Lane <lane>` (lane-owned paths only, never `git add -A`); see
   "Shared working tree" above.

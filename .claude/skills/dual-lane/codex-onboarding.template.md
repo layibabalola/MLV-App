@@ -31,6 +31,10 @@ YOUR LANE:
       ---
     TYPE in {HANDOFF, REVIEW, ACK, STATUS, BLOCKER, QUESTION, HEARTBEAT, COLLABORATION_END}. SEQ is
     per-lane, monotonic. COLLABORATION_END is the control entry that authorizes tearing down a watcher.
+    PRIORITY: a HANDOFF / QUESTION / REVIEW / BLOCKER means the peer needs you to DO something (look for an
+    explicit "YOUR ACTION:" line) — ACT on it. STATUS / ACK / HEARTBEAT are FYI — process, do not block on.
+    Do NOT skip an actionable HANDOFF as if it were status (and Claude must likewise label its actionable
+    asks HANDOFF, not STATUS).
 
 SET UP YOUR IDLE HEARTBEAT (this removes the manual-nudge gap — do it now):
   After every completed turn, while idle, check claude.md every ~{{HEARTBEAT_SECONDS}}s and resume
@@ -41,6 +45,11 @@ SET UP YOUR IDLE HEARTBEAT (this removes the manual-nudge gap — do it now):
   It prints new SEQ blocks ONLY when there is real news, so silence == nothing-new (cheap). If your
   surface cannot run a true background watcher, re-check claude.md at the start of every idle turn.
   Emit a HEARTBEAT/STATUS at least every ~30 min so Claude sees you are alive.
+  CADENCE MATTERS: the two-key loop runs at the SLOWER side's wake cadence. Claude's Monitor polls every
+  ~2s; if your surface only wakes on a scheduled poll, keep that interval SHORT during active work
+  (~2–3 min, not 10+) so you pick up Claude's HANDOFFs promptly. A slow poll forces the human to hand-relay
+  and stalls autonomous (human-out) blocks. Re-read claude.md at the START of every resume regardless — the
+  direct read is the guarantee; the scheduled wake is best-effort.
   LIVENESS + TEARDOWN: the helper also alerts you when Claude's lane goes DARK (its latest entry older
   than ~2x the ~30-min liveness cadence) or when a both-lanes-wait standoff forms -- both only while
   the collaboration is active. Tear down your watcher ONLY when an explicit COLLABORATION_END control
