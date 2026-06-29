@@ -9,6 +9,7 @@
 #include "GpuDisplayWindow.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <QByteArray>
@@ -60,6 +61,15 @@ bool viewportPresentDiagEnabled()
     static const bool enabled =
         envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_PRESENT_DIAG"));
     return enabled;
+}
+
+bool rectsNearlyEqual(const QRectF &a, const QRectF &b)
+{
+    constexpr qreal kTolerance = 0.01;
+    return std::abs(a.left() - b.left()) <= kTolerance
+        && std::abs(a.top() - b.top()) <= kTolerance
+        && std::abs(a.width() - b.width()) <= kTolerance
+        && std::abs(a.height() - b.height()) <= kTolerance;
 }
 
 /* Frame-grab telemetry: when MLVAPP_FRAME_GRAB_DIR is set, save the exact display
@@ -2094,12 +2104,20 @@ QRectF GpuDisplayViewport::targetRectInViewport() const
 {
     if ( !m_view ) return QRectF();
 
-    QRectF sceneRect = m_view->sceneRect();
+    const QRectF viewSceneRect = m_view->sceneRect();
+    QRectF itemRect;
     if ( m_fallbackItem )
     {
-        const QRectF itemRect = m_fallbackItem->sceneBoundingRect();
-        if ( !itemRect.isEmpty() ) sceneRect = itemRect;
+        itemRect = m_fallbackItem->sceneBoundingRect();
     }
+
+    QRectF sceneRect = itemRect.isEmpty() ? viewSceneRect : itemRect;
+    if ( hasPendingFrame() && !viewSceneRect.isEmpty()
+         && (itemRect.isEmpty() || !rectsNearlyEqual(viewSceneRect, itemRect)) )
+    {
+        sceneRect = viewSceneRect;
+    }
+
     if ( sceneRect.isEmpty() ) return QRectF();
 
     return m_view->mapFromScene(sceneRect).boundingRect();

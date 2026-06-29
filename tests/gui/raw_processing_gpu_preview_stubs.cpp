@@ -33,3 +33,46 @@ extern "C" int llrpGpuPlaybackReconRunGlTexture(
     }
     return 0;
 }
+
+extern "C" int llrpGpuPlaybackReconResetGlTextureResources(void)
+{
+    return 0;
+}
+
+extern "C" int llrpGpuPlaybackReconRunDeviceBayer16(
+    const llrpGpuPlaybackReconState_t *,
+    const uint16_t *,
+    size_t,
+    const uint16_t **device_bayer16_out,
+    int *width_out,
+    int *height_out,
+    int *rc_out,
+    llrpGpuPlaybackReconTiming_t *timing_out)
+{
+    if (device_bayer16_out) {
+        *device_bayer16_out = nullptr;
+    }
+    if (width_out) {
+        *width_out = 0;
+    }
+    if (height_out) {
+        *height_out = 0;
+    }
+    if (rc_out) {
+        *rc_out = -1;
+    }
+    if (timing_out) {
+        std::memset(timing_out, 0, sizeof(*timing_out));
+    }
+    return 0;
+}
+
+extern "C" int llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(
+    unsigned int,
+    int *rc_out)
+{
+    if (rc_out) {
+        *rc_out = -1;
+    }
+    return 0;
+}

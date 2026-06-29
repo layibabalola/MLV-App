@@ -270,6 +270,28 @@ QImage rgb16_to_qimage(const std::vector<uint16_t> &rgb16, int width, int height
     return image;
 }
 
+QImage grab_gpu_viewport_framebuffer(QGraphicsView *view)
+{
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
+    if (!viewport) {
+        return QImage();
+    }
+
+    QImage framebuffer;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        QApplication::processEvents();
+        viewport->update();
+        viewport->repaint();
+        QApplication::processEvents();
+        framebuffer = viewport->grabFramebuffer();
+        if (!framebuffer.isNull()) {
+            break;
+        }
+        QTest::qWait(20);
+    }
+    return framebuffer;
+}
+
 QImage crop_presented_frame(QGraphicsView *view, QGraphicsPixmapItem *item)
 {
     auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
@@ -296,6 +318,53 @@ QImage crop_presented_frame(QGraphicsView *view, QGraphicsPixmapItem *item)
 
     const QRect logical_rect =
         view->mapFromScene(item->sceneBoundingRect()).boundingRect().intersected(view->viewport()->rect());
+    if (logical_rect.isEmpty()) {
+        return QImage();
+    }
+
+    const qreal dpr = viewport->devicePixelRatioF();
+    const QRect device_rect(qRound(logical_rect.x() * dpr),
+                            qRound(logical_rect.y() * dpr),
+                            qRound(logical_rect.width() * dpr),
+                            qRound(logical_rect.height() * dpr));
+    QImage cropped = framebuffer.copy(device_rect);
+    if (cropped.isNull()) {
+        return QImage();
+    }
+
+    if (device_rect.size() != logical_rect.size()) {
+        cropped = cropped.scaled(logical_rect.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+
+    return image_regression::normalize_rgb888(cropped);
+}
+
+QImage crop_presented_scene_rect(QGraphicsView *view, const QRectF &scene_rect)
+{
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
+    if (!viewport) {
+        return QImage();
+    }
+
+    QImage framebuffer;
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        QApplication::processEvents();
+        viewport->update();
+        viewport->repaint();
+        QApplication::processEvents();
+        framebuffer = viewport->grabFramebuffer();
+        if (!framebuffer.isNull()) {
+            break;
+        }
+        QTest::qWait(20);
+    }
+
+    if (framebuffer.isNull()) {
+        return QImage();
+    }
+
+    const QRect logical_rect =
+        view->mapFromScene(scene_rect).boundingRect().intersected(view->viewport()->rect());
     if (logical_rect.isEmpty()) {
         return QImage();
     }
@@ -489,6 +558,8 @@ private slots:
     void gpuViewportQueuesRgb16Frame();
     void gpuViewportQueuesBayer16Frame();
     void gpuViewportRejectsInvalidPlaybackReconTexture();
+    void gpuViewportUsesSceneRectForTexturePresentationGeometry();
+    void gpuViewportKeepsNativeSceneRectForTexturePresentationGeometry();
     void gpuViewportPresentsRgb888PatternExactly();
     void gpuViewportPresentsRgb16PatternExactly();
     void mainWindowGpuPreviewPolicyAllowsExperimentalProcessingOnlyWhenCompatible();
@@ -1136,6 +1207,127 @@ void GuiSmokeTest::gpuViewportRejectsInvalidPlaybackReconTexture()
                                                                 &timing));
     QVERIFY(!reason.isEmpty());
     QVERIFY(item->isVisible());
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportUsesSceneRectForTexturePresentationGeometry()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL viewport capture needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    const QSize raw_size(40, 20);
+    const QRectF stretched_scene(QPointF(0.0, 0.0), QSizeF(120.0, 20.0));
+    QImage submitted(raw_size, QImage::Format_RGB888);
+    submitted.fill(QColor(0, 255, 0));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(raw_size);
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    item->setOffset(0.0, 0.0);
+
+    auto *view = new QGraphicsView(&scene);
+    std::unique_ptr<QGraphicsView> view_owner(view);
+    view->setFrameShape(QFrame::NoFrame);
+    view->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setBackgroundBrush(Qt::black);
+    view->setSceneRect(stretched_scene);
+    view->resize(static_cast<int>(stretched_scene.width()) + 8,
+                 static_cast<int>(stretched_scene.height()) + 8);
+
+    QVERIFY(GpuDisplayViewport::installOn(view));
+    view->show();
+    QApplication::processEvents();
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingNearest;
+    QVERIFY(GpuDisplayViewport::presentImage(view, item, submitted, options));
+
+    const QImage actual = crop_presented_scene_rect(view, stretched_scene);
+    if (actual.isNull()) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+
+    QVERIFY(actual.height() >= static_cast<int>(stretched_scene.height()) - 1);
+    QVERIFY(actual.height() <= static_cast<int>(stretched_scene.height()) + 1);
+    QVERIFY(actual.width() >= static_cast<int>(stretched_scene.width()) - 1);
+
+    const QColor right_edge(actual.pixel(actual.width() - 4, actual.height() / 2));
+    QVERIFY2(right_edge.green() > 180 && right_edge.red() < 80 && right_edge.blue() < 80,
+             qPrintable(QStringLiteral("Expected stretched GL presentation to fill scene rect; right edge was rgb(%1,%2,%3)")
+                        .arg(right_edge.red()).arg(right_edge.green()).arg(right_edge.blue())));
+
+    GpuDisplayViewport::clearPresentedImage(view, item);
+    qunsetenv(GpuDisplayViewport::environmentVariableName());
+}
+
+void GuiSmokeTest::gpuViewportKeepsNativeSceneRectForTexturePresentationGeometry()
+{
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        QSKIP("GL viewport capture needs a platform plugin that can create an OpenGL context");
+    }
+
+    qputenv(GpuDisplayViewport::environmentVariableName(), QByteArrayLiteral("1"));
+
+    const QSize raw_size(40, 20);
+    const QRectF native_scene(QPointF(0.0, 0.0), QSizeF(raw_size));
+    QImage submitted(raw_size, QImage::Format_RGB888);
+    submitted.fill(QColor(0, 255, 0));
+
+    QGraphicsScene scene;
+    QPixmap fallback_pixmap(raw_size);
+    fallback_pixmap.fill(Qt::black);
+    QGraphicsPixmapItem *item = scene.addPixmap(fallback_pixmap);
+    item->setOffset(0.0, 0.0);
+
+    auto *view = new QGraphicsView(&scene);
+    std::unique_ptr<QGraphicsView> view_owner(view);
+    view->setFrameShape(QFrame::NoFrame);
+    view->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setBackgroundBrush(Qt::black);
+    view->setSceneRect(native_scene);
+    view->resize(128, raw_size.height() + 8);
+
+    QVERIFY(GpuDisplayViewport::installOn(view));
+    view->show();
+    QApplication::processEvents();
+
+    GpuDisplayViewport::PresentationOptions options;
+    options.samplingMode = GpuDisplayViewport::SamplingNearest;
+    QVERIFY(GpuDisplayViewport::presentImage(view, item, submitted, options));
+
+    const QImage actual = crop_presented_scene_rect(view, native_scene);
+    const QImage framebuffer = grab_gpu_viewport_framebuffer(view);
+    auto *viewport = qobject_cast<GpuDisplayViewport *>(view->viewport());
+    if (actual.isNull() || framebuffer.isNull() || !viewport) {
+        QSKIP("OpenGL framebuffer capture is unavailable in this environment");
+    }
+
+    QVERIFY(actual.width() >= raw_size.width() - 1);
+    QVERIFY(actual.width() <= raw_size.width() + 1);
+    const QColor right_edge(actual.pixel(actual.width() - 4, actual.height() / 2));
+    QVERIFY2(right_edge.green() > 180 && right_edge.red() < 80 && right_edge.blue() < 80,
+             qPrintable(QStringLiteral("Expected native GL presentation to fill native scene rect; right edge was rgb(%1,%2,%3)")
+                        .arg(right_edge.red()).arg(right_edge.green()).arg(right_edge.blue())));
+
+    const int outside_x = 80;
+    if (outside_x < view->viewport()->width()) {
+        const qreal dpr = viewport->devicePixelRatioF();
+        const QColor outside(framebuffer.pixel(qRound(outside_x * dpr),
+                                               qRound((raw_size.height() / 2) * dpr)));
+        QVERIFY2(outside.red() < 20 && outside.green() < 20 && outside.blue() < 20,
+                 qPrintable(QStringLiteral("Expected extra viewport area outside native scene to stay black; outside pixel was rgb(%1,%2,%3)")
+                            .arg(outside.red()).arg(outside.green()).arg(outside.blue())));
+    }
+
+    GpuDisplayViewport::clearPresentedImage(view, item);
     qunsetenv(GpuDisplayViewport::environmentVariableName());
 }
 
