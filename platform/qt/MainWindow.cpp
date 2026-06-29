@@ -1684,9 +1684,22 @@ static bool lookAssistProcessedFloorLiftedPostInvalidShouldFailClosed(
         && rawWhite <= originalRawWhite;
 }
 
+static int lookAssistDisplayTargetMedianForScene( LookAssistScene scene )
+{
+    switch( scene )
+    {
+    case LookAssistScene::Night:            return 64;
+    case LookAssistScene::ArtificialLights: return 82;
+    case LookAssistScene::Shade:            return 96;
+    case LookAssistScene::BrightSun:        return 110;
+    }
+    return 88;
+}
+
 static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
                                                   const LookAssistStats &stats,
-                                                  const LookAssistStats *colorStats = nullptr )
+                                                  const LookAssistStats *colorStats = nullptr,
+                                                  const LookAssistStats *displayStats = nullptr )
 {
     LookAssistPreset preset;
     int targetMedian = 110;
@@ -1775,6 +1788,17 @@ static LookAssistPreset presetForLookAssistScene( LookAssistScene scene,
         exposure = qMin( exposure, 0 );
     if( scene == LookAssistScene::Night )
         exposure = qMax( exposure, 0 );
+
+    if( displayStats != nullptr && displayStats->median > 0.0 )
+    {
+        const int displayTarget = lookAssistDisplayTargetMedianForScene( scene );
+        int displayExposure = lookAssistExposureForTarget(
+            qMax( 1.0, displayStats->median ), (double)displayTarget, 0 );
+        const int displayCap = lookAssistExposureForTarget(
+            qMax( 1.0, displayStats->p99 ), 440.0, 400 );
+        displayExposure = qMin( displayExposure, displayCap );
+        exposure = qBound( -120, displayExposure, 380 );
+    }
 
     preset.exposure = exposure;
 
@@ -13789,6 +13813,94 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             processedColorStats.balanceSamples >= minColorBalanceSamples;
     }
 
+    LookAssistStats displayStatsUi;
+    bool displayStatsValidUi = false;
+    const bool useDisplayMeterExposureUi =
+        effectivePlaybackScaleFactorForRequest() == 2;
+    if( useDisplayMeterExposureUi )
+    {
+        processingObject_t *displayClone =
+            processingCloneForAnalysis( m_pMlvObject->processing );
+        if( displayClone )
+        {
+            mlv_processed_thumbnail_settings_t displaySettings;
+            memset( &displaySettings, 0, sizeof( displaySettings ) );
+            displaySettings.flags = MLV_PROCESSED_THUMBNAIL_APPLY_EXPOSURE
+                                  | MLV_PROCESSED_THUMBNAIL_APPLY_SIMPLE_CONTRAST
+                                  | MLV_PROCESSED_THUMBNAIL_APPLY_SHADOWS
+                                  | MLV_PROCESSED_THUMBNAIL_APPLY_HIGHLIGHTS
+                                  | MLV_PROCESSED_THUMBNAIL_APPLY_VIBRANCE;
+
+            const int totalFramesForMeter =
+                static_cast<int>( getMlvFrames( m_pMlvObject ) );
+            const double samplePcts[3] = { 0.15, 0.5, 0.85 };
+            QByteArray displayThumb;
+            displayThumb.resize( width * height * 3 );
+            double medianSamples[3];
+            double p95Samples[3];
+            double p99Samples[3];
+            int validSamples = 0;
+
+            for( int s = 0; s < 3; ++s )
+            {
+                int sampleFrame = analysisFrame;
+                if( totalFramesForMeter > 1 )
+                {
+                    sampleFrame = static_cast<int>(
+                        samplePcts[s] * ( totalFramesForMeter - 1 ) );
+                    sampleFrame = qBound( 0, sampleFrame, totalFramesForMeter - 1 );
+                }
+
+                if( get_area_average_downscale_thumnail_with_processing_cachefree(
+                        m_pMlvObject,
+                        sampleFrame,
+                        downscaleFactor,
+                        qMax( 1, mlvappEffectiveWorkerThreadCount() ),
+                        displayClone,
+                        &displaySettings,
+                        reinterpret_cast<unsigned char *>( displayThumb.data() ) ) )
+                {
+                    const LookAssistStats sampleStats =
+                        analyzeLookAssistThumbnail(
+                            reinterpret_cast<const unsigned char *>(
+                                displayThumb.constData() ),
+                            width,
+                            height );
+                    if( sampleStats.median > 0.0 )
+                    {
+                        medianSamples[validSamples] = sampleStats.median;
+                        p95Samples[validSamples] = sampleStats.p95;
+                        p99Samples[validSamples] = sampleStats.p99;
+                        ++validSamples;
+                    }
+                }
+
+                if( totalFramesForMeter <= 1 ) break;
+            }
+
+            if( validSamples > 0 )
+            {
+                std::sort( medianSamples, medianSamples + validSamples );
+                std::sort( p95Samples, p95Samples + validSamples );
+                std::sort( p99Samples, p99Samples + validSamples );
+                displayStatsUi.median = medianSamples[validSamples / 2];
+                displayStatsUi.p95 = p95Samples[validSamples / 2];
+                displayStatsUi.p99 = p99Samples[validSamples / 2];
+                displayStatsUi.p05 = displayStatsUi.median;
+                displayStatsValidUi = true;
+                logInteractionEvent(
+                    QStringLiteral("look_assist.display_meter"),
+                    QStringLiteral("samples=%1 robust_median=%2 robust_p95=%3 robust_p99=%4 frame=%5")
+                        .arg( validSamples )
+                        .arg( displayStatsUi.median, 0, 'f', 1 )
+                        .arg( displayStatsUi.p95, 0, 'f', 1 )
+                        .arg( displayStatsUi.p99, 0, 'f', 1 )
+                        .arg( analysisFrame ) );
+            }
+            processingFreeClone( displayClone );
+        }
+    }
+
     // [WB-TRACE] env-gated, read-only diagnostic to pin the Look Assist per-scale WB divergence
     // (dual-lane two-key plan). Logs the per-leg analysis state on the UI thread BEFORE the WB solve.
     // Remove/leave-disabled before merge.
@@ -13896,6 +14008,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                      chromaSmoothVal,
                      chromaSmoothAutoApplied,
                      dispatchGeneration,
+                     displayStatsUi,
+                     displayStatsValidUi,
                      receipt,
                      restoreLookAssistSafetyBaseline]() mutable
         {
@@ -13940,7 +14054,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
             LookAssistPreset preset = presetForLookAssistScene(
                         sceneCopy,
                         statsCopy,
-                        useProcessedColorStatsCopy ? &processedColorStatsCopy : nullptr );
+                        useProcessedColorStatsCopy ? &processedColorStatsCopy : nullptr,
+                        displayStatsValidUi ? &displayStatsUi : nullptr );
 
             // Select thumbnail for WB patch search
             const unsigned char *autoWbThumbnail =
@@ -14524,7 +14639,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     LookAssistPreset preset = presetForLookAssistScene(
                 scene,
                 stats,
-                useProcessedColorStats ? &processedColorStats : nullptr );
+                useProcessedColorStats ? &processedColorStats : nullptr,
+                displayStatsValidUi ? &displayStatsUi : nullptr );
     const int baseTemperature = receipt->temperature() == -1
                               ? ui->horizontalSliderTemperature->value()
                               : receipt->temperature();
@@ -23680,6 +23796,14 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                 return;
             }
 
+            if( m_lookAssistAppliedReceipt == ACTIVE_RECEIPT )
+            {
+                logInteractionEvent(
+                    QStringLiteral("look_assist.apply.dedup_skip"),
+                    QStringLiteral("where=toggle_frame_ready frame=%1").arg( baselineFrame ) );
+                return;
+            }
+
             logInteractionEvent(
                 QStringLiteral("look_assist.toggle.frame_ready_apply"),
                 QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8 serial=%9")
@@ -23699,6 +23823,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                 captureLookAssistBaseline( ACTIVE_RECEIPT );
 
             applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
+            m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
             syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
             setReceipt( ACTIVE_RECEIPT );
             logInteractionEvent(
