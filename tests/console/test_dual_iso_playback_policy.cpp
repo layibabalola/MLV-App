@@ -59,6 +59,31 @@ TEST(DualIsoPlaybackPolicy, InvalidOrDisabledDualIsoDoesNotForcePreview)
     ASSERT_EQ(1, settings.mode);
 }
 
+/* Scale-aware suppression (2026-06-29): at x2 the AUTO preview-override is
+ * suppressed (it cliffs to a magenta fallback at bright-content transitions),
+ * leaving selectedMode=1 (HQ) so the mean23 override engages -- the proven
+ * neutral path. Explicit user preview (selectedMode==2) is still honored, and
+ * x1 (default effectiveScale) is unaffected. */
+TEST(DualIsoPlaybackPolicy, SuppressesAutoPreviewOverrideAtScale2)
+{
+    /* x2: auto override suppressed -> HQ mode retained (mean23 then engages). */
+    const DualIsoPlaybackRuntimeSettings x2 =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 1, 0, 1, 1, false, 2);
+    ASSERT_FALSE(x2.previewOverrideActive);
+    ASSERT_EQ(1, x2.mode);
+
+    /* x2 with explicit user preview (selectedMode==2): still forced to mode 2. */
+    const DualIsoPlaybackRuntimeSettings x2explicit =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 2, 0, 1, 1, false, 2);
+    ASSERT_EQ(2, x2explicit.mode);
+
+    /* x1 (default effectiveScale=1): auto override UNCHANGED (regression guard). */
+    const DualIsoPlaybackRuntimeSettings x1 =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 1, 0, 1, 1, false, 1);
+    ASSERT_TRUE(x1.previewOverrideActive);
+    ASSERT_EQ(2, x1.mode);
+}
+
 /* Phase E5 policy-header tests: the scale-aware downgrade flags are
  * opt-in via MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE=1. With the env
  * unset (default), the flags must always be FALSE regardless of the

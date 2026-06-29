@@ -221,7 +221,8 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
                                                                               int selectedInterpolation,
                                                                               int selectedAliasMap,
                                                                               int selectedFullResBlending,
-                                                                              bool playbackFastProcessingSubsetActive = false)
+                                                                              bool playbackFastProcessingSubsetActive = false,
+                                                                              int effectiveScale = 1)
 {
     if (dualIsoPlaybackOverrideDisabledViaEnv())
     {
@@ -239,11 +240,24 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
      * override below then catches the now-still-HQ playback path and
      * writes the playbackForceMean23 flag, giving us HQ + mean23 (cast
      * closed) at the cost of cadence. */
+    /* Scale-aware suppression (2026-06-29): the AUTO preview-override at x2 reduced-res
+     * playback can fall out of HQ/full20 at bright-content transitions (the dual_iso
+     * full20 timing flag drops 1->0 -> path=0/non-HQ) and renders a MAGENTA cliff
+     * (M16-1243 bright atrium f330+, proven by the peak-frame A/B: -PreferHqMean23 /
+     * disable-override both clear it by keeping HQ/full20). Suppress the AUTO override
+     * at x2 so the hqWillRunDuringPlayback block below sets playbackForceMean23 (HQ +
+     * mean23, "cast closed") -- the proven neutral path that is also FPS-neutral-or-better
+     * (the cliff's path=0 fallback was itself slow). Explicit user preview (selectedMode==2
+     * -> explicitPreviewSelected) is UNTOUCHED, and x1 is UNAFFECTED (effectiveScale default 1).
+     * NOTE: x4/x8 subset show the same magenta (SEQ389) and likely want the same suppression;
+     * scoped to ==2 here as the validated case, x4/x8 is a flagged fast-follow. */
+    const bool suppressAutoPreviewOverrideAtScale = (effectiveScale == 2);
     const bool previewOverrideActive = playbackActive
                                     && (rawFixEnabled || playbackFastProcessingSubsetActive)
                                     && (dualIsoValidity != 0)
                                     && (selectedMode > 0)
-                                    && !preferHqMean23;
+                                    && !preferHqMean23
+                                    && !suppressAutoPreviewOverrideAtScale;
 
     DualIsoPlaybackRuntimeSettings settings = {
         selectedMode,

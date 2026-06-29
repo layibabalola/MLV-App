@@ -7271,7 +7271,8 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             toolButtonDualIsoInterpolationCurrentIndex(),
             toolButtonDualIsoAliasMapCurrentIndex(),
             toolButtonDualIsoFullresBlendingCurrentIndex(),
-            ui->actionUseFastProcessingForPlayback->isChecked() );
+            ui->actionUseFastProcessingForPlayback->isChecked(),
+            effectivePlaybackScaleFactorForRequest() );
     const bool dualIsoPreviewRuntimeActive = (dualIsoPlaybackSettings.mode == 2);
     const bool dualIsoPreviewOverrideActive =
         dualIsoPreviewRuntimeActive && selectedDualIsoMode != 2;
@@ -20699,7 +20700,8 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
                 toolButtonDualIsoInterpolationCurrentIndex(),
                 toolButtonDualIsoAliasMapCurrentIndex(),
                 toolButtonDualIsoFullresBlendingCurrentIndex(),
-                ui->actionUseFastProcessingForPlayback->isChecked() );
+                ui->actionUseFastProcessingForPlayback->isChecked(),
+                effectivePlaybackScaleFactorForRequest() );
 
     const int mean23OverrideValue = settings.playbackForceMean23 ? 1 : 0;
 
