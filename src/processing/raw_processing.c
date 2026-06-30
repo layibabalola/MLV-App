@@ -2161,6 +2161,41 @@ static int processing_has_direct8_shadow_highlight_adjustments(const processingO
         || fabs(processing->shadows_highlights.highlights) >= 0.01;
 }
 
+int processingHasShadowsHighlightsAdjustments(const processingObject_t * processing)
+{
+    return processing_has_direct8_shadow_highlight_adjustments(processing);
+}
+
+int processingGetShadowsHighlightsBlurData(const processingObject_t * processing,
+                                           const uint16_t ** data,
+                                           int * width,
+                                           int * height,
+                                           int * curveIndexMask)
+{
+    if( data ) *data = NULL;
+    if( width ) *width = 0;
+    if( height ) *height = 0;
+    if( curveIndexMask ) *curveIndexMask = processing_shadows_highlights_curve_index_mask_enabled();
+
+    if( !processing
+     || !processingHasShadowsHighlightsAdjustments(processing)
+     || !processing->shadows_highlights.blur_image )
+    {
+        return 0;
+    }
+
+    processing_buffer_t * buffer = processing->shadows_highlights.blur_image;
+    if( !buffer->image || buffer->width == 0 || buffer->height == 0 )
+    {
+        return 0;
+    }
+
+    if( data ) *data = get_buffer(buffer);
+    if( width ) *width = buffer->width;
+    if( height ) *height = buffer->height;
+    return 1;
+}
+
 /* A private part of the processing machine.
  *
  * Phase E7: AgX is now handled in the direct8 fast path (see

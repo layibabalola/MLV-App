@@ -35,6 +35,13 @@ struct GpuPreviewProcessingConfig
     bool applyVignette = false;
     int vignetteStrength = 0;
     QByteArray vignetteMask;
+    bool applyShadowsHighlights = false;
+    bool shadowsHighlightsCurveIndexMask = false;
+    bool shadowsHighlightsFrameStateReady = false;
+    int shadowsHighlightsFrameWidth = 0;
+    int shadowsHighlightsFrameHeight = 0;
+    QByteArray shadowsHighlightsBlur;
+    QByteArray shadowsHighlightsCurve;
     bool applyLut = false;
     bool lut3d = false;
     int lutDimension = 0;
@@ -96,6 +103,17 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
 GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     const processingObject_t * processing,
     QString * reason = nullptr);
+bool gpuPreviewProcessingNeedsShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config);
+bool gpuPreviewProcessingHasShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config,
+    int width,
+    int height);
+bool gpuPreviewProcessingAttachFrameState(GpuPreviewProcessingConfig * config,
+                                          const processingObject_t * processing,
+                                          int width,
+                                          int height,
+                                          QString * reason = nullptr);
 struct GpuPreviewProcessingBackendAvailability
 {
     bool available = false;

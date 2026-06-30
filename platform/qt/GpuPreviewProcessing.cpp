@@ -19,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 #include <omp.h>
 
@@ -152,6 +153,39 @@ float sampleInLoopContrastFactor(const QByteArray & curveBytes, int index)
     }
     const int clamped = std::max(0, std::min(kInLoopContrastSamples - 1, index));
     return reinterpret_cast<const float *>(curveBytes.constData())[clamped];
+}
+
+float sampleShadowsHighlightsFactor(const GpuPreviewProcessingConfig & config,
+                                    int pixelIndex)
+{
+    if ( !config.applyShadowsHighlights
+      || !config.shadowsHighlightsFrameStateReady
+      || config.shadowsHighlightsBlur.size()
+            < static_cast<int>((static_cast<size_t>(pixelIndex) + 1u) * 3u * sizeof(uint16_t)) )
+    {
+        return 1.0f;
+    }
+
+    const uint16_t * blur =
+        reinterpret_cast<const uint16_t *>(config.shadowsHighlightsBlur.constData())
+        + static_cast<size_t>(pixelIndex) * 3u;
+    int bval = 0;
+    if ( config.shadowsHighlightsCurveIndexMask )
+    {
+        bval = blur[0];
+    }
+    else
+    {
+        const int32_t blurR =
+            static_cast<int32_t>(lutValues(config.matrixLutR)[blur[0]]);
+        const int32_t blurG =
+            static_cast<int32_t>(lutValues(config.matrixLutG)[blur[1]]);
+        const int32_t blurB =
+            static_cast<int32_t>(lutValues(config.matrixLutB)[blur[2]]);
+        bval = ((blurR << 2) + (blurG * 11) + blurB) >> 4;
+    }
+
+    return sampleInLoopContrastFactor(config.shadowsHighlightsCurve, bval);
 }
 
 /* Float32 mirror of fromRGBtoHSV (processing.c:282-308): hsv[0]=H in [0,360),
@@ -452,6 +486,7 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
     /* The gradient layer reuses the SHARED expo_correction (vignette x base
      * in-loop-contrast) and the base luma index cval. Capture them here. */
     float sharedVignetteFactor = 1.0f;
+    float sharedShadowsHighlightsFactor = 1.0f;
     float sharedContrastFactor = 1.0f;
     int sharedCval = 0;
     bool sharedHaveCval = false;
@@ -480,6 +515,12 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         }
     }
 
+    if ( config.applyShadowsHighlights )
+    {
+        sharedShadowsHighlightsFactor =
+            sampleShadowsHighlightsFactor(config, pixelIndex);
+    }
+
     if ( config.applyInLoopContrast || config.applyGradientContrast )
     {
         /* In-loop simple-contrast factor (raw_processing.c:2941-2954): a per-pixel
@@ -503,6 +544,13 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
             matrixApplied[1] *= factor;
             matrixApplied[2] *= factor;
         }
+    }
+
+    if ( config.applyShadowsHighlights )
+    {
+        matrixApplied[0] *= sharedShadowsHighlightsFactor;
+        matrixApplied[1] *= sharedShadowsHighlightsFactor;
+        matrixApplied[2] *= sharedShadowsHighlightsFactor;
     }
 
     if ( config.applyHighlightReconstruction )
@@ -617,7 +665,8 @@ void applyPreviewProcessingPixel(const GpuPreviewProcessingConfig & config,
         {
             gradContrastFactor = sampleInLoopContrastFactor(config.gradientContrastCurve, sharedCval);
         }
-        const float gradExpo = sharedVignetteFactor * sharedContrastFactor * gradContrastFactor;
+        const float gradExpo = sharedVignetteFactor * sharedShadowsHighlightsFactor
+                              * sharedContrastFactor * gradContrastFactor;
         g[0] = clamp16(g[0] * gradExpo);
         g[1] = clamp16(g[1] * gradExpo);
         g[2] = clamp16(g[2] * gradExpo);
@@ -1439,6 +1488,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform sampler2D hueVsLumaCurve;\n"
         "uniform sampler2D lumaVsSaturationCurve;\n"
         "uniform sampler2D inLoopContrastCurve;\n"
+        "uniform sampler2D shadowsHighlightsBlurTexture;\n"
+        "uniform sampler2D shadowsHighlightsCurve;\n"
         "uniform float previewProcessingEnabled;\n"
         "uniform float previewApplyCreativeCurves;\n"
         "uniform float previewApplyToning;\n"
@@ -1449,6 +1500,8 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "uniform float previewSaturation;\n"
         "uniform float previewApplyHueVs;\n"
         "uniform float previewApplyInLoopContrast;\n"
+        "uniform float previewApplyShadowsHighlights;\n"
+        "uniform float previewShadowsHighlightsCurveIndexMask;\n"
         "uniform float previewApplyAgx;\n"
         "uniform vec3 previewAgxFwd0;\n"
         "uniform vec3 previewAgxFwd1;\n"
@@ -1601,6 +1654,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "    vec3 leveled = vec3(sampleU16Lut(levelsLut, color.r), sampleU16Lut(levelsLut, color.g), sampleU16Lut(levelsLut, color.b));\n"
         "    vec3 matrixApplied = vec3(sampleU16Lut(matrixLutR, leveled.r), sampleU16Lut(matrixLutG, leveled.g), sampleU16Lut(matrixLutB, leveled.b));\n"
         "    float reconMatrixGreen = matrixApplied.g;\n"
+        "    float shadowsHighlightsF = 1.0;\n"
         "    if (previewApplyVignette > 0.5)\n"
         "    {\n"
         "        vec2 fc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
@@ -1615,11 +1669,29 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "            matrixApplied *= b2 * b2;\n"
         "        }\n"
         "    }\n"
+        "    if (previewApplyShadowsHighlights > 0.5)\n"
+        "    {\n"
+        "        vec2 shfc = vec2(vTexCoord.x, 1.0 - vTexCoord.y) * frameSize;\n"
+        "        vec3 shBlur = floor(texture2D(shadowsHighlightsBlurTexture, (floor(shfc) + vec2(0.5)) / frameSize).rgb * 65535.0 + 0.5);\n"
+        "        float shBval = shBlur.r;\n"
+        "        if (previewShadowsHighlightsCurveIndexMask <= 0.5)\n"
+        "        {\n"
+        "            float shR = floor(sampleU16Lut(matrixLutR, shBlur.r / 65535.0) * 65535.0 + 0.5);\n"
+        "            float shG = floor(sampleU16Lut(matrixLutG, shBlur.g / 65535.0) * 65535.0 + 0.5);\n"
+        "            float shB = floor(sampleU16Lut(matrixLutB, shBlur.b / 65535.0) * 65535.0 + 0.5);\n"
+        "            shBval = floor((shR * 4.0 + shG * 11.0 + shB) / 16.0);\n"
+        "        }\n"
+        "        shadowsHighlightsF = sampleContrastCurve(shadowsHighlightsCurve, shBval);\n"
+        "    }\n"
         "    if (previewApplyInLoopContrast > 0.5)\n"
         "    {\n"
         "        vec3 m16 = floor(matrixApplied * 65535.0 + 0.5);\n"
         "        float cval = floor((m16.r * 4.0 + m16.g * 11.0 + m16.b) / 16.0);\n"
         "        matrixApplied *= sampleContrastCurve(inLoopContrastCurve, cval);\n"
+        "    }\n"
+        "    if (previewApplyShadowsHighlights > 0.5)\n"
+        "    {\n"
+        "        matrixApplied *= shadowsHighlightsF;\n"
         "    }\n"
         "    if (previewApplyHighlightRecon > 0.5)\n"
         "    {\n"
@@ -1699,7 +1771,7 @@ QByteArray gpuPreviewProcessingSubsetFragmentShaderSource(void)
         "            if (previewApplyInLoopContrast > 0.5) baseContrastF = sampleContrastCurve(inLoopContrastCurve, gcval);\n"
         "            if (previewApplyGradientContrast > 0.5) gradContrastF = sampleContrastCurve(gradientContrastCurve, gcval);\n"
         "        }\n"
-        "        g = clamp(g * (vigF * baseContrastF * gradContrastF), 0.0, 65535.0);\n"
+        "        g = clamp(g * (vigF * shadowsHighlightsF * baseContrastF * gradContrastF), 0.0, 65535.0);\n"
         "        if (previewApplyHighlightRecon > 0.5)\n"
         "        {\n"
         "            float gt1 = floor(clamp(gtmpGreen + 0.5, 0.0, 65535.0));\n"
@@ -1921,7 +1993,7 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
      * curve (pre_calc_curve_r) and the gradation curves (gcurve_*). Clips are
      * still failed closed below on the non-creative features the shader does not
      * implement (gradient, LUT, filter, AgX, denoise, grain, CA, sharpen, chroma
-     * separation/blur, clarity, shadows/highlights, vignette, non-Rec709 gamut),
+     * separation/blur, clarity, vignette, non-Rec709 gamut),
      * which are gated independently of the creative flag. */
     /* gradient is now supported: a second pre-creative pipeline through the
      * gradient LUTs, blended into the base in gamma space by the gradient mask
@@ -1977,11 +2049,10 @@ bool gpuPreviewProcessingIsSupported(const processingObject_t * processing,
         return reject(QStringLiteral("chroma blur radius exceeds 127"));
     }
     if ( std::fabs(processing->clarity) >= 0.01 ) return reject(QStringLiteral("clarity enabled"));
-    if ( std::fabs(processing->shadows_highlights.shadows) >= 0.01
-      || std::fabs(processing->shadows_highlights.highlights) >= 0.01 )
-    {
-        return reject(QStringLiteral("shadows/highlights enabled"));
-    }
+    /* Shadows/highlights are supported when the caller attaches the current
+     * frame's blur mask after the production processing pre-pass has refreshed
+     * it. No reject here; gpuPreviewProcessingApplyGpuOffscreen fails closed if
+     * frame state is missing. */
     /* Vignette is supported via a full-frame R32F mask texture sampled by the
      * fragment's raster index (the vmpix off-by-one + vignette_end guard mirrored).
      * Reject only when the strength is set but the mask buffer was never built
@@ -2152,6 +2223,22 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
             config.applyVignette = false;
         }
     }
+    config.applyShadowsHighlights =
+        processingHasShadowsHighlightsAdjustments(processing) != 0;
+    if ( config.applyShadowsHighlights )
+    {
+        config.shadowsHighlightsCurve.resize(static_cast<int>(65536u * sizeof(float)));
+        float * dst = reinterpret_cast<float *>(config.shadowsHighlightsCurve.data());
+        for (int index = 0; index < 65536; ++index)
+        {
+            dst[index] = static_cast<float>(
+                processing->shadows_highlights.shadow_highlight_curve[index]);
+        }
+        int curveIndexMask = 0;
+        (void)processingGetShadowsHighlightsBlurData(
+            processing, nullptr, nullptr, nullptr, &curveIndexMask);
+        config.shadowsHighlightsCurveIndexMask = curveIndexMask != 0;
+    }
     config.applyLut = processing->lut_on != 0 && processing->lut != NULL
                    && processing->lut->cube != NULL && processing->lut->dimension > 1;
     if ( config.applyLut )
@@ -2304,6 +2391,9 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, &config.applyVignette, sizeof(config.applyVignette));
     hash = fnv1a64_append(hash, &config.vignetteStrength, sizeof(config.vignetteStrength));
     hash = fnv1a64_append(hash, config.vignetteMask.constData(), static_cast<size_t>(config.vignetteMask.size()));
+    hash = fnv1a64_append(hash, &config.applyShadowsHighlights, sizeof(config.applyShadowsHighlights));
+    hash = fnv1a64_append(hash, &config.shadowsHighlightsCurveIndexMask, sizeof(config.shadowsHighlightsCurveIndexMask));
+    hash = fnv1a64_append(hash, config.shadowsHighlightsCurve.constData(), static_cast<size_t>(config.shadowsHighlightsCurve.size()));
     hash = fnv1a64_append(hash, &config.applyLut, sizeof(config.applyLut));
     hash = fnv1a64_append(hash, &config.lut3d, sizeof(config.lut3d));
     hash = fnv1a64_append(hash, &config.lutDimension, sizeof(config.lutDimension));
@@ -2345,6 +2435,106 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     hash = fnv1a64_append(hash, config.gradationLutB.constData(), static_cast<size_t>(config.gradationLutB.size()));
     config.signature = hash;
     return config;
+}
+
+bool gpuPreviewProcessingNeedsShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config)
+{
+    return config.enabled && config.applyShadowsHighlights;
+}
+
+bool gpuPreviewProcessingHasShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config,
+    int width,
+    int height)
+{
+    if ( !gpuPreviewProcessingNeedsShadowsHighlightsFrameState(config) )
+    {
+        return true;
+    }
+    if ( !config.shadowsHighlightsFrameStateReady
+      || config.shadowsHighlightsFrameWidth != width
+      || config.shadowsHighlightsFrameHeight != height )
+    {
+        return false;
+    }
+    const size_t pixelCount =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    return config.shadowsHighlightsBlur.size()
+            == static_cast<int>(pixelCount * 3u * sizeof(uint16_t))
+        && config.shadowsHighlightsCurve.size()
+            == static_cast<int>(65536u * sizeof(float));
+}
+
+bool gpuPreviewProcessingAttachFrameState(GpuPreviewProcessingConfig * config,
+                                          const processingObject_t * processing,
+                                          int width,
+                                          int height,
+                                          QString * reason)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( config )
+        {
+            config->shadowsHighlightsFrameStateReady = false;
+            config->shadowsHighlightsFrameWidth = 0;
+            config->shadowsHighlightsFrameHeight = 0;
+            config->shadowsHighlightsBlur.clear();
+        }
+        if ( reason ) *reason = why;
+        return false;
+    };
+
+    if ( !config )
+    {
+        return fail(QStringLiteral("preview-processing config missing"));
+    }
+    if ( !gpuPreviewProcessingNeedsShadowsHighlightsFrameState(*config) )
+    {
+        if ( reason ) reason->clear();
+        return true;
+    }
+    if ( width <= 0 || height <= 0 )
+    {
+        return fail(QStringLiteral("shadows/highlights frame dimensions invalid"));
+    }
+
+    const uint16_t * blurData = nullptr;
+    int blurWidth = 0;
+    int blurHeight = 0;
+    int curveIndexMask = 0;
+    if ( !processingGetShadowsHighlightsBlurData(processing,
+                                                 &blurData,
+                                                 &blurWidth,
+                                                 &blurHeight,
+                                                 &curveIndexMask)
+      || !blurData )
+    {
+        return fail(QStringLiteral("shadows/highlights blur frame unavailable"));
+    }
+    if ( blurWidth != width || blurHeight != height )
+    {
+        return fail(QStringLiteral(
+            "shadows/highlights blur frame dimensions do not match render frame"));
+    }
+
+    const size_t pixelCount =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t byteCount = pixelCount * 3u * sizeof(uint16_t);
+    if ( byteCount > static_cast<size_t>(std::numeric_limits<int>::max()) )
+    {
+        return fail(QStringLiteral("shadows/highlights blur frame is too large"));
+    }
+
+    config->shadowsHighlightsCurveIndexMask = curveIndexMask != 0;
+    config->shadowsHighlightsFrameWidth = width;
+    config->shadowsHighlightsFrameHeight = height;
+    config->shadowsHighlightsBlur =
+        QByteArray(reinterpret_cast<const char *>(blurData),
+                   static_cast<int>(byteCount));
+    config->shadowsHighlightsFrameStateReady = true;
+    if ( reason ) reason->clear();
+    return true;
 }
 
 GpuPreviewProcessingBackendAvailability gpuPreviewProcessingProbeGpuBackend(void)
@@ -2523,6 +2713,23 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
         config.applyHueVs ? config.lumaVsSaturationCurve : QByteArray());
     const QByteArray inLoopContrastBytes = packContrastCurveR32F(
         config.applyInLoopContrast ? config.inLoopContrastCurve : QByteArray());
+    const bool shadowsHighlightsReady =
+        gpuPreviewProcessingHasShadowsHighlightsFrameState(config, width, height);
+    if ( config.applyShadowsHighlights && !shadowsHighlightsReady )
+    {
+        context.doneCurrent();
+        return fail(QStringLiteral(
+            "shadows/highlights frame state missing for GPU preview processing"));
+    }
+    const bool shadowsHighlightsActiveReady =
+        config.applyShadowsHighlights && shadowsHighlightsReady;
+    const QByteArray shadowsHighlightsBlurBytes = shadowsHighlightsActiveReady
+        ? packRgb16Texture(
+            reinterpret_cast<const uint16_t *>(config.shadowsHighlightsBlur.constData()),
+            width * height)
+        : QByteArray(static_cast<int>(4u * sizeof(uint16_t)), '\0');
+    const QByteArray shadowsHighlightsCurveBytes = packContrastCurveR32F(
+        config.applyShadowsHighlights ? config.shadowsHighlightsCurve : QByteArray());
     const QByteArray gradMatrixRBytes = gpuPreviewProcessingPackLookupTextureRgba16(
         config.applyGradient ? config.gradientMatrixLutR : config.gammaLut);
     const QByteArray gradMatrixGBytes = gpuPreviewProcessingPackLookupTextureRgba16(
@@ -2550,6 +2757,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * hueVsLumaTexture = createCurveTexture();
     QOpenGLTexture * lumaVsSaturationTexture = createCurveTexture();
     QOpenGLTexture * inLoopContrastTexture = createContrastCurveTexture();
+    QOpenGLTexture * shadowsHighlightsBlurTexture = createFrameTexture(
+        shadowsHighlightsActiveReady ? width : 1,
+        shadowsHighlightsActiveReady ? height : 1);
+    QOpenGLTexture * shadowsHighlightsCurveTexture = createContrastCurveTexture();
     const bool vignetteReady = config.applyVignette
         && config.vignetteMask.size() == static_cast<int>(static_cast<size_t>(width) * height * sizeof(float));
     QOpenGLTexture * vignetteMaskTexture = createVignetteMaskTexture(
@@ -2610,6 +2821,12 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     hueVsLumaTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, hueVsLumaBytes.constData());
     lumaVsSaturationTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, lumaVsSaturationBytes.constData());
     inLoopContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, inLoopContrastBytes.constData());
+    shadowsHighlightsBlurTexture->setData(QOpenGLTexture::RGBA,
+                                          QOpenGLTexture::UInt16,
+                                          shadowsHighlightsBlurBytes.constData());
+    shadowsHighlightsCurveTexture->setData(QOpenGLTexture::Red,
+                                           QOpenGLTexture::Float32,
+                                           shadowsHighlightsCurveBytes.constData());
     const float vignetteDummy = 0.0f;
     vignetteMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32,
                                  vignetteReady ? config.vignetteMask.constData()
@@ -2654,6 +2871,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("hueVsLumaCurve", 13);
     program.setUniformValue("lumaVsSaturationCurve", 14);
     program.setUniformValue("inLoopContrastCurve", 15);
+    program.setUniformValue("shadowsHighlightsBlurTexture", 25);
+    program.setUniformValue("shadowsHighlightsCurve", 26);
     program.setUniformValue("vignetteMask", 16);
     program.setUniformValue("previewApplyVignette", vignetteReady ? 1.0f : 0.0f);
     program.setUniformValue("previewVignetteStrength", static_cast<float>(config.vignetteStrength));
@@ -2668,6 +2887,10 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     program.setUniformValue("previewLutDomainMax", QVector3D(config.lutDomainMax[0], config.lutDomainMax[1], config.lutDomainMax[2]));
     program.setUniformValue("previewApplyHueVs", config.applyHueVs ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyInLoopContrast", config.applyInLoopContrast ? 1.0f : 0.0f);
+    program.setUniformValue("previewApplyShadowsHighlights",
+                            shadowsHighlightsActiveReady ? 1.0f : 0.0f);
+    program.setUniformValue("previewShadowsHighlightsCurveIndexMask",
+                            config.shadowsHighlightsCurveIndexMask ? 1.0f : 0.0f);
     program.setUniformValue("previewApplyAgx", config.applyAgx ? 1.0f : 0.0f);
     program.setUniformValue("previewAgxFwd0", QVector3D(config.agxForward[0], config.agxForward[1], config.agxForward[2]));
     program.setUniformValue("previewAgxFwd1", QVector3D(config.agxForward[3], config.agxForward[4], config.agxForward[5]));
@@ -2742,6 +2965,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradGammaTexture->bind(22);
     gradContrastTexture->bind(23);
     gradientMaskTexture->bind(24);
+    shadowsHighlightsBlurTexture->bind(25);
+    shadowsHighlightsCurveTexture->bind(26);
 
     const int posLoc = program.attributeLocation("position");
     const int texLoc = program.attributeLocation("texCoord");
@@ -2790,6 +3015,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradGammaTexture->release();
     gradContrastTexture->release();
     gradientMaskTexture->release();
+    shadowsHighlightsBlurTexture->release();
+    shadowsHighlightsCurveTexture->release();
     program.release();
     fbo.release();
 
@@ -2818,6 +3045,8 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     delete gradGammaTexture;
     delete gradContrastTexture;
     delete gradientMaskTexture;
+    delete shadowsHighlightsBlurTexture;
+    delete shadowsHighlightsCurveTexture;
     context.doneCurrent();
 
     /* Spatial post-pass on the developed image, in its own GL context (the per-

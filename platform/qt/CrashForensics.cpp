@@ -736,14 +736,20 @@ void applyCudaPlaybackProfilingEnvironment(bool enabled)
         const char *managedName;
         const char *value;
     } flags[] = {
-        { "MLVAPP_EXPERIMENTAL_GL_VIEWPORT",
-          "MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED", "1" },
+        { "MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT",
+          "MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT_GUI_MANAGED", "1" },
         { "MLVAPP_EXPERIMENTAL_GPU_PROCESSING",
           "MLVAPP_EXPERIMENTAL_GPU_PROCESSING_GUI_MANAGED", "1" },
         { "MLVAPP_GPU_PLAYBACK_RECON",
           "MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED", "1" },
+        { "MLVAPP_GPU_PLAYBACK_RECON_BACKEND",
+          "MLVAPP_GPU_PLAYBACK_RECON_BACKEND_GUI_MANAGED", "cuda" },
         { "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT",
           "MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT_GUI_MANAGED", "1" },
+        { "MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER",
+          "MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER_GUI_MANAGED", "1" },
+        { "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT",
+          "MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT_GUI_MANAGED", "1" },
         { "MLVAPP_PLAYBACK_PHASE3_UNATTENDED",
           "MLVAPP_PLAYBACK_PHASE3_UNATTENDED_GUI_MANAGED", "1" },
         { "MLVAPP_PLAYBACK_QUALITY_MODE",
@@ -751,14 +757,24 @@ void applyCudaPlaybackProfilingEnvironment(bool enabled)
         { "MLVAPP_PLAYBACK_SCALE_FACTOR",
           "MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED", "1" }
     };
+    const ManagedFlag legacyFlags[] = {
+        { "MLVAPP_EXPERIMENTAL_GL_VIEWPORT",
+          "MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED", "" }
+    };
 
     if (!enabled) {
         for (const ManagedFlag &flag : flags) {
             unsetManagedEnv(flag.name, flag.managedName);
         }
+        for (const ManagedFlag &flag : legacyFlags) {
+            unsetManagedEnv(flag.name, flag.managedName);
+        }
         return;
     }
 
+    for (const ManagedFlag &flag : legacyFlags) {
+        unsetManagedEnv(flag.name, flag.managedName);
+    }
     for (const ManagedFlag &flag : flags) {
         setManagedEnv(flag.name, QByteArray(flag.value), flag.managedName);
     }

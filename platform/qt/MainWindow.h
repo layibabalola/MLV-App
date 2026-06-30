@@ -1442,6 +1442,7 @@ private:
     bool shouldUseGpuPreviewProcessingPath( void ) const;
     bool shouldUseGpuBilinearDebayerPath( void ) const;
     bool shouldUseGpuAmazeDebayerPath( void ) const;
+    bool gpuPreviewSurfaceActive( void ) const;
     void setToolButtonFocusPixels( int index );
     void setToolButtonFocusPixelsIntMethod( int index );
     void setToolButtonBadPixels( int index );

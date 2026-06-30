@@ -130,6 +130,44 @@ static std::string render_subset_hash(MlvPipelineFixture & fixture,
     return sha256_bytes(subset_output.data(), subset_output.size() * sizeof(uint16_t));
 }
 
+static GpuPreviewProcessingConfig build_shadows_highlights_config_with_frame_state(
+    MlvPipelineFixture & fixture)
+{
+    configure_gpu_preview_supported_subset(fixture);
+
+    processingObject_t * processing = fixture.processing();
+    ASSERT_TRUE(processing != nullptr);
+    processingAllowCreativeAdjustments(processing);
+    processingSetShadows(processing, 0.32);
+    processingSetHighlights(processing, -0.26);
+
+    QString reason;
+    ASSERT_TRUE(gpuPreviewProcessingIsSupported(processing, &reason));
+    GpuPreviewProcessingConfig config =
+        gpuPreviewProcessingBuildConfig(processing, &reason);
+    ASSERT_TRUE(config.enabled);
+    ASSERT_TRUE(config.applyShadowsHighlights);
+    ASSERT_TRUE(gpuPreviewProcessingNeedsShadowsHighlightsFrameState(config));
+    ASSERT_TRUE(!gpuPreviewProcessingHasShadowsHighlightsFrameState(
+        config, fixture.width(), fixture.height()));
+
+    const std::vector<uint16_t> refreshed =
+        fixture.renderFrame16(0, /*threads=*/1);
+    ASSERT_TRUE(!refreshed.empty());
+
+    ASSERT_TRUE(gpuPreviewProcessingAttachFrameState(
+        &config, processing, fixture.width(), fixture.height(), &reason));
+    ASSERT_TRUE(gpuPreviewProcessingHasShadowsHighlightsFrameState(
+        config, fixture.width(), fixture.height()));
+    ASSERT_TRUE(config.shadowsHighlightsFrameStateReady);
+    ASSERT_EQ(static_cast<int>(static_cast<size_t>(fixture.width())
+                              * fixture.height() * 3u * sizeof(uint16_t)),
+              config.shadowsHighlightsBlur.size());
+    ASSERT_EQ(static_cast<int>(65536u * sizeof(float)),
+              config.shadowsHighlightsCurve.size());
+    return config;
+}
+
 /* A skip reason is "expected" when it reflects an absent / unusable GL backend
  * (headless Session-0 CI, no context, software rasterizer) rather than a real
  * shader/parity bug. Mirrors assert_known_gpu_*_skip_reason in the debayer shell
@@ -355,10 +393,6 @@ TEST(GpuPreviewProcessing, UnsupportedProcessingFeaturesBlockGpuPreviewSubset)
         QStringLiteral("clarity enabled"),
         [](processingObject_t * processing) { processing->clarity = 0.25; });
     assert_gpu_preview_rejects_processing_feature(
-        "shadows_highlights",
-        QStringLiteral("shadows/highlights enabled"),
-        [](processingObject_t * processing) { processing->shadows_highlights.shadows = 0.25; });
-    assert_gpu_preview_rejects_processing_feature(
         "vignette_no_mask",
         QStringLiteral("vignette mask unavailable"),
         [](processingObject_t * processing) {
@@ -403,6 +437,26 @@ TEST(GpuPreviewProcessing, NeutralCreativeAdjustmentsAreSupportedAndApplyCurves)
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.frame0", creative_hash);
     test_artifacts::record("tiny_dual_iso.gpu_preview_subset.creative.signature.frame0",
                            std::to_string(creative_config.signature));
+}
+
+TEST(GpuPreviewProcessing, ShadowsHighlightsIsSupportedAndChangesCpuReference)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig base_config =
+        assert_gpu_preview_subset_supported(fixture);
+    const std::string base_hash = render_subset_hash(fixture, base_config, 0);
+
+    const GpuPreviewProcessingConfig sh_config =
+        build_shadows_highlights_config_with_frame_state(fixture);
+    ASSERT_TRUE(sh_config.applyCreativeCurves);
+    ASSERT_TRUE(sh_config.applyShadowsHighlights);
+    ASSERT_NE(base_config.signature, sh_config.signature);
+
+    const std::string sh_hash = render_subset_hash(fixture, sh_config, 0);
+    ASSERT_TRUE(base_hash != sh_hash);
+
+    test_artifacts::record("tiny_dual_iso.gpu_preview_subset.shadows_highlights.frame0", sh_hash);
 }
 
 TEST(GpuPreviewProcessing, NonNeutralToningIsSupportedAndChangesOutput)
@@ -986,6 +1040,15 @@ TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForSupportedSubset)
     assert_gpu_preview_fixture_ready(fixture);
     const GpuPreviewProcessingConfig config = assert_gpu_preview_subset_supported(fixture);
     assert_gpu_offscreen_matches_cpu_reference(fixture, config, "supported_subset");
+}
+
+TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForShadowsHighlights)
+{
+    MlvPipelineFixture fixture;
+    assert_gpu_preview_fixture_ready(fixture);
+    const GpuPreviewProcessingConfig config =
+        build_shadows_highlights_config_with_frame_state(fixture);
+    assert_gpu_offscreen_matches_cpu_reference(fixture, config, "shadows_highlights");
 }
 
 TEST(GpuPreviewProcessing, GpuOffscreenMatchesCpuReferenceForFullCreativeGrade)

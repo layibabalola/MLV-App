@@ -2293,6 +2293,11 @@ static bool playback_recon_requested_by_environment()
         && value.compare(QStringLiteral("false"), Qt::CaseInsensitive) != 0;
 }
 
+static bool playback_recon_eligibility_diag_requested_by_environment()
+{
+    return environmentFlagEnabled( "MLVAPP_GPU_PLAYBACK_RECON_ELIGIBILITY_DIAG" );
+}
+
 /* Read MLVAPP_PLAYBACK_SCALE_FACTOR for each decision.
  * Accepts "1", "2", "4", "8", or "auto". Returns 0 when unset so the
  * caller can fall back to the GUI dial; returns -1 for "auto" so smoke/dev
@@ -4682,9 +4687,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             r16AmazeAvailability.available;
         bool gpuPlaybackReconAmazeTextureAttempted = false;
         bool gpuPlaybackReconAmazeTextureActive = false;
+        bool gpuPlaybackReconAmazeTexturePresentedByWindow = false;
         bool gpuPlaybackReconNoReadbackPresented = false;
         const bool noReadbackOutputValidationEnabled =
             playbackGpuNoReadbackOutputValidationEnabled();
+        const bool gpuWindowTexturePresentActive = GpuDisplayWindow::isActive();
         QString texturePresentHandoffMode;
         QString texturePresentSource =
             QStringLiteral("cuda_gl_r16_texture_failed");
@@ -4692,37 +4699,65 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
          && gpuPlaybackReconAmazeTextureExtensionAvailable )
         {
             gpuPlaybackReconAmazeTextureAttempted = true;
-            framePresentedByViewport =
-                GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
-                    ui->graphicsView,
-                    m_pGraphicsItem,
-                    task.gpuPlaybackReconTextureInputBayerFrame,
-                    task.gpuPlaybackReconTextureInputBayerFrameSize,
-                    &gpuReconState,
-                    readyFrame.gpuPlaybackReconTextureBlackLevel,
-                    readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
-                    task.gpuPresentationOptions,
-                    &texturePresentReason,
-                    &texturePresentTiming,
-                    &texturePresentHandoffMode,
-                    playbackGpuNoReadbackOutputValidationEnabled(),
-                    task.gpuPlaybackReconTextureRetainedDeviceBayer16,
-                    task.gpuPlaybackReconTextureRetainedDeviceWidth,
-                    task.gpuPlaybackReconTextureRetainedDeviceHeight );
+            if( gpuWindowTexturePresentActive )
+            {
+                framePresentedByViewport =
+                    GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
+                        task.gpuPlaybackReconTextureInputBayerFrame,
+                        task.gpuPlaybackReconTextureInputBayerFrameSize,
+                        &gpuReconState,
+                        readyFrame.gpuPlaybackReconTextureBlackLevel,
+                        readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
+                        &texturePresentReason,
+                        &texturePresentTiming,
+                        &texturePresentHandoffMode,
+                        noReadbackOutputValidationEnabled,
+                        task.gpuPlaybackReconTextureRetainedDeviceBayer16,
+                        task.gpuPlaybackReconTextureRetainedDeviceWidth,
+                        task.gpuPlaybackReconTextureRetainedDeviceHeight,
+                        task.sceneWidth,
+                        task.sceneHeight );
+                gpuPlaybackReconAmazeTexturePresentedByWindow =
+                    framePresentedByViewport;
+            }
+            else
+            {
+                framePresentedByViewport =
+                    GpuDisplayViewport::presentGpuPlaybackReconAmazePostWbTexture(
+                        ui->graphicsView,
+                        m_pGraphicsItem,
+                        task.gpuPlaybackReconTextureInputBayerFrame,
+                        task.gpuPlaybackReconTextureInputBayerFrameSize,
+                        &gpuReconState,
+                        readyFrame.gpuPlaybackReconTextureBlackLevel,
+                        readyFrame.gpuPlaybackReconTextureWbMultipliers.data(),
+                        task.gpuPresentationOptions,
+                        &texturePresentReason,
+                        &texturePresentTiming,
+                        &texturePresentHandoffMode,
+                        noReadbackOutputValidationEnabled,
+                        task.gpuPlaybackReconTextureRetainedDeviceBayer16,
+                        task.gpuPlaybackReconTextureRetainedDeviceWidth,
+                        task.gpuPlaybackReconTextureRetainedDeviceHeight );
+            }
             gpuPlaybackReconAmazeTextureActive = framePresentedByViewport;
             if( framePresentedByViewport )
             {
                 gpuPlaybackReconNoReadbackPresented = true;
+                const QString sourcePrefix = gpuPlaybackReconAmazeTexturePresentedByWindow
+                    ? QStringLiteral("gpu_window_")
+                    : QString();
                 texturePresentSource =
                     texturePresentHandoffMode == QStringLiteral("retained_device_bayer16")
-                            ? QStringLiteral("cuda_retained_device_bayer16_rgba16_amaze_texture")
+                            ? sourcePrefix + QStringLiteral("cuda_retained_device_bayer16_rgba16_amaze_texture")
                         : texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
-                            ? QStringLiteral("cuda_device_bayer16_rgba16_amaze_texture")
-                            : QStringLiteral("cuda_gl_rgba16_amaze_texture");
+                            ? sourcePrefix + QStringLiteral("cuda_device_bayer16_rgba16_amaze_texture")
+                            : sourcePrefix + QStringLiteral("cuda_gl_rgba16_amaze_texture");
             }
         }
         if( hasGpuReconState
          && !framePresentedByViewport
+         && !gpuWindowTexturePresentActive
          && !cpuAmazeSkippedForGpuTextureNoReadback )
         {
             framePresentedByViewport =
@@ -4746,6 +4781,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         }
         if( hasGpuReconState
          && !framePresentedByViewport
+         && !gpuWindowTexturePresentActive
          && cpuAmazeSkippedForGpuTextureNoReadback )
         {
             const uint16_t *fallbackBayer16 = nullptr;
@@ -4960,12 +4996,18 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             QString glTextureReason;
             const bool glTextureReadbackOk =
                 gpuPlaybackReconAmazeTextureActive
-                    ? GpuDisplayViewport::readGpuReconSourceBayer16Texture(
-                        ui->graphicsView,
-                        &glTextureBytes,
-                        &glTextureWidth,
-                        &glTextureHeight,
-                        &glTextureReason )
+                    ? ( gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? GpuDisplayWindow::readGpuReconSourceBayer16TextureIfActive(
+                            &glTextureBytes,
+                            &glTextureWidth,
+                            &glTextureHeight,
+                            &glTextureReason )
+                        : GpuDisplayViewport::readGpuReconSourceBayer16Texture(
+                            ui->graphicsView,
+                            &glTextureBytes,
+                            &glTextureWidth,
+                            &glTextureHeight,
+                            &glTextureReason ) )
                     : GpuDisplayViewport::readPresentedBayer16Texture(
                         ui->graphicsView,
                         &glTextureBytes,
@@ -4975,16 +5017,24 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             const QString glProbeSurface =
                 gpuPlaybackReconAmazeTextureActive
                     && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
-                    ? QStringLiteral("gl_texture_r16_direct_device_bayer16_probe")
+                    ? ( gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? QStringLiteral("gpu_window_gl_texture_r16_direct_device_bayer16_probe")
+                        : QStringLiteral("gl_texture_r16_direct_device_bayer16_probe") )
                 : gpuPlaybackReconAmazeTextureActive
-                    ? QStringLiteral("gl_texture_r16_recon_source")
+                    ? ( gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? QStringLiteral("gpu_window_gl_texture_r16_recon_source")
+                        : QStringLiteral("gl_texture_r16_recon_source") )
                     : QStringLiteral("gl_texture_r16");
             const QString glProbeSource =
                 gpuPlaybackReconAmazeTextureActive
                     && texturePresentHandoffMode == QStringLiteral("direct_device_bayer16")
-                    ? QStringLiteral("cuda_device_bayer16_for_amaze_texture_probe")
+                    ? ( gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? QStringLiteral("gpu_window_cuda_device_bayer16_for_amaze_texture_probe")
+                        : QStringLiteral("cuda_device_bayer16_for_amaze_texture_probe") )
                 : gpuPlaybackReconAmazeTextureActive
-                    ? QStringLiteral("cuda_gl_r16_recon_source_for_amaze_texture")
+                    ? ( gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? QStringLiteral("gpu_window_cuda_gl_r16_recon_source_for_amaze_texture")
+                        : QStringLiteral("cuda_gl_r16_recon_source_for_amaze_texture") )
                     : QStringLiteral("cuda_gl_r16_texture");
             const size_t glTextureWords =
                 static_cast<size_t>( glTextureBytes.size() ) / sizeof( uint16_t );
@@ -5068,7 +5118,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             }
             const QString renderer =
                 sanitizeLogValue(
-                    GpuDisplayViewport::rendererDescriptionFor( ui->graphicsView ) );
+                    gpuPlaybackReconAmazeTexturePresentedByWindow
+                        ? GpuDisplayWindow::rendererDescription()
+                        : GpuDisplayViewport::rendererDescriptionFor( ui->graphicsView ) );
             llrpGpuPlaybackReconBackendInfo_t backendInfo;
             memset( &backendInfo, 0, sizeof( backendInfo ) );
             llrpGpuPlaybackReconGetBackendInfo( &backendInfo );
@@ -5713,7 +5765,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     }
 
     MainWindowGpuPreviewPolicyState renderPolicy;
-    renderPolicy.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    renderPolicy.gpuViewportInstalled = gpuPreviewSurfaceActive();
     renderPolicy.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     renderPolicy.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -5752,7 +5804,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
 
     m_renderThreadUsing16BitPreview = shouldUseGpu16PreviewPath();
     const bool gpuPlaybackReconTextureAutoEnablesGpuProcessing =
-        renderPolicy.gpuViewportInstalled
+        mainWindowAllowsGpu16PreviewRender( renderPolicy )
         && renderPolicy.gpuPlaybackReconEnvironmentRequested
         && renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested
         && renderPolicy.gpuPreviewProcessingCompatible
@@ -5846,10 +5898,12 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         mainWindowUsesGpuAmazeTexturePresentation( renderPolicy );
     requestContext.gpuPlaybackReconTexturePresentRequested =
         mainWindowUsesGpuPlaybackReconTexturePresentation( renderPolicy );
+    GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability;
+    bool r16AmazeTextureProbeRan = false;
     if( requestContext.gpuPlaybackReconTexturePresentRequested )
     {
-        const GpuAmazeDebayerBackendAvailability r16AmazeTextureAvailability =
-            gpuAmazeDebayerProbeR16TextureBackend();
+        r16AmazeTextureProbeRan = true;
+        r16AmazeTextureAvailability = gpuAmazeDebayerProbeR16TextureBackend();
         requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted =
             r16AmazeTextureAvailability.available;
         requestContext.gpuPlaybackReconAmazeTexturePresentRenderer =
@@ -5861,11 +5915,70 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                     ? QStringLiteral("GPU playback recon AMaZE texture-present backend was not admitted on the GUI thread")
                     : r16AmazeTextureAvailability.reason );
     }
+    if( playback_recon_eligibility_diag_requested_by_environment() )
+    {
+        llrpGpuPlaybackReconBackendInfo_t backendInfo;
+        memset( &backendInfo, 0, sizeof( backendInfo ) );
+        llrpGpuPlaybackReconGetBackendInfo( &backendInfo );
+        qInfo().noquote()
+            << QStringLiteral(
+                   "gpu_playback_recon.eligibility "
+                   "viewport_widget=%1 gl_window=%2 surface=%3 recon_env=%4 "
+                   "texture_env=%5 preview_env=%6 preview_compatible=%7 "
+                   "preview_backend_not_cpu=%8 texture_auto_enabled_gpu_processing=%9 "
+                   "render_gpu_processing=%10 phase3_mode=%11 phase3_ok=%12 "
+                   "scale=%13 scale_ok=%14 caching_off=%15 texture_compatible=%16 "
+                   "texture_requested=%17 r16_probe_ran=%18 r16_available=%19 "
+                   "r16_reason=\"%20\" r16_renderer=\"%21\" "
+                   "cuda_backend_available=%22 cuda_backend_attempted=%23 "
+                   "cuda_backend_unavailable=%24 cuda_backend_requested=\"%25\" "
+                   "cuda_backend_resolved=\"%26\" cuda_backend_description=\"%27\" "
+                   "window_renderer=\"%28\" viewport_renderer=\"%29\" "
+                   "gpu16_allowed=%30 histogram=%31 waveform=%32 parade=%33 "
+                   "vectorscope=%34 zebras=%35" )
+                   .arg( bool01( GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) )
+                   .arg( bool01( GpuDisplayWindow::isActive() ) )
+                   .arg( bool01( renderPolicy.gpuViewportInstalled ) )
+                   .arg( bool01( renderPolicy.gpuPlaybackReconEnvironmentRequested ) )
+                   .arg( bool01( renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested ) )
+                   .arg( bool01( renderPolicy.gpuPreviewProcessingEnvironmentRequested ) )
+                   .arg( bool01( renderPolicy.gpuPreviewProcessingCompatible ) )
+                   .arg( bool01( renderPolicy.gpuPreviewProcessingBackendRequest
+                                  != GpuPreviewProcessingBackendRequest::Cpu ) )
+                   .arg( bool01( gpuPlaybackReconTextureAutoEnablesGpuProcessing ) )
+                   .arg( bool01( m_renderThreadUsingGpuPreviewProcessing ) )
+                   .arg( static_cast<int>( requestedPhase3Mode ) )
+                   .arg( bool01( requestedPhase3Mode == Phase3Mode::DecodeReconProcess ) )
+                   .arg( requestedPlaybackScaleFactor )
+                   .arg( bool01( requestedPlaybackScaleFactor == 1 ) )
+                   .arg( bool01( !ui->actionCaching->isChecked() ) )
+                   .arg( bool01( renderPolicy.gpuPlaybackReconTexturePresentationCompatible ) )
+                   .arg( bool01( requestContext.gpuPlaybackReconTexturePresentRequested ) )
+                   .arg( bool01( r16AmazeTextureProbeRan ) )
+                   .arg( bool01( r16AmazeTextureAvailability.available ) )
+                   .arg( sanitizeLogValue( r16AmazeTextureAvailability.reason ) )
+                   .arg( sanitizeLogValue( r16AmazeTextureAvailability.rendererDescription ) )
+                   .arg( bool01( backendInfo.available != 0 ) )
+                   .arg( bool01( backendInfo.attempted != 0 ) )
+                   .arg( bool01( backendInfo.unavailable != 0 ) )
+                   .arg( sanitizeLogValue( QString::fromLocal8Bit( backendInfo.requested_backend ) ) )
+                   .arg( sanitizeLogValue( QString::fromLocal8Bit( backendInfo.resolved_path ) ) )
+                   .arg( sanitizeLogValue( QString::fromLocal8Bit( backendInfo.description ) ) )
+                   .arg( sanitizeLogValue( GpuDisplayWindow::rendererDescription() ) )
+                   .arg( sanitizeLogValue(
+                       GpuDisplayViewport::rendererDescriptionFor( ui->graphicsView ) ) )
+                   .arg( bool01( mainWindowAllowsGpu16PreviewRender( renderPolicy ) ) )
+                   .arg( bool01( renderPolicy.histogramEnabled ) )
+                   .arg( bool01( renderPolicy.waveformEnabled ) )
+                   .arg( bool01( renderPolicy.paradeEnabled ) )
+                   .arg( bool01( renderPolicy.vectorScopeEnabled ) )
+                   .arg( bool01( renderPolicy.zebrasEnabled ) );
+    }
     if( renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested
      && !requestContext.gpuPlaybackReconTexturePresentRequested )
     {
         requestContext.gpuPlaybackReconTexturePresentFallbackReason =
-            QStringLiteral("GPU playback recon texture-present requires the experimental GL viewport, GPU preview processing support, MLVAPP_GPU_PLAYBACK_RECON=1, Decode/Reconstruct/Process playback mode, x1 scale, and caching off");
+            QStringLiteral("GPU playback recon texture-present requires an experimental GL presentation surface, GPU preview processing support, scopes hidden, MLVAPP_GPU_PLAYBACK_RECON=1, Decode/Reconstruct/Process playback mode, x1 scale, and caching off");
     }
     requestContext.renderThreadUsingCpuPreviewProcessing = m_renderThreadUsingCpuPreviewProcessing;
     requestContext.renderThreadUsingPlaybackPreviewProcessing =
@@ -16174,7 +16287,7 @@ void MainWindow::requestFrameRefresh( bool resetCurrentFrameCache, const char *r
 bool MainWindow::shouldUseGpu16PreviewPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
-    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
     policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
     policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
     policyState.paradeEnabled = ui->actionShowParade->isChecked();
@@ -16185,7 +16298,7 @@ bool MainWindow::shouldUseGpu16PreviewPath( void ) const
 bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
-    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -16200,7 +16313,7 @@ bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
 bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
-    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -16220,7 +16333,7 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
 bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
-    policyState.gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
     policyState.gpuPreviewProcessingBackendRequest = m_gpuPreviewProcessingBackendRequest;
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
@@ -16237,6 +16350,12 @@ bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
     policyState.paradeEnabled = ui->actionShowParade->isChecked();
     policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
     return mainWindowAllowsGpuAmazeDebayer( policyState );
+}
+
+bool MainWindow::gpuPreviewSurfaceActive( void ) const
+{
+    return GpuDisplayViewport::isInstalledOn( ui->graphicsView )
+        || GpuDisplayWindow::isActive();
 }
 
 //Write the frame number into the label
@@ -22049,7 +22168,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "prepare_only_allowed=%36 prepare_only_used=%37 "
                     "gpu_tex_nr_owned_input=%38 "
                     "gpu_tex_nr_owned_input_bytes=%39 "
-                    "gpu_tex_nr_release_before_present=%40" )
+                    "gpu_tex_nr_release_before_present=%40 "
+                    "gpu_preview_shadows_highlights_requested=%41 "
+                    "gpu_preview_shadows_highlights_frame_state_ready=%42 "
+                    "gpu_tex_nr_skip_preview_frame_state_needed=%43 "
+                    "gpu_preview_shadows_highlights_frame_state_reason=\"%44\"" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -22137,7 +22260,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     .arg( telemetryIntValue(
                         timing, "playback_prep_owned_gpu_playback_recon_texture_input_bytes" ) )
                     .arg( bool01( telemetryBoolValue(
-                        timing, "playback_prep_gpu_tex_nr_release_before_present" ) ) );
+                        timing, "playback_prep_gpu_tex_nr_release_before_present" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_preview_processing_shadows_highlights_requested" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_preview_processing_shadows_highlights_frame_state_ready" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_preview_frame_state_needed" ) ) )
+                    .arg( timing.value(
+                        QStringLiteral("gpu_preview_processing_shadows_highlights_frame_state_reason") )
+                        .toString( QStringLiteral("none") ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -25113,7 +25245,7 @@ void MainWindow::drawFrameReady()
         m_lastDrawFrameReadyQueueMs =
             (display_start - readyFrame.frameReadyEmitStageTime) * 1000.0;
     }
-    const bool gpuViewportInstalled = GpuDisplayViewport::isInstalledOn( ui->graphicsView );
+    const bool gpuViewportInstalled = gpuPreviewSurfaceActive();
     const bool zoomFitEnabled = ui->actionZoomFit->isChecked();
     const bool zebrasEnabled = ui->actionShowZebras->isChecked();
     const bool betterResizerEnabled = ui->actionBetterResizer->isChecked();

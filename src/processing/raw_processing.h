@@ -35,6 +35,12 @@ void processingGamutRgbToY(int colour_gamut, double out_rgb_to_Y[3]);
  * agx_compressed_matrix and invertMatrix live) so the C++ TU never references
  * the engine global directly. */
 void processingAgxMatrices(double out_forward[9], double out_inverse[9]);
+int processingHasShadowsHighlightsAdjustments(const processingObject_t * processing);
+int processingGetShadowsHighlightsBlurData(const processingObject_t * processing,
+                                           const uint16_t ** data,
+                                           int * width,
+                                           int * height,
+                                           int * curveIndexMask);
 #ifdef __cplusplus
 }
 #endif

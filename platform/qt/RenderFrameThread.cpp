@@ -2803,13 +2803,17 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuPlaybackReconTextureState.valid
         && slot.gpuPlaybackReconTextureState.width == m_imageWidth
         && slot.gpuPlaybackReconTextureState.height == m_imageHeight;
+    const bool gpuTexNrSkipNeedsPreviewFrameState =
+        gpuPreviewProcessingNeedsShadowsHighlightsFrameState(
+            m_activePresentationContext.gpuPreviewProcessingConfig);
     if( gpuTexNrSkipOutputModeEligible
      && gpuTexNrSkipRawAvailable
      && gpuTexNrSkipTextureRequested
      && gpuTexNrSkipScaleEligible
      && gpuTexNrSkipCandidate
      && gpuTexNrSkipInputAvailable
-     && gpuTexNrSkipStateMatches )
+     && gpuTexNrSkipStateMatches
+     && !gpuTexNrSkipNeedsPreviewFrameState )
     {
         skipCpuDebayerForGpuTextureNoReadback =
             r16AmazeTextureAvailability.available;
@@ -2841,6 +2845,9 @@ void RenderFrameThread::drawFrame( int slotIndex,
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_state_matches"),
         gpuTexNrSkipStateMatches );
+    slot.stageTimingTelemetry.insert(
+        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_preview_frame_state_needed"),
+        gpuTexNrSkipNeedsPreviewFrameState );
     slot.stageTimingTelemetry.insert(
         QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_gui_admitted"),
         m_activePresentationContext.gpuPlaybackReconAmazeTexturePresentAdmitted );
@@ -3170,6 +3177,38 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.dualIsoPreviewRegressionMs = llrpGetLastDualIsoPreviewRegressionMilliseconds();
         slot.dualIsoPreviewRowscaleMs = llrpGetLastDualIsoPreviewRowscaleMilliseconds();
         mlv_stage_timing_note("render_thread_draw", frameNumber, render_start);
+    }
+
+    {
+        GpuPreviewProcessingConfig & previewConfig =
+            slot.presentationContext.gpuPreviewProcessingConfig;
+        const bool shadowsHighlightsFrameStateRequested =
+            gpuPreviewProcessingNeedsShadowsHighlightsFrameState(previewConfig);
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("gpu_preview_processing_shadows_highlights_requested"),
+            shadowsHighlightsFrameStateRequested );
+        if ( shadowsHighlightsFrameStateRequested )
+        {
+            QString shadowsHighlightsFrameStateReason;
+            const bool shadowsHighlightsFrameStateReady =
+                gpuPreviewProcessingAttachFrameState(
+                    &previewConfig,
+                    m_pMlvObject ? m_pMlvObject->processing : nullptr,
+                    renderedImageWidth,
+                    renderedImageHeight,
+                    &shadowsHighlightsFrameStateReason);
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_preview_processing_shadows_highlights_frame_state_ready"),
+                shadowsHighlightsFrameStateReady );
+            if ( !shadowsHighlightsFrameStateReason.isEmpty() )
+            {
+                slot.stageTimingTelemetry.insert(
+                    QStringLiteral("gpu_preview_processing_shadows_highlights_frame_state_reason"),
+                    shadowsHighlightsFrameStateReason );
+            }
+            slot.presentationContext.gpuPresentationOptions.previewProcessing =
+                previewConfig;
+        }
     }
 
     slot.stageTimingTelemetry.insert(
