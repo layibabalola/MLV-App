@@ -456,6 +456,19 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     if( cutIn == 0 )  cutIn  = 1;
     if( cutOut == 0 || cutOut > totalFrames ) cutOut = totalFrames;
 
+    /* Hardening (audit #1): a receipt cut-in past the clip end (or past cut-out) makes the export
+     * loop run zero times yet report success -> the orchestrator would see exit 0 with zero DNGs
+     * written. Fail explicitly so run() emits [BATCH] FAIL and returns a non-zero exit code. */
+    if( cutIn > totalFrames || cutIn > cutOut )
+    {
+        result.success = false;
+        result.errorMessage = QStringLiteral("Receipt cut-in %1 is past clip end (frames=%2, cut-out=%3)")
+                    .arg( cutIn ).arg( totalFrames ).arg( cutOut );
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return result;
+    }
+
     const uint32_t unclampedCutOut = cutOut;
     cutOut = BatchRunner::cutOutClampedForMaxFrames(
         cutIn, cutOut, BatchContext::maxFrames() );
@@ -636,7 +649,12 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
         cutOut,               /* from receipt or totalFrames */
         stretchX,             /* from receipt or STRETCH_H_100 */
         stretchY,             /* from receipt or STRETCH_V_100 */
-        true,                 /* export audio if present */
+        ( effectiveCutIn == cutIn ), /* audit #2: export audio only on a full (non-resume) pass.
+                                      * On --resume, effectiveCutIn is advanced past already-exported
+                                      * frames; writeMlvAudioToWaveCut would fopen("wb")-truncate the
+                                      * already-complete <clip>.wav and rewrite it with tail-only audio
+                                      * (audio is written before frames, so the run-1 WAV is complete
+                                      * whenever resume triggers). Skip it to preserve the full WAV. */
         receipt->rawFixesEnabled(), /* from receipt */
         nullptr,
         lookAssistApplied,
