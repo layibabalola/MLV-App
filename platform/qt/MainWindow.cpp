@@ -11016,6 +11016,18 @@ ProcessResult MainWindow::exportCdngSequence(
         mlvObject->llrawproc->fix_raw = 1;
     }
 
+    /* Chroma smoothing is a PREVIEW convenience, not raw: it denoises the Bayer in place and bakes
+     * into the DNG, which Lightroom can't undo. Never bake it on export (Layi 2026-06-30) -- keep the
+     * exported DNGs raw and let Lightroom's non-destructive Color Noise Reduction do the cleanup.
+     * Force it off for the export render regardless of the playback/receipt setting (this also skips
+     * the dual-ISO recon's chroma cleanup, so dual-ISO DNGs come out as raw recon -> clean in LR).
+     * The GUI caller restores the live playback chroma mode afterwards so previews keep smoothing.
+     * Escape hatch: set MLVAPP_EXPORT_BAKE_CHROMA_SMOOTH=1 to retain the playback chroma in exports. */
+    if( !qEnvironmentVariableIsSet( "MLVAPP_EXPORT_BAKE_CHROMA_SMOOTH" ) )
+    {
+        llrpSetChromaSmoothMode( mlvObject, 0 );
+    }
+
     /* --- Build subfolder path and naming prefix --- */
     QString pathName = outDir;
     if( codecOption == CODEC_CNDG_DEFAULT )
@@ -11305,6 +11317,9 @@ void MainWindow::startExportCdng(QString fileName)
         return !m_exportAbortPressed;
     };
 
+    /* exportCdngSequence forces chroma smoothing off for the export render (raw DNGs). Save the live
+     * playback chroma mode and restore it afterwards so the GUI preview keeps its smoothing. */
+    const int guiExportChromaSmoothPrev = llrpGetChromaSmoothMode( m_pMlvObject );
     exportCdngSequence(
         m_pMlvObject,
         pathName,
@@ -11321,6 +11336,7 @@ void MainWindow::startExportCdng(QString fileName)
         m_exportQueue.first()->lookAssistEnabled()
             && m_exportQueue.first()->lookAssistBaselineValid(),
         m_exportQueue.first()->exposure() );
+    llrpSetChromaSmoothMode( m_pMlvObject, guiExportChromaSmoothPrev );
 
     //Enable GUI drawing
     m_dontDraw = false;
