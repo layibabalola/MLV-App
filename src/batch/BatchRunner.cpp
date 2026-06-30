@@ -475,7 +475,22 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     double stretchY = receipt->stretchFactorY();
     /* -1 = uninitialized (never loaded); use no-stretch defaults */
     if( stretchX <= 0 ) stretchX = STRETCH_H_100;
-    if( stretchY <= 0 ) stretchY = STRETCH_V_100;
+    if( stretchY <= 0 )
+    {
+        /* Mirror the GUI first-load auto de-squeeze (MainWindow::setSliders): when the
+         * receipt carries no explicit vertical stretch, derive it from the clip's RAWC
+         * binning/skipping aspect (getMlvAspectRatio = sampling_y/sampling_x). Without
+         * this, headless exports emit picAR={1,1,1,1} -> manual_ar=1 in the DNG writer
+         * -> the writer's own RAWC de-squeeze (dng.c) is skipped -> squeezed CDNGs for
+         * binned modes (e.g. 5D3 1080p: binning_x=3/binning_y=1 -> needs a 3:1 stretch).
+         * Bands kept identical to setSliders so batch DNGs match interactive GUI exports. */
+        float aspectV = getMlvAspectRatio( mlvObject );
+        if( aspectV == 0.0f ) aspectV = 1.0f; /* no RAWC info -> treat as square */
+        if( aspectV > 0.9f && aspectV < 1.1f )      stretchY = STRETCH_V_100;
+        else if( aspectV > 1.6f && aspectV < 1.7f ) stretchY = STRETCH_V_167;
+        else if( aspectV > 2.9f && aspectV < 3.1f ) stretchY = STRETCH_V_300;
+        else                                        stretchY = STRETCH_V_033;
+    }
 
     /* ---- Resume logic (--resume flag) ----
      * Scan the output subfolder for existing DNG files.  If the clip is
