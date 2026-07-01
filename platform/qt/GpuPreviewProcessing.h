@@ -105,6 +105,8 @@ GpuPreviewProcessingConfig gpuPreviewProcessingBuildConfig(
     QString * reason = nullptr);
 bool gpuPreviewProcessingNeedsShadowsHighlightsFrameState(
     const GpuPreviewProcessingConfig & config);
+bool gpuPreviewProcessingDisplayShaderUsesShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config);
 bool gpuPreviewProcessingHasShadowsHighlightsFrameState(
     const GpuPreviewProcessingConfig & config,
     int width,

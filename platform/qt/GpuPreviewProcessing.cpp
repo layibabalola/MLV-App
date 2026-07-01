@@ -2443,6 +2443,16 @@ bool gpuPreviewProcessingNeedsShadowsHighlightsFrameState(
     return config.enabled && config.applyShadowsHighlights;
 }
 
+bool gpuPreviewProcessingDisplayShaderUsesShadowsHighlightsFrameState(
+    const GpuPreviewProcessingConfig & config)
+{
+    /* The live display shader currently applies only the display LUT family
+     * (levels, matrix/WB, gamma). Spatial S/H frame-state is consumed by the
+     * offscreen/subset shader, not by display presentation. */
+    Q_UNUSED(config);
+    return false;
+}
+
 bool gpuPreviewProcessingHasShadowsHighlightsFrameState(
     const GpuPreviewProcessingConfig & config,
     int width,

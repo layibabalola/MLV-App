@@ -290,6 +290,16 @@ TEST(GpuPreviewProcessing, TinyDualIsoReceiptSubsetGoldenOutputIsStable)
                            std::to_string(frame1_config.signature));
 }
 
+TEST(GpuPreviewProcessing, DisplayShaderDoesNotUseShadowsHighlightsFrameState)
+{
+    GpuPreviewProcessingConfig config;
+    config.enabled = true;
+    config.applyShadowsHighlights = true;
+
+    ASSERT_TRUE(gpuPreviewProcessingNeedsShadowsHighlightsFrameState(config));
+    ASSERT_TRUE(!gpuPreviewProcessingDisplayShaderUsesShadowsHighlightsFrameState(config));
+}
+
 TEST(GpuPreviewProcessing, ExposureStopsChangesSubsetConfigAndStableOutput)
 {
     MlvPipelineFixture fixture;
