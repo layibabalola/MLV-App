@@ -57,6 +57,7 @@ constexpr float kClipPoint8 = 0.8f;
 constexpr float kNyquistThreshold = 0.5f;
 constexpr float kTolerance = 1.0e-6f;
 constexpr int kVarianceWavefrontThreads = 256;
+constexpr int kVariancePrefixThreads = 256;
 constexpr int kNyquistPrefixThreads = 256;
 constexpr int kGreenPlaneThreads = 256;
 constexpr int kPmwtRowThreads = 256;
@@ -157,6 +158,14 @@ struct DeviceBuffers
     float * hcd = nullptr;
     float * vcdalt = nullptr;
     float * hcdalt = nullptr;
+    float * variance_h0 = nullptr;
+    float * variance_h1 = nullptr;
+    float * variance_v0 = nullptr;
+    float * variance_v1 = nullptr;
+    unsigned char * variance_h_map = nullptr;
+    unsigned char * variance_v_map = nullptr;
+    unsigned char * variance_h_choice = nullptr;
+    unsigned char * variance_v_choice = nullptr;
     float * dgintv = nullptr;
     float * dginth = nullptr;
     float * cddiffsq = nullptr;
@@ -1702,6 +1711,363 @@ __global__ void k_variance_selection_wavefront_parity_blocks(float * cfa,
     }
 }
 
+__device__ float variance_selection_finish_h_candidate(const float * cfa,
+                                                       float h,
+                                                       int rr,
+                                                       int cc)
+{
+    const int idx = rr * kTileSize + cc;
+    if ((fc_rggb(rr, cc) & 1) != 0)
+    {
+        const float ginth = -h + cfa[idx];
+        if (h > 0.0f)
+        {
+            const float bounded = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+            if (3.0f * h > (ginth + cfa[idx]))
+            {
+                h = bounded;
+            }
+            else
+            {
+                const float hwt = 1.0f - 3.0f * h / (kEps + ginth + cfa[idx]);
+                h = hwt * h + (1.0f - hwt) * bounded;
+            }
+        }
+        if (ginth > kClipPoint)
+        {
+            h = -ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) + cfa[idx];
+        }
+    }
+    else
+    {
+        const float ginth = h + cfa[idx];
+        if (h < 0.0f)
+        {
+            const float bounded = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+            if (3.0f * h < -(ginth + cfa[idx]))
+            {
+                h = bounded;
+            }
+            else
+            {
+                const float hwt = 1.0f + 3.0f * h / (kEps + ginth + cfa[idx]);
+                h = hwt * h + (1.0f - hwt) * bounded;
+            }
+        }
+        if (ginth > kClipPoint)
+        {
+            h = ulim_f(ginth, cfa[idx - 1], cfa[idx + 1]) - cfa[idx];
+        }
+    }
+    return h;
+}
+
+__device__ float variance_selection_finish_v_candidate(const float * cfa,
+                                                       float v,
+                                                       int rr,
+                                                       int cc)
+{
+    const int v1 = kTileSize;
+    const int idx = rr * kTileSize + cc;
+    if ((fc_rggb(rr, cc) & 1) != 0)
+    {
+        const float gintv = -v + cfa[idx];
+        if (v > 0.0f)
+        {
+            const float bounded = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+            if (3.0f * v > (gintv + cfa[idx]))
+            {
+                v = bounded;
+            }
+            else
+            {
+                const float vwt = 1.0f - 3.0f * v / (kEps + gintv + cfa[idx]);
+                v = vwt * v + (1.0f - vwt) * bounded;
+            }
+        }
+        if (gintv > kClipPoint)
+        {
+            v = -ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) + cfa[idx];
+        }
+    }
+    else
+    {
+        const float gintv = v + cfa[idx];
+        if (v < 0.0f)
+        {
+            const float bounded = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+            if (3.0f * v < -(gintv + cfa[idx]))
+            {
+                v = bounded;
+            }
+            else
+            {
+                const float vwt = 1.0f + 3.0f * v / (kEps + gintv + cfa[idx]);
+                v = vwt * v + (1.0f - vwt) * bounded;
+            }
+        }
+        if (gintv > kClipPoint)
+        {
+            v = ulim_f(gintv, cfa[idx - v1], cfa[idx + v1]) - cfa[idx];
+        }
+    }
+    return v;
+}
+
+__device__ unsigned char binary_map_apply(unsigned char map, unsigned int input)
+{
+    return static_cast<unsigned char>((map >> (input & 1u)) & 1u);
+}
+
+__device__ unsigned char binary_map_compose(unsigned char before,
+                                            unsigned char after)
+{
+    const unsigned char out0 =
+        binary_map_apply(after, binary_map_apply(before, 0));
+    const unsigned char out1 =
+        binary_map_apply(after, binary_map_apply(before, 1));
+    return static_cast<unsigned char>(out0 | (out1 << 1));
+}
+
+__global__ void k_variance_selection_candidate_finals(const float * cfa,
+                                                      const float * vcd,
+                                                      const float * hcd,
+                                                      const float * vcdalt,
+                                                      const float * hcdalt,
+                                                      float * h0,
+                                                      float * h1,
+                                                      float * v0,
+                                                      float * v1,
+                                                      int rr1,
+                                                      int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 4 || rr >= rr1 - 4 || cc < 4 || cc >= cc1 - 4) return;
+
+    const int idx = rr * kTileSize + cc;
+    h0[idx] = variance_selection_finish_h_candidate(cfa, hcd[idx], rr, cc);
+    h1[idx] = variance_selection_finish_h_candidate(cfa, hcdalt[idx], rr, cc);
+    v0[idx] = variance_selection_finish_v_candidate(cfa, vcd[idx], rr, cc);
+    v1[idx] = variance_selection_finish_v_candidate(cfa, vcdalt[idx], rr, cc);
+}
+
+__device__ unsigned char variance_h_choice_map(const float * hcd,
+                                               const float * hcdalt,
+                                               float left,
+                                               int idx)
+{
+    const float hcdvar =
+        3.0f * (sqr_f(left) +
+                sqr_f(hcd[idx]) +
+                sqr_f(hcd[idx + 2])) -
+        sqr_f(left + hcd[idx] + hcd[idx + 2]);
+    const float hcdaltvar =
+        3.0f * (sqr_f(hcdalt[idx - 2]) +
+                sqr_f(hcdalt[idx]) +
+                sqr_f(hcdalt[idx + 2])) -
+        sqr_f(hcdalt[idx - 2] + hcdalt[idx] + hcdalt[idx + 2]);
+    return hcdaltvar < hcdvar ? 1 : 0;
+}
+
+__device__ unsigned char variance_v_choice_map(const float * vcd,
+                                               const float * vcdalt,
+                                               float up,
+                                               int idx)
+{
+    const int v2 = 2 * kTileSize;
+    const float vcdvar =
+        3.0f * (sqr_f(up) +
+                sqr_f(vcd[idx]) +
+                sqr_f(vcd[idx + v2])) -
+        sqr_f(up + vcd[idx] + vcd[idx + v2]);
+    const float vcdaltvar =
+        3.0f * (sqr_f(vcdalt[idx - v2]) +
+                sqr_f(vcdalt[idx]) +
+                sqr_f(vcdalt[idx + v2])) -
+        sqr_f(vcdalt[idx - v2] + vcdalt[idx] + vcdalt[idx + v2]);
+    return vcdaltvar < vcdvar ? 1 : 0;
+}
+
+__global__ void k_variance_selection_build_maps(const float * vcd,
+                                                const float * hcd,
+                                                const float * vcdalt,
+                                                const float * hcdalt,
+                                                const float * h0,
+                                                const float * h1,
+                                                const float * v0,
+                                                const float * v1,
+                                                unsigned char * hMap,
+                                                unsigned char * vMap,
+                                                int rr1,
+                                                int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 4 || rr >= rr1 - 4 || cc < 4 || cc >= cc1 - 4) return;
+
+    const int idx = rr * kTileSize + cc;
+
+    float left0 = hcd[idx - 2];
+    float left1 = left0;
+    if (cc - 2 >= 4)
+    {
+        left0 = h0[idx - 2];
+        left1 = h1[idx - 2];
+    }
+    const unsigned char hOut0 = variance_h_choice_map(hcd, hcdalt, left0, idx);
+    const unsigned char hOut1 = variance_h_choice_map(hcd, hcdalt, left1, idx);
+    hMap[idx] = static_cast<unsigned char>(hOut0 | (hOut1 << 1));
+
+    const int v2 = 2 * kTileSize;
+    float up0 = vcd[idx - v2];
+    float up1 = up0;
+    if (rr - 2 >= 4)
+    {
+        up0 = v0[idx - v2];
+        up1 = v1[idx - v2];
+    }
+    const unsigned char vOut0 = variance_v_choice_map(vcd, vcdalt, up0, idx);
+    const unsigned char vOut1 = variance_v_choice_map(vcd, vcdalt, up1, idx);
+    vMap[idx] = static_cast<unsigned char>(vOut0 | (vOut1 << 1));
+}
+
+__global__ void k_variance_selection_h_row_prefix(const unsigned char * hMap,
+                                                  unsigned char * hChoice,
+                                                  int rr1,
+                                                  int cc1)
+{
+    const int rr = blockIdx.x;
+    const int ccParity = blockIdx.y;
+    if (rr < 4 || rr >= rr1 - 4 || ccParity > 1) return;
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    __shared__ unsigned char maps[kTileHalf];
+
+    int ccStart = 4;
+    if ((ccStart & 1) != ccParity) ++ccStart;
+    if (ccStart >= cc1 - 4) return;
+    const int count = ((cc1 - 5 - ccStart) / 2) + 1;
+
+    if (tid < kTileHalf)
+    {
+        if (tid < count)
+        {
+            const int idx = rr * kTileSize + ccStart + 2 * tid;
+            maps[tid] = hMap[idx];
+        }
+        else
+        {
+            maps[tid] = 2;
+        }
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < kTileHalf; offset <<= 1)
+    {
+        unsigned char combined = 2;
+        if (tid < kTileHalf)
+        {
+            const unsigned char mine = maps[tid];
+            const unsigned char before = (tid >= offset) ? maps[tid - offset] : 2;
+            combined = binary_map_compose(before, mine);
+        }
+        __syncthreads();
+        if (tid < kTileHalf && tid >= offset)
+        {
+            maps[tid] = combined;
+        }
+        __syncthreads();
+    }
+
+    if (tid < count)
+    {
+        const int idx = rr * kTileSize + ccStart + 2 * tid;
+        hChoice[idx] = binary_map_apply(maps[tid], 0);
+    }
+}
+
+__global__ void k_variance_selection_v_column_prefix(const unsigned char * vMap,
+                                                     unsigned char * vChoice,
+                                                     int rr1,
+                                                     int cc1)
+{
+    const int cc = blockIdx.x;
+    const int rrParity = blockIdx.y;
+    if (cc < 4 || cc >= cc1 - 4 || rrParity > 1) return;
+
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    __shared__ unsigned char maps[kTileHalf];
+
+    int rrStart = 4;
+    if ((rrStart & 1) != rrParity) ++rrStart;
+    if (rrStart >= rr1 - 4) return;
+    const int count = ((rr1 - 5 - rrStart) / 2) + 1;
+
+    if (tid < kTileHalf)
+    {
+        if (tid < count)
+        {
+            const int idx = (rrStart + 2 * tid) * kTileSize + cc;
+            maps[tid] = vMap[idx];
+        }
+        else
+        {
+            maps[tid] = 2;
+        }
+    }
+    __syncthreads();
+
+    for (int offset = 1; offset < kTileHalf; offset <<= 1)
+    {
+        unsigned char combined = 2;
+        if (tid < kTileHalf)
+        {
+            const unsigned char mine = maps[tid];
+            const unsigned char before = (tid >= offset) ? maps[tid - offset] : 2;
+            combined = binary_map_compose(before, mine);
+        }
+        __syncthreads();
+        if (tid < kTileHalf && tid >= offset)
+        {
+            maps[tid] = combined;
+        }
+        __syncthreads();
+    }
+
+    if (tid < count)
+    {
+        const int idx = (rrStart + 2 * tid) * kTileSize + cc;
+        vChoice[idx] = binary_map_apply(maps[tid], 0);
+    }
+}
+
+__global__ void k_variance_selection_finalize_prefix(float * vcd,
+                                                     float * hcd,
+                                                     float * cddiffsq,
+                                                     const float * h0,
+                                                     const float * h1,
+                                                     const float * v0,
+                                                     const float * v1,
+                                                     const unsigned char * hChoice,
+                                                     const unsigned char * vChoice,
+                                                     int rr1,
+                                                     int cc1)
+{
+    const int cc = blockIdx.x * blockDim.x + threadIdx.x;
+    const int rr = blockIdx.y * blockDim.y + threadIdx.y;
+    if (rr < 4 || rr >= rr1 - 4 || cc < 4 || cc >= cc1 - 4) return;
+
+    const int idx = rr * kTileSize + cc;
+    hcd[idx] = hChoice[idx] ? h1[idx] : h0[idx];
+    vcd[idx] = vChoice[idx] ? v1[idx] : v0[idx];
+
+    if ((fc_rggb(rr, cc) & 1) == 0)
+    {
+        cddiffsq[idx] = sqr_f(vcd[idx] - hcd[idx]);
+    }
+}
+
 __global__ void k_hvwt_adaptive_weights(const float * dirwts0,
                                         const float * dirwts1,
                                         const float * vcd,
@@ -2577,6 +2943,75 @@ void check_cuda(cudaError_t rc, const char * call, const char * file, int line)
 
 #define CK(call) check_cuda((call), #call, __FILE__, __LINE__)
 
+void launch_variance_selection_prefix(const DeviceBuffers & d,
+                                      int rr1,
+                                      int cc1,
+                                      cudaStream_t stream = 0,
+                                      bool checkLaunch = true)
+{
+    const dim3 block(16, 16);
+    const dim3 grid((kTileSize + block.x - 1) / block.x,
+                    (kTileSize + block.y - 1) / block.y);
+    const dim3 prefixGrid(kTileSize, 2);
+
+#define CHECK_VARIANCE_PREFIX_LAUNCH() \
+    do { \
+        if (checkLaunch) CK(cudaGetLastError()); \
+    } while (0)
+
+    k_variance_selection_candidate_finals<<<grid, block, 0, stream>>>(d.cfa,
+                                                                      d.vcd,
+                                                                      d.hcd,
+                                                                      d.vcdalt,
+                                                                      d.hcdalt,
+                                                                      d.variance_h0,
+                                                                      d.variance_h1,
+                                                                      d.variance_v0,
+                                                                      d.variance_v1,
+                                                                      rr1,
+                                                                      cc1);
+    CHECK_VARIANCE_PREFIX_LAUNCH();
+    k_variance_selection_build_maps<<<grid, block, 0, stream>>>(d.vcd,
+                                                               d.hcd,
+                                                               d.vcdalt,
+                                                               d.hcdalt,
+                                                               d.variance_h0,
+                                                               d.variance_h1,
+                                                               d.variance_v0,
+                                                               d.variance_v1,
+                                                               d.variance_h_map,
+                                                               d.variance_v_map,
+                                                               rr1,
+                                                               cc1);
+    CHECK_VARIANCE_PREFIX_LAUNCH();
+    k_variance_selection_h_row_prefix<<<prefixGrid, kVariancePrefixThreads, 0, stream>>>(
+        d.variance_h_map,
+        d.variance_h_choice,
+        rr1,
+        cc1);
+    CHECK_VARIANCE_PREFIX_LAUNCH();
+    k_variance_selection_v_column_prefix<<<prefixGrid, kVariancePrefixThreads, 0, stream>>>(
+        d.variance_v_map,
+        d.variance_v_choice,
+        rr1,
+        cc1);
+    CHECK_VARIANCE_PREFIX_LAUNCH();
+    k_variance_selection_finalize_prefix<<<grid, block, 0, stream>>>(d.vcd,
+                                                                    d.hcd,
+                                                                    d.cddiffsq,
+                                                                    d.variance_h0,
+                                                                    d.variance_h1,
+                                                                    d.variance_v0,
+                                                                    d.variance_v1,
+                                                                    d.variance_h_choice,
+                                                                    d.variance_v_choice,
+                                                                    rr1,
+                                                                    cc1);
+    CHECK_VARIANCE_PREFIX_LAUNCH();
+
+#undef CHECK_VARIANCE_PREFIX_LAUNCH
+}
+
 void add_elapsed_ms(cudaEvent_t start, cudaEvent_t stop, double * total)
 {
     CK(cudaEventRecord(stop));
@@ -2670,6 +3105,14 @@ void allocate_device(DeviceBuffers * d, std::size_t rawCount)
     CK(cudaMalloc(&d->hcd, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->vcdalt, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->hcdalt, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->variance_h0, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->variance_h1, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->variance_v0, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->variance_v1, kTileSamples * sizeof(float)));
+    CK(cudaMalloc(&d->variance_h_map, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMalloc(&d->variance_v_map, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMalloc(&d->variance_h_choice, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMalloc(&d->variance_v_choice, kTileSamples * sizeof(unsigned char)));
     CK(cudaMalloc(&d->dgintv, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->dginth, kTileSamples * sizeof(float)));
     CK(cudaMalloc(&d->cddiffsq, kTileSamples * sizeof(float)));
@@ -2705,6 +3148,14 @@ void free_device(DeviceBuffers * d)
     cudaFree(d->hcd);
     cudaFree(d->vcdalt);
     cudaFree(d->hcdalt);
+    cudaFree(d->variance_h0);
+    cudaFree(d->variance_h1);
+    cudaFree(d->variance_v0);
+    cudaFree(d->variance_v1);
+    cudaFree(d->variance_h_map);
+    cudaFree(d->variance_v_map);
+    cudaFree(d->variance_h_choice);
+    cudaFree(d->variance_v_choice);
     cudaFree(d->dgintv);
     cudaFree(d->dginth);
     cudaFree(d->cddiffsq);
@@ -2743,6 +3194,14 @@ void clear_device_stages(const DeviceBuffers & d)
     CK(cudaMemset(d.hcd, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.vcdalt, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.hcdalt, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.variance_h0, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.variance_h1, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.variance_v0, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.variance_v1, 0, kTileSamples * sizeof(float)));
+    CK(cudaMemset(d.variance_h_map, 0, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMemset(d.variance_v_map, 0, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMemset(d.variance_h_choice, 0, kTileSamples * sizeof(unsigned char)));
+    CK(cudaMemset(d.variance_v_choice, 0, kTileSamples * sizeof(unsigned char)));
     CK(cudaMemset(d.dgintv, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.dginth, 0, kTileSamples * sizeof(float)));
     CK(cudaMemset(d.cddiffsq, 0, kTileSamples * sizeof(float)));
@@ -2938,16 +3397,7 @@ bool run_case(const CaseSpec & spec)
                                            rr1,
                                            cc1);
     CK(cudaGetLastError());
-    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads>>>(
-        d.cfa,
-        d.vcd,
-        d.hcd,
-        d.vcdalt,
-        d.hcdalt,
-        d.cddiffsq,
-        rr1,
-        cc1);
-    CK(cudaGetLastError());
+    launch_variance_selection_prefix(d, rr1, cc1);
     k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
                                              d.dirwts1,
                                              d.vcd,
@@ -3168,15 +3618,7 @@ void run_timed_frame_once(const CaseSpec & spec,
                                                                    rr1,
                                                                    cc1));
             RUN_TIMED_STAGE(varianceSelectionMs,
-                            k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads>>>(
-                                d.cfa,
-                                d.vcd,
-                                d.hcd,
-                                d.vcdalt,
-                                d.hcdalt,
-                                d.cddiffsq,
-                                rr1,
-                                cc1));
+                            launch_variance_selection_prefix(d, rr1, cc1));
             RUN_TIMED_STAGE(hvwtAdaptiveMs,
                             k_hvwt_adaptive_weights<<<grid, block>>>(d.dirwts0,
                                                                      d.dirwts1,
