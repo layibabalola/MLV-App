@@ -30,3 +30,14 @@ DualIsoPipeline.DualIsoPlaybackUsesFastHqPathForFastX2
 
 # --- [FLAKE] documented order/timing flake (passes in isolation) ---
 ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights
+
+# --- [STALE?] idle-telemetry expectation vs 973fe16d unconditional skip stamping ---
+# applyLLRawProcObject stamps LLRP_GPU_EXPORT_SKIP_DISABLED/NOT_DUAL_ISO at entry on
+# EVERY call (973fe16d "profiling: explain GPU export skip gates"), so the post-render
+# idle assertion (skip_code == SKIP_NONE) only holds when llrawproc lands on a different
+# thread than the assert (thread-local telemetry). Pre-existing; fails identically on
+# unrelated source states (also failed on the main tree's divergent src/mlv WIP).
+# Adjudicate: either the idle contract should accept the stamped skip codes after a
+# disabled-path render, or the stamp should move behind the dual-ISO gate.
+# (2026-07-01, Claude implementer lane, A8FEE lock-in completion round.)
+DualIsoPipeline.GpuExportTelemetryIsIdleWhenGpuExportIsDisabled

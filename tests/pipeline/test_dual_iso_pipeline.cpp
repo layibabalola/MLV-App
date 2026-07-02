@@ -1529,8 +1529,15 @@ TEST(DualIsoPipeline, GpuPlaybackReconIneligibleConfigDoesNotTouchBackendWhenOpt
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
 
+    /* AMaZE interp is ineligible-by-design for the GPU recon prepare gate
+     * (interp_method != DISOI_MEAN23 -> UNSUPPORTED before any backend touch).
+     * NOTE: the previous ineligible example {MEAN23, FR_OFF alias, FR_ON, CS_OFF}
+     * became ELIGIBLE when the admission widened to alias 0/1 + chroma<=1 (the
+     * validated A8FEE state), so it now records attempted=1 with a byte-inert
+     * missing-DLL fallback -- that shape is covered by
+     * GpuPlaybackReconAdmittedHqStateFallsBackByteInertWithoutBackend below. */
     const GpuExportDualIsoConfig ineligible_cfg = {
-        DISOI_MEAN23, FR_OFF, FR_ON, CS_OFF
+        DISOI_AMAZE, FR_ON, FR_ON, CS_OFF
     };
 
     MlvPipelineFixture cpu_fixture;
