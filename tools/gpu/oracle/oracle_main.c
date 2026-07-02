@@ -183,9 +183,13 @@ static int ORACLE_IS_BRIGHT[4] = {1, 1, 0, 0};
  *                      it, exercising the anti-posterization dither the base
  *                      vectors never touch. The LUT is dumped to randn05.f32 so
  *                      a consumer can load the EXACT table used. See the dither
- *                      fidelity caveat in README.txt.                          */
+ *                      fidelity caveat in README.txt.
+ *   ORACLE_USE_ALIAS_MAP 0/1, default 1. Exercises the final-blend alias gate.
+ *   ORACLE_CHROMA_SMOOTH_METHOD 0/1, default 0. Exercises optional 2x2 chroma. */
 static int    g_oracle_apply_dither = 0;
 static int    g_oracle_black_delta  = 0;   /* 14-bit units, default 0 */
+static int    g_oracle_use_alias_map = 1;
+static int    g_oracle_chroma_smooth_method = 0;
 
 /* ---- auto_correction (match-by) diagnostic axis (env-controlled) ----------- *
  * ORACLE_AUTO_CORRECTION selects which match_exposures branch diso_get_full20bit
@@ -247,6 +251,18 @@ static void oracle_parse_scalar_env(void)
     if (bd && *bd) g_oracle_black_delta = atoi(bd);
     const char * dt = getenv("ORACLE_APPLY_DITHER");
     if (dt && *dt) g_oracle_apply_dither = (atoi(dt) != 0);
+    const char * am = getenv("ORACLE_USE_ALIAS_MAP");
+    if (am && *am) g_oracle_use_alias_map = (atoi(am) != 0);
+    const char * cs = getenv("ORACLE_CHROMA_SMOOTH_METHOD");
+    if (cs && *cs) {
+        const int v = atoi(cs);
+        if (v >= 0 && v <= 1) {
+            g_oracle_chroma_smooth_method = v;
+        } else {
+            fprintf(stderr, "[oracle] ignoring unsupported ORACLE_CHROMA_SMOOTH_METHOD=%d "
+                            "(supported for CUDA parity: 0/1)\n", v);
+        }
+    }
     const char * ac = getenv("ORACLE_AUTO_CORRECTION");
     if (ac && *ac) {
         int v = atoi(ac);
@@ -733,9 +749,9 @@ int main(int argc, char ** argv)
                         "black_delta=-1 sentinel) -- mirrors GUI DISO_FORCED\n");
     }
     int    interp_method        = sel_interp; /* 0=AMaZE (production default), 1=mean23 */
-    int    use_alias_map        = 1;     /* exercise the 3-pass alias map            */
+    int    use_alias_map        = g_oracle_use_alias_map;
     int    use_fullres          = 1;     /* fullres reconstruction on                */
-    int    chroma_smooth_method = 0;     /* off                                       */
+    int    chroma_smooth_method = g_oracle_chroma_smooth_method;
     int    threads              = 1;     /* single-thread for determinism            */
     int    dark_frame           = 0;
 
@@ -915,7 +931,7 @@ int main(int argc, char ** argv)
      * The buffers persist (the recon reuses them across calls and never frees
      * until free_dualiso_full20bit_scratch). Each plane is w*h.
      *
-     * IMPORTANT chroma_smooth=0 aliasing: the driver sets
+     * IMPORTANT smooth-plane aliasing: with chroma_smooth=0 the driver sets
      *   fullres_smooth = fullres ; halfres_smooth = halfres
      * (dualiso.c:4872/4876) and only points them at scratch->{fullres,halfres}
      * _smooth when chroma_smooth_method != 0. With chroma_smooth_method=0 the
@@ -923,6 +939,11 @@ int main(int argc, char ** argv)
      * written, so we dump scratch->fullres for "fullres_smooth" and
      * scratch->halfres for "halfres_smooth" - exactly the buffers the kernel
      * chain consumes. The CUDA side must mirror this aliasing.
+     *
+     * In the source-smoothed chroma path used for CUDA playback parity,
+     * final_blend consumes scratch->fullres_smooth (the secondary full-res
+     * reconstruction from smoothed source planes), but halfres_smooth remains
+     * scratch->halfres (the mixed output from those smoothed source planes).
      *
      * NOTE raw_buffer_32 holds the FINAL 20-bit blend output here (final_blend
      * does raw_set_pixel32(x,y,ev2raw[output]) into raw_buffer_32), NOT the
@@ -941,10 +962,11 @@ int main(int argc, char ** argv)
     if (sc.bright)      all_ok &= dump_blob(outdir, "stage_bright.u32",         sc.bright,      n * sizeof(uint32_t));
     if (sc.fullres)     all_ok &= dump_blob(outdir, "stage_fullres.u32",        sc.fullres,     n * sizeof(uint32_t));
     if (sc.halfres)     all_ok &= dump_blob(outdir, "stage_halfres.u32",        sc.halfres,     n * sizeof(uint32_t));
-    /* chroma_smooth=0 -> *_smooth == base; dump the base planes under the
-     * smooth name so the CUDA probe can compare its smooth-stage buffers. */
-    if (sc.fullres)     all_ok &= dump_blob(outdir, "stage_fullres_smooth.u32", sc.fullres,     n * sizeof(uint32_t));
-    if (sc.halfres)     all_ok &= dump_blob(outdir, "stage_halfres_smooth.u32", sc.halfres,     n * sizeof(uint32_t));
+    const uint32_t * stage_fullres_smooth =
+        (chroma_smooth_method && sc.fullres_smooth) ? sc.fullres_smooth : sc.fullres;
+    const uint32_t * stage_halfres_smooth = sc.halfres;
+    if (stage_fullres_smooth) all_ok &= dump_blob(outdir, "stage_fullres_smooth.u32", stage_fullres_smooth, n * sizeof(uint32_t));
+    if (stage_halfres_smooth) all_ok &= dump_blob(outdir, "stage_halfres_smooth.u32", stage_halfres_smooth, n * sizeof(uint32_t));
     if (sc.alias_map)   all_ok &= dump_blob(outdir, "stage_alias_map.u16",      sc.alias_map,   n * sizeof(uint16_t));
     if (sc.overexposed) all_ok &= dump_blob(outdir, "stage_overexposed.u16",    sc.overexposed, n * sizeof(uint16_t));
     if (sc.raw_buffer_32) all_ok &= dump_blob(outdir, "stage_final20.u32",      sc.raw_buffer_32, n * sizeof(uint32_t));

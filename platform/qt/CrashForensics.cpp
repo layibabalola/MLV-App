@@ -755,7 +755,9 @@ void applyCudaPlaybackProfilingEnvironment(bool enabled)
         { "MLVAPP_PLAYBACK_QUALITY_MODE",
           "MLVAPP_PLAYBACK_QUALITY_MODE_GUI_MANAGED", "phase3_hq" },
         { "MLVAPP_PLAYBACK_SCALE_FACTOR",
-          "MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED", "1" }
+          "MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED", "1" },
+        { "GOMP_SPINCOUNT",
+          "GOMP_SPINCOUNT_GUI_MANAGED", "0" }
     };
     const ManagedFlag legacyFlags[] = {
         { "MLVAPP_EXPERIMENTAL_GL_VIEWPORT",

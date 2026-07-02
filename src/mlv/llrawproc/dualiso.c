@@ -4365,6 +4365,27 @@ static inline int dualiso_supported_chroma_smooth_method(int method)
     }
 }
 
+static void dualiso_debug_dump_source_smooth_plane(const char * name,
+                                                   const uint32_t * data,
+                                                   size_t bytes)
+{
+    const char * dir = getenv("DUALISO_DEBUG_SOURCE_SMOOTH_DIR");
+    if (!dir || !*dir || !name || !*name || !data || bytes == 0)
+    {
+        return;
+    }
+
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    FILE * f = fopen(path, "wb");
+    if (!f)
+    {
+        return;
+    }
+    fwrite(data, 1, bytes, f);
+    fclose(f);
+}
+
 static inline int smooth_matched_source_planes(struct raw_info raw_info,
                                                uint32_t * dark,
                                                uint32_t * bright,
@@ -4431,6 +4452,13 @@ static inline int smooth_matched_source_planes(struct raw_info raw_info,
     g_dualiso_mix_chroma_probe_stage_cache = 0;
     g_dualiso_full20bit_timing.mix_chroma_probe_stage = 0;
     g_dualiso_full20bit_timing.mix_chroma_halfres_ms += dualiso_debug_elapsed_ms(stage_start);
+
+    dualiso_debug_dump_source_smooth_plane("stage_bright_source_smooth.u32",
+                                           bright_smooth,
+                                           plane_bytes);
+    dualiso_debug_dump_source_smooth_plane("stage_dark_source_smooth.u32",
+                                           dark_smooth,
+                                           plane_bytes);
 
     g_dualiso_full20bit_timing.mix_chroma_ms += dualiso_debug_elapsed_ms(chroma_start);
     return 1;
@@ -5670,6 +5698,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
                                                   int use_alias_map,
                                                   int use_fullres,
                                                   int chroma_smooth_method,
+                                                  int playback_preview_scale_factor,
                                                   int final_blend_fused_to_16bit,
                                                   const dualiso_full20bit_scratch_t * scratch)
 {
@@ -5687,7 +5716,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
         return;
     }
 
-    if(interp_method != 1 || !use_alias_map || !use_fullres || chroma_smooth_method != 0)
+    if(interp_method != 1 || !use_fullres || chroma_smooth_method > 1)
     {
         g_dualiso_last_gpu_recon_state = state;
         return;
@@ -5716,6 +5745,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
     state.use_alias_map = use_alias_map != 0;
     state.use_fullres = use_fullres != 0;
     state.chroma_smooth_method = chroma_smooth_method;
+    state.playback_preview_scale_factor = playback_preview_scale_factor;
     memcpy(state.is_bright, is_bright, sizeof(state.is_bright));
     state.raw2ev = scratch->ev_raw2ev;
     state.ev2raw = scratch->ev2raw_0;
@@ -5727,12 +5757,13 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
     g_dualiso_last_gpu_recon_state = state;
 }
 
-static int dualiso_final_blend_will_fuse_to_16bit(void)
+static int dualiso_final_blend_will_fuse_to_16bit(int fullres_mesh_guard)
 {
 #ifdef DUALISO_AVX2_AVAILABLE
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
-    return g_dualiso_hq_use_avx2 != 0;
+    return g_dualiso_hq_use_avx2 != 0 && !fullres_mesh_guard;
 #else
+    (void)fullres_mesh_guard;
     return 0;
 #endif
 }
@@ -5750,6 +5781,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                  int use_alias_map,
                                  int use_fullres,
                                  int chroma_smooth_method,
+                                 int playback_preview_scale_factor,
                                  int threads,
                                  dualiso_full20bit_scratch_t * scratch,
                                  dualiso_gpu_recon_state_t * state)
@@ -5775,7 +5807,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
         dualiso_supported_chroma_smooth_method(chroma_smooth_method);
 
     if (w <= 0 || h <= 0) DUALISO_GPU_PREP_RETURN(0);
-    if (interp_method != 1 || !use_alias_map || !use_fullres || effective_chroma_smooth_method != 0)
+    if (interp_method != 1 || !use_fullres || effective_chroma_smooth_method > 1)
     {
         DUALISO_GPU_PREP_RETURN(0);
     }
@@ -5928,6 +5960,11 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     {
         DUALISO_GPU_PREP_RETURN(0);
     }
+    const int fullres_mesh_guard =
+        dualiso_x1_playback_fullres_mesh_fix_enabled(playback_preview_scale_factor,
+                                                     use_alias_map,
+                                                     use_fullres,
+                                                     effective_chroma_smooth_method);
 
     state->valid = 1;
     state->width = raw_info.width;
@@ -5942,12 +5979,13 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     state->use_alias_map = use_alias_map != 0;
     state->use_fullres = use_fullres != 0;
     state->chroma_smooth_method = effective_chroma_smooth_method;
+    state->playback_preview_scale_factor = playback_preview_scale_factor;
     memcpy(state->is_bright, is_bright, sizeof(state->is_bright));
     state->raw2ev = scratch->ev_raw2ev;
     state->ev2raw = scratch->ev2raw_0;
     state->mix_curve = mix_curve;
     state->fullres_curve = fullres_curve;
-    state->apply_dither = dualiso_final_blend_will_fuse_to_16bit();
+    state->apply_dither = dualiso_final_blend_will_fuse_to_16bit(fullres_mesh_guard);
     state->randn05 = state->apply_dither ? randn05_cache : NULL;
 
     g_dualiso_full20bit_timing.valid = 1;
@@ -6448,6 +6486,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                           use_alias_map,
                                           use_fullres,
                                           effective_chroma_smooth_method,
+                                          playback_preview_scale_factor,
                                           final_blend_fused_to_16bit,
                                           scratch);
 

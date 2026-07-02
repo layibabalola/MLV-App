@@ -499,13 +499,19 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
             const double directAmazeWallMs = elapsedMs() - directAmazeStartMs;
             if ( directAmazeOk )
             {
-                int validationCopyRc = 0;
-                const bool validationCopyOk =
+                int validationProofRc = 0;
+                llrpGpuPlaybackReconTiming_t validationProofTiming;
+                memset(&validationProofTiming, 0, sizeof(validationProofTiming));
+                const bool validationProofOk =
                     !validationProbeTexture
-                    || llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(
+                    || llrpGpuPlaybackReconRunGlTexture(
+                        state,
+                        rawInputBayer14,
+                        expectedWords * sizeof(uint16_t),
                         m_gpuReconSourceTexture->textureId(),
-                        &validationCopyRc) != 0;
-                if ( validationCopyOk )
+                        &validationProofRc,
+                        &validationProofTiming) != 0;
+                if ( validationProofOk )
                 {
                     rc = directRc;
                     reconTiming = directReconTiming;
@@ -527,8 +533,8 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
                 {
                     directFailureReason =
                         QStringLiteral(
-                            "GPU window direct device proof texture copy failed (rc=%1)")
-                            .arg(validationCopyRc);
+                            "GPU window direct device proof texture render failed (rc=%1)")
+                            .arg(validationProofRc);
                 }
             }
             else
@@ -738,6 +744,9 @@ void GpuDisplayWindow::initializeGL()
     const GLubyte *renderer = glGetString(GL_RENDERER);
     const GLubyte *vendor = glGetString(GL_VENDOR);
     const GLubyte *version = glGetString(GL_VERSION);
+    QOpenGLContext *glContext = context();
+    const int requestedSwapInterval = format().swapInterval();
+    const QSurfaceFormat realizedFormat = glContext ? glContext->format() : format();
     m_rendererDescription = renderer
         ? QString::fromLatin1(reinterpret_cast<const char *>(renderer))
         : QStringLiteral("unknown");
@@ -745,6 +754,8 @@ void GpuDisplayWindow::initializeGL()
         << "Experimental GPU window viewport initialized (renderer=" << m_rendererDescription
         << ", vendor=" << (vendor ? reinterpret_cast<const char *>(vendor) : "unknown")
         << ", version=" << (version ? reinterpret_cast<const char *>(version) : "unknown")
+        << ", requested_swap_interval=" << requestedSwapInterval
+        << ", realized_swap_interval=" << realizedFormat.swapInterval()
         << ").";
     m_loggedContext = true;
 }

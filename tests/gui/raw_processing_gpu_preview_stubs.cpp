@@ -17,6 +17,33 @@ extern "C" void processingAgxMatrices(double out_forward[9], double out_inverse[
     }
 }
 
+extern "C" int processingHasShadowsHighlightsAdjustments(const processingObject_t *)
+{
+    return 0;
+}
+
+extern "C" int processingGetShadowsHighlightsBlurData(
+    const processingObject_t *,
+    const uint16_t **data,
+    int *width,
+    int *height,
+    int *curveIndexMask)
+{
+    if (data) {
+        *data = nullptr;
+    }
+    if (width) {
+        *width = 0;
+    }
+    if (height) {
+        *height = 0;
+    }
+    if (curveIndexMask) {
+        *curveIndexMask = 0;
+    }
+    return 0;
+}
+
 extern "C" int llrpGpuPlaybackReconRunGlTexture(
     const llrpGpuPlaybackReconState_t *,
     const uint16_t *,

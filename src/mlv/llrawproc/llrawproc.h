@@ -84,6 +84,7 @@ typedef struct
     int use_alias_map;
     int use_fullres;
     int chroma_smooth_method;
+    int playback_preview_scale_factor;
     int is_bright[4];
     const int * raw2ev;
     const int * ev2raw;

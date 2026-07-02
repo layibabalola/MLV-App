@@ -9,7 +9,10 @@
 #define MAINWINDOWGPUPREVIEWPOLICY_H
 
 #include "GpuDisplayViewport.h"
+#include <QSize>
 #include <Qt>
+#include <cmath>
+#include <limits>
 
 enum class GpuPreviewProcessingBackendRequest
 {
@@ -341,6 +344,61 @@ inline GpuDisplayViewport::PresentationOptions mainWindowBuildGpuPresentationOpt
     }
 
     return options;
+}
+
+inline int mainWindowGpuTexturePresentScaledDimension(
+    int textureDimension,
+    double stretch)
+{
+    if (textureDimension <= 0) return 0;
+
+    const double safeStretch =
+        (std::isfinite(stretch) && stretch > 0.0) ? stretch : 1.0;
+    const double scaled = static_cast<double>(textureDimension) * safeStretch;
+    if (!std::isfinite(scaled)) return textureDimension;
+    if (scaled >= static_cast<double>(std::numeric_limits<int>::max()))
+    {
+        return std::numeric_limits<int>::max();
+    }
+
+    const long rounded = std::lround(scaled);
+    return rounded < 1L ? 1 : static_cast<int>(rounded);
+}
+
+inline QSize mainWindowGpuTexturePresentDisplaySize(
+    int textureWidth,
+    int textureHeight,
+    double stretchX,
+    double stretchY)
+{
+    return QSize(
+        mainWindowGpuTexturePresentScaledDimension(textureWidth, stretchX),
+        mainWindowGpuTexturePresentScaledDimension(textureHeight, stretchY));
+}
+
+inline int mainWindowVerticalStretchIndexForMlvAspectRatio(double aspectRatio)
+{
+    if (!std::isfinite(aspectRatio) || aspectRatio <= 0.0) return 0;
+    if (aspectRatio > 0.9 && aspectRatio < 1.1) return 0;
+    if (aspectRatio > 1.6 && aspectRatio < 1.7) return 1;
+    if (aspectRatio > 2.9 && aspectRatio < 3.1) return 2;
+    return 3;
+}
+
+inline bool mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
+    double receiptStretchX,
+    double receiptStretchY,
+    double aspectRatio)
+{
+    const int aspectStretchIndex =
+        mainWindowVerticalStretchIndexForMlvAspectRatio(aspectRatio);
+    if (aspectStretchIndex == 0) return false;
+
+    constexpr double kNeutralTolerance = 0.0001;
+    return std::isfinite(receiptStretchX)
+        && std::isfinite(receiptStretchY)
+        && std::fabs(receiptStretchX - 1.0) <= kNeutralTolerance
+        && std::fabs(receiptStretchY - 1.0) <= kNeutralTolerance;
 }
 
 #endif // MAINWINDOWGPUPREVIEWPOLICY_H

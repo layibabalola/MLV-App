@@ -928,7 +928,8 @@ void GpuDisplayViewport::initializeGL()
         return;
     }
 
-    const QSurfaceFormat format = glContext->format();
+    const int requestedSwapInterval = this->format().swapInterval();
+    const QSurfaceFormat realizedFormat = glContext->format();
     QOpenGLFunctions *functions = glContext->functions();
     const GLubyte *renderer = functions ? functions->glGetString(GL_RENDERER) : nullptr;
     const GLubyte *vendor = functions ? functions->glGetString(GL_VENDOR) : nullptr;
@@ -939,11 +940,13 @@ void GpuDisplayViewport::initializeGL()
 
     qInfo().nospace()
         << "Experimental GPU viewport initialized ("
-        << format.majorVersion() << '.'
-        << format.minorVersion()
+        << realizedFormat.majorVersion() << '.'
+        << realizedFormat.minorVersion()
         << ", renderer=" << m_rendererDescription
         << ", vendor=" << (vendor ? reinterpret_cast<const char *>(vendor) : "unknown")
         << ", version=" << (version ? reinterpret_cast<const char *>(version) : "unknown")
+        << ", requested_swap_interval=" << requestedSwapInterval
+        << ", realized_swap_interval=" << realizedFormat.swapInterval()
         << ").";
 
     m_loggedContext = true;
@@ -1555,13 +1558,19 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
             const double directAmazeWallMs = elapsedMs() - directAmazeStartMs;
             if ( directAmazeOk )
             {
-                int validationCopyRc = 0;
-                const bool validationCopyOk =
+                int validationProofRc = 0;
+                llrpGpuPlaybackReconTiming_t validationProofTiming;
+                memset(&validationProofTiming, 0, sizeof(validationProofTiming));
+                const bool validationProofOk =
                     !validationProbeTexture
-                    || llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(
+                    || llrpGpuPlaybackReconRunGlTexture(
+                        state,
+                        rawInputBayer14,
+                        expectedWords * sizeof(uint16_t),
                         m_gpuReconSourceTexture->textureId(),
-                        &validationCopyRc ) != 0;
-                if ( validationCopyOk )
+                        &validationProofRc,
+                        &validationProofTiming) != 0;
+                if ( validationProofOk )
                 {
                     rc = directRc;
                     reconTiming = directReconTiming;
@@ -1581,8 +1590,8 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
                 {
                     directFailureReason =
                         QStringLiteral(
-                            "GPU playback recon direct device proof texture copy failed (rc=%1)")
-                            .arg(validationCopyRc);
+                            "GPU playback recon direct device proof texture render failed (rc=%1)")
+                            .arg(validationProofRc);
                 }
             }
             else

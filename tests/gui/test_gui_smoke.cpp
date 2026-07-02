@@ -553,6 +553,8 @@ private slots:
     void mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes();
     void mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled();
     void mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions();
+    void mainWindowGpuTexturePresentDisplaySizeAppliesStretch();
+    void mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueeze();
     void gpuViewportFallsBackToPixmapWhenNotInstalled();
     void gpuViewportQueuesAndClearsPresentedFrame();
     void gpuViewportQueuesRgb16Frame();
@@ -674,6 +676,33 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()
     options = mainWindowBuildGpuPresentationOptions(state);
     QCOMPARE(options.samplingMode, GpuDisplayViewport::SamplingBicubic);
     QVERIFY(options.showZebras);
+}
+
+void GuiSmokeTest::mainWindowGpuTexturePresentDisplaySizeAppliesStretch()
+{
+    QCOMPARE(mainWindowGpuTexturePresentDisplaySize(1920, 1080, 3.0, 1.0),
+             QSize(5760, 1080));
+    QCOMPARE(mainWindowGpuTexturePresentDisplaySize(1920, 1080, 1.0, 1.667),
+             QSize(1920, 1800));
+    QCOMPARE(mainWindowGpuTexturePresentDisplaySize(1920, 1080, 0.0, -1.0),
+             QSize(1920, 1080));
+    QCOMPARE(mainWindowGpuTexturePresentDisplaySize(0, 1080, 3.0, 1.0),
+             QSize(0, 1080));
+}
+
+void GuiSmokeTest::mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueeze()
+{
+    QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(1.0), 0);
+    QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(1.6667), 1);
+    QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(3.0), 2);
+    QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.3333), 3);
+    QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.0), 0);
+
+    QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 0.3333));
+    QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 3.0));
+    QVERIFY(!mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 1.0));
+    QVERIFY(!mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.25, 1.0, 0.3333));
+    QVERIFY(!mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 0.3333, 0.3333));
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled()

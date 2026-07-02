@@ -233,6 +233,8 @@ TEST(CrashForensics, GuiProfilingPresetsManageOnlyOwnedEnvironment)
         << QByteArrayLiteral("MLVAPP_PLAYBACK_QUALITY_MODE_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED")
+        << QByteArrayLiteral("GOMP_SPINCOUNT")
+        << QByteArrayLiteral("GOMP_SPINCOUNT_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS")
@@ -271,19 +273,28 @@ TEST(CrashForensics, GuiProfilingPresetsManageOnlyOwnedEnvironment)
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_PHASE3_UNATTENDED").toStdString());
     ASSERT_EQ(std::string("phase3_hq"), qgetenv("MLVAPP_PLAYBACK_QUALITY_MODE").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_SCALE_FACTOR").toStdString());
+    ASSERT_EQ(std::string("0"), qgetenv("GOMP_SPINCOUNT").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("GOMP_SPINCOUNT_GUI_MANAGED").toStdString());
 
     CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_GPU_PLAYBACK_RECON"));
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_GPU_PLAYBACK_RECON_BACKEND"));
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_QUALITY_MODE"));
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_SCALE_FACTOR"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("GOMP_SPINCOUNT"));
 
     qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED");
     CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON").toStdString());
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+
+    qputenv("GOMP_SPINCOUNT", QByteArrayLiteral("7"));
+    qunsetenv("GOMP_SPINCOUNT_GUI_MANAGED");
+    CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
+    ASSERT_EQ(std::string("7"), qgetenv("GOMP_SPINCOUNT").toStdString());
+    qunsetenv("GOMP_SPINCOUNT");
 
     CrashForensics::setDngAsyncCompressionProfilingSettings(true, 99, -4);
     ASSERT_TRUE(CrashForensics::dngAsyncCompressionProfilingSettingsEnabled());

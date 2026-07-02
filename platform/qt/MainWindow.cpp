@@ -117,6 +117,11 @@ static bool environmentFlagEnabled( const char *name )
         && value != QByteArrayLiteral("no");
 }
 
+static bool gpuTexNrOverlapTraceEnabled()
+{
+    return environmentFlagEnabled( "MLVAPP_GPU_TEX_NR_OVERLAP_TRACE" );
+}
+
 static bool cdngPayloadHandoffEnabled()
 {
     return environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF" );
@@ -179,6 +184,15 @@ static bool playbackSmokeFrameTelemetryEnabled()
     static const bool enabled =
         qEnvironmentVariableIsSet( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
         && qEnvironmentVariable( "MLVAPP_PLAYBACK_SMOKE_TELEMETRY" )
+           != QStringLiteral("0");
+    return enabled;
+}
+
+static bool playbackSmokeTimelineTelemetryEnabled()
+{
+    static const bool enabled =
+        qEnvironmentVariableIsSet( "MLVAPP_PLAYBACK_SMOKE_TIMELINE_TELEMETRY" )
+        && qEnvironmentVariable( "MLVAPP_PLAYBACK_SMOKE_TIMELINE_TELEMETRY" )
            != QStringLiteral("0");
     return enabled;
 }
@@ -2676,49 +2690,76 @@ static bool mlvappPlaybackLegacyTimerRequested()
 
 static bool mlvappGpuTexNrAcquireLatestReadyRequested()
 {
-    bool ok = false;
-    const int env = qEnvironmentVariableIntValue(
-        "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY", &ok );
-    return ok && env != 0;
+    static const bool requested = []() {
+        bool ok = false;
+        const int env = qEnvironmentVariableIntValue(
+            "MLVAPP_GPU_TEX_NR_ACQUIRE_LATEST_READY", &ok );
+        return ok && env != 0;
+    }();
+    return requested;
 }
 
 static bool mlvappGpuTexNrImmediateDrainRequested()
 {
-    bool ok = false;
-    const int env = qEnvironmentVariableIntValue(
-        "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY", &ok );
-    return ok && env != 0;
+    static const bool requested = []() {
+        bool ok = false;
+        const int env = qEnvironmentVariableIntValue(
+            "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_READY", &ok );
+        return ok ? env != 0 : true;
+    }();
+    return requested;
 }
 
 static int mlvappGpuTexNrImmediateDrainMax()
 {
-    bool ok = false;
-    const int env = qEnvironmentVariableIntValue(
-        "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX", &ok );
-    if( !ok ) return 1;
-    return qBound( 1, env, 8 );
+    static const int maxDrainCount = []() {
+        bool ok = false;
+        const int env = qEnvironmentVariableIntValue(
+            "MLVAPP_GPU_TEX_NR_IMMEDIATE_DRAIN_MAX", &ok );
+        if( !ok ) return 4;
+        return qBound( 1, env, 8 );
+    }();
+    return maxDrainCount;
 }
 
 static bool mlvappGpuTexNrReadyBacklogTelemetryRequested()
 {
-    bool ok = false;
-    const int env = qEnvironmentVariableIntValue(
-        "MLVAPP_GPU_TEX_NR_READY_BACKLOG_TELEMETRY", &ok );
-    return ok && env != 0;
+    static const bool requested = []() {
+        bool ok = false;
+        const int env = qEnvironmentVariableIntValue(
+            "MLVAPP_GPU_TEX_NR_READY_BACKLOG_TELEMETRY", &ok );
+        return ok && env != 0;
+    }();
+    return requested;
+}
+
+static int mlvappGpuTexNrYieldAfterEarlyAdvanceCount()
+{
+    static const int yieldCount = []() {
+        bool ok = false;
+        const int env = qEnvironmentVariableIntValue(
+            "MLVAPP_GPU_TEX_NR_YIELD_AFTER_EARLY_ADVANCE_COUNT", &ok );
+        if( !ok ) return 0;
+        return qBound( 0, env, 8 );
+    }();
+    return yieldCount;
 }
 
 static int mlvappPlaybackRenderLookaheadFrames()
 {
-    bool ok = false;
-    int env = qEnvironmentVariableIntValue(
-        "MLVAPP_PLAYBACK_RENDER_LOOKAHEAD_FRAMES", &ok );
-    if( !ok )
-    {
-        env = qEnvironmentVariableIntValue(
-            "MLVAPP_GPU_TEX_NR_LOOKAHEAD_FRAMES", &ok );
-    }
-    if( !ok ) return 0;
-    return qBound( 0, env, 3 );
+    static const int lookaheadFrames = []() {
+        bool ok = false;
+        int env = qEnvironmentVariableIntValue(
+            "MLVAPP_PLAYBACK_RENDER_LOOKAHEAD_FRAMES", &ok );
+        if( !ok )
+        {
+            env = qEnvironmentVariableIntValue(
+                "MLVAPP_GPU_TEX_NR_LOOKAHEAD_FRAMES", &ok );
+        }
+        if( !ok ) return 0;
+        return qBound( 0, env, 3 );
+    }();
+    return lookaheadFrames;
 }
 
 static int mlvappStartPlaybackTimer( QObject *owner, double framerate )
@@ -3888,9 +3929,22 @@ MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const Playba
         return result;
     }
 
+    const bool gpuTexNrTaskInputAvailable =
+        task.gpuPlaybackReconTextureInputBayerFrame
+        && task.gpuPlaybackReconTextureInputBayerFrameSize
+            >= static_cast<size_t>( sourceWidth ) * static_cast<size_t>( sourceHeight );
+    const bool gpuTexNrTaskRetainedDeviceAvailable =
+        task.gpuPlaybackReconTextureRetainedDeviceBayer16
+        && task.gpuPlaybackReconTextureRetainedDeviceWidth == sourceWidth
+        && task.gpuPlaybackReconTextureRetainedDeviceHeight == sourceHeight
+        && task.gpuPlaybackReconTextureRetainedDeviceToken != 0;
+    const bool gpuTexNrTaskStateMatches =
+        task.gpuPlaybackReconTextureState.valid
+        && task.gpuPlaybackReconTextureState.width == sourceWidth
+        && task.gpuPlaybackReconTextureState.height == sourceHeight;
     if( task.readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
-     && telemetryBoolValue( task.readyFrame.stageTimingTelemetry,
-                            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" ) )
+     && gpuTexNrTaskStateMatches
+     && ( gpuTexNrTaskInputAvailable || gpuTexNrTaskRetainedDeviceAvailable ) )
     {
         result.preparedWidth = sourceWidth;
         result.preparedHeight = sourceHeight;
@@ -4453,6 +4507,12 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_elapsed_before_present_ms"),
         prepElapsedBeforePresentMs );
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_prep_present_begin_stage_time"),
+            prepPresentStart );
+    }
 
     const uint64_t display_signature =
         playbackProcessingSubsetActive
@@ -4695,12 +4755,41 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QString texturePresentHandoffMode;
         QString texturePresentSource =
             QStringLiteral("cuda_gl_r16_texture_failed");
+        const bool overlapTrace = gpuTexNrOverlapTraceEnabled();
+        qint64 texturePresentWallStartMs = 0;
+        if( overlapTrace )
+        {
+            texturePresentWallStartMs = QDateTime::currentMSecsSinceEpoch();
+            qInfo().nospace()
+                << "gpu_tex_nr_overlap_trace event=texture_start"
+                << " frame=" << readyFrame.frameNumber
+                << " serial=" << readyFrame.requestSerial
+                << " token=" << static_cast<qulonglong>(
+                    task.gpuPlaybackReconTextureRetainedDeviceToken )
+                << " retained=" << ( task.gpuPlaybackReconTextureRetainedDeviceBayer16 ? 1 : 0 )
+                << " window=" << ( gpuWindowTexturePresentActive ? 1 : 0 )
+                << " wall_ms=" << texturePresentWallStartMs;
+        }
         if( hasGpuReconState
          && gpuPlaybackReconAmazeTextureExtensionAvailable )
         {
             gpuPlaybackReconAmazeTextureAttempted = true;
             if( gpuWindowTexturePresentActive )
             {
+                const int textureDisplaySourceWidth =
+                    task.gpuPlaybackReconTextureRetainedDeviceWidth > 0
+                        ? task.gpuPlaybackReconTextureRetainedDeviceWidth
+                        : gpuReconState.width;
+                const int textureDisplaySourceHeight =
+                    task.gpuPlaybackReconTextureRetainedDeviceHeight > 0
+                        ? task.gpuPlaybackReconTextureRetainedDeviceHeight
+                        : gpuReconState.height;
+                const QSize textureDisplaySize =
+                    mainWindowGpuTexturePresentDisplaySize(
+                        textureDisplaySourceWidth,
+                        textureDisplaySourceHeight,
+                        task.stretchX,
+                        task.stretchY );
                 framePresentedByViewport =
                     GpuDisplayWindow::presentGpuPlaybackReconAmazePostWbTextureIfActive(
                         task.gpuPlaybackReconTextureInputBayerFrame,
@@ -4715,8 +4804,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                         task.gpuPlaybackReconTextureRetainedDeviceBayer16,
                         task.gpuPlaybackReconTextureRetainedDeviceWidth,
                         task.gpuPlaybackReconTextureRetainedDeviceHeight,
-                        task.sceneWidth,
-                        task.sceneHeight );
+                        textureDisplaySize.width(),
+                        textureDisplaySize.height() );
                 gpuPlaybackReconAmazeTexturePresentedByWindow =
                     framePresentedByViewport;
             }
@@ -4883,6 +4972,30 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         }
         const double texturePresentMs =
             (mlv_stage_timing_now() - texturePresentStart) * 1000.0;
+        if( overlapTrace )
+        {
+            qInfo().nospace()
+                << "gpu_tex_nr_overlap_trace event=texture_end"
+                << " frame=" << readyFrame.frameNumber
+                << " serial=" << readyFrame.requestSerial
+                << " token=" << static_cast<qulonglong>(
+                    task.gpuPlaybackReconTextureRetainedDeviceToken )
+                << " presented=" << ( framePresentedByViewport ? 1 : 0 )
+                << " no_readback=" << ( gpuPlaybackReconNoReadbackPresented ? 1 : 0 )
+                << " handoff=" << ( texturePresentHandoffMode.isEmpty()
+                    ? QStringLiteral("none")
+                    : texturePresentHandoffMode )
+                << " source=" << texturePresentSource
+                << " kernel_ms=" << ( texturePresentTiming.available
+                    ? texturePresentTiming.kernel_ms
+                    : 0.0 )
+                << " total_ms=" << ( texturePresentTiming.available
+                    ? texturePresentTiming.total_ms
+                    : texturePresentMs )
+                << " wall_elapsed_ms=" << ( QDateTime::currentMSecsSinceEpoch()
+                    - texturePresentWallStartMs )
+                << " wall_ms=" << QDateTime::currentMSecsSinceEpoch();
+        }
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_amaze_texture_present_extension_available"),
             gpuPlaybackReconAmazeTextureExtensionAvailable );
@@ -5605,6 +5718,12 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
 
     const double present_start = mlv_stage_timing_now();
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_present_begin_stage_time"),
+            present_start );
+    }
     if( displayPreviewCachingAllowed && !framePresentedByViewport )
     {
         DisplayPreviewCacheEntry & cacheEntry =
@@ -5638,7 +5757,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         cachedPixmapAvailable = !cacheEntry.pixmap.isNull();
     }
 
-    m_lastDrawFrameReadyPresentMs = (mlv_stage_timing_now() - present_start) * 1000.0;
+    const double presentEndStageTime = mlv_stage_timing_now();
+    m_lastDrawFrameReadyPresentMs = (presentEndStageTime - present_start) * 1000.0;
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_present_end_stage_time"),
+            presentEndStageTime );
+    }
     mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
 
     const uint8_t *scopeSourceImage = task.scopeSourceImage;
@@ -6095,6 +6221,16 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         && m_pRenderThread->hasPlaybackLookaheadRequest(
             static_cast<uint32_t>( requestedFrame ),
             requestContext.presentationGeneration );
+    const bool timelineAdvanceForRequest =
+        m_playbackSmokeTimelineTelemetry
+        && m_playbackTimelineAdvancePending
+        && requestSerial == m_playbackTimelineExpectedRequestSerial;
+    if( m_playbackSmokeTimelineTelemetry
+     && m_playbackTimelineAdvancePending
+     && requestSerial > m_playbackTimelineExpectedRequestSerial )
+    {
+        m_playbackTimelineAdvancePending = false;
+    }
     if( playbackLookaheadCoversCurrent )
     {
         const bool playbackLookaheadReady =
@@ -6124,6 +6260,10 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         }
         if( updateTimecodeLabel && !m_tcModeDuration )
             updateTimeCodeLabelForFrame( requestedFrame );
+        if( timelineAdvanceForRequest )
+        {
+            m_playbackTimelineAdvancePending = false;
+        }
         return;
     }
 
@@ -6152,6 +6292,29 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
             true );
     }
 
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        requestContext.renderRequestIssueStageTime = mlv_stage_timing_now();
+    }
+    if( timelineAdvanceForRequest )
+    {
+        requestContext.playbackTimelineAdvanceRequest = true;
+        requestContext.playbackTimelineAdvanceEarly =
+            m_playbackTimelineAdvanceEarly;
+        requestContext.playbackTimelinePredictiveGpuTexNr =
+            m_playbackTimelinePredictiveGpuTexNr;
+        requestContext.playbackTimelineSourceRequestSerial =
+            m_playbackTimelineSourceRequestSerial;
+        requestContext.playbackTimelineSourceFrame =
+            m_playbackTimelineSourceFrame;
+        requestContext.playbackTimelineAdvanceIssueStageTime =
+            m_playbackTimelineAdvanceIssueStageTime;
+        requestContext.playbackTimelineSourceFrameReadyEmitStageTime =
+            m_playbackTimelineSourceFrameReadyEmitStageTime;
+        requestContext.playbackTimelineSourceDrawBeginStageTime =
+            m_playbackTimelineSourceDrawBeginStageTime;
+    }
+
     //Get frame from library
     if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
     {
@@ -6164,6 +6327,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                                       requestSerial,
                                       requestContext,
                                       presentationPreparation );
+        if( timelineAdvanceForRequest )
+        {
+            m_playbackTimelineIssuedRequestSerial = requestSerial;
+            m_playbackTimelineAdvancePending = false;
+        }
         queuePlaybackLookaheadRequests( requestContext,
                                         renderOutputMode,
                                         m_renderThreadUsingGpuBilinearDebayer,
@@ -6185,6 +6353,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                                       requestSerial,
                                       requestContext,
                                       presentationPreparation );
+        if( timelineAdvanceForRequest )
+        {
+            m_playbackTimelineIssuedRequestSerial = requestSerial;
+            m_playbackTimelineAdvancePending = false;
+        }
         queuePlaybackLookaheadRequests( requestContext,
                                         renderOutputMode,
                                         m_renderThreadUsingGpuBilinearDebayer,
@@ -13274,15 +13447,17 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     else ui->comboBoxHStretch->setCurrentIndex( 7 );
     on_comboBoxHStretch_currentIndexChanged( ui->comboBoxHStretch->currentIndex() );
 
-    if( receipt->stretchFactorY() == -1 )
+    const float ratioVFromMlv = m_pMlvObject ? getMlvAspectRatio( m_pMlvObject ) : 0.0f;
+    const double mlvAspectRatio = ratioVFromMlv == 0.0f ? 1.0 : ratioVFromMlv;
+    if( receipt->stretchFactorY() == -1
+     || mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
+            receipt->stretchFactorX(),
+            receipt->stretchFactorY(),
+            mlvAspectRatio ) )
     {
-        float ratioV = getMlvAspectRatio( m_pMlvObject );
-        if( ratioV == 0.0 ) ratioV = 1.0; // set it to 1 if no information in the MLV file
-        //Init vertical stretching automatically when imported and loaded very first time completely
-        if( ratioV > 0.9 && ratioV < 1.1 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
-        else if( ratioV > 1.6 && ratioV < 1.7 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
-        else if( ratioV > 2.9 && ratioV < 3.1 ) ui->comboBoxVStretch->setCurrentIndex( 2 );
-        else ui->comboBoxVStretch->setCurrentIndex( 3 );
+        // Neutral receipts should not suppress RAWC de-squeeze on anamorphic/binned clips.
+        ui->comboBoxVStretch->setCurrentIndex(
+            mainWindowVerticalStretchIndexForMlvAspectRatio( mlvAspectRatio ) );
     }
     else if( receipt->stretchFactorY() == STRETCH_V_100 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
     else if( receipt->stretchFactorY() == STRETCH_V_167 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
@@ -21036,6 +21211,9 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
 
     m_playbackSmokeActive = true;
     m_playbackSmokeFrameTelemetry = playbackSmokeFrameTelemetryEnabled();
+    m_playbackSmokeTimelineTelemetry =
+        m_playbackSmokeFrameTelemetry
+        && playbackSmokeTimelineTelemetryEnabled();
     m_playbackSmokeStartPosition = ui->horizontalSliderPosition->value();
     m_playbackSmokeStartCutIn = ui->spinBoxCutIn->value();
     m_playbackSmokeStartCutOut = ui->spinBoxCutOut->value();
@@ -21709,7 +21887,7 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     const double drawOverlayMs = m_lastDrawFrameReadyOverlayMs;
     const double presentIntervalMinusRenderTotalMs =
         qMax( 0.0, intervalMs - renderTotalMs );
-    const double presentUiSignalLatencyMs = queueWaitMs;
+    const double presentUiSignalLatencyMs = m_lastDrawFrameReadyQueueMs;
     const double presentDrawPresentMs = drawImageMs + drawPresentMs;
     const double presentOverlaysScopesMs = drawScopesMs + drawOverlayMs;
     const double presentRenderSlotReleaseMs = drawAdvanceMs;
@@ -22162,6 +22340,221 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( processed8ThreadingOverheadMs, 0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
+                   "playback_smoke.request_state session=%1 index=%2 serial=%3 "
+                   "render_thread_busy_at_request=%4 "
+                   "render_thread_rendering_at_request=%5 "
+                   "render_thread_queued_at_request=%6 "
+                   "render_thread_phase3_work_in_flight_at_request=%7 "
+                   "render_thread_request_queue_depth_at_request=%8 "
+                   "render_thread_free_slot_count_at_request=%9 "
+                   "render_thread_ready_slot_count_at_request=%10 "
+                   "render_thread_presenting_slot_count_at_request=%11 "
+                   "render_thread_phase3_active_slot_count_at_request=%12 "
+                   "render_thread_decode_request_count_at_request=%13 "
+                   "render_thread_recon_request_count_at_request=%14 "
+                   "render_thread_decode_ready_slot_count_at_request=%15 "
+                   "render_thread_process_ready_slot_count_at_request=%16 "
+                   "render_total_ms=%17 render_work_ms=%18 queue_wait_ms=%19 "
+                   "draw_total_ms=%20 present_ui_signal_latency_ms=%21 "
+                   "still_drawing=%22 pending_advance=%23" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "render_thread_busy_at_request" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "render_thread_rendering_at_request" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "render_thread_queued_at_request" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "render_thread_phase3_work_in_flight_at_request" ) ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_request_queue_depth_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_free_slot_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_ready_slot_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_presenting_slot_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_phase3_active_slot_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_decode_request_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_recon_request_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_decode_ready_slot_count_at_request" ) )
+                   .arg( telemetryIntValue(
+                       timing, "render_thread_process_ready_slot_count_at_request" ) )
+                   .arg( renderTotalMs, 0, 'f', 3 )
+                   .arg( renderWorkMs, 0, 'f', 3 )
+                   .arg( queueWaitMs, 0, 'f', 3 )
+                   .arg( drawTotalMs, 0, 'f', 3 )
+                    .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
+                    .arg( bool01( m_frameStillDrawing ) )
+                    .arg( bool01( m_playbackFrameAdvancePending ) );
+        if( m_playbackSmokeTimelineTelemetry )
+        {
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.timeline session=%1 index=%2 serial=%3 "
+                   "display_frame=%4 request_issue_stage=%5 "
+                   "render_entry_stage=%6 render_request_stage=%7 "
+                   "render_queue_push_stage=%8 render_start_stage=%9 "
+                   "render_end_stage=%10 frame_ready_emit_stage=%11 "
+                   "draw_begin_stage=%12 prep_present_begin_stage=%13 "
+                   "present_begin_stage=%14 present_end_stage=%15 "
+                   "draw_end_stage=%16 early_issue_stage=%17 "
+                   "early_return_stage=%18 early_expected_serial=%19 "
+                   "early_issued_serial=%20 early_issued=%21 "
+                   "tail_issue_stage=%22 tail_return_stage=%23 "
+                   "tail_expected_serial=%24 tail_issued_serial=%25 "
+                   "tail_issued=%26 advance_request=%27 advance_early=%28 "
+                   "predictive_gpu_tex_nr=%29 source_serial=%30 "
+                   "source_frame=%31 source_ready_emit_stage=%32 "
+                   "source_draw_begin_stage=%33 issue_to_start_ms=%34 "
+                   "queue_wait_ms=%35 present_ui_signal_latency_ms=%36 "
+                   "draw_total_ms=%37" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( static_cast<qulonglong>( displayFrame ) )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_request_issue_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_render_frame_entry_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_request_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_request_queue_push_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_start_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_end_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "frame_ready_emit_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_draw_begin_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_prep_present_begin_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_present_begin_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_present_end_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_draw_end_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_early_advance_issue_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_early_advance_return_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_early_advance_expected_serial" ) )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_early_advance_issued_serial" ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "playback_timeline_early_advance_request_issued" ) ) )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_tail_advance_issue_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_tail_advance_return_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_tail_advance_expected_serial" ) )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_tail_advance_issued_serial" ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "playback_timeline_tail_advance_request_issued" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "playback_timeline_advance_request" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "playback_timeline_advance_early" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "playback_timeline_predictive_gpu_tex_nr" ) ) )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_source_request_serial" ) )
+                   .arg( telemetryIntValue(
+                       timing, "playback_timeline_source_frame" ) )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_source_frame_ready_emit_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_timeline_source_draw_begin_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "render_thread_request_issue_to_start_ms" ), 0, 'f', 3 )
+                       .arg( queueWaitMs, 0, 'f', 3 )
+                       .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
+                       .arg( drawTotalMs, 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.phase3_queue session=%1 index=%2 serial=%3 "
+                   "decode_queue_stage=%4 decode_start_stage=%5 "
+                   "decode_end_stage=%6 decode_done_signal_stage=%7 "
+                   "decode_ready_take_stage=%8 recon_start_stage=%9 "
+                   "recon_end_stage=%10 process_ready_signal_stage=%11 "
+                   "process_ready_take_stage=%12 request_to_decode_queue_ms=%13 "
+                   "decode_queue_wait_ms=%14 decode_worker_ms=%15 "
+                   "decode_done_to_recon_start_ms=%16 "
+                   "decode_done_to_process_take_ms=%17 recon_worker_ms=%18 "
+                   "process_ready_signal_to_take_ms=%19 "
+                   "process_ready_take_to_render_start_ms=%20 "
+                   "process_ready_signal_to_render_start_ms=%21 "
+                   "request_to_process_ready_signal_ms=%22" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_queue_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_start_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_end_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_done_signal_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_ready_take_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_start_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_end_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_process_ready_signal_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_process_ready_take_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_request_to_decode_queue_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_queue_wait_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_worker_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_done_to_recon_start_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_decode_done_to_process_take_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_worker_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_process_ready_signal_to_take_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_process_ready_take_to_render_start_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_process_ready_signal_to_render_start_ms" ), 0, 'f', 3 )
+                       .arg( telemetryDoubleValue(
+                           timing, "phase3_request_to_process_ready_signal_ms" ), 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.early_yield session=%1 index=%2 serial=%3 "
+                   "yield_count=%4 yield_elapsed_ms=%5" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( telemetryIntValue(
+                       timing,
+                       "playback_timeline_early_advance_yield_count" ) )
+                   .arg( telemetryDoubleValue(
+                           timing,
+                           "playback_timeline_early_advance_yield_elapsed_ms" ),
+                           0, 'f', 3 );
+        }
+        qInfo().noquote()
+            << QStringLiteral(
                    "playback_smoke.gpu_frame session=%1 index=%2 status=%3 "
                    "recon_env=%4 recon_attempted=%5 recon_used=%6 "
                    "recon_state_valid=%7 recon_rc=%8 texture_requested=%9 "
@@ -22188,7 +22581,15 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "gpu_preview_shadows_highlights_requested=%41 "
                     "gpu_preview_shadows_highlights_frame_state_ready=%42 "
                     "gpu_tex_nr_skip_preview_frame_state_needed=%43 "
-                    "gpu_preview_shadows_highlights_frame_state_reason=\"%44\"" )
+                    "gpu_preview_shadows_highlights_frame_state_reason=\"%44\" "
+                    "gpu_tex_nr_fast_sh_state_enabled=%45 "
+                    "gpu_tex_nr_fast_sh_state_eligible=%46 "
+                    "gpu_tex_nr_fast_sh_state_attempted=%47 "
+                    "gpu_tex_nr_fast_sh_state_ready=%48 "
+                    "gpu_tex_nr_fast_sh_debayer_ms=%49 "
+                    "gpu_tex_nr_fast_sh_refresh_ms=%50 "
+                    "gpu_tex_nr_fast_sh_state_reason=\"%51\" "
+                    "gpu_tex_nr_display_lut_only_sh_frame_state_bypass=%52" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -22285,7 +22686,27 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         timing, "gpu_playback_recon_amaze_texture_present_skip_gate_preview_frame_state_needed" ) ) )
                     .arg( timing.value(
                         QStringLiteral("gpu_preview_processing_shadows_highlights_frame_state_reason") )
-                        .toString( QStringLiteral("none") ) );
+                        .toString( QStringLiteral("none") ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_frame_state_enabled" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_frame_state_eligible" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_frame_state_attempted" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_frame_state_ready" ) ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_debayer_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_refresh_ms" ),
+                        0, 'f', 3 )
+                    .arg( timing.value(
+                        QStringLiteral("gpu_playback_recon_amaze_texture_present_skip_gate_fast_sh_frame_state_reason") )
+                        .toString( QStringLiteral("none") ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing,
+                        "gpu_playback_recon_amaze_texture_present_skip_gate_display_lut_only_sh_frame_state_bypass" ) ) );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -24512,7 +24933,7 @@ bool MainWindow::isFrameSettledForAnalysis( int frameIndex,
 }
 
 void MainWindow::finishPresentedFrame( uint64_t displayFrame,
-                                       const RenderFrameThread::ReadyFrame &readyFrame,
+                                       RenderFrameThread::ReadyFrame &readyFrame,
                                        const PresentationRequestContext &requestContext,
                                        const uint8_t *rgb8DisplaySource,
                                        uint8_t underOver,
@@ -24716,9 +25137,17 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
 
     ui->actionDeleteSelectedClips->setEnabled( true );
 
-    m_lastDrawFrameReadyOverlayMs = (mlv_stage_timing_now() - overlay_start) * 1000.0;
+    const double overlayEndStageTime = mlv_stage_timing_now();
+    m_lastDrawFrameReadyOverlayMs = (overlayEndStageTime - overlay_start) * 1000.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.overlay", displayFrame, m_lastDrawFrameReadyOverlayMs);
-    m_lastDrawFrameReadyTotalMs = (mlv_stage_timing_now() - displayStart) * 1000.0;
+    const double drawTotalEndStageTime = mlv_stage_timing_now();
+    m_lastDrawFrameReadyTotalMs = (drawTotalEndStageTime - displayStart) * 1000.0;
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_end_stage_time"),
+            drawTotalEndStageTime );
+    }
     mlv_stage_timing_note_elapsed("drawFrameReady.total", displayFrame, m_lastDrawFrameReadyTotalMs);
     if( ui->actionPlay->isChecked()
      && playbackQualityModeIntIsPhase3( m_playbackQualityMode ) )
@@ -24819,10 +25248,56 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         else if( !m_frameStillDrawing )
         {
             m_skipImmediateTimecodeLabel = true;
+            const bool timelineTelemetry = m_playbackSmokeTimelineTelemetry;
+            const uint64_t expectedRequestSerial =
+                timelineTelemetry ? m_nextRenderRequestSerial : 0;
             const double advance_start = mlv_stage_timing_now();
+            if( timelineTelemetry )
+            {
+                m_playbackTimelineAdvancePending = true;
+                m_playbackTimelineExpectedRequestSerial = expectedRequestSerial;
+                m_playbackTimelineIssuedRequestSerial = 0;
+                m_playbackTimelineSourceRequestSerial = readyFrame.requestSerial;
+                m_playbackTimelineSourceFrame = static_cast<uint32_t>( displayFrame );
+                m_playbackTimelineAdvanceEarly = false;
+                m_playbackTimelinePredictiveGpuTexNr = false;
+                m_playbackTimelineAdvanceIssueStageTime = advance_start;
+                m_playbackTimelineSourceFrameReadyEmitStageTime =
+                    readyFrame.frameReadyEmitStageTime;
+                m_playbackTimelineSourceDrawBeginStageTime = displayStart;
+            }
             timerFrameEvent();
+            const double advance_return = mlv_stage_timing_now();
             m_lastDrawFrameReadyAdvanceMs =
-                (mlv_stage_timing_now() - advance_start) * 1000.0;
+                (advance_return - advance_start) * 1000.0;
+            const bool timelineRequestIssued =
+                timelineTelemetry
+                && m_playbackTimelineIssuedRequestSerial == expectedRequestSerial;
+            if( timelineTelemetry )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_tail_advance_issue_stage_time"),
+                    advance_start );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_tail_advance_return_stage_time"),
+                    advance_return );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_tail_advance_expected_serial"),
+                    static_cast<qint64>( expectedRequestSerial ) );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_tail_advance_issued_serial"),
+                    static_cast<qint64>(
+                        timelineRequestIssued ? expectedRequestSerial : 0 ) );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_tail_advance_request_issued"),
+                    timelineRequestIssued );
+            }
+            if( timelineTelemetry
+             && m_playbackTimelineAdvancePending
+             && m_playbackTimelineExpectedRequestSerial == expectedRequestSerial )
+            {
+                m_playbackTimelineAdvancePending = false;
+            }
             mlv_stage_timing_note_elapsed("drawFrameReady.advance",
                                           displayFrame,
                                           m_lastDrawFrameReadyAdvanceMs);
@@ -25005,17 +25480,20 @@ void MainWindow::drawFrameReady()
                     QStringLiteral("playback_gpu_tex_nr_ready_backlog_after_acquire"),
                     gpuTexNrReadyBacklogAfterAcquire );
             }
-            readyFrame.stageTimingTelemetry.insert(
-                QStringLiteral("playback_gpu_tex_nr_acquire_latest_ready_requested"),
-                latestGpuTexNrReady );
-            readyFrame.stageTimingTelemetry.insert(
-                QStringLiteral("playback_gpu_tex_nr_acquire_mode"),
-                latestGpuTexNrReady
-                    ? QStringLiteral("latest_ready_opt_in")
-                    : QStringLiteral("oldest_ordered_default") );
-            readyFrame.stageTimingTelemetry.insert(
-                QStringLiteral("playback_lookahead_pruned_before_acquire"),
-                prunedPlaybackLookaheadBeforeAcquire );
+            if( m_playbackSmokeFrameTelemetry )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_gpu_tex_nr_acquire_latest_ready_requested"),
+                    latestGpuTexNrReady );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_gpu_tex_nr_acquire_mode"),
+                    latestGpuTexNrReady
+                        ? QStringLiteral("latest_ready_opt_in")
+                        : QStringLiteral("oldest_ordered_default") );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_lookahead_pruned_before_acquire"),
+                    prunedPlaybackLookaheadBeforeAcquire );
+            }
         }
     }
     if( !haveReadyFrame )
@@ -25202,9 +25680,12 @@ void MainWindow::drawFrameReady()
         && telemetryBoolValue(
             readyFrame.stageTimingTelemetry,
             "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" );
-    readyFrame.stageTimingTelemetry.insert(
-        QStringLiteral("playback_predictive_gpu_tex_nr_advance_requested"),
-        predictiveGpuTexNrEarlyAdvance );
+    if( m_playbackSmokeFrameTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_predictive_gpu_tex_nr_advance_requested"),
+            predictiveGpuTexNrEarlyAdvance );
+    }
     bool predictiveGpuTexNrEarlyAdvanceExecuted = false;
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
@@ -25212,11 +25693,82 @@ void MainWindow::drawFrameReady()
         if( !m_frameStillDrawing )
         {
             m_skipImmediateTimecodeLabel = true;
+            const bool timelineTelemetry = m_playbackSmokeTimelineTelemetry;
+            const int configuredEarlyAdvanceYieldCount =
+                mlvappGpuTexNrYieldAfterEarlyAdvanceCount();
+            const bool trackEarlyAdvanceRequest =
+                timelineTelemetry || configuredEarlyAdvanceYieldCount > 0;
+            const uint64_t expectedRequestSerial =
+                trackEarlyAdvanceRequest ? m_nextRenderRequestSerial : 0;
             const double advance_start = mlv_stage_timing_now();
+            if( trackEarlyAdvanceRequest )
+            {
+                m_playbackTimelineAdvancePending = true;
+                m_playbackTimelineExpectedRequestSerial = expectedRequestSerial;
+                m_playbackTimelineIssuedRequestSerial = 0;
+                m_playbackTimelineSourceRequestSerial = readyFrame.requestSerial;
+                m_playbackTimelineSourceFrame = static_cast<uint32_t>( display_frame );
+                m_playbackTimelineAdvanceEarly = true;
+                m_playbackTimelinePredictiveGpuTexNr = predictiveGpuTexNrEarlyAdvance;
+                m_playbackTimelineAdvanceIssueStageTime = advance_start;
+                m_playbackTimelineSourceFrameReadyEmitStageTime =
+                    readyFrame.frameReadyEmitStageTime;
+                m_playbackTimelineSourceDrawBeginStageTime = 0.0;
+            }
             timerFrameEvent( predictiveGpuTexNrEarlyAdvance );
+            const double advance_return = mlv_stage_timing_now();
             m_lastDrawFrameReadyAdvanceMs =
-                (mlv_stage_timing_now() - advance_start) * 1000.0;
+                (advance_return - advance_start) * 1000.0;
             predictiveGpuTexNrEarlyAdvanceExecuted = true;
+            const bool timelineRequestIssued =
+                trackEarlyAdvanceRequest
+                && m_playbackTimelineIssuedRequestSerial == expectedRequestSerial;
+            const int earlyAdvanceYieldCount =
+                ( timelineRequestIssued && predictiveGpuTexNrEarlyAdvance )
+                    ? configuredEarlyAdvanceYieldCount
+                    : 0;
+            double earlyAdvanceYieldMs = 0.0;
+            if( earlyAdvanceYieldCount > 0 )
+            {
+                const double yieldStart = mlv_stage_timing_now();
+                for( int i = 0; i < earlyAdvanceYieldCount; ++i )
+                {
+                    QThread::yieldCurrentThread();
+                }
+                earlyAdvanceYieldMs =
+                    ( mlv_stage_timing_now() - yieldStart ) * 1000.0;
+            }
+            if( timelineTelemetry )
+            {
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_issue_stage_time"),
+                    advance_start );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_return_stage_time"),
+                    advance_return );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_expected_serial"),
+                    static_cast<qint64>( expectedRequestSerial ) );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_issued_serial"),
+                    static_cast<qint64>(
+                        timelineRequestIssued ? expectedRequestSerial : 0 ) );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_request_issued"),
+                    timelineRequestIssued );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_yield_count"),
+                    earlyAdvanceYieldCount );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_yield_elapsed_ms"),
+                    earlyAdvanceYieldMs );
+            }
+            if( trackEarlyAdvanceRequest
+             && m_playbackTimelineAdvancePending
+             && m_playbackTimelineExpectedRequestSerial == expectedRequestSerial )
+            {
+                m_playbackTimelineAdvancePending = false;
+            }
             mlv_stage_timing_note_elapsed("drawFrameReady.advance_early",
                                           display_frame,
                                           m_lastDrawFrameReadyAdvanceMs);
@@ -25228,6 +25780,18 @@ void MainWindow::drawFrameReady()
         predictiveGpuTexNrEarlyAdvanceExecuted );
 
     const double display_start = mlv_stage_timing_now();
+    if( m_playbackSmokeTimelineTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_begin_stage_time"),
+            display_start );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_current_request_serial"),
+            static_cast<qint64>( readyFrame.requestSerial ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_current_frame_ready_emit_stage_time"),
+            readyFrame.frameReadyEmitStageTime );
+    }
     if( interactiveTraceEnabled() )
     {
         logInteractionEvent(
@@ -25540,17 +26104,31 @@ void MainWindow::drawFrameReady()
             task.preEnqueueMs );
     };
 
+    const bool gpuTexNrInlineHostInputAvailable =
+        readyFrame.gpuPlaybackReconTextureInputBayerFrame
+        && readyFrame.gpuPlaybackReconTextureInputBayerFrameSize > 0;
+    const bool gpuTexNrInlineRetainedDeviceAvailable =
+        readyFrame.gpuPlaybackReconTextureRetainedDeviceBayer16
+        && readyFrame.gpuPlaybackReconTextureRetainedDeviceWidth == sourceWidth
+        && readyFrame.gpuPlaybackReconTextureRetainedDeviceHeight == sourceHeight
+        && readyFrame.gpuPlaybackReconTextureRetainedDeviceToken != 0;
+    const bool gpuTexNrInlineStateMatches =
+        readyFrame.gpuPlaybackReconTextureState.valid
+        && readyFrame.gpuPlaybackReconTextureState.width == sourceWidth
+        && readyFrame.gpuPlaybackReconTextureState.height == sourceHeight;
     const bool inlineGpuPlaybackReconTextureNoReadbackPrep =
         ui->actionPlay->isChecked()
         && readyFrame.gpuPlaybackReconTextureNoReadbackCandidate
         && requestContext.gpuPlaybackReconTexturePresentRequested
         && requestContext.gpuPlaybackReconAmazeTexturePresentAdmitted
-        && readyFrame.gpuPlaybackReconTextureInputBayerFrame
-        && readyFrame.gpuPlaybackReconTextureInputBayerFrameSize > 0
-        && readyFrame.gpuPlaybackReconTextureState.valid
-        && telemetryBoolValue(
-            readyFrame.stageTimingTelemetry,
-            "render_thread_cpu_amaze_debayer_skipped_for_gpu_tex_nr" );
+        && gpuTexNrInlineStateMatches
+        && ( gpuTexNrInlineHostInputAvailable || gpuTexNrInlineRetainedDeviceAvailable );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_gpu_tex_nr_inline_host_input_available"),
+        gpuTexNrInlineHostInputAvailable );
+    task.readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_gpu_tex_nr_inline_retained_device_available"),
+        gpuTexNrInlineRetainedDeviceAvailable );
     const bool inlineFastPlaybackPrep =
         ui->actionPlay->isChecked()
         && ( inlineGpuPlaybackReconTextureNoReadbackPrep

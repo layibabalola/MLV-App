@@ -983,6 +983,16 @@ private:
     double m_lastDrawFrameReadyScopesMs = 0.0;
     double m_lastDrawFrameReadyOverlayMs = 0.0;
     double m_lastDrawFrameReadyTotalMs = 0.0;
+    bool m_playbackTimelineAdvancePending = false;
+    uint64_t m_playbackTimelineExpectedRequestSerial = 0;
+    uint64_t m_playbackTimelineIssuedRequestSerial = 0;
+    uint64_t m_playbackTimelineSourceRequestSerial = 0;
+    uint32_t m_playbackTimelineSourceFrame = 0;
+    bool m_playbackTimelineAdvanceEarly = false;
+    bool m_playbackTimelinePredictiveGpuTexNr = false;
+    double m_playbackTimelineAdvanceIssueStageTime = 0.0;
+    double m_playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
+    double m_playbackTimelineSourceDrawBeginStageTime = 0.0;
     double m_playbackScopeLastUpdateTime = 0.0;
     uint64_t m_playbackScopeUpdateCount = 0;
     uint64_t m_playbackScopeSkipCount = 0;
@@ -993,6 +1003,7 @@ private:
     double m_lastPlaybackAudioSyncTime = 0.0;
     bool m_playbackSmokeActive = false;
     bool m_playbackSmokeFrameTelemetry = false;
+    bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
     int m_playbackSmokeStartPosition = 0;
     int m_playbackSmokeStartCutIn = 0;
@@ -1351,7 +1362,7 @@ private:
     void playbackPrepThreadLoop( void );
     void presentPlaybackPreparedFrame( const PlaybackPrepResult &result );
     void finishPresentedFrame( uint64_t displayFrame,
-                               const RenderFrameThread::ReadyFrame &readyFrame,
+                               RenderFrameThread::ReadyFrame &readyFrame,
                                const PresentationRequestContext &requestContext,
                                const uint8_t *rgb8DisplaySource,
                                uint8_t underOver,

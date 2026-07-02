@@ -22,6 +22,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
@@ -237,6 +240,10 @@ static const GpuExportDualIsoConfig kGpuExportSupportedDualIsoConfig = {
     DISOI_MEAN23, FR_ON, FR_ON, CS_OFF
 };
 
+static const GpuExportDualIsoConfig kGpuPlaybackChromaDualIsoConfig = {
+    DISOI_MEAN23, FR_ON, FR_ON, CS_2x2
+};
+
 static void configure_gpu_export_dual_iso(MlvPipelineFixture & fixture,
                                           const GpuExportDualIsoConfig & cfg)
 {
@@ -264,6 +271,110 @@ public:
         llrpSetGpuPlaybackReconAllowedForCurrentThread(0);
     }
 };
+
+class GpuPlaybackReconTexturePresentOptIn
+{
+public:
+    explicit GpuPlaybackReconTexturePresentOptIn(bool enabled)
+    {
+        llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(
+            enabled ? 1 : 0);
+    }
+
+    ~GpuPlaybackReconTexturePresentOptIn()
+    {
+        llrpSetGpuPlaybackReconTexturePresentPreferredForCurrentThread(0);
+    }
+};
+
+class GpuPlaybackReconTexturePrepareOnlyOptIn
+{
+public:
+    explicit GpuPlaybackReconTexturePrepareOnlyOptIn(bool enabled)
+    {
+        llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(
+            enabled ? 1 : 0);
+    }
+
+    ~GpuPlaybackReconTexturePrepareOnlyOptIn()
+    {
+        llrpSetGpuPlaybackReconTexturePrepareOnlyForCurrentThread(0);
+    }
+};
+
+class OpenMpThreadCountScope
+{
+public:
+    explicit OpenMpThreadCountScope(int threads)
+        : previous_(1)
+    {
+#ifdef _OPENMP
+        previous_ = omp_get_max_threads();
+        omp_set_num_threads(threads);
+#else
+        (void)threads;
+#endif
+    }
+
+    ~OpenMpThreadCountScope()
+    {
+#ifdef _OPENMP
+        omp_set_num_threads(previous_);
+#endif
+    }
+
+private:
+    int previous_;
+};
+
+static void apply_receipt_for_raw_processing(MlvPipelineFixture & fixture,
+                                             const QString & receipt_path,
+                                             QString * error_message)
+{
+    ASSERT_TRUE(ReceiptLoader::loadFromFile(receipt_path,
+                                            &fixture.receipt(),
+                                            error_message));
+    ReceiptApplier::applyToMlv(&fixture.receipt(),
+                               fixture.video(),
+                               fixture.processing());
+    disableMlvCaching(fixture.video());
+}
+
+struct LocalRawRenderResult {
+    std::vector<uint16_t> frame;
+    int bitShift = -1;
+    int width = 0;
+    int height = 0;
+};
+
+static LocalRawRenderResult render_local_raw_with_receipt_config(
+    const QString & clip_path,
+    const QString & receipt_path,
+    const GpuExportDualIsoConfig & cfg,
+    int cpu_cores,
+    int omp_threads,
+    QString * error_message)
+{
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openClipFile(clip_path, error_message));
+    apply_receipt_for_raw_processing(fixture, receipt_path, error_message);
+    configure_gpu_export_dual_iso(fixture, cfg);
+    setMlvCpuCores(fixture.video(), cpu_cores);
+
+    LocalRawRenderResult result;
+    result.width = fixture.width();
+    result.height = fixture.height();
+    result.frame.resize(static_cast<std::size_t>(result.width)
+                        * static_cast<std::size_t>(result.height));
+    {
+        const OpenMpThreadCountScope omp_threads_scope(omp_threads);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(fixture.video(),
+                                                   0,
+                                                   result.frame.data(),
+                                                   &result.bitShift));
+    }
+    return result;
+}
 
 // Deterministic Look-Assist-style DNG metadata overrides for the parity matrix.
 // The exact values are arbitrary but fixed: both the CPU and GPU export of a case
@@ -1273,7 +1384,7 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAdmitsHqNonBaseLiveState)
     /* The live M16-1327 non-base HQ Dual ISO state (auto-corrected:
      * black_delta=960, ev_correction=4.0, is_bright={0,1,1,0}) is admitted by
      * the widened eligibility guard because it is still the proven HQ-config
-     * class (interp==1, alias==1, fullres==1, chroma==0). Admission means the
+     * class (interp==1, alias==0/1, fullres==1, chroma==0/1). Admission means the
      * bridge ATTEMPTS the backend rather than short-circuiting with
      * UNSUPPORTED_STATE. With the playback DLL pointed at a missing path the
      * backend is unavailable, so the call returns 0 with rc=-1 (generic
@@ -1307,7 +1418,7 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAdmitsHqNonBaseLiveState)
     state.interp_method = 1;
     state.use_alias_map = 1;
     state.use_fullres = 1;
-    state.chroma_smooth_method = 0;
+    state.chroma_smooth_method = 1;
     state.is_bright[0] = 0;
     state.is_bright[1] = 1;
     state.is_bright[2] = 1;
@@ -1330,6 +1441,19 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeAdmitsHqNonBaseLiveState)
     ASSERT_EQ(1, llrpGpuExportBackendAttemptedForTesting());
     ASSERT_EQ(1, llrpGpuExportBackendUnavailableForTesting());
 
+    state.use_alias_map = 0;
+    timing.available = 1;
+    rc = 123;
+    ASSERT_EQ(0, llrpGpuPlaybackReconRunGlTexture(&state,
+                                                  rawInput,
+                                                  sizeof(rawInput),
+                                                  7,
+                                                  &rc,
+                                                  &timing));
+    ASSERT_EQ(-1, rc);
+    ASSERT_NE(LLRP_GPU_PLAYBACK_RECON_RC_UNSUPPORTED_STATE, rc);
+    ASSERT_EQ(0, timing.available);
+
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
     ASSERT_EQ(1, llrpResetGpuExportBackendForTesting());
 }
@@ -1338,8 +1462,8 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsNonHqConfig)
 {
     /* Reject side of the widened guard: a genuinely non-HQ config must stay
      * fail-closed (UNSUPPORTED_STATE) even when all the level/ev scalars look
-     * like a valid HQ clip. Each of the four HQ-class flags is exercised: a
-     * non-AMaZE interp, alias map off, fullres off, and chroma smoothing on.
+     * like a valid HQ clip. Each unsupported HQ-class flag is exercised: a
+     * non-AMaZE interp, invalid alias flag, fullres off, and unsupported chroma smoothing.
      * None of these reaches the backend -- the guard short-circuits with
      * UNSUPPORTED_STATE so the CPU readback path is used. */
     static int dummy_int_lut[1] = { 0 };
@@ -1350,13 +1474,13 @@ TEST(DualIsoPipeline, GpuPlaybackReconGlTextureBridgeRejectsNonHqConfig)
 
     /* Each entry mutates exactly one HQ-class flag away from the proven class.
      * The .mark field selects which flag is non-HQ (0=interp, 1=alias,
-     * 2=fullres, 3=chroma). */
+     * 2=fullres, 3=unsupported chroma). */
     const int non_hq_cases[4][4] = {
         /* interp, alias, fullres, chroma */
         { 0, 1, 1, 0 }, /* non-AMaZE interp */
-        { 1, 0, 1, 0 }, /* alias map off    */
+        { 1, 2, 1, 0 }, /* invalid alias flag */
         { 1, 1, 0, 0 }, /* fullres off      */
-        { 1, 1, 1, 1 }, /* chroma smoothing on */
+        { 1, 1, 1, 2 }, /* unsupported chroma smoothing */
     };
 
     for(int ci = 0; ci < 4; ++ci) {
@@ -1560,6 +1684,345 @@ TEST(DualIsoPipeline, GpuPlaybackReconNoReadbackArmsOnEffectivenessNotRawFixMode
 
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
     ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, GpuPlaybackReconOutputValidationKeepsCpuOraclePath)
+{
+    /* Output validation snapshots slot.rawImage16 as the CPU oracle for GL/CUDA
+     * parity. If prepare-only is admitted, rawImage16 intentionally remains the
+     * pre-recon input, so validation can compare against a stale/raw oracle.
+     * Keep this guard in the C worker too, not only in the Qt caller scope. */
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_RECON_DLL");
+    qunsetenv("MLVAPP_GPU_EXPORT_DLL");
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT", QByteArrayLiteral("1"));
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    configure_gpu_export_supported_dual_iso(fixture);
+
+    std::vector<uint16_t> frame;
+    {
+        const GpuPlaybackReconThreadOptIn opt_in(true);
+        const GpuPlaybackReconTexturePresentOptIn texture_present(true);
+        const GpuPlaybackReconTexturePrepareOnlyOptIn prepare_only(true);
+        frame = fixture.renderFrame16(0, 1);
+    }
+
+    ASSERT_TRUE(!frame.empty());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastPrepareOnlyForTesting());
+    ASSERT_EQ(0, llrpGpuPlaybackReconLastRunAttemptedForTesting());
+    ASSERT_EQ(1, llrpGpuPlaybackReconLastStateValidForTesting());
+    ASSERT_TRUE(llrpGpuPlaybackReconGetLastInputBayer16(nullptr, 0)
+                > static_cast<size_t>(0));
+
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT");
+    ASSERT_EQ(1, llrpResetGpuPlaybackReconRunForTesting());
+}
+
+TEST(DualIsoPipeline, NormalDualIsoRawOutputStableAcrossThreadCounts)
+{
+    QString error_message;
+
+    MlvPipelineFixture serial_fixture;
+    assert_fixture_ready(serial_fixture);
+    configure_gpu_export_supported_dual_iso(serial_fixture);
+    setMlvCpuCores(serial_fixture.video(), 1);
+    std::vector<uint16_t> serial_frame(
+        static_cast<std::size_t>(serial_fixture.width())
+        * static_cast<std::size_t>(serial_fixture.height()));
+    int serial_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(1);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(serial_fixture.video(),
+                                                   0,
+                                                   serial_frame.data(),
+                                                   &serial_bit_shift));
+    }
+
+    MlvPipelineFixture threaded_fixture;
+    assert_fixture_ready(threaded_fixture);
+    configure_gpu_export_supported_dual_iso(threaded_fixture);
+    setMlvCpuCores(threaded_fixture.video(), 4);
+    std::vector<uint16_t> threaded_frame(
+        static_cast<std::size_t>(threaded_fixture.width())
+        * static_cast<std::size_t>(threaded_fixture.height()));
+    int threaded_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(4);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(threaded_fixture.video(),
+                                                   0,
+                                                   threaded_frame.data(),
+                                                   &threaded_bit_shift));
+    }
+
+    ASSERT_EQ(serial_bit_shift, threaded_bit_shift);
+    ASSERT_EQ(serial_frame.size(), threaded_frame.size());
+
+    const frame_compare_result_t compare =
+        compare_frames_u16(serial_frame.data(),
+                           threaded_frame.data(),
+                           serial_fixture.width(),
+                           serial_fixture.height(),
+                           1,
+                           0);
+    std::fprintf(stderr,
+                 "NormalDualIsoRawOutputStableAcrossThreadCounts: %s\n",
+                 frame_compare_summary(compare).c_str());
+    ASSERT_EQ(static_cast<std::uint64_t>(0),
+              compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, LocalM16RawOutputStableAcrossThreadCountsIfAvailable)
+{
+    const QString clip_path = QStringLiteral("C:/temp/MLV/M16-1327.MLV");
+    if (!QFile::exists(clip_path)) {
+        SKIP_TEST("C:/temp/MLV/M16-1327.MLV is not available on this machine.");
+        return;
+    }
+
+    QString error_message;
+
+    MlvPipelineFixture serial_fixture;
+    ASSERT_TRUE(serial_fixture.openClipFile(clip_path, &error_message));
+    ASSERT_TRUE(serial_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                           &error_message));
+    ASSERT_TRUE(serial_fixture.applyReceipt(&error_message));
+    configure_gpu_export_supported_dual_iso(serial_fixture);
+    setMlvCpuCores(serial_fixture.video(), 1);
+    std::vector<uint16_t> serial_frame(
+        static_cast<std::size_t>(serial_fixture.width())
+        * static_cast<std::size_t>(serial_fixture.height()));
+    int serial_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(1);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(serial_fixture.video(),
+                                                   0,
+                                                   serial_frame.data(),
+                                                   &serial_bit_shift));
+    }
+
+    MlvPipelineFixture threaded_fixture;
+    ASSERT_TRUE(threaded_fixture.openClipFile(clip_path, &error_message));
+    ASSERT_TRUE(threaded_fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                             &error_message));
+    ASSERT_TRUE(threaded_fixture.applyReceipt(&error_message));
+    configure_gpu_export_supported_dual_iso(threaded_fixture);
+    setMlvCpuCores(threaded_fixture.video(), 4);
+    std::vector<uint16_t> threaded_frame(
+        static_cast<std::size_t>(threaded_fixture.width())
+        * static_cast<std::size_t>(threaded_fixture.height()));
+    int threaded_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(4);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(threaded_fixture.video(),
+                                                   0,
+                                                   threaded_frame.data(),
+                                                   &threaded_bit_shift));
+    }
+
+    ASSERT_EQ(serial_bit_shift, threaded_bit_shift);
+    ASSERT_EQ(serial_frame.size(), threaded_frame.size());
+
+    const frame_compare_result_t compare =
+        compare_frames_u16(serial_frame.data(),
+                           threaded_frame.data(),
+                           serial_fixture.width(),
+                           serial_fixture.height(),
+                           1,
+                           0);
+    std::fprintf(stderr,
+                 "LocalM16RawOutputStableAcrossThreadCountsIfAvailable: %s\n",
+                 frame_compare_summary(compare).c_str());
+    ASSERT_EQ(static_cast<std::uint64_t>(0),
+              compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, LocalM16ExactReceiptRawOutputStableAcrossThreadCountsIfAvailable)
+{
+    const QString clip_path = QStringLiteral("C:/temp/MLV/M16-1327.MLV");
+    if (!QFile::exists(clip_path)) {
+        SKIP_TEST("C:/temp/MLV/M16-1327.MLV is not available on this machine.");
+        return;
+    }
+
+    const QByteArray receipt_env = qgetenv("MLVAPP_TEST_M16_RECEIPT");
+    if (receipt_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_TEST_M16_RECEIPT to a M16-1327 receipt path to run.");
+        return;
+    }
+
+    const QString receipt_path = QString::fromLocal8Bit(receipt_env);
+    if (!QFile::exists(receipt_path)) {
+        SKIP_TEST("MLVAPP_TEST_M16_RECEIPT path does not exist.");
+        return;
+    }
+
+    QString error_message;
+
+    MlvPipelineFixture serial_fixture;
+    ASSERT_TRUE(serial_fixture.openClipFile(clip_path, &error_message));
+    apply_receipt_for_raw_processing(serial_fixture, receipt_path, &error_message);
+    configure_gpu_export_dual_iso(serial_fixture, kGpuPlaybackChromaDualIsoConfig);
+    setMlvCpuCores(serial_fixture.video(), 1);
+    std::vector<uint16_t> serial_frame(
+        static_cast<std::size_t>(serial_fixture.width())
+        * static_cast<std::size_t>(serial_fixture.height()));
+    int serial_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(1);
+    ASSERT_EQ(0, getMlvRawFrameProcessedUint16(serial_fixture.video(),
+                                                   0,
+                                                   serial_frame.data(),
+                                                   &serial_bit_shift));
+    }
+
+    MlvPipelineFixture same_cores_serial_omp_fixture;
+    ASSERT_TRUE(same_cores_serial_omp_fixture.openClipFile(clip_path, &error_message));
+    apply_receipt_for_raw_processing(same_cores_serial_omp_fixture, receipt_path, &error_message);
+    configure_gpu_export_dual_iso(same_cores_serial_omp_fixture,
+                                  kGpuPlaybackChromaDualIsoConfig);
+    setMlvCpuCores(same_cores_serial_omp_fixture.video(), 4);
+    std::vector<uint16_t> same_cores_serial_omp_frame(
+        static_cast<std::size_t>(same_cores_serial_omp_fixture.width())
+        * static_cast<std::size_t>(same_cores_serial_omp_fixture.height()));
+    int same_cores_serial_omp_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(1);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(
+                         same_cores_serial_omp_fixture.video(),
+                         0,
+                         same_cores_serial_omp_frame.data(),
+                         &same_cores_serial_omp_bit_shift));
+    }
+
+    MlvPipelineFixture threaded_fixture;
+    ASSERT_TRUE(threaded_fixture.openClipFile(clip_path, &error_message));
+    apply_receipt_for_raw_processing(threaded_fixture, receipt_path, &error_message);
+    configure_gpu_export_dual_iso(threaded_fixture, kGpuPlaybackChromaDualIsoConfig);
+    setMlvCpuCores(threaded_fixture.video(), 4);
+    std::vector<uint16_t> threaded_frame(
+        static_cast<std::size_t>(threaded_fixture.width())
+        * static_cast<std::size_t>(threaded_fixture.height()));
+    int threaded_bit_shift = -1;
+    {
+        const OpenMpThreadCountScope omp_threads(4);
+        ASSERT_EQ(0, getMlvRawFrameProcessedUint16(threaded_fixture.video(),
+                                                   0,
+                                                   threaded_frame.data(),
+                                                   &threaded_bit_shift));
+    }
+
+    ASSERT_EQ(serial_bit_shift, threaded_bit_shift);
+    ASSERT_EQ(serial_bit_shift, same_cores_serial_omp_bit_shift);
+    ASSERT_EQ(serial_frame.size(), threaded_frame.size());
+    ASSERT_EQ(serial_frame.size(), same_cores_serial_omp_frame.size());
+
+    const frame_compare_result_t same_cores_serial_omp_compare =
+        compare_frames_u16(serial_frame.data(),
+                           same_cores_serial_omp_frame.data(),
+                           serial_fixture.width(),
+                           serial_fixture.height(),
+                           1,
+                           0);
+    const frame_compare_result_t compare =
+        compare_frames_u16(serial_frame.data(),
+                           threaded_frame.data(),
+                           serial_fixture.width(),
+                           serial_fixture.height(),
+                           1,
+                           0);
+    std::fprintf(stderr,
+                 "LocalM16ExactReceiptRawOutputStableAcrossThreadCountsIfAvailable "
+                 "(cores4+omp1): %s\n",
+                 frame_compare_summary(same_cores_serial_omp_compare).c_str());
+    std::fprintf(stderr,
+                 "LocalM16ExactReceiptRawOutputStableAcrossThreadCountsIfAvailable "
+                 "(cores4+omp4): %s\n",
+                 frame_compare_summary(compare).c_str());
+    ASSERT_EQ(static_cast<std::uint64_t>(0),
+              same_cores_serial_omp_compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0),
+              same_cores_serial_omp_compare.max_abs_diff);
+    ASSERT_EQ(static_cast<std::uint64_t>(0),
+              compare.pixels_exceeding_tolerance);
+    ASSERT_EQ(static_cast<std::uint16_t>(0), compare.max_abs_diff);
+}
+
+TEST(DualIsoPipeline, LocalM16GpuPlaybackConfigMatrixStableAcrossOpenMpIfAvailable)
+{
+    const QString clip_path = QStringLiteral("C:/temp/MLV/M16-1327.MLV");
+    if (!QFile::exists(clip_path)) {
+        SKIP_TEST("C:/temp/MLV/M16-1327.MLV is not available on this machine.");
+        return;
+    }
+
+    const QByteArray receipt_env = qgetenv("MLVAPP_TEST_M16_RECEIPT");
+    if (receipt_env.isEmpty()) {
+        SKIP_TEST("Set MLVAPP_TEST_M16_RECEIPT to a M16-1327 receipt path to run.");
+        return;
+    }
+
+    const QString receipt_path = QString::fromLocal8Bit(receipt_env);
+    if (!QFile::exists(receipt_path)) {
+        SKIP_TEST("MLVAPP_TEST_M16_RECEIPT path does not exist.");
+        return;
+    }
+
+    struct MatrixCase {
+        const char * name;
+        GpuExportDualIsoConfig cfg;
+    };
+    const MatrixCase cases[] = {
+        { "mean23-alias1-fullres1-cs0", { DISOI_MEAN23, FR_ON,  FR_ON,  CS_OFF } },
+        { "mean23-alias0-fullres1-cs1", { DISOI_MEAN23, FR_OFF, FR_ON,  CS_2x2 } },
+        { "mean23-alias1-fullres0-cs1", { DISOI_MEAN23, FR_ON,  FR_OFF, CS_2x2 } },
+        { "mean23-alias1-fullres1-cs1", { DISOI_MEAN23, FR_ON,  FR_ON,  CS_2x2 } },
+    };
+
+    QString error_message;
+    bool failed = false;
+    for (const MatrixCase & c : cases) {
+        const LocalRawRenderResult serial =
+            render_local_raw_with_receipt_config(clip_path,
+                                                 receipt_path,
+                                                 c.cfg,
+                                                 4,
+                                                 1,
+                                                 &error_message);
+        const LocalRawRenderResult threaded =
+            render_local_raw_with_receipt_config(clip_path,
+                                                 receipt_path,
+                                                 c.cfg,
+                                                 4,
+                                                 4,
+                                                 &error_message);
+        ASSERT_EQ(serial.bitShift, threaded.bitShift);
+        ASSERT_EQ(serial.frame.size(), threaded.frame.size());
+        const frame_compare_result_t compare =
+            compare_frames_u16(serial.frame.data(),
+                               threaded.frame.data(),
+                               serial.width,
+                               serial.height,
+                               1,
+                               0);
+        std::fprintf(stderr,
+                     "LocalM16GpuPlaybackConfigMatrixStableAcrossOpenMpIfAvailable "
+                     "%s: %s\n",
+                     c.name,
+                     frame_compare_summary(compare).c_str());
+        if (compare.pixels_exceeding_tolerance != 0
+         || compare.max_abs_diff != 0) {
+            failed = true;
+        }
+    }
+
+    ASSERT_FALSE(failed);
 }
 
 TEST(DualIsoPipeline, GpuPlaybackReconCudaReadbackMatchesCpuWhenBackendAvailable)
@@ -8961,7 +9424,8 @@ TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForFastX2)
     ASSERT_FALSE(scaled.empty());
     ASSERT_EQ(std::string("none"),
               std::string(mlv_phase4bv2_last_fallback_reason()));
-    ASSERT_EQ(2, mlv_phase4bv2_last_path_taken());
+    /* x2 full-XY uses path 4; path 2 is the x4 X-only fallback. */
+    ASSERT_EQ(4, mlv_phase4bv2_last_path_taken());
 }
 
 TEST(DualIsoPipeline, DualIsoPlaybackUsesFastHqPathForAggressiveX4)

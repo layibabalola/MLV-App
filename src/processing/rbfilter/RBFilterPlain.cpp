@@ -573,6 +573,62 @@ void CRBFilterPlain::filter(uint16_t* __restrict img_src, uint16_t* __restrict i
         double vertical_up_body_store_color_prev_ms = 0.0;
         double vertical_up_body_store_color_assign_ms = 0.0;
 
+        if( !timing_enabled )
+        {
+            if( rgb3 )
+            {
+                for (int y = 1; y < height; y++)
+                {
+                    for (int x = 0; x < width-1; x++)
+                    {
+                        src_color -= channel;
+                        src_color_prev -= channel;
+                        int diff = getDiffFactorRgb3(src_color, src_color_prev);
+
+                        float alpha_f = range_table_f[diff];
+
+                        *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+
+                        const float src_term_0 = inv_alpha_f * (*src_color_hor--);
+                        const float prev_term_0 = alpha_f * (*prev_color--);
+                        *up_pass_color-- = src_term_0 + prev_term_0;
+
+                        const float src_term_1 = inv_alpha_f * (*src_color_hor--);
+                        const float prev_term_1 = alpha_f * (*prev_color--);
+                        *up_pass_color-- = src_term_1 + prev_term_1;
+
+                        const float src_term_2 = inv_alpha_f * (*src_color_hor--);
+                        const float prev_term_2 = alpha_f * (*prev_color--);
+                        *up_pass_color-- = src_term_2 + prev_term_2;
+                    }
+                }
+            }
+            else
+            {
+                for (int y = 1; y < height; y++)
+                {
+                    for (int x = 0; x < width-1; x++)
+                    {
+                        src_color -= channel;
+                        src_color_prev -= channel;
+                        int diff = getDiffFactor(src_color, src_color_prev);
+
+                        float alpha_f = range_table_f[diff];
+
+                        *up_pass_factor-- = inv_alpha_f + alpha_f * (*prev_factor--);
+
+                        for (int c = 0; c < channel; c++)
+                        {
+                            const float src_term = inv_alpha_f * (*src_color_hor--);
+                            const float prev_term = alpha_f * (*prev_color--);
+                            *up_pass_color-- = src_term + prev_term;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         // handle other lines
         if( rgb3 )
         {

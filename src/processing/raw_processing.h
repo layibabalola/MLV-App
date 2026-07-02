@@ -41,6 +41,12 @@ int processingGetShadowsHighlightsBlurData(const processingObject_t * processing
                                            int * width,
                                            int * height,
                                            int * curveIndexMask);
+int processingRefreshShadowsHighlightsBlurFromRgb16(processingObject_t * processing,
+                                                    uint16_t * inputImage,
+                                                    int width,
+                                                    int height,
+                                                    int threads,
+                                                    int forceExportPolicy);
 #ifdef __cplusplus
 }
 #endif
@@ -136,6 +142,14 @@ void processingSetPlaybackPreviewScaleFactor(int scaleFactor);
 int processingPlaybackPreviewScaleFactor(void);
 void processingResetShadowsHighlightsProbeModeCacheForTesting(void);
 void processingResetShadowsHighlightsQuarterresEnvCacheForTesting(void);
+int processingRgbU16UpsampleExact2xMatchesGenericForTesting(const uint16_t * src,
+                                                            int src_w,
+                                                            int src_h,
+                                                            int threads);
+int processingRgbU16DownsampleExact4xMatchesTwoStepForTesting(const uint16_t * src,
+                                                              int src_w,
+                                                              int src_h,
+                                                              int threads);
 void applyProcessingObject8( processingObject_t * processing,
                              int imageX, int imageY,
                              uint16_t * __restrict inputImage,

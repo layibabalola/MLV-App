@@ -4743,6 +4743,12 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
             }
         }
         if (!mlvPlaybackAggressivePreviewMode()
+         && mlv_phase4bv2_allow_fast_hq_via_env(scaleFactor)
+         && mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
+        {
+            return 1;
+        }
+        if (!mlvPlaybackAggressivePreviewMode()
          && mlv_quarterres_x2_preview_enabled()
          && mlv_render_scaled_rgb16_x2_quarter_preview_core(video, frameIndex, NULL, outputFrame, threads,
                                                             /*upscale_to_out*/1, NULL, NULL))
@@ -6095,6 +6101,7 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
                                                                                 uint8_t * outputFrame,
                                                                                 int threads,
                                                                                 int scaleFactor,
+                                                                                int allowScale1StateDebayer,
                                                                                 int recordTelemetry)
 {
     if (!video || !reconnedRawFrame || !outputFrame || !processing) return 0;
@@ -6106,8 +6113,11 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
 
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_frame_size);
-    if (!unprocessed_frame || eff_scale <= 1)
+    const uint64_t rgb_buf_words = (eff_scale > 1)
+        ? rgb_frame_size
+        : (uint64_t)full_w * (uint64_t)full_h * 3u;
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_buf_words);
+    if (!unprocessed_frame || (eff_scale <= 1 && !allowScale1StateDebayer))
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
         return 0;
@@ -6124,7 +6134,17 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
-    if (eff_scale == 4)
+    if (eff_scale == 1)
+    {
+        /* CUDA no-readback x1 presents from the retained reconstructed Bayer
+         * on the GPU. This render is only the fresh Look Assist frame-state
+         * producer, so avoid the full CPU AMaZE fallback that otherwise
+         * dominates the path; the displayed pixels still come from the CUDA
+         * AMaZE/device-Bayer presenter. */
+        debayerBasicU16(unprocessed_frame, reconnedRawFrame, full_w, full_h,
+                        threads, bit_shift);
+    }
+    else if (eff_scale == 4)
     {
         pl_downsample_bayer_to_rgb_4x(reconnedRawFrame, full_w, full_h,
                                       unprocessed_frame, bit_shift, threads);
@@ -7085,7 +7105,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                  const uint16_t * reconnedRawFrame,
                                                  uint8_t * outputFrame,
                                                  int threads,
-                                                 int scaleFactor)
+                                                 int scaleFactor,
+                                                 int allowScale1StateDebayer)
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
@@ -7118,7 +7139,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
     const int out_w = (normalizedScale > 1) ? (full_w / normalizedScale) : full_w;
     const int out_h = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
-    if (!mlv_can_use_direct_processed_frame8_path(video) || normalizedScale <= 1)
+    if (!mlv_can_use_direct_processed_frame8_path(video)
+     || (normalizedScale <= 1 && !allowScale1StateDebayer))
     {
         processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
@@ -7140,6 +7162,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                                               outputFrame,
                                                                               threads,
                                                                               normalizedScale,
+                                                                              allowScale1StateDebayer,
                                                                               1))
     {
         pthread_mutex_lock(&video->processed8_prefetch_mutex);

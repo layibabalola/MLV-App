@@ -110,7 +110,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                  const uint16_t * reconnedRawFrame,
                                                  uint8_t * outputFrame,
                                                  int threads,
-                                                 int scaleFactor);
+                                                 int scaleFactor,
+                                                 int allowScale1StateDebayer);
 void getMlvProcessedFrame16Scaled(mlvObject_t * video,
                                   uint64_t frameIndex,
                                   uint16_t * outputFrame,
