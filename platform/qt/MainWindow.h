@@ -993,6 +993,10 @@ private:
     double m_playbackTimelineAdvanceIssueStageTime = 0.0;
     double m_playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
     double m_playbackTimelineSourceDrawBeginStageTime = 0.0;
+    double m_lastDrawFrameEntryStageTime = 0.0;
+    double m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
+    double m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
+    double m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
     double m_playbackScopeLastUpdateTime = 0.0;
     uint64_t m_playbackScopeUpdateCount = 0;
     uint64_t m_playbackScopeSkipCount = 0;

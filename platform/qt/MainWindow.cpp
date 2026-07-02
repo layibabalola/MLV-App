@@ -5877,6 +5877,10 @@ void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
 //Draw a raw picture to the gui -> start render thread
 void MainWindow::drawFrame( bool updateTimecodeLabel )
 {
+    m_lastDrawFrameEntryStageTime = mlv_stage_timing_now();
+    m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
+    m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
+    m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
     m_frameStillDrawing = true;
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
     if( !playbackPolicyActive()
@@ -5972,9 +5976,14 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     m_lastQueuedPlaybackProcessingReason.clear();
     if( m_renderThreadUsingGpuPreviewProcessing || playbackProcessingSelected )
     {
+        m_lastDrawFrameGpuPreviewConfigBeginStageTime = mlv_stage_timing_now();
         m_lastQueuedGpuPreviewProcessingConfig =
             gpuPreviewProcessingBuildConfig( m_pProcessingObject,
                                             &m_lastQueuedPlaybackProcessingReason );
+        m_lastDrawFrameGpuPreviewConfigEndStageTime = mlv_stage_timing_now();
+        m_lastDrawFrameGpuPreviewConfigBuildMs =
+            ( m_lastDrawFrameGpuPreviewConfigEndStageTime
+              - m_lastDrawFrameGpuPreviewConfigBeginStageTime ) * 1000.0;
     }
     if( playbackProcessingSelected
      && !m_renderThreadUsingGpuPreviewProcessing
@@ -21898,6 +21907,61 @@ void MainWindow::notePlaybackSmokePresentedFrame(
               - presentDrawPresentMs
               - presentOverlaysScopesMs
               - presentRenderSlotReleaseMs );
+    const auto stageDurationMs = []( double earlier, double later ) -> double
+    {
+        return ( earlier > 0.0 && later >= earlier )
+            ? ( later - earlier ) * 1000.0
+            : 0.0;
+    };
+    const double uiSignalFrameReadyEmitStage =
+        telemetryDoubleValue( timing, "frame_ready_emit_stage_time" );
+    const double uiSignalDrawReadyEntryStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_entry_stage_time" );
+    const double uiSignalDrawReadyAfterPruneStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_after_prune_stage_time" );
+    const double uiSignalDrawReadyAfterAcquireStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_after_acquire_stage_time" );
+    const double uiSignalDrawReadyAfterConsumeStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_after_consume_stage_time" );
+    const double uiSignalDrawReadyBeforeEarlyAdvanceStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_before_early_advance_stage_time" );
+    const double uiSignalDrawReadyAfterEarlyAdvanceStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_draw_ready_after_early_advance_stage_time" );
+    const double uiSignalDrawBeginStage =
+        telemetryDoubleValue( timing, "playback_timeline_draw_begin_stage_time" );
+    const double uiSignalFrameReadyToSlotMs =
+        stageDurationMs( uiSignalFrameReadyEmitStage,
+                         uiSignalDrawReadyEntryStage );
+    const double uiSignalPruneMs =
+        stageDurationMs( uiSignalDrawReadyEntryStage,
+                         uiSignalDrawReadyAfterPruneStage );
+    const double uiSignalAcquireMs =
+        stageDurationMs( uiSignalDrawReadyAfterPruneStage,
+                         uiSignalDrawReadyAfterAcquireStage );
+    const double uiSignalConsumeMs =
+        stageDurationMs( uiSignalDrawReadyAfterAcquireStage,
+                         uiSignalDrawReadyAfterConsumeStage );
+    const double uiSignalPreEarlyAdvanceMs =
+        stageDurationMs( uiSignalDrawReadyAfterConsumeStage,
+                         uiSignalDrawReadyBeforeEarlyAdvanceStage );
+    const double uiSignalEarlyAdvanceMs =
+        stageDurationMs( uiSignalDrawReadyBeforeEarlyAdvanceStage,
+                         uiSignalDrawReadyAfterEarlyAdvanceStage );
+    const double uiSignalPostEarlyToDrawBeginMs =
+        stageDurationMs( uiSignalDrawReadyAfterEarlyAdvanceStage,
+                         uiSignalDrawBeginStage );
+    const double uiSignalSlotToDrawBeginMs =
+        stageDurationMs( uiSignalDrawReadyEntryStage, uiSignalDrawBeginStage );
+    const double uiSignalEarlyAdvanceGpuPreviewConfigBuildMs =
+        telemetryDoubleValue(
+            timing,
+            "playback_timeline_early_advance_gpu_preview_config_build_ms" );
     const double processed16SetupMs = processingSetupMs;
     const double processed16CoreMathMs = processingCoreMs;
     const double processed16LocalToneMs =
@@ -22477,11 +22541,46 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        timing, "playback_timeline_source_frame_ready_emit_stage_time" ), 0, 'f', 9 )
                    .arg( telemetryDoubleValue(
                        timing, "playback_timeline_source_draw_begin_stage_time" ), 0, 'f', 9 )
-                   .arg( telemetryDoubleValue(
-                       timing, "render_thread_request_issue_to_start_ms" ), 0, 'f', 3 )
+                       .arg( telemetryDoubleValue(
+                           timing, "render_thread_request_issue_to_start_ms" ), 0, 'f', 3 )
                        .arg( queueWaitMs, 0, 'f', 3 )
                        .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
                        .arg( drawTotalMs, 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.ui_signal session=%1 index=%2 serial=%3 "
+                   "display_frame=%4 frame_ready_emit_stage=%5 "
+                   "draw_ready_entry_stage=%6 after_prune_stage=%7 "
+                   "after_acquire_stage=%8 after_consume_stage=%9 "
+                   "before_early_stage=%10 after_early_stage=%11 "
+                   "draw_begin_stage=%12 frame_ready_to_slot_ms=%13 "
+                   "prune_ms=%14 acquire_ms=%15 consume_ms=%16 "
+                   "pre_early_ms=%17 early_advance_ms=%18 "
+                   "post_early_to_draw_begin_ms=%19 slot_to_draw_begin_ms=%20 "
+                   "frame_ready_to_draw_begin_ms=%21 "
+                   "early_gpu_preview_config_build_ms=%22" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( static_cast<qulonglong>( displayFrame ) )
+                   .arg( uiSignalFrameReadyEmitStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyEntryStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyAfterPruneStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyAfterAcquireStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyAfterConsumeStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyBeforeEarlyAdvanceStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawReadyAfterEarlyAdvanceStage, 0, 'f', 9 )
+                   .arg( uiSignalDrawBeginStage, 0, 'f', 9 )
+                   .arg( uiSignalFrameReadyToSlotMs, 0, 'f', 3 )
+                   .arg( uiSignalPruneMs, 0, 'f', 3 )
+                   .arg( uiSignalAcquireMs, 0, 'f', 3 )
+                   .arg( uiSignalConsumeMs, 0, 'f', 3 )
+                   .arg( uiSignalPreEarlyAdvanceMs, 0, 'f', 3 )
+                   .arg( uiSignalEarlyAdvanceMs, 0, 'f', 3 )
+                   .arg( uiSignalPostEarlyToDrawBeginMs, 0, 'f', 3 )
+                   .arg( uiSignalSlotToDrawBeginMs, 0, 'f', 3 )
+                   .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
+                   .arg( uiSignalEarlyAdvanceGpuPreviewConfigBuildMs, 0, 'f', 3 );
             qInfo().noquote()
                 << QStringLiteral(
                        "playback_smoke.phase3_queue session=%1 index=%2 serial=%3 "
@@ -25381,6 +25480,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
 //Draw the frame when render thread is ready
 void MainWindow::drawFrameReady()
 {
+    const double drawReadyEntryStageTime = mlv_stage_timing_now();
     RenderFrameThread::ReadyFrame readyFrame;
     PresentationRequestContext requestContext;
     bool haveReadyFrame = false;
@@ -25426,6 +25526,7 @@ void MainWindow::drawFrameReady()
             }
         }
     }
+    const double drawReadyAfterPruneStageTime = mlv_stage_timing_now();
     if( m_pRenderThread )
     {
         const bool gpuTexNrReadyBacklogTelemetry =
@@ -25496,6 +25597,7 @@ void MainWindow::drawFrameReady()
             }
         }
     }
+    const double drawReadyAfterAcquireStageTime = mlv_stage_timing_now();
     if( !haveReadyFrame )
     {
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
@@ -25529,6 +25631,7 @@ void MainWindow::drawFrameReady()
     }
 
     consumePresentationRequest( readyFrame.requestSerial, nullptr );
+    const double drawReadyAfterConsumeStageTime = mlv_stage_timing_now();
     requestContext = readyFrame.presentationContext;
     if( requestContext.presentationGeneration != activeGeneration )
     {
@@ -25686,6 +25789,7 @@ void MainWindow::drawFrameReady()
             QStringLiteral("playback_predictive_gpu_tex_nr_advance_requested"),
             predictiveGpuTexNrEarlyAdvance );
     }
+    const double drawReadyBeforeEarlyAdvanceStageTime = mlv_stage_timing_now();
     bool predictiveGpuTexNrEarlyAdvanceExecuted = false;
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
@@ -25701,6 +25805,10 @@ void MainWindow::drawFrameReady()
             const uint64_t expectedRequestSerial =
                 trackEarlyAdvanceRequest ? m_nextRenderRequestSerial : 0;
             const double advance_start = mlv_stage_timing_now();
+            m_lastDrawFrameEntryStageTime = 0.0;
+            m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
+            m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
+            m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
             if( trackEarlyAdvanceRequest )
             {
                 m_playbackTimelineAdvancePending = true;
@@ -25762,6 +25870,18 @@ void MainWindow::drawFrameReady()
                 readyFrame.stageTimingTelemetry.insert(
                     QStringLiteral("playback_timeline_early_advance_yield_elapsed_ms"),
                     earlyAdvanceYieldMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_draw_frame_entry_stage_time"),
+                    m_lastDrawFrameEntryStageTime );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_gpu_preview_config_begin_stage_time"),
+                    m_lastDrawFrameGpuPreviewConfigBeginStageTime );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_gpu_preview_config_end_stage_time"),
+                    m_lastDrawFrameGpuPreviewConfigEndStageTime );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_gpu_preview_config_build_ms"),
+                    m_lastDrawFrameGpuPreviewConfigBuildMs );
             }
             if( trackEarlyAdvanceRequest
              && m_playbackTimelineAdvancePending
@@ -25775,6 +25895,7 @@ void MainWindow::drawFrameReady()
             m_skipImmediateTimecodeLabel = false;
         }
     }
+    const double drawReadyAfterEarlyAdvanceStageTime = mlv_stage_timing_now();
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_predictive_gpu_tex_nr_advance_executed"),
         predictiveGpuTexNrEarlyAdvanceExecuted );
@@ -25782,6 +25903,24 @@ void MainWindow::drawFrameReady()
     const double display_start = mlv_stage_timing_now();
     if( m_playbackSmokeTimelineTelemetry )
     {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_entry_stage_time"),
+            drawReadyEntryStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_after_prune_stage_time"),
+            drawReadyAfterPruneStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_after_acquire_stage_time"),
+            drawReadyAfterAcquireStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_after_consume_stage_time"),
+            drawReadyAfterConsumeStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_before_early_advance_stage_time"),
+            drawReadyBeforeEarlyAdvanceStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_draw_ready_after_early_advance_stage_time"),
+            drawReadyAfterEarlyAdvanceStageTime );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_timeline_draw_begin_stage_time"),
             display_start );
