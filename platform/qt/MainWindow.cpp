@@ -21402,6 +21402,11 @@ void MainWindow::beginPlaybackSmokeTelemetry( void )
     m_playbackSmokeStartAudioSyncApplied = m_playbackAudioSyncAppliedCount;
     m_playbackSmokeStartAudioSyncSkipped = m_playbackAudioSyncSkippedCount;
     m_playbackSmokeStartTime = mlv_stage_timing_now();
+    m_guiBusyProbeSessionId = 0;
+    m_guiBusyProbeRequestSerial = 0;
+    m_guiBusyProbeDisplayFrame = 0;
+    m_guiBusyProbeScheduleStageTime = 0.0;
+    m_guiBusyProbeFiredStageTime = 0.0;
     m_playbackSmokeLastPresentedTime = 0.0;
     m_playbackSmokeFirstPresentMs = 0.0;
     m_playbackSmokePresentedIntervalSumMs = 0.0;
@@ -22070,6 +22075,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     };
     const double uiSignalFrameReadyEmitStage =
         telemetryDoubleValue( timing, "frame_ready_emit_stage_time" );
+    const double uiSignalFrameReadyTrueEmitStage =
+        telemetryDoubleValue( timing, "frame_ready_true_emit_stage_time" );
+    const double uiSignalFrameReadyEmitToTrueEmitMs =
+        stageDurationMs( uiSignalFrameReadyEmitStage,
+                         uiSignalFrameReadyTrueEmitStage );
+    const int uiSignalFrameReadyEmitRequestSerial =
+        telemetryIntValue( timing, "frame_ready_emit_request_serial" );
+    const bool uiSignalFrameReadyEmitSerialMatch =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_current_frame_ready_emit_serial_match" );
     const double uiSignalDrawReadyEntryStage =
         telemetryDoubleValue(
             timing, "playback_timeline_draw_ready_entry_stage_time" );
@@ -22092,6 +22108,9 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue( timing, "playback_timeline_draw_begin_stage_time" );
     const double uiSignalFrameReadyToSlotMs =
         stageDurationMs( uiSignalFrameReadyEmitStage,
+                         uiSignalDrawReadyEntryStage );
+    const double uiSignalTrueFrameReadyToSlotMs =
+        stageDurationMs( uiSignalFrameReadyTrueEmitStage,
                          uiSignalDrawReadyEntryStage );
     const double uiSignalPruneMs =
         stageDurationMs( uiSignalDrawReadyEntryStage,
@@ -22121,6 +22140,42 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryBoolValue(
             timing,
             "playback_timeline_early_advance_gpu_preview_config_cache_hit" );
+    const int uiSignalPreviousGuiBusyProbeSerial =
+        telemetryIntValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_serial" );
+    const int uiSignalPreviousGuiBusyProbeFrame =
+        telemetryIntValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_frame" );
+    const double uiSignalPreviousGuiBusyProbeScheduleStage =
+        telemetryDoubleValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_schedule_stage_time" );
+    const double uiSignalPreviousGuiBusyProbeFiredStage =
+        telemetryDoubleValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_fired_stage_time" );
+    const bool uiSignalPreviousGuiBusyProbeFired =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_fired" );
+    const bool uiSignalPreviousGuiBusyProbePendingAtEntry =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_pending_at_entry" );
+    const bool uiSignalTrueEmitDuringPreviousGuiBusyProbe =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_true_emit_during_previous_gui_busy_probe" );
+    const bool uiSignalSlotEntryBeforePreviousGuiIdleProbe =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_slot_entry_before_previous_gui_idle_probe" );
+    const double uiSignalPreviousGuiBusyProbePendingMs =
+        telemetryDoubleValue(
+            timing,
+            "playback_timeline_gui_busy_probe_previous_pending_ms" );
     const double processed16SetupMs = processingSetupMs;
     const double processed16CoreMathMs = processingCoreMs;
     const double processed16LocalToneMs =
@@ -22742,6 +22797,39 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
                    .arg( uiSignalEarlyAdvanceGpuPreviewConfigBuildMs, 0, 'f', 3 )
                    .arg( bool01( uiSignalEarlyAdvanceGpuPreviewConfigCacheHit ) );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.dispatch_probe session=%1 index=%2 serial=%3 "
+                   "display_frame=%4 frame_ready_emit_stage=%5 "
+                   "frame_ready_true_emit_stage=%6 emit_to_true_emit_ms=%7 "
+                   "frame_ready_to_slot_ms=%8 true_frame_ready_to_slot_ms=%9 "
+                   "emit_request_serial=%10 emit_serial_match=%11 "
+                   "prev_probe_serial=%12 prev_probe_frame=%13 "
+                   "prev_probe_schedule_stage=%14 prev_probe_fired_stage=%15 "
+                   "prev_probe_fired=%16 prev_probe_pending_at_entry=%17 "
+                   "true_emit_during_prev_probe=%18 "
+                   "slot_entry_before_prev_probe_fired=%19 "
+                   "prev_probe_pending_ms=%20" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( static_cast<qulonglong>( displayFrame ) )
+                   .arg( uiSignalFrameReadyEmitStage, 0, 'f', 9 )
+                   .arg( uiSignalFrameReadyTrueEmitStage, 0, 'f', 9 )
+                   .arg( uiSignalFrameReadyEmitToTrueEmitMs, 0, 'f', 3 )
+                   .arg( uiSignalFrameReadyToSlotMs, 0, 'f', 3 )
+                   .arg( uiSignalTrueFrameReadyToSlotMs, 0, 'f', 3 )
+                   .arg( uiSignalFrameReadyEmitRequestSerial )
+                   .arg( bool01( uiSignalFrameReadyEmitSerialMatch ) )
+                   .arg( uiSignalPreviousGuiBusyProbeSerial )
+                   .arg( uiSignalPreviousGuiBusyProbeFrame )
+                   .arg( uiSignalPreviousGuiBusyProbeScheduleStage, 0, 'f', 9 )
+                   .arg( uiSignalPreviousGuiBusyProbeFiredStage, 0, 'f', 9 )
+                   .arg( bool01( uiSignalPreviousGuiBusyProbeFired ) )
+                   .arg( bool01( uiSignalPreviousGuiBusyProbePendingAtEntry ) )
+                   .arg( bool01( uiSignalTrueEmitDuringPreviousGuiBusyProbe ) )
+                   .arg( bool01( uiSignalSlotEntryBeforePreviousGuiIdleProbe ) )
+                   .arg( uiSignalPreviousGuiBusyProbePendingMs, 0, 'f', 3 );
             qInfo().noquote()
                 << QStringLiteral(
                        "playback_smoke.phase3_queue session=%1 index=%2 serial=%3 "
@@ -26066,6 +26154,36 @@ void MainWindow::drawFrameReady()
         predictiveGpuTexNrEarlyAdvanceExecuted );
 
     const double display_start = mlv_stage_timing_now();
+    const double frameReadyTrueEmitStageTime =
+        readyFrame.frameReadyTrueEmitStageTime > 0.0
+            ? readyFrame.frameReadyTrueEmitStageTime
+            : readyFrame.frameReadyEmitStageTime;
+    const bool frameReadyEmitSerialMatch =
+        readyFrame.frameReadyEmitRequestSerial == readyFrame.requestSerial;
+    const bool previousGuiBusyProbeSameSession =
+        m_guiBusyProbeSessionId == m_playbackSmokeSessionId;
+    const bool previousGuiBusyProbeScheduled =
+        previousGuiBusyProbeSameSession
+        && m_guiBusyProbeScheduleStageTime > 0.0;
+    const bool previousGuiBusyProbeFired =
+        previousGuiBusyProbeScheduled
+        && m_guiBusyProbeFiredStageTime >= m_guiBusyProbeScheduleStageTime;
+    const bool previousGuiBusyProbePendingAtEntry =
+        previousGuiBusyProbeScheduled && !previousGuiBusyProbeFired;
+    const double previousGuiBusyProbePendingMs =
+        previousGuiBusyProbeFired
+            ? ( m_guiBusyProbeFiredStageTime
+                - m_guiBusyProbeScheduleStageTime ) * 1000.0
+            : 0.0;
+    const bool trueEmitDuringPreviousGuiBusyProbe =
+        previousGuiBusyProbeScheduled
+        && frameReadyTrueEmitStageTime >= m_guiBusyProbeScheduleStageTime
+        && ( !previousGuiBusyProbeFired
+             || frameReadyTrueEmitStageTime <= m_guiBusyProbeFiredStageTime );
+    const bool slotEntryBeforePreviousGuiIdleProbe =
+        previousGuiBusyProbeScheduled
+        && ( !previousGuiBusyProbeFired
+             || drawReadyEntryStageTime <= m_guiBusyProbeFiredStageTime );
     if( m_playbackSmokeTimelineTelemetry )
     {
         readyFrame.stageTimingTelemetry.insert(
@@ -26095,6 +26213,68 @@ void MainWindow::drawFrameReady()
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_timeline_current_frame_ready_emit_stage_time"),
             readyFrame.frameReadyEmitStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_current_frame_ready_true_emit_stage_time"),
+            frameReadyTrueEmitStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_current_frame_ready_emit_request_serial"),
+            static_cast<qint64>( readyFrame.frameReadyEmitRequestSerial ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_current_frame_ready_emit_serial_match"),
+            frameReadyEmitSerialMatch );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_serial"),
+            static_cast<qint64>( m_guiBusyProbeRequestSerial ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_frame"),
+            static_cast<qint64>( m_guiBusyProbeDisplayFrame ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_schedule_stage_time"),
+            previousGuiBusyProbeScheduled ? m_guiBusyProbeScheduleStageTime : 0.0 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_fired_stage_time"),
+            previousGuiBusyProbeFired ? m_guiBusyProbeFiredStageTime : 0.0 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_fired"),
+            previousGuiBusyProbeFired );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_pending_at_entry"),
+            previousGuiBusyProbePendingAtEntry );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_true_emit_during_previous_gui_busy_probe"),
+            trueEmitDuringPreviousGuiBusyProbe );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_slot_entry_before_previous_gui_idle_probe"),
+            slotEntryBeforePreviousGuiIdleProbe );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_previous_pending_ms"),
+            previousGuiBusyProbePendingMs );
+
+        m_guiBusyProbeSessionId = m_playbackSmokeSessionId;
+        m_guiBusyProbeRequestSerial = readyFrame.requestSerial;
+        m_guiBusyProbeDisplayFrame = display_frame;
+        m_guiBusyProbeScheduleStageTime = display_start;
+        m_guiBusyProbeFiredStageTime = 0.0;
+        const uint64_t probeSessionId = m_guiBusyProbeSessionId;
+        const uint64_t probeRequestSerial = m_guiBusyProbeRequestSerial;
+        const double probeScheduleStageTime = m_guiBusyProbeScheduleStageTime;
+        QTimer::singleShot( 0, this,
+                            [this,
+                             probeSessionId,
+                             probeRequestSerial,
+                             probeScheduleStageTime]()
+        {
+            if( m_guiBusyProbeSessionId != probeSessionId
+             || m_guiBusyProbeRequestSerial != probeRequestSerial
+             || m_guiBusyProbeScheduleStageTime != probeScheduleStageTime )
+            {
+                return;
+            }
+            m_guiBusyProbeFiredStageTime = mlv_stage_timing_now();
+        } );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_gui_busy_probe_schedule_stage_time"),
+            m_guiBusyProbeScheduleStageTime );
     }
     if( interactiveTraceEnabled() )
     {

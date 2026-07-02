@@ -1273,6 +1273,8 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
         frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
         frame->frameReadyEmitStageTime = slot.frameReadyEmitStageTime;
+        frame->frameReadyTrueEmitStageTime = slot.frameReadyTrueEmitStageTime;
+        frame->frameReadyEmitRequestSerial = slot.frameReadyEmitRequestSerial;
         frame->processedFrame8Active = slot.processedFrame8Active;
         frame->processedFrame8Signature = slot.processedFrame8Signature;
         frame->processedFrame16Active = slot.processedFrame16Active;
@@ -2342,6 +2344,20 @@ void RenderFrameThread::runPhase3( void )
                                  "phase3-decoded" );
         }
         publishRenderedSlot( slotIndex, request, activePhase3Mode );
+        const double frameReadyTrueEmitStageTime = mlv_stage_timing_now();
+        m_frameSlots[slotIndex].frameReadyTrueEmitStageTime =
+            frameReadyTrueEmitStageTime;
+        m_frameSlots[slotIndex].frameReadyEmitRequestSerial =
+            request.requestSerial;
+        if( playbackSmokeTimelineTelemetryEnabled() )
+        {
+            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
+                QStringLiteral("frame_ready_true_emit_stage_time"),
+                frameReadyTrueEmitStageTime );
+            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
+                QStringLiteral("frame_ready_emit_request_serial"),
+                static_cast<qint64>( request.requestSerial ) );
+        }
         m_mutex.unlock();
         emit frameReady();
         m_mutex.lock();
@@ -2671,6 +2687,20 @@ void RenderFrameThread::runSerial(void)
         m_frameSlots[slotIndex].ready = true;
         m_frameReady = true;
         m_waitCondition.wakeAll();
+        const double frameReadyTrueEmitStageTime = mlv_stage_timing_now();
+        m_frameSlots[slotIndex].frameReadyTrueEmitStageTime =
+            frameReadyTrueEmitStageTime;
+        m_frameSlots[slotIndex].frameReadyEmitRequestSerial =
+            request.requestSerial;
+        if( playbackSmokeTimelineTelemetryEnabled() )
+        {
+            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
+                QStringLiteral("frame_ready_true_emit_stage_time"),
+                frameReadyTrueEmitStageTime );
+            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
+                QStringLiteral("frame_ready_emit_request_serial"),
+                static_cast<qint64>( request.requestSerial ) );
+        }
         m_mutex.unlock();
         emit frameReady();
         m_mutex.lock();
