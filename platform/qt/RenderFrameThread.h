@@ -64,6 +64,61 @@ public:
             std::vector<float> randn05;
         };
 
+        struct LutSnapshotKey
+        {
+            const int *raw2ev = nullptr;
+            const int *ev2raw = nullptr;
+            const double *mixCurve = nullptr;
+            const double *fullresCurve = nullptr;
+            const float *randn05 = nullptr;
+            int width = 0;
+            int height = 0;
+            int blackLevel = 0;
+            int whiteLevel = 0;
+            int whiteDarkened = 0;
+            int blackDelta = 0;
+            double evCorrection = 0.0;
+            double darkNoise = 0.0;
+            int interpMethod = 0;
+            bool useAliasMap = false;
+            bool useFullres = false;
+            int chromaSmoothMethod = 0;
+            std::array<int, 4> isBright{{0, 0, 0, 0}};
+            bool applyDither = false;
+            uint64_t processingGeneration = 0;
+
+            bool operator==( const LutSnapshotKey &other ) const
+            {
+                return raw2ev == other.raw2ev
+                    && ev2raw == other.ev2raw
+                    && mixCurve == other.mixCurve
+                    && fullresCurve == other.fullresCurve
+                    && randn05 == other.randn05
+                    && width == other.width
+                    && height == other.height
+                    && blackLevel == other.blackLevel
+                    && whiteLevel == other.whiteLevel
+                    && whiteDarkened == other.whiteDarkened
+                    && blackDelta == other.blackDelta
+                    && evCorrection == other.evCorrection
+                    && darkNoise == other.darkNoise
+                    && interpMethod == other.interpMethod
+                    && useAliasMap == other.useAliasMap
+                    && useFullres == other.useFullres
+                    && chromaSmoothMethod == other.chromaSmoothMethod
+                    && isBright == other.isBright
+                    && applyDither == other.applyDither
+                    && processingGeneration == other.processingGeneration;
+            }
+        };
+
+        struct LutCacheEntry
+        {
+            LutSnapshotKey key;
+            std::shared_ptr<const LutSnapshot> luts;
+            uint64_t lastUse = 0;
+        };
+
         bool valid = false;
         int width = 0;
         int height = 0;
@@ -79,6 +134,7 @@ public:
         int chromaSmoothMethod = 0;
         std::array<int, 4> isBright{{0, 0, 0, 0}};
         bool applyDither = false;
+        uint64_t processingGeneration = 0;
         std::shared_ptr<const LutSnapshot> luts;
     };
 
@@ -102,6 +158,7 @@ public:
             MainWindowGpuPreviewPolicyState gpuPreviewPolicy;
             GpuDisplayViewport::PresentationOptions gpuPresentationOptions;
             GpuPreviewProcessingConfig gpuPreviewProcessingConfig;
+            uint64_t gpuPreviewProcessingConfigGeneration = 0;
             QString playbackProcessingReason;
             bool playbackActive = false;
             bool dropFramePlaybackActive = false;
@@ -208,6 +265,33 @@ public:
         double renderFrameEntryStageTime = 0.0;
         double requestStageTime = 0.0;
         double requestQueuePushStageTime = 0.0;
+        double phase3LoopWakeStageTime = 0.0;
+        double phase3RenderRequestTakeStageTime = 0.0;
+        double phase3AfterTakeStampStageTime = 0.0;
+        double phase3AfterRenderFrameFlagStageTime = 0.0;
+        double phase3ModeBranchEntryStageTime = 0.0;
+        double phase3BeforeLiveFallbackCheckStageTime = 0.0;
+        double phase3AfterLiveFallbackCheckStageTime = 0.0;
+        double phase3BeforeKillSwitchCheckStageTime = 0.0;
+        double phase3AfterKillSwitchCheckStageTime = 0.0;
+        double phase3BeforeFirstTransitionStageTime = 0.0;
+        double phase3AfterFirstTransitionStageTime = 0.0;
+        double phase3BeforeSecondTransitionStageTime = 0.0;
+        double phase3AfterSecondTransitionStageTime = 0.0;
+        double phase3ModeBranchExitStageTime = 0.0;
+        double phase3PolicyDoneStageTime = 0.0;
+        double phase3ActiveAssignDoneStageTime = 0.0;
+        double phase3BeforeDecodeAheadStageTime = 0.0;
+        double phase3AfterDecodeAheadStageTime = 0.0;
+        double phase3BeforeUnlockStageTime = 0.0;
+        double phase3AfterUnlockStageTime = 0.0;
+        double phase3RenderDecodedSlotEntryStageTime = 0.0;
+        double phase3BeforeDrawFrameStageTime = 0.0;
+        double runSerialActiveAssignDoneStageTime = 0.0;
+        double runSerialPhasePolicyDoneStageTime = 0.0;
+        double runSerialBeforeUnlockStageTime = 0.0;
+        double runSerialAfterUnlockStageTime = 0.0;
+        double runSerialBeforeDrawFrameStageTime = 0.0;
         Phase3Mode phase3Mode = Phase3Mode::Disabled;
         ReadyFrame::PresentationContext presentationContext;
         PresentationPreparationOptions presentationPreparationOptions;
@@ -251,6 +335,7 @@ public:
                       uint64_t requestSerial,
                       const ReadyFrame::PresentationContext &presentationContext,
                       const PresentationPreparationOptions &presentationPreparation );
+    void setGpuPlaybackReconTextureLutSnapshotGeneration( uint64_t generation );
     bool isFrameReady( void );
     bool isIdle( void );
     bool acquireLatestReadyFrame( ReadyFrame *frame );
@@ -458,6 +543,7 @@ private:
     static constexpr int kDefaultFrameSlotCount = 4;
     static constexpr int kMaxFrameSlotCount = 12;
     static constexpr int kRenderRequestQueueDepth = 4;
+    static constexpr size_t kGpuPlaybackReconTextureLutCacheSlots = 8;
     mlvObject_t *m_pMlvObject;
     bool m_initialized;
     bool m_stop;
@@ -505,6 +591,11 @@ private:
     std::vector<float> m_gpuBilinearDebayerRawFrame;
     std::vector<float> m_gpuAmazeDebayerRawFrame;
     std::vector<uint16_t> m_gpuPlaybackReconStateRgb16;
+    std::array<GpuPlaybackReconTextureState::LutCacheEntry,
+               kGpuPlaybackReconTextureLutCacheSlots>
+        m_gpuPlaybackReconTextureLutCache;
+    uint64_t m_gpuPlaybackReconTextureLutCacheUseCounter = 0;
+    std::atomic<uint64_t> m_gpuPlaybackReconTextureLutSnapshotGeneration{1};
     DecodeWorker *m_decodeWorker;
     ReconWorker *m_reconWorker;
     bool m_decodeWorkerStop;

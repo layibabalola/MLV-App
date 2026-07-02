@@ -39,6 +39,9 @@ public:
         float zebraUnderThreshold;
         float zebraOverThreshold;
         GpuPreviewProcessingConfig previewProcessing;
+        qint64 telemetryRequestSerial;
+        qint64 telemetryDisplayFrame;
+        double telemetryDrawBeginStageTime;
 
         PresentationOptions()
             : samplingMode(SamplingLinear)
@@ -46,6 +49,9 @@ public:
             , zebraUnderThreshold(preview_zebra::kUnderThresholdNormalized)
             , zebraOverThreshold(preview_zebra::kOverThresholdNormalized)
             , previewProcessing()
+            , telemetryRequestSerial(0)
+            , telemetryDisplayFrame(0)
+            , telemetryDrawBeginStageTime(0.0)
         {
         }
     };
@@ -168,6 +174,7 @@ private:
                                         QString *rendererDescription,
                                         GpuAmazeDebayerBackendTiming *timing);
     void clearPresentedImage(void);
+    void requestInstrumentedUpdate(const char *reason);
     void updateTextureIfNeeded(void);
     void updateProcessingTexturesIfNeeded(void);
     void ensureProgram(void);
@@ -204,6 +211,13 @@ private:
     uint64_t m_processingTextureSignature;
     bool m_processingTextureSignatureValid;
     QString m_rendererDescription;
+    double m_lastUpdateRequestStageTime;
+    qulonglong m_updateRequestSequence;
+    qulonglong m_lastPaintLoggedUpdateSequence;
+    QString m_lastUpdateReason;
+    qint64 m_lastUpdateRequestSerial;
+    qint64 m_lastUpdateDisplayFrame;
+    double m_lastUpdateDrawBeginStageTime;
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;
     QOpenGLTexture *m_gpuReconSourceTexture;

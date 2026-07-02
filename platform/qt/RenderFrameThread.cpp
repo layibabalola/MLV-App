@@ -445,6 +445,15 @@ bool playbackSmokeTimelineTelemetryEnabled()
     return enabled;
 }
 
+bool gpuPlaybackReconTextureLutSnapshotCacheEnabled()
+{
+    static const bool enabled =
+        !qEnvironmentVariableIsSet( "MLVAPP_GPU_PLAYBACK_RECON_LUT_SNAPSHOT_CACHE" )
+        || qEnvironmentVariable( "MLVAPP_GPU_PLAYBACK_RECON_LUT_SNAPSHOT_CACHE" )
+           != QStringLiteral("0");
+    return enabled;
+}
+
 bool gpuPlaybackReconShadowsHighlightsFrameStateAvailable(
     const GpuPreviewProcessingConfig &config,
     const processingObject_t *processing,
@@ -470,11 +479,65 @@ bool gpuPlaybackReconShadowsHighlightsFrameStateAvailable(
     return blurWidth == width && blurHeight == height;
 }
 
+RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshotKey
+makeGpuPlaybackReconTextureLutKey( const llrpGpuPlaybackReconState_t &source,
+                                   uint64_t processingGeneration )
+{
+    RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshotKey key;
+    key.raw2ev = source.raw2ev;
+    key.ev2raw = source.ev2raw;
+    key.mixCurve = source.mix_curve;
+    key.fullresCurve = source.fullres_curve;
+    key.randn05 = source.apply_dither ? source.randn05 : nullptr;
+    key.width = source.width;
+    key.height = source.height;
+    key.blackLevel = source.black_level;
+    key.whiteLevel = source.white_level;
+    key.whiteDarkened = source.white_darkened;
+    key.blackDelta = source.black_delta;
+    key.evCorrection = source.ev_correction;
+    key.darkNoise = source.dark_noise;
+    key.interpMethod = source.interp_method;
+    key.useAliasMap = source.use_alias_map != 0;
+    key.useFullres = source.use_fullres != 0;
+    key.chromaSmoothMethod = source.chroma_smooth_method;
+    for( size_t i = 0; i < key.isBright.size(); ++i )
+    {
+        key.isBright[i] = source.is_bright[i];
+    }
+    key.applyDither = source.apply_dither != 0;
+    key.processingGeneration = processingGeneration;
+    return key;
+}
+
+template <size_t CacheSlots>
 bool assignGpuPlaybackReconTextureState(
     RenderFrameThread::GpuPlaybackReconTextureState &destination,
-    const llrpGpuPlaybackReconState_t &source)
+    const llrpGpuPlaybackReconState_t &source,
+    uint64_t processingGeneration,
+    std::array<RenderFrameThread::GpuPlaybackReconTextureState::LutCacheEntry,
+               CacheSlots> &lutCache,
+    uint64_t &lutCacheUseCounter,
+    bool *lutCacheHit,
+    int *lutCacheEntryCount)
 {
     destination = RenderFrameThread::GpuPlaybackReconTextureState();
+    if( lutCacheHit )
+    {
+        *lutCacheHit = false;
+    }
+    if( lutCacheEntryCount )
+    {
+        int populatedEntries = 0;
+        for( const auto &entry : lutCache )
+        {
+            if( entry.luts )
+            {
+                ++populatedEntries;
+            }
+        }
+        *lutCacheEntryCount = populatedEntries;
+    }
     if( !source.valid
      || source.width <= 0
      || source.height <= 0
@@ -487,27 +550,104 @@ bool assignGpuPlaybackReconTextureState(
         return false;
     }
 
+    const bool useLutCache = gpuPlaybackReconTextureLutSnapshotCacheEnabled();
+    auto key = RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshotKey();
+    uint64_t useCounter = 0;
+    std::shared_ptr<const RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshot> luts;
+    int populatedEntries = 0;
+    if( useLutCache )
+    {
+        key = makeGpuPlaybackReconTextureLutKey( source, processingGeneration );
+        ++lutCacheUseCounter;
+        if( lutCacheUseCounter == 0 )
+        {
+            lutCacheUseCounter = 1;
+        }
+        useCounter = lutCacheUseCounter;
+
+        for( auto &entry : lutCache )
+        {
+            if( entry.luts )
+            {
+                ++populatedEntries;
+                if( !luts && entry.key == key )
+                {
+                    entry.lastUse = useCounter;
+                    luts = entry.luts;
+                    if( lutCacheHit )
+                    {
+                        *lutCacheHit = true;
+                    }
+                }
+            }
+        }
+        if( lutCacheEntryCount )
+        {
+            *lutCacheEntryCount = populatedEntries;
+        }
+    }
+
     try
     {
-        std::shared_ptr<RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshot> luts =
-            std::make_shared<RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshot>();
-        luts->raw2ev.assign(
-            source.raw2ev,
-            source.raw2ev + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
-        luts->ev2raw.assign(
-            source.ev2raw,
-            source.ev2raw + LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT );
-        luts->mixCurve.assign(
-            source.mix_curve,
-            source.mix_curve + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
-        luts->fullresCurve.assign(
-            source.fullres_curve,
-            source.fullres_curve + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
-        if( source.apply_dither )
+        if( !luts )
         {
-            luts->randn05.assign(
-                source.randn05,
-                source.randn05 + LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT );
+            std::shared_ptr<RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshot> copiedLuts =
+                std::make_shared<RenderFrameThread::GpuPlaybackReconTextureState::LutSnapshot>();
+            copiedLuts->raw2ev.assign(
+                source.raw2ev,
+                source.raw2ev + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
+            copiedLuts->ev2raw.assign(
+                source.ev2raw,
+                source.ev2raw + LLRP_GPU_PLAYBACK_RECON_EV2RAW_COUNT );
+            copiedLuts->mixCurve.assign(
+                source.mix_curve,
+                source.mix_curve + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
+            copiedLuts->fullresCurve.assign(
+                source.fullres_curve,
+                source.fullres_curve + LLRP_GPU_PLAYBACK_RECON_RAW2EV_COUNT );
+            if( source.apply_dither )
+            {
+                copiedLuts->randn05.assign(
+                    source.randn05,
+                    source.randn05 + LLRP_GPU_PLAYBACK_RECON_RANDN05_COUNT );
+            }
+
+            if( useLutCache )
+            {
+                size_t targetIndex = 0;
+                bool targetSelected = false;
+                uint64_t oldestUse = 0;
+                for( size_t i = 0; i < CacheSlots; ++i )
+                {
+                    const auto &entry = lutCache[i];
+                    if( !entry.luts )
+                    {
+                        targetIndex = i;
+                        targetSelected = true;
+                        break;
+                    }
+                    if( !targetSelected || entry.lastUse < oldestUse )
+                    {
+                        targetIndex = i;
+                        oldestUse = entry.lastUse;
+                        targetSelected = true;
+                    }
+                }
+                auto &target = lutCache[targetIndex];
+                const bool wasEmpty = !target.luts;
+                target.key = key;
+                target.luts = copiedLuts;
+                target.lastUse = useCounter;
+                if( wasEmpty )
+                {
+                    ++populatedEntries;
+                }
+                if( lutCacheEntryCount )
+                {
+                    *lutCacheEntryCount = populatedEntries;
+                }
+            }
+            luts = copiedLuts;
         }
         destination.luts = luts;
     }
@@ -535,6 +675,7 @@ bool assignGpuPlaybackReconTextureState(
         destination.isBright[i] = source.is_bright[i];
     }
     destination.applyDither = source.apply_dither != 0;
+    destination.processingGeneration = processingGeneration;
     return true;
 }
 
@@ -654,6 +795,10 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
     }
     m_gpuBilinearDebayerRawFrame.clear();
     m_gpuAmazeDebayerRawFrame.clear();
+    m_gpuPlaybackReconTextureLutCache = {};
+    m_gpuPlaybackReconTextureLutCacheUseCounter = 0;
+    m_gpuPlaybackReconTextureLutSnapshotGeneration.store(
+        1, std::memory_order_release );
     const size_t pixelCount =
         static_cast<size_t>(qMax(0, imageWidth)) * static_cast<size_t>(qMax(0, imageHeight));
     const size_t rgbPixelCount = pixelCount * 3u;
@@ -663,6 +808,37 @@ void RenderFrameThread::init(mlvObject_t *pMlvObject, int imageWidth, int imageH
         slot.rawImage16.assign( rgbPixelCount, 0u );
         slot.resetMetadata();
         slot.state.store( SlotState::Idle, std::memory_order_release );
+    }
+}
+
+void RenderFrameThread::setGpuPlaybackReconTextureLutSnapshotGeneration(
+    uint64_t generation )
+{
+    if( generation == 0 )
+    {
+        generation = 1;
+    }
+    uint64_t current = m_gpuPlaybackReconTextureLutSnapshotGeneration.load(
+        std::memory_order_acquire );
+    for( ;; )
+    {
+        uint64_t next = current + 1;
+        if( next == 0 )
+        {
+            next = 1;
+        }
+        if( generation > next )
+        {
+            next = generation;
+        }
+        if( m_gpuPlaybackReconTextureLutSnapshotGeneration.compare_exchange_weak(
+                current,
+                next,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire ) )
+        {
+            return;
+        }
     }
 }
 
@@ -1493,6 +1669,12 @@ void RenderFrameThread::queueDecodeRequestLocked( int slotIndex, const RenderReq
         slot.stageTimingTelemetry.insert(
             QStringLiteral("phase3_decode_queue_stage_time"),
             decodeQueueStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("phase3_loop_wake_stage_time"),
+            request.phase3LoopWakeStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("phase3_render_request_take_stage_time"),
+            request.phase3RenderRequestTakeStageTime );
     }
     transitionSlotState( slotIndex,
                          SlotState::Idle,
@@ -1664,7 +1846,16 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
     }
 
     FrameSlot &slot = m_frameSlots[entry.slotIndex];
-    if( playbackSmokeTimelineTelemetryEnabled() )
+    const bool detailedTimelineTelemetry = playbackSmokeTimelineTelemetryEnabled();
+    const auto stampReconStage = [&slot, detailedTimelineTelemetry]( const char * key )
+    {
+        if( detailedTimelineTelemetry )
+        {
+            slot.stageTimingTelemetry.insert( QString::fromLatin1( key ),
+                                              mlv_stage_timing_now() );
+        }
+    };
+    if( detailedTimelineTelemetry )
     {
         slot.stageTimingTelemetry.insert(
             QStringLiteral("phase3_recon_start_stage_time"),
@@ -1685,6 +1876,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                          entry.request.frameNumber,
                          entry.request.requestSerial,
                          "phase3-3c-recon" );
+    stampReconStage( "phase3_recon_after_state_transitions_stage_time" );
 
     const size_t rawPixelCount =
         static_cast<size_t>( qMax( 0, m_imageWidth ) )
@@ -1716,6 +1908,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             gpuPlaybackReconTextureNoReadbackFallbackReason =
                 QStringLiteral("GPU playback recon no-readback request was not armed");
         }
+        stampReconStage( "phase3_recon_before_scope_setup_stage_time" );
         const GpuPlaybackReconScope gpuPlaybackReconScope(
             entry.request.presentationContext.playbackActive );
         const GpuPlaybackReconTexturePresentScope gpuPlaybackReconTexturePresentScope(
@@ -1723,21 +1916,29 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         const GpuPlaybackReconTexturePrepareOnlyScope
             gpuPlaybackReconTexturePrepareOnlyScope(
                 allowGpuPlaybackReconTexturePrepareOnly );
+        stampReconStage( "phase3_recon_after_scope_setup_stage_time" );
+        stampReconStage( "phase3_recon_before_capture_set_frame_stage_time" );
         mlv_pipeline_capture_set_current_frame( entry.request.frameNumber );
+        stampReconStage( "phase3_recon_after_capture_set_frame_stage_time" );
+        stampReconStage( "phase3_recon_before_apply_llrawproc_stage_time" );
         applyLLRawProcObjectWorker( m_pMlvObject,
                                     slot.rawImage16.data(),
                                     rawPixelCount * sizeof(uint16_t),
                                     workerState,
                                     0 );
+        stampReconStage( "phase3_recon_after_apply_llrawproc_stage_time" );
         insertLlrawprocReconTimingTelemetry( slot.stageTimingTelemetry );
         insertGpuPlaybackReconRunTelemetry( slot.stageTimingTelemetry );
+        stampReconStage( "phase3_recon_after_timing_capture_stage_time" );
         bool gpuPlaybackReconTextureBayerSnapshotCopied = false;
+        stampReconStage( "phase3_recon_before_no_readback_state_stage_time" );
         if( wantsGpuPlaybackReconTextureNoReadback )
         {
             const bool outputValidationRequired =
                 gpuPlaybackReconNoReadbackOutputValidationEnabled();
             gpuPlaybackReconTextureBayerSnapshotCopied =
                 !outputValidationRequired;
+            stampReconStage( "phase3_recon_before_oracle_snapshot_stage_time" );
             if( outputValidationRequired )
             {
                 /* Snapshot the recon-output Dual ISO bayer NOW, before the process
@@ -1764,6 +1965,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             {
                 slot.gpuPlaybackReconTextureBayerFrame.clear();
             }
+            stampReconStage( "phase3_recon_after_oracle_snapshot_stage_time" );
+            stampReconStage( "phase3_recon_before_prepared_input_snapshot_stage_time" );
             const bool prepareOnlyUsed =
                 llrpGpuPlaybackReconLastPrepareOnlyForTesting() != 0;
             const size_t preparedInputWords =
@@ -1810,7 +2013,9 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 gpuPlaybackReconTextureNoReadbackFallbackReason =
                     QStringLiteral("GPU playback recon prepared input snapshot was unavailable");
             }
+            stampReconStage( "phase3_recon_after_prepared_input_snapshot_stage_time" );
 
+            stampReconStage( "phase3_recon_before_retained_device_query_stage_time" );
             llrpGpuPlaybackRetainedDeviceBayer16_t retainedDevice;
             memset( &retainedDevice, 0, sizeof( retainedDevice ) );
             if( !outputValidationRequired
@@ -1847,16 +2052,58 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 slot.gpuPlaybackReconTextureRetainedDeviceHeight = 0;
                 slot.gpuPlaybackReconTextureRetainedDeviceToken = 0;
             }
+            stampReconStage( "phase3_recon_after_retained_device_query_stage_time" );
 
+            stampReconStage( "phase3_recon_before_prepared_state_snapshot_stage_time" );
             llrpGpuPlaybackReconState_t preparedState;
             memset( &preparedState, 0, sizeof( preparedState ) );
             const bool preparedStateAvailable =
                 llrpGpuPlaybackReconGetLastPreparedState( &preparedState ) != 0;
             gpuPlaybackReconTexturePreparedStateValid = preparedState.valid != 0;
+            bool gpuPlaybackReconTextureLutCacheHit = false;
+            int gpuPlaybackReconTextureLutCacheEntries = 0;
+            const uint64_t gpuPlaybackReconTextureLutSnapshotAtomicGeneration =
+                m_gpuPlaybackReconTextureLutSnapshotGeneration.load(
+                    std::memory_order_acquire );
+            const uint64_t gpuPlaybackReconTextureLutSnapshotRequestGeneration =
+                entry.request.presentationContext.gpuPreviewProcessingConfigGeneration;
+            uint64_t gpuPlaybackReconTextureLutSnapshotGeneration =
+                gpuPlaybackReconTextureLutSnapshotAtomicGeneration;
+            if( entry.request.presentationContext.gpuPreviewProcessingConfigGeneration
+             > gpuPlaybackReconTextureLutSnapshotGeneration )
+            {
+                gpuPlaybackReconTextureLutSnapshotGeneration =
+                    entry.request.presentationContext.gpuPreviewProcessingConfigGeneration;
+            }
             gpuPlaybackReconTextureStateSnapshotOk =
                 preparedStateAvailable
                 && assignGpuPlaybackReconTextureState( slot.gpuPlaybackReconTextureState,
-                                                       preparedState );
+                                                       preparedState,
+                                                       gpuPlaybackReconTextureLutSnapshotGeneration,
+                                                       m_gpuPlaybackReconTextureLutCache,
+                                                       m_gpuPlaybackReconTextureLutCacheUseCounter,
+                                                       &gpuPlaybackReconTextureLutCacheHit,
+                                                       &gpuPlaybackReconTextureLutCacheEntries );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("phase3_recon_lut_snapshot_cache_hit"),
+                gpuPlaybackReconTextureLutCacheHit );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("phase3_recon_lut_snapshot_processing_generation"),
+                static_cast<double>(
+                    gpuPlaybackReconTextureLutSnapshotGeneration ) );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("phase3_recon_lut_snapshot_atomic_generation"),
+                static_cast<double>(
+                    gpuPlaybackReconTextureLutSnapshotAtomicGeneration ) );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("phase3_recon_lut_snapshot_request_generation"),
+                static_cast<double>(
+                    gpuPlaybackReconTextureLutSnapshotRequestGeneration ) );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("phase3_recon_lut_snapshot_cache_entries"),
+                gpuPlaybackReconTextureLutCacheEntries );
+            stampReconStage( "phase3_recon_after_prepared_state_snapshot_stage_time" );
+            stampReconStage( "phase3_recon_before_candidate_validation_stage_time" );
             if( gpuPlaybackReconTextureInputAvailable
              && gpuPlaybackReconTextureStateSnapshotOk
              && gpuPlaybackReconTextureBayerSnapshotCopied )
@@ -1889,7 +2136,9 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                                 : QStringLiteral("GPU playback recon state snapshot was rejected") );
                 }
             }
+            stampReconStage( "phase3_recon_after_candidate_validation_stage_time" );
         }
+        stampReconStage( "phase3_recon_after_no_readback_state_stage_time" );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("gpu_playback_recon_texture_present_no_readback_recon_requested"),
             wantsGpuPlaybackReconTextureNoReadback );
@@ -1932,6 +2181,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                 QStringLiteral("gpu_playback_recon_texture_present_no_readback_fallback_reason"),
                 gpuPlaybackReconTextureNoReadbackFallbackReason );
         }
+        stampReconStage( "phase3_recon_after_metadata_insert_stage_time" );
     }
 
     if( stageCsvEnabled )
@@ -1947,6 +2197,7 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
             0 );
     }
 
+    stampReconStage( "phase3_recon_before_process_ready_transition_stage_time" );
     transitionSlotState( entry.slotIndex,
                          SlotState::Recon,
                          SlotState::ProcessReady,
@@ -1954,7 +2205,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
                          entry.request.frameNumber,
                          entry.request.requestSerial,
                          "phase3-3c-process-ready" );
-    if( playbackSmokeTimelineTelemetryEnabled() )
+    stampReconStage( "phase3_recon_after_process_ready_transition_stage_time" );
+    if( detailedTimelineTelemetry )
     {
         slot.stageTimingTelemetry.insert(
             QStringLiteral("phase3_recon_end_stage_time"),
@@ -2040,13 +2292,20 @@ void RenderFrameThread::renderDecodedSlot( int slotIndex,
                                            const RenderRequest &request,
                                            Phase3Mode activePhase3Mode )
 {
+    RenderRequest instrumentedRequest = request;
+    if( playbackSmokeTimelineTelemetryEnabled() )
+    {
+        instrumentedRequest.phase3RenderDecodedSlotEntryStageTime =
+            mlv_stage_timing_now();
+        m_activeRenderRequest = instrumentedRequest;
+    }
     const bool overlapTrace = gpuTexNrOverlapTraceEnabled();
     if( overlapTrace )
     {
         qInfo().nospace()
             << "gpu_tex_nr_overlap_trace event=render_start"
-            << " frame=" << request.frameNumber
-            << " serial=" << request.requestSerial
+            << " frame=" << instrumentedRequest.frameNumber
+            << " serial=" << instrumentedRequest.requestSerial
             << " slot=" << slotIndex
             << " wall_ms=" << QDateTime::currentMSecsSinceEpoch();
     }
@@ -2060,8 +2319,8 @@ void RenderFrameThread::renderDecodedSlot( int slotIndex,
     if( stageCsvEnabled )
     {
         stage_timing_csv_sink_write_event(
-            request.frameNumber,
-            request.requestSerial,
+            instrumentedRequest.frameNumber,
+            instrumentedRequest.requestSerial,
             static_cast<uint8_t>( slotIndex ),
             MLV_STAGE_DECODE,
             "enter",
@@ -2079,6 +2338,12 @@ void RenderFrameThread::renderDecodedSlot( int slotIndex,
         activePhase3Mode == Phase3Mode::DecodeReconProcess
      && slotState == SlotState::ProcessReady
      && !m_frameSlots[slotIndex].rawImage16.empty();
+    if( playbackSmokeTimelineTelemetryEnabled() )
+    {
+        instrumentedRequest.phase3BeforeDrawFrameStageTime =
+            mlv_stage_timing_now();
+        m_activeRenderRequest = instrumentedRequest;
+    }
     drawFrame( slotIndex,
                ( consumeDecodedRaw || consumeReconnedRaw )
                    ? m_frameSlots[slotIndex].rawImage16.data()
@@ -2099,7 +2364,7 @@ void RenderFrameThread::renderDecodedSlot( int slotIndex,
     }
     if( phase3Active )
     {
-        emitPhase3StageTelemetry( request,
+        emitPhase3StageTelemetry( instrumentedRequest,
                                   m_frameSlots[slotIndex],
                                   slotIndex,
                                   activePhase3Mode );
@@ -2229,6 +2494,8 @@ void RenderFrameThread::runPhase3( void )
             m_waitCondition.wait( &m_mutex );
         }
         if( m_stop ) break;
+        const double phase3LoopWakeStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
 
         bool queuedPhase3Request = false;
         if( !m_renderRequests.empty()
@@ -2236,8 +2503,11 @@ void RenderFrameThread::runPhase3( void )
          && phase3DecodeAheadActive( m_renderRequests.front().phase3Mode ) )
         {
             const int slotIndex = findFreeSlotLocked();
-            const RenderRequest request = m_renderRequests.front();
+            RenderRequest request = m_renderRequests.front();
             m_renderRequests.pop_front();
+            request.phase3LoopWakeStageTime = phase3LoopWakeStageTime;
+            request.phase3RenderRequestTakeStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
             m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( slotIndex, request );
             queuedPhase3Request = true;
@@ -2269,12 +2539,26 @@ void RenderFrameThread::runPhase3( void )
             slotIndex = findFreeSlotLocked();
             request = m_renderRequests.front();
             m_renderRequests.pop_front();
+            request.phase3LoopWakeStageTime = phase3LoopWakeStageTime;
+            request.phase3RenderRequestTakeStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+            request.phase3AfterTakeStampStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
             m_renderFrame = !m_renderRequests.empty();
+            request.phase3AfterRenderFrameFlagStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
 
             const Phase3Mode requestedPhase3Mode = request.phase3Mode;
+            request.phase3ModeBranchEntryStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
             if( requestedPhase3Mode != Phase3Mode::Disabled )
             {
-                if( phase3LiveFallbackActive() )
+                request.phase3BeforeLiveFallbackCheckStageTime =
+                    playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                const bool liveFallbackActive = phase3LiveFallbackActive();
+                request.phase3AfterLiveFallbackCheckStageTime =
+                    playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                if( liveFallbackActive )
                 {
                     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
                     playbackQualityAutoFallbackEpochWriteToSettings(
@@ -2287,48 +2571,87 @@ void RenderFrameThread::runPhase3( void )
                                              mlv_stage_timing_now_ns(),
                                              request.frameNumber,
                                              request.requestSerial,
-                                             static_cast<uint8_t>( requestedPhase3Mode ),
-                                             "phase3-live-fallback" );
+                                              static_cast<uint8_t>( requestedPhase3Mode ),
+                                              "phase3-live-fallback" );
                 }
-                else if( !phase3KillSwitchActive( requestedPhase3Mode ) )
+                else
                 {
-                    activePhase3Mode = requestedPhase3Mode;
-                    transitionSlotState( slotIndex,
-                                         SlotState::Idle,
-                                         SlotState::Requested,
-                                         activePhase3Mode,
-                                         request.frameNumber,
-                                         request.requestSerial,
-                                         "phase3-requested" );
-                    transitionSlotState( slotIndex,
-                                         SlotState::Requested,
-                                         SlotState::Decoding,
-                                         activePhase3Mode,
-                                         request.frameNumber,
-                                         request.requestSerial,
-                                         "phase3-decoding" );
+                    request.phase3BeforeKillSwitchCheckStageTime =
+                        playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                    const bool killSwitchActive =
+                        phase3KillSwitchActive( requestedPhase3Mode );
+                    request.phase3AfterKillSwitchCheckStageTime =
+                        playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                    if( !killSwitchActive )
+                    {
+                        activePhase3Mode = requestedPhase3Mode;
+                        request.phase3BeforeFirstTransitionStageTime =
+                            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                        transitionSlotState( slotIndex,
+                                             SlotState::Idle,
+                                             SlotState::Requested,
+                                             activePhase3Mode,
+                                             request.frameNumber,
+                                             request.requestSerial,
+                                             "phase3-requested" );
+                        request.phase3AfterFirstTransitionStageTime =
+                            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                        request.phase3BeforeSecondTransitionStageTime =
+                            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                        transitionSlotState( slotIndex,
+                                             SlotState::Requested,
+                                             SlotState::Decoding,
+                                             activePhase3Mode,
+                                             request.frameNumber,
+                                             request.requestSerial,
+                                             "phase3-decoding" );
+                        request.phase3AfterSecondTransitionStageTime =
+                            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+                    }
                 }
             }
+            request.phase3ModeBranchExitStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
         }
         else
         {
             continue;
         }
 
+        request.phase3PolicyDoneStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
         setupActiveRequestLocked( request, slotIndex );
+        request.phase3ActiveAssignDoneStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = request;
 
+        request.phase3BeforeDecodeAheadStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = request;
         if( !m_renderRequests.empty()
          && findFreeSlotLocked() >= 0
          && phase3DecodeAheadActive( m_renderRequests.front().phase3Mode ) )
         {
             const int nextSlotIndex = findFreeSlotLocked();
-            const RenderRequest nextRequest = m_renderRequests.front();
+            RenderRequest nextRequest = m_renderRequests.front();
             m_renderRequests.pop_front();
+            nextRequest.phase3LoopWakeStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+            nextRequest.phase3RenderRequestTakeStageTime =
+                playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
             m_renderFrame = !m_renderRequests.empty();
             queueDecodeRequestLocked( nextSlotIndex, nextRequest );
         }
+        request.phase3AfterDecodeAheadStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        request.phase3BeforeUnlockStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = request;
 
         m_mutex.unlock();
+        request.phase3AfterUnlockStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = request;
         renderDecodedSlot( slotIndex, request, activePhase3Mode );
         m_mutex.lock();
 
@@ -2492,22 +2815,29 @@ void RenderFrameThread::runSerial(void)
         }
 
         const RenderRequest request = m_renderRequests.front();
+        const double requestTakeStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
         m_renderRequests.pop_front();
+        RenderRequest instrumentedRequest = request;
+        instrumentedRequest.phase3RenderRequestTakeStageTime =
+            requestTakeStageTime;
         m_renderFrame = !m_renderRequests.empty();
-        m_activeFrameNumber = request.frameNumber;
-        m_activeOutputMode = request.outputMode;
-        m_activeUseGpuBilinearDebayer = request.useGpuBilinearDebayer;
-        m_activeUseGpuAmazeDebayer = request.useGpuAmazeDebayer;
-        m_activeFrameRequestSerial = request.requestSerial;
-        m_activeFrameRequestStageTime = request.requestStageTime;
-        m_activePresentationContext = request.presentationContext;
-        m_activePresentationPreparationOptions = request.presentationPreparationOptions;
-        m_activeQueuedPlaybackDropCount = request.queuedPlaybackDropCount;
-        m_activeRenderRequest = request;
+        m_activeFrameNumber = instrumentedRequest.frameNumber;
+        m_activeOutputMode = instrumentedRequest.outputMode;
+        m_activeUseGpuBilinearDebayer = instrumentedRequest.useGpuBilinearDebayer;
+        m_activeUseGpuAmazeDebayer = instrumentedRequest.useGpuAmazeDebayer;
+        m_activeFrameRequestSerial = instrumentedRequest.requestSerial;
+        m_activeFrameRequestStageTime = instrumentedRequest.requestStageTime;
+        m_activePresentationContext = instrumentedRequest.presentationContext;
+        m_activePresentationPreparationOptions = instrumentedRequest.presentationPreparationOptions;
+        m_activeQueuedPlaybackDropCount = instrumentedRequest.queuedPlaybackDropCount;
+        m_activeRenderRequest = instrumentedRequest;
         m_renderingFrame = true;
         m_renderingSlotIndex = slotIndex;
+        instrumentedRequest.runSerialActiveAssignDoneStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
 
-        const Phase3Mode requestedPhase3Mode = request.phase3Mode;
+        const Phase3Mode requestedPhase3Mode = instrumentedRequest.phase3Mode;
         Phase3Mode activePhase3Mode = Phase3Mode::Disabled;
         if( requestedPhase3Mode != Phase3Mode::Disabled )
         {
@@ -2522,8 +2852,8 @@ void RenderFrameThread::runSerial(void)
                                          0,
                                          0,
                                          mlv_stage_timing_now_ns(),
-                                         request.frameNumber,
-                                         request.requestSerial,
+                                         instrumentedRequest.frameNumber,
+                                         instrumentedRequest.requestSerial,
                                          static_cast<uint8_t>( requestedPhase3Mode ),
                                          "phase3-live-fallback" );
             }
@@ -2534,19 +2864,26 @@ void RenderFrameThread::runSerial(void)
                                      SlotState::Idle,
                                      SlotState::Requested,
                                      activePhase3Mode,
-                                     request.frameNumber,
-                                     request.requestSerial,
+                                     instrumentedRequest.frameNumber,
+                                     instrumentedRequest.requestSerial,
                                      "phase3-requested" );
                 transitionSlotState( slotIndex,
                                      SlotState::Requested,
                                      SlotState::Decoding,
                                      activePhase3Mode,
-                                     request.frameNumber,
-                                     request.requestSerial,
+                                     instrumentedRequest.frameNumber,
+                                     instrumentedRequest.requestSerial,
                                      "phase3-decoding" );
             }
         }
+        instrumentedRequest.runSerialPhasePolicyDoneStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        instrumentedRequest.runSerialBeforeUnlockStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = instrumentedRequest;
         m_mutex.unlock();
+        instrumentedRequest.runSerialAfterUnlockStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
         const bool phase3Active = activePhase3Mode != Phase3Mode::Disabled;
         const bool stageCsvEnabled =
             !phase3Active && stage_timing_csv_sink_enabled() != 0;
@@ -2565,6 +2902,9 @@ void RenderFrameThread::runSerial(void)
                 telemetryMode,
                 0 );
         }
+        instrumentedRequest.runSerialBeforeDrawFrameStageTime =
+            playbackSmokeTimelineTelemetryEnabled() ? mlv_stage_timing_now() : 0.0;
+        m_activeRenderRequest = instrumentedRequest;
         drawFrame( slotIndex );
         if( phase3Active )
         {
@@ -2581,7 +2921,7 @@ void RenderFrameThread::runSerial(void)
         }
         if( phase3Active )
         {
-            emitPhase3StageTelemetry( request,
+            emitPhase3StageTelemetry( instrumentedRequest,
                                       m_frameSlots[slotIndex],
                                       slotIndex,
                                       activePhase3Mode );
@@ -2590,8 +2930,8 @@ void RenderFrameThread::runSerial(void)
         {
             const uint64_t renderLeaveNs = mlv_stage_timing_now_ns();
             stage_timing_csv_sink_write_event(
-                request.frameNumber,
-                request.requestSerial,
+                instrumentedRequest.frameNumber,
+                instrumentedRequest.requestSerial,
                 static_cast<uint8_t>( slotIndex ),
                 MLV_STAGE_DECODE,
                 "leave",
@@ -2599,8 +2939,8 @@ void RenderFrameThread::runSerial(void)
                 telemetryMode,
                 0 );
             stage_timing_csv_sink_write_event(
-                request.frameNumber,
-                request.requestSerial,
+                instrumentedRequest.frameNumber,
+                instrumentedRequest.requestSerial,
                 static_cast<uint8_t>( slotIndex ),
                 MLV_STAGE_RECON,
                 "enter",
@@ -2608,8 +2948,8 @@ void RenderFrameThread::runSerial(void)
                 telemetryMode,
                 0 );
             stage_timing_csv_sink_write_event(
-                request.frameNumber,
-                request.requestSerial,
+                instrumentedRequest.frameNumber,
+                instrumentedRequest.requestSerial,
                 static_cast<uint8_t>( slotIndex ),
                 MLV_STAGE_RECON,
                 "leave",
@@ -2617,8 +2957,8 @@ void RenderFrameThread::runSerial(void)
                 telemetryMode,
                 0 );
             stage_timing_csv_sink_write_event(
-                request.frameNumber,
-                request.requestSerial,
+                instrumentedRequest.frameNumber,
+                instrumentedRequest.requestSerial,
                 static_cast<uint8_t>( slotIndex ),
                 MLV_STAGE_PROCESS,
                 "enter",
@@ -2829,6 +3169,12 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                    bool decodedRawFrameAlreadyReconned )
 {
     FrameSlot &slot = m_frameSlots[slotIndex];
+    const bool detailedTimelineTelemetry =
+        playbackSmokeTimelineTelemetryEnabled();
+    const bool requestStateTelemetry =
+        playbackSmokeFrameTelemetryEnabled();
+    const double drawFrameEntryStageTime =
+        detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
     const bool preserveGpuPlaybackReconTextureSnapshot =
         decodedRawFrameAlreadyReconned
         && slot.gpuPlaybackReconTextureNoReadbackCandidate;
@@ -2911,7 +3257,13 @@ void RenderFrameThread::drawFrame( int slotIndex,
         preservedGpuPlaybackReconTextureWbMultipliers =
             slot.gpuPlaybackReconTextureWbMultipliers;
     }
+    const double prologueBeforeResetMetadataStageTime =
+        detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
+    const QJsonObject preservedPhase3StageTimingTelemetry =
+        detailedTimelineTelemetry ? slot.stageTimingTelemetry : QJsonObject();
     slot.resetMetadata();
+    const double prologueAfterResetMetadataStageTime =
+        detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
     slot.frameNumber = m_activeFrameNumber;
     slot.requestSerial = m_activeFrameRequestSerial;
     slot.outputMode = m_activeOutputMode;
@@ -2940,21 +3292,42 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.gpuPlaybackReconTextureWbMultipliers =
             preservedGpuPlaybackReconTextureWbMultipliers;
     }
+    const double prologueAfterSnapshotRestoreStageTime =
+        detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
+    for( auto it = preservedPhase3StageTimingTelemetry.begin();
+         it != preservedPhase3StageTimingTelemetry.end();
+         ++it )
+    {
+        slot.stageTimingTelemetry.insert( it.key(), it.value() );
+    }
     for( auto it = preservedGpuPlaybackReconTextureTelemetry.begin();
          it != preservedGpuPlaybackReconTextureTelemetry.end();
          ++it )
     {
         slot.stageTimingTelemetry.insert( it.key(), it.value() );
     }
+    const double prologueAfterPreservedTelemetryStageTime =
+        detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
     const RenderRequest requestTelemetry = m_activeRenderRequest;
     const double requestIssueStageTime =
         requestTelemetry.presentationContext.renderRequestIssueStageTime;
-    const bool detailedTimelineTelemetry =
-        playbackSmokeTimelineTelemetryEnabled();
-    const bool requestStateTelemetry =
-        playbackSmokeFrameTelemetryEnabled();
     if( detailedTimelineTelemetry )
     {
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_draw_frame_entry_stage_time"),
+            drawFrameEntryStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_prologue_before_reset_metadata_stage_time"),
+            prologueBeforeResetMetadataStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_prologue_after_reset_metadata_stage_time"),
+            prologueAfterResetMetadataStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_prologue_after_snapshot_restore_stage_time"),
+            prologueAfterSnapshotRestoreStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_prologue_after_preserved_telemetry_stage_time"),
+            prologueAfterPreservedTelemetryStageTime );
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_request_issue_stage_time"),
             requestIssueStageTime );
@@ -2967,6 +3340,87 @@ void RenderFrameThread::drawFrame( int slotIndex,
         slot.stageTimingTelemetry.insert(
             QStringLiteral("render_thread_request_queue_push_stage_time"),
             requestTelemetry.requestQueuePushStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("phase3_loop_wake_stage_time"),
+            requestTelemetry.phase3LoopWakeStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("phase3_render_request_take_stage_time"),
+            requestTelemetry.phase3RenderRequestTakeStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_take_stamp_stage_time"),
+            requestTelemetry.phase3AfterTakeStampStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_render_frame_flag_stage_time"),
+            requestTelemetry.phase3AfterRenderFrameFlagStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_mode_branch_entry_stage_time"),
+            requestTelemetry.phase3ModeBranchEntryStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_live_fallback_check_stage_time"),
+            requestTelemetry.phase3BeforeLiveFallbackCheckStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_live_fallback_check_stage_time"),
+            requestTelemetry.phase3AfterLiveFallbackCheckStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_kill_switch_check_stage_time"),
+            requestTelemetry.phase3BeforeKillSwitchCheckStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_kill_switch_check_stage_time"),
+            requestTelemetry.phase3AfterKillSwitchCheckStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_first_transition_stage_time"),
+            requestTelemetry.phase3BeforeFirstTransitionStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_first_transition_stage_time"),
+            requestTelemetry.phase3AfterFirstTransitionStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_second_transition_stage_time"),
+            requestTelemetry.phase3BeforeSecondTransitionStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_second_transition_stage_time"),
+            requestTelemetry.phase3AfterSecondTransitionStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_mode_branch_exit_stage_time"),
+            requestTelemetry.phase3ModeBranchExitStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_policy_done_stage_time"),
+            requestTelemetry.phase3PolicyDoneStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_active_assign_done_stage_time"),
+            requestTelemetry.phase3ActiveAssignDoneStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_decode_ahead_stage_time"),
+            requestTelemetry.phase3BeforeDecodeAheadStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_decode_ahead_stage_time"),
+            requestTelemetry.phase3AfterDecodeAheadStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_unlock_stage_time"),
+            requestTelemetry.phase3BeforeUnlockStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_after_unlock_stage_time"),
+            requestTelemetry.phase3AfterUnlockStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_render_decoded_slot_entry_stage_time"),
+            requestTelemetry.phase3RenderDecodedSlotEntryStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_phase3_before_draw_frame_stage_time"),
+            requestTelemetry.phase3BeforeDrawFrameStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_run_serial_active_assign_done_stage_time"),
+            requestTelemetry.runSerialActiveAssignDoneStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_run_serial_phase_policy_done_stage_time"),
+            requestTelemetry.runSerialPhasePolicyDoneStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_run_serial_before_unlock_stage_time"),
+            requestTelemetry.runSerialBeforeUnlockStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_run_serial_after_unlock_stage_time"),
+            requestTelemetry.runSerialAfterUnlockStageTime );
+        slot.stageTimingTelemetry.insert(
+            QStringLiteral("render_thread_run_serial_before_draw_frame_stage_time"),
+            requestTelemetry.runSerialBeforeDrawFrameStageTime );
         if( requestTelemetry.renderFrameEntryStageTime > 0.0
          && requestIssueStageTime > 0.0
          && requestTelemetry.renderFrameEntryStageTime >= requestIssueStageTime )
@@ -3088,6 +3542,10 @@ void RenderFrameThread::drawFrame( int slotIndex,
         };
         const double phase3DecodeQueueStageTime =
             telemetryStageTime( "phase3_decode_queue_stage_time" );
+        const double phase3LoopWakeStageTime =
+            telemetryStageTime( "phase3_loop_wake_stage_time" );
+        const double phase3RenderRequestTakeStageTime =
+            telemetryStageTime( "phase3_render_request_take_stage_time" );
         const double phase3DecodeStartStageTime =
             telemetryStageTime( "phase3_decode_start_stage_time" );
         const double phase3DecodeEndStageTime =
@@ -3104,8 +3562,140 @@ void RenderFrameThread::drawFrame( int slotIndex,
             telemetryStageTime( "phase3_process_ready_signal_stage_time" );
         const double phase3ProcessReadyTakeStageTime =
             telemetryStageTime( "phase3_process_ready_take_stage_time" );
+        insertStageDeltaMs( "render_thread_request_to_draw_frame_entry_ms",
+                            requestTelemetry.requestStageTime,
+                            drawFrameEntryStageTime );
+        insertStageDeltaMs( "render_thread_queue_push_to_draw_frame_entry_ms",
+                            requestTelemetry.requestQueuePushStageTime,
+                            drawFrameEntryStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_take_to_active_assign_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.runSerialActiveAssignDoneStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_active_assign_to_phase_policy_ms",
+                            requestTelemetry.runSerialActiveAssignDoneStageTime,
+                            requestTelemetry.runSerialPhasePolicyDoneStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_phase_policy_to_before_unlock_ms",
+                            requestTelemetry.runSerialPhasePolicyDoneStageTime,
+                            requestTelemetry.runSerialBeforeUnlockStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_before_unlock_to_after_unlock_ms",
+                            requestTelemetry.runSerialBeforeUnlockStageTime,
+                            requestTelemetry.runSerialAfterUnlockStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_after_unlock_to_before_draw_frame_ms",
+                            requestTelemetry.runSerialAfterUnlockStageTime,
+                            requestTelemetry.runSerialBeforeDrawFrameStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_take_to_before_draw_frame_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.runSerialBeforeDrawFrameStageTime );
+        insertStageDeltaMs( "render_thread_run_serial_before_draw_frame_to_draw_entry_ms",
+                            requestTelemetry.runSerialBeforeDrawFrameStageTime,
+                            drawFrameEntryStageTime );
+        insertStageDeltaMs( "render_thread_phase3_take_to_policy_done_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.phase3PolicyDoneStageTime );
+        insertStageDeltaMs( "render_thread_phase3_take_to_after_take_stamp_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.phase3AfterTakeStampStageTime );
+        insertStageDeltaMs( "render_thread_phase3_after_take_to_render_frame_flag_ms",
+                            requestTelemetry.phase3AfterTakeStampStageTime,
+                            requestTelemetry.phase3AfterRenderFrameFlagStageTime );
+        insertStageDeltaMs( "render_thread_phase3_render_frame_flag_to_mode_branch_ms",
+                            requestTelemetry.phase3AfterRenderFrameFlagStageTime,
+                            requestTelemetry.phase3ModeBranchEntryStageTime );
+        insertStageDeltaMs( "render_thread_phase3_mode_branch_to_live_fallback_ms",
+                            requestTelemetry.phase3ModeBranchEntryStageTime,
+                            requestTelemetry.phase3BeforeLiveFallbackCheckStageTime );
+        insertStageDeltaMs( "render_thread_phase3_live_fallback_check_ms",
+                            requestTelemetry.phase3BeforeLiveFallbackCheckStageTime,
+                            requestTelemetry.phase3AfterLiveFallbackCheckStageTime );
+        insertStageDeltaMs( "render_thread_phase3_after_live_fallback_to_kill_switch_ms",
+                            requestTelemetry.phase3AfterLiveFallbackCheckStageTime,
+                            requestTelemetry.phase3BeforeKillSwitchCheckStageTime );
+        insertStageDeltaMs( "render_thread_phase3_kill_switch_check_ms",
+                            requestTelemetry.phase3BeforeKillSwitchCheckStageTime,
+                            requestTelemetry.phase3AfterKillSwitchCheckStageTime );
+        insertStageDeltaMs( "render_thread_phase3_after_kill_switch_to_first_transition_ms",
+                            requestTelemetry.phase3AfterKillSwitchCheckStageTime,
+                            requestTelemetry.phase3BeforeFirstTransitionStageTime );
+        insertStageDeltaMs( "render_thread_phase3_first_transition_ms",
+                            requestTelemetry.phase3BeforeFirstTransitionStageTime,
+                            requestTelemetry.phase3AfterFirstTransitionStageTime );
+        insertStageDeltaMs( "render_thread_phase3_between_transitions_ms",
+                            requestTelemetry.phase3AfterFirstTransitionStageTime,
+                            requestTelemetry.phase3BeforeSecondTransitionStageTime );
+        insertStageDeltaMs( "render_thread_phase3_second_transition_ms",
+                            requestTelemetry.phase3BeforeSecondTransitionStageTime,
+                            requestTelemetry.phase3AfterSecondTransitionStageTime );
+        insertStageDeltaMs( "render_thread_phase3_second_transition_to_branch_exit_ms",
+                            requestTelemetry.phase3AfterSecondTransitionStageTime,
+                            requestTelemetry.phase3ModeBranchExitStageTime );
+        insertStageDeltaMs( "render_thread_phase3_branch_exit_to_policy_done_ms",
+                            requestTelemetry.phase3ModeBranchExitStageTime,
+                            requestTelemetry.phase3PolicyDoneStageTime );
+        insertStageDeltaMs( "render_thread_phase3_take_to_mode_branch_exit_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.phase3ModeBranchExitStageTime );
+        insertStageDeltaMs( "render_thread_phase3_policy_to_active_assign_ms",
+                            requestTelemetry.phase3PolicyDoneStageTime,
+                            requestTelemetry.phase3ActiveAssignDoneStageTime );
+        insertStageDeltaMs( "render_thread_phase3_active_assign_to_before_decode_ahead_ms",
+                            requestTelemetry.phase3ActiveAssignDoneStageTime,
+                            requestTelemetry.phase3BeforeDecodeAheadStageTime );
+        insertStageDeltaMs( "render_thread_phase3_decode_ahead_ms",
+                            requestTelemetry.phase3BeforeDecodeAheadStageTime,
+                            requestTelemetry.phase3AfterDecodeAheadStageTime );
+        insertStageDeltaMs( "render_thread_phase3_after_decode_ahead_to_before_unlock_ms",
+                            requestTelemetry.phase3AfterDecodeAheadStageTime,
+                            requestTelemetry.phase3BeforeUnlockStageTime );
+        insertStageDeltaMs( "render_thread_phase3_before_unlock_to_after_unlock_ms",
+                            requestTelemetry.phase3BeforeUnlockStageTime,
+                            requestTelemetry.phase3AfterUnlockStageTime );
+        insertStageDeltaMs( "render_thread_phase3_after_unlock_to_render_decoded_slot_entry_ms",
+                            requestTelemetry.phase3AfterUnlockStageTime,
+                            requestTelemetry.phase3RenderDecodedSlotEntryStageTime );
+        insertStageDeltaMs( "render_thread_phase3_render_decoded_slot_entry_to_before_draw_frame_ms",
+                            requestTelemetry.phase3RenderDecodedSlotEntryStageTime,
+                            requestTelemetry.phase3BeforeDrawFrameStageTime );
+        insertStageDeltaMs( "render_thread_phase3_before_draw_frame_to_draw_entry_ms",
+                            requestTelemetry.phase3BeforeDrawFrameStageTime,
+                            drawFrameEntryStageTime );
+        insertStageDeltaMs( "render_thread_phase3_take_to_before_draw_frame_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            requestTelemetry.phase3BeforeDrawFrameStageTime );
+        insertStageDeltaMs( "render_thread_phase3_take_to_draw_frame_entry_ms",
+                            requestTelemetry.phase3RenderRequestTakeStageTime,
+                            drawFrameEntryStageTime );
+        insertStageDeltaMs( "render_thread_draw_frame_entry_to_start_ms",
+                            drawFrameEntryStageTime,
+                            render_start );
+        insertStageDeltaMs( "render_thread_prologue_snapshot_preserve_ms",
+                            drawFrameEntryStageTime,
+                            prologueBeforeResetMetadataStageTime );
+        insertStageDeltaMs( "render_thread_prologue_reset_metadata_ms",
+                            prologueBeforeResetMetadataStageTime,
+                            prologueAfterResetMetadataStageTime );
+        insertStageDeltaMs( "render_thread_prologue_snapshot_restore_ms",
+                            prologueAfterResetMetadataStageTime,
+                            prologueAfterSnapshotRestoreStageTime );
+        insertStageDeltaMs( "render_thread_prologue_preserved_telemetry_ms",
+                            prologueAfterSnapshotRestoreStageTime,
+                            prologueAfterPreservedTelemetryStageTime );
+        insertStageDeltaMs( "render_thread_prologue_telemetry_setup_ms",
+                            prologueAfterPreservedTelemetryStageTime,
+                            render_start );
         insertStageDeltaMs( "phase3_request_to_decode_queue_ms",
                             requestTelemetry.requestStageTime,
+                            phase3DecodeQueueStageTime );
+        insertStageDeltaMs( "phase3_request_queue_push_to_loop_wake_ms",
+                            requestTelemetry.requestQueuePushStageTime,
+                            phase3LoopWakeStageTime );
+        insertStageDeltaMs( "phase3_loop_wake_to_render_request_take_ms",
+                            phase3LoopWakeStageTime,
+                            phase3RenderRequestTakeStageTime );
+        insertStageDeltaMs( "phase3_request_queue_push_to_take_ms",
+                            requestTelemetry.requestQueuePushStageTime,
+                            phase3RenderRequestTakeStageTime );
+        insertStageDeltaMs( "phase3_render_request_take_to_decode_queue_ms",
+                            phase3RenderRequestTakeStageTime,
                             phase3DecodeQueueStageTime );
         insertStageDeltaMs( "phase3_decode_queue_wait_ms",
                             phase3DecodeQueueStageTime,
@@ -3122,12 +3712,57 @@ void RenderFrameThread::drawFrame( int slotIndex,
         insertStageDeltaMs( "phase3_recon_worker_ms",
                             phase3ReconStartStageTime,
                             phase3ReconEndStageTime );
+        insertStageDeltaMs( "phase3_recon_initial_state_transitions_ms",
+                            phase3ReconStartStageTime,
+                            telemetryStageTime( "phase3_recon_after_state_transitions_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_scope_setup_ms",
+                            telemetryStageTime( "phase3_recon_before_scope_setup_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_scope_setup_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_capture_set_frame_ms",
+                            telemetryStageTime( "phase3_recon_before_capture_set_frame_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_capture_set_frame_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_apply_llrawproc_wall_ms",
+                            telemetryStageTime( "phase3_recon_before_apply_llrawproc_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_apply_llrawproc_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_timing_capture_ms",
+                            telemetryStageTime( "phase3_recon_after_apply_llrawproc_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_timing_capture_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_oracle_snapshot_ms",
+                            telemetryStageTime( "phase3_recon_before_oracle_snapshot_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_oracle_snapshot_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_prepared_input_snapshot_ms",
+                            telemetryStageTime( "phase3_recon_before_prepared_input_snapshot_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_prepared_input_snapshot_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_retained_device_query_ms",
+                            telemetryStageTime( "phase3_recon_before_retained_device_query_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_retained_device_query_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_prepared_state_snapshot_ms",
+                            telemetryStageTime( "phase3_recon_before_prepared_state_snapshot_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_prepared_state_snapshot_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_candidate_validation_ms",
+                            telemetryStageTime( "phase3_recon_before_candidate_validation_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_candidate_validation_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_no_readback_state_ms",
+                            telemetryStageTime( "phase3_recon_before_no_readback_state_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_no_readback_state_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_metadata_insert_ms",
+                            telemetryStageTime( "phase3_recon_after_no_readback_state_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_metadata_insert_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_process_ready_transition_ms",
+                            telemetryStageTime( "phase3_recon_before_process_ready_transition_stage_time" ),
+                            telemetryStageTime( "phase3_recon_after_process_ready_transition_stage_time" ) );
+        insertStageDeltaMs( "phase3_recon_end_to_process_ready_signal_ms",
+                            phase3ReconEndStageTime,
+                            phase3ProcessReadySignalStageTime );
         insertStageDeltaMs( "phase3_process_ready_signal_to_take_ms",
                             phase3ProcessReadySignalStageTime,
                             phase3ProcessReadyTakeStageTime );
         insertStageDeltaMs( "phase3_process_ready_take_to_render_start_ms",
                             phase3ProcessReadyTakeStageTime,
                             render_start );
+        insertStageDeltaMs( "phase3_process_ready_take_to_draw_frame_entry_ms",
+                            phase3ProcessReadyTakeStageTime,
+                            drawFrameEntryStageTime );
         insertStageDeltaMs( "phase3_process_ready_signal_to_render_start_ms",
                             phase3ProcessReadySignalStageTime,
                             render_start );

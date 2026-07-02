@@ -2488,6 +2488,7 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_renderThreadUsingGpuPreviewProcessing = false;
     m_renderThreadUsingGpuBilinearDebayer = false;
     m_renderThreadUsingGpuAmazeDebayer = false;
+    m_pRenderThread = nullptr;
     m_displayPreviewCacheNextSlot = 0;
     invalidateDisplayPreviewCache();
 
@@ -6132,6 +6133,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     requestContext.gpuPreviewPolicy = renderPolicy;
     requestContext.gpuPresentationOptions = m_lastQueuedGpuPresentationOptions;
     requestContext.gpuPreviewProcessingConfig = m_lastQueuedGpuPreviewProcessingConfig;
+    requestContext.gpuPreviewProcessingConfigGeneration =
+        m_gpuPreviewProcessingConfigCacheGeneration;
     requestContext.playbackProcessingReason = m_lastQueuedPlaybackProcessingReason;
     requestContext.playbackActive = ui->actionPlay->isChecked();
     requestContext.dropFramePlaybackActive =
@@ -8467,7 +8470,6 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 exposureBefore + midSessionExposureDelta );
             requestFrameRefresh(
                 false, "gui-smoke-mid-session-exposure-change" );
-            qApp->processEvents( QEventLoop::AllEvents );
 
             const int exposureAfter = ui->horizontalSliderExposure->value();
             qInfo().noquote()
@@ -8492,6 +8494,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                        .arg( ui->horizontalSliderPosition->value() );
 
             midSessionExposureChangeApplied = true;
+            qApp->processEvents( QEventLoop::AllEvents );
         }
         QThread::msleep( 10 );
     }
@@ -16488,6 +16491,11 @@ void MainWindow::invalidateGpuPreviewProcessingConfigCache( void )
     {
         m_gpuPreviewProcessingConfigCacheGeneration = 1;
     }
+    if( m_pRenderThread )
+    {
+        m_pRenderThread->setGpuPlaybackReconTextureLutSnapshotGeneration(
+            m_gpuPreviewProcessingConfigCacheGeneration );
+    }
 }
 
 GpuPreviewProcessingConfig MainWindow::gpuPreviewProcessingConfigForCurrentSettings(
@@ -22140,6 +22148,88 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryBoolValue(
             timing,
             "playback_timeline_early_advance_gpu_preview_config_cache_hit" );
+    const double uiSignalSourceFrameReadyEmitStage =
+        telemetryDoubleValue(
+            timing, "playback_timeline_source_frame_ready_emit_stage_time" );
+    const double uiSignalRenderEntryStage =
+        telemetryDoubleValue(
+            timing, "render_thread_render_frame_entry_stage_time" );
+    const double uiSignalRenderRequestStage =
+        telemetryDoubleValue(
+            timing, "render_thread_request_stage_time" );
+    const double uiSignalRenderStartStage =
+        telemetryDoubleValue(
+            timing, "render_thread_start_stage_time" );
+    const double uiSignalSourceReadyToRenderEntryMs =
+        stageDurationMs( uiSignalSourceFrameReadyEmitStage,
+                         uiSignalRenderEntryStage );
+    const double uiSignalSourceReadyToRenderRequestMs =
+        stageDurationMs( uiSignalSourceFrameReadyEmitStage,
+                         uiSignalRenderRequestStage );
+    const double uiSignalSourceReadyToRenderStartMs =
+        stageDurationMs( uiSignalSourceFrameReadyEmitStage,
+                         uiSignalRenderStartStage );
+    const bool uiSignalEarlyAdvanceCandidate =
+        telemetryBoolValue(
+            timing, "playback_predictive_gpu_tex_nr_advance_requested" );
+    const bool uiSignalEarlyAdvanceExecuted =
+        telemetryBoolValue(
+            timing, "playback_predictive_gpu_tex_nr_advance_executed" );
+    const bool uiSignalEarlyAdvancePlaybackEligible =
+        telemetryBoolValue(
+            timing, "playback_timeline_early_advance_playback_eligible" );
+    const bool uiSignalEarlyAdvanceRenderIdleAtDecision =
+        telemetryBoolValue(
+            timing, "playback_timeline_early_advance_render_idle_at_decision" );
+    const bool uiSignalEarlyAdvanceStillDrawingAtDecision =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_early_advance_frame_still_drawing_at_decision" );
+    const bool uiSignalEarlyAdvanceSuppressedByIsIdle =
+        telemetryBoolValue(
+            timing, "playback_timeline_early_advance_suppressed_by_isidle" );
+    const double renderThreadDrawFrameEntryStage =
+        telemetryDoubleValue(
+            timing, "render_thread_draw_frame_entry_stage_time" );
+    const double renderThreadPrologueBeforeResetStage =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_before_reset_metadata_stage_time" );
+    const double renderThreadPrologueAfterResetStage =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_after_reset_metadata_stage_time" );
+    const double renderThreadPrologueAfterSnapshotRestoreStage =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_after_snapshot_restore_stage_time" );
+    const double renderThreadPrologueAfterPreservedTelemetryStage =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_after_preserved_telemetry_stage_time" );
+    const double renderThreadRequestToDrawEntryMs =
+        telemetryDoubleValue(
+            timing, "render_thread_request_to_draw_frame_entry_ms" );
+    const double renderThreadQueuePushToDrawEntryMs =
+        telemetryDoubleValue(
+            timing, "render_thread_queue_push_to_draw_frame_entry_ms" );
+    const double renderThreadDrawEntryToStartMs =
+        telemetryDoubleValue(
+            timing, "render_thread_draw_frame_entry_to_start_ms" );
+    const double renderThreadPrologueSnapshotPreserveMs =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_snapshot_preserve_ms" );
+    const double renderThreadPrologueResetMetadataMs =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_reset_metadata_ms" );
+    const double renderThreadPrologueSnapshotRestoreMs =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_snapshot_restore_ms" );
+    const double renderThreadProloguePreservedTelemetryMs =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_preserved_telemetry_ms" );
+    const double renderThreadPrologueTelemetrySetupMs =
+        telemetryDoubleValue(
+            timing, "render_thread_prologue_telemetry_setup_ms" );
+    const double phase3ProcessReadyTakeToDrawEntryMs =
+        telemetryDoubleValue(
+            timing, "phase3_process_ready_take_to_draw_frame_entry_ms" );
     const int uiSignalPreviousGuiBusyProbeSerial =
         telemetryIntValue(
             timing,
@@ -22828,8 +22918,280 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( bool01( uiSignalPreviousGuiBusyProbeFired ) )
                    .arg( bool01( uiSignalPreviousGuiBusyProbePendingAtEntry ) )
                    .arg( bool01( uiSignalTrueEmitDuringPreviousGuiBusyProbe ) )
-                   .arg( bool01( uiSignalSlotEntryBeforePreviousGuiIdleProbe ) )
-                   .arg( uiSignalPreviousGuiBusyProbePendingMs, 0, 'f', 3 );
+                    .arg( bool01( uiSignalSlotEntryBeforePreviousGuiIdleProbe ) )
+                    .arg( uiSignalPreviousGuiBusyProbePendingMs, 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.issue_probe session=%1 index=%2 serial=%3 "
+                    "display_frame=%4 source_serial=%5 source_frame=%6 "
+                    "source_ready_emit_stage=%7 render_entry_stage=%8 "
+                    "source_ready_to_render_entry_ms=%9 "
+                    "source_ready_to_request_ms=%10 "
+                    "source_ready_to_render_start_ms=%11 "
+                    "predictive_candidate=%12 playback_eligible=%13 "
+                    "render_idle_at_decision=%14 "
+                    "still_drawing_at_decision=%15 "
+                    "suppressed_by_isidle=%16 early_executed=%17 "
+                    "early_issued=%18 tail_issued=%19 "
+                    "ready_backlog_before_acquire=%20 "
+                    "ready_backlog_after_acquire=%21" )
+                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                    .arg( m_playbackSmokePresentedFrames )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( telemetryIntValue(
+                        timing, "playback_timeline_source_request_serial" ) )
+                    .arg( telemetryIntValue(
+                        timing, "playback_timeline_source_frame" ) )
+                    .arg( uiSignalSourceFrameReadyEmitStage, 0, 'f', 9 )
+                    .arg( uiSignalRenderEntryStage, 0, 'f', 9 )
+                    .arg( uiSignalSourceReadyToRenderEntryMs, 0, 'f', 3 )
+                    .arg( uiSignalSourceReadyToRenderRequestMs, 0, 'f', 3 )
+                    .arg( uiSignalSourceReadyToRenderStartMs, 0, 'f', 3 )
+                    .arg( bool01( uiSignalEarlyAdvanceCandidate ) )
+                    .arg( bool01( uiSignalEarlyAdvancePlaybackEligible ) )
+                    .arg( bool01( uiSignalEarlyAdvanceRenderIdleAtDecision ) )
+                    .arg( bool01( uiSignalEarlyAdvanceStillDrawingAtDecision ) )
+                    .arg( bool01( uiSignalEarlyAdvanceSuppressedByIsIdle ) )
+                    .arg( bool01( uiSignalEarlyAdvanceExecuted ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing,
+                        "playback_timeline_early_advance_request_issued" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing,
+                        "playback_timeline_tail_advance_request_issued" ) ) )
+                    .arg( telemetryIntValue(
+                        timing,
+                        "playback_gpu_tex_nr_ready_backlog_before_acquire" ) )
+                    .arg( telemetryIntValue(
+                        timing,
+                        "playback_gpu_tex_nr_ready_backlog_after_acquire" ) );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.render_prologue session=%1 index=%2 serial=%3 "
+                    "display_frame=%4 request_stage=%5 queue_push_stage=%6 "
+                    "draw_frame_entry_stage=%7 before_reset_stage=%8 "
+                    "after_reset_stage=%9 after_snapshot_restore_stage=%10 "
+                    "after_preserved_telemetry_stage=%11 render_start_stage=%12 "
+                    "request_to_draw_entry_ms=%13 queue_push_to_draw_entry_ms=%14 "
+                    "phase3_process_ready_take_to_draw_entry_ms=%15 "
+                    "draw_entry_to_start_ms=%16 snapshot_preserve_ms=%17 "
+                    "reset_metadata_ms=%18 snapshot_restore_ms=%19 "
+                    "preserved_telemetry_ms=%20 telemetry_setup_ms=%21 "
+                    "queue_wait_ms=%22" )
+                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                    .arg( m_playbackSmokePresentedFrames )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( uiSignalRenderRequestStage, 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_request_queue_push_stage_time" ), 0, 'f', 9 )
+                    .arg( renderThreadDrawFrameEntryStage, 0, 'f', 9 )
+                    .arg( renderThreadPrologueBeforeResetStage, 0, 'f', 9 )
+                    .arg( renderThreadPrologueAfterResetStage, 0, 'f', 9 )
+                    .arg( renderThreadPrologueAfterSnapshotRestoreStage, 0, 'f', 9 )
+                    .arg( renderThreadPrologueAfterPreservedTelemetryStage, 0, 'f', 9 )
+                    .arg( uiSignalRenderStartStage, 0, 'f', 9 )
+                    .arg( renderThreadRequestToDrawEntryMs, 0, 'f', 3 )
+                    .arg( renderThreadQueuePushToDrawEntryMs, 0, 'f', 3 )
+                    .arg( phase3ProcessReadyTakeToDrawEntryMs, 0, 'f', 3 )
+                    .arg( renderThreadDrawEntryToStartMs, 0, 'f', 3 )
+                    .arg( renderThreadPrologueSnapshotPreserveMs, 0, 'f', 3 )
+                    .arg( renderThreadPrologueResetMetadataMs, 0, 'f', 3 )
+                    .arg( renderThreadPrologueSnapshotRestoreMs, 0, 'f', 3 )
+                    .arg( renderThreadProloguePreservedTelemetryMs, 0, 'f', 3 )
+                    .arg( renderThreadPrologueTelemetrySetupMs, 0, 'f', 3 )
+                    .arg( queueWaitMs, 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.render_serial session=%1 index=%2 serial=%3 "
+                    "display_frame=%4 take_stage=%5 active_assign_done_stage=%6 "
+                    "phase_policy_done_stage=%7 before_unlock_stage=%8 "
+                    "after_unlock_stage=%9 before_draw_frame_stage=%10 "
+                    "draw_frame_entry_stage=%11 take_to_active_assign_ms=%12 "
+                    "active_assign_to_phase_policy_ms=%13 "
+                    "phase_policy_to_before_unlock_ms=%14 "
+                    "before_unlock_to_after_unlock_ms=%15 "
+                    "after_unlock_to_before_draw_frame_ms=%16 "
+                    "take_to_before_draw_frame_ms=%17 "
+                    "before_draw_frame_to_draw_entry_ms=%18 "
+                    "request_to_draw_entry_ms=%19" )
+                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                    .arg( m_playbackSmokePresentedFrames )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_render_request_take_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_active_assign_done_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_phase_policy_done_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_before_unlock_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_after_unlock_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_before_draw_frame_stage_time" ), 0, 'f', 9 )
+                    .arg( renderThreadDrawFrameEntryStage, 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_take_to_active_assign_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_active_assign_to_phase_policy_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_phase_policy_to_before_unlock_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_before_unlock_to_after_unlock_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_after_unlock_to_before_draw_frame_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_take_to_before_draw_frame_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_run_serial_before_draw_frame_to_draw_entry_ms" ), 0, 'f', 3 )
+                    .arg( renderThreadRequestToDrawEntryMs, 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.phase3_handoff session=%1 index=%2 serial=%3 "
+                    "display_frame=%4 take_stage=%5 policy_done_stage=%6 "
+                    "active_assign_done_stage=%7 before_decode_ahead_stage=%8 "
+                    "after_decode_ahead_stage=%9 before_unlock_stage=%10 "
+                    "after_unlock_stage=%11 render_decoded_entry_stage=%12 "
+                    "before_draw_frame_stage=%13 draw_frame_entry_stage=%14 "
+                    "take_to_policy_done_ms=%15 policy_to_active_assign_ms=%16 "
+                    "active_assign_to_before_decode_ahead_ms=%17 "
+                    "decode_ahead_ms=%18 after_decode_ahead_to_before_unlock_ms=%19 "
+                    "before_unlock_to_after_unlock_ms=%20 "
+                    "after_unlock_to_render_decoded_entry_ms=%21 "
+                    "render_decoded_entry_to_before_draw_frame_ms=%22 "
+                    "before_draw_frame_to_draw_entry_ms=%23 "
+                    "take_to_before_draw_frame_ms=%24 take_to_draw_frame_entry_ms=%25" )
+                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                    .arg( m_playbackSmokePresentedFrames )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_render_request_take_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_policy_done_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_active_assign_done_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_decode_ahead_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_decode_ahead_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_unlock_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_unlock_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_render_decoded_slot_entry_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_draw_frame_stage_time" ), 0, 'f', 9 )
+                    .arg( renderThreadDrawFrameEntryStage, 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_policy_done_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_policy_to_active_assign_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_active_assign_to_before_decode_ahead_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_decode_ahead_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_decode_ahead_to_before_unlock_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_unlock_to_after_unlock_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_unlock_to_render_decoded_slot_entry_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_render_decoded_slot_entry_to_before_draw_frame_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_draw_frame_to_draw_entry_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_before_draw_frame_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_draw_frame_entry_ms" ), 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.phase3_policy session=%1 index=%2 serial=%3 "
+                    "display_frame=%4 take_stage=%5 after_take_stage=%6 "
+                    "render_frame_flag_stage=%7 branch_entry_stage=%8 "
+                    "live_before_stage=%9 live_after_stage=%10 "
+                    "kill_before_stage=%11 kill_after_stage=%12 "
+                    "first_before_stage=%13 first_after_stage=%14 "
+                    "second_before_stage=%15 second_after_stage=%16 "
+                    "branch_exit_stage=%17 policy_done_stage=%18 "
+                    "take_to_policy_done_ms=%19 take_to_after_take_ms=%20 "
+                    "after_take_to_render_frame_flag_ms=%21 "
+                    "render_frame_flag_to_mode_branch_ms=%22 "
+                    "mode_branch_to_live_fallback_ms=%23 "
+                    "live_fallback_check_ms=%24 "
+                    "after_live_fallback_to_kill_switch_ms=%25 "
+                    "kill_switch_check_ms=%26 "
+                    "after_kill_switch_to_first_transition_ms=%27 "
+                    "first_transition_ms=%28 between_transitions_ms=%29 "
+                    "second_transition_ms=%30 second_transition_to_branch_exit_ms=%31 "
+                    "branch_exit_to_policy_done_ms=%32 take_to_mode_branch_exit_ms=%33" )
+                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                    .arg( m_playbackSmokePresentedFrames )
+                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                    .arg( static_cast<qulonglong>( displayFrame ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_render_request_take_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_take_stamp_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_render_frame_flag_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_mode_branch_entry_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_live_fallback_check_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_live_fallback_check_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_kill_switch_check_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_kill_switch_check_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_first_transition_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_first_transition_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_before_second_transition_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_second_transition_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_mode_branch_exit_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_policy_done_stage_time" ), 0, 'f', 9 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_policy_done_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_after_take_stamp_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_take_to_render_frame_flag_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_render_frame_flag_to_mode_branch_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_mode_branch_to_live_fallback_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_live_fallback_check_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_live_fallback_to_kill_switch_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_kill_switch_check_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_after_kill_switch_to_first_transition_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_first_transition_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_between_transitions_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_second_transition_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_second_transition_to_branch_exit_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_branch_exit_to_policy_done_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "render_thread_phase3_take_to_mode_branch_exit_ms" ), 0, 'f', 3 );
             qInfo().noquote()
                 << QStringLiteral(
                        "playback_smoke.phase3_queue session=%1 index=%2 serial=%3 "
@@ -22837,14 +23199,19 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "decode_end_stage=%6 decode_done_signal_stage=%7 "
                    "decode_ready_take_stage=%8 recon_start_stage=%9 "
                    "recon_end_stage=%10 process_ready_signal_stage=%11 "
-                   "process_ready_take_stage=%12 request_to_decode_queue_ms=%13 "
-                   "decode_queue_wait_ms=%14 decode_worker_ms=%15 "
-                   "decode_done_to_recon_start_ms=%16 "
-                   "decode_done_to_process_take_ms=%17 recon_worker_ms=%18 "
-                   "process_ready_signal_to_take_ms=%19 "
-                   "process_ready_take_to_render_start_ms=%20 "
-                   "process_ready_signal_to_render_start_ms=%21 "
-                   "request_to_process_ready_signal_ms=%22" )
+                   "process_ready_take_stage=%12 loop_wake_stage=%13 "
+                   "render_request_take_stage=%14 request_to_decode_queue_ms=%15 "
+                   "request_queue_push_to_loop_wake_ms=%16 "
+                   "loop_wake_to_request_take_ms=%17 "
+                   "request_queue_push_to_take_ms=%18 "
+                   "request_take_to_decode_queue_ms=%19 "
+                   "decode_queue_wait_ms=%20 decode_worker_ms=%21 "
+                   "decode_done_to_recon_start_ms=%22 "
+                   "decode_done_to_process_take_ms=%23 recon_worker_ms=%24 "
+                   "process_ready_signal_to_take_ms=%25 "
+                   "process_ready_take_to_render_start_ms=%26 "
+                   "process_ready_signal_to_render_start_ms=%27 "
+                   "request_to_process_ready_signal_ms=%28" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
@@ -22867,7 +23234,19 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( telemetryDoubleValue(
                        timing, "phase3_process_ready_take_stage_time" ), 0, 'f', 9 )
                    .arg( telemetryDoubleValue(
+                       timing, "phase3_loop_wake_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_render_request_take_stage_time" ), 0, 'f', 9 )
+                   .arg( telemetryDoubleValue(
                        timing, "phase3_request_to_decode_queue_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_request_queue_push_to_loop_wake_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_loop_wake_to_render_request_take_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_request_queue_push_to_take_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_render_request_take_to_decode_queue_ms" ), 0, 'f', 3 )
                    .arg( telemetryDoubleValue(
                        timing, "phase3_decode_queue_wait_ms" ), 0, 'f', 3 )
                    .arg( telemetryDoubleValue(
@@ -22882,10 +23261,81 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        timing, "phase3_process_ready_signal_to_take_ms" ), 0, 'f', 3 )
                    .arg( telemetryDoubleValue(
                        timing, "phase3_process_ready_take_to_render_start_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_process_ready_signal_to_render_start_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_request_to_process_ready_signal_ms" ), 0, 'f', 3 );
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_smoke.phase3_recon_detail session=%1 index=%2 serial=%3 "
+                   "state_transitions_ms=%4 scope_setup_ms=%5 "
+                   "capture_set_frame_ms=%6 apply_llrawproc_wall_ms=%7 "
+                   "llrawproc_total_ms=%8 llrawproc_dual_iso_ms=%9 "
+                   "timing_capture_ms=%10 no_readback_state_ms=%11 "
+                   "oracle_snapshot_ms=%12 prepared_input_snapshot_ms=%13 "
+                   "retained_device_query_ms=%14 prepared_state_snapshot_ms=%15 "
+                   "candidate_validation_ms=%16 metadata_insert_ms=%17 "
+                   "process_ready_transition_ms=%18 end_to_signal_ms=%19 "
+                   "worker_ms=%20 worker_minus_apply_ms=%21 worker_minus_llrawproc_ms=%22 "
+                   "lut_cache_hit=%23 lut_cache_entries=%24 "
+                   "phase3_recon_lut_snapshot_processing_generation=%25 "
+                   "phase3_recon_lut_snapshot_atomic_generation=%26 "
+                   "phase3_recon_lut_snapshot_request_generation=%27" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( m_playbackSmokePresentedFrames )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
                    .arg( telemetryDoubleValue(
-                       timing, "phase3_process_ready_signal_to_render_start_ms" ), 0, 'f', 3 )
-                       .arg( telemetryDoubleValue(
-                           timing, "phase3_request_to_process_ready_signal_ms" ), 0, 'f', 3 );
+                       timing, "phase3_recon_initial_state_transitions_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_scope_setup_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_capture_set_frame_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_apply_llrawproc_wall_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "llrawproc_total_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "llrawproc_dual_iso_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_timing_capture_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_no_readback_state_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_oracle_snapshot_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_prepared_input_snapshot_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_retained_device_query_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_prepared_state_snapshot_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_candidate_validation_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_metadata_insert_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_process_ready_transition_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_end_to_process_ready_signal_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_worker_ms" ), 0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "phase3_recon_worker_ms" )
+                       - telemetryDoubleValue(
+                           timing, "phase3_recon_apply_llrawproc_wall_ms" ), 0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "phase3_recon_worker_ms" )
+                        - telemetryDoubleValue(
+                            timing, "llrawproc_total_ms" ), 0, 'f', 3 )
+                    .arg( telemetryBoolValue(
+                        timing, "phase3_recon_lut_snapshot_cache_hit" ) )
+                    .arg( telemetryIntValue(
+                        timing, "phase3_recon_lut_snapshot_cache_entries" ) )
+                    .arg( static_cast<qulonglong>( telemetryDoubleValue(
+                        timing, "phase3_recon_lut_snapshot_processing_generation" ) ) )
+                    .arg( static_cast<qulonglong>( telemetryDoubleValue(
+                        timing, "phase3_recon_lut_snapshot_atomic_generation" ) ) )
+                    .arg( static_cast<qulonglong>( telemetryDoubleValue(
+                        timing, "phase3_recon_lut_snapshot_request_generation" ) ) );
             qInfo().noquote()
                 << QStringLiteral(
                        "playback_smoke.early_yield session=%1 index=%2 serial=%3 "
@@ -26040,9 +26490,16 @@ void MainWindow::drawFrameReady()
     }
     const double drawReadyBeforeEarlyAdvanceStageTime = mlv_stage_timing_now();
     bool predictiveGpuTexNrEarlyAdvanceExecuted = false;
+    bool predictiveGpuTexNrEarlyAdvancePlaybackEligible = false;
+    bool predictiveGpuTexNrEarlyAdvanceRenderIdle = false;
+    bool predictiveGpuTexNrEarlyAdvanceSuppressedByIsIdle = false;
     if( ui->actionPlay->isChecked() && m_pRenderThread )
     {
+        predictiveGpuTexNrEarlyAdvancePlaybackEligible = true;
         m_frameStillDrawing = !m_pRenderThread->isIdle();
+        predictiveGpuTexNrEarlyAdvanceRenderIdle = !m_frameStillDrawing;
+        predictiveGpuTexNrEarlyAdvanceSuppressedByIsIdle =
+            predictiveGpuTexNrEarlyAdvance && m_frameStillDrawing;
         if( !m_frameStillDrawing )
         {
             m_skipImmediateTimecodeLabel = true;
@@ -26152,6 +26609,25 @@ void MainWindow::drawFrameReady()
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_predictive_gpu_tex_nr_advance_executed"),
         predictiveGpuTexNrEarlyAdvanceExecuted );
+    if( m_playbackSmokeFrameTelemetry )
+    {
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_early_advance_decision_stage_time"),
+            drawReadyBeforeEarlyAdvanceStageTime );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_early_advance_playback_eligible"),
+            predictiveGpuTexNrEarlyAdvancePlaybackEligible );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_early_advance_render_idle_at_decision"),
+            predictiveGpuTexNrEarlyAdvanceRenderIdle );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_early_advance_frame_still_drawing_at_decision"),
+            predictiveGpuTexNrEarlyAdvancePlaybackEligible
+                && !predictiveGpuTexNrEarlyAdvanceRenderIdle );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_timeline_early_advance_suppressed_by_isidle"),
+            predictiveGpuTexNrEarlyAdvanceSuppressedByIsIdle );
+    }
 
     const double display_start = mlv_stage_timing_now();
     const double frameReadyTrueEmitStageTime =
@@ -26460,6 +26936,11 @@ void MainWindow::drawFrameReady()
     GpuDisplayViewport::PresentationOptions gpuPresentationOptions =
         requestContext.gpuPresentationOptions;
     gpuPresentationOptions.showZebras = gpuPreviewPolicy.zebrasEnabled;
+    gpuPresentationOptions.telemetryRequestSerial =
+        static_cast<qint64>( readyFrame.requestSerial );
+    gpuPresentationOptions.telemetryDisplayFrame =
+        static_cast<qint64>( display_frame );
+    gpuPresentationOptions.telemetryDrawBeginStageTime = display_start;
     if( gpuPreviewProcessingActive )
     {
         gpuPresentationOptions.previewProcessing = gpuPreviewProcessingConfig;
