@@ -23387,7 +23387,13 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "gpu_tex_nr_fast_sh_debayer_ms=%49 "
                     "gpu_tex_nr_fast_sh_refresh_ms=%50 "
                     "gpu_tex_nr_fast_sh_state_reason=\"%51\" "
-                    "gpu_tex_nr_display_lut_only_sh_frame_state_bypass=%52" )
+                    "gpu_tex_nr_display_lut_only_sh_frame_state_bypass=%52 "
+                    "recon_upload_ms=%53 recon_kernel_ms=%54 "
+                    "recon_interop_ms=%55 recon_total_ms=%56 "
+                    "recon_wall_ms=%57 recon_host_gap_ms=%58 "
+                    "recon_backend_config_ms=%59 "
+                    "recon_backend_run_wall_ms=%60 "
+                    "recon_retained_device_copy_ms=%61" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -23504,7 +23510,34 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         .toString( QStringLiteral("none") ) )
                     .arg( bool01( telemetryBoolValue(
                         timing,
-                        "gpu_playback_recon_amaze_texture_present_skip_gate_display_lut_only_sh_frame_state_bypass" ) ) );
+                        "gpu_playback_recon_amaze_texture_present_skip_gate_display_lut_only_sh_frame_state_bypass" ) ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_upload_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_kernel_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_interop_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_total_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_wall_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_host_gap_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_backend_config_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_backend_run_wall_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_retained_device_copy_ms" ),
+                        0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "

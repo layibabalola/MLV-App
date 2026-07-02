@@ -2475,23 +2475,23 @@ static void match_by_histogram(struct raw_info raw_info,
     *black_delta = b * 16;
 }
 
-static int match_exposures(struct raw_info raw_info,
-                           uint32_t * raw_buffer_32,
-                           int dark_frame,
-                           int iso1,
-                           int iso2,
-                           int * auto_correction,
-                           double * ev_correction,
-                           int * black_delta,
-                           int * white_darkened,
-                           int * is_bright,
-                           dualiso_full20bit_scratch_t * scratch)
+static int compute_match_exposure_scalars(struct raw_info raw_info,
+                                          uint32_t * raw_buffer_32,
+                                          int dark_frame,
+                                          int iso1,
+                                          int iso2,
+                                          int * auto_correction,
+                                          double * ev_correction,
+                                          int * black_delta,
+                                          int * white_darkened,
+                                          int * is_bright,
+                                          dualiso_full20bit_scratch_t * scratch,
+                                          int allow_histogram,
+                                          double * applied_ev_correction,
+                                          int * applied_black_delta)
 {
     int black = raw_info.black_level;
     int white = MIN(raw_info.white_level, *white_darkened);
-
-    int w = raw_info.width;
-    int h = raw_info.height;
 
     double _ev_correction = 0.0;
     int _black_delta = 0;
@@ -2518,6 +2518,10 @@ static int match_exposures(struct raw_info raw_info,
     }
     else if (*auto_correction == -2)
     {
+        if (!allow_histogram || !raw_buffer_32)
+        {
+            return -1;
+        }
         match_by_histogram(raw_info, raw_buffer_32, &_ev_correction, &_black_delta, white_darkened, is_bright, scratch);
     }
 
@@ -2533,6 +2537,14 @@ static int match_exposures(struct raw_info raw_info,
 
     _ev_correction = COERCE(_ev_correction, 0, 6.0);
     _black_delta = COERCE(_black_delta, 0, 100 * 64);
+    if (applied_ev_correction)
+    {
+        *applied_ev_correction = _ev_correction;
+    }
+    if (applied_black_delta)
+    {
+        *applied_black_delta = _black_delta;
+    }
 
     *ev_correction = -_ev_correction;
     *black_delta = _black_delta / 64;
@@ -2547,6 +2559,50 @@ static int match_exposures(struct raw_info raw_info,
         return 0;
     }
 
+    double factor = pow(2, -_ev_correction);
+    *white_darkened = ((white - black + _black_delta) * factor) + black;
+
+    return 1;
+}
+
+static int match_exposures(struct raw_info raw_info,
+                           uint32_t * raw_buffer_32,
+                           int dark_frame,
+                           int iso1,
+                           int iso2,
+                           int * auto_correction,
+                           double * ev_correction,
+                           int * black_delta,
+                           int * white_darkened,
+                           int * is_bright,
+                           dualiso_full20bit_scratch_t * scratch)
+{
+    int black = raw_info.black_level;
+    int w = raw_info.width;
+    int h = raw_info.height;
+    double applied_ev_correction = 0.0;
+    int applied_black_delta = 0;
+    const int scalar_rc = compute_match_exposure_scalars(raw_info,
+                                                        raw_buffer_32,
+                                                        dark_frame,
+                                                        iso1,
+                                                        iso2,
+                                                        auto_correction,
+                                                        ev_correction,
+                                                        black_delta,
+                                                        white_darkened,
+                                                        is_bright,
+                                                        scratch,
+                                                        1,
+                                                        &applied_ev_correction,
+                                                        &applied_black_delta);
+    if (scalar_rc <= 0)
+    {
+        return scalar_rc;
+    }
+
+    const int _black_delta = applied_black_delta;
+    const double _ev_correction = applied_ev_correction;
     double factor = pow(2, -_ev_correction);
 
     #pragma omp parallel for collapse(2)
@@ -2570,8 +2626,6 @@ static int match_exposures(struct raw_info raw_info,
             raw_set_pixel20(x, y, p);
         }
     }
-
-    *white_darkened = ((white - black + _black_delta) * factor) + black;
 
     return 1;
 }
@@ -5892,40 +5946,60 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                         &bright_noise_ev);
     g_dualiso_full20bit_timing.noise_ms += dualiso_debug_elapsed_ms(stage_start);
 
-    stage_start = mlv_stage_timing_now();
-    if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
-    {
-        g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
-        DUALISO_GPU_PREP_RETURN(0);
-    }
-    g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
-
-    stage_start = mlv_stage_timing_now();
-    uint32_t * raw_buffer_32 = convert_to_20bit(raw_info, image_data, scratch->raw_buffer_32);
-    g_dualiso_full20bit_timing.convert20_ms += dualiso_debug_elapsed_ms(stage_start);
-    if (!raw_buffer_32)
-    {
-        DUALISO_GPU_PREP_RETURN(0);
-    }
-
     dark_noise *= 64;
     bright_noise *= 64;
     dark_noise_ev += 6;
     bright_noise_ev += 6;
 
     int white_darkened = white_bright;
+    const int requires_full20_match = (*auto_correction == -2);
+    uint32_t * raw_buffer_32 = NULL;
+    if (requires_full20_match)
+    {
+        stage_start = mlv_stage_timing_now();
+        if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
+        {
+            g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
+            DUALISO_GPU_PREP_RETURN(0);
+        }
+        g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
+
+        stage_start = mlv_stage_timing_now();
+        raw_buffer_32 = convert_to_20bit(raw_info, image_data, scratch->raw_buffer_32);
+        g_dualiso_full20bit_timing.convert20_ms += dualiso_debug_elapsed_ms(stage_start);
+        if (!raw_buffer_32)
+        {
+            DUALISO_GPU_PREP_RETURN(0);
+        }
+    }
+
     stage_start = mlv_stage_timing_now();
-    const int expo_matched = match_exposures(raw_info,
-                                             raw_buffer_32,
-                                             dark_frame,
-                                             iso1,
-                                             iso2,
-                                             auto_correction,
-                                             ev_correction,
-                                             black_delta,
-                                             &white_darkened,
-                                             is_bright,
-                                             scratch);
+    const int expo_matched = requires_full20_match
+        ? match_exposures(raw_info,
+                          raw_buffer_32,
+                          dark_frame,
+                          iso1,
+                          iso2,
+                          auto_correction,
+                          ev_correction,
+                          black_delta,
+                          &white_darkened,
+                          is_bright,
+                          scratch)
+        : compute_match_exposure_scalars(raw_info,
+                                         NULL,
+                                         dark_frame,
+                                         iso1,
+                                         iso2,
+                                         auto_correction,
+                                         ev_correction,
+                                         black_delta,
+                                         &white_darkened,
+                                         is_bright,
+                                         scratch,
+                                         0,
+                                         NULL,
+                                         NULL);
     (void)expo_matched;
     const double corr_ev = ABS(*ev_correction);
     g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);

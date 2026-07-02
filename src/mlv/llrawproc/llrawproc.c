@@ -285,6 +285,8 @@ static MLV_THREAD_LOCAL uint16_t *g_llrawproc_gpu_playback_last_input_bayer16 = 
 static MLV_THREAD_LOCAL size_t g_llrawproc_gpu_playback_last_input_words = 0;
 static MLV_THREAD_LOCAL llrpGpuPlaybackRetainedDeviceBayer16_t
     g_llrawproc_gpu_playback_last_retained_device_bayer16 = {0};
+static MLV_THREAD_LOCAL llrpGpuPlaybackReconTiming_t
+    g_llrawproc_gpu_playback_last_timing = {0};
 
 static void llrawproc_gpu_export_reset_last_run_state(void)
 {
@@ -330,6 +332,9 @@ static void llrawproc_gpu_playback_reset_last_run_state(void)
     memset(&g_llrawproc_gpu_playback_last_retained_device_bayer16,
            0,
            sizeof(g_llrawproc_gpu_playback_last_retained_device_bayer16));
+    memset(&g_llrawproc_gpu_playback_last_timing,
+           0,
+           sizeof(g_llrawproc_gpu_playback_last_timing));
 }
 
 static int llrawproc_gpu_playback_take_last_input_bayer16(uint16_t * owned_input,
@@ -469,6 +474,13 @@ int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void);
 int llrpGpuPlaybackReconLastPrepareOnlyForTesting(void)
 {
     return g_llrawproc_gpu_playback_last_prepare_only;
+}
+
+int llrpGpuPlaybackReconLastTimingForTesting(llrpGpuPlaybackReconTiming_t * timing)
+{
+    if(!timing) return 0;
+    *timing = g_llrawproc_gpu_playback_last_timing;
+    return timing->available != 0;
 }
 
 static void llrawproc_gpu_playback_public_state_from_dualiso(
@@ -998,6 +1010,10 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     llrawprocGpuReconLutsKey_t luts_key;
     int rc = 0;
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
+    const double backend_wall_start = mlv_stage_timing_now();
+    double backend_config_ms = 0.0;
+    double backend_run_wall_ms = 0.0;
+    double retained_device_copy_ms = 0.0;
 
     if(rc_out) *rc_out = -1;
     if(allocated_bytes_out) *allocated_bytes_out = 0;
@@ -1066,6 +1082,7 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     const int need_set_clip = !clip_matches;
     const int need_set_luts = need_set_clip || !luts_match;
 
+    const double backend_config_start = mlv_stage_timing_now();
     if(need_set_clip)
     {
         rc = g->set_clip(g->backend, &clip);
@@ -1094,7 +1111,14 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
             g->luts_configured = 0;
         }
     }
-    if(rc == 0) rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
+    backend_config_ms += (mlv_stage_timing_now() - backend_config_start) * 1000.0;
+    if(rc == 0)
+    {
+        const double backend_run_start = mlv_stage_timing_now();
+        rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
+        backend_run_wall_ms =
+            (mlv_stage_timing_now() - backend_run_start) * 1000.0;
+    }
     if(rc == 0
      && out_kind == IGPU_OUT_DEVICE_BAYER16
      && g->last_device_output
@@ -1140,12 +1164,15 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
         int retained_width = 0;
         int retained_height = 0;
         uint64_t retained_token = 0;
+        const double retained_start = mlv_stage_timing_now();
         const int retained_rc =
             g->retain_last_device_output(g->backend,
                                          &retained_device_bayer16,
                                          &retained_width,
                                          &retained_height,
                                          &retained_token);
+        retained_device_copy_ms =
+            (mlv_stage_timing_now() - retained_start) * 1000.0;
         if(retained_rc == 0
         && retained_device_bayer16
         && retained_width == state->width
@@ -1187,6 +1214,16 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
             timing_out->interop_ms = timing.download_ms;
             timing_out->total_ms = timing.total_ms;
         }
+    }
+    if(timing_out)
+    {
+        timing_out->wall_ms =
+            (mlv_stage_timing_now() - backend_wall_start) * 1000.0;
+        timing_out->host_gap_ms = timing_out->wall_ms - timing_out->total_ms;
+        timing_out->context_ms = backend_config_ms;
+        timing_out->setup_ms = 0.0;
+        timing_out->recon_wall_ms = backend_run_wall_ms;
+        timing_out->post_ms = retained_device_copy_ms;
     }
     pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
 
@@ -3118,6 +3155,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                     &retained_timing)
                              && retained_device.valid)
                             {
+                                g_llrawproc_gpu_playback_last_timing =
+                                    retained_timing;
                                 g_llrawproc_gpu_playback_last_retained_device_bayer16 =
                                     retained_device;
                                 g_llrawproc_gpu_playback_last_run_rc = retained_rc;
@@ -3125,6 +3164,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                             }
                             else
                             {
+                                g_llrawproc_gpu_playback_last_timing =
+                                    retained_timing;
                                 memset(
                                     &g_llrawproc_gpu_playback_last_retained_device_bayer16,
                                     0,

@@ -154,7 +154,16 @@ bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
         || key == QStringLiteral("gpu_playback_recon_attempted")
         || key == QStringLiteral("gpu_playback_recon_used")
         || key == QStringLiteral("gpu_playback_recon_state_valid")
-        || key == QStringLiteral("gpu_playback_recon_rc");
+        || key == QStringLiteral("gpu_playback_recon_rc")
+        || key == QStringLiteral("gpu_playback_recon_upload_ms")
+        || key == QStringLiteral("gpu_playback_recon_kernel_ms")
+        || key == QStringLiteral("gpu_playback_recon_interop_ms")
+        || key == QStringLiteral("gpu_playback_recon_total_ms")
+        || key == QStringLiteral("gpu_playback_recon_wall_ms")
+        || key == QStringLiteral("gpu_playback_recon_host_gap_ms")
+        || key == QStringLiteral("gpu_playback_recon_backend_config_ms")
+        || key == QStringLiteral("gpu_playback_recon_backend_run_wall_ms")
+        || key == QStringLiteral("gpu_playback_recon_retained_device_copy_ms");
 }
 
 void preserveGpuPlaybackReconTimingTelemetry( const QJsonObject &source,
@@ -383,6 +392,37 @@ void insertGpuPlaybackReconRunTelemetry( QJsonObject &target )
     target.insert(
         QStringLiteral("gpu_playback_recon_rc"),
         llrpGpuPlaybackReconLastRunRcForTesting() );
+    llrpGpuPlaybackReconTiming_t reconTiming = {};
+    if( llrpGpuPlaybackReconLastTimingForTesting( &reconTiming ) )
+    {
+        target.insert(
+            QStringLiteral("gpu_playback_recon_upload_ms"),
+            reconTiming.upload_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_kernel_ms"),
+            reconTiming.kernel_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_interop_ms"),
+            reconTiming.interop_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_total_ms"),
+            reconTiming.total_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_wall_ms"),
+            reconTiming.wall_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_host_gap_ms"),
+            reconTiming.host_gap_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_backend_config_ms"),
+            reconTiming.context_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_backend_run_wall_ms"),
+            reconTiming.recon_wall_ms );
+        target.insert(
+            QStringLiteral("gpu_playback_recon_retained_device_copy_ms"),
+            reconTiming.post_ms );
+    }
 }
 
 bool gpuPlaybackReconNoReadbackOutputValidationEnabled()
