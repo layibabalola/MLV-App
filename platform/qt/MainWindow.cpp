@@ -2836,8 +2836,13 @@ void MainWindow::timerFrameEvent( bool predictivePlaybackAdvance )
     }
 
     //Playback
+    const bool frameChangedBeforePlayback = m_frameChanged;
     const int positionBeforePlayback = ui->horizontalSliderPosition->value();
     playbackHandling( timeDiff );
+    if( frameChangedBeforePlayback )
+    {
+        invalidateGpuPreviewProcessingConfigCache();
+    }
     if( interactiveTraceEnabled() )
     {
         logInteractionEvent(
@@ -3747,6 +3752,7 @@ void MainWindow::enqueuePlaybackPrepTask( const PlaybackPrepTask &task )
 
 void MainWindow::invalidatePlaybackPrepForDisplayChange( const char *reason )
 {
+    invalidateGpuPreviewProcessingConfigCache();
     const uint64_t newGeneration =
         m_playbackPresentationGeneration.fetch_add( 1, std::memory_order_acq_rel ) + 1;
     const uint64_t oldGeneration = newGeneration - 1;
@@ -5878,9 +5884,14 @@ void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
 void MainWindow::drawFrame( bool updateTimecodeLabel )
 {
     m_lastDrawFrameEntryStageTime = mlv_stage_timing_now();
+    if( m_frameChanged )
+    {
+        invalidateGpuPreviewProcessingConfigCache();
+    }
     m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
     m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
     m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
+    m_lastDrawFrameGpuPreviewConfigCacheHit = false;
     m_frameStillDrawing = true;
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
     if( !playbackPolicyActive()
@@ -5978,8 +5989,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     {
         m_lastDrawFrameGpuPreviewConfigBeginStageTime = mlv_stage_timing_now();
         m_lastQueuedGpuPreviewProcessingConfig =
-            gpuPreviewProcessingBuildConfig( m_pProcessingObject,
-                                            &m_lastQueuedPlaybackProcessingReason );
+            gpuPreviewProcessingConfigForCurrentSettings(
+                &m_lastQueuedPlaybackProcessingReason );
         m_lastDrawFrameGpuPreviewConfigEndStageTime = mlv_stage_timing_now();
         m_lastDrawFrameGpuPreviewConfigBuildMs =
             ( m_lastDrawFrameGpuPreviewConfigEndStageTime
@@ -8399,10 +8410,89 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
     applyEffectiveDualIsoPlaybackSettings();
     qApp->processEvents( QEventLoop::AllEvents );
 
+    bool midSessionExposureChangeEnabled = false;
+    bool midSessionExposureChangeApplied = false;
+    int midSessionExposureAtMs = 0;
+    int midSessionExposureDelta = 40;
+    if( qEnvironmentVariableIsSet( "MLVAPP_GUI_SMOKE_MID_SESSION_EXPOSURE_AT_MS" ) )
+    {
+        bool atOk = false;
+        const int parsedAt =
+            qEnvironmentVariableIntValue(
+                "MLVAPP_GUI_SMOKE_MID_SESSION_EXPOSURE_AT_MS", &atOk );
+        midSessionExposureChangeEnabled = atOk && parsedAt >= 0;
+        midSessionExposureAtMs = qMax( 0, parsedAt );
+        if( !atOk )
+        {
+            qWarning().noquote()
+                << QStringLiteral(
+                       "gui_smoke.mid_session_exposure_change requested=1 applied=0 reason=invalid_at_ms" );
+        }
+    }
+    if( midSessionExposureChangeEnabled
+     && qEnvironmentVariableIsSet( "MLVAPP_GUI_SMOKE_MID_SESSION_EXPOSURE_DELTA" ) )
+    {
+        bool deltaOk = false;
+        const int parsedDelta =
+            qEnvironmentVariableIntValue(
+                "MLVAPP_GUI_SMOKE_MID_SESSION_EXPOSURE_DELTA", &deltaOk );
+        if( deltaOk )
+        {
+            midSessionExposureDelta = parsedDelta;
+        }
+        else
+        {
+            qWarning().noquote()
+                << QStringLiteral(
+                       "gui_smoke.mid_session_exposure_change requested=1 applied=0 reason=invalid_delta" );
+            midSessionExposureChangeEnabled = false;
+        }
+    }
+
     const int durationMs = qMax( 100, options.durationMs );
     while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )
     {
         qApp->processEvents( QEventLoop::AllEvents );
+        if( midSessionExposureChangeEnabled
+         && !midSessionExposureChangeApplied
+         && playbackClock.elapsed() >= midSessionExposureAtMs )
+        {
+            const qint64 elapsedMs = playbackClock.elapsed();
+            const int exposureBefore = ui->horizontalSliderExposure->value();
+            const uint64_t cacheGenerationBefore =
+                m_gpuPreviewProcessingConfigCacheGeneration;
+            const bool cacheValidBefore = m_gpuPreviewProcessingConfigCacheValid;
+
+            ui->horizontalSliderExposure->setValue(
+                exposureBefore + midSessionExposureDelta );
+            requestFrameRefresh(
+                false, "gui-smoke-mid-session-exposure-change" );
+            qApp->processEvents( QEventLoop::AllEvents );
+
+            const int exposureAfter = ui->horizontalSliderExposure->value();
+            qInfo().noquote()
+                << QStringLiteral(
+                       "gui_smoke.mid_session_exposure_change "
+                       "requested=1 applied=%1 elapsed_ms=%2 "
+                       "exposure_before=%3 exposure_after=%4 delta=%5 "
+                       "cache_generation_before=%6 cache_generation_after=%7 "
+                       "cache_valid_before=%8 cache_valid_after=%9 "
+                       "frame_changed=%10 position=%11" )
+                       .arg( bool01( exposureAfter != exposureBefore ) )
+                       .arg( elapsedMs )
+                       .arg( exposureBefore )
+                       .arg( exposureAfter )
+                       .arg( midSessionExposureDelta )
+                       .arg( static_cast<qulonglong>( cacheGenerationBefore ) )
+                       .arg( static_cast<qulonglong>(
+                           m_gpuPreviewProcessingConfigCacheGeneration ) )
+                       .arg( bool01( cacheValidBefore ) )
+                       .arg( bool01( m_gpuPreviewProcessingConfigCacheValid ) )
+                       .arg( bool01( m_frameChanged ) )
+                       .arg( ui->horizontalSliderPosition->value() );
+
+            midSessionExposureChangeApplied = true;
+        }
         QThread::msleep( 10 );
     }
 
@@ -13186,6 +13276,7 @@ void MainWindow::pasteReceiptFromClipboardTo(int row)
 //Set the edit sliders to settings
 void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
 {
+    invalidateGpuPreviewProcessingConfigCache();
     m_setSliders = true;
     ui->horizontalSliderExposure->setValue( receipt->exposure() );
     ui->horizontalSliderContrast->setValue( receipt->contrast() );
@@ -16379,6 +16470,7 @@ static uint8_t applyZebrasToImage( QImage *image, bool enableZebras )
 
 void MainWindow::invalidateDisplayPreviewCache( void )
 {
+    invalidateGpuPreviewProcessingConfigCache();
     m_displayPreviewCacheNextSlot = 0;
     m_lastDisplaySceneWidth = -1;
     m_lastDisplaySceneHeight = -1;
@@ -16386,6 +16478,68 @@ void MainWindow::invalidateDisplayPreviewCache( void )
     {
         entry = DisplayPreviewCacheEntry();
     }
+}
+
+void MainWindow::invalidateGpuPreviewProcessingConfigCache( void )
+{
+    m_gpuPreviewProcessingConfigCacheValid = false;
+    ++m_gpuPreviewProcessingConfigCacheGeneration;
+    if( m_gpuPreviewProcessingConfigCacheGeneration == 0 )
+    {
+        m_gpuPreviewProcessingConfigCacheGeneration = 1;
+    }
+}
+
+GpuPreviewProcessingConfig MainWindow::gpuPreviewProcessingConfigForCurrentSettings(
+    QString *reason )
+{
+    m_lastDrawFrameGpuPreviewConfigCacheHit = false;
+
+    const processingObject_t *processing = m_pProcessingObject;
+    if( !processing )
+    {
+        if( reason ) reason->clear();
+        return GpuPreviewProcessingConfig();
+    }
+
+    const int dualIso = ( processing->dual_iso != nullptr )
+        ? *processing->dual_iso : 0;
+    const int highestGreenDiso =
+        static_cast<int>( processing->highest_green_diso );
+    const int gradientHighestGreenDiso =
+        static_cast<int>( processing->highest_green_gradient_diso );
+
+    if( m_gpuPreviewProcessingConfigCacheValid
+     && m_gpuPreviewProcessingConfigCacheEntryGeneration
+            == m_gpuPreviewProcessingConfigCacheGeneration
+     && m_gpuPreviewProcessingConfigCacheProcessing == processing
+     && m_gpuPreviewProcessingConfigCacheDualIso == dualIso
+     && m_gpuPreviewProcessingConfigCacheHighestGreenDiso == highestGreenDiso
+     && m_gpuPreviewProcessingConfigCacheGradientHighestGreenDiso
+            == gradientHighestGreenDiso )
+    {
+        m_lastDrawFrameGpuPreviewConfigCacheHit = true;
+        if( reason ) *reason = m_gpuPreviewProcessingConfigCacheReason;
+        return m_gpuPreviewProcessingConfigCache;
+    }
+
+    QString buildReason;
+    GpuPreviewProcessingConfig config =
+        gpuPreviewProcessingBuildConfig( processing, &buildReason );
+
+    m_gpuPreviewProcessingConfigCacheValid = true;
+    m_gpuPreviewProcessingConfigCacheEntryGeneration =
+        m_gpuPreviewProcessingConfigCacheGeneration;
+    m_gpuPreviewProcessingConfigCacheProcessing = processing;
+    m_gpuPreviewProcessingConfigCacheDualIso = dualIso;
+    m_gpuPreviewProcessingConfigCacheHighestGreenDiso = highestGreenDiso;
+    m_gpuPreviewProcessingConfigCacheGradientHighestGreenDiso =
+        gradientHighestGreenDiso;
+    m_gpuPreviewProcessingConfigCache = config;
+    m_gpuPreviewProcessingConfigCacheReason = buildReason;
+
+    if( reason ) *reason = buildReason;
+    return config;
 }
 
 void MainWindow::clearPresentationForClipOpen( const char *reason )
@@ -17077,6 +17231,7 @@ void MainWindow::on_horizontalSliderPosition_valueChanged(int position)
     if( !m_playbackInternalSliderAdvance )
     {
         invalidatePlaybackPrepForDisplayChange( "playback-position-change" );
+        invalidateGpuPreviewProcessingConfigCache();
     }
 
     //Enable jumping while drop frame mode playback is active
@@ -21962,6 +22117,10 @@ void MainWindow::notePlaybackSmokePresentedFrame(
         telemetryDoubleValue(
             timing,
             "playback_timeline_early_advance_gpu_preview_config_build_ms" );
+    const bool uiSignalEarlyAdvanceGpuPreviewConfigCacheHit =
+        telemetryBoolValue(
+            timing,
+            "playback_timeline_early_advance_gpu_preview_config_cache_hit" );
     const double processed16SetupMs = processingSetupMs;
     const double processed16CoreMathMs = processingCoreMs;
     const double processed16LocalToneMs =
@@ -22558,7 +22717,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "pre_early_ms=%17 early_advance_ms=%18 "
                    "post_early_to_draw_begin_ms=%19 slot_to_draw_begin_ms=%20 "
                    "frame_ready_to_draw_begin_ms=%21 "
-                   "early_gpu_preview_config_build_ms=%22" )
+                   "early_gpu_preview_config_build_ms=%22 "
+                   "early_gpu_preview_config_cache_hit=%23" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
@@ -22580,7 +22740,8 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( uiSignalPostEarlyToDrawBeginMs, 0, 'f', 3 )
                    .arg( uiSignalSlotToDrawBeginMs, 0, 'f', 3 )
                    .arg( presentUiSignalLatencyMs, 0, 'f', 3 )
-                   .arg( uiSignalEarlyAdvanceGpuPreviewConfigBuildMs, 0, 'f', 3 );
+                   .arg( uiSignalEarlyAdvanceGpuPreviewConfigBuildMs, 0, 'f', 3 )
+                   .arg( bool01( uiSignalEarlyAdvanceGpuPreviewConfigCacheHit ) );
             qInfo().noquote()
                 << QStringLiteral(
                        "playback_smoke.phase3_queue session=%1 index=%2 serial=%3 "
@@ -25809,6 +25970,7 @@ void MainWindow::drawFrameReady()
             m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
             m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
             m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
+            m_lastDrawFrameGpuPreviewConfigCacheHit = false;
             if( trackEarlyAdvanceRequest )
             {
                 m_playbackTimelineAdvancePending = true;
@@ -25882,6 +26044,9 @@ void MainWindow::drawFrameReady()
                 readyFrame.stageTimingTelemetry.insert(
                     QStringLiteral("playback_timeline_early_advance_gpu_preview_config_build_ms"),
                     m_lastDrawFrameGpuPreviewConfigBuildMs );
+                readyFrame.stageTimingTelemetry.insert(
+                    QStringLiteral("playback_timeline_early_advance_gpu_preview_config_cache_hit"),
+                    m_lastDrawFrameGpuPreviewConfigCacheHit );
             }
             if( trackEarlyAdvanceRequest
              && m_playbackTimelineAdvancePending

@@ -997,6 +997,7 @@ private:
     double m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
     double m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
     double m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
+    bool m_lastDrawFrameGpuPreviewConfigCacheHit = false;
     double m_playbackScopeLastUpdateTime = 0.0;
     uint64_t m_playbackScopeUpdateCount = 0;
     uint64_t m_playbackScopeSkipCount = 0;
@@ -1274,6 +1275,15 @@ private:
     GpuDisplayViewport::PresentationOptions m_lastQueuedGpuPresentationOptions;
     GpuPreviewProcessingConfig m_lastQueuedGpuPreviewProcessingConfig;
     QString m_lastQueuedPlaybackProcessingReason;
+    bool m_gpuPreviewProcessingConfigCacheValid = false;
+    uint64_t m_gpuPreviewProcessingConfigCacheGeneration = 1;
+    uint64_t m_gpuPreviewProcessingConfigCacheEntryGeneration = 0;
+    const processingObject_t *m_gpuPreviewProcessingConfigCacheProcessing = nullptr;
+    int m_gpuPreviewProcessingConfigCacheDualIso = 0;
+    int m_gpuPreviewProcessingConfigCacheHighestGreenDiso = 0;
+    int m_gpuPreviewProcessingConfigCacheGradientHighestGreenDiso = 0;
+    GpuPreviewProcessingConfig m_gpuPreviewProcessingConfigCache;
+    QString m_gpuPreviewProcessingConfigCacheReason;
     std::deque<PresentationRequestContext> m_pendingPresentationRequests;
     PresentationRequestContext m_lastPresentedRequestContext;
     bool m_lastPresentedRequestContextValid = false;
@@ -1432,6 +1442,9 @@ private:
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
     void invalidateDisplayPreviewCache( void );
+    void invalidateGpuPreviewProcessingConfigCache( void );
+    GpuPreviewProcessingConfig gpuPreviewProcessingConfigForCurrentSettings(
+        QString *reason );
     void clearPresentationForClipOpen( const char *reason );
     void requestFrameRefresh( bool resetCurrentFrameCache, const char *reason = nullptr );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
