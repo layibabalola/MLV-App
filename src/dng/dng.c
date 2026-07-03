@@ -1111,9 +1111,10 @@ static void export_profile_write_json(void)
             dng_compress_output_bytes_total += frame->dng_compress_output_bytes;
         }
     }
-    pthread_mutex_lock(&g_export_profile_mutex);
+    /* This writer is also called from profile-path rollover while
+     * g_export_profile_mutex is already held. The rest of this JSON snapshot
+     * reads profiler globals lock-free, so do not re-enter the mutex here. */
     async_writer_compress_used = g_export_profile_async_writer_compress_used;
-    pthread_mutex_unlock(&g_export_profile_mutex);
     bottleneck = export_profile_select_bottleneck();
 
     g_export_profile_write_in_progress = 1;

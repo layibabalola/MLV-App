@@ -676,6 +676,36 @@ static void preserve_profiler_gate_artifacts(const QString & suffix,
     }
 }
 
+static void assert_export_stage_profiler_byte_inert_for_raw_state(QTemporaryDir & temp_dir,
+                                                                  int raw_state)
+{
+    const QString suffix = raw_state == COMPRESSED_RAW
+        ? QStringLiteral("compressed")
+        : QStringLiteral("uncompressed");
+    const QString off_profile = temp_dir.filePath(suffix + QStringLiteral("-off.json"));
+    const QString on_profile = temp_dir.filePath(suffix + QStringLiteral("-on.json"));
+    const QString off_dng = temp_dir.filePath(suffix + QStringLiteral("-off.dng"));
+    const QString on_dng = temp_dir.filePath(suffix + QStringLiteral("-on.dng"));
+
+    const QByteArray off_bytes =
+        export_tiny_dng_for_profiler_gate(raw_state, false, off_dng, off_profile);
+    ASSERT_FALSE(QFile::exists(off_profile));
+
+    const QByteArray on_bytes =
+        export_tiny_dng_for_profiler_gate(raw_state, true, on_dng, on_profile);
+    preserve_profiler_gate_artifacts(suffix, off_dng, on_dng, off_profile, on_profile);
+    ASSERT_TRUE(off_bytes == on_bytes);
+    ASSERT_TRUE(QFile::exists(on_profile));
+    assert_profiler_json_valid_for_raw_state(on_profile, raw_state);
+}
+
+static void clear_export_stage_profiler_env()
+{
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+}
+
 static void preserve_gpu_export_gate_artifacts(const QString & suffix,
                                                const QString & cpu_dng,
                                                const QString & fallback_dng)
@@ -2663,29 +2693,10 @@ TEST(DualIsoPipeline, ExportStageProfilerIsByteInertForCompressedAndUncompressed
 
     const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
     for (int raw_state : raw_states) {
-        const QString suffix = raw_state == COMPRESSED_RAW
-            ? QStringLiteral("compressed")
-            : QStringLiteral("uncompressed");
-        const QString off_profile = temp_dir.filePath(suffix + QStringLiteral("-off.json"));
-        const QString on_profile = temp_dir.filePath(suffix + QStringLiteral("-on.json"));
-        const QString off_dng = temp_dir.filePath(suffix + QStringLiteral("-off.dng"));
-        const QString on_dng = temp_dir.filePath(suffix + QStringLiteral("-on.dng"));
-
-        const QByteArray off_bytes =
-            export_tiny_dng_for_profiler_gate(raw_state, false, off_dng, off_profile);
-        ASSERT_FALSE(QFile::exists(off_profile));
-
-        const QByteArray on_bytes =
-            export_tiny_dng_for_profiler_gate(raw_state, true, on_dng, on_profile);
-        preserve_profiler_gate_artifacts(suffix, off_dng, on_dng, off_profile, on_profile);
-        ASSERT_TRUE(off_bytes == on_bytes);
-        ASSERT_TRUE(QFile::exists(on_profile));
-        assert_profiler_json_valid_for_raw_state(on_profile, raw_state);
+        assert_export_stage_profiler_byte_inert_for_raw_state(temp_dir, raw_state);
     }
 
-    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
-    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
-    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    clear_export_stage_profiler_env();
 }
 
 TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
