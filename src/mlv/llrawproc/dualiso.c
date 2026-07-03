@@ -5842,6 +5842,184 @@ static int dualiso_final_blend_will_fuse_to_16bit(int fullres_mesh_guard)
 #endif
 }
 
+/* ---- BUG-A fix: per-frame dual-ISO phase verification (work order
+ * .claude-state/coordination/bug-a-recon-work-order.md). The bright/dark row
+ * pattern of some real dual-ISO clips ROTATES per camera frame; the cached
+ * diso_pattern is only a prior and must be verified against each frame. ---- */
+
+static int dualiso_phase_verify_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char * v = getenv("MLVAPP_DISO_PER_FRAME_PHASE");
+        cached = (v && v[0] == '0') ? 0 : 1;   /* default ON */
+    }
+    return cached;
+}
+
+static int dualiso_phase_log_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char * v = getenv("MLVAPP_LOG_DISO_PHASE");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Cheap read-only phase probe: subsampled mod-4 green-pixel row-group means.
+ * Returns 1 with *implied_pattern set to the iso_patterns index (0..3) when
+ * THIS frame shows a DECISIVE 2-line dual-ISO layout; returns 0 otherwise
+ * (low signal / non-cyclic top pair / tiny frame -> caller keeps the cache).
+ * Cost ~w*h/64 reads (~48K at 1920x804, well under 0.3ms). Domain note: runs
+ * BEFORE the 14->20 bit black/white scaling in both callers, so
+ * raw_info.black_level / white_level are the raw 14-bit-domain values. */
+static int dualiso_phase_probe(struct raw_info raw_info,
+                               uint16_t * image_data,
+                               int * implied_pattern)
+{
+    const int w = raw_info.width;
+    const int h = raw_info.height;
+    const int y0 = (raw_info.active_area.y1 + 3) & ~3;   /* same convention as identify */
+    const int y_end = h / 4 * 4;
+    if (y_end - y0 < 16 || w < 16) return 0;
+
+    double sum[4] = {0.0, 0.0, 0.0, 0.0};
+    long   cnt[4] = {0, 0, 0, 0};
+
+    for (int y = y0; y < y_end; y++)
+    {
+        if (((y - y0) >> 2) & 3) continue;               /* every 4th row-quad */
+        const uint16_t * row = image_data + (size_t)y * (size_t)w;
+        for (int x = ((y % 2) ? 0 : 1); x < w; x += 8)   /* green sites, every 4th green */
+        {
+            sum[y % 4] += (double)row[x];
+            cnt[y % 4]++;
+        }
+    }
+
+    double g[4];
+    for (int i = 0; i < 4; i++)
+    {
+        if (cnt[i] < 64) return 0;
+        g[i] = sum[i] / (double)cnt[i] - (double)raw_info.black_level;
+    }
+
+    int order[4] = {0, 1, 2, 3};
+    for (int i = 0; i < 4; i++)
+        for (int j = i + 1; j < 4; j++)
+            if (g[order[j]] > g[order[i]]) { int t = order[i]; order[i] = order[j]; order[j] = t; }
+
+    const int b0 = order[0];
+    const int b1 = order[1];
+    /* bright pair must be cyclically adjacent: {0,1},{1,2},{2,3},{3,0} */
+    if (!((((b0 + 1) & 3) == b1) || (((b1 + 1) & 3) == b0))) return 0;
+
+    const double bright_min = MIN(g[b0], g[b1]);
+    const double dark_max   = MAX(g[order[2]], g[order[3]]);
+    const double margin_floor =
+        MAX(16.0, (double)(raw_info.white_level - raw_info.black_level) / 64.0);
+    if (bright_min - dark_max < margin_floor) return 0;
+
+    int probe_bright[4] = {0, 0, 0, 0};
+    probe_bright[b0] = 1;
+    probe_bright[b1] = 1;
+    static const int probe_patterns[4][4] = {{1,1,0,0},{1,0,0,1},{0,0,1,1},{0,1,1,0}};
+    for (int i = 0; i < 4; i++)
+    {
+        if (probe_bright[0] == probe_patterns[i][0] &&
+            probe_bright[1] == probe_patterns[i][1] &&
+            probe_bright[2] == probe_patterns[i][2] &&
+            probe_bright[3] == probe_patterns[i][3])
+        {
+            *implied_pattern = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Factored pattern resolution shared by diso_get_full20bit and
+ * diso_prepare_gpu_recon_state. Fills is_bright[4]; returns 0 = hard failure
+ * (caller returns 0 exactly as before). Behavior is IDENTICAL to the pre-fix
+ * duplicated blocks EXCEPT inside the cached -1..-4 branch, where the cached
+ * pattern is verified against THIS frame and re-detected on decisive mismatch
+ * (fail-safe: any probe/identify failure keeps the cached pattern). */
+static int dualiso_resolve_iso_pattern(struct raw_info raw_info,
+                                       uint16_t * image_data,
+                                       int rggb,
+                                       int * iso_pattern,
+                                       int * is_bright,
+                                       dualiso_full20bit_scratch_t * scratch)
+{
+    const int iso_patterns[4][4] = {{1, 1, 0, 0}, {1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 1, 0}};
+
+    if (!*iso_pattern)
+    {
+        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
+            return 0;
+        for (int i = 0; i < 4; i++)
+        {
+            if (memcmp(is_bright, iso_patterns[i], 4 * sizeof(int)) == 0)
+            {
+                *iso_pattern = -(i + 1);
+                break;
+            }
+        }
+        return (*iso_pattern != 0);
+    }
+    else if (*iso_pattern > 0 && *iso_pattern <= 4)
+    {
+        memcpy(is_bright, iso_patterns[*iso_pattern - 1], 4 * sizeof(int));
+        return 1;
+    }
+    else if (*iso_pattern >= -4 && *iso_pattern <= -1)
+    {
+        const int cached_idx = (-*iso_pattern) - 1;
+        if (dualiso_phase_verify_enabled())
+        {
+            int implied = -1;
+            if (dualiso_phase_probe(raw_info, image_data, &implied)
+             && implied != cached_idx)
+            {
+                int fresh[4];
+                if (identify_bright_and_dark_fields(raw_info, image_data, rggb, fresh, scratch))
+                {
+                    for (int i = 0; i < 4; i++)
+                    {
+                        if (memcmp(fresh, iso_patterns[i], 4 * sizeof(int)) == 0)
+                        {
+                            if (dualiso_phase_log_enabled())
+                            {
+                                fprintf(stderr,
+                                        "[DISO_PHASE] per-frame re-detect: cached=%d implied=%d fresh=%d\n",
+                                        cached_idx, implied, i);
+                            }
+                            memcpy(is_bright, fresh, 4 * sizeof(int));
+                            *iso_pattern = -(i + 1);
+                            return 1;
+                        }
+                    }
+                }
+                /* identify failed or non-tabular -> fall through to cache */
+            }
+        }
+        memcpy(is_bright, iso_patterns[cached_idx], 4 * sizeof(int));
+        return 1;
+    }
+    else if (*iso_pattern == 5)
+    {
+        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
+        {
+            memcpy(is_bright, iso_patterns[0], 4 * sizeof(int));
+        }
+        return 1;
+    }
+    return 0;
+}
+
 int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                  uint16_t * image_data,
                                  int dark_frame,
@@ -5892,49 +6070,10 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
         DUALISO_GPU_PREP_RETURN(0);
     }
 
-    const int iso_patterns[4][4] = {{1, 1, 0, 0}, {1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 1, 0}};
     int is_bright[4];
     double stage_start = mlv_stage_timing_now();
 
-    if (!*iso_pattern)
-    {
-        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
-        {
-            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
-            DUALISO_GPU_PREP_RETURN(0);
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            if (memcmp(is_bright, iso_patterns[i], sizeof(is_bright)) == 0)
-            {
-                *iso_pattern = -(i + 1);
-                break;
-            }
-        }
-
-        if (!*iso_pattern)
-        {
-            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
-            DUALISO_GPU_PREP_RETURN(0);
-        }
-    }
-    else if (*iso_pattern > 0 && *iso_pattern <= 4)
-    {
-        memcpy(is_bright, iso_patterns[*iso_pattern - 1], sizeof(is_bright));
-    }
-    else if (*iso_pattern >= -4 && *iso_pattern <= -1)
-    {
-        memcpy(is_bright, iso_patterns[(-*iso_pattern) - 1], sizeof(is_bright));
-    }
-    else if (*iso_pattern == 5)
-    {
-        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
-        {
-            memcpy(is_bright, iso_patterns[0], sizeof(is_bright));
-        }
-    }
-    else
+    if (!dualiso_resolve_iso_pattern(raw_info, image_data, rggb, iso_pattern, is_bright, scratch))
     {
         g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
         DUALISO_GPU_PREP_RETURN(0);
@@ -6114,59 +6253,10 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         h--;
     }
     
-    const int iso_patterns[4][4] = {{1, 1, 0, 0}, {1, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 1, 0}};
-
     int is_bright[4];
     double stage_start = mlv_stage_timing_now();
 
-    if (!*iso_pattern)
-    {
-        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
-        {
-            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
-            DUALISO_FULL20_RETURN(0);
-        }
-
-        for (int i = 0; i < 4; i++)
-        {
-            if (memcmp(is_bright, iso_patterns[i], sizeof(is_bright)) == 0)
-            {
-                *iso_pattern = -(i + 1);
-                break;
-            }
-        }
-
-        if (!*iso_pattern)
-        {
-            g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
-            DUALISO_FULL20_RETURN(0);
-        }
-    }
-    else if (*iso_pattern > 0 && *iso_pattern <= 4)
-    {
-        memcpy(is_bright, iso_patterns[*iso_pattern - 1], sizeof(is_bright));
-    }
-    else if (*iso_pattern >= -4 && *iso_pattern <= -1)
-    {
-        /* Negative values in {-1..-4} are the "pattern already auto-discovered"
-           encoding written by the !*iso_pattern branch above on a previous
-           call. On forced llrawproc re-entry (e.g. resetMlvCachedFrame) the
-           published shared->diso_pattern reseeds this function with the
-           negative value, so we must reuse it instead of silently returning 0
-           (which would leave raw_image_buff unprocessed while downstream still
-           promoted dng_bit_depth to 16). This mirrors diso_get_preview's
-           preview_pattern_index() convention of ABS(iso_pattern) at
-           dualiso.c:46-48. See analysis: Nineteenth pass - 2026-04-21. */
-        memcpy(is_bright, iso_patterns[(-*iso_pattern) - 1], sizeof(is_bright));
-    }
-    else if (*iso_pattern == 5)
-    {
-        if (!identify_bright_and_dark_fields(raw_info, image_data, rggb, is_bright, scratch))
-        {
-            memcpy(is_bright, iso_patterns[0], sizeof(is_bright));
-        }
-    }
-    else
+    if (!dualiso_resolve_iso_pattern(raw_info, image_data, rggb, iso_pattern, is_bright, scratch))
     {
         g_dualiso_full20bit_timing.pattern_ms += dualiso_debug_elapsed_ms(stage_start);
         DUALISO_FULL20_RETURN(0);
