@@ -115,7 +115,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/GpuDebayer.h \
     $$REPO_ROOT/platform/qt/GpuPreviewProcessing.h \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.h \
-    $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h
+    $$REPO_ROOT/tests/pipeline/backend_parametric_fixture.h \
+    $$REPO_ROOT/tests/pipeline/playback_path_test_state.h
 
 win32{
     QMAKE_CFLAGS_RELEASE -= -O2

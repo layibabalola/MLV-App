@@ -1,6 +1,8 @@
 #include "../common/minitest.h"
 #include "../common/hash_helpers.h"
 
+#include "playback_path_test_state.h"
+
 #include "../../src/processing/denoiser/denoiser_2d_median.h"
 #include "../../src/processing/rbfilter/RBFilterPlain.h"
 #include "../../src/processing/rbfilter/rbf_wrapper.h"
@@ -86,6 +88,7 @@ public:
         : preview_(processingPlaybackPreviewModeEnabled())
         , aggressive_(processingPlaybackAggressivePreviewModeEnabled())
         , scale_factor_(processingPlaybackPreviewScaleFactor())
+        , playback_path_state_()
     {
     }
 
@@ -100,6 +103,7 @@ private:
     int preview_;
     int aggressive_;
     int scale_factor_;
+    ScopedPlaybackPathTestState playback_path_state_;
 };
 
 #ifdef _OPENMP
@@ -643,9 +647,9 @@ TEST(ProcessingFilters, ShadowsHighlightsProbeTelemetryIsOptInByDefault)
 
 TEST(ProcessingFilters, SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(0);
     processingSetPlaybackPreviewScaleFactor(8);
@@ -684,9 +688,9 @@ TEST(ProcessingFilters, SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighligh
 
 TEST(ProcessingFilters, AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(4);
@@ -722,9 +726,9 @@ TEST(ProcessingFilters, AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHigh
 
 TEST(ProcessingFilters, AggressiveX8PlaybackPreviewUsesQuarterresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(8);
@@ -760,9 +764,9 @@ TEST(ProcessingFilters, AggressiveX8PlaybackPreviewUsesQuarterresShadowsHighligh
 
 TEST(ProcessingFilters, AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(2);
