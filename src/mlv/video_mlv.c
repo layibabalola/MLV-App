@@ -5629,24 +5629,44 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     }
 }
 
-static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
+static void mlv_compute_desired_processing_bw_levels(mlvObject_t * video,
+                                                     float * desired_black_level,
+                                                     int * desired_white_level,
+                                                     int * desired_bit_depth,
+                                                     int * expected_black_level,
+                                                     int * expected_white_level)
 {
-    const int desired_bit_depth = llrpHQDualIso(video)
+    *desired_bit_depth = llrpHQDualIso(video)
         ? video->llrawproc->dng_bit_depth
         : getMlvBitdepth(video);
-    const float desired_black_level = llrpHQDualIso(video)
+    *desired_black_level = llrpHQDualIso(video)
         ? (float)video->llrawproc->dng_black_level
         : (float)getMlvBlackLevel(video);
-    const int desired_white_level = llrpHQDualIso(video)
+    *desired_white_level = llrpHQDualIso(video)
         ? video->llrawproc->dng_white_level
         : getMlvWhiteLevel(video);
-    const int bits_shift = 16 - desired_bit_depth;
-    const int expected_black_level =
-        (desired_black_level > 0.0f)
-            ? (int)(desired_black_level * pow(2.0, bits_shift))
+    const int bits_shift = 16 - *desired_bit_depth;
+    *expected_black_level =
+        (*desired_black_level > 0.0f)
+            ? (int)(*desired_black_level * pow(2.0, bits_shift))
             : 0;
-    const int expected_white_level =
-        (int)((double)(desired_white_level << bits_shift) * 0.993);
+    *expected_white_level =
+        (int)((double)(*desired_white_level << bits_shift) * 0.993);
+}
+
+static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
+{
+    float desired_black_level = 0.0f;
+    int desired_white_level = 0;
+    int desired_bit_depth = 0;
+    int expected_black_level = 0;
+    int expected_white_level = 0;
+    mlv_compute_desired_processing_bw_levels(video,
+                                             &desired_black_level,
+                                             &desired_white_level,
+                                             &desired_bit_depth,
+                                             &expected_black_level,
+                                             &expected_white_level);
 
     if ((int)video->processing->black_level != expected_black_level
      || video->processing->white_level != expected_white_level)
@@ -5656,6 +5676,40 @@ static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
                                         desired_white_level,
                                         desired_bit_depth);
     }
+}
+
+/* The fast/subset playback-preview path renders through the GPU-preview
+ * config (GpuPreviewProcessing) instead of the classic processed-frame cores,
+ * so it never reaches the per-frame mlv_sync_processing_black_white_levels()
+ * those cores run. For an HQ dual-ISO clip whose recon rescales the data
+ * range (e.g. restricted-range lossless: RAWI white ~6000 scaled to a
+ * ~63000-domain), the processing object then keeps its clip-open pre-scale
+ * levels and the subset renders the recon-scaled data several times too
+ * bright with clipped highlights. These two entry points let the subset path
+ * mirror the cores' sync: check first (cheap, no mutation), then sync under
+ * the caller's render-idle guard. */
+int mlvProcessingDualIsoBlackWhiteLevelsOutOfSync(mlvObject_t * video)
+{
+    if (!video || !video->processing || !video->llrawproc) return 0;
+    float desired_black_level = 0.0f;
+    int desired_white_level = 0;
+    int desired_bit_depth = 0;
+    int expected_black_level = 0;
+    int expected_white_level = 0;
+    mlv_compute_desired_processing_bw_levels(video,
+                                             &desired_black_level,
+                                             &desired_white_level,
+                                             &desired_bit_depth,
+                                             &expected_black_level,
+                                             &expected_white_level);
+    return ((int)video->processing->black_level != expected_black_level)
+        || (video->processing->white_level != expected_white_level);
+}
+
+void mlvSyncProcessingDualIsoBlackWhiteLevels(mlvObject_t * video)
+{
+    if (!video || !video->processing || !video->llrawproc) return;
+    mlv_sync_processing_black_white_levels(video);
 }
 
 static int mlv_can_use_direct_processed_frame8_path(mlvObject_t * video)

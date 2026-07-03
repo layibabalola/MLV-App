@@ -5983,6 +5983,19 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     m_lastQueuedPlaybackProcessingReason.clear();
     if( m_renderThreadUsingGpuPreviewProcessing || playbackProcessingSelected )
     {
+        /* The fast/subset path renders via this config instead of the classic
+         * cores, so mirror the cores' per-frame dual-ISO black/white level
+         * sync BEFORE the config bakes the level/gamma LUTs. Without this, a
+         * restricted-range dual-ISO clip keeps its clip-open (pre-recon-scale)
+         * levels and the subset renders the recon-scaled data several times
+         * too bright (washed out, clipped highlights, exposed recon texture). */
+        if( m_pMlvObject && m_fileLoaded
+         && mlvProcessingDualIsoBlackWhiteLevelsOutOfSync( m_pMlvObject ) )
+        {
+            waitForRenderThreadIdleBeforeCoreMutation( "dual-iso-subset-level-sync" );
+            mlvSyncProcessingDualIsoBlackWhiteLevels( m_pMlvObject );
+            invalidateGpuPreviewProcessingConfigCache();
+        }
         m_lastQueuedGpuPreviewProcessingConfig =
             gpuPreviewProcessingConfigForCurrentSettings(
                 &m_lastQueuedPlaybackProcessingReason );

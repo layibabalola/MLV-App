@@ -88,6 +88,13 @@ void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t *
  * the scaled API today are forward-compatible: their output buffer must be
  * sized to mlvFrameOutputDimensions(), and once Phase 4B lands the same
  * call site automatically gets the smaller render. */
+/* Fast/subset playback-preview level sync (see video_mlv.c): the subset path
+ * renders via the GPU-preview config instead of the classic cores, so it must
+ * mirror their per-frame dual-ISO black/white level sync before the config is
+ * built. Check first (no mutation), then sync under a render-idle guard. */
+int mlvProcessingDualIsoBlackWhiteLevelsOutOfSync(mlvObject_t * video);
+void mlvSyncProcessingDualIsoBlackWhiteLevels(mlvObject_t * video);
+
 void getMlvProcessedFrame8Scaled(mlvObject_t * video,
                                  uint64_t frameIndex,
                                  uint8_t * outputFrame,
