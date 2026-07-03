@@ -6452,6 +6452,99 @@ public:
     }
 };
 
+static void reset_phase4b_playback_path_test_state()
+{
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW");
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES");
+    MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE");
+    MLVAPP_TEST_UNSETENV("MLVAPP_LOG_PHASE4BV2");
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
+    mlvSetPlaybackFastX4HqPathMode(0);
+    mlvSetPlaybackAggressivePreviewMode(0);
+    mlv_phase4bv_reset_env_cache_for_testing();
+}
+
+class ScopedPhase4BPlaybackPathTestState
+{
+public:
+    ScopedPhase4BPlaybackPathTestState()
+        : m_disablePhase4Bv4X8(captureEnv("MLVAPP_DISABLE_PHASE4BV4_X8"))
+        , m_enableDualIsoX2FullresFixes(captureEnv("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES"))
+        , m_disableQuarterresX2Preview(captureEnv("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW"))
+        , m_enableDualIsoX4FullresFixes(captureEnv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES"))
+        , m_enableDualIsoFastX4InHq(captureEnv("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ"))
+        , m_playbackPreferHqMean23(captureEnv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23"))
+        , m_profileDisableDualIsoOverride(captureEnv("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE"))
+        , m_disableDualIsoPlaybackMean23Override(captureEnv("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE"))
+        , m_logPhase4Bv2(captureEnv("MLVAPP_LOG_PHASE4BV2"))
+        , m_experimentalProcessed8Prefetch(captureEnv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH"))
+        , m_fastX4HqPathMode(mlvPlaybackFastX4HqPathMode())
+        , m_aggressivePreviewMode(mlvPlaybackAggressivePreviewMode())
+    {
+        reset_phase4b_playback_path_test_state();
+    }
+
+    ~ScopedPhase4BPlaybackPathTestState()
+    {
+        restoreEnv("MLVAPP_DISABLE_PHASE4BV4_X8", m_disablePhase4Bv4X8);
+        restoreEnv("MLVAPP_ENABLE_DUAL_ISO_X2_FULLRES_FIXES", m_enableDualIsoX2FullresFixes);
+        restoreEnv("MLVAPP_DISABLE_QUARTERRES_X2_PREVIEW", m_disableQuarterresX2Preview);
+        restoreEnv("MLVAPP_ENABLE_DUAL_ISO_X4_FULLRES_FIXES", m_enableDualIsoX4FullresFixes);
+        restoreEnv("MLVAPP_ENABLE_DUAL_ISO_FAST_X4_IN_HQ", m_enableDualIsoFastX4InHq);
+        restoreEnv("MLVAPP_PLAYBACK_PREFER_HQ_MEAN23", m_playbackPreferHqMean23);
+        restoreEnv("MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE", m_profileDisableDualIsoOverride);
+        restoreEnv("MLVAPP_DISABLE_DUALISO_PLAYBACK_MEAN23_OVERRIDE", m_disableDualIsoPlaybackMean23Override);
+        restoreEnv("MLVAPP_LOG_PHASE4BV2", m_logPhase4Bv2);
+        restoreEnv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", m_experimentalProcessed8Prefetch);
+        mlv_phase4bv_reset_env_cache_for_testing();
+        mlvSetPlaybackFastX4HqPathMode(m_fastX4HqPathMode);
+        mlvSetPlaybackAggressivePreviewMode(m_aggressivePreviewMode);
+    }
+
+private:
+    struct EnvValue
+    {
+        bool present;
+        std::string value;
+    };
+
+    static EnvValue captureEnv(const char * name)
+    {
+        const char * value = std::getenv(name);
+        return EnvValue{ value != nullptr, value ? std::string(value) : std::string() };
+    }
+
+    static void restoreEnv(const char * name, const EnvValue & env)
+    {
+        if (env.present)
+        {
+            MLVAPP_TEST_SETENV(name, env.value.c_str());
+        }
+        else
+        {
+            MLVAPP_TEST_UNSETENV(name);
+        }
+    }
+
+    EnvValue m_disablePhase4Bv4X8;
+    EnvValue m_enableDualIsoX2FullresFixes;
+    EnvValue m_disableQuarterresX2Preview;
+    EnvValue m_enableDualIsoX4FullresFixes;
+    EnvValue m_enableDualIsoFastX4InHq;
+    EnvValue m_playbackPreferHqMean23;
+    EnvValue m_profileDisableDualIsoOverride;
+    EnvValue m_disableDualIsoPlaybackMean23Override;
+    EnvValue m_logPhase4Bv2;
+    EnvValue m_experimentalProcessed8Prefetch;
+    int m_fastX4HqPathMode;
+    int m_aggressivePreviewMode;
+};
+
 /* Phase: Mean23 playback override (this commit). The receipt asks for AMaZE
  * (dualIsoInterpolation == 0). With the playback-only override clear the HQ
  * recon must run AMaZE; flipping diso_playback_force_mean23=1 must redirect
@@ -7698,9 +7791,8 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInAggressivePrev
 
 TEST(DualIsoPipeline, Phase4Bv4_Processed8CacheHitPreservesPhasePathTelemetry)
 {
+    ScopedPhase4BPlaybackPathTestState playbackPathState;
     ScopedAggressivePreviewMode aggressivePreview(1);
-    MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
-    mlv_phase4bv_reset_env_cache_for_testing();
 
     MlvPipelineFixture fixture;
     QString error_message;
