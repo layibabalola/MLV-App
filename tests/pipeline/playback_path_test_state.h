@@ -20,6 +20,17 @@ struct PlaybackPathSavedEnv
     PlaybackPathEnvValue value;
 };
 
+struct PlaybackPathProcessState
+{
+    std::array<PlaybackPathSavedEnv, 32> env;
+    int fastX4HqPathMode;
+    int aggressivePreviewMode;
+    int proxyLevel;
+    int processingPreviewMode;
+    int processingAggressivePreviewMode;
+    int processingPreviewScaleFactor;
+};
+
 inline constexpr const char * kPlaybackPathEnvNames[] = {
     "MLVAPP_DISABLE_PHASE4BV2",
     "MLVAPP_DISABLE_PHASE4BV3",
@@ -109,44 +120,37 @@ public:
 
     explicit ScopedPlaybackPathTestState(
         Processed8PrefetchPolicy prefetchPolicy = Processed8PrefetchPolicy::Default)
-        : m_env(captureEnv())
-        , m_fastX4HqPathMode(mlvPlaybackFastX4HqPathMode())
-        , m_aggressivePreviewMode(mlvPlaybackAggressivePreviewMode())
-        , m_proxyLevel(mlvPlaybackProxyLevel())
-        , m_processingPreviewMode(processingPlaybackPreviewModeEnabled())
-        , m_processingAggressivePreviewMode(processingPlaybackAggressivePreviewModeEnabled())
-        , m_processingPreviewScaleFactor(processingPlaybackPreviewScaleFactor())
+        : m_state(captureProcessState())
     {
-        resetToCleanBaseline(prefetchPolicy);
+        resetProcessStateForTest(prefetchPolicy);
     }
 
     ~ScopedPlaybackPathTestState()
     {
-        for (const PlaybackPathSavedEnv & saved : m_env)
-        {
-            playbackPathTestRestoreEnv(saved.name, saved.value);
-        }
-
-        mlv_phase4bv_reset_env_cache_for_testing();
-        processingResetShadowsHighlightsProbeModeCacheForTesting();
-        processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
-
-        mlvSetPlaybackFastX4HqPathMode(m_fastX4HqPathMode);
-        mlvSetPlaybackAggressivePreviewMode(m_aggressivePreviewMode);
-        mlvSetPlaybackProxyLevel(m_proxyLevel);
-        processingSetPlaybackPreviewMode(m_processingPreviewMode);
-        processingSetPlaybackAggressivePreviewMode(m_processingAggressivePreviewMode);
-        processingSetPlaybackPreviewScaleFactor(m_processingPreviewScaleFactor);
+        applyProcessState(m_state);
     }
 
     ScopedPlaybackPathTestState(const ScopedPlaybackPathTestState &) = delete;
     ScopedPlaybackPathTestState & operator=(const ScopedPlaybackPathTestState &) = delete;
 
-private:
+    static void resetProcessStateForTest(
+        Processed8PrefetchPolicy prefetchPolicy = Processed8PrefetchPolicy::Default)
+    {
+        PlaybackPathProcessState state = initialProcessState();
+        if (prefetchPolicy == Processed8PrefetchPolicy::Disabled)
+        {
+            setEnvInState(state, "MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
+        }
+        applyProcessState(state);
+    }
+
     static constexpr std::size_t kEnvCount =
         sizeof(kPlaybackPathEnvNames) / sizeof(kPlaybackPathEnvNames[0]);
 
     using EnvSnapshot = std::array<PlaybackPathSavedEnv, kEnvCount>;
+
+private:
+    static_assert(kEnvCount == 32, "PlaybackPathProcessState env snapshot size must match env name list");
 
     static EnvSnapshot captureEnv()
     {
@@ -161,34 +165,55 @@ private:
         return env;
     }
 
-    static void resetToCleanBaseline(Processed8PrefetchPolicy prefetchPolicy)
+    static PlaybackPathProcessState captureProcessState()
     {
-        for (const char * name : kPlaybackPathEnvNames)
-        {
-            playbackPathTestUnsetEnv(name);
-        }
-
-        if (prefetchPolicy == Processed8PrefetchPolicy::Disabled)
-        {
-            playbackPathTestSetEnv("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
-        }
-
-        mlvSetPlaybackFastX4HqPathMode(0);
-        mlvSetPlaybackAggressivePreviewMode(0);
-        mlvSetPlaybackProxyLevel(-1);
-        processingSetPlaybackPreviewMode(0);
-        processingSetPlaybackAggressivePreviewMode(0);
-        processingSetPlaybackPreviewScaleFactor(1);
-        playbackPathTestResetEnvCaches();
+        return PlaybackPathProcessState{
+            captureEnv(),
+            mlvPlaybackFastX4HqPathMode(),
+            mlvPlaybackAggressivePreviewMode(),
+            mlvPlaybackProxyLevel(),
+            processingPlaybackPreviewModeEnabled(),
+            processingPlaybackAggressivePreviewModeEnabled(),
+            processingPlaybackPreviewScaleFactor(),
+        };
     }
 
-    EnvSnapshot m_env;
-    int m_fastX4HqPathMode;
-    int m_aggressivePreviewMode;
-    int m_proxyLevel;
-    int m_processingPreviewMode;
-    int m_processingAggressivePreviewMode;
-    int m_processingPreviewScaleFactor;
+    static const PlaybackPathProcessState & initialProcessState()
+    {
+        static const PlaybackPathProcessState state = captureProcessState();
+        return state;
+    }
+
+    static void applyProcessState(const PlaybackPathProcessState & state)
+    {
+        for (const PlaybackPathSavedEnv & saved : state.env)
+        {
+            playbackPathTestRestoreEnv(saved.name, saved.value);
+        }
+        playbackPathTestResetEnvCaches();
+        mlvSetPlaybackFastX4HqPathMode(state.fastX4HqPathMode);
+        mlvSetPlaybackAggressivePreviewMode(state.aggressivePreviewMode);
+        mlvSetPlaybackProxyLevel(state.proxyLevel);
+        processingSetPlaybackPreviewMode(state.processingPreviewMode);
+        processingSetPlaybackAggressivePreviewMode(state.processingAggressivePreviewMode);
+        processingSetPlaybackPreviewScaleFactor(state.processingPreviewScaleFactor);
+    }
+
+    static void setEnvInState(PlaybackPathProcessState & state,
+                              const char * name,
+                              const char * value)
+    {
+        for (PlaybackPathSavedEnv & saved : state.env)
+        {
+            if (std::string(saved.name) == std::string(name))
+            {
+                saved.value = PlaybackPathEnvValue{ true, std::string(value) };
+                return;
+            }
+        }
+    }
+
+    PlaybackPathProcessState m_state;
 };
 
 #endif

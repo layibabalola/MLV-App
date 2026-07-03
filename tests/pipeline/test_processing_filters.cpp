@@ -88,7 +88,6 @@ public:
         : preview_(processingPlaybackPreviewModeEnabled())
         , aggressive_(processingPlaybackAggressivePreviewModeEnabled())
         , scale_factor_(processingPlaybackPreviewScaleFactor())
-        , playback_path_state_()
     {
     }
 
@@ -103,7 +102,6 @@ private:
     int preview_;
     int aggressive_;
     int scale_factor_;
-    ScopedPlaybackPathTestState playback_path_state_;
 };
 
 #ifdef _OPENMP

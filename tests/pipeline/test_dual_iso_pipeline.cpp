@@ -6437,14 +6437,10 @@ class ScopedAggressivePreviewMode
 {
 public:
     explicit ScopedAggressivePreviewMode(int enabled)
-        : m_playbackPathState()
     {
         mlvSetPlaybackAggressivePreviewMode(enabled);
         mlv_phase4bv_reset_env_cache_for_testing();
     }
-
-private:
-    ScopedPlaybackPathTestState m_playbackPathState;
 };
 
 /* Phase: Mean23 playback override (this commit). The receipt asks for AMaZE
@@ -8089,6 +8085,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
     MLVAPP_TEST_SETENV("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING", "1");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -8117,6 +8115,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
     ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
 
     processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
+    processingSetPlaybackPreviewMode(0);
+    processingSetPlaybackAggressivePreviewMode(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_QUARTERRES_X2_PROCESSING");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
@@ -8129,6 +8129,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneCanUseQuarterResShadowsHighlightsWh
     MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -8150,6 +8152,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneCanUseQuarterResShadowsHighlightsWh
 
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_STANDARD_X1_SH_QUARTERRES");
+    processingSetPlaybackPreviewMode(0);
+    processingSetPlaybackAggressivePreviewMode(0);
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 }
@@ -8159,6 +8163,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneUsesQuarterResShadowsHighlightsByDe
     MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -8179,6 +8185,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneUsesQuarterResShadowsHighlightsByDe
     ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
 
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingSetPlaybackPreviewMode(0);
+    processingSetPlaybackAggressivePreviewMode(0);
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 }
@@ -8474,6 +8482,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleFourKeepsQuarterResShadowsHighlightsOf
     MLVAPP_TEST_SETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
 
     MlvPipelineFixture fixture;
     QString error_message;
@@ -8494,6 +8504,8 @@ TEST(DualIsoPipeline, StandardPreviewScaleFourKeepsQuarterResShadowsHighlightsOf
     ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds());
 
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
+    processingSetPlaybackPreviewMode(0);
+    processingSetPlaybackAggressivePreviewMode(0);
     processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
 }

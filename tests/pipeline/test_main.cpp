@@ -3,6 +3,8 @@
 #include "../common/test_artifacts.h"
 #include "../common/test_runtime.h"
 
+#include "playback_path_test_state.h"
+
 #include "../../src/debug/ForceSingleThread.h"
 #include "../../src/debug/StageTimingCsvSink.h"
 
@@ -185,6 +187,64 @@ static bool apply_complex_filter_to_registry(const std::string & value)
     return true;
 }
 
+static int run_all_with_playback_path_reset()
+{
+    int failed = 0;
+    for (const minitest::TestCase & test : minitest::registry()) {
+        const std::string test_name =
+            std::string(test.suite) + "." + std::string(test.name);
+        if (!minitest::active_filter().empty()) {
+            const std::string & filter = minitest::active_filter();
+            const bool suffix_wildcard =
+                !filter.empty() && filter[filter.size() - 1] == '*';
+            const std::string prefix =
+                suffix_wildcard ? filter.substr(0, filter.size() - 1) : filter;
+            if (suffix_wildcard) {
+                bool matches = test_name.compare(0, prefix.size(), prefix) == 0;
+                if (!matches && !prefix.empty() && prefix[prefix.size() - 1] == '_') {
+                    std::string dotted_prefix = prefix;
+                    dotted_prefix[dotted_prefix.size() - 1] = '.';
+                    matches = test_name.compare(0, dotted_prefix.size(), dotted_prefix) == 0;
+                }
+                if (!matches) {
+                    continue;
+                }
+            } else if (test_name != filter) {
+                continue;
+            }
+        }
+
+        ScopedPlaybackPathTestState::resetProcessStateForTest();
+        try {
+            test.fn();
+            std::cout << "[PASS] " << test.suite << "." << test.name << "\n";
+        } catch (const minitest::Skip & skip_error) {
+            minitest::skip_count() += 1;
+            std::cout << "[SKIP] " << test.suite << "." << test.name
+                      << " - " << skip_error.what() << "\n";
+        } catch (const minitest::Failure & failure) {
+            failed += 1;
+            std::cerr << "[FAIL] " << test.suite << "." << test.name
+                      << " - " << failure.what() << "\n";
+        } catch (const std::exception & error) {
+            failed += 1;
+            std::cerr << "[FAIL] " << test.suite << "." << test.name
+                      << " - unexpected exception: " << error.what() << "\n";
+        } catch (...) {
+            failed += 1;
+            std::cerr << "[FAIL] " << test.suite << "." << test.name
+                      << " - unknown exception\n";
+        }
+        ScopedPlaybackPathTestState::resetProcessStateForTest();
+    }
+
+    std::cout << "[SUMMARY] tests=" << minitest::registry().size()
+              << " assertions=" << minitest::assertion_count()
+              << " skipped=" << minitest::skip_count()
+              << " failed=" << failed << "\n";
+    return failed;
+}
+
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
@@ -236,7 +296,7 @@ int main(int argc, char ** argv)
         return 4;
     }
 
-    const int failed = minitest::run_all();
+    const int failed = run_all_with_playback_path_reset();
     stage_timing_csv_sink_close();
 
     if (!hash_output_path.empty()) {
