@@ -74,13 +74,22 @@ function Quote-ProcessArgument {
     return '"' + ($Value -replace '"', '\"') + '"'
 }
 
+function Write-AgentHeartbeat {
+    param([string]$Activity = "")
+
+    $line = "alive $((Get-Date).ToString('o')) pid=$PID host=$env:COMPUTERNAME"
+    if (![string]::IsNullOrWhiteSpace($Activity)) {
+        $line += " $Activity"
+    }
+    $line | Set-Content -Encoding ASCII $heartbeat
+}
+
 "agent start $((Get-Date).ToString('o')) pid=$PID host=$env:COMPUTERNAME root=$Root shell=$psExe" |
     Add-Content -Encoding ASCII (Join-Path $logs "agent.log")
 
 while ($true) {
     # Liveness heartbeat (VM checks this file's age before submitting).
-    "alive $((Get-Date).ToString('o')) pid=$PID host=$env:COMPUTERNAME" |
-        Set-Content -Encoding ASCII $heartbeat
+    Write-AgentHeartbeat
 
     $jobs = Get-ChildItem $inbox -Filter *.job.ps1 -File -ErrorAction SilentlyContinue | Sort-Object Name
     foreach ($job in $jobs) {
@@ -107,7 +116,15 @@ while ($true) {
                 -WindowStyle Hidden `
                 -PassThru
 
-            if ($jobProcess.WaitForExit($JobTimeoutSec * 1000)) {
+            $deadline = (Get-Date).AddSeconds($JobTimeoutSec)
+            $waitSliceMs = [Math]::Max(250, [Math]::Min(5000, $PollSeconds * 1000))
+            while (!$jobProcess.HasExited -and (Get-Date) -lt $deadline) {
+                Write-AgentHeartbeat -Activity "job=$jobId"
+                $remainingMs = [Math]::Max(1, [int][Math]::Min($waitSliceMs, ($deadline - (Get-Date)).TotalMilliseconds))
+                [void]$jobProcess.WaitForExit($remainingMs)
+            }
+
+            if ($jobProcess.HasExited) {
                 $exit = $jobProcess.ExitCode
             }
             else {
