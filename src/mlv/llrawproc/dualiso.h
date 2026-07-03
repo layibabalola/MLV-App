@@ -293,6 +293,10 @@ typedef struct
     int apply_dither;
 } dualiso_gpu_recon_state_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing;
 
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
@@ -302,6 +306,7 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
 int dualiso_debug_get_last_gpu_recon_state(dualiso_gpu_recon_state_t * state);
 void dualiso_debug_reset_last_gpu_recon_state(void);
 void dualiso_debug_set_gpu_recon_state_capture_enabled(int enabled);
+void dualiso_debug_reset_phase_verify_env_cache(void);
 
 /* Test-only: counts how many times the HQ recon entered AMaZE (which == 0)
  * vs mean23 (which == 1) since the last reset. Used by pipeline tests to
@@ -323,5 +328,9 @@ unsigned long long dualiso_debug_fullres_blend_taken_count(void);
 void dualiso_debug_reset_full20bit_timing(void);
 void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing);
 int dualiso_mix_chroma_probe_mode(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

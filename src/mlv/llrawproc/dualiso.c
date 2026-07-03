@@ -5847,26 +5847,33 @@ static int dualiso_final_blend_will_fuse_to_16bit(int fullres_mesh_guard)
  * pattern of some real dual-ISO clips ROTATES per camera frame; the cached
  * diso_pattern is only a prior and must be verified against each frame. ---- */
 
+static int g_dualiso_phase_verify_enabled_cache = -1;
+static int g_dualiso_phase_log_enabled_cache = -1;
+
+void dualiso_debug_reset_phase_verify_env_cache(void)
+{
+    g_dualiso_phase_verify_enabled_cache = -1;
+    g_dualiso_phase_log_enabled_cache = -1;
+}
+
 static int dualiso_phase_verify_enabled(void)
 {
-    static int cached = -1;
-    if (cached < 0)
+    if (g_dualiso_phase_verify_enabled_cache < 0)
     {
         const char * v = getenv("MLVAPP_DISO_PER_FRAME_PHASE");
-        cached = (v && v[0] == '0') ? 0 : 1;   /* default ON */
+        g_dualiso_phase_verify_enabled_cache = (v && v[0] == '0') ? 0 : 1;   /* default ON */
     }
-    return cached;
+    return g_dualiso_phase_verify_enabled_cache;
 }
 
 static int dualiso_phase_log_enabled(void)
 {
-    static int cached = -1;
-    if (cached < 0)
+    if (g_dualiso_phase_log_enabled_cache < 0)
     {
         const char * v = getenv("MLVAPP_LOG_DISO_PHASE");
-        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+        g_dualiso_phase_log_enabled_cache = (v && v[0] && v[0] != '0') ? 1 : 0;
     }
-    return cached;
+    return g_dualiso_phase_log_enabled_cache;
 }
 
 /* Cheap read-only phase probe: subsampled mod-4 green-pixel row-group means.

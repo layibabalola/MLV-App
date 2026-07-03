@@ -4961,6 +4961,221 @@ TEST(DualIsoPipeline, HeadlessDualIsoPreviewAutoDetectsPatternAndKeepsItAcrossFr
     ASSERT_EQ(std::abs(detected_pattern), std::abs(fixture.video()->llrawproc->diso_pattern));
 }
 
+class ScopedDualIsoPhaseEnv
+{
+public:
+    ScopedDualIsoPhaseEnv()
+        : had_value_(qEnvironmentVariableIsSet("MLVAPP_DISO_PER_FRAME_PHASE")),
+          old_value_(qgetenv("MLVAPP_DISO_PER_FRAME_PHASE"))
+    {
+    }
+
+    ~ScopedDualIsoPhaseEnv()
+    {
+        if (had_value_)
+            qputenv("MLVAPP_DISO_PER_FRAME_PHASE", old_value_);
+        else
+            qunsetenv("MLVAPP_DISO_PER_FRAME_PHASE");
+        dualiso_debug_reset_phase_verify_env_cache();
+    }
+
+    void set(const QByteArray & value)
+    {
+        qputenv("MLVAPP_DISO_PER_FRAME_PHASE", value);
+        dualiso_debug_reset_phase_verify_env_cache();
+    }
+
+    void unset()
+    {
+        qunsetenv("MLVAPP_DISO_PER_FRAME_PHASE");
+        dualiso_debug_reset_phase_verify_env_cache();
+    }
+
+private:
+    bool had_value_;
+    QByteArray old_value_;
+};
+
+static struct raw_info synthetic_dual_iso_phase_raw_info()
+{
+    struct raw_info raw = {};
+    raw.width = 128;
+    raw.height = 128;
+    raw.pitch = raw.width * static_cast<int>(sizeof(uint16_t));
+    raw.frame_size = raw.pitch * raw.height;
+    raw.bits_per_pixel = 14;
+    raw.black_level = 1024;
+    raw.white_level = 15000;
+    raw.active_area.x1 = 0;
+    raw.active_area.y1 = 0;
+    raw.active_area.x2 = raw.width;
+    raw.active_area.y2 = raw.height;
+    raw.cfa_pattern = 0x02010100;
+    return raw;
+}
+
+static std::vector<uint16_t> synthetic_dual_iso_phase_frame(const struct raw_info & raw,
+                                                           int pattern_index)
+{
+    static const int kPatterns[4][4] = {
+        {1, 1, 0, 0},
+        {1, 0, 0, 1},
+        {0, 0, 1, 1},
+        {0, 1, 1, 0},
+    };
+    std::vector<uint16_t> frame(static_cast<size_t>(raw.width) * static_cast<size_t>(raw.height));
+    for (int y = 0; y < raw.height; y++)
+    {
+        const int bright_row = kPatterns[pattern_index][y & 3];
+        for (int x = 0; x < raw.width; x++)
+        {
+            const int texture = ((x * 3 + y * 5) & 31);
+            frame[static_cast<size_t>(y) * static_cast<size_t>(raw.width) + static_cast<size_t>(x)] =
+                static_cast<uint16_t>((bright_row ? 8192 : 2048) + texture);
+        }
+    }
+    return frame;
+}
+
+static int synthetic_dual_iso_prepare_state(struct raw_info raw,
+                                            std::vector<uint16_t> & frame,
+                                            int * iso_pattern,
+                                            dualiso_full20bit_scratch_t * scratch,
+                                            dualiso_gpu_recon_state_t * state)
+{
+    int auto_correction = -1;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+    return diso_prepare_gpu_recon_state(raw,
+                                        frame.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        1,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        scratch,
+                                        state);
+}
+
+static std::string synthetic_phase_pattern_list(const std::vector<int> & patterns)
+{
+    std::string out;
+    for (size_t i = 0; i < patterns.size(); i++)
+    {
+        if (i) out += ",";
+        out += std::to_string(patterns[i]);
+    }
+    return out;
+}
+
+static void assert_dual_iso_pattern(const dualiso_gpu_recon_state_t & state, int pattern_index)
+{
+    static const int kPatterns[4][4] = {
+        {1, 1, 0, 0},
+        {1, 0, 0, 1},
+        {0, 0, 1, 1},
+        {0, 1, 1, 0},
+    };
+    for (int i = 0; i < 4; i++)
+        ASSERT_EQ(kPatterns[pattern_index][i], state.is_bright[i]);
+}
+
+TEST(DualIsoPipeline, DualIsoPerFramePhaseVerificationHandlesRotatingStaticAndKillSwitchSyntheticBuffers)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    const struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+
+    phase_env.unset();
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 0;
+        std::vector<int> observed_patterns;
+        const int sequence[] = {0, 1, 2, 3, 0};
+        for (int pattern_index : sequence)
+        {
+            std::vector<uint16_t> frame = synthetic_dual_iso_phase_frame(raw, pattern_index);
+            dualiso_gpu_recon_state_t state = {};
+            ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
+            ASSERT_EQ(1, state.valid);
+            ASSERT_EQ(-(pattern_index + 1), iso_pattern);
+            assert_dual_iso_pattern(state, pattern_index);
+            observed_patterns.push_back(iso_pattern);
+        }
+        test_artifacts::record("dual_iso.per_frame_phase.rotating.patterns",
+                               synthetic_phase_pattern_list(observed_patterns));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+
+    phase_env.unset();
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 0;
+        std::vector<int> observed_patterns;
+        dualiso_gpu_recon_state_t previous = {};
+        for (int i = 0; i < 2; i++)
+        {
+            std::vector<uint16_t> frame = synthetic_dual_iso_phase_frame(raw, 1);
+            dualiso_gpu_recon_state_t state = {};
+            ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
+            ASSERT_EQ(1, state.valid);
+            ASSERT_EQ(-2, iso_pattern);
+            assert_dual_iso_pattern(state, 1);
+            observed_patterns.push_back(iso_pattern);
+            if (i == 0)
+            {
+                previous = state;
+            }
+            else
+            {
+                ASSERT_EQ(previous.black_level, state.black_level);
+                ASSERT_EQ(previous.white_level, state.white_level);
+                ASSERT_EQ(previous.white_darkened, state.white_darkened);
+                ASSERT_EQ(previous.black_delta, state.black_delta);
+                ASSERT_EQ(previous.is_bright[0], state.is_bright[0]);
+                ASSERT_EQ(previous.is_bright[1], state.is_bright[1]);
+                ASSERT_EQ(previous.is_bright[2], state.is_bright[2]);
+                ASSERT_EQ(previous.is_bright[3], state.is_bright[3]);
+            }
+        }
+        test_artifacts::record("dual_iso.per_frame_phase.static.patterns",
+                               synthetic_phase_pattern_list(observed_patterns));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+
+    phase_env.set(QByteArrayLiteral("0"));
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 0;
+        std::vector<int> observed_patterns;
+
+        std::vector<uint16_t> first = synthetic_dual_iso_phase_frame(raw, 0);
+        dualiso_gpu_recon_state_t first_state = {};
+        ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, first, &iso_pattern, &scratch, &first_state) != 0);
+        ASSERT_EQ(-1, iso_pattern);
+        assert_dual_iso_pattern(first_state, 0);
+        observed_patterns.push_back(iso_pattern);
+
+        std::vector<uint16_t> second = synthetic_dual_iso_phase_frame(raw, 2);
+        dualiso_gpu_recon_state_t second_state = {};
+        ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, second, &iso_pattern, &scratch, &second_state) != 0);
+        ASSERT_EQ(-1, iso_pattern);
+        assert_dual_iso_pattern(second_state, 0);
+        observed_patterns.push_back(iso_pattern);
+
+        test_artifacts::record("dual_iso.per_frame_phase.kill_switch.patterns",
+                               synthetic_phase_pattern_list(observed_patterns));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+}
+
 TEST(DualIsoPipeline, HeadlessDualIsoPreviewReusesLeastSquaresScratchAcrossFrames)
 {
     MlvPipelineFixture fixture;
