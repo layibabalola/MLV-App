@@ -154,16 +154,7 @@ bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
         || key == QStringLiteral("gpu_playback_recon_attempted")
         || key == QStringLiteral("gpu_playback_recon_used")
         || key == QStringLiteral("gpu_playback_recon_state_valid")
-        || key == QStringLiteral("gpu_playback_recon_rc")
-        || key == QStringLiteral("gpu_playback_recon_upload_ms")
-        || key == QStringLiteral("gpu_playback_recon_kernel_ms")
-        || key == QStringLiteral("gpu_playback_recon_interop_ms")
-        || key == QStringLiteral("gpu_playback_recon_total_ms")
-        || key == QStringLiteral("gpu_playback_recon_wall_ms")
-        || key == QStringLiteral("gpu_playback_recon_host_gap_ms")
-        || key == QStringLiteral("gpu_playback_recon_backend_config_ms")
-        || key == QStringLiteral("gpu_playback_recon_backend_run_wall_ms")
-        || key == QStringLiteral("gpu_playback_recon_retained_device_copy_ms");
+        || key == QStringLiteral("gpu_playback_recon_rc");
 }
 
 void preserveGpuPlaybackReconTimingTelemetry( const QJsonObject &source,
@@ -392,37 +383,6 @@ void insertGpuPlaybackReconRunTelemetry( QJsonObject &target )
     target.insert(
         QStringLiteral("gpu_playback_recon_rc"),
         llrpGpuPlaybackReconLastRunRcForTesting() );
-    llrpGpuPlaybackReconTiming_t reconTiming = {};
-    if( llrpGpuPlaybackReconLastTimingForTesting( &reconTiming ) )
-    {
-        target.insert(
-            QStringLiteral("gpu_playback_recon_upload_ms"),
-            reconTiming.upload_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_kernel_ms"),
-            reconTiming.kernel_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_interop_ms"),
-            reconTiming.interop_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_total_ms"),
-            reconTiming.total_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_wall_ms"),
-            reconTiming.wall_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_host_gap_ms"),
-            reconTiming.host_gap_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_backend_config_ms"),
-            reconTiming.context_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_backend_run_wall_ms"),
-            reconTiming.recon_wall_ms );
-        target.insert(
-            QStringLiteral("gpu_playback_recon_retained_device_copy_ms"),
-            reconTiming.post_ms );
-    }
 }
 
 bool gpuPlaybackReconNoReadbackOutputValidationEnabled()
@@ -1489,8 +1449,6 @@ bool RenderFrameThread::acquireReadySlotLocked( ReadyFrame *frame,
         frame->dualIsoPreviewRegressionMs = slot.dualIsoPreviewRegressionMs;
         frame->dualIsoPreviewRowscaleMs = slot.dualIsoPreviewRowscaleMs;
         frame->frameReadyEmitStageTime = slot.frameReadyEmitStageTime;
-        frame->frameReadyTrueEmitStageTime = slot.frameReadyTrueEmitStageTime;
-        frame->frameReadyEmitRequestSerial = slot.frameReadyEmitRequestSerial;
         frame->processedFrame8Active = slot.processedFrame8Active;
         frame->processedFrame8Signature = slot.processedFrame8Signature;
         frame->processedFrame16Active = slot.processedFrame16Active;
@@ -2707,20 +2665,6 @@ void RenderFrameThread::runPhase3( void )
                                  "phase3-decoded" );
         }
         publishRenderedSlot( slotIndex, request, activePhase3Mode );
-        const double frameReadyTrueEmitStageTime = mlv_stage_timing_now();
-        m_frameSlots[slotIndex].frameReadyTrueEmitStageTime =
-            frameReadyTrueEmitStageTime;
-        m_frameSlots[slotIndex].frameReadyEmitRequestSerial =
-            request.requestSerial;
-        if( playbackSmokeTimelineTelemetryEnabled() )
-        {
-            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
-                QStringLiteral("frame_ready_true_emit_stage_time"),
-                frameReadyTrueEmitStageTime );
-            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
-                QStringLiteral("frame_ready_emit_request_serial"),
-                static_cast<qint64>( request.requestSerial ) );
-        }
         m_mutex.unlock();
         emit frameReady();
         m_mutex.lock();
@@ -3067,20 +3011,6 @@ void RenderFrameThread::runSerial(void)
         m_frameSlots[slotIndex].ready = true;
         m_frameReady = true;
         m_waitCondition.wakeAll();
-        const double frameReadyTrueEmitStageTime = mlv_stage_timing_now();
-        m_frameSlots[slotIndex].frameReadyTrueEmitStageTime =
-            frameReadyTrueEmitStageTime;
-        m_frameSlots[slotIndex].frameReadyEmitRequestSerial =
-            request.requestSerial;
-        if( playbackSmokeTimelineTelemetryEnabled() )
-        {
-            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
-                QStringLiteral("frame_ready_true_emit_stage_time"),
-                frameReadyTrueEmitStageTime );
-            m_frameSlots[slotIndex].stageTimingTelemetry.insert(
-                QStringLiteral("frame_ready_emit_request_serial"),
-                static_cast<qint64>( request.requestSerial ) );
-        }
         m_mutex.unlock();
         emit frameReady();
         m_mutex.lock();

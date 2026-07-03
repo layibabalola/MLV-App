@@ -234,8 +234,6 @@ public:
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
         double frameReadyEmitStageTime = 0.0;
-        double frameReadyTrueEmitStageTime = 0.0;
-        uint64_t frameReadyEmitRequestSerial = 0;
         PresentationContext presentationContext;
         bool processedFrame8Active = false;
         uint64_t processedFrame8Signature = 0;
@@ -443,8 +441,6 @@ private:
         double dualIsoPreviewRegressionMs = 0.0;
         double dualIsoPreviewRowscaleMs = 0.0;
         double frameReadyEmitStageTime = 0.0;
-        double frameReadyTrueEmitStageTime = 0.0;
-        uint64_t frameReadyEmitRequestSerial = 0;
         ReadyFrame::PresentationContext presentationContext;
         bool processedFrame8Active = false;
         uint64_t processedFrame8Signature = 0;
@@ -502,8 +498,6 @@ private:
             dualIsoPreviewRegressionMs = 0.0;
             dualIsoPreviewRowscaleMs = 0.0;
             frameReadyEmitStageTime = 0.0;
-            frameReadyTrueEmitStageTime = 0.0;
-            frameReadyEmitRequestSerial = 0;
             processedFrame8Active = false;
             processedFrame8Signature = 0;
             processedFrame16Active = false;

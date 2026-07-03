@@ -7,7 +7,6 @@
 
 #include "GpuDisplayWindow.h"
 #include "GpuDebayer.h"
-#include "debug/StageTiming.h"
 
 #include <QGraphicsView>
 #include <QWidget>
@@ -40,12 +39,6 @@ bool windowEnvFlagEnabled(const QByteArray &value)
     if ( value.isEmpty() ) return false;
     const QByteArray normalized = value.trimmed().toLower();
     return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-}
-
-bool playbackSmokeTelemetryEnabledForGpuWindow()
-{
-    return qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_SMOKE_TELEMETRY")
-        && qEnvironmentVariable("MLVAPP_PLAYBACK_SMOKE_TELEMETRY") != QStringLiteral("0");
 }
 
 /* GLSL 1.20 passthrough -- works in the NVIDIA compatibility context a QOpenGLWindow
@@ -269,24 +262,10 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_loggedPaint(false)
     , m_loggedPresented(false)
     , m_loggedSetImage(false)
-    , m_lastUpdateRequestStageTime(0.0)
-    , m_updateRequestSequence(0)
-    , m_lastPaintLoggedUpdateSequence(0)
 {
     QSurfaceFormat fmt = format();
     fmt.setSwapInterval(0);
     setFormat(fmt);
-}
-
-void GpuDisplayWindow::requestInstrumentedUpdate(const char *reason)
-{
-    if ( playbackSmokeTelemetryEnabledForGpuWindow() )
-    {
-        m_lastUpdateRequestStageTime = mlv_stage_timing_now();
-        ++m_updateRequestSequence;
-        m_lastUpdateReason = QString::fromLatin1(reason ? reason : "unknown");
-    }
-    update();
 }
 
 GpuDisplayWindow::~GpuDisplayWindow()
@@ -327,7 +306,7 @@ void GpuDisplayWindow::setPresentedImage(const QImage &image)
                           << m_pendingImage.width() << "x" << m_pendingImage.height() << ").";
         m_loggedSetImage = true;
     }
-    requestInstrumentedUpdate("cpu_image");
+    update();
 }
 
 void GpuDisplayWindow::clearPresented()
@@ -341,7 +320,7 @@ void GpuDisplayWindow::clearPresented()
     m_pendingTextureFromGpuRecon = false;
     m_texturePresentationActive = false;
     m_textureDirty = true;
-    requestInstrumentedUpdate("clear");
+    update();
 }
 
 bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
@@ -656,7 +635,7 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     m_textureDirty = false;
     m_texturePresentationActive = false;
     if ( madeCurrent ) doneCurrent();
-    requestInstrumentedUpdate("gpu_recon_amaze_texture");
+    update();
     postMs = elapsedMs() - postStartMs;
     if ( handoffMode ) *handoffMode = handoffModeValue;
     if ( timing )
@@ -879,39 +858,6 @@ void GpuDisplayWindow::updateTextureIfNeeded()
 
 void GpuDisplayWindow::paintGL()
 {
-    const bool smokeTelemetry = playbackSmokeTelemetryEnabledForGpuWindow();
-    const double paintEntryStageTime =
-        smokeTelemetry ? mlv_stage_timing_now() : 0.0;
-    const double updateRequestStageTime = m_lastUpdateRequestStageTime;
-    const qulonglong updateSequence = m_updateRequestSequence;
-    const bool logPaintTiming =
-        smokeTelemetry
-        && updateSequence > 0
-        && updateSequence != m_lastPaintLoggedUpdateSequence;
-    if ( logPaintTiming )
-    {
-        const double updateToPaintMs =
-            ( updateRequestStageTime > 0.0
-           && paintEntryStageTime >= updateRequestStageTime )
-                ? ( paintEntryStageTime - updateRequestStageTime ) * 1000.0
-                : 0.0;
-        qInfo().noquote()
-            << QStringLiteral(
-                   "playback_smoke.gpu_window_paint update_seq=%1 "
-                   "reason=%2 update_request_stage=%3 paint_entry_stage=%4 "
-                   "update_to_paint_ms=%5 pending_gpu_texture=%6 "
-                   "texture_dirty=%7 texture_active_before_paint=%8" )
-                  .arg( updateSequence )
-                  .arg( m_lastUpdateReason )
-                  .arg( updateRequestStageTime, 0, 'f', 9 )
-                  .arg( paintEntryStageTime, 0, 'f', 9 )
-                  .arg( updateToPaintMs, 0, 'f', 3 )
-                  .arg( m_pendingTextureFromGpuRecon ? 1 : 0 )
-                  .arg( m_textureDirty ? 1 : 0 )
-                  .arg( m_texturePresentationActive ? 1 : 0 );
-        m_lastPaintLoggedUpdateSequence = updateSequence;
-    }
-
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);

@@ -7,7 +7,6 @@
 
 #include "GpuDisplayViewport.h"
 #include "GpuDisplayWindow.h"
-#include "debug/StageTiming.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,12 +50,6 @@ bool envFlagEnabled(const QByteArray &value)
         || normalized == "true"
         || normalized == "yes"
         || normalized == "on";
-}
-
-bool playbackSmokeTelemetryEnabledForViewport()
-{
-    return qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_SMOKE_TELEMETRY")
-        && qEnvironmentVariable("MLVAPP_PLAYBACK_SMOKE_TELEMETRY") != QStringLiteral("0");
 }
 
 /* Bug A diagnostic: env-gated (MLVAPP_VIEWPORT_PRESENT_DIAG=1) per-frame trace of
@@ -359,12 +352,6 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
     , m_pendingTextureHeight(0)
     , m_processingTextureSignature(0)
     , m_processingTextureSignatureValid(false)
-    , m_lastUpdateRequestStageTime(0.0)
-    , m_updateRequestSequence(0)
-    , m_lastPaintLoggedUpdateSequence(0)
-    , m_lastUpdateRequestSerial(0)
-    , m_lastUpdateDisplayFrame(0)
-    , m_lastUpdateDrawBeginStageTime(0.0)
     , m_program(nullptr)
     , m_texture(nullptr)
     , m_gpuReconSourceTexture(nullptr)
@@ -406,21 +393,6 @@ GpuDisplayViewport::GpuDisplayViewport(QWidget *parent)
             << " native=" << (viewportAbNativeWindow() ? 1 : 0)
             << " prime=" << (viewportAbPrimeEnabled() ? 1 : 0)
             << " flush=" << qgetenv("MLVAPP_VIEWPORT_AB_FLUSH").constData();
-}
-
-void GpuDisplayViewport::requestInstrumentedUpdate(const char *reason)
-{
-    if ( playbackSmokeTelemetryEnabledForViewport() )
-    {
-        m_lastUpdateRequestStageTime = mlv_stage_timing_now();
-        ++m_updateRequestSequence;
-        m_lastUpdateReason = QString::fromLatin1(reason ? reason : "unknown");
-        m_lastUpdateRequestSerial = m_presentationOptions.telemetryRequestSerial;
-        m_lastUpdateDisplayFrame = m_presentationOptions.telemetryDisplayFrame;
-        m_lastUpdateDrawBeginStageTime =
-            m_presentationOptions.telemetryDrawBeginStageTime;
-    }
-    update();
 }
 
 GpuDisplayViewport::~GpuDisplayViewport()
@@ -943,7 +915,7 @@ void GpuDisplayViewport::initializeGL()
                 top->resize(s + QSize(1, 1));
                 top->resize(s);
             }
-            requestInstrumentedUpdate("initialize_prime");
+            update();
         });
     }
 
@@ -982,52 +954,6 @@ void GpuDisplayViewport::initializeGL()
 
 void GpuDisplayViewport::paintGL()
 {
-    const bool smokeTelemetry = playbackSmokeTelemetryEnabledForViewport();
-    const double paintEntryStageTime =
-        smokeTelemetry ? mlv_stage_timing_now() : 0.0;
-    const double updateRequestStageTime = m_lastUpdateRequestStageTime;
-    const qulonglong updateSequence = m_updateRequestSequence;
-    const bool logPaintTiming =
-        smokeTelemetry
-        && updateSequence > 0
-        && updateSequence != m_lastPaintLoggedUpdateSequence;
-    if ( logPaintTiming )
-    {
-        const double updateToPaintMs =
-            ( updateRequestStageTime > 0.0
-           && paintEntryStageTime >= updateRequestStageTime )
-                ? ( paintEntryStageTime - updateRequestStageTime ) * 1000.0
-                : 0.0;
-        const double drawBeginToPaintMs =
-            ( m_lastUpdateDrawBeginStageTime > 0.0
-           && paintEntryStageTime >= m_lastUpdateDrawBeginStageTime )
-                ? ( paintEntryStageTime - m_lastUpdateDrawBeginStageTime ) * 1000.0
-                : 0.0;
-        qInfo().noquote()
-            << QStringLiteral(
-                   "playback_smoke.gpu_viewport_paint update_seq=%1 "
-                   "reason=%2 serial=%3 display_frame=%4 "
-                   "update_request_stage=%5 paint_entry_stage=%6 "
-                   "draw_begin_stage=%7 update_to_paint_ms=%8 "
-                   "draw_begin_to_paint_ms=%9 pending_gpu_recon=%10 "
-                   "pending_gpu_amaze=%11 texture_dirty=%12 "
-                   "texture_active_before_paint=%13" )
-                  .arg( updateSequence )
-                  .arg( m_lastUpdateReason )
-                  .arg( m_lastUpdateRequestSerial )
-                  .arg( m_lastUpdateDisplayFrame )
-                  .arg( updateRequestStageTime, 0, 'f', 9 )
-                  .arg( paintEntryStageTime, 0, 'f', 9 )
-                  .arg( m_lastUpdateDrawBeginStageTime, 0, 'f', 9 )
-                  .arg( updateToPaintMs, 0, 'f', 3 )
-                  .arg( drawBeginToPaintMs, 0, 'f', 3 )
-                  .arg( m_pendingTextureFromGpuRecon ? 1 : 0 )
-                  .arg( m_pendingTextureFromGpuAmaze ? 1 : 0 )
-                  .arg( m_textureDirty ? 1 : 0 )
-                  .arg( m_texturePresentationActive ? 1 : 0 );
-        m_lastPaintLoggedUpdateSequence = updateSequence;
-    }
-
     const QColor clearColor = m_view
         ? m_view->backgroundBrush().color()
         : palette().color(QPalette::Window);
@@ -1248,7 +1174,7 @@ void GpuDisplayViewport::setPresentedImage(const QImage &image, const Presentati
     setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
-    requestInstrumentedUpdate("cpu_image");
+    update();
 }
 
 void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
@@ -1282,7 +1208,7 @@ void GpuDisplayViewport::setPresentedRgb16(const uint16_t *imageData,
     setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
-    requestInstrumentedUpdate("rgb16");
+    update();
 }
 
 void GpuDisplayViewport::setPresentedBayer16(const uint16_t *imageData,
@@ -1306,7 +1232,7 @@ void GpuDisplayViewport::setPresentedBayer16(const uint16_t *imageData,
     setPresentationOptions(options);
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
-    requestInstrumentedUpdate("bayer16");
+    update();
 }
 
 bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
@@ -1434,7 +1360,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconTexture(
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( madeCurrent ) doneCurrent();
-    requestInstrumentedUpdate("gpu_recon_texture");
+    update();
     postMs = elapsedMs() - postStartMs;
     if ( timingTarget )
     {
@@ -1770,7 +1696,7 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( madeCurrent ) doneCurrent();
-    requestInstrumentedUpdate("gpu_recon_amaze_texture");
+    update();
     postMs = elapsedMs() - postStartMs;
     if ( handoffMode ) *handoffMode = handoffModeValue;
     if ( timing )
@@ -1880,7 +1806,7 @@ bool GpuDisplayViewport::setPresentedAmazePostWbTexture(const float *rawFrame,
     m_texturePresentationActive = false;
     if ( m_fallbackItem ) m_fallbackItem->setVisible(false);
     if ( madeCurrent ) doneCurrent();
-    requestInstrumentedUpdate("gpu_amaze_texture");
+    update();
     return true;
 }
 
@@ -1899,7 +1825,7 @@ void GpuDisplayViewport::clearPresentedImage()
     m_processingTexturesDirty = false;
     cleanupGLResources();
     if ( m_fallbackItem ) m_fallbackItem->setVisible(true);
-    requestInstrumentedUpdate("clear");
+    update();
 }
 
 void GpuDisplayViewport::updateTextureIfNeeded()

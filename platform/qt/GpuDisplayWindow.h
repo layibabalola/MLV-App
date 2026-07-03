@@ -108,7 +108,6 @@ protected:
     void paintGL() override;
 
 private:
-    void requestInstrumentedUpdate(const char *reason);
     void ensureProgram(void);
     void updateTextureIfNeeded(void);
     void destroyTexture(void);
@@ -131,10 +130,6 @@ private:
     bool m_loggedPaint;
     bool m_loggedPresented;
     bool m_loggedSetImage;
-    double m_lastUpdateRequestStageTime;
-    qulonglong m_updateRequestSequence;
-    qulonglong m_lastPaintLoggedUpdateSequence;
-    QString m_lastUpdateReason;
     QString m_rendererDescription;
 };
 

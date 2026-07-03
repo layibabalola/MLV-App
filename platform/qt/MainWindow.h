@@ -993,11 +993,6 @@ private:
     double m_playbackTimelineAdvanceIssueStageTime = 0.0;
     double m_playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
     double m_playbackTimelineSourceDrawBeginStageTime = 0.0;
-    double m_lastDrawFrameEntryStageTime = 0.0;
-    double m_lastDrawFrameGpuPreviewConfigBeginStageTime = 0.0;
-    double m_lastDrawFrameGpuPreviewConfigEndStageTime = 0.0;
-    double m_lastDrawFrameGpuPreviewConfigBuildMs = 0.0;
-    bool m_lastDrawFrameGpuPreviewConfigCacheHit = false;
     double m_playbackScopeLastUpdateTime = 0.0;
     uint64_t m_playbackScopeUpdateCount = 0;
     uint64_t m_playbackScopeSkipCount = 0;
@@ -1265,11 +1260,6 @@ private:
     bool m_headlessPlaybackProfileActive = false;
     uint64_t m_nextRenderRequestSerial = 1;
     uint64_t m_lastPresentedRequestSerial = 0;
-    uint64_t m_guiBusyProbeSessionId = 0;
-    uint64_t m_guiBusyProbeRequestSerial = 0;
-    uint64_t m_guiBusyProbeDisplayFrame = 0;
-    double m_guiBusyProbeScheduleStageTime = 0.0;
-    double m_guiBusyProbeFiredStageTime = 0.0;
     GpuPreviewProcessingBackendRequest m_gpuPreviewProcessingBackendRequest =
         GpuPreviewProcessingBackendRequest::Auto;
     GpuBilinearDebayerBackendRequest m_gpuBilinearDebayerBackendRequest =

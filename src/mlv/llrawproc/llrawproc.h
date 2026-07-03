@@ -110,8 +110,6 @@ typedef struct
     double post_ms;
 } llrpGpuPlaybackReconTiming_t;
 
-int llrpGpuPlaybackReconLastTimingForTesting(llrpGpuPlaybackReconTiming_t * timing);
-
 typedef struct
 {
     int valid;
