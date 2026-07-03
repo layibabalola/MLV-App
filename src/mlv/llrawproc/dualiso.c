@@ -2763,8 +2763,28 @@ static int ensure_scratch_ev_lut(dualiso_full20bit_scratch_t * scratch,
 static inline double compute_noise(struct raw_info raw_info, uint16_t * image_data, double * noise_std, double * dark_noise, double * bright_noise, double * dark_noise_ev, double * bright_noise_ev)
 {
     double noise_avg = 0.0;
+    int has_noise_samples = 0;
     for (int y = 0; y < 4; y++)
-        compute_black_noise(raw_info, image_data, 8, raw_info.active_area.x1 - 8, raw_info.active_area.y1/4*4 + 20 + y, raw_info.active_area.y2 - 20, 1, 4, &noise_avg, &noise_std[y]);
+    {
+        int y1 = raw_info.active_area.y1/4*4 + 20 + y;
+        int y2 = raw_info.active_area.y2 - 20;
+        if (8 < raw_info.active_area.x1 - 8 && y1 < y2)
+        {
+            has_noise_samples = 1;
+            break;
+        }
+    }
+    if (has_noise_samples)
+    {
+        for (int y = 0; y < 4; y++)
+            compute_black_noise(raw_info, image_data, 8, raw_info.active_area.x1 - 8, raw_info.active_area.y1/4*4 + 20 + y, raw_info.active_area.y2 - 20, 1, 4, &noise_avg, &noise_std[y]);
+    }
+    else
+    {
+        noise_avg = raw_info.black_level;
+        for (int y = 0; y < 4; y++)
+            noise_std[y] = 8.0; /* compute_black_noise's empty-window default */
+    }
 #ifndef STDOUT_SILENT
     printf("Noise levels    : %.02f %.02f %.02f %.02f (14-bit)\n", noise_std[0], noise_std[1], noise_std[2], noise_std[3]);
 #endif
