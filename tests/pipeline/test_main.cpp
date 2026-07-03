@@ -11,9 +11,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <string>
+#include <vector>
 
 static bool compare_against_golden(const QString & golden_path, std::string * error_message)
 {
@@ -78,6 +80,111 @@ static bool compare_against_golden(const QString & golden_path, std::string * er
     return true;
 }
 
+struct ParsedTestFilter {
+    std::vector<std::string> include;
+    std::vector<std::string> exclude;
+};
+
+static std::vector<std::string> split_filter_patterns(const std::string & value)
+{
+    std::vector<std::string> patterns;
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t end = value.find(':', start);
+        const std::string pattern =
+            value.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        if (!pattern.empty()) {
+            patterns.push_back(pattern);
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        start = end + 1;
+    }
+    return patterns;
+}
+
+static ParsedTestFilter parse_test_filter(const std::string & value)
+{
+    ParsedTestFilter filter;
+    const std::size_t negative_separator = value.find('-');
+    const std::string include_part = negative_separator == std::string::npos
+        ? value
+        : value.substr(0, negative_separator);
+    const std::string exclude_part = negative_separator == std::string::npos
+        ? std::string()
+        : value.substr(negative_separator + 1);
+
+    filter.include = split_filter_patterns(include_part);
+    if (filter.include.empty()) {
+        filter.include.push_back("*");
+    }
+    filter.exclude = split_filter_patterns(exclude_part);
+    return filter;
+}
+
+static bool pattern_matches_test_name(const std::string & test_name,
+                                      const std::string & pattern)
+{
+    if (pattern == "*") {
+        return true;
+    }
+    const bool suffix_wildcard =
+        !pattern.empty() && pattern[pattern.size() - 1] == '*';
+    if (!suffix_wildcard) {
+        return test_name == pattern;
+    }
+
+    const std::string prefix = pattern.substr(0, pattern.size() - 1);
+    bool matches = test_name.compare(0, prefix.size(), prefix) == 0;
+    if (!matches && !prefix.empty() && prefix[prefix.size() - 1] == '_') {
+        std::string dotted_prefix = prefix;
+        dotted_prefix[dotted_prefix.size() - 1] = '.';
+        matches = test_name.compare(0, dotted_prefix.size(), dotted_prefix) == 0;
+    }
+    return matches;
+}
+
+static bool test_matches_filter(const minitest::TestCase & test,
+                                const ParsedTestFilter & filter)
+{
+    const std::string test_name =
+        std::string(test.suite) + "." + std::string(test.name);
+    const bool included =
+        std::any_of(filter.include.begin(),
+                    filter.include.end(),
+                    [&](const std::string & pattern) {
+                        return pattern_matches_test_name(test_name, pattern);
+                    });
+    if (!included) {
+        return false;
+    }
+    return std::none_of(filter.exclude.begin(),
+                        filter.exclude.end(),
+                        [&](const std::string & pattern) {
+                            return pattern_matches_test_name(test_name, pattern);
+                        });
+}
+
+static bool apply_complex_filter_to_registry(const std::string & value)
+{
+    const ParsedTestFilter filter = parse_test_filter(value);
+    const bool needs_registry_filter =
+        !filter.exclude.empty() || filter.include.size() > 1;
+    if (!needs_registry_filter) {
+        return false;
+    }
+
+    std::vector<minitest::TestCase> selected;
+    for (const minitest::TestCase & test : minitest::registry()) {
+        if (test_matches_filter(test, filter)) {
+            selected.push_back(test);
+        }
+    }
+    minitest::registry() = selected;
+    return true;
+}
+
 int main(int argc, char ** argv)
 {
     test_runtime::force_single_threaded_pipeline();
@@ -119,7 +226,7 @@ int main(int argc, char ** argv)
         }
     }
 
-    if (!test_filter.empty()) {
+    if (!test_filter.empty() && !apply_complex_filter_to_registry(test_filter)) {
         minitest::set_filter(test_filter);
     }
 
