@@ -226,6 +226,8 @@ const char *dualIsoFull20PatternSourceName( int patternSource )
         return "fresh_auto";
     case DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE:
         return "explicit_positive";
+    case DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE_REDETECTED:
+        return "explicit_positive_redetected";
     case DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE:
         return "cached_negative";
     case DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE_REDETECTED:

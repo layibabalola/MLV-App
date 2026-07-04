@@ -5992,9 +5992,10 @@ static int dualiso_phase_probe(struct raw_info raw_info,
 /* Factored pattern resolution shared by diso_get_full20bit and
  * diso_prepare_gpu_recon_state. Fills is_bright[4]; returns 0 = hard failure
  * (caller returns 0 exactly as before). Behavior is IDENTICAL to the pre-fix
- * duplicated blocks EXCEPT inside the cached -1..-4 branch, where the cached
- * pattern is verified against THIS frame and re-detected on decisive mismatch
- * (fail-safe: any probe/identify failure keeps the cached pattern). */
+ * duplicated blocks EXCEPT inside the cached -1..-4 and explicit +1..+4
+ * branches, where the selected pattern is verified against THIS frame and
+ * re-detected on decisive mismatch (fail-safe: any probe/identify failure
+ * keeps the selected pattern). */
 static int dualiso_resolve_iso_pattern(struct raw_info raw_info,
                                        uint16_t * image_data,
                                        int rggb,
@@ -6044,7 +6045,49 @@ static int dualiso_resolve_iso_pattern(struct raw_info raw_info,
     }
     else if (*iso_pattern > 0 && *iso_pattern <= 4)
     {
-        memcpy(is_bright, iso_patterns[*iso_pattern - 1], 4 * sizeof(int));
+        const int explicit_idx = *iso_pattern - 1;
+        g_dualiso_full20bit_timing.phase_cached_pattern = explicit_idx + 1;
+        if (g_dualiso_full20bit_timing.phase_verify_enabled)
+        {
+            int implied = -1;
+            g_dualiso_full20bit_timing.phase_probe_attempted = 1;
+            if (dualiso_phase_probe(raw_info, image_data, &implied))
+            {
+                g_dualiso_full20bit_timing.phase_probe_succeeded = 1;
+                if (implied >= 0)
+                    g_dualiso_full20bit_timing.phase_implied_pattern = implied + 1;
+                if (implied != explicit_idx)
+                {
+                    int fresh[4];
+                    g_dualiso_full20bit_timing.phase_probe_decisive = 1;
+                    if (identify_bright_and_dark_fields(raw_info, image_data, rggb, fresh, scratch))
+                    {
+                        for (int i = 0; i < 4; i++)
+                        {
+                            if (memcmp(fresh, iso_patterns[i], 4 * sizeof(int)) == 0)
+                            {
+                                if (dualiso_phase_log_enabled())
+                                {
+                                    fprintf(stderr,
+                                            "[DISO_PHASE] explicit re-detect: explicit=%d implied=%d fresh=%d\n",
+                                            explicit_idx, implied, i);
+                                }
+                                memcpy(is_bright, fresh, 4 * sizeof(int));
+                                *iso_pattern = -(i + 1);
+                                g_dualiso_full20bit_timing.phase_probe_redetected = 1;
+                                dualiso_debug_note_pattern_resolution(
+                                    DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE_REDETECTED,
+                                    iso_pattern,
+                                    is_bright);
+                                return 1;
+                            }
+                        }
+                    }
+                    /* identify failed or non-tabular -> fall through to explicit choice */
+                }
+            }
+        }
+        memcpy(is_bright, iso_patterns[explicit_idx], 4 * sizeof(int));
         dualiso_debug_note_pattern_resolution(
             DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE,
             iso_pattern,

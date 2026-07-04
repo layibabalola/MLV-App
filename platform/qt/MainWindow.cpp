@@ -13500,12 +13500,35 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     }
     else
     {
-        ui->DualIsoPatternComboBox->setCurrentIndex( receipt->dualIsoPattern() );
-        on_DualIsoPatternComboBox_currentIndexChanged( receipt->dualIsoPattern() );
+        const int displayPattern =
+            dualIsoUiPatternIndexFromCorePattern(
+                dualIsoCorePatternFromUiIndex( receipt->dualIsoPattern() ) );
+        ui->DualIsoPatternComboBox->blockSignals( true );
+        ui->DualIsoPatternComboBox->setCurrentIndex( displayPattern );
+        ui->DualIsoPatternComboBox->blockSignals( false );
+
+        ui->horizontalSliderDualIsoEvCorrection->blockSignals( true );
         ui->horizontalSliderDualIsoEvCorrection->setValue( receipt->dualIsoEvCorrection() );
-        on_horizontalSliderDualIsoEvCorrection_valueChanged( receipt->dualIsoEvCorrection() );
+        ui->horizontalSliderDualIsoEvCorrection->blockSignals( false );
+        if( receipt->dualIsoEvCorrection() != 1 )
+        {
+            const double displayEv = receipt->dualIsoEvCorrection() / 200.0;
+            ui->DualIsoEvCorrectionVal->setText( QString("%1").arg( displayEv, 0, 'f', 2 ) );
+        }
+
+        ui->horizontalSliderDualIsoBlackDelta->blockSignals( true );
         ui->horizontalSliderDualIsoBlackDelta->setValue( receipt->dualIsoBlackDelta() );
-        on_horizontalSliderDualIsoBlackDelta_valueChanged( receipt->dualIsoBlackDelta() );
+        ui->horizontalSliderDualIsoBlackDelta->blockSignals( false );
+        if( receipt->dualIsoBlackDelta() != -1 )
+        {
+            ui->DualIsoBlackDeltaVal->setText( QString("%1").arg( receipt->dualIsoBlackDelta() ) );
+        }
+
+        m_pMlvObject->llrawproc->diso_pattern = 0;
+        m_pMlvObject->llrawproc->diso_auto_correction =
+            ( receipt->dualIsoForced() == DISO_FORCED ) ? -2 : -1;
+        m_pMlvObject->llrawproc->diso_ev_correction = 1;
+        m_pMlvObject->llrawproc->diso_black_delta = -1;
     }
 
     setToolButtonDualIso( receipt->dualIso() );

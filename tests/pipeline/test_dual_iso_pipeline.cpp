@@ -5183,6 +5183,36 @@ TEST(DualIsoPipeline, DualIsoPerFramePhaseVerificationHandlesRotatingStaticAndKi
         free_dualiso_full20bit_scratch(&scratch);
     }
 
+    phase_env.unset();
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 1;
+        std::vector<uint16_t> frame = synthetic_dual_iso_phase_frame(raw, 2);
+        dualiso_gpu_recon_state_t state = {};
+        ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
+        ASSERT_EQ(1, state.valid);
+        ASSERT_EQ(-3, iso_pattern);
+        assert_dual_iso_pattern(state, 2);
+        test_artifacts::record("dual_iso.per_frame_phase.explicit_mismatch.pattern",
+                               std::to_string(iso_pattern));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+
+    phase_env.unset();
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 2;
+        std::vector<uint16_t> frame = synthetic_dual_iso_phase_frame(raw, 1);
+        dualiso_gpu_recon_state_t state = {};
+        ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
+        ASSERT_EQ(1, state.valid);
+        ASSERT_EQ(2, iso_pattern);
+        assert_dual_iso_pattern(state, 1);
+        test_artifacts::record("dual_iso.per_frame_phase.explicit_match.pattern",
+                               std::to_string(iso_pattern));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+
     phase_env.set(QByteArrayLiteral("0"));
     {
         dualiso_full20bit_scratch_t scratch = {};
@@ -5205,6 +5235,21 @@ TEST(DualIsoPipeline, DualIsoPerFramePhaseVerificationHandlesRotatingStaticAndKi
 
         test_artifacts::record("dual_iso.per_frame_phase.kill_switch.patterns",
                                synthetic_phase_pattern_list(observed_patterns));
+        free_dualiso_full20bit_scratch(&scratch);
+    }
+
+    phase_env.set(QByteArrayLiteral("0"));
+    {
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 1;
+        std::vector<uint16_t> frame = synthetic_dual_iso_phase_frame(raw, 2);
+        dualiso_gpu_recon_state_t state = {};
+        ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
+        ASSERT_EQ(1, state.valid);
+        ASSERT_EQ(1, iso_pattern);
+        assert_dual_iso_pattern(state, 0);
+        test_artifacts::record("dual_iso.per_frame_phase.explicit_kill_switch.pattern",
+                               std::to_string(iso_pattern));
         free_dualiso_full20bit_scratch(&scratch);
     }
 }
