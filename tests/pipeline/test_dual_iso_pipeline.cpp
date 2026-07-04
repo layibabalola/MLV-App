@@ -8305,6 +8305,49 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfResPreviewDefaultsOnInPlaybackP
     ASSERT_EQ(std::string("none"), std::string(mlv_phase4bv2_last_fallback_reason()));
 }
 
+TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneIncompatibleHalfProxyDoesNotSeedPattern)
+{
+    struct PreviewModeResetGuard {
+        ~PreviewModeResetGuard()
+        {
+            processingSetPlaybackPreviewMode(0);
+            processingSetPlaybackAggressivePreviewMode(0);
+        }
+    } preview_mode_reset_guard;
+
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"), &error_message));
+    fixture.receipt().setFocusPixels(1);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
+    ASSERT_EQ(0, fixture.video()->llrawproc->diso_pattern);
+
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    if ((full_w % 4) != 0 || full_h < 16) {
+        return;
+    }
+
+    const std::vector<uint16_t> got = fixture.renderFrame16Scaled(0, 1, 1);
+    ASSERT_FALSE(got.empty());
+    ASSERT_EQ(0, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("x1 half-res receipt incompatible"),
+              std::string(mlv_phase4bv2_last_fallback_reason()));
+
+    dualiso_full20bit_timing_t timing = {};
+    llrpGetLastDualIsoFull20bitTiming(&timing);
+    ASSERT_EQ(full_w, timing.input_width);
+    ASSERT_EQ(full_h, timing.input_height);
+    ASSERT_EQ(0, timing.pattern_initial);
+    ASSERT_EQ(DUALISO_FULL20_PATTERN_SOURCE_FRESH_AUTO, timing.pattern_source);
+    ASSERT_TRUE(timing.pattern_resolved < 0);
+}
+
 TEST(DualIsoPipeline, Phase4B_DualIsoScaleOneHalfProcessingKillSwitchRestoresPath6)
 {
     struct PreviewModeResetGuard {

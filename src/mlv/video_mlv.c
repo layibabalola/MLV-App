@@ -4467,6 +4467,13 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
 {
     if (!video || !outputFrame || !llrpHQDualIso(video)) return 0;
     if (halvings != 1 && halvings != 2) return 0;
+    if (!mlv_phase4bv2_receipt_compatible(video))
+    {
+        mlv_phase4bv2_log_rejection(halvings == 2
+                                    ? "x1 quarter-res receipt incompatible"
+                                    : "x1 half-res receipt incompatible");
+        return 0;
+    }
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int eff_h = (full_h / 16) * 16;            /* 16-aligned: dual-ISO 4-row phase */
