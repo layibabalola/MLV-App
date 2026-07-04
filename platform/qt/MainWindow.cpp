@@ -7329,12 +7329,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             qApp->processEvents( QEventLoop::AllEvents );
             ui->checkBoxLookAssistEnable->click();
             qApp->processEvents( QEventLoop::AllEvents );
-            QString toggleSettleFailure;
             trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-begin"));
-            if( !renderFrameIndex( startFrame, -1, true, &toggleSettleFailure ) )
+            if( !settleLookAssistForProfile(
+                    QStringLiteral("look-assist-toggle-smoke-recheck-settle") ) )
             {
-                err << "[PROFILE] ERROR: " << toggleSettleFailure << "\n";
-                trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-failed: ") + toggleSettleFailure);
+                err << "[PROFILE] ERROR: " << lookAssistSettleSmokeFailure << "\n";
+                trace(QStringLiteral("look-assist-toggle-smoke-recheck-settle-failed: ")
+                      + lookAssistSettleSmokeFailure);
                 return 7;
             }
             qApp->processEvents( QEventLoop::AllEvents );
@@ -25482,6 +25483,8 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
     {
         restoreLookAssistBaseline( ACTIVE_RECEIPT );
         m_lastLookAssistDiagnosticsValid = false;
+        if( m_lookAssistAppliedReceipt == ACTIVE_RECEIPT )
+            m_lookAssistAppliedReceipt = nullptr;
     }
 
     setReceipt( ACTIVE_RECEIPT );
