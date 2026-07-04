@@ -204,6 +204,14 @@ static bool dualIsoWarmupInstrumentationEnabled()
     return enabled;
 }
 
+static const char *dualIsoSessionPatternSourceName( int runtimePattern )
+{
+    if( runtimePattern == 0 ) return "fresh_auto";
+    if( runtimePattern >= 1 && runtimePattern <= 4 ) return "explicit_positive";
+    if( runtimePattern <= -1 && runtimePattern >= -4 ) return "cached_negative";
+    return "invalid";
+}
+
 static bool playbackGpuNoReadbackOutputValidationEnabled()
 {
     static const bool enabled =
@@ -13529,6 +13537,45 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             ( receipt->dualIsoForced() == DISO_FORCED ) ? -2 : -1;
         m_pMlvObject->llrawproc->diso_ev_correction = 1;
         m_pMlvObject->llrawproc->diso_black_delta = -1;
+    }
+
+    if( dualIsoWarmupInstrumentationEnabled() )
+    {
+        const int runtimePattern = m_pMlvObject->llrawproc->diso_pattern;
+        qInfo().noquote()
+            << QStringLiteral(
+                   "[DISO_WARMUP] session_load "
+                   "receipt_dual_iso_forced=%1 "
+                   "receipt_dual_iso=%2 "
+                   "receipt_dual_iso_auto_corrected=%3 "
+                   "receipt_dual_iso_pattern_ui=%4 "
+                   "display_dual_iso_pattern_ui=%5 "
+                   "dual_iso_session_pattern_initial=%6 "
+                   "dual_iso_session_pattern_resolved=%7 "
+                   "dual_iso_session_pattern_source_name=%8 "
+                   "runtime_diso_auto_correction=%9 "
+                   "runtime_diso_ev_correction=%10 "
+                   "runtime_diso_black_delta=%11 "
+                   "receipt_dual_iso_ev_correction=%12 "
+                   "receipt_dual_iso_black_delta=%13 "
+                   "file_loaded=%14 "
+                   "paste=%15" )
+                   .arg( receipt->dualIsoForced() )
+                   .arg( receipt->dualIso() )
+                   .arg( bool01( receipt->dualIsoAutoCorrected() ) )
+                   .arg( receipt->dualIsoPattern() )
+                   .arg( ui->DualIsoPatternComboBox->currentIndex() )
+                   .arg( runtimePattern )
+                   .arg( runtimePattern )
+                   .arg( QString::fromLatin1(
+                       dualIsoSessionPatternSourceName( runtimePattern ) ) )
+                   .arg( m_pMlvObject->llrawproc->diso_auto_correction )
+                   .arg( m_pMlvObject->llrawproc->diso_ev_correction )
+                   .arg( m_pMlvObject->llrawproc->diso_black_delta )
+                   .arg( receipt->dualIsoEvCorrection() )
+                   .arg( receipt->dualIsoBlackDelta() )
+                   .arg( bool01( m_fileLoaded ) )
+                   .arg( bool01( paste ) );
     }
 
     setToolButtonDualIso( receipt->dualIso() );
