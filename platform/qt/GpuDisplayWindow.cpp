@@ -83,6 +83,16 @@ QString GpuDisplayWindow::rendererDescription()
     return win ? win->m_rendererDescription : QString();
 }
 
+QSize GpuDisplayWindow::effectiveDisplaySizeForImage(const QSize &imageSize,
+                                                     const QSize &requestedDisplaySize)
+{
+    if ( requestedDisplaySize.width() > 0 && requestedDisplaySize.height() > 0 )
+    {
+        return requestedDisplaySize;
+    }
+    return imageSize;
+}
+
 QSize GpuDisplayWindow::displaySize()
 {
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
@@ -139,7 +149,8 @@ bool GpuDisplayWindow::installInPreview(QGraphicsView *view)
     return true;
 }
 
-bool GpuDisplayWindow::presentImageIfActive(const QImage &image)
+bool GpuDisplayWindow::presentImageIfActive(const QImage &image,
+                                            const QSize &displaySize)
 {
     QMutexLocker lock(&g_activeMutex);
     GpuDisplayWindow *win = g_activeWindow.load(std::memory_order_acquire);
@@ -149,7 +160,7 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image)
     {
         // Same (GUI) thread: setPresentedImage deep-copies synchronously, and the
         // destructor runs on this same thread, so there is no race here.
-        win->setPresentedImage(image);
+        win->setPresentedImage(image, displaySize);
     }
     else
     {
@@ -159,7 +170,9 @@ bool GpuDisplayWindow::presentImageIfActive(const QImage &image)
         // the copy() inside setPresentedImage would run too late. The mutex keeps the
         // destructor from freeing `win` between this load and the queued post.
         const QImage owned = image.copy();
-        QMetaObject::invokeMethod(win, [win, owned]() { win->setPresentedImage(owned); },
+        QMetaObject::invokeMethod(win, [win, owned, displaySize]() {
+                                      win->setPresentedImage(owned, displaySize);
+                                  },
                                   Qt::QueuedConnection);
     }
     return true;
@@ -262,6 +275,7 @@ GpuDisplayWindow::GpuDisplayWindow(QWindow *parent)
     , m_loggedPaint(false)
     , m_loggedPresented(false)
     , m_loggedSetImage(false)
+    , m_loggedSetGpuTexture(false)
 {
     QSurfaceFormat fmt = format();
     fmt.setSwapInterval(0);
@@ -289,21 +303,40 @@ GpuDisplayWindow::~GpuDisplayWindow()
     }
 }
 
-void GpuDisplayWindow::setPresentedImage(const QImage &image)
+void GpuDisplayWindow::setPresentedImage(const QImage &image,
+                                         const QSize &displaySize)
 {
+    const QSize previousDisplaySize(m_pendingDisplayWidth,
+                                    m_pendingDisplayHeight);
+    const QSize previousImageSize = m_pendingImage.size();
+    const QSize previousTextureSize(m_pendingTextureWidth,
+                                    m_pendingTextureHeight);
     m_pendingImage = image.format() == QImage::Format_RGBA8888
         ? image.copy()
         : image.convertToFormat(QImage::Format_RGBA8888);
+    QSize effectiveDisplaySize =
+        effectiveDisplaySizeForImage(m_pendingImage.size(), displaySize);
+    if ( effectiveDisplaySize == m_pendingImage.size()
+      && previousDisplaySize.width() > 0
+      && previousDisplaySize.height() > 0
+      && previousDisplaySize != effectiveDisplaySize
+      && ( previousImageSize == m_pendingImage.size()
+        || previousTextureSize == m_pendingImage.size() ) )
+    {
+        effectiveDisplaySize = previousDisplaySize;
+    }
     m_pendingTextureFromGpuRecon = false;
     m_gpuReconSourceTextureCurrent = false;
     m_texturePresentationActive = false;
-    m_pendingDisplayWidth = m_pendingImage.width();
-    m_pendingDisplayHeight = m_pendingImage.height();
+    m_pendingDisplayWidth = effectiveDisplaySize.width();
+    m_pendingDisplayHeight = effectiveDisplaySize.height();
     m_textureDirty = true;
     if ( !m_loggedSetImage )
     {
         qInfo().nospace() << "gpu_window setPresentedImage: first frame received ("
-                          << m_pendingImage.width() << "x" << m_pendingImage.height() << ").";
+                          << m_pendingImage.width() << "x" << m_pendingImage.height()
+                          << ", display=" << m_pendingDisplayWidth
+                          << "x" << m_pendingDisplayHeight << ").";
         m_loggedSetImage = true;
     }
     update();
@@ -635,6 +668,15 @@ bool GpuDisplayWindow::setPresentedGpuPlaybackReconAmazePostWbTexture(
     m_textureDirty = false;
     m_texturePresentationActive = false;
     if ( madeCurrent ) doneCurrent();
+    if ( !m_loggedSetGpuTexture )
+    {
+        qInfo().nospace()
+            << "gpu_window setPresentedGpuPlaybackReconAmazePostWbTexture: first texture received ("
+            << texWidth << "x" << texHeight
+            << ", display=" << m_pendingDisplayWidth
+            << "x" << m_pendingDisplayHeight << ").";
+        m_loggedSetGpuTexture = true;
+    }
     update();
     postMs = elapsedMs() - postStartMs;
     if ( handoffMode ) *handoffMode = handoffModeValue;
@@ -822,6 +864,8 @@ void GpuDisplayWindow::updateTextureIfNeeded()
     ensureProgram();
     if ( !m_program ) return;
 
+    const QSize pendingDisplaySize(m_pendingDisplayWidth,
+                                   m_pendingDisplayHeight);
     if ( m_textureFromGpuRecon )
     {
         destroyTexture();
@@ -843,6 +887,11 @@ void GpuDisplayWindow::updateTextureIfNeeded()
         m_texture->setWrapMode(QOpenGLTexture::ClampToEdge);
         m_texture->setMinMagFilters(QOpenGLTexture::Linear, QOpenGLTexture::Linear);
     }
+    if ( pendingDisplaySize.width() > 0 && pendingDisplaySize.height() > 0 )
+    {
+        m_pendingDisplayWidth = pendingDisplaySize.width();
+        m_pendingDisplayHeight = pendingDisplaySize.height();
+    }
     m_texture->setData(QOpenGLTexture::RGBA,
                        QOpenGLTexture::UInt8,
                        uploadImage.constBits());
@@ -851,8 +900,6 @@ void GpuDisplayWindow::updateTextureIfNeeded()
     m_textureFromGpuRecon = false;
     m_pendingTextureWidth = uploadImage.width();
     m_pendingTextureHeight = uploadImage.height();
-    m_pendingDisplayWidth = m_pendingImage.width();
-    m_pendingDisplayHeight = m_pendingImage.height();
     m_texturePresentationActive = false;
 }
 
@@ -914,7 +961,9 @@ void GpuDisplayWindow::paintGL()
     if ( !m_loggedPresented )
     {
         qInfo().nospace() << "gpu_window paintGL: presented a frame texture ("
-                          << m_texture->width() << "x" << m_texture->height() << ").";
+                          << m_texture->width() << "x" << m_texture->height()
+                          << ", display=" << displayWidth
+                          << "x" << displayHeight << ").";
         m_loggedPresented = true;
     }
 

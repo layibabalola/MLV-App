@@ -15,6 +15,7 @@
 #include <QByteArray>
 #include <QColor>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QOpenGLContext>
 #include <QPalette>
@@ -70,6 +71,58 @@ bool rectsNearlyEqual(const QRectF &a, const QRectF &b)
         && std::abs(a.top() - b.top()) <= kTolerance
         && std::abs(a.width() - b.width()) <= kTolerance
         && std::abs(a.height() - b.height()) <= kTolerance;
+}
+
+QSize displaySizeForWindowPresent(const QGraphicsView *view,
+                                  const QGraphicsPixmapItem *fallbackItem,
+                                  const QImage &image)
+{
+    const QRectF viewSceneRect = view ? view->sceneRect() : QRectF();
+    const QRectF sceneObjectRect =
+        ( view && view->scene() ) ? view->scene()->sceneRect() : QRectF();
+    QRectF itemRect;
+    if ( fallbackItem )
+    {
+        itemRect = fallbackItem->sceneBoundingRect();
+    }
+
+    const auto rectMatchesImage = [&image](const QRectF &rect) -> bool
+    {
+        constexpr qreal kTolerance = 0.01;
+        return !rect.isEmpty()
+            && std::abs(rect.width() - image.width()) <= kTolerance
+            && std::abs(rect.height() - image.height()) <= kTolerance;
+    };
+
+    QRectF sceneRect;
+    const QRectF candidates[3] = { sceneObjectRect, viewSceneRect, itemRect };
+    for ( const QRectF &candidate : candidates )
+    {
+        if ( !candidate.isEmpty() && !rectMatchesImage(candidate) )
+        {
+            sceneRect = candidate;
+            break;
+        }
+    }
+    if ( sceneRect.isEmpty() )
+    {
+        for ( const QRectF &candidate : candidates )
+        {
+            if ( !candidate.isEmpty() )
+            {
+                sceneRect = candidate;
+                break;
+            }
+        }
+    }
+
+    if ( sceneRect.isEmpty() )
+    {
+        return image.size();
+    }
+
+    return QSize(std::max(1, qRound(sceneRect.width())),
+                 std::max(1, qRound(sceneRect.height())));
 }
 
 /* Frame-grab telemetry: when MLVAPP_FRAME_GRAB_DIR is set, save the exact display
@@ -676,7 +729,9 @@ bool GpuDisplayViewport::presentImage(QGraphicsView *view,
     // installed in that mode.
     if ( !image.isNull() )
     {
-        if ( GpuDisplayWindow::presentImageIfActive(image) ) return true;
+        const QSize displaySize =
+            displaySizeForWindowPresent(view, fallbackItem, image);
+        if ( GpuDisplayWindow::presentImageIfActive(image, displaySize) ) return true;
     }
     else if ( GpuDisplayWindow::clearIfActive() )
     {

@@ -192,6 +192,100 @@ void restoreGpuPlaybackReconTimingTelemetry( QJsonObject &target,
     }
 }
 
+bool dualIsoWarmupInstrumentationEnabled()
+{
+    const QByteArray value =
+        qgetenv( "MLVAPP_DISO_WARMUP_INSTRUMENT" ).trimmed().toLower();
+    static const bool enabled =
+        !value.isEmpty()
+        && value != QByteArrayLiteral("0")
+        && value != QByteArrayLiteral("false")
+        && value != QByteArrayLiteral("off")
+        && value != QByteArrayLiteral("no");
+    return enabled;
+}
+
+const char *dualIsoFull20PathKindName( int pathKind )
+{
+    switch( pathKind )
+    {
+    case DUALISO_FULL20_PATH_CPU_FULL20:
+        return "cpu_full20";
+    case DUALISO_FULL20_PATH_GPU_PREPARE:
+        return "gpu_prepare";
+    default:
+        return "none";
+    }
+}
+
+const char *dualIsoFull20PatternSourceName( int patternSource )
+{
+    switch( patternSource )
+    {
+    case DUALISO_FULL20_PATTERN_SOURCE_FRESH_AUTO:
+        return "fresh_auto";
+    case DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE:
+        return "explicit_positive";
+    case DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE:
+        return "cached_negative";
+    case DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE_REDETECTED:
+        return "cached_negative_redetected";
+    case DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DETECT:
+        return "special_auto_detect";
+    case DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DEFAULT:
+        return "special_auto_default";
+    case DUALISO_FULL20_PATTERN_SOURCE_INVALID:
+        return "invalid";
+    default:
+        return "none";
+    }
+}
+
+void insertDualIsoWarmupInstrumentationTelemetry(
+    QJsonObject &target,
+    const dualiso_full20bit_timing_t &dualIsoFull20 )
+{
+    if( !dualIsoWarmupInstrumentationEnabled() ) return;
+
+    target.insert( QStringLiteral("dual_iso_full20_path_kind"),
+                   dualIsoFull20.path_kind );
+    target.insert( QStringLiteral("dual_iso_full20_path_kind_name"),
+                   QString::fromLatin1(
+                       dualIsoFull20PathKindName( dualIsoFull20.path_kind ) ) );
+    target.insert( QStringLiteral("dual_iso_full20_input_width"),
+                   dualIsoFull20.input_width );
+    target.insert( QStringLiteral("dual_iso_full20_input_height"),
+                   dualIsoFull20.input_height );
+    target.insert( QStringLiteral("dual_iso_full20_playback_preview_scale_factor"),
+                   dualIsoFull20.playback_preview_scale_factor );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_initial"),
+                   dualIsoFull20.pattern_initial );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_resolved"),
+                   dualIsoFull20.pattern_resolved );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_source"),
+                   dualIsoFull20.pattern_source );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_source_name"),
+                   QString::fromLatin1(
+                       dualIsoFull20PatternSourceName(
+                           dualIsoFull20.pattern_source ) ) );
+    target.insert( QStringLiteral("dual_iso_full20_pattern_result"),
+                   dualIsoFull20.pattern_result );
+    target.insert( QStringLiteral("dual_iso_full20_phase_verify_enabled"),
+                   dualIsoFull20.phase_verify_enabled != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_phase_probe_attempted"),
+                   dualIsoFull20.phase_probe_attempted != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_phase_probe_succeeded"),
+                   dualIsoFull20.phase_probe_succeeded != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_phase_probe_decisive"),
+                   dualIsoFull20.phase_probe_decisive != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_phase_probe_redetected"),
+                   dualIsoFull20.phase_probe_redetected != 0 );
+    target.insert( QStringLiteral("dual_iso_full20_phase_cached_pattern"),
+                   dualIsoFull20.phase_cached_pattern );
+    target.insert( QStringLiteral("dual_iso_full20_phase_implied_pattern"),
+                   dualIsoFull20.phase_implied_pattern );
+}
+
 void insertLlrawprocReconTimingTelemetry( QJsonObject &target )
 {
     const double llrawprocTotalMs = llrpGetLastTotalMilliseconds();
@@ -269,6 +363,7 @@ void insertLlrawprocReconTimingTelemetry( QJsonObject &target )
                    dualIsoFull20.use_alias_map != 0 );
     target.insert( QStringLiteral("dual_iso_full20_use_fullres"),
                    dualIsoFull20.use_fullres != 0 );
+    insertDualIsoWarmupInstrumentationTelemetry( target, dualIsoFull20 );
 }
 
 std::array<double, 3> normalizedWbMultipliers6500()
@@ -5565,6 +5660,8 @@ void RenderFrameThread::drawFrame( int slotIndex,
                                       dualIsoFull20.threads );
     slot.stageTimingTelemetry.insert( QStringLiteral("dual_iso_full20_valid"),
                                       dualIsoFull20.valid != 0 );
+    insertDualIsoWarmupInstrumentationTelemetry( slot.stageTimingTelemetry,
+                                                 dualIsoFull20 );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_chroma_smooth_ms"),
                                       llrawprocChromaSmoothMs );
     slot.stageTimingTelemetry.insert( QStringLiteral("llrawproc_other_ms"),

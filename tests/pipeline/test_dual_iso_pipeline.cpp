@@ -13,6 +13,7 @@
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptApplier.h"
 #include "../../src/batch/ReceiptLoader.h"
+#include "../../platform/qt/DualIsoPatternMapping.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -116,6 +117,26 @@ static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
                               nullptr));
     freeDngObject(dng);
     return read_all_bytes(dng_path);
+}
+
+TEST(DualIsoPipeline, DualIsoPatternMappingPreservesAutoAndCorePatternValues)
+{
+    ASSERT_EQ(0, dualIsoCorePatternFromUiIndex(0));
+    ASSERT_EQ(1, dualIsoCorePatternFromUiIndex(1));
+    ASSERT_EQ(2, dualIsoCorePatternFromUiIndex(2));
+    ASSERT_EQ(3, dualIsoCorePatternFromUiIndex(3));
+    ASSERT_EQ(4, dualIsoCorePatternFromUiIndex(4));
+    ASSERT_EQ(5, dualIsoCorePatternFromUiIndex(5));
+    ASSERT_EQ(0, dualIsoCorePatternFromUiIndex(-1));
+    ASSERT_EQ(0, dualIsoCorePatternFromUiIndex(6));
+
+    ASSERT_EQ(0, dualIsoUiPatternIndexFromCorePattern(0));
+    ASSERT_EQ(1, dualIsoUiPatternIndexFromCorePattern(1));
+    ASSERT_EQ(4, dualIsoUiPatternIndexFromCorePattern(4));
+    ASSERT_EQ(5, dualIsoUiPatternIndexFromCorePattern(5));
+    ASSERT_EQ(1, dualIsoUiPatternIndexFromCorePattern(-1));
+    ASSERT_EQ(4, dualIsoUiPatternIndexFromCorePattern(-4));
+    ASSERT_EQ(0, dualIsoUiPatternIndexFromCorePattern(6));
 }
 
 static QByteArray export_tiny_dng_via_payload_for_pipeline_prep(int raw_state,

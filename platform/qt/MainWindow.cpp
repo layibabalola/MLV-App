@@ -197,6 +197,13 @@ static bool playbackSmokeTimelineTelemetryEnabled()
     return enabled;
 }
 
+static bool dualIsoWarmupInstrumentationEnabled()
+{
+    static const bool enabled =
+        environmentFlagEnabled( "MLVAPP_DISO_WARMUP_INSTRUMENT" );
+    return enabled;
+}
+
 static bool playbackGpuNoReadbackOutputValidationEnabled()
 {
     static const bool enabled =
@@ -25733,6 +25740,42 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        bool releasePresentedFrameEarly,
                                        double displayStart )
 {
+    if( dualIsoWarmupInstrumentationEnabled() )
+    {
+        if( m_dualIsoWarmupTelemetryPresentationGeneration
+            != requestContext.presentationGeneration )
+        {
+            m_dualIsoWarmupTelemetryPresentationGeneration =
+                requestContext.presentationGeneration;
+            m_dualIsoWarmupTelemetryPresentedFrames = 0;
+        }
+        const int presentedIndex =
+            m_dualIsoWarmupTelemetryPresentedFrames;
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_index"),
+            presentedIndex );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_index_valid"),
+            presentedIndex >= 0 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_warmup_probe_window"),
+            presentedIndex >= 0 && presentedIndex < 8 );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_frame"),
+            static_cast<qint64>( displayFrame ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_request_serial"),
+            static_cast<qint64>( readyFrame.requestSerial ) );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_smoke_active"),
+            m_playbackSmokeActive );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_play_active"),
+            ui->actionPlay->isChecked() );
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_presented_position_slider"),
+            ui->horizontalSliderPosition->value() );
+    }
     recordPresentedFrame( readyFrame, requestContext );
     m_lastPresentedFrameColorTelemetry = QJsonObject();
     double headlessPresentedColorAnalysisMs = 0.0;
@@ -26102,6 +26145,8 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
         }
     }
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
+    if( dualIsoWarmupInstrumentationEnabled() )
+        ++m_dualIsoWarmupTelemetryPresentedFrames;
     if( interactiveTraceEnabled() )
     {
         logInteractionEvent(

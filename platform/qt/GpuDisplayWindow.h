@@ -51,7 +51,10 @@ public:
     /* Route a CPU RGBA frame (or a clear) to the active window. Return true when the
      * window handled it (so the QOpenGLWidget/pixmap path can be skipped). Safe to call
      * from any thread; work is marshaled to the window's GUI thread. */
-    static bool presentImageIfActive(const QImage &image);
+    static QSize effectiveDisplaySizeForImage(const QSize &imageSize,
+                                              const QSize &requestedDisplaySize);
+    static bool presentImageIfActive(const QImage &image,
+                                     const QSize &displaySize = QSize());
     static bool clearIfActive(void);
     static QString rendererDescription(void);
     static bool presentGpuPlaybackReconAmazePostWbTextureIfActive(
@@ -81,7 +84,8 @@ public:
     explicit GpuDisplayWindow(QWindow *parent = nullptr);
     ~GpuDisplayWindow() override;
 
-    void setPresentedImage(const QImage &image);
+    void setPresentedImage(const QImage &image,
+                           const QSize &displaySize = QSize());
     void clearPresented(void);
     bool setPresentedGpuPlaybackReconAmazePostWbTexture(
         const uint16_t *rawInputBayer14,
@@ -130,6 +134,7 @@ private:
     bool m_loggedPaint;
     bool m_loggedPresented;
     bool m_loggedSetImage;
+    bool m_loggedSetGpuTexture;
     QString m_rendererDescription;
 };
 

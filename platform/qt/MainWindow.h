@@ -1014,6 +1014,8 @@ private:
     int m_playbackSmokePresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
+    int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;

@@ -37,6 +37,25 @@ enum
     DUALISO_MIX_CURVE_CACHE_SLOTS = 4
 };
 
+enum
+{
+    DUALISO_FULL20_PATH_NONE = 0,
+    DUALISO_FULL20_PATH_CPU_FULL20 = 1,
+    DUALISO_FULL20_PATH_GPU_PREPARE = 2
+};
+
+enum
+{
+    DUALISO_FULL20_PATTERN_SOURCE_NONE = 0,
+    DUALISO_FULL20_PATTERN_SOURCE_FRESH_AUTO = 1,
+    DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE = 2,
+    DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE = 3,
+    DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE_REDETECTED = 4,
+    DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DETECT = 5,
+    DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DEFAULT = 6,
+    DUALISO_FULL20_PATTERN_SOURCE_INVALID = 7
+};
+
 typedef struct
 {
     int * data_x;
@@ -261,6 +280,21 @@ typedef struct
     int final_blend_probe_mode;
     int mix_curve_rebuilt;
     int mix_curve_global_hit;
+    int path_kind;
+    int input_width;
+    int input_height;
+    int playback_preview_scale_factor;
+    int pattern_initial;
+    int pattern_resolved;
+    int pattern_source;
+    int pattern_result;
+    int phase_verify_enabled;
+    int phase_probe_attempted;
+    int phase_probe_succeeded;
+    int phase_probe_decisive;
+    int phase_probe_redetected;
+    int phase_cached_pattern;
+    int phase_implied_pattern;
     int interp_method;
     int use_alias_map;
     int use_fullres;
