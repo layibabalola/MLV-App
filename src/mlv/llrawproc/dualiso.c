@@ -6058,32 +6058,13 @@ static int dualiso_resolve_iso_pattern(struct raw_info raw_info,
                     g_dualiso_full20bit_timing.phase_implied_pattern = implied + 1;
                 if (implied != explicit_idx)
                 {
-                    int fresh[4];
                     g_dualiso_full20bit_timing.phase_probe_decisive = 1;
-                    if (identify_bright_and_dark_fields(raw_info, image_data, rggb, fresh, scratch))
+                    if (dualiso_phase_log_enabled())
                     {
-                        for (int i = 0; i < 4; i++)
-                        {
-                            if (memcmp(fresh, iso_patterns[i], 4 * sizeof(int)) == 0)
-                            {
-                                if (dualiso_phase_log_enabled())
-                                {
-                                    fprintf(stderr,
-                                            "[DISO_PHASE] explicit re-detect: explicit=%d implied=%d fresh=%d\n",
-                                            explicit_idx, implied, i);
-                                }
-                                memcpy(is_bright, fresh, 4 * sizeof(int));
-                                *iso_pattern = -(i + 1);
-                                g_dualiso_full20bit_timing.phase_probe_redetected = 1;
-                                dualiso_debug_note_pattern_resolution(
-                                    DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE_REDETECTED,
-                                    iso_pattern,
-                                    is_bright);
-                                return 1;
-                            }
-                        }
+                        fprintf(stderr,
+                                "[DISO_PHASE] explicit mismatch: explicit=%d implied=%d\n",
+                                explicit_idx, implied);
                     }
-                    /* identify failed or non-tabular -> fall through to explicit choice */
                 }
             }
         }

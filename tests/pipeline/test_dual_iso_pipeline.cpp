@@ -5191,8 +5191,19 @@ TEST(DualIsoPipeline, DualIsoPerFramePhaseVerificationHandlesRotatingStaticAndKi
         dualiso_gpu_recon_state_t state = {};
         ASSERT_TRUE(synthetic_dual_iso_prepare_state(raw, frame, &iso_pattern, &scratch, &state) != 0);
         ASSERT_EQ(1, state.valid);
-        ASSERT_EQ(-3, iso_pattern);
-        assert_dual_iso_pattern(state, 2);
+        ASSERT_EQ(1, iso_pattern);
+        assert_dual_iso_pattern(state, 0);
+        dualiso_full20bit_timing_t timing = {};
+        dualiso_debug_get_full20bit_timing(&timing);
+        ASSERT_EQ(1, timing.pattern_initial);
+        ASSERT_EQ(1, timing.pattern_resolved);
+        ASSERT_EQ(DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE, timing.pattern_source);
+        ASSERT_EQ(1, timing.phase_probe_attempted);
+        ASSERT_EQ(1, timing.phase_probe_succeeded);
+        ASSERT_EQ(1, timing.phase_probe_decisive);
+        ASSERT_EQ(0, timing.phase_probe_redetected);
+        ASSERT_EQ(1, timing.phase_cached_pattern);
+        ASSERT_EQ(3, timing.phase_implied_pattern);
         test_artifacts::record("dual_iso.per_frame_phase.explicit_mismatch.pattern",
                                std::to_string(iso_pattern));
         free_dualiso_full20bit_scratch(&scratch);
