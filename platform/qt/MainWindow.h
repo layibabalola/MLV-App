@@ -936,7 +936,12 @@ private:
     int m_lastLookAssistPostTintDelta = 0;
     int m_lastLookAssistChromaSmooth = 0;
     bool m_lastLookAssistChromaSmoothAutoApplied = false;
+    int m_lastLookAssistAnalysisFrame = -1;
+    QString m_lastLookAssistAnalysisAutoReason;
+    size_t m_lastLookAssistAnalysisAutoSampleCount = 0;
+    bool m_lastLookAssistAnalysisAfterAutoSteady = false;
     int m_lookAssistUnsettledAnalysisCount = 0;
+    int m_lookAssistAutoWarmupDeferralCount = 0;
     // De-dupe guard: the receipt whose Auto Look Assist analysis already ran this clip-open. A second
     // setSliders/deferral must not re-run the ~3s auto-WB analysis (it derives the same look and just
     // re-freezes the UI). Keyed on the receipt pointer so different clips re-analyze naturally.
@@ -1361,6 +1366,9 @@ private:
                                const PresentationRequestContext &requestContext );
     bool isFrameSettledForAnalysis( int frameIndex,
                                     uint64_t requestSerialFloor ) const;
+    bool isLookAssistFrameSettledForAnalysis( int baselineFrame,
+                                              uint64_t requestSerialFloor,
+                                              int *analysisFrame );
     void beginPlaybackSmokeTelemetry( void );
     void notePlaybackSmokePresentedFrame( uint64_t displayFrame,
                                           const RenderFrameThread::ReadyFrame &readyFrame,

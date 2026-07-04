@@ -6424,6 +6424,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     } headlessPlaybackProfileActiveGuard{ m_headlessPlaybackProfileActive };
 
     m_lookAssistUnsettledAnalysisCount = 0;
+    m_lookAssistAutoWarmupDeferralCount = 0;
     m_gpuPreviewProcessingBackendRequest = options.gpuPreviewProcessingBackend;
     m_gpuBilinearDebayerBackendRequest = options.gpuBilinearDebayerBackend;
     m_gpuAmazeDebayerBackendRequest = options.gpuAmazeDebayerBackend;
@@ -7039,6 +7040,16 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                       m_lastPresentedRequestContextValid
                           ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
                           : -1 );
+        state.insert( QStringLiteral("analysis_frame"), m_lastLookAssistAnalysisFrame );
+        state.insert( QStringLiteral("analysis_auto_reason"),
+                      m_lastLookAssistAnalysisAutoReason );
+        state.insert( QStringLiteral("analysis_auto_sample_count"),
+                      static_cast<double>(
+                          m_lastLookAssistAnalysisAutoSampleCount ) );
+        state.insert( QStringLiteral("analysis_after_auto_steady"),
+                      m_lastLookAssistAnalysisAfterAutoSteady );
+        state.insert( QStringLiteral("auto_warmup_deferral_count"),
+                      m_lookAssistAutoWarmupDeferralCount );
         if( m_lastLookAssistDiagnosticsValid )
         {
             state.insert( QStringLiteral("median"), m_lastLookAssistMedian );
@@ -7200,6 +7211,54 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
             return false;
         }
 
+        if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+         && m_playbackQualityAutoDecisionReason
+                == PlaybackQualityAutoDecisionReason::WarmupHq
+         && !m_lastLookAssistDiagnosticsValid )
+        {
+            trace(label + QStringLiteral("-auto-playback-settle-begin reason=%1 samples=%2")
+                  .arg( QString::fromLatin1(
+                      playbackQualityAutoDecisionReasonName(
+                          m_playbackQualityAutoDecisionReason ) ) )
+                  .arg( static_cast<qulonglong>(
+                      m_playbackQualityAutoDecisionSampleCount ) ));
+            const bool loopWasChecked = ui->actionLoop->isChecked();
+            if( !loopWasChecked ) ui->actionLoop->trigger();
+            if( !ui->actionPlay->isChecked() ) ui->actionPlay->trigger();
+            qApp->processEvents( QEventLoop::AllEvents );
+            if( !ui->actionPlay->isChecked() )
+            {
+                lookAssistSettleSmokeStable = false;
+                lookAssistSettleSmokeFailure =
+                    QStringLiteral("Play action did not enter checked state while settling Look Assist Auto warmup.");
+                trace(label + QStringLiteral("-auto-playback-settle-failed: ")
+                      + lookAssistSettleSmokeFailure);
+                return false;
+            }
+
+            QElapsedTimer autoSettleClock;
+            autoSettleClock.start();
+            while( autoSettleClock.elapsed() < 12000
+                && ui->checkBoxLookAssistEnable->isChecked()
+                && !m_lastLookAssistDiagnosticsValid )
+            {
+                qApp->processEvents( QEventLoop::AllEvents );
+                QThread::msleep( 10 );
+            }
+            if( ui->actionPlay->isChecked() ) ui->actionPlay->trigger();
+            if( ui->actionLoop->isChecked() != loopWasChecked )
+                ui->actionLoop->trigger();
+            qApp->processEvents( QEventLoop::AllEvents );
+            trace(label + QStringLiteral("-auto-playback-settle-end diagnostics_valid=%1 reason=%2 samples=%3 elapsed_ms=%4")
+                  .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+                  .arg( QString::fromLatin1(
+                      playbackQualityAutoDecisionReasonName(
+                          m_playbackQualityAutoDecisionReason ) ) )
+                  .arg( static_cast<qulonglong>(
+                      m_playbackQualityAutoDecisionSampleCount ) )
+                  .arg( autoSettleClock.elapsed() ));
+        }
+
         QElapsedTimer lookAssistClock;
         lookAssistClock.start();
         while( lookAssistClock.elapsed() < 8000
@@ -7243,12 +7302,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         trace(QStringLiteral("look-assist-toggle-smoke-begin"));
         if( ui->checkBoxLookAssistEnable->isChecked() )
         {
-            QString settleFailure;
             trace(QStringLiteral("look-assist-toggle-smoke-load-settle-begin"));
-            if( !renderFrameIndex( startFrame, -1, true, &settleFailure ) )
+            if( !settleLookAssistForProfile(
+                    QStringLiteral("look-assist-toggle-smoke-load-settle") ) )
             {
-                err << "[PROFILE] ERROR: " << settleFailure << "\n";
-                trace(QStringLiteral("look-assist-toggle-smoke-load-settle-failed: ") + settleFailure);
+                err << "[PROFILE] ERROR: " << lookAssistSettleSmokeFailure << "\n";
+                trace(QStringLiteral("look-assist-toggle-smoke-load-settle-failed: ")
+                      + lookAssistSettleSmokeFailure);
                 return 7;
             }
             qApp->processEvents( QEventLoop::AllEvents );
@@ -7698,9 +7758,11 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     metadata.insert( QStringLiteral("playback_scale_toggle_inflight_smoke_failure"), playbackScaleToggleInflightSmokeFailure );
     metadata.insert( QStringLiteral("playback_scale_toggle_inflight_state"), playbackScaleToggleInflightState );
     metadata.insert( QStringLiteral("look_assist_frame_settle_policy"),
-                     QStringLiteral("analysis waits for frameReady with request serial floor, exact presented frame match, and current presentation generation") );
+                     QStringLiteral("analysis waits for frameReady with request serial floor, exact presented frame match, and current presentation generation; Auto mode also waits for auto_reason to leave warmup_hq and analyzes that first steady presented frame") );
     metadata.insert( QStringLiteral("look_assist_unsettled_analysis_count"),
                      m_lookAssistUnsettledAnalysisCount );
+    metadata.insert( QStringLiteral("look_assist_auto_warmup_deferral_count"),
+                     m_lookAssistAutoWarmupDeferralCount );
     metadata.insert( QStringLiteral("scope"), QString::fromLatin1( playback_profile_scope_name( options.scope ) ) );
     metadata.insert( QStringLiteral("playback_policy_active"),
                      m_headlessPlaybackProfileUsePlaybackPolicy );
@@ -7826,6 +7888,15 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
                     m_lastLookAssistDiagnosticsValid );
     metadata.insert( QStringLiteral("look_assist_analysis_source"),
                     QStringLiteral("raw_debayered_downscale") );
+    metadata.insert( QStringLiteral("look_assist_analysis_frame"),
+                    m_lastLookAssistAnalysisFrame );
+    metadata.insert( QStringLiteral("look_assist_analysis_auto_reason"),
+                    m_lastLookAssistAnalysisAutoReason );
+    metadata.insert( QStringLiteral("look_assist_analysis_auto_sample_count"),
+                    static_cast<double>(
+                        m_lastLookAssistAnalysisAutoSampleCount ) );
+    metadata.insert( QStringLiteral("look_assist_analysis_after_auto_steady"),
+                    m_lastLookAssistAnalysisAfterAutoSteady );
     if( m_lastLookAssistDiagnosticsValid )
     {
         metadata.insert( QStringLiteral("look_assist_scene"), m_lastLookAssistScene );
@@ -7982,6 +8053,7 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 {
     QTextStream out(stdout);
     QTextStream err(stderr);
+    m_lookAssistAutoWarmupDeferralCount = 0;
 
     if( options.inputPath.isEmpty() )
     {
@@ -8162,7 +8234,33 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         QElapsedTimer lookAssistClock;
         lookAssistClock.start();
         requestFrameRefresh( true, "gui-smoke-look-assist-settle" );
-        while( lookAssistClock.elapsed() < 8000
+        const bool lookAssistAutoWarmupSettle =
+            m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+            && m_playbackQualityAutoDecisionReason
+                == PlaybackQualityAutoDecisionReason::WarmupHq;
+        const int lookAssistSettleTimeoutMs =
+            lookAssistAutoWarmupSettle ? 15000 : 8000;
+        const bool loopWasCheckedForLookAssist = ui->actionLoop->isChecked();
+        bool playStartedForLookAssist = false;
+        if( lookAssistAutoWarmupSettle )
+        {
+            logInteractionEvent(
+                QStringLiteral("gui_smoke.look_assist_auto_playback_settle_begin"),
+                QStringLiteral("reason=%1 samples=%2")
+                    .arg( QString::fromLatin1(
+                        playbackQualityAutoDecisionReasonName(
+                            m_playbackQualityAutoDecisionReason ) ) )
+                    .arg( static_cast<qulonglong>(
+                        m_playbackQualityAutoDecisionSampleCount ) ) );
+            if( !loopWasCheckedForLookAssist ) ui->actionLoop->trigger();
+            if( !ui->actionPlay->isChecked() )
+            {
+                ui->actionPlay->trigger();
+                qApp->processEvents( QEventLoop::AllEvents );
+            }
+            playStartedForLookAssist = ui->actionPlay->isChecked();
+        }
+        while( lookAssistClock.elapsed() < lookAssistSettleTimeoutMs
             && m_fileLoaded
             && ACTIVE_RECEIPT
             && ACTIVE_RECEIPT->lookAssistEnabled()
@@ -8176,6 +8274,24 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
                 requestFrameRefresh( true, "gui-smoke-look-assist-settle" );
             }
             QThread::msleep( 25 );
+        }
+        if( lookAssistAutoWarmupSettle )
+        {
+            if( playStartedForLookAssist && ui->actionPlay->isChecked() )
+                ui->actionPlay->trigger();
+            if( ui->actionLoop->isChecked() != loopWasCheckedForLookAssist )
+                ui->actionLoop->trigger();
+            qApp->processEvents( QEventLoop::AllEvents );
+            logInteractionEvent(
+                QStringLiteral("gui_smoke.look_assist_auto_playback_settle_end"),
+                QStringLiteral("diagnostics_valid=%1 wait_ms=%2 reason=%3 samples=%4")
+                    .arg( bool01( m_lastLookAssistDiagnosticsValid ) )
+                    .arg( lookAssistClock.elapsed() )
+                    .arg( QString::fromLatin1(
+                        playbackQualityAutoDecisionReasonName(
+                            m_playbackQualityAutoDecisionReason ) ) )
+                    .arg( static_cast<qulonglong>(
+                        m_playbackQualityAutoDecisionSampleCount ) ) );
         }
         lookAssistWaitMs = static_cast<int>( lookAssistClock.elapsed() );
     }
@@ -13803,7 +13919,9 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             [this, activeReceiptAtLoad, baselineFrame, baselineRequestFloor, applied, readyConnection]()
         {
             if( *applied ) return;
-            if( !isFrameSettledForAnalysis( baselineFrame, baselineRequestFloor ) )
+            int analysisFrame = baselineFrame;
+            if( !isLookAssistFrameSettledForAnalysis(
+                    baselineFrame, baselineRequestFloor, &analysisFrame ) )
             {
                 return;
             }
@@ -13837,7 +13955,7 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
             // just-settled first frame PAINTS first - the user sees the clip immediately instead of a
             // black screen held while the synchronous analysis blocks the UI thread. Re-validate inside
             // since ACTIVE_RECEIPT / enabled state could change during the short delay.
-            QTimer::singleShot( 50, this, [this, activeReceiptAtLoad, baselineFrame]()
+            QTimer::singleShot( 50, this, [this, activeReceiptAtLoad, baselineFrame, analysisFrame]()
             {
                 if( !m_fileLoaded
                  || SESSION_CLIP_COUNT <= 0
@@ -13852,7 +13970,7 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
 
                 logInteractionEvent(
                     QStringLiteral("look_assist.setSliders.frame_ready_apply"),
-                    QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8")
+                    QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 baseline_frame=%8 analysis_frame=%9 auto_reason=%10 auto_samples=%11")
                         .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
                         .arg( ui->horizontalSliderExposure->value() )
                         .arg( ui->horizontalSliderContrast->value() )
@@ -13860,14 +13978,20 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                         .arg( ui->horizontalSliderTint->value() )
                         .arg( ui->horizontalSliderRawBlack->value() )
                         .arg( ui->horizontalSliderRawWhite->value() )
-                        .arg( baselineFrame ) );
+                        .arg( baselineFrame )
+                        .arg( analysisFrame )
+                        .arg( QString::fromLatin1(
+                            playbackQualityAutoDecisionReasonName(
+                                m_playbackQualityAutoDecisionReason ) ) )
+                        .arg( static_cast<qulonglong>(
+                            m_playbackQualityAutoDecisionSampleCount ) ) );
 
                 if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
                     restoreLookAssistBaseline( ACTIVE_RECEIPT );
                 else
                     captureLookAssistBaseline( ACTIVE_RECEIPT );
 
-                applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
+                applyLookAssistToReceipt( ACTIVE_RECEIPT, analysisFrame );
                 m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
                 syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
                 setReceipt( ACTIVE_RECEIPT );
@@ -14088,6 +14212,14 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
     m_lastLookAssistColorCastWarning.clear();
     m_lastLookAssistChromaSmooth = toolButtonChromaSmoothCurrentIndex();
     m_lastLookAssistChromaSmoothAutoApplied = false;
+    m_lastLookAssistAnalysisFrame = -1;
+    m_lastLookAssistAnalysisAutoReason =
+        QString::fromLatin1(
+            playbackQualityAutoDecisionReasonName(
+                m_playbackQualityAutoDecisionReason ) );
+    m_lastLookAssistAnalysisAutoSampleCount =
+        m_playbackQualityAutoDecisionSampleCount;
+    m_lastLookAssistAnalysisAfterAutoSteady = false;
     // Diagnostic gate: MLVAPP_NO_LOOK_ASSIST=1 skips the auto-look analysis entirely so its
     // clip-open cost can be measured/disabled without touching the GUI checkbox.
     static const bool s_noLookAssist = qEnvironmentVariableIntValue( "MLVAPP_NO_LOOK_ASSIST" ) != 0;
@@ -14170,23 +14302,41 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                 .arg( totalFrames ) );
         return;
     }
+    m_lastLookAssistAnalysisFrame = analysisFrame;
+    m_lastLookAssistAnalysisAutoReason =
+        QString::fromLatin1(
+            playbackQualityAutoDecisionReasonName(
+                m_playbackQualityAutoDecisionReason ) );
+    m_lastLookAssistAnalysisAutoSampleCount =
+        m_playbackQualityAutoDecisionSampleCount;
+    m_lastLookAssistAnalysisAfterAutoSteady =
+        m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+        && m_playbackQualityAutoDecisionReason
+            != PlaybackQualityAutoDecisionReason::WarmupHq;
+    const bool acceptedAutoSteadyAnalysis =
+        m_lastLookAssistAnalysisAfterAutoSteady
+        && m_lastLookAssistAnalysisFrame == analysisFrame;
     const bool settledForAnalysis =
-        m_lastPresentedRequestContextValid
+        acceptedAutoSteadyAnalysis
+        || ( m_lastPresentedRequestContextValid
         && m_lastPresentedRequestSerial > 0
-        && static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == analysisFrame;
+        && static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == analysisFrame );
     if( !settledForAnalysis )
     {
         ++m_lookAssistUnsettledAnalysisCount;
         logInteractionEvent(
             QStringLiteral("look_assist.apply.unsettled"),
-            QStringLiteral("frame=%1 last_serial=%2 last_frame=%3 next_serial=%4 count=%5")
+            QStringLiteral("frame=%1 last_serial=%2 last_frame=%3 next_serial=%4 count=%5 auto_reason=%6 auto_samples=%7")
                 .arg( analysisFrame )
                 .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
                 .arg( m_lastPresentedRequestContextValid
                       ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
                       : -1 )
                 .arg( static_cast<qulonglong>( m_nextRenderRequestSerial ) )
-                .arg( m_lookAssistUnsettledAnalysisCount ) );
+                .arg( m_lookAssistUnsettledAnalysisCount )
+                .arg( m_lastLookAssistAnalysisAutoReason )
+                .arg( static_cast<qulonglong>(
+                    m_lastLookAssistAnalysisAutoSampleCount ) ) );
     }
 
     // Keep the technical raw fix in sync with the auto look.
@@ -25214,7 +25364,9 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
             [this, activeReceiptAtToggle, baselineFrame, baselineRequestFloor, applied, readyConnection]()
         {
             if( *applied ) return;
-            if( !isFrameSettledForAnalysis( baselineFrame, baselineRequestFloor ) )
+            int analysisFrame = baselineFrame;
+            if( !isLookAssistFrameSettledForAnalysis(
+                    baselineFrame, baselineRequestFloor, &analysisFrame ) )
             {
                 return;
             }
@@ -25245,7 +25397,7 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
 
             logInteractionEvent(
                 QStringLiteral("look_assist.toggle.frame_ready_apply"),
-                QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 frame=%8 serial=%9")
+                QStringLiteral("baseline_valid=%1 exp_before=%2 contrast_before=%3 temp_before=%4 tint_before=%5 raw_black_before=%6 raw_white_before=%7 baseline_frame=%8 analysis_frame=%9 serial=%10 auto_reason=%11 auto_samples=%12")
                     .arg( bool01( ACTIVE_RECEIPT->lookAssistBaselineValid() ) )
                     .arg( ui->horizontalSliderExposure->value() )
                     .arg( ui->horizontalSliderContrast->value() )
@@ -25254,14 +25406,20 @@ void MainWindow::on_checkBoxLookAssistEnable_clicked( bool checked )
                     .arg( ui->horizontalSliderRawBlack->value() )
                     .arg( ui->horizontalSliderRawWhite->value() )
                     .arg( baselineFrame )
-                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) ) );
+                    .arg( analysisFrame )
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                    .arg( QString::fromLatin1(
+                        playbackQualityAutoDecisionReasonName(
+                            m_playbackQualityAutoDecisionReason ) ) )
+                    .arg( static_cast<qulonglong>(
+                        m_playbackQualityAutoDecisionSampleCount ) ) );
 
             if( ACTIVE_RECEIPT->lookAssistBaselineValid() )
                 restoreLookAssistBaseline( ACTIVE_RECEIPT );
             else
                 captureLookAssistBaseline( ACTIVE_RECEIPT );
 
-            applyLookAssistToReceipt( ACTIVE_RECEIPT, baselineFrame );
+            applyLookAssistToReceipt( ACTIVE_RECEIPT, analysisFrame );
             m_lookAssistAppliedReceipt = ACTIVE_RECEIPT;
             syncLookAssistDerivedUiToReceipt( ACTIVE_RECEIPT );
             setReceipt( ACTIVE_RECEIPT );
@@ -25800,6 +25958,52 @@ bool MainWindow::isFrameSettledForAnalysis( int frameIndex,
         return false;
     }
     return static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == frameIndex;
+}
+
+bool MainWindow::isLookAssistFrameSettledForAnalysis( int baselineFrame,
+                                                      uint64_t requestSerialFloor,
+                                                      int *analysisFrame )
+{
+    if( analysisFrame ) *analysisFrame = baselineFrame;
+    if( baselineFrame < 0 || !m_lastPresentedRequestContextValid ) return false;
+    if( m_lastPresentedRequestSerial < requestSerialFloor ) return false;
+    if( m_lastPresentedRequestContext.presentationGeneration
+        != m_playbackPresentationGeneration.load( std::memory_order_acquire ) )
+    {
+        return false;
+    }
+
+    if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto ) )
+    {
+        if( m_playbackQualityAutoDecisionReason
+            == PlaybackQualityAutoDecisionReason::WarmupHq )
+        {
+            ++m_lookAssistAutoWarmupDeferralCount;
+            logInteractionEvent(
+                QStringLiteral("look_assist.apply.defer_auto_warmup"),
+                QStringLiteral("baseline_frame=%1 last_frame=%2 serial=%3 floor=%4 auto_reason=%5 auto_samples=%6 count=%7")
+                    .arg( baselineFrame )
+                    .arg( static_cast<int>( m_lastPresentedRequestContext.frameNumber ) )
+                    .arg( static_cast<qulonglong>( m_lastPresentedRequestSerial ) )
+                    .arg( static_cast<qulonglong>( requestSerialFloor ) )
+                    .arg( QString::fromLatin1(
+                        playbackQualityAutoDecisionReasonName(
+                            m_playbackQualityAutoDecisionReason ) ) )
+                    .arg( static_cast<qulonglong>(
+                        m_playbackQualityAutoDecisionSampleCount ) )
+                    .arg( m_lookAssistAutoWarmupDeferralCount ) );
+            return false;
+        }
+
+        if( analysisFrame )
+        {
+            *analysisFrame =
+                static_cast<int>( m_lastPresentedRequestContext.frameNumber );
+        }
+        return true;
+    }
+
+    return static_cast<int>( m_lastPresentedRequestContext.frameNumber ) == baselineFrame;
 }
 
 void MainWindow::finishPresentedFrame( uint64_t displayFrame,
