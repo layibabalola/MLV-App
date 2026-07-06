@@ -104,6 +104,18 @@ typedef struct
     double mix_curve_last_overlap[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_last_used[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_use_counter;
+    double * fullres_curve;
+    float * fullres_curve_float;
+    double * fullres_curve_float_as_double;
+    size_t fullres_curve_capacity;
+    size_t fullres_curve_float_capacity;
+    size_t fullres_curve_float_as_double_capacity;
+    int fullres_curve_valid;
+    int fullres_curve_float_valid;
+    int fullres_curve_float_as_double_valid;
+    int fullres_curve_black;
+    int fullres_curve_float_black;
+    int fullres_curve_float_as_double_black;
 
     int * histogram_match_dark;
     int * histogram_match_bright;

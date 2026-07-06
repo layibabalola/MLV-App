@@ -21560,12 +21560,13 @@ void MainWindow::applyEffectiveDualIsoPlaybackSettings( void )
 
     waitForRenderThreadIdleBeforeCoreMutation( "dual-iso-playback-settings" );
 
-    llrpSetDualIsoMode( m_pMlvObject, settings.mode );
-    llrpSetDualIsoInterpolationMethod( m_pMlvObject, settings.interpolation );
-    llrpSetDualIsoAliasMapMode( m_pMlvObject, settings.aliasMap );
-    llrpSetDualIsoFullResBlendingMode( m_pMlvObject, settings.fullResBlending );
-    llrpSetDualIsoPlaybackForceMean23( m_pMlvObject, mean23OverrideValue );
-    llrpSetDualIsoPlaybackForceDisableAliasMap( m_pMlvObject, disableAliasMapValue );
+    llrpSetDualIsoPlaybackRuntimeState( m_pMlvObject,
+                                        settings.mode,
+                                        settings.interpolation,
+                                        settings.aliasMap,
+                                        settings.fullResBlending,
+                                        mean23OverrideValue,
+                                        disableAliasMapValue );
     processingSetBlackAndWhiteLevel( m_pMlvObject->processing,
                                      getMlvBlackLevel( m_pMlvObject ),
                                      getMlvWhiteLevel( m_pMlvObject ),

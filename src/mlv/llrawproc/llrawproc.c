@@ -4345,6 +4345,28 @@ void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value)
     video->llrawproc->diso_playback_force_disable_alias_map = value ? 1 : 0;
 }
 
+void llrpSetDualIsoPlaybackRuntimeState(mlvObject_t * video,
+                                        int mode,
+                                        int interpolation,
+                                        int alias_map,
+                                        int fullres_blending,
+                                        int playback_force_mean23,
+                                        int playback_force_disable_alias_map)
+{
+    if (!video || !video->llrawproc) return;
+
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    video->llrawproc->dual_iso = mode;
+    video->llrawproc->diso_averaging = interpolation;
+    video->llrawproc->diso_alias_map = alias_map;
+    video->llrawproc->diso_frblending = fullres_blending;
+    video->llrawproc->diso_playback_force_mean23 =
+        playback_force_mean23 ? 1 : 0;
+    video->llrawproc->diso_playback_force_disable_alias_map =
+        playback_force_disable_alias_map ? 1 : 0;
+    pthread_mutex_unlock(&video->llrawproc_mutex);
+}
+
 int llrpGetDualIsoValidity(mlvObject_t * video)
 {
     return video->llrawproc->diso_validity;

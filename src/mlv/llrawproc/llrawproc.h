@@ -339,6 +339,17 @@ void llrpSetDualIsoFullResBlendingMode(mlvObject_t * video, int value);
 int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video);
 void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value);
 
+/* Playback runtime fast/quality state can flip while worker threads are
+ * rendering. Apply the coupled fields under one llrawproc mutex so workers
+ * never capture a half-HQ/half-fast state. */
+void llrpSetDualIsoPlaybackRuntimeState(mlvObject_t * video,
+                                        int mode,
+                                        int interpolation,
+                                        int alias_map,
+                                        int fullres_blending,
+                                        int playback_force_mean23,
+                                        int playback_force_disable_alias_map);
+
 enum { DISO_INVALID, DISO_FORCED, DISO_VALID }; // Return values
 int llrpGetDualIsoValidity(mlvObject_t * video);
 void llrpSetDualIsoValidity(mlvObject_t * video, int diso_force);

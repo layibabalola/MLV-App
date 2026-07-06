@@ -72,8 +72,8 @@ static int g_dualiso_mix_chroma_probe_mode_cache = INT_MIN;
 static int g_dualiso_mix_chroma_probe_stage_cache = 0;
 static int g_dualiso_mix_halfres_probe_mode_cache = INT_MIN;
 static int g_dualiso_final_blend_probe_mode_cache = INT_MIN;
-static inline float * build_fullres_curve_float(int black);
-static inline double * build_fullres_curve_float_as_double(int black);
+static inline float * build_fullres_curve_float(dualiso_full20bit_scratch_t * scratch, int black);
+static inline double * build_fullres_curve_float_as_double(dualiso_full20bit_scratch_t * scratch, int black);
 
 enum
 {
@@ -1320,6 +1320,9 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
         free(scratch->mix_curve[i]);
         free(scratch->mix_curve_float[i]);
     }
+    free(scratch->fullres_curve);
+    free(scratch->fullres_curve_float);
+    free(scratch->fullres_curve_float_as_double);
     free(scratch->histogram_match_dark);
     free(scratch->histogram_match_bright);
     free(scratch->histogram_match_tmp);
@@ -2836,73 +2839,105 @@ static inline double compute_noise(struct raw_info raw_info, uint16_t * image_da
     return noise_avg;
 }
 
-static inline double * build_fullres_curve(int black)
+static inline double compute_fullres_curve_value(int black, int i)
 {
-    /* fullres mixing curve */
-    static double fullres_curve[1<<20];
-    static int previous_black = -1;
-    
-    if(previous_black == black) return fullres_curve;
-    
-    previous_black = black;
-    
     const double fullres_start = 4;
     const double fullres_transition = 4;
-    //const double fullres_thr = 0.8;
-    
+    double ev2 = log2(MAX(i/64.0 - black/64.0, 1));
+    double c2 = -cos(COERCE(ev2 - fullres_start, 0, fullres_transition)*M_PI/fullres_transition);
+    return (c2+1) / 2;
+}
+
+static inline double * build_fullres_curve(dualiso_full20bit_scratch_t * scratch, int black)
+{
+    if(!scratch) return NULL;
+
+    const size_t curve_count = (size_t)(1u << 20);
+    if(scratch->fullres_curve
+       && scratch->fullres_curve_capacity >= curve_count
+       && scratch->fullres_curve_valid
+       && scratch->fullres_curve_black == black)
+    {
+        return scratch->fullres_curve;
+    }
+
+    double * fullres_curve = ensure_double_scratch_buffer(&scratch->fullres_curve,
+                                                          &scratch->fullres_curve_capacity,
+                                                          curve_count);
+    if(!fullres_curve) return NULL;
+
+    scratch->fullres_curve_valid = 0;
     #pragma omp parallel for
     for (int i = 0; i < (1<<20); i++)
     {
-        double ev2 = log2(MAX(i/64.0 - black/64.0, 1));
-        double c2 = -cos(COERCE(ev2 - fullres_start, 0, fullres_transition)*M_PI/fullres_transition);
-        double f = (c2+1) / 2;
-        fullres_curve[i] = f;
+        fullres_curve[i] = compute_fullres_curve_value(black, i);
     }
 
+    scratch->fullres_curve_black = black;
+    scratch->fullres_curve_valid = 1;
     return fullres_curve;
 }
 
-static inline float * build_fullres_curve_float(int black)
+static inline float * build_fullres_curve_float(dualiso_full20bit_scratch_t * scratch, int black)
 {
-    static float fullres_curve_f[1<<20];
-    static int previous_black = -1;
+    if(!scratch) return NULL;
 
-    if(previous_black == black) return fullres_curve_f;
+    const size_t curve_count = (size_t)(1u << 20);
+    if(scratch->fullres_curve_float
+       && scratch->fullres_curve_float_capacity >= curve_count
+       && scratch->fullres_curve_float_valid
+       && scratch->fullres_curve_float_black == black)
+    {
+        return scratch->fullres_curve_float;
+    }
 
-    previous_black = black;
+    float * fullres_curve_f = ensure_float_scratch_buffer(&scratch->fullres_curve_float,
+                                                          &scratch->fullres_curve_float_capacity,
+                                                          curve_count);
+    if(!fullres_curve_f) return NULL;
 
-    const double fullres_start = 4;
-    const double fullres_transition = 4;
-
+    scratch->fullres_curve_float_valid = 0;
+    scratch->fullres_curve_float_as_double_valid = 0;
     #pragma omp parallel for
     for (int i = 0; i < (1<<20); i++)
     {
-        double ev2 = log2(MAX(i/64.0 - black/64.0, 1));
-        double c2 = -cos(COERCE(ev2 - fullres_start, 0, fullres_transition)*M_PI/fullres_transition);
-        double f = (c2+1) / 2;
-        fullres_curve_f[i] = (float)f;
+        fullres_curve_f[i] = (float)compute_fullres_curve_value(black, i);
     }
 
+    scratch->fullres_curve_float_black = black;
+    scratch->fullres_curve_float_valid = 1;
     return fullres_curve_f;
 }
 
-static inline double * build_fullres_curve_float_as_double(int black)
+static inline double * build_fullres_curve_float_as_double(dualiso_full20bit_scratch_t * scratch, int black)
 {
-    static double fullres_curve_fd[1<<20];
-    static int previous_black = -1;
+    if(!scratch) return NULL;
 
-    if(previous_black == black) return fullres_curve_fd;
+    const size_t curve_count = (size_t)(1u << 20);
+    if(scratch->fullres_curve_float_as_double
+       && scratch->fullres_curve_float_as_double_capacity >= curve_count
+       && scratch->fullres_curve_float_as_double_valid
+       && scratch->fullres_curve_float_as_double_black == black)
+    {
+        return scratch->fullres_curve_float_as_double;
+    }
 
-    float * fullres_curve_f = build_fullres_curve_float(black);
-    if(!fullres_curve_f) return NULL;
+    double * fullres_curve_fd =
+        ensure_double_scratch_buffer(&scratch->fullres_curve_float_as_double,
+                                     &scratch->fullres_curve_float_as_double_capacity,
+                                     curve_count);
+    float * fullres_curve_f = build_fullres_curve_float(scratch, black);
+    if(!fullres_curve_fd || !fullres_curve_f) return NULL;
 
+    scratch->fullres_curve_float_as_double_valid = 0;
     #pragma omp parallel for
     for(int i = 0; i < 1<<20; i++)
     {
         fullres_curve_fd[i] = (double)fullres_curve_f[i];
     }
 
-    previous_black = black;
+    scratch->fullres_curve_float_as_double_black = black;
+    scratch->fullres_curve_float_as_double_valid = 1;
     return fullres_curve_fd;
 }
 
@@ -3190,7 +3225,13 @@ static inline void amaze_interpolate(struct raw_info raw_info,
         for (int x = 0; x < w; x ++)
             edge_direction[x + y*w] = d0;
     
-    double * fullres_curve = build_fullres_curve(black);
+    double * fullres_curve = build_fullres_curve(scratch, black);
+    if(!fullres_curve)
+    {
+        g_dualiso_full20bit_timing.interp_amaze_edge_init_ms +=
+            dualiso_debug_elapsed_ms(amaze_stage_start);
+        return;
+    }
     g_dualiso_full20bit_timing.interp_amaze_edge_init_ms +=
         dualiso_debug_elapsed_ms(amaze_stage_start);
     
@@ -4255,14 +4296,14 @@ static inline void build_alias_map(struct raw_info raw_info,
     int h = raw_info.height;
     
     double alias_stage_start = mlv_stage_timing_now();
-    double * fullres_curve = build_fullres_curve(black);
+    double * fullres_curve = build_fullres_curve(scratch, black);
 #ifndef STDOUT_SILENT
     printf("Building alias map...\n");
 #endif
     uint16_t* alias_aux = ensure_alias_aux_scratch(scratch, (size_t)w * (size_t)h);
     g_dualiso_full20bit_timing.mix_alias_map_setup_ms +=
         dualiso_debug_elapsed_ms(alias_stage_start);
-    if (!alias_aux)
+    if (!fullres_curve || !alias_aux)
     {
         return;
     }
@@ -5273,8 +5314,8 @@ static inline int final_blend(struct raw_info raw_info,
     double final_blend_setup_start = mlv_stage_timing_now();
     /* fullres mixing curve */
     const int use_float_fullres_curve = use_final_blend_float_fullres_curve();
-    double * fullres_curve = use_float_fullres_curve ? NULL : build_fullres_curve(black);
-    float * fullres_curve_f = use_float_fullres_curve ? build_fullres_curve_float(black) : NULL;
+    double * fullres_curve = use_float_fullres_curve ? NULL : build_fullres_curve(scratch, black);
+    float * fullres_curve_f = use_float_fullres_curve ? build_fullres_curve_float(scratch, black) : NULL;
     
     int w = raw_info.width;
     int h = raw_info.height;
@@ -5296,6 +5337,11 @@ static inline int final_blend(struct raw_info raw_info,
     (void)final_blend_probe_ev2raw_store;
     (void)final_blend_probe_arithmetic;
     (void)final_blend_probe_detail;
+    if((use_float_fullres_curve && !fullres_curve_f) || (!use_float_fullres_curve && !fullres_curve))
+    {
+        g_dualiso_full20bit_timing.final_blend_setup_ms += dualiso_debug_elapsed_ms(final_blend_setup_start);
+        return 0;
+    }
     if (!ensure_scratch_ev_lut(scratch, black, white, &raw2ev, &raw2ev_float, &ev2raw))
     {
         g_dualiso_full20bit_timing.final_blend_setup_ms += dualiso_debug_elapsed_ms(final_blend_setup_start);
@@ -5815,7 +5861,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
                                                   int chroma_smooth_method,
                                                   int playback_preview_scale_factor,
                                                   int final_blend_fused_to_16bit,
-                                                  const dualiso_full20bit_scratch_t * scratch)
+                                                  dualiso_full20bit_scratch_t * scratch)
 {
     if(!g_dualiso_gpu_recon_state_capture_enabled)
     {
@@ -5839,7 +5885,7 @@ static void dualiso_debug_publish_gpu_recon_state(int ret,
 
     const double overlap = g_dualiso_full20bit_timing.mix_curve_overlap;
     const double * mix_curve = dualiso_select_gpu_mix_curve(scratch, black, white, corr_ev, overlap);
-    const double * fullres_curve = build_fullres_curve_float_as_double((int)black);
+    const double * fullres_curve = build_fullres_curve_float_as_double(scratch, (int)black);
 
     if(!scratch->ev_raw2ev || !scratch->ev2raw_0 || !mix_curve || !fullres_curve)
     {
@@ -6318,7 +6364,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     (void)raw2ev_float;
     (void)ev2raw;
 
-    const double * fullres_curve = build_fullres_curve_float_as_double(black);
+    const double * fullres_curve = build_fullres_curve_float_as_double(scratch, black);
     if (!scratch->ev_raw2ev || !scratch->ev2raw_0 || !mix_curve || !fullres_curve)
     {
         DUALISO_GPU_PREP_RETURN(0);
@@ -6746,7 +6792,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                              corr_ev,
                                              overlap_at_use);
             const double * fullres_curve_at_use =
-                build_fullres_curve_float_as_double(black);
+                build_fullres_curve_float_as_double(scratch, black);
             char pou_path[1200];
             snprintf(pou_path, sizeof(pou_path), "%s/recon_pou.txt", pou_dir);
             FILE * pou_f = fopen(pou_path, "wb");
