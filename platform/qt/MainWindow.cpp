@@ -6188,7 +6188,8 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                    "cuda_backend_resolved=\"%26\" cuda_backend_description=\"%27\" "
                    "window_renderer=\"%28\" viewport_renderer=\"%29\" "
                    "gpu16_allowed=%30 histogram=%31 waveform=%32 parade=%33 "
-                   "vectorscope=%34 zebras=%35" )
+                   "vectorscope=%34 zebras=%35 edit_dock_visible=%36 "
+                   "edit_dock_w=%37 edit_dock_h=%38 edit_action_checked=%39" )
                    .arg( bool01( GpuDisplayViewport::isInstalledOn( ui->graphicsView ) ) )
                    .arg( bool01( GpuDisplayWindow::isActive() ) )
                    .arg( bool01( renderPolicy.gpuViewportInstalled ) )
@@ -6225,7 +6226,11 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
                    .arg( bool01( renderPolicy.waveformEnabled ) )
                    .arg( bool01( renderPolicy.paradeEnabled ) )
                    .arg( bool01( renderPolicy.vectorScopeEnabled ) )
-                   .arg( bool01( renderPolicy.zebrasEnabled ) );
+                   .arg( bool01( renderPolicy.zebrasEnabled ) )
+                   .arg( bool01( ui->dockWidgetEdit->isVisible() ) )
+                   .arg( ui->dockWidgetEdit->width() )
+                   .arg( ui->dockWidgetEdit->height() )
+                   .arg( bool01( ui->actionShowEditArea->isChecked() ) );
     }
     if( renderPolicy.gpuPlaybackReconTexturePresentationEnvironmentRequested
      && !requestContext.gpuPlaybackReconTexturePresentRequested )
