@@ -12,16 +12,10 @@ struct DualIsoPlaybackRuntimeSettings
     int fullResBlending;
     bool previewOverrideActive;
     /* Mean23 fast-path override: independent of previewOverrideActive.
-     * The preview override forces mode=2 (rowscale, no HQ at all). The
-     * mean23 override only applies when the user has explicitly selected
-     * mode=2 themselves (so the preview override doesn't kick in) or when
-     * the preview override is suppressed (e.g. via the diagnostic
-     * MLVAPP_PROFILE_DISABLE_DUALISO_OVERRIDE). In production the preview
-     * override is always preferred over the mean23 override because
-     * preview rowscale is faster than mean23 HQ; mean23 is the
-     * second-best fallback for the case where the user wants HQ-style
-     * receipt-driven output during playback (e.g. while exporting from
-     * the timeline). */
+     * The preview override marker says the automatic missed-target rescue
+     * branch fired; explicit user Preview still forces mode=2 rowscale, but
+     * automatic rescue keeps HQ recon for dual-ISO clips and uses mean23 as
+     * the playback-safe interpolation override. */
     bool playbackForceMean23;
     /* Phase E5: scale-aware alias_map downgrade. Enabled when HQ recon will
      * actually run during playback (same trigger surface as
@@ -127,7 +121,7 @@ inline bool dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv()
 }
 
 /* Opt-in: prefer HQ Dual ISO recon with mean23 interpolation during playback
- * over the preview-rowscale-forced override. Closes the structural magenta
+ * over the legacy preview-rowscale-forced override. Closes the structural magenta
  * cast that preview rowscale introduces (preview's global linear gain is
  * fundamentally different from HQ matched-pair recon and produces a
  * deterministic chroma bias on bright lanes). The GUI Playback Quality modes
@@ -141,8 +135,9 @@ inline bool dualIsoPlaybackDowngradeAliasMapAtScaleViaEnv()
  * (for example x8 Dual ISO Fast/Auto paths) so HQ + mean23 runs after early
  * Bayer-domain reduction instead of at full sensor size.
  *
- * Without either this env var or a GUI fallback, playback continues to use
- * preview rowscale. With it, playback uses HQ + mean23. */
+ * Without either this env var or a GUI fallback, playback still records the
+ * automatic rescue branch and keeps its alias_map relaxation. With the opt-in,
+ * even that rescue marker is suppressed and playback uses receipt HQ + mean23. */
 inline bool dualIsoPlaybackPreferHqMean23ViaEnv()
 {
     static int cached = -1;
@@ -235,9 +230,9 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
     const bool preferHqMean23 = dualIsoPlaybackPreferHqMean23();
     /* When the user has opted into HQ-during-playback (via env var or via
      * the GUI Playback Quality dial that sets the QSettings-backed
-     * fallback), suppress the preview-rowscale override so the receipt's
-     * selectedMode (typically 1 = HQ recon) flows through. The mean23
-     * override below then catches the now-still-HQ playback path and
+     * fallback), suppress the automatic rescue marker entirely so the
+     * receipt's selectedMode (typically 1 = HQ recon) flows through. The
+     * mean23 override below then catches the now-still-HQ playback path and
      * writes the playbackForceMean23 flag, giving us HQ + mean23 (cast
      * closed) at the cost of cadence. */
     /* Scale-aware suppression (2026-06-29): the AUTO preview-override at x2 reduced-res
@@ -248,7 +243,8 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
      * at x2 so the hqWillRunDuringPlayback block below sets playbackForceMean23 (HQ +
      * mean23, "cast closed") -- the proven neutral path that is also FPS-neutral-or-better
      * (the cliff's path=0 fallback was itself slow). Explicit user preview (selectedMode==2
-     * -> explicitPreviewSelected) is UNTOUCHED, and x1 is UNAFFECTED (effectiveScale default 1).
+     * -> explicitPreviewSelected) is UNTOUCHED, and x1 still records the rescue marker
+     * while keeping HQ recon/full-res blending.
      * NOTE: x4/x8 subset show the same magenta (SEQ389) and likely want the same suppression;
      * scoped to ==2 here as the validated case, x4/x8 is a flagged fast-follow. */
     const bool suppressAutoPreviewOverrideAtScale = (effectiveScale == 2);
@@ -268,12 +264,20 @@ inline DualIsoPlaybackRuntimeSettings effectiveDualIsoPlaybackRuntimeSettings(bo
         false
     };
 
-    if( explicitPreviewSelected || previewOverrideActive )
+    if( explicitPreviewSelected )
     {
         settings.mode = 2;
         settings.interpolation = 1;
         settings.aliasMap = 0;
         settings.fullResBlending = 0;
+    }
+    else if( previewOverrideActive )
+    {
+        /* Keep the automatic rescue visible, but do not move dual-ISO clips
+         * into the preview rowscale family: mode=2/fullResBlending=0 is the
+         * aliasing failure path. Retain HQ recon plus receipt-authored
+         * full-res blending, and keep only the low-risk alias_map relaxation. */
+        settings.aliasMap = 0;
     }
 
     /* Mean23 playback override: only applies when the receipt-driven HQ

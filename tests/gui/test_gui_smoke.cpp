@@ -1034,11 +1034,12 @@ void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideS
                                                        0,
                                                        1,
                                                        1);
-    QCOMPARE(settings.mode, 2);
-    QCOMPARE(settings.interpolation, 1);
+    QCOMPARE(settings.mode, 1);
+    QCOMPARE(settings.interpolation, 0);
     QCOMPARE(settings.aliasMap, 0);
-    QCOMPARE(settings.fullResBlending, 0);
+    QCOMPARE(settings.fullResBlending, 1);
     QVERIFY(settings.previewOverrideActive);
+    QVERIFY(settings.playbackForceMean23);
 
     settings = effectiveDualIsoPlaybackRuntimeSettings(false,
                                                        true,
