@@ -6027,10 +6027,15 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
         && !ui->actionCaching->isChecked();
-    renderPolicy.histogramEnabled = ui->actionShowHistogram->isChecked();
-    renderPolicy.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
-    renderPolicy.paradeEnabled = ui->actionShowParade->isChecked();
-    renderPolicy.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    renderPolicy.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    renderPolicy.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    renderPolicy.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    renderPolicy.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
     renderPolicy.betterResizerEnabled =
         ui->actionBetterResizer->isChecked() || GpuDisplayWindow::isActive();
     renderPolicy.zebrasEnabled = ui->actionShowZebras->isChecked();
@@ -17007,10 +17012,15 @@ bool MainWindow::shouldUseGpu16PreviewPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
-    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
-    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
-    policyState.paradeEnabled = ui->actionShowParade->isChecked();
-    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    policyState.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    policyState.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
     return mainWindowAllowsGpu16PreviewRender( policyState );
 }
 
@@ -17022,10 +17032,15 @@ bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
     policyState.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
-    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
-    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
-    policyState.paradeEnabled = ui->actionShowParade->isChecked();
-    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    policyState.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    policyState.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
     return mainWindowAllowsGpuPreviewProcessing( policyState );
 }
 
@@ -17042,10 +17057,15 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
         gpuBilinearDebayerRequestedByEnvironment();
     policyState.gpuBilinearDebayerCompatible =
         m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
-    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
-    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
-    policyState.paradeEnabled = ui->actionShowParade->isChecked();
-    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    policyState.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    policyState.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
     return mainWindowAllowsGpuBilinearDebayer( policyState );
 }
 
@@ -17064,10 +17084,15 @@ bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
         && !ui->actionCaching->isChecked();
-    policyState.histogramEnabled = ui->actionShowHistogram->isChecked();
-    policyState.waveformEnabled = ui->actionShowWaveFormMonitor->isChecked();
-    policyState.paradeEnabled = ui->actionShowParade->isChecked();
-    policyState.vectorScopeEnabled = ui->actionShowVectorScope->isChecked();
+    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    policyState.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    policyState.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
     return mainWindowAllowsGpuAmazeDebayer( policyState );
 }
 

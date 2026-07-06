@@ -551,6 +551,7 @@ class GuiSmokeTest : public QObject
 private slots:
     void checkedStateUpdatesPalette();
     void mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes();
+    void mainWindowGpuPreviewPolicyScopesVetoOnlyWhenDisplayed();
     void mainWindowGpuPreviewPolicyUsesGpuShaderZebrasWhenViewportInstalled();
     void mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions();
     void mainWindowGpuTexturePresentDisplaySizeAppliesStretch();
@@ -640,6 +641,34 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyAllowsGpu16OnlyWithoutScopes()
     QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
     QVERIFY(!mainWindowUsesGpu16PreviewPresentation(state));
     QVERIFY(!mainWindowUsesGpuImagePresentation(state));
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyScopesVetoOnlyWhenDisplayed()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.gpuViewportInstalled = true;
+    state.renderThreadUsing16BitPreview = true;
+
+    state.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        false, true);
+    state.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        false, true);
+    state.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        false, true);
+    state.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        false, true);
+    QVERIFY(mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(mainWindowUsesGpu16PreviewPresentation(state));
+
+    state.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        true, true);
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
+    QVERIFY(!mainWindowUsesGpu16PreviewPresentation(state));
+
+    state.histogramEnabled = false;
+    state.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        true, true);
+    QVERIFY(!mainWindowAllowsGpu16PreviewRender(state));
 }
 
 void GuiSmokeTest::mainWindowGpuPreviewPolicyBuildsExpectedPresenterOptions()

@@ -79,6 +79,13 @@ struct MainWindowGpuPreviewPolicyState
     Qt::TransformationMode transformationMode = Qt::FastTransformation;
 };
 
+inline bool mainWindowScopeActionConsumesPresentedPixels(
+    bool editAreaVisible,
+    bool scopeActionChecked)
+{
+    return editAreaVisible && scopeActionChecked;
+}
+
 inline bool mainWindowHasScopeVisualization(
     const MainWindowGpuPreviewPolicyState &state)
 {
