@@ -123,6 +123,11 @@ static bool gpuTexNrOverlapTraceEnabled()
     return environmentFlagEnabled( "MLVAPP_GPU_TEX_NR_OVERLAP_TRACE" );
 }
 
+static bool f3CutRangeRepairDisabledByEnvironment()
+{
+    return environmentFlagEnabled( "MLVAPP_F3_DISABLE_CUT_RANGE_REPAIR" );
+}
+
 static bool cdngPayloadHandoffEnabled()
 {
     return environmentFlagEnabled( "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF" );
@@ -9396,15 +9401,39 @@ void MainWindow::playbackHandling(int timeDiff)
         {
             if( ui->actionLoop->isChecked() )
             {
-                const int cutInFrame = playback_frame_range::clampFrameIndex(
-                    ui->spinBoxCutIn->value() - 1,
-                    m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0 );
+                const int requestedCutInFrame = ui->spinBoxCutIn->value() - 1;
+                bool cutInFrameChanged = false;
+                const int clampedCutInFrame = playback_frame_range::clampFrameIndex(
+                    requestedCutInFrame,
+                    m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0,
+                    &cutInFrameChanged );
+                const bool repairDisabled = f3CutRangeRepairDisabledByEnvironment();
+                if( repairDisabled && cutInFrameChanged )
+                {
+                    logInteractionEvent(
+                        QStringLiteral("play.request_frame_repair_disabled"),
+                        QStringLiteral("where=playbackHandling.loop requested_before=%1 requested_after=%2 cut_in=%3 cut_out=%4 total_frames=%5 drop_frame=%6 play_checked=%7")
+                            .arg( requestedCutInFrame )
+                            .arg( clampedCutInFrame )
+                            .arg( ui->spinBoxCutIn->value() )
+                            .arg( ui->spinBoxCutOut->value() )
+                            .arg( m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0 )
+                            .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+                            .arg( bool01( ui->actionPlay->isChecked() ) ) );
+                }
+                const int cutInFrame = repairDisabled
+                    ? requestedCutInFrame
+                    : clampedCutInFrame;
                 //Loop, goto cut in
                 m_playbackInternalSliderAdvance = true;
                 ui->horizontalSliderPosition->setValue( cutInFrame );
                 m_playbackInternalSliderAdvance = false;
                 m_frameChanged = true;
-                if( ui->actionAudioOutput->isChecked() )m_newPosDropMode = cutInFrame;
+                if( ui->actionAudioOutput->isChecked()
+                 || ( repairDisabled && ui->actionDropFrameMode->isChecked() ) )
+                {
+                    m_newPosDropMode = cutInFrame;
+                }
 
                 //Sync audio
                 if( ui->actionAudioOutput->isChecked()
@@ -13859,17 +13888,32 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
                 totalFrames );
         if( normalized.valid && normalized.changed )
         {
-            logInteractionEvent(
-                QStringLiteral("play.cut_range_repaired"),
-                QStringLiteral("where=setSliders cut_in_before=%1 cut_out_before=%2 cut_in_after=%3 cut_out_after=%4 total_frames=%5 position=%6")
-                    .arg( static_cast<int>( receipt->cutIn() ) )
-                    .arg( static_cast<int>( receipt->cutOut() ) )
-                    .arg( normalized.cutIn )
-                    .arg( normalized.cutOut )
-                    .arg( totalFrames )
-                    .arg( ui->horizontalSliderPosition->value() ) );
-            receipt->setCutIn( static_cast<uint32_t>( normalized.cutIn ) );
-            receipt->setCutOut( static_cast<uint32_t>( normalized.cutOut ) );
+            if( f3CutRangeRepairDisabledByEnvironment() )
+            {
+                logInteractionEvent(
+                    QStringLiteral("play.cut_range_repair_disabled"),
+                    QStringLiteral("where=setSliders cut_in_before=%1 cut_out_before=%2 cut_in_after=%3 cut_out_after=%4 total_frames=%5 position=%6")
+                        .arg( static_cast<int>( receipt->cutIn() ) )
+                        .arg( static_cast<int>( receipt->cutOut() ) )
+                        .arg( normalized.cutIn )
+                        .arg( normalized.cutOut )
+                        .arg( totalFrames )
+                        .arg( ui->horizontalSliderPosition->value() ) );
+            }
+            else
+            {
+                logInteractionEvent(
+                    QStringLiteral("play.cut_range_repaired"),
+                    QStringLiteral("where=setSliders cut_in_before=%1 cut_out_before=%2 cut_in_after=%3 cut_out_after=%4 total_frames=%5 position=%6")
+                        .arg( static_cast<int>( receipt->cutIn() ) )
+                        .arg( static_cast<int>( receipt->cutOut() ) )
+                        .arg( normalized.cutIn )
+                        .arg( normalized.cutOut )
+                        .arg( totalFrames )
+                        .arg( ui->horizontalSliderPosition->value() ) );
+                receipt->setCutIn( static_cast<uint32_t>( normalized.cutIn ) );
+                receipt->setCutOut( static_cast<uint32_t>( normalized.cutOut ) );
+            }
         }
         ui->spinBoxCutIn->setValue( receipt->cutIn() );
         on_spinBoxCutIn_valueChanged( receipt->cutIn() );
@@ -27801,6 +27845,22 @@ bool MainWindow::normalizePlaybackCutRangeForLoadedClip( const char *where )
      || m_newPosDropMode > playback_frame_range::lastFrameIndex( normalized );
     if( !normalized.changed && !dropModeOutOfRange ) return false;
 
+    if( f3CutRangeRepairDisabledByEnvironment() )
+    {
+        logInteractionEvent(
+            QStringLiteral("play.cut_range_repair_disabled"),
+            QStringLiteral("where=%1 cut_in_before=%2 cut_out_before=%3 cut_in_after=%4 cut_out_after=%5 total_frames=%6 position=%7 drop_pos_before=%8")
+                .arg( QString::fromLatin1( where ? where : "unknown" ) )
+                .arg( cutInBefore )
+                .arg( cutOutBefore )
+                .arg( normalized.cutIn )
+                .arg( normalized.cutOut )
+                .arg( totalFrames )
+                .arg( ui->horizontalSliderPosition->value() )
+                .arg( dropModeBefore, 0, 'f', 3 ) );
+        return false;
+    }
+
     logInteractionEvent(
         QStringLiteral("play.cut_range_repaired"),
         QStringLiteral("where=%1 cut_in_before=%2 cut_out_before=%3 cut_in_after=%4 cut_out_after=%5 total_frames=%6 position=%7 drop_pos_before=%8")
@@ -27845,6 +27905,21 @@ int MainWindow::normalizePlaybackRequestedFrame( int requestedFrame, const char 
         &changed );
     if( !changed ) return requestedFrame;
 
+    if( f3CutRangeRepairDisabledByEnvironment() )
+    {
+        logInteractionEvent(
+            QStringLiteral("play.request_frame_repair_disabled"),
+            QStringLiteral("where=%1 requested_before=%2 requested_after=%3 cut_in=%4 cut_out=%5 drop_frame=%6 play_checked=%7")
+                .arg( QString::fromLatin1( where ? where : "unknown" ) )
+                .arg( requestedFrame )
+                .arg( normalizedFrame )
+                .arg( ui->spinBoxCutIn->value() )
+                .arg( ui->spinBoxCutOut->value() )
+                .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+                .arg( bool01( ui->actionPlay->isChecked() ) ) );
+        return requestedFrame;
+    }
+
     logInteractionEvent(
         QStringLiteral("play.request_frame_repaired"),
         QStringLiteral("where=%1 requested_before=%2 requested_after=%3 cut_in=%4 cut_out=%5 drop_frame=%6 play_checked=%7")
@@ -27883,22 +27958,41 @@ void MainWindow::initCutInOut(int frames)
     }
     else
     {
+        const bool repairDisabled = f3CutRangeRepairDisabledByEnvironment();
         const playback_frame_range::CutRange normalized =
             playback_frame_range::normalizeCutRange(
                 ui->spinBoxCutIn->value(),
                 ui->spinBoxCutOut->value(),
                 frames );
-        ui->spinBoxCutIn->setMinimum( 1 );
+        ui->spinBoxCutIn->setMinimum( repairDisabled ? 0 : 1 );
         ui->spinBoxCutIn->setMaximum( frames );
-        ui->spinBoxCutOut->setMinimum( 1 );
+        ui->spinBoxCutOut->setMinimum( repairDisabled ? 0 : 1 );
         ui->spinBoxCutOut->setMaximum( frames );
         if( normalized.valid )
         {
-            ui->spinBoxCutIn->setValue( normalized.cutIn );
-            ui->spinBoxCutOut->setValue( normalized.cutOut );
-            m_newPosDropMode = playback_frame_range::clampFrameIndex(
-                ui->horizontalSliderPosition->value(),
-                frames );
+            if( repairDisabled )
+            {
+                if( normalized.changed )
+                {
+                    logInteractionEvent(
+                        QStringLiteral("play.cut_range_repair_disabled"),
+                        QStringLiteral("where=initCutInOut cut_in_before=%1 cut_out_before=%2 cut_in_after=%3 cut_out_after=%4 total_frames=%5 position=%6")
+                            .arg( ui->spinBoxCutIn->value() )
+                            .arg( ui->spinBoxCutOut->value() )
+                            .arg( normalized.cutIn )
+                            .arg( normalized.cutOut )
+                            .arg( frames )
+                            .arg( ui->horizontalSliderPosition->value() ) );
+                }
+            }
+            else
+            {
+                ui->spinBoxCutIn->setValue( normalized.cutIn );
+                ui->spinBoxCutOut->setValue( normalized.cutOut );
+                m_newPosDropMode = playback_frame_range::clampFrameIndex(
+                    ui->horizontalSliderPosition->value(),
+                    frames );
+            }
         }
     }
 }
