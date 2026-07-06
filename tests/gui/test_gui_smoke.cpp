@@ -571,6 +571,7 @@ private slots:
     void mainWindowGpuPreviewPolicyKeepsAmazeTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyKeepsPlaybackReconTexturePresentExplicitAndNested();
     void mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus();
+    void mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback();
     void dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate();
     void dualIsoPatternMappingKeepsUiAndCoreConventionsAligned();
     void gpuViewportRgb888ZebraProcessingMatchesCpuReference();
@@ -1039,6 +1040,33 @@ void GuiSmokeTest::mainWindowGpuPreviewPolicyClassifiesPlaybackPipelineStatus()
     QCOMPARE( QString::fromLatin1( mainWindowGpuPlaybackPipelineStatusDescription(
                   GpuPlaybackPipelineStatus::GpuTextureNoReadback ) ),
               QStringLiteral( "CUDA-to-GL texture presentation without per-frame CPU readback" ) );
+}
+
+void GuiSmokeTest::mainWindowGpuPreviewPolicyLabelsVisibleScopeCpuFallback()
+{
+    MainWindowGpuPreviewPolicyState state;
+    state.histogramEnabled = true;
+
+    QCOMPARE( QString::fromLatin1(
+                  mainWindowGpuPlaybackPipelineStatusBadgeLabel(
+                      GpuPlaybackPipelineStatus::Cpu,
+                      state,
+                      true ) ),
+              QStringLiteral( "CPU - scopes active" ) );
+    QCOMPARE( QString::fromLatin1(
+                  mainWindowGpuPlaybackPipelineStatusBadgeLabel(
+                      GpuPlaybackPipelineStatus::Cpu,
+                      state,
+                      false ) ),
+              QStringLiteral( "CPU" ) );
+    QCOMPARE( QString::fromLatin1(
+                  mainWindowGpuPlaybackPipelineStatusBadgeLabel(
+                      GpuPlaybackPipelineStatus::GpuTextureNoReadback,
+                      state,
+                      true ) ),
+              QStringLiteral( "GPU Tex NR" ) );
+    QVERIFY( QString::fromLatin1( mainWindowScopePerformanceHintText() )
+                 .contains( QStringLiteral( "Hide the edit area with E" ) ) );
 }
 
 void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideSeparate()

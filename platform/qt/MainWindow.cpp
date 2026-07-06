@@ -9763,6 +9763,16 @@ void MainWindow::initGui( void )
     m_scopeGroup->addAction( ui->actionShowWaveFormMonitor );
     m_scopeGroup->addAction( ui->actionShowHistogram );
     m_scopeGroup->addAction( ui->actionShowParade );
+    const QString scopePerformanceHint =
+        tr( mainWindowScopePerformanceHintText() );
+    ui->actionShowVectorScope->setToolTip( scopePerformanceHint );
+    ui->actionShowVectorScope->setStatusTip( scopePerformanceHint );
+    ui->actionShowWaveFormMonitor->setToolTip( scopePerformanceHint );
+    ui->actionShowWaveFormMonitor->setStatusTip( scopePerformanceHint );
+    ui->actionShowHistogram->setToolTip( scopePerformanceHint );
+    ui->actionShowHistogram->setStatusTip( scopePerformanceHint );
+    ui->actionShowParade->setToolTip( scopePerformanceHint );
+    ui->actionShowParade->setStatusTip( scopePerformanceHint );
 
     //Session List options as group
     m_sessionListGroup = new QActionGroup( this );
@@ -18968,24 +18978,28 @@ void MainWindow::on_actionZoom100_triggered()
 void MainWindow::on_actionShowHistogram_triggered(void)
 {
     m_frameChanged = true;
+    maybeShowScopePerformanceWarning( ui->actionShowHistogram );
 }
 
 //Show Waveform
 void MainWindow::on_actionShowWaveFormMonitor_triggered(void)
 {
     m_frameChanged = true;
+    maybeShowScopePerformanceWarning( ui->actionShowWaveFormMonitor );
 }
 
 //Show Parade
 void MainWindow::on_actionShowParade_triggered()
 {
     m_frameChanged = true;
+    maybeShowScopePerformanceWarning( ui->actionShowParade );
 }
 
 //Show VectorScope
 void MainWindow::on_actionShowVectorScope_triggered()
 {
     m_frameChanged = true;
+    maybeShowScopePerformanceWarning( ui->actionShowVectorScope );
 }
 
 //Use none debayer (speedy B&W)
@@ -19763,6 +19777,10 @@ void MainWindow::updatePlaybackQualityIndicator( void )
                   telemetryBoolValue( m_lastPresentedStageTimingTelemetry,
                                       "gpu_playback_recon_texture_present_no_readback_active" ) )
             : GpuPlaybackPipelineStatus::Cpu;
+    const bool scopePerformanceCaveat =
+        m_lastPresentedRequestContextValid
+        && gpuPlaybackPipelineStatus == GpuPlaybackPipelineStatus::Cpu
+        && visibleScopesBlockGpuTexturePlayback();
 
     const PlaybackQualityIndicatorCache currentCache =
     {
@@ -19786,7 +19804,8 @@ void MainWindow::updatePlaybackQualityIndicator( void )
         m_lastPresentedRequestContextValid,
         m_lastPresentedRequestContext.playbackScaleFactor,
         phase3Tier,
-        static_cast<int>( gpuPlaybackPipelineStatus )
+        static_cast<int>( gpuPlaybackPipelineStatus ),
+        scopePerformanceCaveat
     };
     if( m_playbackQualityIndicatorCacheValid
      && currentCache.playbackQualityMode == m_playbackQualityIndicatorCache.playbackQualityMode
@@ -19820,7 +19839,9 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             == m_playbackQualityIndicatorCache.lastPresentedRequestScaleFactor
      && currentCache.phase3Tier == m_playbackQualityIndicatorCache.phase3Tier
      && currentCache.gpuPlaybackPipelineStatus
-            == m_playbackQualityIndicatorCache.gpuPlaybackPipelineStatus )
+            == m_playbackQualityIndicatorCache.gpuPlaybackPipelineStatus
+     && currentCache.scopePerformanceCaveat
+            == m_playbackQualityIndicatorCache.scopePerformanceCaveat )
     {
         return;
     }
@@ -19973,8 +19994,10 @@ void MainWindow::updatePlaybackQualityIndicator( void )
     {
         text += tr( " [%1]" )
             .arg( QString::fromLatin1(
-                mainWindowGpuPlaybackPipelineStatusLabel(
-                    gpuPlaybackPipelineStatus ) ) );
+                mainWindowGpuPlaybackPipelineStatusBadgeLabel(
+                    gpuPlaybackPipelineStatus,
+                    m_lastPresentedRequestContext.gpuPreviewPolicy,
+                    scopePerformanceCaveat ) ) );
     }
     QString indicatorTooltip =
         tr( "Active playback quality mode and presented pipeline. "
@@ -19989,6 +20012,12 @@ void MainWindow::updatePlaybackQualityIndicator( void )
             "The status suffix reports the presented pipeline: CPU, GPU Preview, "
             "GPU RB, GPU Tex RB, or scoped GPU Tex NR.\n"
             "Keyboard shortcut: Q" );
+    if( scopePerformanceCaveat )
+    {
+        const QString scopeHint = tr( mainWindowScopePerformanceHintText() );
+        indicatorTooltip += tr( "\n%1" ).arg( scopeHint );
+        toolButtonTooltip += tr( "\n%1" ).arg( scopeHint );
+    }
     if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto ) )
     {
         const double autoAverageFps =
@@ -20246,6 +20275,122 @@ QString MainWindow::activeClipPhase3Fingerprint( void ) const
 {
     if( !m_pModel || SESSION_EMPTY || !ACTIVE_CLIP ) return QString();
     return phase3ClipFingerprintForPath( ACTIVE_CLIP->getPath() );
+}
+
+MainWindowGpuPreviewPolicyState MainWindow::gpuPreviewPolicyForCurrentScopeState(
+    bool includeVisibleScopes ) const
+{
+    MainWindowGpuPreviewPolicyState policyState;
+    policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
+    policyState.gpuPreviewProcessingBackendRequest =
+        m_gpuPreviewProcessingBackendRequest;
+    policyState.gpuPreviewProcessingEnvironmentRequested =
+        gpuPreviewProcessingRequestedByEnvironment();
+    policyState.gpuPreviewProcessingCompatible =
+        gpuPreviewProcessingIsSupported( m_pProcessingObject );
+    policyState.gpuBilinearDebayerBackendRequest =
+        m_gpuBilinearDebayerBackendRequest;
+    policyState.gpuBilinearDebayerEnvironmentRequested =
+        gpuBilinearDebayerRequestedByEnvironment();
+    policyState.gpuBilinearDebayerCompatible =
+        m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
+    policyState.gpuAmazeDebayerBackendRequest = m_gpuAmazeDebayerBackendRequest;
+    policyState.gpuAmazeDebayerEnvironmentRequested =
+        gpuAmazeDebayerRequestedByEnvironment();
+    policyState.gpuAmazeTexturePresentationEnvironmentRequested =
+        gpuAmazeTexturePresentRequestedByEnvironment();
+    policyState.gpuPlaybackReconEnvironmentRequested =
+        playback_recon_requested_by_environment();
+    policyState.gpuPlaybackReconTexturePresentationEnvironmentRequested =
+        playback_recon_texture_present_requested_by_environment();
+
+    const bool scopeDisplayVisible =
+        includeVisibleScopes && ui->dockWidgetEdit->isVisible();
+    policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
+    policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowWaveFormMonitor->isChecked() );
+    policyState.paradeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowParade->isChecked() );
+    policyState.vectorScopeEnabled = mainWindowScopeActionConsumesPresentedPixels(
+        scopeDisplayVisible, ui->actionShowVectorScope->isChecked() );
+    policyState.betterResizerEnabled =
+        ui->actionBetterResizer->isChecked() || GpuDisplayWindow::isActive();
+    policyState.zebrasEnabled = ui->actionShowZebras->isChecked();
+    policyState.playbackScaleFactorActive = effectivePlaybackScaleFactorForRequest();
+
+    const Phase3Mode requestedPhase3Mode =
+        phase3ModeFor( playbackQualityModeFromInt( m_playbackQualityMode ) );
+    policyState.gpuAmazeDebayerCompatible =
+        m_pMlvObject
+        && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
+        && !ui->actionCaching->isChecked();
+    const bool texturePathCanAutoEnableGpuProcessing =
+        mainWindowAllowsGpu16PreviewRender( policyState )
+        && policyState.gpuPlaybackReconEnvironmentRequested
+        && policyState.gpuPlaybackReconTexturePresentationEnvironmentRequested
+        && policyState.gpuPreviewProcessingCompatible
+        && policyState.gpuPreviewProcessingBackendRequest
+            != GpuPreviewProcessingBackendRequest::Cpu
+        && requestedPhase3Mode == Phase3Mode::DecodeReconProcess
+        && policyState.playbackScaleFactorActive == 1
+        && !ui->actionCaching->isChecked();
+    if( texturePathCanAutoEnableGpuProcessing )
+    {
+        policyState.gpuPreviewProcessingEnvironmentRequested = true;
+    }
+
+    policyState.renderThreadUsing16BitPreview =
+        mainWindowAllowsGpu16PreviewRender( policyState );
+    policyState.renderThreadUsingGpuProcessingPreview =
+        mainWindowAllowsGpuPreviewProcessing( policyState );
+    policyState.gpuPlaybackReconTexturePresentationCompatible =
+        policyState.gpuViewportInstalled
+        && policyState.gpuPlaybackReconEnvironmentRequested
+        && policyState.renderThreadUsingGpuProcessingPreview
+        && requestedPhase3Mode == Phase3Mode::DecodeReconProcess
+        && policyState.playbackScaleFactorActive == 1
+        && !ui->actionCaching->isChecked();
+    policyState.renderThreadUsingGpuPlaybackReconTexturePresentation =
+        mainWindowAllowsGpuPlaybackReconTexturePresentation( policyState );
+    return policyState;
+}
+
+bool MainWindow::visibleScopesBlockGpuTexturePlayback( void ) const
+{
+    const MainWindowGpuPreviewPolicyState visiblePolicy =
+        gpuPreviewPolicyForCurrentScopeState( true );
+    if( !mainWindowHasScopeVisualization( visiblePolicy ) )
+    {
+        return false;
+    }
+    if( mainWindowAllowsGpuPlaybackReconTexturePresentation( visiblePolicy ) )
+    {
+        return false;
+    }
+
+    const MainWindowGpuPreviewPolicyState hiddenScopePolicy =
+        gpuPreviewPolicyForCurrentScopeState( false );
+    return mainWindowAllowsGpuPlaybackReconTexturePresentation( hiddenScopePolicy );
+}
+
+void MainWindow::maybeShowScopePerformanceWarning( QAction *scopeAction )
+{
+    if( m_scopePerformanceWarningShown
+     || !scopeAction
+     || !scopeAction->isChecked()
+     || !m_fileLoaded
+     || !ui->actionPlay->isChecked()
+     || !visibleScopesBlockGpuTexturePlayback() )
+    {
+        return;
+    }
+
+    m_scopePerformanceWarningShown = true;
+    QMessageBox::information(
+        this,
+        tr( "Scopes reduce playback speed" ),
+        tr( mainWindowScopePerformanceHintText() ) );
 }
 
 QStringList MainWindow::pinnedClipFingerprintsForPhase3( void ) const

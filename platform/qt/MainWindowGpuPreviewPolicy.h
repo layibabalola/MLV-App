@@ -298,6 +298,26 @@ inline const char *mainWindowGpuPlaybackPipelineStatusLabel(
     return "CPU";
 }
 
+inline const char *mainWindowGpuPlaybackPipelineStatusBadgeLabel(
+    GpuPlaybackPipelineStatus status,
+    const MainWindowGpuPreviewPolicyState &state,
+    bool limitedByVisibleScopes)
+{
+    if (status == GpuPlaybackPipelineStatus::Cpu
+     && limitedByVisibleScopes
+     && mainWindowHasScopeVisualization(state))
+    {
+        return "CPU - scopes active";
+    }
+    return mainWindowGpuPlaybackPipelineStatusLabel(status);
+}
+
+inline const char *mainWindowScopePerformanceHintText()
+{
+    return "Visible scopes can disable the fastest GPU texture playback path. "
+           "Hide the edit area with E when you need faster playback.";
+}
+
 inline const char *mainWindowGpuPlaybackPipelineStatusDescription(
     GpuPlaybackPipelineStatus status)
 {

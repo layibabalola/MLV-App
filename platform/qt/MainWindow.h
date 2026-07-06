@@ -59,6 +59,8 @@ namespace Ui {
 class MainWindow;
 }
 
+class QAction;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -872,9 +874,11 @@ private:
         int lastPresentedRequestScaleFactor = -1;
         int phase3Tier = -1;
         int gpuPlaybackPipelineStatus = -1;
+        bool scopePerformanceCaveat = false;
     };
     PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
     bool m_playbackQualityIndicatorCacheValid = false;
+    bool m_scopePerformanceWarningShown = false;
     struct DualIsoPlaybackUiCache
     {
         int toolMode = -1;
@@ -1442,6 +1446,10 @@ private:
     QString activeClipPhase3Fingerprint( void ) const;
     QStringList pinnedClipFingerprintsForPhase3( void ) const;
     int  effectivePlaybackScaleFactorForRequest( void ) const;
+    MainWindowGpuPreviewPolicyState gpuPreviewPolicyForCurrentScopeState(
+        bool includeVisibleScopes ) const;
+    bool visibleScopesBlockGpuTexturePlayback( void ) const;
+    void maybeShowScopePerformanceWarning( QAction *scopeAction );
     static bool dualIsoPlaybackPreferHqMean23GuiFallback( void );
     void beginPlayToFirstFrameMeasurement( void );
     void notePlayToFirstFramePresentation( int presentedFrame );
