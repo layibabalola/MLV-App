@@ -158,6 +158,14 @@ int getMlvRawFrameProcessedUint16(mlvObject_t *, uint64_t, uint16_t *, int * bit
     return 0;
 }
 
+int getMlvRawFrameProcessedUint16Direct(mlvObject_t *, uint64_t, uint16_t *, int * bit_shift)
+{
+    if (bit_shift) {
+        *bit_shift = 0;
+    }
+    return 0;
+}
+
 static void fill_stub_thumbnail(mlvObject_t * video, int downscale_factor, unsigned char * out_buffer)
 {
     if (!out_buffer) {

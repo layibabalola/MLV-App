@@ -2327,6 +2327,82 @@ static bool playback_recon_eligibility_diag_requested_by_environment()
     return environmentFlagEnabled( "MLVAPP_GPU_PLAYBACK_RECON_ELIGIBILITY_DIAG" );
 }
 
+enum class PlaybackAutoFastPathDiagnosticMode
+{
+    Normal,
+    SuppressFast,
+    ForceFast
+};
+
+static const char * playback_auto_fast_path_diag_name(
+    PlaybackAutoFastPathDiagnosticMode mode )
+{
+    switch( mode )
+    {
+    case PlaybackAutoFastPathDiagnosticMode::SuppressFast: return "suppress_fast";
+    case PlaybackAutoFastPathDiagnosticMode::ForceFast:    return "force_fast";
+    case PlaybackAutoFastPathDiagnosticMode::Normal:
+    default:                                               return "normal";
+    }
+}
+
+static PlaybackAutoFastPathDiagnosticMode playback_auto_fast_path_diag_mode()
+{
+    const bool suppressFast =
+        environmentFlagEnabled( "MLVAPP_PLAYBACK_AUTO_SUPPRESS_FAST" );
+    const bool forceFast =
+        environmentFlagEnabled( "MLVAPP_PLAYBACK_AUTO_FORCE_FAST" );
+    if( forceFast && suppressFast )
+    {
+        static bool loggedConflict = false;
+        if( !loggedConflict )
+        {
+            qWarning().noquote()
+                << "MLVAPP_PLAYBACK_AUTO_FORCE_FAST and"
+                << "MLVAPP_PLAYBACK_AUTO_SUPPRESS_FAST are both set;"
+                << "FORCE_FAST wins for this diagnostic run.";
+            loggedConflict = true;
+        }
+    }
+    if( forceFast ) return PlaybackAutoFastPathDiagnosticMode::ForceFast;
+    if( suppressFast ) return PlaybackAutoFastPathDiagnosticMode::SuppressFast;
+    return PlaybackAutoFastPathDiagnosticMode::Normal;
+}
+
+/* Flight-only diagnostic override for Q2/H-AUTODYN. Returns -1 when unset,
+ * -2 when invalid, or the requested target FPS. Values intentionally extend
+ * beyond the UI's 24/30/60 choices so a slow/fast machine can be forced into
+ * or away from the missed_target_fast Auto branch. */
+static int playback_auto_target_fps_env_override()
+{
+    const QString raw =
+        qEnvironmentVariable("MLVAPP_PLAYBACK_AUTO_TARGET_FPS").trimmed();
+    if( raw.isEmpty() ) return -1;
+    bool ok = false;
+    const int parsed = raw.toInt(&ok);
+    if( ok && parsed >= 1 && parsed <= 1000 ) return parsed;
+    return -2;
+}
+
+static PlaybackQualityAutoSampler::Decision playback_auto_force_fast_decision(
+    int targetFps,
+    bool sharperHeadroomScaleAllowed,
+    double averageFrameMs,
+    size_t sampleCount )
+{
+    if( targetFps <= 0 ) targetFps = 30;
+    const double frameBudgetMs = 1000.0 / static_cast<double>( targetFps );
+    return PlaybackQualityAutoSampler::Decision{
+        4,
+        false,
+        PlaybackQualityAutoDecisionReason::MissedTargetFast,
+        sharperHeadroomScaleAllowed,
+        averageFrameMs > 0.0 ? averageFrameMs : frameBudgetMs * 1.20,
+        frameBudgetMs,
+        sampleCount
+    };
+}
+
 /* Read MLVAPP_PLAYBACK_SCALE_FACTOR for each decision.
  * Accepts "1", "2", "4", "8", or "auto". Returns 0 when unset so the
  * caller can fall back to the GUI dial; returns -1 for "auto" so smoke/dev
@@ -19025,6 +19101,19 @@ void MainWindow::initPlaybackQualityFromSettings( void )
     int rawTargetFps = set.value( PlaybackQualitySettings::kKeyAutoTargetFps(),
                                   PlaybackQualitySettings::kDefaultAutoTargetFps() ).toInt();
     if ( rawTargetFps != 24 && rawTargetFps != 30 && rawTargetFps != 60 ) rawTargetFps = 30;
+    const int envAutoTargetFps = playback_auto_target_fps_env_override();
+    if( envAutoTargetFps == -2 )
+    {
+        qWarning().noquote()
+            << "MLVAPP_PLAYBACK_AUTO_TARGET_FPS ignored:"
+            << envValueForLog( "MLVAPP_PLAYBACK_AUTO_TARGET_FPS" )
+            << "(must be an integer from 1 to 1000);"
+            << "falling back to Playback/AutoTargetFps setting.";
+    }
+    else if( envAutoTargetFps > 0 )
+    {
+        rawTargetFps = envAutoTargetFps;
+    }
     const bool indicatorVisible =
         set.value( PlaybackQualitySettings::kKeyShowQualityIndicator(),
                    PlaybackQualitySettings::kDefaultShowQualityIndicator() ).toBool();
@@ -19060,6 +19149,21 @@ void MainWindow::initPlaybackQualityFromSettings( void )
             << "MLVAPP_PLAYBACK_QUALITY_MODE ="
             << rawMode
             << "(env override; Playback/QualityMode setting is bypassed).";
+    }
+    if( envAutoTargetFps > 0 )
+    {
+        qInfo().noquote()
+            << "MLVAPP_PLAYBACK_AUTO_TARGET_FPS ="
+            << rawTargetFps
+            << "(env override; Playback/AutoTargetFps setting is bypassed).";
+    }
+    if( playback_auto_fast_path_diag_mode()
+        != PlaybackAutoFastPathDiagnosticMode::Normal )
+    {
+        qInfo().noquote()
+            << "Playback Auto fast-path diagnostic mode ="
+            << QString::fromLatin1( playback_auto_fast_path_diag_name(
+                   playback_auto_fast_path_diag_mode() ) );
     }
 
     /* Seed active state without persisting (already loaded). */
@@ -19257,6 +19361,13 @@ void MainWindow::seedPlaybackQualityActiveStateForCurrentContext( void )
     m_playbackQualityActiveScale =
         playbackQualityScaleFactorForMode( pqMode, dualIsoActive );
     m_playbackQualityActiveHq = playbackQualityWantsHqMean23( pqMode );
+    if( pqMode == PlaybackQualityMode::Auto
+     && playback_auto_fast_path_diag_mode()
+        == PlaybackAutoFastPathDiagnosticMode::ForceFast )
+    {
+        m_playbackQualityActiveScale = 4;
+        m_playbackQualityActiveHq = false;
+    }
     g_playbackQualityActiveHqMirror.store(
         m_playbackQualityActiveHq ? 1 : 0,
         std::memory_order_release );
@@ -19269,15 +19380,29 @@ void MainWindow::resetPlaybackQualityAutoRunState( void )
     m_playbackQualityLastPresentedTime = 0.0;
     m_playbackQualitySampler.reset();
     m_playbackQualityAutoCapabilityTracker.reset();
-    m_playbackQualityAutoDecisionReason =
-        PlaybackQualityAutoDecisionReason::WarmupHq;
-    m_playbackQualityAutoDecisionAverageMs = 0.0;
     m_playbackQualityAutoDecisionBudgetMs =
         1000.0 / static_cast<double>( m_playbackAutoTargetFps > 0
                                       ? m_playbackAutoTargetFps
                                       : 30 );
-    m_playbackQualityAutoDecisionSampleCount = 0;
     m_playbackQualityAutoHeadroomCapability = false;
+    if( m_playbackQualityMode == static_cast<int>( PlaybackQualityMode::Auto )
+     && playback_auto_fast_path_diag_mode()
+        == PlaybackAutoFastPathDiagnosticMode::ForceFast )
+    {
+        m_playbackQualityAutoDecisionReason =
+            PlaybackQualityAutoDecisionReason::MissedTargetFast;
+        m_playbackQualityAutoDecisionAverageMs =
+            m_playbackQualityAutoDecisionBudgetMs * 1.20;
+        m_playbackQualityAutoDecisionSampleCount =
+            PlaybackQualityAutoSampler::kSlidingWindow;
+    }
+    else
+    {
+        m_playbackQualityAutoDecisionReason =
+            PlaybackQualityAutoDecisionReason::WarmupHq;
+        m_playbackQualityAutoDecisionAverageMs = 0.0;
+        m_playbackQualityAutoDecisionSampleCount = 0;
+    }
 }
 
 void MainWindow::applyPlaybackScaleFactorOverride( int scaleFactor, bool persist )
@@ -19438,7 +19563,26 @@ void MainWindow::applyPlaybackQualityMode( int mode, bool persist, bool forceRef
 
 void MainWindow::applyPlaybackAutoTargetFps( int targetFps, bool persist )
 {
-    if ( targetFps != 24 && targetFps != 30 && targetFps != 60 ) targetFps = 30;
+    const int envAutoTargetFps = playback_auto_target_fps_env_override();
+    const bool envAutoTargetFpsActive = envAutoTargetFps > 0;
+    if( envAutoTargetFps > 0 )
+    {
+        targetFps = envAutoTargetFps;
+        persist = false;
+    }
+    else if( envAutoTargetFps == -2 )
+    {
+        qWarning().noquote()
+            << "MLVAPP_PLAYBACK_AUTO_TARGET_FPS ignored:"
+            << envValueForLog( "MLVAPP_PLAYBACK_AUTO_TARGET_FPS" )
+            << "(must be an integer from 1 to 1000);"
+            << "falling back to requested UI target.";
+    }
+    if ( !envAutoTargetFpsActive
+      && targetFps != 24 && targetFps != 30 && targetFps != 60 )
+    {
+        targetFps = 30;
+    }
     m_playbackAutoTargetFps = targetFps;
     resetPlaybackQualityAutoRunState();
     if ( ui->actionPlaybackAutoTarget24 )
@@ -26280,34 +26424,90 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     }
     if( ui->actionPlay->isChecked() && m_playbackQualityMode == 2 )
     {
+        const PlaybackAutoFastPathDiagnosticMode fastDiagMode =
+            playback_auto_fast_path_diag_mode();
+        const bool forceFast =
+            fastDiagMode == PlaybackAutoFastPathDiagnosticMode::ForceFast;
+        const bool suppressFast =
+            fastDiagMode == PlaybackAutoFastPathDiagnosticMode::SuppressFast;
+        bool hasPresentedInterval = false;
+        bool decisionEvaluated = false;
+        bool effectiveQualityChanged = false;
+        bool autoDecisionTelemetryChanged = false;
+        bool cacheInvalidated = false;
+        bool coreSettingsApplied = false;
+        bool fastDecisionSuppressed = false;
+        double presentedIntervalMs = 0.0;
+        const int previousScale = m_playbackQualityActiveScale;
+        const bool previousHq = m_playbackQualityActiveHq;
+        PlaybackQualityAutoDecisionReason originalReason =
+            m_playbackQualityAutoDecisionReason;
+        PlaybackQualityAutoSampler::Decision decision =
+            PlaybackQualityAutoSampler::Decision{
+                m_playbackQualityActiveScale,
+                m_playbackQualityActiveHq,
+                m_playbackQualityAutoDecisionReason,
+                m_playbackQualityAutoHeadroomCapability,
+                m_playbackQualityAutoDecisionAverageMs,
+                m_playbackQualityAutoDecisionBudgetMs,
+                m_playbackQualityAutoDecisionSampleCount
+            };
         if( m_playbackQualityLastPresentedTime > 0.0
          && displayStart >= m_playbackQualityLastPresentedTime )
         {
-            const double presentedIntervalMs =
+            presentedIntervalMs =
                 ( displayStart - m_playbackQualityLastPresentedTime ) * 1000.0;
             if( presentedIntervalMs > 0.0 )
             {
+                hasPresentedInterval = true;
                 m_playbackQualitySampler.recordFrameMs( presentedIntervalMs );
                 ++m_playbackQualityFrameCounter;
-                if( (m_playbackQualityFrameCounter
+                if( forceFast
+                 || (m_playbackQualityFrameCounter
                      % PlaybackQualityAutoSampler::kSlidingWindow) == 0 )
                 {
+                    decisionEvaluated = true;
                     const bool dualIsoActive =
                         ( m_pMlvObject != nullptr )
                         && ( llrpGetDualIsoValidity( m_pMlvObject ) != 0 )
                         && ui->checkBoxRawFixEnable->isChecked();
                     const bool sharperHeadroomScaleAllowed =
                         m_playbackQualityAutoCapabilityTracker.sharperHeadroomScaleAllowed();
-                    const PlaybackQualityAutoSampler::Decision decision =
-                        m_playbackQualitySampler.decideNextSlot(
+                    if( forceFast )
+                    {
+                        const size_t diagnosticSampleCount =
+                            m_playbackQualityFrameCounter
+                                < PlaybackQualityAutoSampler::kSlidingWindow
+                            ? m_playbackQualityFrameCounter
+                            : PlaybackQualityAutoSampler::kSlidingWindow;
+                        decision = playback_auto_force_fast_decision(
+                            m_playbackAutoTargetFps,
+                            sharperHeadroomScaleAllowed,
+                            presentedIntervalMs,
+                            diagnosticSampleCount );
+                    }
+                    else
+                    {
+                        decision = m_playbackQualitySampler.decideNextSlot(
                             m_playbackAutoTargetFps,
                             dualIsoActive,
                             mlvPlaybackAggressivePreviewMode() != 0,
                             sharperHeadroomScaleAllowed );
-                    const bool effectiveQualityChanged =
+                    }
+                    originalReason = decision.reason;
+                    if( suppressFast
+                     && decision.reason
+                        == PlaybackQualityAutoDecisionReason::MissedTargetFast )
+                    {
+                        decision.scaleFactor = 4;
+                        decision.useHqMean23 = true;
+                        decision.reason = PlaybackQualityAutoDecisionReason::SteadyHq;
+                        fastDecisionSuppressed = true;
+                    }
+                    effectiveQualityChanged =
                         decision.scaleFactor != m_playbackQualityActiveScale
                      || decision.useHqMean23 != m_playbackQualityActiveHq;
-                    const bool autoDecisionTelemetryChanged =
+                    autoDecisionTelemetryChanged =
                         decision.reason != m_playbackQualityAutoDecisionReason
                      || decision.averageFrameMs != m_playbackQualityAutoDecisionAverageMs
                      || decision.frameBudgetMs != m_playbackQualityAutoDecisionBudgetMs
@@ -26328,9 +26528,11 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                             m_playbackQualityActiveHq ? 1 : 0,
                             std::memory_order_release );
                         invalidateDisplayPreviewCache();
+                        cacheInvalidated = true;
                         m_frameChanged = true;
                         updatePlaybackQualityIndicator();
                         applyEffectiveDualIsoPlaybackSettings();
+                        coreSettingsApplied = true;
                     }
                     else if( autoDecisionTelemetryChanged )
                     {
@@ -26338,6 +26540,51 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                     }
                 }
             }
+        }
+        if( m_playbackSmokeFrameTelemetry )
+        {
+            qInfo().noquote()
+                << QStringLiteral(
+                       "playback_auto.decision session=%1 presented_index=%2 "
+                       "display_frame=%3 serial=%4 auto_present_index=%5 "
+                       "has_interval=%6 interval_ms=%7 decision_evaluated=%8 "
+                       "force_fast=%9 suppress_fast=%10 fast_suppressed=%11 "
+                       "diag_mode=%12 auto_target_fps=%13 original_reason=%14 "
+                       "final_reason=%15 previous_scale=%16 previous_hq=%17 "
+                       "new_scale=%18 new_hq=%19 avg_ms=%20 budget_ms=%21 "
+                       "sample_count=%22 effective_changed=%23 "
+                       "auto_telemetry_changed=%24 cache_invalidated=%25 "
+                       "core_settings_applied=%26" )
+                   .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
+                   .arg( static_cast<qulonglong>(
+                       m_playbackSmokePresentedFrames + 1 ) )
+                   .arg( static_cast<qulonglong>( displayFrame ) )
+                   .arg( static_cast<qulonglong>( readyFrame.requestSerial ) )
+                   .arg( static_cast<qulonglong>( m_playbackQualityFrameCounter ) )
+                   .arg( bool01( hasPresentedInterval ) )
+                   .arg( presentedIntervalMs, 0, 'f', 3 )
+                   .arg( bool01( decisionEvaluated ) )
+                   .arg( bool01( forceFast ) )
+                   .arg( bool01( suppressFast ) )
+                   .arg( bool01( fastDecisionSuppressed ) )
+                   .arg( QString::fromLatin1(
+                       playback_auto_fast_path_diag_name( fastDiagMode ) ) )
+                   .arg( m_playbackAutoTargetFps )
+                   .arg( QString::fromLatin1(
+                       playbackQualityAutoDecisionReasonName( originalReason ) ) )
+                   .arg( QString::fromLatin1(
+                       playbackQualityAutoDecisionReasonName( decision.reason ) ) )
+                   .arg( previousScale )
+                   .arg( bool01( previousHq ) )
+                   .arg( decision.scaleFactor )
+                   .arg( bool01( decision.useHqMean23 ) )
+                   .arg( decision.averageFrameMs, 0, 'f', 3 )
+                   .arg( decision.frameBudgetMs, 0, 'f', 3 )
+                   .arg( static_cast<qulonglong>( decision.sampleCount ) )
+                   .arg( bool01( effectiveQualityChanged ) )
+                   .arg( bool01( autoDecisionTelemetryChanged ) )
+                   .arg( bool01( cacheInvalidated ) )
+                   .arg( bool01( coreSettingsApplied ) );
         }
         m_playbackQualityLastPresentedTime = displayStart;
     }
