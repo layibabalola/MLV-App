@@ -10,6 +10,7 @@
 #include "DecodeWorker.h"
 #include "GpuDebayer.h"
 #include "Phase3Breadcrumbs.h"
+#include "PlaybackFrameRange.h"
 #include "PlaybackQualityPolicy.h"
 #include "ReconWorker.h"
 
@@ -953,6 +954,18 @@ void RenderFrameThread::renderFrame(uint32_t frameNumber,
     const double renderFrameEntryStageTime =
         detailedTimelineTelemetry ? mlv_stage_timing_now() : 0.0;
     QMutexLocker locker(&m_mutex);
+    const int totalFrames = m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0;
+    if( !playback_frame_range::isValidFrameNumber( frameNumber, totalFrames ) )
+    {
+        qWarning() << "RenderFrameThread rejected invalid frame request"
+                   << "frame=" << frameNumber
+                   << "total_frames=" << totalFrames
+                   << "request_serial=" << requestSerial
+                   << "playback_active=" << presentationContext.playbackActive
+                   << "drop_frame=" << presentationContext.dropFramePlaybackActive;
+        return;
+    }
+
     RenderRequest request;
     request.frameNumber = frameNumber;
     request.outputMode = outputMode;

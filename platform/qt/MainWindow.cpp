@@ -8,6 +8,7 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
 #include "CrashForensics.h"
+#include "PlaybackFrameRange.h"
 #include "debug/StageTiming.h"
 extern "C" {
 #include "../../src/mlv/pipeline_stage_capture.h"
@@ -2572,6 +2573,7 @@ MainWindow::MainWindow(int &argc, char **argv, QWidget *parent) :
     m_zoomTo100Center = false;
     m_zoomModeChanged = false;
     m_tryToSyncAudio = false;
+    m_newPosDropMode = 0.0;
     m_playbackStopped = false;
     m_dualIsoPlaybackPreviewActive = false;
     m_inClipDeleteProcess = false;
@@ -6283,6 +6285,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
     {
         requestedFrame = m_newPosDropMode;
     }
+    requestedFrame = normalizePlaybackRequestedFrame( requestedFrame, "drawFrame" );
     if( m_playToFirstFramePending && !m_playToFirstFrameTargetFrameValid )
     {
         m_playToFirstFrameTargetFrame = requestedFrame;
@@ -9385,24 +9388,7 @@ void MainWindow::playbackHandling(int timeDiff)
     {
         if( m_fileLoaded && m_pMlvObject )
         {
-            const int totalFrames = getMlvFrames( m_pMlvObject );
-            if( totalFrames > 1
-             && ui->spinBoxCutOut->value() <= ui->spinBoxCutIn->value()
-             && ui->spinBoxCutOut->value() < totalFrames )
-            {
-                logInteractionEvent(
-                    QStringLiteral("play.cut_range_repaired"),
-                    QStringLiteral("where=playbackHandling cut_in=%1 cut_out_before=%2 total_frames=%3 position=%4")
-                        .arg( ui->spinBoxCutIn->value() )
-                        .arg( ui->spinBoxCutOut->value() )
-                        .arg( totalFrames )
-                        .arg( ui->horizontalSliderPosition->value() ) );
-                ui->spinBoxCutOut->setValue( totalFrames );
-                if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 && ACTIVE_RECEIPT )
-                {
-                    ACTIVE_RECEIPT->setCutOut( totalFrames );
-                }
-            }
+            normalizePlaybackCutRangeForLoadedClip( "playbackHandling" );
         }
 
         //when on last frame
@@ -9410,12 +9396,15 @@ void MainWindow::playbackHandling(int timeDiff)
         {
             if( ui->actionLoop->isChecked() )
             {
+                const int cutInFrame = playback_frame_range::clampFrameIndex(
+                    ui->spinBoxCutIn->value() - 1,
+                    m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0 );
                 //Loop, goto cut in
                 m_playbackInternalSliderAdvance = true;
-                ui->horizontalSliderPosition->setValue( ui->spinBoxCutIn->value() - 1 );
+                ui->horizontalSliderPosition->setValue( cutInFrame );
                 m_playbackInternalSliderAdvance = false;
                 m_frameChanged = true;
-                if( ui->actionAudioOutput->isChecked() )m_newPosDropMode = ui->spinBoxCutIn->value() - 1;
+                if( ui->actionAudioOutput->isChecked() )m_newPosDropMode = cutInFrame;
 
                 //Sync audio
                 if( ui->actionAudioOutput->isChecked()
@@ -13862,6 +13851,26 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
 
     if( !paste && !receipt->wasNeverLoaded() )
     {
+        const int totalFrames = m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0;
+        const playback_frame_range::CutRange normalized =
+            playback_frame_range::normalizeCutRange(
+                static_cast<int>( receipt->cutIn() ),
+                static_cast<int>( receipt->cutOut() ),
+                totalFrames );
+        if( normalized.valid && normalized.changed )
+        {
+            logInteractionEvent(
+                QStringLiteral("play.cut_range_repaired"),
+                QStringLiteral("where=setSliders cut_in_before=%1 cut_out_before=%2 cut_in_after=%3 cut_out_after=%4 total_frames=%5 position=%6")
+                    .arg( static_cast<int>( receipt->cutIn() ) )
+                    .arg( static_cast<int>( receipt->cutOut() ) )
+                    .arg( normalized.cutIn )
+                    .arg( normalized.cutOut )
+                    .arg( totalFrames )
+                    .arg( ui->horizontalSliderPosition->value() ) );
+            receipt->setCutIn( static_cast<uint32_t>( normalized.cutIn ) );
+            receipt->setCutOut( static_cast<uint32_t>( normalized.cutOut ) );
+        }
         ui->spinBoxCutIn->setValue( receipt->cutIn() );
         on_spinBoxCutIn_valueChanged( receipt->cutIn() );
         ui->spinBoxCutOut->setValue( receipt->cutOut() );
@@ -18353,8 +18362,11 @@ void MainWindow::on_horizontalSliderVidstabSmoothing_doubleClicked()
 //Jump to first frame
 void MainWindow::on_actionGoto_First_Frame_triggered()
 {
+    const int cutInFrame = playback_frame_range::clampFrameIndex(
+        ui->spinBoxCutIn->value() - 1,
+        ( m_fileLoaded && m_pMlvObject ) ? getMlvFrames( m_pMlvObject ) : 0 );
     //If actual position is cut in, we jump to 0
-    if( ui->horizontalSliderPosition->value() == ui->spinBoxCutIn->value() - 1 )
+    if( ui->horizontalSliderPosition->value() == cutInFrame )
     {
         ui->horizontalSliderPosition->setValue( 0 );
         m_newPosDropMode = 0;
@@ -18362,8 +18374,8 @@ void MainWindow::on_actionGoto_First_Frame_triggered()
     //Else we jump to cut in
     else
     {
-        ui->horizontalSliderPosition->setValue( ui->spinBoxCutIn->value() - 1 );
-        m_newPosDropMode = ui->spinBoxCutIn->value() - 1;
+        ui->horizontalSliderPosition->setValue( cutInFrame );
+        m_newPosDropMode = cutInFrame;
     }
 
     //Sync audio if playback and audio active
@@ -21595,24 +21607,7 @@ void MainWindow::on_actionPlay_triggered(bool checked)
 
     if( checked && m_fileLoaded && m_pMlvObject )
     {
-        const int totalFrames = getMlvFrames( m_pMlvObject );
-        if( totalFrames > 1
-         && ui->spinBoxCutOut->value() <= ui->spinBoxCutIn->value()
-         && ui->spinBoxCutOut->value() < totalFrames )
-        {
-            logInteractionEvent(
-                QStringLiteral("play.cut_range_repaired"),
-                QStringLiteral("where=triggered cut_in=%1 cut_out_before=%2 total_frames=%3 position=%4")
-                    .arg( ui->spinBoxCutIn->value() )
-                    .arg( ui->spinBoxCutOut->value() )
-                    .arg( totalFrames )
-                    .arg( ui->horizontalSliderPosition->value() ) );
-            ui->spinBoxCutOut->setValue( totalFrames );
-            if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 && ACTIVE_RECEIPT )
-            {
-                ACTIVE_RECEIPT->setCutOut( totalFrames );
-            }
-        }
+        normalizePlaybackCutRangeForLoadedClip( "triggered" );
     }
 
     //Last frame? Go to first frame!
@@ -27786,10 +27781,97 @@ void MainWindow::gradientGraphicElementHovered(bool isHovered)
     m_pGradientElement->gradientGraphicsElement()->setPen( pen );
 }
 
+bool MainWindow::normalizePlaybackCutRangeForLoadedClip( const char *where )
+{
+    if( !m_fileLoaded || !m_pMlvObject ) return false;
+
+    const int totalFrames = getMlvFrames( m_pMlvObject );
+    const playback_frame_range::CutRange normalized =
+        playback_frame_range::normalizeCutRange(
+            ui->spinBoxCutIn->value(),
+            ui->spinBoxCutOut->value(),
+            totalFrames );
+    if( !normalized.valid ) return false;
+
+    const int cutInBefore = ui->spinBoxCutIn->value();
+    const int cutOutBefore = ui->spinBoxCutOut->value();
+    const double dropModeBefore = m_newPosDropMode;
+    const bool dropModeOutOfRange =
+        m_newPosDropMode < playback_frame_range::firstFrameIndex( normalized )
+     || m_newPosDropMode > playback_frame_range::lastFrameIndex( normalized );
+    if( !normalized.changed && !dropModeOutOfRange ) return false;
+
+    logInteractionEvent(
+        QStringLiteral("play.cut_range_repaired"),
+        QStringLiteral("where=%1 cut_in_before=%2 cut_out_before=%3 cut_in_after=%4 cut_out_after=%5 total_frames=%6 position=%7 drop_pos_before=%8")
+            .arg( QString::fromLatin1( where ? where : "unknown" ) )
+            .arg( cutInBefore )
+            .arg( cutOutBefore )
+            .arg( normalized.cutIn )
+            .arg( normalized.cutOut )
+            .arg( totalFrames )
+            .arg( ui->horizontalSliderPosition->value() )
+            .arg( dropModeBefore, 0, 'f', 3 ) );
+
+    if( normalized.changed )
+    {
+        ui->spinBoxCutIn->setValue( normalized.cutIn );
+        ui->spinBoxCutOut->setValue( normalized.cutOut );
+        if( SESSION_CLIP_COUNT > 0 && SESSION_ACTIVE_CLIP_ROW >= 0 && ACTIVE_RECEIPT )
+        {
+            ACTIVE_RECEIPT->setCutIn( static_cast<uint32_t>( normalized.cutIn ) );
+            ACTIVE_RECEIPT->setCutOut( static_cast<uint32_t>( normalized.cutOut ) );
+        }
+    }
+
+    if( dropModeOutOfRange )
+    {
+        m_newPosDropMode = playback_frame_range::clampFrameIndex(
+            static_cast<int>( m_newPosDropMode ),
+            totalFrames );
+    }
+
+    return true;
+}
+
+int MainWindow::normalizePlaybackRequestedFrame( int requestedFrame, const char *where )
+{
+    if( !m_fileLoaded || !m_pMlvObject ) return requestedFrame;
+
+    bool changed = false;
+    const int normalizedFrame = playback_frame_range::clampFrameIndex(
+        requestedFrame,
+        getMlvFrames( m_pMlvObject ),
+        &changed );
+    if( !changed ) return requestedFrame;
+
+    logInteractionEvent(
+        QStringLiteral("play.request_frame_repaired"),
+        QStringLiteral("where=%1 requested_before=%2 requested_after=%3 cut_in=%4 cut_out=%5 drop_frame=%6 play_checked=%7")
+            .arg( QString::fromLatin1( where ? where : "unknown" ) )
+            .arg( requestedFrame )
+            .arg( normalizedFrame )
+            .arg( ui->spinBoxCutIn->value() )
+            .arg( ui->spinBoxCutOut->value() )
+            .arg( bool01( ui->actionDropFrameMode->isChecked() ) )
+            .arg( bool01( ui->actionPlay->isChecked() ) ) );
+
+    if( ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
+    {
+        m_newPosDropMode = normalizedFrame;
+    }
+    if( ui->horizontalSliderPosition->value() != normalizedFrame )
+    {
+        QSignalBlocker blocker( ui->horizontalSliderPosition );
+        ui->horizontalSliderPosition->setValue( normalizedFrame );
+    }
+    return normalizedFrame;
+}
+
 //Init the CutIn/Out elements with frames of clip
 void MainWindow::initCutInOut(int frames)
 {
-    if( frames == -1 )
+    if( frames <= 0 )
     {
         ui->spinBoxCutIn->setMinimum( 0 );
         ui->spinBoxCutIn->setMaximum( 0 );
@@ -27797,15 +27879,27 @@ void MainWindow::initCutInOut(int frames)
         ui->spinBoxCutOut->setMinimum( 0 );
         ui->spinBoxCutOut->setMaximum( 0 );
         ui->spinBoxCutOut->setValue( 0 );
+        m_newPosDropMode = 0.0;
     }
     else
     {
+        const playback_frame_range::CutRange normalized =
+            playback_frame_range::normalizeCutRange(
+                ui->spinBoxCutIn->value(),
+                ui->spinBoxCutOut->value(),
+                frames );
         ui->spinBoxCutIn->setMinimum( 1 );
         ui->spinBoxCutIn->setMaximum( frames );
-        //ui->spinBoxCutIn->setValue( 1 );
         ui->spinBoxCutOut->setMinimum( 1 );
         ui->spinBoxCutOut->setMaximum( frames );
-        //ui->spinBoxCutOut->setValue( frames );
+        if( normalized.valid )
+        {
+            ui->spinBoxCutIn->setValue( normalized.cutIn );
+            ui->spinBoxCutOut->setValue( normalized.cutOut );
+            m_newPosDropMode = playback_frame_range::clampFrameIndex(
+                ui->horizontalSliderPosition->value(),
+                frames );
+        }
     }
 }
 

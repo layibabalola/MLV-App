@@ -1507,6 +1507,8 @@ private:
     int toolButtonDarkFrameSubtractionCurrentIndex( void );
     int toolButtonGCurvesCurrentIndex( void );
     void initCutInOut( int frames );
+    bool normalizePlaybackCutRangeForLoadedClip( const char *where );
+    int normalizePlaybackRequestedFrame( int requestedFrame, const char *where );
     void initRawBlackAndWhite( void );
     double getHorizontalStretchFactor( bool downScale );
     double getVerticalStretchFactor( bool downScale );
