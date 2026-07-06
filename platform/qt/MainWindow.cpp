@@ -6027,7 +6027,7 @@ void MainWindow::drawFrame( bool updateTimecodeLabel )
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
         && !ui->actionCaching->isChecked();
-    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     renderPolicy.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
     renderPolicy.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
@@ -17012,7 +17012,7 @@ bool MainWindow::shouldUseGpu16PreviewPath( void ) const
 {
     MainWindowGpuPreviewPolicyState policyState;
     policyState.gpuViewportInstalled = gpuPreviewSurfaceActive();
-    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
     policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
@@ -17032,7 +17032,7 @@ bool MainWindow::shouldUseGpuPreviewProcessingPath( void ) const
     policyState.gpuPreviewProcessingEnvironmentRequested =
         gpuPreviewProcessingRequestedByEnvironment();
     policyState.gpuPreviewProcessingCompatible = gpuPreviewProcessingIsSupported( m_pProcessingObject );
-    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
     policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
@@ -17057,7 +17057,7 @@ bool MainWindow::shouldUseGpuBilinearDebayerPath( void ) const
         gpuBilinearDebayerRequestedByEnvironment();
     policyState.gpuBilinearDebayerCompatible =
         m_pMlvObject && doesMlvAlwaysUseAmaze( m_pMlvObject ) == 0;
-    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
     policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
@@ -17084,7 +17084,7 @@ bool MainWindow::shouldUseGpuAmazeDebayerPath( void ) const
         m_pMlvObject
         && doesMlvAlwaysUseAmaze( m_pMlvObject ) != 0
         && !ui->actionCaching->isChecked();
-    const bool scopeDisplayVisible = ui->actionShowEditArea->isChecked();
+    const bool scopeDisplayVisible = ui->dockWidgetEdit->isVisible();
     policyState.histogramEnabled = mainWindowScopeActionConsumesPresentedPixels(
         scopeDisplayVisible, ui->actionShowHistogram->isChecked() );
     policyState.waveformEnabled = mainWindowScopeActionConsumesPresentedPixels(
