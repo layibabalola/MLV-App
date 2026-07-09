@@ -582,6 +582,9 @@ int copy_gl_r16_texture_to_bayer16(unsigned int glTexture,
     return 0;
 }
 
+void clear_nyquist_dependent_scratch(const DeviceBuffers & d,
+                                     cudaStream_t stream);
+
 void run_tile(const float * dRaw,
               uint16_t * dRgb16,
               DeviceBuffers & d,
@@ -648,6 +651,7 @@ void run_tile(const float * dRaw,
                                                         rr1,
                                                         cc1);
     CK(cudaGetLastError());
+    clear_nyquist_dependent_scratch(d, stream);
     k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
     CK(cudaGetLastError());
     k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
@@ -820,6 +824,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                         rr1,
                                                         cc1);
     CHECK_LIVE_TILE_LAUNCH();
+    clear_nyquist_dependent_scratch(d, stream);
     k_nyquist_test<<<grid, block, 0, stream>>>(d.cddiffsq, d.delhvsqsum, d.nyquist, rr1, cc1);
     CHECK_LIVE_TILE_LAUNCH();
     k_nyquist_refine_row_prefix<<<1, kNyquistPrefixThreads, 0, stream>>>(d.nyquist, rr1, cc1);
@@ -935,6 +940,23 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
     }
     CK(cudaGetLastError());
 #undef CHECK_LIVE_TILE_LAUNCH
+}
+
+void clear_nyquist_dependent_scratch(const DeviceBuffers & d,
+                                     cudaStream_t stream)
+{
+    CK(cudaMemsetAsync(d.nyquist,
+                       0,
+                       kHalfTileSamples * sizeof(unsigned char),
+                       stream));
+    CK(cudaMemsetAsync(d.dgrb2h,
+                       0,
+                       kHalfTileSamples * sizeof(float),
+                       stream));
+    CK(cudaMemsetAsync(d.dgrb2v,
+                       0,
+                       kHalfTileSamples * sizeof(float),
+                       stream));
 }
 
 void run_frame_to_device_rgb16(const float * dRaw,
