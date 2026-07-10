@@ -130,6 +130,10 @@ static void llrawproc_reset_dual_iso_full20bit_timing(void)
            sizeof(g_llrawproc_last_dual_iso_full20bit_timing));
     g_llrawproc_last_dual_iso_full20bit_timing.interp_method = -1;
     g_llrawproc_last_dual_iso_full20bit_timing.final_blend_probe_mode = -1;
+    g_llrawproc_last_dual_iso_full20bit_timing.path_kind =
+        DUALISO_FULL20_PATH_NONE;
+    g_llrawproc_last_dual_iso_full20bit_timing.pattern_source =
+        DUALISO_FULL20_PATTERN_SOURCE_NONE;
 }
 
 static int dualiso_playback_mean23_override_disabled_via_env(void)
@@ -253,6 +257,12 @@ static int llrawproc_gpu_playback_retain_device_output_enabled(void)
 {
     return llrawproc_env_truthy_value(
         getenv("MLVAPP_GPU_PLAYBACK_RECON_RETAIN_DEVICE_OUTPUT"));
+}
+
+static int llrawproc_gpu_playback_recon_output_validation_enabled(void)
+{
+    return llrawproc_env_truthy_value(
+        getenv("MLVAPP_GPU_PLAYBACK_RECON_VALIDATE_OUTPUT"));
 }
 
 static MLV_THREAD_LOCAL int g_llrawproc_gpu_export_last_run_attempted = 0;
@@ -486,6 +496,7 @@ static void llrawproc_gpu_playback_public_state_from_dualiso(
     out->use_alias_map = state->use_alias_map;
     out->use_fullres = state->use_fullres;
     out->chroma_smooth_method = state->chroma_smooth_method;
+    out->playback_preview_scale_factor = state->playback_preview_scale_factor;
     memcpy(out->is_bright, state->is_bright, sizeof(out->is_bright));
     out->raw2ev = state->raw2ev;
     out->ev2raw = state->ev2raw;
@@ -519,6 +530,7 @@ static int llrawproc_gpu_playback_dualiso_state_from_public(
     out->use_alias_map = state->use_alias_map;
     out->use_fullres = state->use_fullres;
     out->chroma_smooth_method = state->chroma_smooth_method;
+    out->playback_preview_scale_factor = state->playback_preview_scale_factor;
     memcpy(out->is_bright, state->is_bright, sizeof(out->is_bright));
     out->raw2ev = state->raw2ev;
     out->ev2raw = state->ev2raw;
@@ -536,15 +548,15 @@ static int llrawproc_gpu_playback_recon_state_matches_validated_config(
 
     /* The no-readback playback path is admitted ONLY for the proven HQ
      * (high-quality) recon config class:
-     *   interp_method == 1 (AMaZE), use_alias_map == 1, use_fullres == 1,
-     *   chroma_smooth_method == 0 (chroma smoothing off).
-     * Any other config (mean/non-AMaZE interp, alias map off, fullres off, or
-     * chroma smoothing on) is unproven for the no-readback bridge and must stay
-     * fail-closed so the CPU readback path is used instead. */
+     *   interp_method == 1 (AMaZE), use_alias_map == 0 or 1, use_fullres == 1,
+     *   chroma_smooth_method == 0 or 1 (off or 2x2).
+     * Any other config (mean/non-AMaZE interp, invalid alias flag, fullres off, or
+     * unsupported chroma smoothing) is unproven for the no-readback bridge and
+     * must stay fail-closed so the CPU readback path is used instead. */
     if(state->interp_method != 1) return 0;
-    if(state->use_alias_map != 1) return 0;
+    if(state->use_alias_map != 0 && state->use_alias_map != 1) return 0;
     if(state->use_fullres != 1) return 0;
-    if(state->chroma_smooth_method != 0) return 0;
+    if(state->chroma_smooth_method < 0 || state->chroma_smooth_method > 1) return 0;
 
     /* Within the HQ-config class, admit by DEFAULT for arbitrary
      * is_bright / ev_correction / black_delta. These vary per clip
@@ -990,7 +1002,6 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     llrawprocGpuReconLutsKey_t luts_key;
     int rc = 0;
     const size_t pixel_count = raw_image_size / sizeof(uint16_t);
-
     if(rc_out) *rc_out = -1;
     if(allocated_bytes_out) *allocated_bytes_out = 0;
     if(allocated_bytes_valid_out) *allocated_bytes_valid_out = 0;
@@ -1034,6 +1045,7 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     frame.use_alias_map = state->use_alias_map;
     frame.use_fullres = state->use_fullres;
     frame.chroma_smooth_method = state->chroma_smooth_method;
+    frame.playback_preview_scale_factor = state->playback_preview_scale_factor;
     frame.apply_dither = state->apply_dither;
 
     pthread_mutex_lock(&g_llrawproc_gpu_recon_backend_mutex);
@@ -1085,7 +1097,10 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
             g->luts_configured = 0;
         }
     }
-    if(rc == 0) rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
+    if(rc == 0)
+    {
+        rc = g->run(g->backend, &frame, gpu_input, out_kind, gpu_output, gl_texture_id);
+    }
     if(rc == 0
      && out_kind == IGPU_OUT_DEVICE_BAYER16
      && g->last_device_output
@@ -2930,6 +2945,8 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 isolated_analysis ? 0 : llrawproc_gpu_export_enabled();
             const int gpu_export_trusted_requested =
                 gpu_export_requested && llrawproc_gpu_export_trusted_enabled();
+            const int gpu_playback_output_validation_requested =
+                llrawproc_gpu_playback_recon_output_validation_enabled();
             int gpu_playback_recon_used = 0;
             int gpu_export_trusted_attempted = 0;
             int gpu_export_trusted_used = 0;
@@ -2988,6 +3005,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 llrawproc_gpu_playback_reset_last_run_state();
                 if (g_llrawproc_gpu_playback_texture_prepare_only_allowed
                  && g_llrawproc_gpu_playback_texture_present_preferred
+                 && !gpu_playback_output_validation_requested
                  && !gpu_export_input)
                 {
                     gpu_playback_input = raw_image_buff;
@@ -3049,6 +3067,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                                  diso_alias_map,
                                                  diso_frblending,
                                                  chroma_smooth_mode,
+                                                 isolated_analysis
+                                                     ? 0
+                                                     : processingPlaybackPreviewModeEnabled()
+                                                     ? ((video && video->playback_scale_factor_active > 0)
+                                                         ? video->playback_scale_factor_active
+                                                         : processingPlaybackPreviewScaleFactor())
+                                                     : 0,
                                                  llrawproc_threads,
                                                  &worker->diso_full20bit_scratch,
                                                  &gpu_playback_state))
@@ -3067,6 +3092,7 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     const int gpu_playback_prepare_only_allowed =
                         g_llrawproc_gpu_playback_texture_prepare_only_allowed
                         && g_llrawproc_gpu_playback_texture_present_preferred
+                        && !gpu_playback_output_validation_requested
                         && !gpu_export_input
                         && gpu_playback_state.valid
                         && llrawproc_gpu_playback_recon_state_matches_validated_config(
@@ -3078,27 +3104,28 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                         {
                             llrpGpuPlaybackReconState_t public_gpu_playback_state;
                             llrpGpuPlaybackRetainedDeviceBayer16_t retained_device;
-                            llrpGpuPlaybackReconTiming_t retained_timing;
                             int retained_rc = -1;
                             memset(&public_gpu_playback_state,
                                    0,
                                    sizeof(public_gpu_playback_state));
                             memset(&retained_device, 0, sizeof(retained_device));
-                            memset(&retained_timing, 0, sizeof(retained_timing));
                             llrawproc_gpu_playback_public_state_from_dualiso(
                                 &gpu_playback_state,
                                 &public_gpu_playback_state);
+                            g_llrawproc_gpu_playback_last_run_attempted = 1;
                             if (llrpGpuPlaybackReconRunRetainedDeviceBayer16(
                                     &public_gpu_playback_state,
                                     gpu_playback_input,
                                     raw_image_size,
                                     &retained_device,
                                     &retained_rc,
-                                    &retained_timing)
+                                    NULL)
                              && retained_device.valid)
                             {
                                 g_llrawproc_gpu_playback_last_retained_device_bayer16 =
                                     retained_device;
+                                g_llrawproc_gpu_playback_last_run_rc = retained_rc;
+                                g_llrawproc_gpu_playback_last_used = 1;
                             }
                             else
                             {
@@ -3150,6 +3177,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                                                  diso_alias_map,
                                                  diso_frblending,
                                                  chroma_smooth_mode,
+                                                 isolated_analysis
+                                                     ? 0
+                                                     : processingPlaybackPreviewModeEnabled()
+                                                     ? ((video && video->playback_scale_factor_active > 0)
+                                                         ? video->playback_scale_factor_active
+                                                         : processingPlaybackPreviewScaleFactor())
+                                                     : 0,
                                                  llrawproc_threads,
                                                  &worker->diso_full20bit_scratch,
                                                  &gpu_export_state))
@@ -4309,6 +4343,28 @@ int llrpGetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video)
 void llrpSetDualIsoPlaybackForceDisableAliasMap(mlvObject_t * video, int value)
 {
     video->llrawproc->diso_playback_force_disable_alias_map = value ? 1 : 0;
+}
+
+void llrpSetDualIsoPlaybackRuntimeState(mlvObject_t * video,
+                                        int mode,
+                                        int interpolation,
+                                        int alias_map,
+                                        int fullres_blending,
+                                        int playback_force_mean23,
+                                        int playback_force_disable_alias_map)
+{
+    if (!video || !video->llrawproc) return;
+
+    pthread_mutex_lock(&video->llrawproc_mutex);
+    video->llrawproc->dual_iso = mode;
+    video->llrawproc->diso_averaging = interpolation;
+    video->llrawproc->diso_alias_map = alias_map;
+    video->llrawproc->diso_frblending = fullres_blending;
+    video->llrawproc->diso_playback_force_mean23 =
+        playback_force_mean23 ? 1 : 0;
+    video->llrawproc->diso_playback_force_disable_alias_map =
+        playback_force_disable_alias_map ? 1 : 0;
+    pthread_mutex_unlock(&video->llrawproc_mutex);
 }
 
 int llrpGetDualIsoValidity(mlvObject_t * video)

@@ -738,6 +738,50 @@ static void rgb_u16_downsample_2x_box(const uint16_t * __restrict src,
     }
 }
 
+static void rgb_u16_downsample_4x_two_stage_box(const uint16_t * __restrict src,
+                                                uint16_t * __restrict dst,
+                                                int src_w,
+                                                int src_h,
+                                                int threads)
+{
+    const int dst_w = src_w >> 2;
+    const int dst_h = src_h >> 2;
+    const size_t src_stride = (size_t)src_w * 3u;
+    const size_t dst_stride = (size_t)dst_w * 3u;
+
+    #pragma omp parallel for if(threads > 1) num_threads(threads)
+    for (int y = 0; y < dst_h; ++y)
+    {
+        uint16_t * drow = dst + (size_t)y * dst_stride;
+        const int sy = y << 2;
+        for (int x = 0; x < dst_w; ++x)
+        {
+            const int sx = x << 2;
+            uint16_t * out = drow + (size_t)x * 3u;
+            for (int c = 0; c < 3; ++c)
+            {
+                uint32_t half_sum = 0;
+                for (int by = 0; by < 2; ++by)
+                {
+                    for (int bx = 0; bx < 2; ++bx)
+                    {
+                        const int base_x = sx + (bx << 1);
+                        const int base_y = sy + (by << 1);
+                        const uint16_t * p00 =
+                            src + (size_t)base_y * src_stride + (size_t)base_x * 3u + c;
+                        const uint16_t * p01 = p00 + 3;
+                        const uint16_t * p10 = p00 + src_stride;
+                        const uint16_t * p11 = p10 + 3;
+                        half_sum += ((uint32_t)p00[0] + (uint32_t)p01[0]
+                                   + (uint32_t)p10[0] + (uint32_t)p11[0]) >> 2;
+                    }
+                }
+                out[c] = (uint16_t)(half_sum >> 2);
+            }
+        }
+    }
+}
+
 static void rgb_u16_upsample_2x_bilinear(const uint16_t * __restrict src,
                                          uint16_t * __restrict dst,
                                          int src_w,
@@ -789,13 +833,13 @@ static void rgb_u16_upsample_2x_bilinear(const uint16_t * __restrict src,
     }
 }
 
-static void rgb_u16_upsample_2x_bilinear_to_size(const uint16_t * __restrict src,
-                                                 uint16_t * __restrict dst,
-                                                 int src_w,
-                                                 int src_h,
-                                                 int dst_w,
-                                                 int dst_h,
-                                                 int threads)
+static void rgb_u16_upsample_2x_bilinear_to_size_generic(const uint16_t * __restrict src,
+                                                         uint16_t * __restrict dst,
+                                                         int src_w,
+                                                         int src_h,
+                                                         int dst_w,
+                                                         int dst_h,
+                                                         int threads)
 {
     if( !src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 )
     {
@@ -857,6 +901,115 @@ static void rgb_u16_upsample_2x_bilinear_to_size(const uint16_t * __restrict src
             }
         }
     }
+}
+
+static void rgb_u16_upsample_2x_bilinear_to_size(const uint16_t * __restrict src,
+                                                 uint16_t * __restrict dst,
+                                                 int src_w,
+                                                 int src_h,
+                                                 int dst_w,
+                                                 int dst_h,
+                                                 int threads)
+{
+    if( !src || !dst || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 )
+    {
+        return;
+    }
+
+    if( dst_w == (src_w << 1) && dst_h == (src_h << 1) )
+    {
+        rgb_u16_upsample_2x_bilinear(src, dst, src_w, src_h, threads);
+        return;
+    }
+
+    rgb_u16_upsample_2x_bilinear_to_size_generic(src,
+                                                 dst,
+                                                 src_w,
+                                                 src_h,
+                                                 dst_w,
+                                                 dst_h,
+                                                 threads);
+}
+
+int processingRgbU16UpsampleExact2xMatchesGenericForTesting(const uint16_t * src,
+                                                            int src_w,
+                                                            int src_h,
+                                                            int threads)
+{
+    if( !src || src_w <= 0 || src_h <= 0 )
+    {
+        return 0;
+    }
+
+    const int dst_w = src_w << 1;
+    const int dst_h = src_h << 1;
+    const size_t dst_words = (size_t)dst_w * (size_t)dst_h * 3u;
+    uint16_t * exact = (uint16_t *)calloc(dst_words, sizeof(uint16_t));
+    uint16_t * generic = (uint16_t *)calloc(dst_words, sizeof(uint16_t));
+    if( !exact || !generic )
+    {
+        free(exact);
+        free(generic);
+        return 0;
+    }
+
+    rgb_u16_upsample_2x_bilinear(src, exact, src_w, src_h, threads);
+    rgb_u16_upsample_2x_bilinear_to_size_generic(src,
+                                                 generic,
+                                                 src_w,
+                                                 src_h,
+                                                 dst_w,
+                                                 dst_h,
+                                                 threads);
+    const int matches =
+        memcmp(exact, generic, dst_words * sizeof(uint16_t)) == 0;
+    free(exact);
+    free(generic);
+    return matches;
+}
+
+int processingRgbU16DownsampleExact4xMatchesTwoStepForTesting(const uint16_t * src,
+                                                              int src_w,
+                                                              int src_h,
+                                                              int threads)
+{
+    if( !src || src_w < 4 || src_h < 4 )
+    {
+        return 0;
+    }
+
+    const int half_w = src_w >> 1;
+    const int half_h = src_h >> 1;
+    const int dst_w = half_w >> 1;
+    const int dst_h = half_h >> 1;
+    if( dst_w <= 0 || dst_h <= 0 )
+    {
+        return 0;
+    }
+
+    const size_t half_words = (size_t)half_w * (size_t)half_h * 3u;
+    const size_t dst_words = (size_t)dst_w * (size_t)dst_h * 3u;
+    uint16_t * half = (uint16_t *)calloc(half_words, sizeof(uint16_t));
+    uint16_t * two_step = (uint16_t *)calloc(dst_words, sizeof(uint16_t));
+    uint16_t * direct = (uint16_t *)calloc(dst_words, sizeof(uint16_t));
+    if( !half || !two_step || !direct )
+    {
+        free(half);
+        free(two_step);
+        free(direct);
+        return 0;
+    }
+
+    rgb_u16_downsample_2x_box(src, half, src_w, src_h, threads);
+    rgb_u16_downsample_2x_box(half, two_step, half_w, half_h, threads);
+    rgb_u16_downsample_4x_two_stage_box(src, direct, src_w, src_h, threads);
+
+    const int matches =
+        memcmp(two_step, direct, dst_words * sizeof(uint16_t)) == 0;
+    free(half);
+    free(two_step);
+    free(direct);
+    return matches;
 }
 
 static int ensure_sharpen_mask_scratch(processingObject_t * processing, size_t pixel_count)
@@ -1492,6 +1645,68 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
     processing_capture_last_shadows_highlights_rbf_timing();
     g_processing_last_shadows_highlights_filter_ms +=
         (omp_get_wtime() - shadows_highlights_filter_start) * 1000.0;
+}
+
+int processingRefreshShadowsHighlightsBlurFromRgb16(processingObject_t * processing,
+                                                    uint16_t * inputImage,
+                                                    int width,
+                                                    int height,
+                                                    int threads,
+                                                    int forceExportPolicy)
+{
+    if( !processing || !inputImage || width <= 0 || height <= 0 )
+    {
+        return 0;
+    }
+
+    const int shadows_highlights_active =
+        ( processing->shadows_highlights.shadows <= -0.01 || processing->shadows_highlights.shadows >= 0.01 )
+     || ( processing->shadows_highlights.highlights <= -0.01 || processing->shadows_highlights.highlights >= 0.01 )
+     || ( processing->clarity <= -0.01 || processing->clarity >= 0.01 );
+    if( !shadows_highlights_active )
+    {
+        return 0;
+    }
+
+    g_processing_last_shadows_highlights_resize_ms = 0.0;
+    g_processing_last_shadows_highlights_copy_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_fullres_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_halfres_downsample_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_halfres_rbf_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_halfres_upsample_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_downsample_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_rbf_ms = 0.0;
+    g_processing_last_shadows_highlights_filter_quarterres_upsample_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_left_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_right_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_horizontal_average_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_down_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_first_line_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_diff_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_factor_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_src_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_prev_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_body_store_color_assign_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_vertical_up_ms = 0.0;
+    g_processing_last_shadows_highlights_rbf_output_ms = 0.0;
+
+    const double start = omp_get_wtime();
+    const double resize_start = omp_get_wtime();
+    buffer_set_size(processing->shadows_highlights.blur_image, width, height);
+    g_processing_last_shadows_highlights_resize_ms =
+        (omp_get_wtime() - resize_start) * 1000.0;
+    processing_compute_shadows_highlights_blur(
+        processing, inputImage, width, height, threads, forceExportPolicy);
+    g_processing_last_shadows_highlights_prep_ms =
+        (omp_get_wtime() - start) * 1000.0;
+    return 1;
 }
 
 /* Apply it with multiple threads */
@@ -2159,6 +2374,41 @@ static int processing_has_direct8_shadow_highlight_adjustments(const processingO
      * exactly as it does for exports (shared helper, round-4 item 0c). */
     return fabs(processing->shadows_highlights.shadows) >= 0.01
         || fabs(processing->shadows_highlights.highlights) >= 0.01;
+}
+
+int processingHasShadowsHighlightsAdjustments(const processingObject_t * processing)
+{
+    return processing_has_direct8_shadow_highlight_adjustments(processing);
+}
+
+int processingGetShadowsHighlightsBlurData(const processingObject_t * processing,
+                                           const uint16_t ** data,
+                                           int * width,
+                                           int * height,
+                                           int * curveIndexMask)
+{
+    if( data ) *data = NULL;
+    if( width ) *width = 0;
+    if( height ) *height = 0;
+    if( curveIndexMask ) *curveIndexMask = processing_shadows_highlights_curve_index_mask_enabled();
+
+    if( !processing
+     || !processingHasShadowsHighlightsAdjustments(processing)
+     || !processing->shadows_highlights.blur_image )
+    {
+        return 0;
+    }
+
+    processing_buffer_t * buffer = processing->shadows_highlights.blur_image;
+    if( !buffer->image || buffer->width == 0 || buffer->height == 0 )
+    {
+        return 0;
+    }
+
+    if( data ) *data = get_buffer(buffer);
+    if( width ) *width = buffer->width;
+    if( height ) *height = buffer->height;
+    return 1;
 }
 
 /* A private part of the processing machine.

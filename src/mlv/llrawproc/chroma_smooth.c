@@ -118,7 +118,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
                                int black,
                                int white)
 {
-    int x,y;
+    int y;
 
 #pragma omp parallel for
     for (y = 4; y < h-5; y += 2)
@@ -157,7 +157,7 @@ static void CHROMA_SMOOTH_FUNC(int w,
         CHROMA_SMOOTH_TYPE *out_y = out + (size_t)y * (size_t)w;
         CHROMA_SMOOTH_TYPE *out_y_p1 = out_y + w;
 
-        for (x = 4; x < w-4; x += 2)
+        for (int x = 4; x < w-4; x += 2)
         {
             int r0 = row_y[x];
             int b0 = row_y_p1[x + 1];

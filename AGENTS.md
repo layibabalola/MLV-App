@@ -36,6 +36,20 @@
 - The Windows `console_tests` and `pipeline_tests` builds deploy Qt runtime/plugins with `windeployqt`, then copy MinGW/OpenMP runtime DLLs beside the exe through `tools\testing\deploy-windows-test-runtime.ps1`. If a modal missing-DLL popup appears, treat it as a workflow regression: stop using the bare command, rerun through `tools\testing\run-windows-test.ps1`, and update this note if the wrapper itself fails.
 - When running a nested `pwsh.exe -Command` from an already-running PowerShell shell, do not put `$env:PATH=...` inside outer double quotes; the outer shell expands `$env:PATH` too early and can corrupt the child PATH. Prefer the current-shell form above, or single-quote the child command string.
 
+## Aspect / RAWC de-squeeze -- apply in EVERY present/output/screenshot path (Layi 2026-06-30)
+
+The de-squeeze is NOT centralized: every render / present / export / screenshot path re-implements it,
+so a NEW path tends to FORGET it and ship a SQUEEZED image (this is why "aspect ratio is always wrong").
+Source of truth = `getMlvAspectRatio(mlvObject)` (RAWC `sampling_y/sampling_x` -> vertical stretch / picAR),
+NOT raw RAWI dims and NOT the texture's pixel WxH. When ADDING or REVIEWING any frame display/export/
+screenshot path, VERIFY the aspect matches getMlvAspectRatio. Known-good paths: GUI `setSliders`, CDNG export
+picAR->`dng.c` (`d245e785`), `GpuDisplayViewport` stretched targetRect (`ed1bffaf`). CURRENT REGRESSION:
+the M2 no-readback CUDA texture-present (`GpuDisplayWindow.cpp:624/:870`) letterboxes using display dims that
+do NOT carry the stretch -> the no-readback smoke screenshots are squeezed. Fix: pass de-squeezed
+`displayWidth/Height = (texWidth, round(texHeight * verticalStretch))` into the texture-present. Prefer to
+CENTRALIZE the de-squeeze in one helper so future paths cannot forget it. Canonical detail:
+`.claude-state/project-memory/aspect-desqueeze-always-apply.md`.
+
 ## Output-Regression Prevention -- "behavior-preserving" is the HIGHEST-risk class
 
 Three output regressions (per-clip color casts, dark/flat exposure, jerky playback) shipped over

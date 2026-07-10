@@ -59,6 +59,8 @@ namespace Ui {
 class MainWindow;
 }
 
+class QAction;
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -872,9 +874,11 @@ private:
         int lastPresentedRequestScaleFactor = -1;
         int phase3Tier = -1;
         int gpuPlaybackPipelineStatus = -1;
+        bool scopePerformanceCaveat = false;
     };
     PlaybackQualityIndicatorCache m_playbackQualityIndicatorCache;
     bool m_playbackQualityIndicatorCacheValid = false;
+    bool m_scopePerformanceWarningShown = false;
     struct DualIsoPlaybackUiCache
     {
         int toolMode = -1;
@@ -936,7 +940,12 @@ private:
     int m_lastLookAssistPostTintDelta = 0;
     int m_lastLookAssistChromaSmooth = 0;
     bool m_lastLookAssistChromaSmoothAutoApplied = false;
+    int m_lastLookAssistAnalysisFrame = -1;
+    QString m_lastLookAssistAnalysisAutoReason;
+    size_t m_lastLookAssistAnalysisAutoSampleCount = 0;
+    bool m_lastLookAssistAnalysisAfterAutoSteady = false;
     int m_lookAssistUnsettledAnalysisCount = 0;
+    int m_lookAssistAutoWarmupDeferralCount = 0;
     // De-dupe guard: the receipt whose Auto Look Assist analysis already ran this clip-open. A second
     // setSliders/deferral must not re-run the ~3s auto-WB analysis (it derives the same look and just
     // re-freezes the UI). Keyed on the receipt pointer so different clips re-analyze naturally.
@@ -983,6 +992,16 @@ private:
     double m_lastDrawFrameReadyScopesMs = 0.0;
     double m_lastDrawFrameReadyOverlayMs = 0.0;
     double m_lastDrawFrameReadyTotalMs = 0.0;
+    bool m_playbackTimelineAdvancePending = false;
+    uint64_t m_playbackTimelineExpectedRequestSerial = 0;
+    uint64_t m_playbackTimelineIssuedRequestSerial = 0;
+    uint64_t m_playbackTimelineSourceRequestSerial = 0;
+    uint32_t m_playbackTimelineSourceFrame = 0;
+    bool m_playbackTimelineAdvanceEarly = false;
+    bool m_playbackTimelinePredictiveGpuTexNr = false;
+    double m_playbackTimelineAdvanceIssueStageTime = 0.0;
+    double m_playbackTimelineSourceFrameReadyEmitStageTime = 0.0;
+    double m_playbackTimelineSourceDrawBeginStageTime = 0.0;
     double m_playbackScopeLastUpdateTime = 0.0;
     uint64_t m_playbackScopeUpdateCount = 0;
     uint64_t m_playbackScopeSkipCount = 0;
@@ -993,6 +1012,7 @@ private:
     double m_lastPlaybackAudioSyncTime = 0.0;
     bool m_playbackSmokeActive = false;
     bool m_playbackSmokeFrameTelemetry = false;
+    bool m_playbackSmokeTimelineTelemetry = false;
     uint64_t m_playbackSmokeSessionId = 0;
     int m_playbackSmokeStartPosition = 0;
     int m_playbackSmokeStartCutIn = 0;
@@ -1003,6 +1023,8 @@ private:
     int m_playbackSmokePresentedFrames = 0;
     int m_playbackSmokeFirstPresentedFrame = -1;
     int m_playbackSmokeLastPresentedFrame = -1;
+    uint64_t m_dualIsoWarmupTelemetryPresentationGeneration = 0;
+    int m_dualIsoWarmupTelemetryPresentedFrames = 0;
     uint64_t m_playbackSmokeStartRequestSerial = 0;
     uint64_t m_playbackSmokeStartPrepStaleDrops = 0;
     uint64_t m_playbackSmokeStartPrepGenerationDrops = 0;
@@ -1259,6 +1281,15 @@ private:
     GpuDisplayViewport::PresentationOptions m_lastQueuedGpuPresentationOptions;
     GpuPreviewProcessingConfig m_lastQueuedGpuPreviewProcessingConfig;
     QString m_lastQueuedPlaybackProcessingReason;
+    bool m_gpuPreviewProcessingConfigCacheValid = false;
+    uint64_t m_gpuPreviewProcessingConfigCacheGeneration = 1;
+    uint64_t m_gpuPreviewProcessingConfigCacheEntryGeneration = 0;
+    const processingObject_t *m_gpuPreviewProcessingConfigCacheProcessing = nullptr;
+    int m_gpuPreviewProcessingConfigCacheDualIso = 0;
+    int m_gpuPreviewProcessingConfigCacheHighestGreenDiso = 0;
+    int m_gpuPreviewProcessingConfigCacheGradientHighestGreenDiso = 0;
+    GpuPreviewProcessingConfig m_gpuPreviewProcessingConfigCache;
+    QString m_gpuPreviewProcessingConfigCacheReason;
     std::deque<PresentationRequestContext> m_pendingPresentationRequests;
     PresentationRequestContext m_lastPresentedRequestContext;
     bool m_lastPresentedRequestContextValid = false;
@@ -1339,6 +1370,9 @@ private:
                                const PresentationRequestContext &requestContext );
     bool isFrameSettledForAnalysis( int frameIndex,
                                     uint64_t requestSerialFloor ) const;
+    bool isLookAssistFrameSettledForAnalysis( int baselineFrame,
+                                              uint64_t requestSerialFloor,
+                                              int *analysisFrame );
     void beginPlaybackSmokeTelemetry( void );
     void notePlaybackSmokePresentedFrame( uint64_t displayFrame,
                                           const RenderFrameThread::ReadyFrame &readyFrame,
@@ -1351,7 +1385,7 @@ private:
     void playbackPrepThreadLoop( void );
     void presentPlaybackPreparedFrame( const PlaybackPrepResult &result );
     void finishPresentedFrame( uint64_t displayFrame,
-                               const RenderFrameThread::ReadyFrame &readyFrame,
+                               RenderFrameThread::ReadyFrame &readyFrame,
                                const PresentationRequestContext &requestContext,
                                const uint8_t *rgb8DisplaySource,
                                uint8_t underOver,
@@ -1412,11 +1446,18 @@ private:
     QString activeClipPhase3Fingerprint( void ) const;
     QStringList pinnedClipFingerprintsForPhase3( void ) const;
     int  effectivePlaybackScaleFactorForRequest( void ) const;
+    MainWindowGpuPreviewPolicyState gpuPreviewPolicyForCurrentScopeState(
+        bool includeVisibleScopes ) const;
+    bool visibleScopesBlockGpuTexturePlayback( void ) const;
+    void maybeShowScopePerformanceWarning( QAction *scopeAction );
     static bool dualIsoPlaybackPreferHqMean23GuiFallback( void );
     void beginPlayToFirstFrameMeasurement( void );
     void notePlayToFirstFramePresentation( int presentedFrame );
     bool primePlaybackCacheOnPlayStart( void );
     void invalidateDisplayPreviewCache( void );
+    void invalidateGpuPreviewProcessingConfigCache( void );
+    GpuPreviewProcessingConfig gpuPreviewProcessingConfigForCurrentSettings(
+        QString *reason );
     void clearPresentationForClipOpen( const char *reason );
     void requestFrameRefresh( bool resetCurrentFrameCache, const char *reason = nullptr );
     void readXmlElementsFromFile(QXmlStreamReader *Rxml, ReceiptSettings *receipt , int version);
@@ -1442,6 +1483,7 @@ private:
     bool shouldUseGpuPreviewProcessingPath( void ) const;
     bool shouldUseGpuBilinearDebayerPath( void ) const;
     bool shouldUseGpuAmazeDebayerPath( void ) const;
+    bool gpuPreviewSurfaceActive( void ) const;
     void setToolButtonFocusPixels( int index );
     void setToolButtonFocusPixelsIntMethod( int index );
     void setToolButtonBadPixels( int index );
@@ -1473,6 +1515,8 @@ private:
     int toolButtonDarkFrameSubtractionCurrentIndex( void );
     int toolButtonGCurvesCurrentIndex( void );
     void initCutInOut( int frames );
+    bool normalizePlaybackCutRangeForLoadedClip( const char *where );
+    int normalizePlaybackRequestedFrame( int requestedFrame, const char *where );
     void initRawBlackAndWhite( void );
     double getHorizontalStretchFactor( bool downScale );
     double getVerticalStretchFactor( bool downScale );

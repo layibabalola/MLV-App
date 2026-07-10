@@ -25,6 +25,12 @@ param(
     [int]$ExpectedScaleRequest = 4,
     [int]$ExpectedVisualScaleRequest = -2,
     [int]$ExpectedQualityMode = 2,
+    [string]$ExpectedStretchX = "",
+    [string]$ExpectedStretchY = "",
+    [int]$ExpectedHStretchIndex = -1,
+    [int]$ExpectedVStretchIndex = -1,
+    [string]$ExpectedAspectMode = "",
+    [double]$ExpectedStretchTolerance = 0.0001,
     [switch]$UsePersistedPlaybackSettings,
     [switch]$PreferHqMean23,
     [switch]$FrameTelemetry,
@@ -1001,6 +1007,12 @@ if ($DryRun) {
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
+            expectedStretchX = $ExpectedStretchX
+            expectedStretchY = $ExpectedStretchY
+            expectedHStretchIndex = $ExpectedHStretchIndex
+            expectedVStretchIndex = $ExpectedVStretchIndex
+            expectedAspectMode = $ExpectedAspectMode
+            expectedStretchTolerance = $ExpectedStretchTolerance
             qualityModeOverride = $QualityMode
             scaleFactorOverride = $ScaleFactor
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
@@ -1522,6 +1534,44 @@ $screenshotAspectEvidence = if ($CaptureScreenshot) {
     $null
 }
 
+$expectedStretchXValue = if ([string]::IsNullOrWhiteSpace($ExpectedStretchX)) { $null } else { Convert-ToNullableDouble $ExpectedStretchX }
+$expectedStretchYValue = if ([string]::IsNullOrWhiteSpace($ExpectedStretchY)) { $null } else { Convert-ToNullableDouble $ExpectedStretchY }
+if (-not [string]::IsNullOrWhiteSpace($ExpectedStretchX) -and $null -eq $expectedStretchXValue) {
+    $validationFailures += "ExpectedStretchX '$ExpectedStretchX' could not be parsed as a number."
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedStretchY) -and $null -eq $expectedStretchYValue) {
+    $validationFailures += "ExpectedStretchY '$ExpectedStretchY' could not be parsed as a number."
+}
+if ($null -ne $expectedStretchXValue -and
+    ($null -eq $screenshotAspectEvidence -or
+     $null -eq $screenshotAspectEvidence.stretchX -or
+     [Math]::Abs([double]$screenshotAspectEvidence.stretchX - [double]$expectedStretchXValue) -gt $ExpectedStretchTolerance)) {
+    $validationFailures += "Screenshot stretchX was $($screenshotAspectEvidence.stretchX); expected $expectedStretchXValue (+/- $ExpectedStretchTolerance)."
+}
+if ($null -ne $expectedStretchYValue -and
+    ($null -eq $screenshotAspectEvidence -or
+     $null -eq $screenshotAspectEvidence.stretchY -or
+     [Math]::Abs([double]$screenshotAspectEvidence.stretchY - [double]$expectedStretchYValue) -gt $ExpectedStretchTolerance)) {
+    $validationFailures += "Screenshot stretchY was $($screenshotAspectEvidence.stretchY); expected $expectedStretchYValue (+/- $ExpectedStretchTolerance)."
+}
+if ($ExpectedHStretchIndex -ge 0 -and
+    ($null -eq $screenshotAspectEvidence -or
+     $null -eq $screenshotAspectEvidence.hStretchIndex -or
+     [int]$screenshotAspectEvidence.hStretchIndex -ne $ExpectedHStretchIndex)) {
+    $validationFailures += "Screenshot hStretchIndex was $($screenshotAspectEvidence.hStretchIndex); expected $ExpectedHStretchIndex."
+}
+if ($ExpectedVStretchIndex -ge 0 -and
+    ($null -eq $screenshotAspectEvidence -or
+     $null -eq $screenshotAspectEvidence.vStretchIndex -or
+     [int]$screenshotAspectEvidence.vStretchIndex -ne $ExpectedVStretchIndex)) {
+    $validationFailures += "Screenshot vStretchIndex was $($screenshotAspectEvidence.vStretchIndex); expected $ExpectedVStretchIndex."
+}
+if (-not [string]::IsNullOrWhiteSpace($ExpectedAspectMode) -and
+    ($null -eq $screenshotAspectEvidence -or
+     [string]$screenshotAspectEvidence.mode -ne $ExpectedAspectMode)) {
+    $validationFailures += "Screenshot aspect mode was '$($screenshotAspectEvidence.mode)'; expected '$ExpectedAspectMode'."
+}
+
 # Temporal playback-artifact gate (flicker / stall / cadence jitter) parsed from the interactive trace.
 $playbackArtifacts = $null
 if ($DetectPlaybackArtifacts) {
@@ -1584,6 +1634,12 @@ $result = [pscustomobject]@{
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
+            expectedStretchX = $ExpectedStretchX
+            expectedStretchY = $ExpectedStretchY
+            expectedHStretchIndex = $ExpectedHStretchIndex
+            expectedVStretchIndex = $ExpectedVStretchIndex
+            expectedAspectMode = $ExpectedAspectMode
+            expectedStretchTolerance = $ExpectedStretchTolerance
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         matchedUserShellDefaults = [pscustomobject]@{
@@ -1759,6 +1815,21 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
         ($null -ne $validatedScaleRequest -and [int]$validatedScaleRequest -eq $ExpectedScaleRequest))
     qualityModeMatched = ($ExpectedQualityMode -lt 0 -or
         ($null -ne $validatedQualityMode -and [int]$validatedQualityMode -eq $ExpectedQualityMode))
+    aspectMatched =
+        (($null -eq $expectedStretchXValue -or
+          ($null -ne $screenshotAspectEvidence -and $null -ne $screenshotAspectEvidence.stretchX -and
+           [Math]::Abs([double]$screenshotAspectEvidence.stretchX - [double]$expectedStretchXValue) -le $ExpectedStretchTolerance)) -and
+         ($null -eq $expectedStretchYValue -or
+          ($null -ne $screenshotAspectEvidence -and $null -ne $screenshotAspectEvidence.stretchY -and
+           [Math]::Abs([double]$screenshotAspectEvidence.stretchY - [double]$expectedStretchYValue) -le $ExpectedStretchTolerance)) -and
+         ($ExpectedHStretchIndex -lt 0 -or
+          ($null -ne $screenshotAspectEvidence -and $null -ne $screenshotAspectEvidence.hStretchIndex -and
+           [int]$screenshotAspectEvidence.hStretchIndex -eq $ExpectedHStretchIndex)) -and
+         ($ExpectedVStretchIndex -lt 0 -or
+          ($null -ne $screenshotAspectEvidence -and $null -ne $screenshotAspectEvidence.vStretchIndex -and
+           [int]$screenshotAspectEvidence.vStretchIndex -eq $ExpectedVStretchIndex)) -and
+         ([string]::IsNullOrWhiteSpace($ExpectedAspectMode) -or
+          ($null -ne $screenshotAspectEvidence -and [string]$screenshotAspectEvidence.mode -eq $ExpectedAspectMode)))
     failures = $validationFailures
     warnings = $validationWarnings
     settledValidationRecommendedSeconds = $settledValidationRecommendedSeconds

@@ -70,6 +70,14 @@ Append at the physical end of the file (EOF) so the newest block is unambiguous.
 **COLLABORATION_END** is a control entry that authorizes tearing down a lane's idle watcher (see
 "Collaboration teardown" under the idle-heartbeat section) — it is the ONLY entry that does.
 
+Status discipline:
+- `OPEN` means the block still requires action or acknowledgement and may pin the live ledger.
+- Routine informational `STATUS`, `ACK`, and `HEARTBEAT` entries should be written as
+  `RESOLVED` unless they explicitly request action from the other lane.
+- When an `OPEN` item is superseded, acknowledged, merged, blocked by a newer item, or moved into
+  a sidecar handoff, mark YOUR old block `RESOLVED` in the same turn. Do not leave stale
+  informational entries `OPEN`.
+
 A **REVIEW** entry additionally carries two dedicated lines so any downstream finalize/closeout
 gate can parse it unambiguously:
 - `Range:` — value EXACTLY equals the canonical full-40-char `startHead..head` range token.
@@ -78,11 +86,42 @@ gate can parse it unambiguously:
 ## Read/write order (per heartbeat) — no ambiguity
 1. **READ** the other lane file.
 2. Process entries with `SEQ > your cursor`, oldest → newest.
-3. Do the work (implement / review).
-4. **WRITE** your response entries to **your** file; bump **your** cursor. Mark your own prior
+3. **Budget gate before work:** run the archive helper on YOUR lane file when it is over the
+   live budget, before implementation/review/build/profiling work. If your lane remains over
+   budget after safe archiving because stale actionable blocks are still `OPEN`, write one
+   compact `BLOCKER` / `STATUS` explaining the pinned blocks and do not add verbose evidence
+   to the live ledger; put details in a sidecar under `.claude-state/`.
+4. Do the work (implement / review). **No inbound is NOT no work:** if you have an open assigned
+   task or a clear forward direction, that IS your work — proceed (see *Anti-passivity* below);
+   never sit in liveness/ledger mode while assigned work is open.
+5. **WRITE** your response entries to **your** file; bump **your** cursor. Mark your own prior
    entries RESOLVED by editing their `status:` line (your file only). Do not rewrite history
    beyond your own status lines.
-5. Archive (below).
+6. Archive again if the write pushed your lane over budget.
+
+## Anti-passivity — liveness/ledger mode is NOT a holding pattern (2026-06-29)
+Keep the work MOVING; do not emit liveness heartbeats while assigned work is open. The failure this
+prevents: after a detour (the NoLA historical matrix) resolved and the reviewer named the next work
+("forward on Block 2 speckle") but did NOT post a fresh ceremonial HANDOFF, the implementer held in
+liveness/ledger mode for many heartbeats instead of resuming the task it was already assigned —
+"no new precise HANDOFF" was misread as "no work."
+
+- **An assigned task RESUMES when its hold/detour/dependency clears — no fresh ceremonial HANDOFF is
+  required to continue work already assigned.** If a HANDOFF assigned you a task and a detour
+  interrupted it, finishing the detour means RESUME it; do not wait to be re-handed the same task.
+- **Direction is authorization.** The reviewer naming the next valuable work (in a REVIEW/STATUS) or
+  the human giving an explicit-enough instruction IS the go-ahead — proceed; do not wait for ceremony.
+- **"No new message" ≠ "no work"** — applies to any open assigned task or clear forward direction, not
+  just an open CHANGES_REQUESTED.
+- **Liveness heartbeats are NOT progress and NOT a holding pattern.** If you emit consecutive
+  liveness/ledger entries while you have open assigned work or a clear direction, you are stuck
+  passive: RESUME the work, or post a concrete BLOCKER. A legitimate HOLD must name the SPECIFIC thing
+  it waits on AND the exact release condition (e.g. "holding the GUI gate until peer posts merge-done");
+  an open-ended "waiting for a handoff" hold is forbidden.
+- **Reviewer mirror duty: when YOU resolve a detour/question whose next work is the peer's, POST the
+  explicit forward HANDOFF** (TYPE HANDOFF, `YOUR ACTION:` + precise scope) — do NOT leave the
+  direction implied in REVIEW/STATUS prose and then idle in gate-prep/liveness while the peer waits.
+  Naming "forward on X" in a REVIEW is NOT a handoff; the peer will hold for the ceremony.
 
 ## ACK discipline
 Every HANDOFF and every REVIEW must be ACKed by the other lane within one heartbeat of being
@@ -96,23 +135,30 @@ is a real cost. Keep YOUR lane file small.
 - **Budget:** your live lane file holds at most the **~15 most-recent SEQ blocks** PLUS any still-OPEN
   entries PLUS the header. That is the target size, not a 40-entry ceiling.
 - **Cadence:** check the budget **at the start of every session** and **on every turn that touches the
-  collaboration** (do it alongside the heartbeat-liveness re-verify). If you are over budget, prune
-  immediately — do not let it drift to hundreds of entries (it has before).
+  collaboration** (do it alongside the heartbeat-liveness re-verify). This is a **pre-work hard gate**:
+  if you are over budget, prune immediately before implementation/review/build/profiling work — do not
+  let it drift to hundreds of entries (it has before).
 - **Operator (the teeth):** run the shared helper against YOUR OWN file; it is conservative and
   dry-run by default:
   ```
   pwsh -NoProfile -ExecutionPolicy Bypass -File <skill>/archive-ledger.ps1 \
     -LaneFile <your lane .md> -OtherLaneFile <other lane .md> [-KeepRecent 15] [-Apply]
   ```
-  It moves a block to `archive/<lane>-<UTCdate>.md` ONLY if it is **RESOLVED**, **its SEQ ≤ the other
-  lane's cursor** (they have read it), AND it is older than the keep-recent window. It NEVER archives
-  an OPEN/ACKED block, the recent window, or anything the other lane has not yet read; it backs up the
-  original and leaves a pointer line. Run dry-run first, then `-Apply`.
+  It moves a block to `archive/<lane>-<UTCdate>.md` only when it is safe: its SEQ ≤ the other
+  lane's cursor (they have read it), it is older than the keep-recent window, and it is either
+  `RESOLVED` or a non-actionable informational type the helper recognizes (`STATUS`, `ACK`,
+  `HEARTBEAT`, `OBSERVATION`). It NEVER archives actionable `OPEN` blocks (`HANDOFF`, `REVIEW`,
+  `QUESTION`, `BLOCKER`), the recent window, or anything the other lane has not yet read; it backs
+  up the original and leaves a pointer line. Run dry-run first, then `-Apply`.
 - **Safety:** only archive entries the OTHER lane has already ACKed (its cursor proves it). Never touch
   the other lane's file or archive. Archived history stays in `archive/` (recoverable), so pruning is
   loss-free.
 - This is per-lane: each lane prunes only its own file. A bloated other-lane file is a nudge to send
   (the other lane must prune its own); you cannot prune it for them.
+- **Sidecar rule:** large evidence tables, screenshot lists, build matrices, long root-cause notes,
+  and session handoffs belong in `.claude-state/coordination/dual-lane/*.md` or
+  `.claude-state/profiling/**`, with one pointer line in the live ledger. Do not paste long evidence
+  dumps into `codex.md` / `claude.md`.
 
 ---
 
@@ -153,6 +199,26 @@ with each side thinking the other is idle. Both lanes MUST therefore:
   compaction and can be duplicated, so do NOT treat it as the source of truth. **Directly re-read the
   other lane file from your cursor at the START of every turn that touches the collaboration**, even
   when no notification arrived. "No notification" is never proof there is nothing new.
+- **A notification is a SNAPSHOT; the cursors are the TRUTH.** A WAKE / heartbeat / STALE line (and the
+  harness-surfaced WAKE event text, and any "no new entries" prose a lane writes) is point-in-time and
+  LAGS the live files — a "no new entries" claim is true only as of its own timestamp; the peer may post a
+  second later (2026-06-28: Codex SEQ372 "no new Claude entries" was written 22s before Claude SEQ131, and
+  was briefly misread as a possible lane split). So NEVER conclude split / stall / missed-message / idle
+  from a snapshot. Diagnose coordination state ONLY from the authoritative one-shot
+  `heartbeat-check.ps1 -Status` (prints both ledgers' max-SEQ, BOTH header cursors, the inbound/outbound
+  gaps, peer age, and a verdict) or an equivalent direct read of both `## SEQ` headers + both header
+  cursors. When you WRITE a liveness / "no new entries" line, self-date it (your read time + the exact
+  max-SEQ you saw) so a later reader can tell at a glance whether it is stale.
+- **A STALENESS ALERT is ledger-age only — distinguish DARK from HEADS-DOWN before escalating.** The
+  helper flags the peer "stale" when its newest entry is older than the threshold (~60 min), but a peer
+  mid-build/iterate during an implementation phase legitimately posts nothing for that long. Before any
+  escalation, run `-Status`, confirm the peer's watcher PID is alive, AND check for active peer WORK
+  (build/capture/analysis processes — cc1plus/g++/mingw32-make/qmake/MLVApp/python — and recent writes
+  in the peer's worktree, e.g. `C:\mlvtmp\wt-*`). If the peer is demonstrably WORKING it is a FALSE
+  alarm: note it self-dated and keep waiting — do NOT post a RESUME-REQUEST, ask for a restart, or cry
+  wolf. Escalate (RESUME-REQUEST + ask the human to restart) ONLY when the peer is genuinely INERT
+  (watcher dead, or no active process AND no recent worktree writes). This is the mirror of *Anti-passivity*:
+  ledger silence proves neither "dead" nor "idle" by itself.
 - **Non-deferral:** when the heartbeat (or a direct read) surfaces a new entry, process it
   PROMPTLY. Do not get absorbed in an unrelated task and let the channel starve — coordination-doc
   processing is not deferrable behind long side-work.

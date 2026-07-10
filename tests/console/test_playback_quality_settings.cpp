@@ -85,8 +85,8 @@ TEST(PlaybackQualitySettings, RoundTripQualityMode)
 
     clearAllPlaybackQualityKeys();
 
-    /* Default should be Auto. */
-    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Auto),
+    /* Fresh/unset settings default to Quality. */
+    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::HighQuality),
                static_cast<int>(playbackQualityModeFromSettings()) );
 
     playbackQualityModeWriteToSettings( PlaybackQualityMode::HighQuality );
@@ -106,12 +106,12 @@ TEST(PlaybackQualitySettings, RoundTripQualityMode)
                    PlaybackQualitySettings::kApplication() );
     set.setValue( PlaybackQualitySettings::kKeyQualityMode(), -1 );
     set.sync();
-    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Auto),
+    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::HighQuality),
                static_cast<int>(playbackQualityModeFromSettings()) );
 
     set.setValue( PlaybackQualitySettings::kKeyQualityMode(), 999 );
     set.sync();
-    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::Auto),
+    ASSERT_EQ( static_cast<int>(PlaybackQualityMode::HighQuality),
                static_cast<int>(playbackQualityModeFromSettings()) );
 
     clearAllPlaybackQualityKeys();

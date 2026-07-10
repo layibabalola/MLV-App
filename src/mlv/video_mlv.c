@@ -3357,8 +3357,88 @@ int getMlvRawFrameProcessedUint16DirectWithChromaSmooth(mlvObject_t * video,
                                                    frameIndex,
                                                    outputFrame,
                                                    bit_shift,
-                                                   1,
-                                                   chroma_smooth_method);
+                                                    1,
+                                                    chroma_smooth_method);
+}
+
+int get_mlv_raw_frame_debayered_isolated_analysis_scaled(mlvObject_t * video,
+                                                         uint64_t frameIndex,
+                                                         uint16_t * outputFrame,
+                                                         int scaleFactor,
+                                                         int threads,
+                                                         int * outWidth,
+                                                         int * outHeight,
+                                                         int * outScaleFactor)
+{
+    if (!video || !outputFrame)
+    {
+        return 0;
+    }
+
+    const int full_w = (int)getMlvWidth(video);
+    const int full_h = (int)getMlvHeight(video);
+    const int normalized_scale = mlv_effective_playback_scale_factor(video, scaleFactor);
+    if (full_w <= 0 || full_h <= 0 || normalized_scale <= 1)
+    {
+        return 0;
+    }
+
+    const int out_w = full_w / normalized_scale;
+    const int out_h = full_h / normalized_scale;
+    if (out_w <= 0 || out_h <= 0)
+    {
+        return 0;
+    }
+
+    const uint64_t full_pixels = (uint64_t)full_w * (uint64_t)full_h;
+    const uint64_t out_words = (uint64_t)out_w * (uint64_t)out_h * 3u;
+    uint16_t * raw_frame = mlv_ensure_thread_u16_buffer(full_pixels);
+    if (!raw_frame)
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    int bit_shift = 0;
+    if (getMlvRawFrameProcessedUint16Direct(video, frameIndex, raw_frame, &bit_shift))
+    {
+        memset(outputFrame, 0, (size_t)out_words * sizeof(uint16_t));
+        return 0;
+    }
+
+    const int downsample_threads = threads > 0 ? threads : 1;
+    const double debayer_start = mlv_stage_timing_now();
+    if (normalized_scale == 8)
+    {
+        pl_downsample_bayer_to_rgb_8x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    else if (normalized_scale == 4)
+    {
+        pl_downsample_bayer_to_rgb_4x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    else
+    {
+        pl_downsample_bayer_to_rgb_2x(raw_frame, full_w, full_h,
+                                      outputFrame, bit_shift, downsample_threads);
+    }
+    g_mlv_last_debayered_frame_ms = (mlv_stage_timing_now() - debayer_start) * 1000.0;
+    mlv_stage_timing_note_elapsed("debayered_frame", frameIndex, g_mlv_last_debayered_frame_ms);
+
+    if (outWidth)
+    {
+        *outWidth = out_w;
+    }
+    if (outHeight)
+    {
+        *outHeight = out_h;
+    }
+    if (outScaleFactor)
+    {
+        *outScaleFactor = normalized_scale;
+    }
+    return 1;
 }
 
 int getMlvRawFrameProcessedUint16(mlvObject_t * video,
@@ -4387,6 +4467,13 @@ static int mlv_render_scaled_rgb16_x1_half_preview_core(mlvObject_t * video,
 {
     if (!video || !outputFrame || !llrpHQDualIso(video)) return 0;
     if (halvings != 1 && halvings != 2) return 0;
+    if (!mlv_phase4bv2_receipt_compatible(video))
+    {
+        mlv_phase4bv2_log_rejection(halvings == 2
+                                    ? "x1 quarter-res receipt incompatible"
+                                    : "x1 half-res receipt incompatible");
+        return 0;
+    }
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
     const int eff_h = (full_h / 16) * 16;            /* 16-aligned: dual-ISO 4-row phase */
@@ -4661,6 +4748,12 @@ static int mlv_render_scaled_rgb16_v2(mlvObject_t * video,
                                                                              &x2_receipt_flags_snapshot);
                 }
             }
+        }
+        if (!mlvPlaybackAggressivePreviewMode()
+         && mlv_phase4bv2_allow_fast_hq_via_env(scaleFactor)
+         && mlv_render_scaled_rgb16_x2_full_xy(video, frameIndex, outputFrame, threads))
+        {
+            return 1;
         }
         if (!mlvPlaybackAggressivePreviewMode()
          && mlv_quarterres_x2_preview_enabled()
@@ -5543,24 +5636,44 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     }
 }
 
-static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
+static void mlv_compute_desired_processing_bw_levels(mlvObject_t * video,
+                                                     float * desired_black_level,
+                                                     int * desired_white_level,
+                                                     int * desired_bit_depth,
+                                                     int * expected_black_level,
+                                                     int * expected_white_level)
 {
-    const int desired_bit_depth = llrpHQDualIso(video)
+    *desired_bit_depth = llrpHQDualIso(video)
         ? video->llrawproc->dng_bit_depth
         : getMlvBitdepth(video);
-    const float desired_black_level = llrpHQDualIso(video)
+    *desired_black_level = llrpHQDualIso(video)
         ? (float)video->llrawproc->dng_black_level
         : (float)getMlvBlackLevel(video);
-    const int desired_white_level = llrpHQDualIso(video)
+    *desired_white_level = llrpHQDualIso(video)
         ? video->llrawproc->dng_white_level
         : getMlvWhiteLevel(video);
-    const int bits_shift = 16 - desired_bit_depth;
-    const int expected_black_level =
-        (desired_black_level > 0.0f)
-            ? (int)(desired_black_level * pow(2.0, bits_shift))
+    const int bits_shift = 16 - *desired_bit_depth;
+    *expected_black_level =
+        (*desired_black_level > 0.0f)
+            ? (int)(*desired_black_level * pow(2.0, bits_shift))
             : 0;
-    const int expected_white_level =
-        (int)((double)(desired_white_level << bits_shift) * 0.993);
+    *expected_white_level =
+        (int)((double)(*desired_white_level << bits_shift) * 0.993);
+}
+
+static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
+{
+    float desired_black_level = 0.0f;
+    int desired_white_level = 0;
+    int desired_bit_depth = 0;
+    int expected_black_level = 0;
+    int expected_white_level = 0;
+    mlv_compute_desired_processing_bw_levels(video,
+                                             &desired_black_level,
+                                             &desired_white_level,
+                                             &desired_bit_depth,
+                                             &expected_black_level,
+                                             &expected_white_level);
 
     if ((int)video->processing->black_level != expected_black_level
      || video->processing->white_level != expected_white_level)
@@ -5570,6 +5683,40 @@ static void mlv_sync_processing_black_white_levels(mlvObject_t * video)
                                         desired_white_level,
                                         desired_bit_depth);
     }
+}
+
+/* The fast/subset playback-preview path renders through the GPU-preview
+ * config (GpuPreviewProcessing) instead of the classic processed-frame cores,
+ * so it never reaches the per-frame mlv_sync_processing_black_white_levels()
+ * those cores run. For an HQ dual-ISO clip whose recon rescales the data
+ * range (e.g. restricted-range lossless: RAWI white ~6000 scaled to a
+ * ~63000-domain), the processing object then keeps its clip-open pre-scale
+ * levels and the subset renders the recon-scaled data several times too
+ * bright with clipped highlights. These two entry points let the subset path
+ * mirror the cores' sync: check first (cheap, no mutation), then sync under
+ * the caller's render-idle guard. */
+int mlvProcessingDualIsoBlackWhiteLevelsOutOfSync(mlvObject_t * video)
+{
+    if (!video || !video->processing || !video->llrawproc) return 0;
+    float desired_black_level = 0.0f;
+    int desired_white_level = 0;
+    int desired_bit_depth = 0;
+    int expected_black_level = 0;
+    int expected_white_level = 0;
+    mlv_compute_desired_processing_bw_levels(video,
+                                             &desired_black_level,
+                                             &desired_white_level,
+                                             &desired_bit_depth,
+                                             &expected_black_level,
+                                             &expected_white_level);
+    return ((int)video->processing->black_level != expected_black_level)
+        || (video->processing->white_level != expected_white_level);
+}
+
+void mlvSyncProcessingDualIsoBlackWhiteLevels(mlvObject_t * video)
+{
+    if (!video || !video->processing || !video->llrawproc) return;
+    mlv_sync_processing_black_white_levels(video);
 }
 
 static int mlv_can_use_direct_processed_frame8_path(mlvObject_t * video)
@@ -6015,6 +6162,7 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
                                                                                 uint8_t * outputFrame,
                                                                                 int threads,
                                                                                 int scaleFactor,
+                                                                                int allowScale1StateDebayer,
                                                                                 int recordTelemetry)
 {
     if (!video || !reconnedRawFrame || !outputFrame || !processing) return 0;
@@ -6026,8 +6174,11 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const int out_h = (eff_scale > 1) ? (full_h / eff_scale) : full_h;
 
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3;
-    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_frame_size);
-    if (!unprocessed_frame || eff_scale <= 1)
+    const uint64_t rgb_buf_words = (eff_scale > 1)
+        ? rgb_frame_size
+        : (uint64_t)full_w * (uint64_t)full_h * 3u;
+    uint16_t * unprocessed_frame = mlv_ensure_thread_scaled_input_buffer(rgb_buf_words);
+    if (!unprocessed_frame || (eff_scale <= 1 && !allowScale1StateDebayer))
     {
         memset(outputFrame, 0, (size_t)rgb_frame_size);
         return 0;
@@ -6044,7 +6195,17 @@ static int mlv_render_processed_frame8_direct_with_processing_from_reconned_raw(
     const double processed16_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const double debayer_start = recordTelemetry ? mlv_stage_timing_now() : 0.0;
     const int bit_shift = llrpHQDualIso(video) ? 0 : (16 - video->RAWI.raw_info.bits_per_pixel);
-    if (eff_scale == 4)
+    if (eff_scale == 1)
+    {
+        /* CUDA no-readback x1 presents from the retained reconstructed Bayer
+         * on the GPU. This render is only the fresh Look Assist frame-state
+         * producer, so avoid the full CPU AMaZE fallback that otherwise
+         * dominates the path; the displayed pixels still come from the CUDA
+         * AMaZE/device-Bayer presenter. */
+        debayerBasicU16(unprocessed_frame, reconnedRawFrame, full_w, full_h,
+                        threads, bit_shift);
+    }
+    else if (eff_scale == 4)
     {
         pl_downsample_bayer_to_rgb_4x(reconnedRawFrame, full_w, full_h,
                                       unprocessed_frame, bit_shift, threads);
@@ -7005,7 +7166,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                  const uint16_t * reconnedRawFrame,
                                                  uint8_t * outputFrame,
                                                  int threads,
-                                                 int scaleFactor)
+                                                 int scaleFactor,
+                                                 int allowScale1StateDebayer)
 {
     const double total_start = mlv_stage_timing_now();
     const int previous_preview_mode = processingPlaybackPreviewModeEnabled();
@@ -7038,7 +7200,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
     const int out_w = (normalizedScale > 1) ? (full_w / normalizedScale) : full_w;
     const int out_h = (normalizedScale > 1) ? (full_h / normalizedScale) : full_h;
     const uint64_t rgb_frame_size = (uint64_t)out_w * (uint64_t)out_h * 3u;
-    if (!mlv_can_use_direct_processed_frame8_path(video) || normalizedScale <= 1)
+    if (!mlv_can_use_direct_processed_frame8_path(video)
+     || (normalizedScale <= 1 && !allowScale1StateDebayer))
     {
         processingSetPlaybackAggressivePreviewMode(previous_aggressive_preview_mode);
         processingSetPlaybackPreviewMode(previous_preview_mode);
@@ -7060,6 +7223,7 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                                               outputFrame,
                                                                               threads,
                                                                               normalizedScale,
+                                                                              allowScale1StateDebayer,
                                                                               1))
     {
         pthread_mutex_lock(&video->processed8_prefetch_mutex);

@@ -26,6 +26,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_dual_iso_playback_policy.cpp \
     $$REPO_ROOT/tests/console/test_frame_compare.cpp \
     $$REPO_ROOT/tests/console/test_phase3_quality_policy.cpp \
+    $$REPO_ROOT/tests/console/test_playback_frame_range.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
     $$REPO_ROOT/tests/console/test_receipt_loader.cpp \
@@ -37,7 +38,8 @@ HEADERS += \
     $$REPO_ROOT/tests/common/test_runtime.h \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
-    $$REPO_ROOT/tests/common/repo_paths.h
+    $$REPO_ROOT/tests/common/repo_paths.h \
+    $$REPO_ROOT/platform/qt/PlaybackFrameRange.h
 
 win32{
     WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)

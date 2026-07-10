@@ -28,6 +28,8 @@ param(
     [int]$Phase3FrameSlots = 0,
     [int]$PlaybackTimerPollMs = 0,
     [int]$PlaybackRenderLookaheadFrames = 0,
+    [string]$QtBin = "",
+    [string]$MingwBin = "",
     [switch]$SkipBuild,
     [switch]$AllowNonUltraMagnus,
     [switch]$AllowGpuNameMismatch,
@@ -42,6 +44,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Build tool fallback order:
+#   1. explicit -QtBin / -MingwBin
+#   2. MLVAPP_QT_BIN / MLVAPP_MINGW_BIN
+#   3. QT_BIN / MINGW_BIN
+#   4. the current Ultra-Magnus defaults under C:\Qt
 
 # The no-readback P3 validation always runs with the heavy per-frame GL-readback + CPU-replay +
 # SHA256 parity instrumentation, which perturbs PRESENT cadence (it is absent from real,
@@ -76,6 +84,61 @@ function Resolve-RepoPath {
         return $Path
     }
     return (Join-Path $Root $Path)
+}
+
+function Resolve-BinDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [string]$ExplicitPath = "",
+        [string[]]$EnvironmentVariableNames = @(),
+        [Parameter(Mandatory = $true)][string]$DefaultPath,
+        [string]$RequiredTool = ""
+    )
+
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    if (![string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        [void]$candidates.Add([pscustomobject]@{ source = "parameter"; path = $ExplicitPath })
+    }
+    foreach ($envName in $EnvironmentVariableNames) {
+        $value = [Environment]::GetEnvironmentVariable($envName)
+        if (![string]::IsNullOrWhiteSpace($value)) {
+            [void]$candidates.Add([pscustomobject]@{ source = "env:$envName"; path = $value })
+        }
+    }
+    [void]$candidates.Add([pscustomobject]@{ source = "default"; path = $DefaultPath })
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        $candidatePath = [Environment]::ExpandEnvironmentVariables([string]$candidate.path)
+        if ([string]::IsNullOrWhiteSpace($candidatePath) -or $seen.ContainsKey($candidatePath)) {
+            continue
+        }
+        $seen[$candidatePath] = $true
+        if (!(Test-Path -LiteralPath $candidatePath -PathType Container)) {
+            continue
+        }
+        if (![string]::IsNullOrWhiteSpace($RequiredTool)) {
+            $toolPath = Join-Path $candidatePath $RequiredTool
+            if (!(Test-Path -LiteralPath $toolPath -PathType Leaf)) {
+                continue
+            }
+        }
+        return [pscustomobject]@{
+            label = $Label
+            path = (Resolve-Path -LiteralPath $candidatePath).Path
+            source = [string]$candidate.source
+            requiredTool = $RequiredTool
+            candidates = @($candidates)
+        }
+    }
+
+    return [pscustomobject]@{
+        label = $Label
+        path = $null
+        source = $null
+        requiredTool = $RequiredTool
+        candidates = @($candidates)
+    }
 }
 
 function Convert-PlaybackLogLineToObject {
@@ -756,12 +819,37 @@ $releaseInfo = $null
 $releaseHash = $null
 $gpuPreferenceBefore = $null
 $gpuPreferenceAfter = $null
+$qtBinResolution = $null
+$mingwBinResolution = $null
 
 if ($failures.Count -eq 0 -and !$DryRun -and !$SkipBuild) {
-    $env:PATH = "C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.10.2\mingw_64\bin;" + $env:PATH
-    & "C:\Qt\Tools\mingw1310_64\bin\mingw32-make.exe" -C (Join-Path $repo "platform\qt\build-release") -B release -j4
-    if ($LASTEXITCODE -ne 0) {
-        Add-Failure $failures "Release build failed with exit code $LASTEXITCODE."
+    $qtBinResolution = Resolve-BinDirectory `
+        -Label "Qt bin" `
+        -ExplicitPath $QtBin `
+        -EnvironmentVariableNames @("MLVAPP_QT_BIN", "QT_BIN") `
+        -DefaultPath "C:\Qt\6.10.2\mingw_64\bin" `
+        -RequiredTool "qmake.exe"
+    $mingwBinResolution = Resolve-BinDirectory `
+        -Label "MinGW bin" `
+        -ExplicitPath $MingwBin `
+        -EnvironmentVariableNames @("MLVAPP_MINGW_BIN", "MINGW_BIN") `
+        -DefaultPath "C:\Qt\Tools\mingw1310_64\bin" `
+        -RequiredTool "mingw32-make.exe"
+
+    if ($null -eq $qtBinResolution.path) {
+        Add-Failure $failures "Could not resolve Qt bin directory with qmake.exe. Fallback order: -QtBin, MLVAPP_QT_BIN, QT_BIN, C:\Qt\6.10.2\mingw_64\bin."
+    }
+    if ($null -eq $mingwBinResolution.path) {
+        Add-Failure $failures "Could not resolve MinGW bin directory with mingw32-make.exe. Fallback order: -MingwBin, MLVAPP_MINGW_BIN, MINGW_BIN, C:\Qt\Tools\mingw1310_64\bin."
+    }
+
+    if ($failures.Count -eq 0) {
+        $env:PATH = "$($mingwBinResolution.path);$($qtBinResolution.path);" + $env:PATH
+        $makeExe = Join-Path $mingwBinResolution.path "mingw32-make.exe"
+        & $makeExe -C (Join-Path $repo "platform\qt\build-release") -B release -j4
+        if ($LASTEXITCODE -ne 0) {
+            Add-Failure $failures "Release build failed with exit code $LASTEXITCODE."
+        }
     }
 }
 
@@ -1324,6 +1412,10 @@ $summary = [pscustomobject]@{
         speedLeg = [bool]$SpeedLeg
         minPresentedFps = $MinPresentedFps
         targetPresentedFps = $TargetPresentedFps
+        qtBin = if ($qtBinResolution) { $qtBinResolution.path } else { $QtBin }
+        qtBinSource = if ($qtBinResolution) { $qtBinResolution.source } else { $null }
+        mingwBin = if ($mingwBinResolution) { $mingwBinResolution.path } else { $MingwBin }
+        mingwBinSource = if ($mingwBinResolution) { $mingwBinResolution.source } else { $null }
         gpuPlaybackReconBackend = $GpuPlaybackReconBackend
         cudaAmazeLiveTileStreams = if ($CudaAmazeLiveTileStreams -gt 0) { $CudaAmazeLiveTileStreams } else { $null }
         cudaAmazeFastLaunchChecks = [bool]$CudaAmazeFastLaunchChecks

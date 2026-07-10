@@ -1111,9 +1111,10 @@ static void export_profile_write_json(void)
             dng_compress_output_bytes_total += frame->dng_compress_output_bytes;
         }
     }
-    pthread_mutex_lock(&g_export_profile_mutex);
+    /* This writer is also called from profile-path rollover while
+     * g_export_profile_mutex is already held. The rest of this JSON snapshot
+     * reads profiler globals lock-free, so do not re-enter the mutex here. */
     async_writer_compress_used = g_export_profile_async_writer_compress_used;
-    pthread_mutex_unlock(&g_export_profile_mutex);
     bottleneck = export_profile_select_bottleneck();
 
     g_export_profile_write_in_progress = 1;
@@ -2052,7 +2053,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
         
         struct directory_entry EXIF_IFD[EXIF_IFD_COUNT] =
         {
-            {tcExposureTime,                ttRational, RATIONAL_ENTRY2((int32_t)mlv_data->EXPO.shutterValue/1000, 1000, header, &data_offset)},
+            {tcExposureTime,                ttRational, RATIONAL_ENTRY2((int32_t)mlv_data->EXPO.shutterValue, 1000000, header, &data_offset)},
             {tcFNumber,                     ttRational, RATIONAL_ENTRY2(mlv_data->LENS.aperture, 100, header, &data_offset)},
             {tcISOSpeedRatings,             ttShort,    1,      mlv_data->EXPO.isoValue},
             {tcSensitivityType,             ttShort,    1,      stISOSpeed},
@@ -2060,7 +2061,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcSubjectDistance,             ttRational, RATIONAL_ENTRY2(mlv_data->LENS.focalDist, 1, header, &data_offset)},
             {tcFocalLength,                 ttRational, RATIONAL_ENTRY2(mlv_data->LENS.focalLength, 1, header, &data_offset)},
             {tcFocalPlaneXResolutionExif,   ttRational, RATIONAL_ENTRY(focal_resolution_x, header, &data_offset, 2)},
-            {tcFocalPlaneYResolutionExif,   ttRational, RATIONAL_ENTRY(focal_resolution_x, header, &data_offset, 2)},
+            {tcFocalPlaneYResolutionExif,   ttRational, RATIONAL_ENTRY(focal_resolution_y, header, &data_offset, 2)},
             {tcFocalPlaneResolutionUnitExif,ttShort,    1,      camid->focal_unit}, //inches
             {tcLensModelExif,               ttAscii,    STRING_ENTRY((char*)mlv_data->LENS.lensName, header, &data_offset)},
         };

@@ -88,6 +88,13 @@ void getMlvProcessedFrame16(mlvObject_t * video, uint64_t frameIndex, uint16_t *
  * the scaled API today are forward-compatible: their output buffer must be
  * sized to mlvFrameOutputDimensions(), and once Phase 4B lands the same
  * call site automatically gets the smaller render. */
+/* Fast/subset playback-preview level sync (see video_mlv.c): the subset path
+ * renders via the GPU-preview config instead of the classic cores, so it must
+ * mirror their per-frame dual-ISO black/white level sync before the config is
+ * built. Check first (no mutation), then sync under a render-idle guard. */
+int mlvProcessingDualIsoBlackWhiteLevelsOutOfSync(mlvObject_t * video);
+void mlvSyncProcessingDualIsoBlackWhiteLevels(mlvObject_t * video);
+
 void getMlvProcessedFrame8Scaled(mlvObject_t * video,
                                  uint64_t frameIndex,
                                  uint8_t * outputFrame,
@@ -110,7 +117,8 @@ int getMlvProcessedFrame8ScaledFromReconnedRaw16(mlvObject_t * video,
                                                  const uint16_t * reconnedRawFrame,
                                                  uint8_t * outputFrame,
                                                  int threads,
-                                                 int scaleFactor);
+                                                 int scaleFactor,
+                                                 int allowScale1StateDebayer);
 void getMlvProcessedFrame16Scaled(mlvObject_t * video,
                                   uint64_t frameIndex,
                                   uint16_t * outputFrame,
@@ -296,6 +304,17 @@ void get_mlv_raw_frame_debayered_isolated_analysis(mlvObject_t * video,
                                                    float * temp_memory,
                                                    uint16_t * output_frame,
                                                    int debayer_type ); /* Debayer type: 0=bilinear 1=amaze */
+/* Cache-free isolated-analysis source for reduced thumbnails. This decodes and
+ * runs llrawproc at full resolution through the direct path, then emits a
+ * reduced RGB16 frame via Bayer->RGB block averaging. Returns 1 on success. */
+int get_mlv_raw_frame_debayered_isolated_analysis_scaled(mlvObject_t * video,
+                                                         uint64_t frame_index,
+                                                         uint16_t * output_frame,
+                                                         int scale_factor,
+                                                         int threads,
+                                                         int * out_width,
+                                                         int * out_height,
+                                                         int * out_scale_factor);
 
 /* Thumbnail Creation with a downscaled raw image sub-sampling algorithm is used. */
 int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscaled_factor, int width, int height, int threads);
@@ -333,14 +352,29 @@ typedef struct mlv_processed_thumbnail_settings
     int source_chroma_smooth_method;
 } mlv_processed_thumbnail_settings_t;
 
-/* Same isolated source/downscale path as get_area_average_downscale_thumnail,
- * but renders through a caller-owned processing object. Returns 1 on success.
+/* Same live/cache-backed source and downscale path as
+ * get_area_average_downscale_thumnail, but renders through a caller-owned
+ * processing object. Returns 1 on success.
  * The optional settings are applied only to that caller-owned processing object;
- * this function never mutates video->processing, caches, receipts, or playback
- * preview globals. When APPLY_CHROMA_SMOOTH is set, source_chroma_smooth_method
- * is applied only to the isolated raw-source render for this call and never
- * stored back to the shared mlvObject. */
+ * this function never mutates video->processing, receipts, or playback preview
+ * globals. Use the cache-free sibling for detached analysis workers. */
 int get_area_average_downscale_thumnail_with_processing(
+    mlvObject_t *video,
+    int frame_index,
+    int downscale_factor,
+    int cpu_cores,
+    processingObject_t *analysis_processing,
+    const mlv_processed_thumbnail_settings_t *settings,
+    unsigned char *out_buffer);
+
+/* Cache-free sibling for detached analysis workers. It first tries the reduced
+ * direct isolated-analysis RGB16 source, then falls back to full-resolution
+ * get_mlv_raw_frame_debayered_isolated_analysis with bilinear debayering. Both
+ * paths use the same downscale and caller-owned processing path as
+ * get_area_average_downscale_thumnail_with_processing. Returns 1 on success and
+ * never mutates video->processing, receipts, playback preview globals, or the
+ * playback cache. */
+int get_area_average_downscale_thumnail_with_processing_cachefree(
     mlvObject_t *video,
     int frame_index,
     int downscale_factor,

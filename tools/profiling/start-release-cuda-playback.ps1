@@ -159,6 +159,7 @@ if ([string]::IsNullOrWhiteSpace($BackendDll)) {
 else {
     $BackendDll = Resolve-RepoPath -Root $root -Path $BackendDll
 }
+$amazeBackendDll = Join-Path $exeDir "igpu_amaze_debayer_cuda.dll"
 
 $platformDir = Join-Path $exeDir "platforms"
 $qwindows = Join-Path $platformDir "qwindows.dll"
@@ -193,14 +194,17 @@ $environment = [ordered]@{
     QT_OPENGL = "desktop"
     QT_QPA_PLATFORM_PLUGIN_PATH = $platformDir
     QT_PLUGIN_PATH = $exeDir
-    MLVAPP_EXPERIMENTAL_GL_VIEWPORT = "1"
+    MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT = "1"
     MLVAPP_EXPERIMENTAL_GPU_PROCESSING = "1"
     MLVAPP_GPU_PLAYBACK_RECON = "1"
     MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT = "1"
+    MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER = "1"
+    MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT = "1"
     MLVAPP_PLAYBACK_PHASE3_UNATTENDED = "1"
     MLVAPP_PLAYBACK_QUALITY_MODE = $QualityMode
     MLVAPP_PLAYBACK_SCALE_FACTOR = $ScaleFactor
     MLVAPP_GPU_PLAYBACK_RECON_DLL = (Resolve-Path -LiteralPath $BackendDll).Path
+    MLVAPP_GPU_AMAZE_DEBAYER_DLL = (Resolve-Path -LiteralPath $amazeBackendDll).Path
 }
 if (-not [string]::IsNullOrWhiteSpace($GpuPlaybackReconBackend)) {
     $environment["MLVAPP_GPU_PLAYBACK_RECON_BACKEND"] = $GpuPlaybackReconBackend
@@ -225,6 +229,7 @@ $manifest = [ordered]@{
     repoRoot = $root
     exe = Get-FileArtifact -Path $exe
     backend = Get-FileArtifact -Path $BackendDll
+    amazeBackend = Get-FileArtifact -Path $amazeBackendDll
     cudart = Get-FileArtifact -Path (Join-Path $exeDir "cudart64_12.dll")
     qwindows = Get-FileArtifact -Path $qwindows
     clipPath = $clipFullPath
@@ -244,7 +249,7 @@ $manifest = [ordered]@{
         notes = @(
             "This launcher requests the scoped CUDA no-readback playback path for interactive use.",
             "A manifest plus process start is not proof; use the local smoke wrapper for backend load, no-readback/fallback counts, FPS, and DNG hash evidence.",
-            "The validated P3 shape still requires a compatible Dual ISO clip, Phase 3 HQ playback mode, x1 scale, GPU viewport, GPU preview processing, and caching off."
+            "The validated P3 shape still requires a compatible Dual ISO clip, Phase 3 HQ playback mode, x1 scale, the native GPU window viewport, GPU preview processing, hidden scopes, and caching off."
         )
     }
     waitForExit = [bool]$Wait

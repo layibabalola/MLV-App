@@ -211,20 +211,30 @@ TEST(CrashForensics, GuiProfilingPresetsManageOnlyOwnedEnvironment)
 {
     PerformanceSettingsSnapshot settingsSnapshot;
     EnvSnapshot envSnapshot(QList<QByteArray>()
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PROCESSING_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON")
         << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON_BACKEND")
+        << QByteArrayLiteral("MLVAPP_GPU_PLAYBACK_RECON_BACKEND_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT")
         << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER_GUI_MANAGED")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT")
+        << QByteArrayLiteral("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_PHASE3_UNATTENDED")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_PHASE3_UNATTENDED_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_QUALITY_MODE")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_QUALITY_MODE_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR")
         << QByteArrayLiteral("MLVAPP_PLAYBACK_SCALE_FACTOR_GUI_MANAGED")
+        << QByteArrayLiteral("GOMP_SPINCOUNT")
+        << QByteArrayLiteral("GOMP_SPINCOUNT_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_GUI_MANAGED")
         << QByteArrayLiteral("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS")
@@ -249,26 +259,42 @@ TEST(CrashForensics, GuiProfilingPresetsManageOnlyOwnedEnvironment)
 
     CrashForensics::setCudaPlaybackProfilingSettingsEnabled(true);
     ASSERT_TRUE(CrashForensics::cudaPlaybackProfilingSettingsEnabled());
+    qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT_GUI_MANAGED", QByteArrayLiteral("1"));
     CrashForensics::applyCudaPlaybackProfilingEnvironment(true);
-    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GL_VIEWPORT").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT").toStdString());
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT"));
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_PROCESSING").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON").toStdString());
+    ASSERT_EQ(std::string("cuda"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON_BACKEND").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_PLAYBACK_RECON_TEXTURE_PRESENT").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_EXPERIMENTAL_GPU_AMAZE_TEXTURE_PRESENT").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_PHASE3_UNATTENDED").toStdString());
     ASSERT_EQ(std::string("phase3_hq"), qgetenv("MLVAPP_PLAYBACK_QUALITY_MODE").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_PLAYBACK_SCALE_FACTOR").toStdString());
+    ASSERT_EQ(std::string("0"), qgetenv("GOMP_SPINCOUNT").toStdString());
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED").toStdString());
+    ASSERT_EQ(std::string("1"), qgetenv("GOMP_SPINCOUNT_GUI_MANAGED").toStdString());
 
     CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_GPU_PLAYBACK_RECON"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_GPU_PLAYBACK_RECON_BACKEND"));
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_QUALITY_MODE"));
     ASSERT_FALSE(qEnvironmentVariableIsSet("MLVAPP_PLAYBACK_SCALE_FACTOR"));
+    ASSERT_FALSE(qEnvironmentVariableIsSet("GOMP_SPINCOUNT"));
 
     qputenv("MLVAPP_GPU_PLAYBACK_RECON", QByteArrayLiteral("1"));
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON_GUI_MANAGED");
     CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
     ASSERT_EQ(std::string("1"), qgetenv("MLVAPP_GPU_PLAYBACK_RECON").toStdString());
     qunsetenv("MLVAPP_GPU_PLAYBACK_RECON");
+
+    qputenv("GOMP_SPINCOUNT", QByteArrayLiteral("7"));
+    qunsetenv("GOMP_SPINCOUNT_GUI_MANAGED");
+    CrashForensics::applyCudaPlaybackProfilingEnvironment(false);
+    ASSERT_EQ(std::string("7"), qgetenv("GOMP_SPINCOUNT").toStdString());
+    qunsetenv("GOMP_SPINCOUNT");
 
     CrashForensics::setDngAsyncCompressionProfilingSettings(true, 99, -4);
     ASSERT_TRUE(CrashForensics::dngAsyncCompressionProfilingSettingsEnabled());
