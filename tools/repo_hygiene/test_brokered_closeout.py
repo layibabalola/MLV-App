@@ -2735,6 +2735,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(
             {
                 "build/provenance-p0",
+                "claude/export-hardening",
                 "codex/cuda-chroma-x1",
                 "codex/laon-sh-no-readback",
                 "codex/optimus-m2-x1",
@@ -2755,6 +2756,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(
             {
                 "C:/!Layi Wkspc/MLV-App",
+                "C:/mlvtmp/mlvapp-export-hardening-claude",
                 "C:/mlvtmp/codex-w10-agent-heartbeat-hardening",
                 "C:/mlvtmp/codex-w10c-agent-reliability",
                 "C:/mlvtmp/mlvapp-5aa7cebe-codex-ui-signal",

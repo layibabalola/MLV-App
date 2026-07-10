@@ -220,6 +220,17 @@ run `repo-sweep-closeout.ps1`, inspect that candidate's latest report, and use
 `remediate-retained-closeout.ps1 -Apply` only after the owner has made its bytes
 eligible. Do not bulk-clean these surfaces or infer ownership from this card.
 
+Content-review parking extension (2026-07-10): `claude/export-hardening` at
+`84ed31860808d2bbf8f23e7b75507be405298c67` and its worktree
+`C:/mlvtmp/mlvapp-export-hardening-claude` are also explicitly protected. A
+clean merge probe is not content approval: this branch contains four real
+product commits across batch, DNG, and CLI export surfaces. Do not integrate it
+as repository hygiene. After P0-A, queue it as a normal reviewed work block
+alongside or immediately before P0-B/P0-C, with focused batch/DNG tests, a
+release rebuild and fingerprint, a CODEX handoff, and a Claude review. Its
+export work also informs E4-1; protection is removed only by that reviewed
+integration or an explicit reviewed rejection.
+
 ### E4-1 — ship the rendered-export walking skeleton
 
 Delete no contract types merely for aesthetic cleanup, but add no new framework
