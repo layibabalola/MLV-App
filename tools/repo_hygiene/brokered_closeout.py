@@ -367,7 +367,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     },
     "validation": {
         "timeoutMs": 120000,
-        "maxOutputBytes": 524288,
+        "maxOutputBytes": 8388608,
         "fullSuiteEnvVar": "CLOSEOUT_RUN_FULL_VALIDATION",
         "runFullSuiteByDefault": False,
         "commands": [
