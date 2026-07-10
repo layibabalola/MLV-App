@@ -6,7 +6,21 @@
     "targetBranch": "master",
     "remote": "fork",
     "allowLocalOnly": true,
-    "protectedBranches": ["master", "main", "develop", "release/*", "codex/f1-visible-scope-policy", "closeout/recovery/detached/*"],
+    "protectedBranches": [
+      "master",
+      "main",
+      "develop",
+      "release/*",
+      "codex/f1-visible-scope-policy",
+      "closeout/recovery/detached/*",
+      "build/provenance-p0",
+      "codex/cuda-chroma-x1",
+      "codex/laon-sh-no-readback",
+      "codex/optimus-m2-x1",
+      "codex/ui-signal-gap-instrument",
+      "codex/w10-agent-heartbeat-hardening",
+      "codex/w10c-agent-reliability"
+    ],
     "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
     "fetchBeforeEvidence": true
   },
@@ -196,7 +210,19 @@
     "protectedWorktreeRoots": [
       ".claude/worktrees/**",
       "**/.claude-state/worktrees/f1-visible-scope-policy",
-      "**/.claude-state/closeout/repo-sweep/detached-preserve/**"
+      "**/.claude-state/closeout/repo-sweep/detached-preserve/**",
+      "C:/!Layi Wkspc/MLV-App",
+      "C:/mlvtmp/codex-w10-agent-heartbeat-hardening",
+      "C:/mlvtmp/codex-w10c-agent-reliability",
+      "C:/mlvtmp/mlvapp-5aa7cebe-codex-ui-signal",
+      "C:/mlvtmp/mlvapp-f28dbca7-cuda-chroma-codex",
+      "C:/mlvtmp/mlvapp-f28dbca7-laon-nr-codex",
+      "C:/mlvtmp/mlvapp-optimus-m2-codex",
+      "C:/mlvtmp/opus-review-bugA",
+      "C:/mlvtmp/wt-baseline",
+      "C:/mlvtmp/wt-bisect",
+      "C:/mlvtmp/wt-good-765ed4a3",
+      "C:/mlvtmp/wt-precuda"
     ]
   },
   "responseHookLifecycle": {

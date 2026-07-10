@@ -2732,6 +2732,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.assertIn("codex/f1-visible-scope-policy", config["git"]["protectedBranches"])
         self.assertIn("closeout/recovery/detached/*", config["git"]["protectedBranches"])
+        self.assertTrue(
+            {
+                "build/provenance-p0",
+                "codex/cuda-chroma-x1",
+                "codex/laon-sh-no-readback",
+                "codex/optimus-m2-x1",
+                "codex/ui-signal-gap-instrument",
+                "codex/w10-agent-heartbeat-hardening",
+                "codex/w10c-agent-reliability",
+            }.issubset(config["git"]["protectedBranches"]),
+            "the enumerated CI-1 legacy branches must remain parked instead of being merged or pruned",
+        )
         self.assertIn(
             "**/.claude-state/worktrees/f1-visible-scope-policy",
             config["cleanupPolicy"]["protectedWorktreeRoots"],
@@ -2739,6 +2751,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn(
             "**/.claude-state/closeout/repo-sweep/detached-preserve/**",
             config["cleanupPolicy"]["protectedWorktreeRoots"],
+        )
+        self.assertTrue(
+            {
+                "C:/!Layi Wkspc/MLV-App",
+                "C:/mlvtmp/codex-w10-agent-heartbeat-hardening",
+                "C:/mlvtmp/codex-w10c-agent-reliability",
+                "C:/mlvtmp/mlvapp-5aa7cebe-codex-ui-signal",
+                "C:/mlvtmp/mlvapp-f28dbca7-cuda-chroma-codex",
+                "C:/mlvtmp/mlvapp-f28dbca7-laon-nr-codex",
+                "C:/mlvtmp/mlvapp-optimus-m2-codex",
+                "C:/mlvtmp/opus-review-bugA",
+                "C:/mlvtmp/wt-baseline",
+                "C:/mlvtmp/wt-bisect",
+                "C:/mlvtmp/wt-good-765ed4a3",
+                "C:/mlvtmp/wt-precuda",
+            }.issubset(config["cleanupPolicy"]["protectedWorktreeRoots"]),
+            "the enumerated CI-1 legacy worktrees must remain byte-preserved and owner-controlled",
         )
         validation_names = [command["name"] for command in config["validation"]["commands"]]
         self.assertEqual(

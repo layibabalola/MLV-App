@@ -188,6 +188,38 @@ runs and collect two consecutive green executions before removing
 `EXTERNAL_GATE` with the exact access/install command and continue to E4-1 only
 if local CI-equivalent proof is green and the user accepts the temporary gate.
 
+Repository-closeout debt parked for CI-1 (full sweep at
+`c6ea6a1e43451273f41cedf59428f3d193d6bb3d`, 2026-07-10): the completed sweep
+enumerated 33 retained reports and 40 actionable candidates. Safe classes remain
+broker-owned and are not parked: 17 `preserve_detached_dirty_now`, 3
+`prune_now`, 1 `clean_integrate_now`, and 19 clean-detached removals. The exact
+unsafe classes below are parked by explicit branch/worktree protection; parking
+does not approve, merge, reset, clean, or delete their bytes.
+
+- `foreign_dirty_retained` (3): `codex/w10c-agent-reliability` at
+  `C:/mlvtmp/codex-w10c-agent-reliability`, `codex/ui-signal-gap-instrument` at
+  `C:/mlvtmp/mlvapp-5aa7cebe-codex-ui-signal`, and
+  `codex/w10-agent-heartbeat-hardening` at
+  `C:/mlvtmp/codex-w10-agent-heartbeat-hardening`.
+- `foreign_dirty_target_overlap` (3): `codex/cuda-chroma-x1` at
+  `C:/mlvtmp/mlvapp-f28dbca7-cuda-chroma-codex`,
+  `codex/optimus-m2-x1` at `C:/mlvtmp/mlvapp-optimus-m2-codex`, and
+  `codex/laon-sh-no-readback` at
+  `C:/mlvtmp/mlvapp-f28dbca7-laon-nr-codex`.
+- `unowned_dirty` (1): `build/provenance-p0` in the main
+  `C:/!Layi Wkspc/MLV-App` checkout.
+- `too_many_dirty_paths` (5 detached build-heavy worktrees):
+  `C:/mlvtmp/opus-review-bugA`, `C:/mlvtmp/wt-bisect`,
+  `C:/mlvtmp/wt-precuda`, `C:/mlvtmp/wt-baseline`, and
+  `C:/mlvtmp/wt-good-765ed4a3`.
+
+Exit from parking requires the owning lane to preserve or commit its exact dirty
+paths, prove target-overlap resolution where present, and then remove the
+corresponding exact protection in a reviewed change. The recovery route is to
+run `repo-sweep-closeout.ps1`, inspect that candidate's latest report, and use
+`remediate-retained-closeout.ps1 -Apply` only after the owner has made its bytes
+eligible. Do not bulk-clean these surfaces or infer ownership from this card.
+
 ### E4-1 — ship the rendered-export walking skeleton
 
 Delete no contract types merely for aesthetic cleanup, but add no new framework
