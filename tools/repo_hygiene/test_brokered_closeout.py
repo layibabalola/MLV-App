@@ -2730,8 +2730,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "repo-sweep candidate reports can exceed 1 MiB in established workspaces",
         )
         self.assertIn("codex/f1-visible-scope-policy", config["git"]["protectedBranches"])
+        self.assertIn("closeout/recovery/detached/*", config["git"]["protectedBranches"])
         self.assertIn(
             "**/.claude-state/worktrees/f1-visible-scope-policy",
+            config["cleanupPolicy"]["protectedWorktreeRoots"],
+        )
+        self.assertIn(
+            "**/.claude-state/closeout/repo-sweep/detached-preserve/**",
             config["cleanupPolicy"]["protectedWorktreeRoots"],
         )
         validation_names = [command["name"] for command in config["validation"]["commands"]]

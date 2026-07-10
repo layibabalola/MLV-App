@@ -345,7 +345,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "targetBranch": "master",
         "remote": "fork",
         "allowLocalOnly": True,
-        "protectedBranches": ["master", "main", "develop", "release/*"],
+        "protectedBranches": ["master", "main", "develop", "release/*", "closeout/recovery/detached/*"],
         "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
         "fetchBeforeEvidence": True,
     },
@@ -517,7 +517,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "retainOriginalWorktreeOnTreeMismatch": True,
         "removeCleanDetachedWorktreesInSweep": False,
         "dropStashesInSweep": False,
-        "protectedWorktreeRoots": [".claude/worktrees/**"],
+        "protectedWorktreeRoots": [
+            ".claude/worktrees/**",
+            "**/.claude-state/closeout/repo-sweep/detached-preserve/**",
+        ],
     },
     "responseHookLifecycle": {
         "skipSessionWorktreeSignal": "SkipSessionWorktree",
