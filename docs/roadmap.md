@@ -231,6 +231,15 @@ release rebuild and fingerprint, a CODEX handoff, and a Claude review. Its
 export work also informs E4-1; protection is removed only by that reviewed
 integration or an explicit reviewed rejection.
 
+Live-session protection extension (2026-07-10): Fable SEQ 479/480 identified
+`claude/sleepy-brahmagupta-3996c3` and
+`C:/!Layi Wkspc/MLV-App/.claude/worktrees/sleepy-brahmagupta-3996c3` as the
+live Fable hub #13 Claude session seat, not stale cleanup debris. Candidate
+`e9a40b0802eb2dff` is retained as live-session-protected: do not delete its
+branch, remove its worktree, or treat a restore as new dirt. The broad
+`.claude/worktrees/**` root remains inspect-only; the exact branch/path
+protection prevents branch-oriented cleanup from bypassing that policy.
+
 ### E4-1 — ship the rendered-export walking skeleton
 
 Delete no contract types merely for aesthetic cleanup, but add no new framework
