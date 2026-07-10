@@ -246,7 +246,7 @@
     "finalizeTimeoutMs": 1800000,
     "repoSweepTimeoutMs": 600000,
     "adapterHeartbeatSeconds": 30,
-    "maxProcessOutputBytes": 1048576,
+    "maxProcessOutputBytes": 8388608,
     "boundedRunnerExitCodes": {
       "timeout": 124,
       "outputCap": 125,

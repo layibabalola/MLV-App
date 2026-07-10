@@ -2718,7 +2718,11 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(closeout_command_timeout_ms(config, ["detect"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["repair"]), 0)
         self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
-        self.assertGreater(closeout_max_process_output_bytes(config), 0)
+        self.assertGreaterEqual(
+            closeout_max_process_output_bytes(config),
+            8 * 1024 * 1024,
+            "sweep and retained-remediation reports can exceed 1 MiB in established workspaces",
+        )
         self.assertGreater(config["validation"]["timeoutMs"], 0)
         self.assertGreaterEqual(
             config["validation"]["maxOutputBytes"],
