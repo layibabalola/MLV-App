@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#define IGPU_RECON_ABI_VERSION 1
+#define IGPU_RECON_ABI_VERSION 2
 
 typedef struct igpu_recon_backend igpu_recon_backend; /* opaque handle */
 
@@ -58,7 +58,8 @@ typedef struct {
     int      interp_method;       /* 1 = mean23 (only supported path for v1)     */
     int      use_alias_map;       /* run the 3-pass alias map                    */
     int      use_fullres;         /* run fullres reconstruction                  */
-    int      chroma_smooth_method;/* 0 = off (v1); 2/3/5 add a chroma stencil    */
+    int      chroma_smooth_method;/* 0 = off, 1 = 2x2; 2/3 stay unsupported      */
+    int      playback_preview_scale_factor; /* 0 export/unknown, 1/2/4/8 playback */
     int      apply_dither;        /* final_blend / convert16 dithering           */
 } igpu_recon_frame_t;
 

@@ -128,15 +128,29 @@ static bool parse_scalars_file(const std::string& path, VectorScalars* scalars)
         else if (strcmp(key, "height") == 0) scalars->height = atoi(value);
         else if (strcmp(key, "black_level") == 0) scalars->black_level = atoi(value);
         else if (strcmp(key, "white_level") == 0) scalars->white_level = atoi(value);
+        else if (strcmp(key, "black20") == 0) scalars->black_level = atoi(value);
+        else if (strcmp(key, "white20") == 0) scalars->white_level = atoi(value);
         else if (strcmp(key, "white_darkened") == 0) scalars->white_darkened = atoi(value);
         else if (strcmp(key, "black_delta") == 0) scalars->black_delta = atoi(value);
+        else if (strcmp(key, "black_delta20") == 0) scalars->black_delta = atoi(value);
         else if (strcmp(key, "ev_correction") == 0) scalars->ev_correction = atof(value);
         else if (strcmp(key, "dark_noise") == 0) scalars->dark_noise = atof(value);
+        else if (strcmp(key, "dark_noise20") == 0) scalars->dark_noise = atof(value);
+        else if (strcmp(key, "dark_noise_20bit") == 0) scalars->dark_noise = atof(value);
         else if (strcmp(key, "interp_method") == 0) scalars->interp_method = atoi(value);
         else if (strcmp(key, "use_alias_map") == 0) scalars->use_alias_map = atoi(value);
         else if (strcmp(key, "use_fullres") == 0) scalars->use_fullres = atoi(value);
         else if (strcmp(key, "chroma_smooth_method") == 0) scalars->chroma_smooth_method = atoi(value);
         else if (strcmp(key, "apply_dither") == 0) scalars->apply_dither = atoi(value);
+        else if (strcmp(key, "is_bright") == 0) {
+            int b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+            if (sscanf(value, "%d,%d,%d,%d", &b0, &b1, &b2, &b3) == 4) {
+                scalars->is_bright[0] = b0;
+                scalars->is_bright[1] = b1;
+                scalars->is_bright[2] = b2;
+                scalars->is_bright[3] = b3;
+            }
+        }
         else if (strcmp(key, "is_bright0") == 0) scalars->is_bright[0] = atoi(value);
         else if (strcmp(key, "is_bright1") == 0) scalars->is_bright[1] = atoi(value);
         else if (strcmp(key, "is_bright2") == 0) scalars->is_bright[2] = atoi(value);

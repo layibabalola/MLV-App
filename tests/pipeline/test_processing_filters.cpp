@@ -1,7 +1,10 @@
 #include "../common/minitest.h"
 #include "../common/hash_helpers.h"
 
+#include "playback_path_test_state.h"
+
 #include "../../src/processing/denoiser/denoiser_2d_median.h"
+#include "../../src/processing/rbfilter/RBFilterPlain.h"
 #include "../../src/processing/rbfilter/rbf_wrapper.h"
 #include "../../src/processing/sobel/sobel.h"
 
@@ -18,6 +21,10 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace {
 
@@ -96,6 +103,26 @@ private:
     int aggressive_;
     int scale_factor_;
 };
+
+#ifdef _OPENMP
+class OpenMpThreadCountScope
+{
+public:
+    explicit OpenMpThreadCountScope(int threads)
+        : previous_(omp_get_max_threads())
+    {
+        omp_set_num_threads(threads);
+    }
+
+    ~OpenMpThreadCountScope()
+    {
+        omp_set_num_threads(previous_);
+    }
+
+private:
+    int previous_;
+};
+#endif
 
 uint16_t limit_u16_from_i32(std::int32_t value)
 {
@@ -354,6 +381,174 @@ TEST(ProcessingFilters, RbfFilterOutputLutMatchesSeparateLevelsPass)
     ASSERT_EQ(hash_image(expected_output), hash_image(actual_output));
 }
 
+TEST(ProcessingFilters, RbfFilterOutputLutStableAcrossOpenMpThreadCounts)
+{
+    const int width = 96;
+    const int height = 64;
+    const float sigma_spatial = 0.0025f;
+    const float sigma_range = 0.165f;
+
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> serial_output(input.size(), 0);
+    std::vector<uint16_t> parallel_output(input.size(), 0);
+    std::vector<uint16_t> levels_lut(65536);
+    for( std::size_t i = 0; i < levels_lut.size(); ++i )
+    {
+        const uint32_t value = static_cast<uint32_t>(i);
+        levels_lut[i] = static_cast<uint16_t>((value * 257u + (value >> 3) + 19u) & 0xffffu);
+    }
+
+#ifdef _OPENMP
+    const int previous_threads = omp_get_max_threads();
+    omp_set_num_threads(1);
+#endif
+    recursive_bf_wrap_with_output_lut(input.data(),
+                                      serial_output.data(),
+                                      sigma_spatial,
+                                      sigma_range,
+                                      width,
+                                      height,
+                                      3,
+                                      levels_lut.data());
+
+#ifdef _OPENMP
+    omp_set_num_threads(4);
+#endif
+    recursive_bf_wrap_with_output_lut(input.data(),
+                                      parallel_output.data(),
+                                      sigma_spatial,
+                                      sigma_range,
+                                      width,
+                                      height,
+                                      3,
+                                      levels_lut.data());
+
+#ifdef _OPENMP
+    omp_set_num_threads(previous_threads);
+#endif
+
+    ASSERT_EQ(hash_image(serial_output), hash_image(parallel_output));
+}
+
+TEST(ProcessingFilters, RbfFilterNoDetailFastPathMatchesTimedReference)
+{
+    const int width = 96;
+    const int height = 64;
+    const float sigma_spatial = 0.0025f;
+    const float sigma_range = 0.165f;
+
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+    std::vector<uint16_t> timed_output(input.size(), 0);
+    std::vector<uint16_t> fast_output(input.size(), 0);
+    std::vector<uint16_t> levels_lut(65536);
+    for( std::size_t i = 0; i < levels_lut.size(); ++i )
+    {
+        const uint32_t value = static_cast<uint32_t>(i);
+        levels_lut[i] = static_cast<uint16_t>((value * 257u + (value >> 3) + 19u) & 0xffffu);
+    }
+
+    CRBFilterPlain timed_filter;
+    timed_filter.reserveMemory(width, height, 3);
+    timed_filter.setTimingEnabled(true);
+    timed_filter.filter(input.data(),
+                        timed_output.data(),
+                        sigma_spatial,
+                        sigma_range,
+                        width,
+                        height,
+                        3,
+                        levels_lut.data());
+
+    CRBFilterPlain fast_filter;
+    fast_filter.reserveMemory(width, height, 3);
+    fast_filter.setTimingEnabled(false);
+    fast_filter.filter(input.data(),
+                       fast_output.data(),
+                       sigma_spatial,
+                       sigma_range,
+                       width,
+                       height,
+                       3,
+                       levels_lut.data());
+
+    ASSERT_EQ(hash_image(timed_output), hash_image(fast_output));
+}
+
+TEST(ProcessingFilters, ShadowsHighlightsQuarterresBlurStableAcrossOpenMpThreadCounts)
+{
+    const int width = 192;
+    const int height = 128;
+    std::vector<uint16_t> input = make_rgb_pattern(width, height);
+
+    ProcessingPlaybackPreviewModeScope playback_scope;
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+    processingSetPlaybackPreviewScaleFactor(1);
+    processingResetShadowsHighlightsQuarterresEnvCacheForTesting();
+
+    processingObject_t * serial_processing = initProcessingObject();
+    processingObject_t * parallel_processing = initProcessingObject();
+    ASSERT_TRUE(serial_processing != nullptr);
+    ASSERT_TRUE(parallel_processing != nullptr);
+    processingSetShadows(serial_processing, 0.66);
+    processingSetHighlights(serial_processing, -0.26);
+    processingSetShadows(parallel_processing, 0.66);
+    processingSetHighlights(parallel_processing, -0.26);
+
+    int serial_ok = 0;
+    int parallel_ok = 0;
+    const uint16_t * serial_blur = nullptr;
+    const uint16_t * parallel_blur = nullptr;
+    int serial_width = 0;
+    int serial_height = 0;
+    int parallel_width = 0;
+    int parallel_height = 0;
+    int serial_curve_index = 0;
+    int parallel_curve_index = 0;
+
+    {
+#ifdef _OPENMP
+        OpenMpThreadCountScope threads(1);
+#endif
+        serial_ok = processingRefreshShadowsHighlightsBlurFromRgb16(
+            serial_processing, input.data(), width, height, 1, 0);
+    }
+    ASSERT_EQ(1, serial_ok);
+    ASSERT_TRUE(processingGetShadowsHighlightsBlurData(serial_processing,
+                                                       &serial_blur,
+                                                       &serial_width,
+                                                       &serial_height,
+                                                       &serial_curve_index));
+
+    {
+#ifdef _OPENMP
+        OpenMpThreadCountScope threads(4);
+#endif
+        parallel_ok = processingRefreshShadowsHighlightsBlurFromRgb16(
+            parallel_processing, input.data(), width, height, 4, 0);
+    }
+    ASSERT_EQ(1, parallel_ok);
+    ASSERT_TRUE(processingGetShadowsHighlightsBlurData(parallel_processing,
+                                                       &parallel_blur,
+                                                       &parallel_width,
+                                                       &parallel_height,
+                                                       &parallel_curve_index));
+
+    ASSERT_EQ(serial_width, parallel_width);
+    ASSERT_EQ(serial_height, parallel_height);
+    ASSERT_EQ(serial_curve_index, parallel_curve_index);
+
+    const std::size_t blur_words =
+        static_cast<std::size_t>(serial_width) * static_cast<std::size_t>(serial_height) * 3u;
+    std::vector<uint16_t> serial_copy(serial_blur, serial_blur + blur_words);
+    std::vector<uint16_t> parallel_copy(parallel_blur, parallel_blur + blur_words);
+
+    freeProcessingObject(serial_processing);
+    freeProcessingObject(parallel_processing);
+
+    ASSERT_EQ(hash_image(serial_copy), hash_image(parallel_copy));
+}
+
 TEST(ProcessingFilters, RbfFilterCurveIndexOutputMatchesSeparateLevelsAndMatrixPass)
 {
     const int width = 22;
@@ -450,9 +645,9 @@ TEST(ProcessingFilters, ShadowsHighlightsProbeTelemetryIsOptInByDefault)
 
 TEST(ProcessingFilters, SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(0);
     processingSetPlaybackPreviewScaleFactor(8);
@@ -491,9 +686,9 @@ TEST(ProcessingFilters, SharpOddHeightPlaybackPreviewKeepsFullresShadowsHighligh
 
 TEST(ProcessingFilters, AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(4);
@@ -529,9 +724,9 @@ TEST(ProcessingFilters, AggressiveOddHeightPlaybackPreviewUsesHalfresShadowsHigh
 
 TEST(ProcessingFilters, AggressiveX8PlaybackPreviewUsesQuarterresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(8);
@@ -567,9 +762,9 @@ TEST(ProcessingFilters, AggressiveX8PlaybackPreviewUsesQuarterresShadowsHighligh
 
 TEST(ProcessingFilters, AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights)
 {
-    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "0");
-    processingResetShadowsHighlightsProbeModeCacheForTesting();
     ProcessingPlaybackPreviewModeScope playback_scope;
+    set_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE", "1");
+    processingResetShadowsHighlightsProbeModeCacheForTesting();
     processingSetPlaybackPreviewMode(1);
     processingSetPlaybackAggressivePreviewMode(1);
     processingSetPlaybackPreviewScaleFactor(2);
@@ -601,6 +796,50 @@ TEST(ProcessingFilters, AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighligh
     freeProcessingObject(processing);
     unset_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
     processingResetShadowsHighlightsProbeModeCacheForTesting();
+}
+
+TEST(ProcessingFilters, Exact2xRgbUpsampleMatchesGenericToSize)
+{
+    const int dimensions[][2] = {
+        {1, 1},
+        {2, 3},
+        {17, 11},
+        {33, 29},
+    };
+
+    for( const auto & dimensions_pair : dimensions )
+    {
+        const int width = dimensions_pair[0];
+        const int height = dimensions_pair[1];
+        const std::vector<uint16_t> input = make_rgb_pattern(width, height);
+        ASSERT_TRUE(processingRgbU16UpsampleExact2xMatchesGenericForTesting(
+            input.data(),
+            width,
+            height,
+            2));
+    }
+}
+
+TEST(ProcessingFilters, Exact4xRgbDownsampleMatchesTwoStep)
+{
+    const int dimensions[][2] = {
+        {4, 4},
+        {8, 12},
+        {68, 44},
+        {70, 58},
+    };
+
+    for( const auto & dimensions_pair : dimensions )
+    {
+        const int width = dimensions_pair[0];
+        const int height = dimensions_pair[1];
+        const std::vector<uint16_t> input = make_rgb_pattern(width, height);
+        ASSERT_TRUE(processingRgbU16DownsampleExact4xMatchesTwoStepForTesting(
+            input.data(),
+            width,
+            height,
+            2));
+    }
 }
 
 TEST(ProcessingFilters, ChromaSmooth2x2MatchesScalarReference)

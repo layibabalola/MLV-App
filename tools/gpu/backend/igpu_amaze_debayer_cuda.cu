@@ -631,16 +631,7 @@ void run_tile(const float * dRaw,
                                                       rr1,
                                                       cc1);
     CK(cudaGetLastError());
-    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
-        d.cfa,
-        d.vcd,
-        d.hcd,
-        d.vcdalt,
-        d.hcdalt,
-        d.cddiffsq,
-        rr1,
-        cc1);
-    CK(cudaGetLastError());
+    launch_variance_selection_prefix(d, rr1, cc1, stream);
     k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
                                                         d.dirwts1,
                                                         d.vcd,
@@ -804,15 +795,7 @@ void run_tile_bayer16_post_wb(const uint16_t * dBayer16,
                                                       rr1,
                                                       cc1);
     CHECK_LIVE_TILE_LAUNCH();
-    k_variance_selection_wavefront_parity_blocks<<<4, kVarianceWavefrontThreads, 0, stream>>>(
-        d.cfa,
-        d.vcd,
-        d.hcd,
-        d.vcdalt,
-        d.hcdalt,
-        d.cddiffsq,
-        rr1,
-        cc1);
+    launch_variance_selection_prefix(d, rr1, cc1, stream, !fastLaunchChecks);
     CHECK_LIVE_TILE_LAUNCH();
     k_hvwt_adaptive_weights<<<grid, block, 0, stream>>>(d.dirwts0,
                                                         d.dirwts1,

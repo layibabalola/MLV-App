@@ -13,8 +13,9 @@
  *   no C++ name-mangling, POD structs).
  *
  * SCOPE / PARITY (v1)
- *   interp_method=1 (mean23), use_alias_map=1, use_fullres=1, chroma_smooth=0,
- *   RGGB phase is_bright[y&3]={1,1,0,0}. The host supplies the 4 precomputed
+ *   interp_method=1 (mean23), use_alias_map=0 or 1, use_fullres=1,
+ *   chroma_smooth=0 or 1 (2x2 only), RGGB phase is_bright[y&3]={1,1,0,0}.
+ *   The host supplies the 4 precomputed
  *   LUTs (raw2ev, ev2raw, mix_curve, fullres_curve) so no GPU libm enters the
  *   integer-LUT parity surface; build with --fmad=false for IEEE blends.
  *
@@ -237,6 +238,41 @@ __global__ void k_fullres(uint32_t* __restrict fullres,
     }
 }
 
+__device__ static inline int raw20_to_ev(const int* __restrict raw2ev, uint32_t raw)
+{
+    return raw2ev[raw > 0xFFFFFu ? 0xFFFFF : (int)raw];
+}
+
+__global__ void k_fullres_phase_balance(uint32_t* __restrict fullres,
+                                         const uint32_t* __restrict dark,
+                                         const uint32_t* __restrict bright,
+                                         const int* __restrict raw2ev,
+                                         const int* __restrict ev2raw,
+                                         int W, int H)
+{
+    const int x = blockIdx.x*blockDim.x + threadIdx.x;
+    const int y = blockIdx.y*blockDim.y + threadIdx.y;
+    if (x>=W || y>=H) return;
+    const size_t i=(size_t)x+(size_t)y*W;
+    const int bright_row = d_is_bright[y & 3];
+    const uint32_t native = bright_row ? bright[i] : dark[i];
+    const uint32_t opposite = bright_row ? dark[i] : bright[i];
+
+    if (bright[i] >= (uint32_t)d_white_darkened) {
+        fullres[i] = bright_row ? (uint32_t)imax((int)native, (int)opposite) : native;
+        return;
+    }
+
+    const int native_weight = 1;
+    const int opposite_weight = ((x ^ y) & 1) ? 3 : 1;
+    const int denom = native_weight + opposite_weight;
+    int ev = (raw20_to_ev(raw2ev, native) * native_weight +
+              raw20_to_ev(raw2ev, opposite) * opposite_weight +
+              denom / 2) / denom;
+    ev = icoerce(ev, -10 * EV_RESOLUTION, 14 * EV_RESOLUTION - 1);
+    fullres[i] = (uint32_t)ev2raw[ev];
+}
+
 /* STAGE 6: mix_images halfres blend */
 __global__ void k_mix_halfres(uint32_t* __restrict halfres,
                               const uint32_t* __restrict bright, const uint32_t* __restrict dark,
@@ -281,6 +317,183 @@ __global__ void k_mix_halfres_avx2(uint32_t* __restrict halfres,
     int mixed = __float2int_rz(mixed_f);
     mixed = icoerce(mixed, -10*EV_RESOLUTION, 14*EV_RESOLUTION - 1);
     halfres[i] = ev2raw[mixed];
+}
+
+__device__ static inline int chroma_med5(int a0, int a1, int a2, int a3, int a4)
+{
+    #define CS2_SWAP(lo, hi) do { \
+        const int _lo = imin((lo), (hi)); \
+        const int _hi = imax((lo), (hi)); \
+        (lo) = _lo; \
+        (hi) = _hi; \
+    } while (0)
+
+    CS2_SWAP(a0, a1);
+    CS2_SWAP(a3, a4);
+    CS2_SWAP(a0, a3);
+    CS2_SWAP(a1, a4);
+    CS2_SWAP(a1, a2);
+    CS2_SWAP(a2, a3);
+    CS2_SWAP(a1, a2);
+
+    #undef CS2_SWAP
+    return a2;
+}
+
+__device__ static inline uint32_t chroma_ev2raw_lookup(const int* __restrict ev2raw, int ev)
+{
+    ev = icoerce(ev, -10 * EV_RESOLUTION, 14 * EV_RESOLUTION - 1);
+    return (uint32_t)ev2raw[ev];
+}
+
+__device__ static inline void chroma_sample_h(const uint32_t* __restrict row0,
+                                              const uint32_t* __restrict row1,
+                                              int x0,
+                                              const int* __restrict raw2ev,
+                                              int* eh,
+                                              int* med_r,
+                                              int* med_b,
+                                              int k)
+{
+    const int r = (int)row0[x0];
+    const int b = (int)row1[x0 + 1];
+    const int rr = raw2ev[r];
+    const int bb = raw2ev[b];
+    const int g1 = raw2ev[row0[x0 + 1]];
+    const int g2 = raw2ev[row1[x0]];
+    const int g3 = raw2ev[row0[x0 - 1]];
+    const int g5 = raw2ev[row1[x0 + 2]];
+    const int gr = (g1 + g3) / 2;
+    const int gb = (g2 + g5) / 2;
+    *eh += iabs_(g1 - g3) + iabs_(g2 - g5);
+    med_r[k] = rr - gr;
+    med_b[k] = bb - gb;
+}
+
+__device__ static inline void chroma_sample_v(const uint32_t* __restrict row0,
+                                              const uint32_t* __restrict row1,
+                                              const uint32_t* __restrict rowm1,
+                                              const uint32_t* __restrict rowp2,
+                                              int x0,
+                                              const int* __restrict raw2ev,
+                                              int* ev,
+                                              int* med_r,
+                                              int* med_b,
+                                              int k)
+{
+    const int r = (int)row0[x0];
+    const int b = (int)row1[x0 + 1];
+    const int rr = raw2ev[r];
+    const int bb = raw2ev[b];
+    const int g1 = raw2ev[row0[x0 + 1]];
+    const int g2 = raw2ev[row1[x0]];
+    const int g4 = raw2ev[rowm1[x0]];
+    const int g6 = raw2ev[rowp2[x0 + 1]];
+    const int gr = (g2 + g4) / 2;
+    const int gb = (g1 + g6) / 2;
+    *ev += iabs_(g2 - g4) + iabs_(g1 - g6);
+    med_r[k] = rr - gr;
+    med_b[k] = bb - gb;
+}
+
+/* Optional 2x2 chroma smoothing, matching hdr_chroma_smooth(... method=1).
+ * Input is copied to output before this kernel, so borders and greens remain
+ * unchanged just like the CPU scratch flow. */
+__global__ void k_chroma_smooth_2x2(const uint32_t* __restrict inp,
+                                    uint32_t* __restrict out,
+                                    const int* __restrict raw2ev,
+                                    const int* __restrict ev2raw,
+                                    int white_level,
+                                    int W, int H)
+{
+    const int x = 4 + 2 * (blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = 4 + 2 * (blockIdx.y * blockDim.y + threadIdx.y);
+    if (x >= W - 4 || y >= H - 5) return;
+
+    const uint32_t* row_y_m3 = inp + (size_t)(y - 3) * (size_t)W;
+    const uint32_t* row_y_m2 = inp + (size_t)(y - 2) * (size_t)W;
+    const uint32_t* row_y_m1 = inp + (size_t)(y - 1) * (size_t)W;
+    const uint32_t* row_y    = inp + (size_t)y * (size_t)W;
+    const uint32_t* row_y_p1 = row_y + W;
+    const uint32_t* row_y_p2 = inp + (size_t)(y + 2) * (size_t)W;
+    const uint32_t* row_y_p3 = inp + (size_t)(y + 3) * (size_t)W;
+    const uint32_t* row_y_p4 = inp + (size_t)(y + 4) * (size_t)W;
+    uint32_t* out_y = out + (size_t)y * (size_t)W;
+    uint32_t* out_y_p1 = out_y + W;
+
+    const int r0 = (int)row_y[x];
+    const int b0 = (int)row_y_p1[x + 1];
+    const unsigned int white_u = (unsigned int)white_level;
+    const int write_r = (unsigned int)r0 < white_u;
+    const int write_b = (unsigned int)b0 < white_u;
+    if (!write_r && !write_b) return;
+
+    int med_r[5];
+    int med_b[5];
+    int eh = 0;
+    int ev = 0;
+
+    chroma_sample_h(row_y,    row_y_p1, x - 2, raw2ev, &eh, med_r, med_b, 0);
+    chroma_sample_h(row_y_m2, row_y_m1, x,     raw2ev, &eh, med_r, med_b, 1);
+    chroma_sample_h(row_y,    row_y_p1, x,     raw2ev, &eh, med_r, med_b, 2);
+    chroma_sample_h(row_y_p2, row_y_p3, x,     raw2ev, &eh, med_r, med_b, 3);
+    chroma_sample_h(row_y,    row_y_p1, x + 2, raw2ev, &eh, med_r, med_b, 4);
+    const int drh = chroma_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
+    const int dbh = chroma_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
+
+    chroma_sample_v(row_y,    row_y_p1, row_y_m1, row_y_p2, x - 2, raw2ev, &ev, med_r, med_b, 0);
+    chroma_sample_v(row_y_m2, row_y_m1, row_y_m3, row_y,    x,     raw2ev, &ev, med_r, med_b, 1);
+    chroma_sample_v(row_y,    row_y_p1, row_y_m1, row_y_p2, x,     raw2ev, &ev, med_r, med_b, 2);
+    chroma_sample_v(row_y_p2, row_y_p3, row_y_p1, row_y_p4, x,     raw2ev, &ev, med_r, med_b, 3);
+    chroma_sample_v(row_y,    row_y_p1, row_y_m1, row_y_p2, x + 2, raw2ev, &ev, med_r, med_b, 4);
+    const int drv = chroma_med5(med_r[0], med_r[1], med_r[2], med_r[3], med_r[4]);
+    const int dbv = chroma_med5(med_b[0], med_b[1], med_b[2], med_b[3], med_b[4]);
+
+    const int g1 = raw2ev[row_y[x + 1]];
+    const int g2 = raw2ev[row_y_p1[x]];
+    const int g3 = raw2ev[row_y[x - 1]];
+    const int g4 = raw2ev[row_y_m1[x]];
+    const int g5 = raw2ev[row_y_p1[x + 2]];
+    const int g6 = raw2ev[row_y_p2[x + 1]];
+
+    const int grv = (g2 + g4) / 2;
+    const int grh = (g1 + g3) / 2;
+    const int gbv = (g1 + g6) / 2;
+    const int gbh = (g2 + g5) / 2;
+    const int choose_ev_lt_eh = ev < eh;
+    int dr = choose_ev_lt_eh ? drv : drh;
+    int db = choose_ev_lt_eh ? dbv : dbh;
+
+    const int direction_ev_thr = 64;
+    const int black_thr = d_black + 64 * 64;
+    const int use_average =
+        r0 < black_thr ||
+        b0 < black_thr ||
+        iabs_(drv - drh) < direction_ev_thr ||
+        iabs_(grv - grh) < direction_ev_thr ||
+        iabs_(gbv - gbh) < direction_ev_thr;
+
+    int gr = 0;
+    int gb = 0;
+    if (use_average) {
+        if (write_r) {
+            dr = (drv + drh) / 2;
+            gr = (g1 + g2 + g3 + g4) / 4;
+        }
+        if (write_b) {
+            db = (dbv + dbh) / 2;
+            gb = (g1 + g2 + g5 + g6) / 4;
+        }
+    } else if (choose_ev_lt_eh) {
+        if (write_r) gr = grv;
+        if (write_b) gb = gbv;
+    } else {
+        if (write_r) gr = grh;
+        if (write_b) gb = gbh;
+    }
+
+    if (write_r) out_y[x] = chroma_ev2raw_lookup(ev2raw, gr + dr);
+    if (write_b) out_y_p1[x + 1] = chroma_ev2raw_lookup(ev2raw, gb + db);
 }
 
 /* STAGE 7: build_alias_map */
@@ -492,6 +705,279 @@ __global__ void k_convert16(uint16_t* __restrict out, const uint32_t* __restrict
     out[i] = (uint16_t)icoerce(o, 0, 0xFFFF);
 }
 
+__device__ static inline uint32_t ev_to_raw20(const int* __restrict ev2raw, int ev)
+{
+    ev = icoerce(ev, -10 * EV_RESOLUTION, 14 * EV_RESOLUTION - 1);
+    return (uint32_t)ev2raw[ev];
+}
+
+/* CPU x1 playback mesh guard path. Mirrors final_blend(... fullres_mesh_guard=1)
+ * and writes raw32 so the post-blend stabilizers can run before 16-bit convert. */
+__global__ void k_final_blend_mesh_guard(uint32_t* __restrict raw32,
+                                         const uint32_t* __restrict bright,
+                                         const uint32_t* __restrict halfres_smooth,
+                                         const uint32_t* __restrict fullres,
+                                         const uint32_t* __restrict fullres_smooth,
+                                         const uint32_t* __restrict dark,
+                                         const uint16_t* __restrict overexposed,
+                                         const uint16_t* __restrict alias_map,
+                                         const int* __restrict raw2ev,
+                                         const int* __restrict ev2raw,
+                                         const double* __restrict fullres_curve_f,
+                                         int W, int H)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= W || y >= H) return;
+    const size_t i = (size_t)x + (size_t)y * (size_t)W;
+
+    const int b = (int)bright[i];
+    const int hr = (int)halfres_smooth[i];
+    const int fr = (int)fullres[i];
+    const int frs = (int)fullres_smooth[i];
+    const int hrev = raw2ev[hr];
+    const int frev = raw2ev[fr];
+    const int frsev = raw2ev[frs];
+
+    double f = (double)(float)fullres_curve_f[b & 0xFFFFF];
+    double c = 0.0;
+    if (alias_map) {
+        const int co = (int)alias_map[i];
+        c = dcoerce((double)co / (double)ALIAS_MAP_MAX, 0.0, 1.0);
+    }
+
+    const double ovf = dcoerce((double)overexposed[i] / 200.0, 0.0, 1.0);
+    c = dmax(c, ovf);
+    f = dmax(f, c);
+
+    if (x > 1 && x + 2 < W && y > 1 && y + 2 < H) {
+        const int full_left_ev = raw2ev[fullres[i - 2]];
+        const int full_right_ev = raw2ev[fullres[i + 2]];
+        const int full_up_ev = raw2ev[fullres[i - (size_t)2 * (size_t)W]];
+        const int full_down_ev = raw2ev[fullres[i + (size_t)2 * (size_t)W]];
+        const int half_left2_ev = raw2ev[halfres_smooth[i - 2]];
+        const int half_right2_ev = raw2ev[halfres_smooth[i + 2]];
+        const int half_up2_ev = raw2ev[halfres_smooth[i - (size_t)2 * (size_t)W]];
+        const int half_down2_ev = raw2ev[halfres_smooth[i + (size_t)2 * (size_t)W]];
+        const int full_axis_ev = imax(iabs_(full_left_ev - full_right_ev),
+                                      iabs_(full_up_ev - full_down_ev));
+        const int half_axis2_ev = imax(iabs_(half_left2_ev - half_right2_ev),
+                                       iabs_(half_up2_ev - half_down2_ev));
+        const int full_outlier_ev = imax(
+            iabs_(frev - ((full_left_ev + full_right_ev + 1) / 2)),
+            iabs_(frev - ((full_up_ev + full_down_ev + 1) / 2)));
+        const int half_outlier_ev = imax(
+            iabs_(hrev - ((half_left2_ev + half_right2_ev + 1) / 2)),
+            iabs_(hrev - ((half_up2_ev + half_down2_ev + 1) / 2)));
+        if (full_outlier_ev > half_outlier_ev + EV_RESOLUTION / 2 &&
+            full_axis_ev > half_axis2_ev + EV_RESOLUTION / 2) {
+            f = dmin(f, dmax(ovf, 0.005));
+        } else if (full_outlier_ev > half_outlier_ev + EV_RESOLUTION / 4 &&
+                   full_axis_ev > half_axis2_ev + EV_RESOLUTION / 4) {
+            f = dmin(f, dmax(ovf, 0.015));
+        }
+    }
+
+    if (x > 0 && x + 1 < W && y > 0 && y + 1 < H) {
+        const int half_left_ev = raw2ev[halfres_smooth[i - 1]];
+        const int half_right_ev = raw2ev[halfres_smooth[i + 1]];
+        const int half_up_ev = raw2ev[halfres_smooth[i - (size_t)W]];
+        const int half_down_ev = raw2ev[halfres_smooth[i + (size_t)W]];
+        const int half_grad_ev = imax(iabs_(half_left_ev - half_right_ev),
+                                      iabs_(half_up_ev - half_down_ev));
+        double local_cap = 1.0;
+        if (half_grad_ev < EV_RESOLUTION / 4) {
+            local_cap = 0.005;
+        } else if (half_grad_ev < EV_RESOLUTION) {
+            local_cap = 0.015;
+        } else if (half_grad_ev < EV_RESOLUTION * 2) {
+            local_cap = 0.04;
+        } else if (half_grad_ev < EV_RESOLUTION * 4) {
+            local_cap = 0.10;
+        }
+        f = dmin(f, dmax(ovf, local_cap));
+    }
+
+    const double noisy_or_overexposed = dmax(ovf, 1.0 - f);
+    const int anchor_ev = hrev;
+    double fev = noisy_or_overexposed * (double)frsev +
+                 (1.0 - noisy_or_overexposed) * (double)frev;
+
+    if (x > 1 && x + 2 < W && y > 1 && y + 2 < H) {
+        const int full_left_ev = raw2ev[fullres[i - 2]];
+        const int full_right_ev = raw2ev[fullres[i + 2]];
+        const int full_up_ev = raw2ev[fullres[i - (size_t)2 * (size_t)W]];
+        const int full_down_ev = raw2ev[fullres[i + (size_t)2 * (size_t)W]];
+        const int full_base_ev = (full_left_ev + full_right_ev +
+                                  full_up_ev + full_down_ev + 2) / 4;
+        const int half_left_ev = raw2ev[halfres_smooth[i - 2]];
+        const int half_right_ev = raw2ev[halfres_smooth[i + 2]];
+        const int half_up_ev = raw2ev[halfres_smooth[i - (size_t)2 * (size_t)W]];
+        const int half_down_ev = raw2ev[halfres_smooth[i + (size_t)2 * (size_t)W]];
+        const int half_base_ev = (half_left_ev + half_right_ev +
+                                  half_up_ev + half_down_ev + 2) / 4;
+        const int half_detail_ev = imax(
+            imax(iabs_(hrev - half_base_ev), iabs_(half_left_ev - half_right_ev)),
+            iabs_(half_up_ev - half_down_ev));
+        const int detail_limit_ev = icoerce(half_detail_ev / 8 + EV_RESOLUTION / 32,
+                                            EV_RESOLUTION / 64,
+                                            EV_RESOLUTION / 4);
+        const int green_site = ((x ^ y) & 1);
+        const int full_detail_ev = green_site
+            ? icoerce(frev - full_base_ev, -detail_limit_ev, detail_limit_ev)
+            : 0;
+        const int full_smooth_detail_ev = green_site
+            ? icoerce(frsev - full_base_ev, -detail_limit_ev, detail_limit_ev)
+            : 0;
+        const int anchored_full_ev = anchor_ev + full_detail_ev;
+        const int anchored_smooth_ev = anchor_ev + full_smooth_detail_ev;
+        fev = noisy_or_overexposed * (double)anchored_smooth_ev +
+              (1.0 - noisy_or_overexposed) * (double)anchored_full_ev;
+    }
+
+    const int sig = ((int)dark[i] + b) / 2;
+    const double cap = (double)(sig - d_black) / (double)(4 * d_dark_noise);
+    f = dmax(0.0, dmin(f, cap));
+
+    int output = (int)((double)anchor_ev * (1.0 - f) + fev * f);
+    raw32[i] = ev_to_raw20(ev2raw, output);
+}
+
+__global__ void k_output_vertical_mesh_stabilize(uint32_t* __restrict image,
+                                                 const uint32_t* __restrict source,
+                                                 const int* __restrict raw2ev,
+                                                 const int* __restrict ev2raw,
+                                                 int W, int H)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = 2 + blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= W || y >= H - 2) return;
+    const size_t idx = (size_t)x + (size_t)y * (size_t)W;
+    const int up_ev = raw20_to_ev(raw2ev, source[idx - (size_t)2 * (size_t)W]);
+    const int down_ev = raw20_to_ev(raw2ev, source[idx + (size_t)2 * (size_t)W]);
+    const int same_color_edge_limit = (EV_RESOLUTION * 3) / 4;
+    if (iabs_(up_ev - down_ev) > same_color_edge_limit) return;
+
+    const int center_ev = raw20_to_ev(raw2ev, source[idx]);
+    const int neighbor_ev = (up_ev + down_ev + 1) / 2;
+    const int correction_floor = EV_RESOLUTION / 32;
+    if (iabs_(center_ev - neighbor_ev) < correction_floor) return;
+
+    const int corrected_ev = (center_ev + 2 * neighbor_ev + 1) / 3;
+    image[idx] = ev_to_raw20(ev2raw, corrected_ev);
+}
+
+__global__ void k_source_mesh_stabilize(uint32_t* __restrict plane,
+                                        const uint32_t* __restrict source,
+                                        const int* __restrict raw2ev,
+                                        const int* __restrict ev2raw,
+                                        int W, int H)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= W || y >= H) return;
+    const size_t idx = (size_t)x + (size_t)y * (size_t)W;
+    const int center_ev = raw20_to_ev(raw2ev, source[idx]);
+    int weighted_ev = center_ev * 2;
+    int weight = 2;
+    const int same_color_edge_limit = (EV_RESOLUTION * 3) / 4;
+
+    if (y >= 2 && y + 2 < H) {
+        const int up_ev = raw20_to_ev(raw2ev, source[idx - (size_t)2 * (size_t)W]);
+        const int down_ev = raw20_to_ev(raw2ev, source[idx + (size_t)2 * (size_t)W]);
+        if (iabs_(up_ev - down_ev) <= same_color_edge_limit) {
+            weighted_ev += ((up_ev + down_ev + 1) / 2) * 2;
+            weight += 2;
+        }
+    }
+    if (x >= 2 && x + 2 < W) {
+        const int left_ev = raw20_to_ev(raw2ev, source[idx - 2]);
+        const int right_ev = raw20_to_ev(raw2ev, source[idx + 2]);
+        if (iabs_(left_ev - right_ev) <= same_color_edge_limit) {
+            weighted_ev += ((left_ev + right_ev + 1) / 2) * 2;
+            weight += 2;
+        }
+    }
+    if (weight == 2) return;
+
+    const int corrected_ev = (weighted_ev + weight / 2) / weight;
+    const int correction_floor = EV_RESOLUTION / 32;
+    if (iabs_(center_ev - corrected_ev) < correction_floor) return;
+    plane[idx] = ev_to_raw20(ev2raw, corrected_ev);
+}
+
+__global__ void k_flat_green_cell_balance(uint32_t* __restrict image,
+                                          const int* __restrict raw2ev,
+                                          const int* __restrict ev2raw,
+                                          int W, int H)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < 2 || x >= W - 3 || y < 2 || y >= H - 3 || (x & 1) || (y & 1)) return;
+
+    const size_t g_red_idx = (size_t)(x + 1) + (size_t)y * (size_t)W;
+    const size_t g_blue_idx = (size_t)x + (size_t)(y + 1) * (size_t)W;
+    const int g_red_left_ev = raw20_to_ev(raw2ev, image[g_red_idx - 2]);
+    const int g_red_right_ev = raw20_to_ev(raw2ev, image[g_red_idx + 2]);
+    const int g_red_up_ev = raw20_to_ev(raw2ev, image[g_red_idx - (size_t)2 * (size_t)W]);
+    const int g_red_down_ev = raw20_to_ev(raw2ev, image[g_red_idx + (size_t)2 * (size_t)W]);
+    const int g_blue_left_ev = raw20_to_ev(raw2ev, image[g_blue_idx - 2]);
+    const int g_blue_right_ev = raw20_to_ev(raw2ev, image[g_blue_idx + 2]);
+    const int g_blue_up_ev = raw20_to_ev(raw2ev, image[g_blue_idx - (size_t)2 * (size_t)W]);
+    const int g_blue_down_ev = raw20_to_ev(raw2ev, image[g_blue_idx + (size_t)2 * (size_t)W]);
+    const int red_green_axis_ev = imax(iabs_(g_red_left_ev - g_red_right_ev),
+                                       iabs_(g_red_up_ev - g_red_down_ev));
+    const int blue_green_axis_ev = imax(iabs_(g_blue_left_ev - g_blue_right_ev),
+                                        iabs_(g_blue_up_ev - g_blue_down_ev));
+    if (imax(red_green_axis_ev, blue_green_axis_ev) > EV_RESOLUTION * 3 / 2) return;
+
+    const int g_red_ev = raw20_to_ev(raw2ev, image[g_red_idx]);
+    const int g_blue_ev = raw20_to_ev(raw2ev, image[g_blue_idx]);
+    const int delta = g_red_ev - g_blue_ev;
+    if (iabs_(delta) <= EV_RESOLUTION / 64) return;
+
+    const int max_green_correction = EV_RESOLUTION / 2;
+    const int correction = icoerce(delta / 2,
+                                   -max_green_correction,
+                                   max_green_correction);
+    image[g_red_idx] = ev_to_raw20(ev2raw, g_red_ev - correction);
+    image[g_blue_idx] = ev_to_raw20(ev2raw, g_blue_ev + correction);
+}
+
+__global__ void k_flat_chroma_guard(uint32_t* __restrict image,
+                                    const int* __restrict raw2ev,
+                                    const int* __restrict ev2raw,
+                                    int W, int H)
+{
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x < 1 || x >= W - 1 || y < 1 || y >= H - 1) return;
+    const int red_site = ((x & 1) == 0) && ((y & 1) == 0);
+    const int blue_site = ((x & 1) == 1) && ((y & 1) == 1);
+    if (!red_site && !blue_site) return;
+
+    const size_t idx = (size_t)x + (size_t)y * (size_t)W;
+    const int left_green_ev = raw20_to_ev(raw2ev, image[idx - 1]);
+    const int right_green_ev = raw20_to_ev(raw2ev, image[idx + 1]);
+    const int up_green_ev = raw20_to_ev(raw2ev, image[idx - (size_t)W]);
+    const int down_green_ev = raw20_to_ev(raw2ev, image[idx + (size_t)W]);
+    const int green_min = imin(imin(left_green_ev, right_green_ev),
+                               imin(up_green_ev, down_green_ev));
+    const int green_max = imax(imax(left_green_ev, right_green_ev),
+                               imax(up_green_ev, down_green_ev));
+    if (green_max - green_min > EV_RESOLUTION * 3 / 2) return;
+
+    const int green_avg = (left_green_ev + right_green_ev +
+                           up_green_ev + down_green_ev + 2) / 4;
+    const int site_ev = raw20_to_ev(raw2ev, image[idx]);
+    const int target_ev = green_avg + (red_site ? 0 : -EV_RESOLUTION / 4);
+    const int excess = site_ev - target_ev;
+    if (excess <= EV_RESOLUTION / 32) return;
+
+    const int correction = imin(excess, EV_RESOLUTION * 2);
+    image[idx] = ev_to_raw20(ev2raw, site_ev - correction);
+}
+
 /* STAGE 9+10: AVX2-compatible final_blend fused directly to 16-bit.
  * Mirrors final_blend_row_avx2(... fuse_to_16bit=1): float raw2ev values,
  * explicit fused multiply-adds, and per-row dither cursor `(y*7 + x) & 1023`.
@@ -581,7 +1067,10 @@ struct igpu_recon_backend {
     /* device buffers (W*H sized; allocated on set_clip) */
     uint16_t *d_in, *d_out, *d_alias, *d_aliasaux, *d_over, *d_overaux;
     uint32_t *d_raw32, *d_dark, *d_bright, *d_fullres, *d_halfres;
+    uint32_t *d_fullres_smooth, *d_halfres_smooth;
+    uint32_t *d_chroma_tmp;
     uint64_t clip_allocated_bytes;
+    uint64_t chroma_tmp_allocated_bytes;
 
     /* device LUTs (uploaded once on set_luts) */
     int      *dd_raw2ev, *dd_ev2raw;     /* ev2raw is BASE; origin = +EV2RAW_ORIGIN */
@@ -607,6 +1096,82 @@ struct igpu_recon_backend {
 
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
+
+static int debug_dump_blob(const char* dir,
+                           const char* name,
+                           const void* data,
+                           size_t bytes)
+{
+    if (!dir || !*dir || !name || !*name || !data) return 0;
+#ifdef _WIN32
+    CreateDirectoryA(dir, NULL);
+#endif
+    char path[MAX_PATH * 4];
+    snprintf(path, sizeof(path), "%s\\%s", dir, name);
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[igpu_recon_cuda] debug dump cannot open %s\n", path);
+        return -1;
+    }
+    const size_t wrote = fwrite(data, 1, bytes, f);
+    fclose(f);
+    if (wrote != bytes) {
+        fprintf(stderr, "[igpu_recon_cuda] debug dump short write %s\n", path);
+        return -1;
+    }
+    return 0;
+}
+
+static int debug_dump_device_blob(const char* dir,
+                                  const char* name,
+                                  const void* device,
+                                  size_t bytes)
+{
+    if (!dir || !*dir || !name || !*name || !device || bytes == 0) return 0;
+    void* host = malloc(bytes);
+    if (!host) {
+        fprintf(stderr, "[igpu_recon_cuda] debug dump malloc failed for %s (%zu bytes)\n",
+                name, bytes);
+        return -1;
+    }
+    const cudaError_t e = cudaMemcpy(host, device, bytes, cudaMemcpyDeviceToHost);
+    if (e != cudaSuccess) {
+        fprintf(stderr, "[igpu_recon_cuda] debug dump cudaMemcpy(%s) failed: %s\n",
+                name, cudaGetErrorString(e));
+        free(host);
+        return -1;
+    }
+    const int rc = debug_dump_blob(dir, name, host, bytes);
+    free(host);
+    return rc;
+}
+
+static void debug_dump_recon_stages(igpu_recon_backend* b,
+                                    const igpu_recon_frame_t* frame,
+                                    uint32_t* fullres_smooth,
+                                    uint32_t* halfres_smooth)
+{
+    const char* dir = getenv("IGPU_RECON_DEBUG_DUMP_DIR");
+    if (!dir || !*dir || !b || !frame) return;
+    const size_t n = (size_t)b->width * (size_t)b->height;
+    debug_dump_device_blob(dir, "cuda_stage_dark.u32", b->d_dark, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_bright.u32", b->d_bright, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_dark_source_smooth.u32",
+                           b->d_halfres_smooth, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_bright_source_smooth.u32",
+                           b->d_fullres_smooth, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_fullres.u32", b->d_fullres, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_halfres.u32", b->d_halfres, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_fullres_smooth.u32",
+                           fullres_smooth, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_halfres_smooth.u32",
+                           halfres_smooth, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_stage_alias_map.u16", b->d_alias, n * sizeof(uint16_t));
+    debug_dump_device_blob(dir, "cuda_stage_overexposed.u16", b->d_over, n * sizeof(uint16_t));
+    debug_dump_device_blob(dir, "cuda_stage_final20.u32", b->d_raw32, n * sizeof(uint32_t));
+    debug_dump_device_blob(dir, "cuda_out.u16", b->d_out, n * sizeof(uint16_t));
+    debug_dump_blob(dir, "cuda_debug_frame.bin", frame, sizeof(*frame));
+}
 
 static int reset_cached_gl_resource(CachedGlImageResource* cache,
                                     int tolerate_invalid_graphics_context)
@@ -740,9 +1305,15 @@ static void free_clip_buffers(igpu_recon_backend* b) {
     if (b->d_bright)   cudaFree(b->d_bright);
     if (b->d_fullres)  cudaFree(b->d_fullres);
     if (b->d_halfres)  cudaFree(b->d_halfres);
+    if (b->d_fullres_smooth) cudaFree(b->d_fullres_smooth);
+    if (b->d_halfres_smooth) cudaFree(b->d_halfres_smooth);
+    if (b->d_chroma_tmp) cudaFree(b->d_chroma_tmp);
     b->d_in=b->d_out=b->d_alias=b->d_aliasaux=b->d_over=b->d_overaux=NULL;
     b->d_raw32=b->d_dark=b->d_bright=b->d_fullres=b->d_halfres=NULL;
+    b->d_fullres_smooth=b->d_halfres_smooth=NULL;
+    b->d_chroma_tmp=NULL;
     b->clip_allocated_bytes = 0;
+    b->chroma_tmp_allocated_bytes = 0;
 }
 
 static void free_retained_device_outputs(igpu_recon_backend* b) {
@@ -887,9 +1458,11 @@ int igpu_recon_set_clip(igpu_recon_backend* b, const igpu_recon_clip_t* clip)
     CK(cudaMalloc(&b->d_bright,  n*sizeof(uint32_t)));
     CK(cudaMalloc(&b->d_fullres, n*sizeof(uint32_t)));
     CK(cudaMalloc(&b->d_halfres, n*sizeof(uint32_t)));
+    CK(cudaMalloc(&b->d_fullres_smooth, n*sizeof(uint32_t)));
+    CK(cudaMalloc(&b->d_halfres_smooth, n*sizeof(uint32_t)));
     b->clip_allocated_bytes =
         (uint64_t)n * (6ull * (uint64_t)sizeof(uint16_t)
-                     + 5ull * (uint64_t)sizeof(uint32_t));
+                     + 7ull * (uint64_t)sizeof(uint32_t));
 
     /* push the static per-clip constants to __constant__.
      * white_darkened is recomputed in set_clip exactly as the engine does,
@@ -984,16 +1557,19 @@ int igpu_recon_run(igpu_recon_backend* b,
         return -1;
     }
     if (frame->interp_method != 1 ||
-        !frame->use_alias_map ||
+        (frame->use_alias_map != 0 && frame->use_alias_map != 1) ||
         !frame->use_fullres ||
-        frame->chroma_smooth_method != 0 ||
+        frame->chroma_smooth_method < 0 ||
+        frame->chroma_smooth_method > 1 ||
+        frame->playback_preview_scale_factor < 0 ||
         (frame->apply_dither != 0 && frame->apply_dither != 1)) {
-        fprintf(stderr, "[igpu_recon_cuda] unsupported v1 frame controls "
-                        "(interp=%d alias=%d fullres=%d chroma=%d dither=%d)\n",
+        fprintf(stderr, "[igpu_recon_cuda] unsupported frame controls "
+                        "(interp=%d alias=%d fullres=%d chroma=%d scale=%d dither=%d)\n",
                 frame->interp_method,
                 frame->use_alias_map,
                 frame->use_fullres,
                 frame->chroma_smooth_method,
+                frame->playback_preview_scale_factor,
                 frame->apply_dither);
         return 3;
     }
@@ -1073,45 +1649,115 @@ int igpu_recon_run(igpu_recon_backend* b,
     { dim3 g((W+15)/16,(4+15)/16); k_border_botrows<<<g,bt>>>(b->d_raw32,b->d_dark,b->d_bright,W,H); }
     { int t=256; dim3 g((H+t-1)/t); k_border_cols<<<g,t>>>(b->d_raw32,b->d_dark,b->d_bright,W,H); }
 
-    /* STAGE 5: fullres */
-    k_fullres<<<gt,bt>>>(b->d_fullres,b->d_dark,b->d_bright,W,H);
+    const int apply_chroma_smooth = (frame->chroma_smooth_method == 1);
+    if (apply_chroma_smooth && !b->d_chroma_tmp) {
+        CK(cudaMalloc(&b->d_chroma_tmp, n*sizeof(uint32_t)));
+        b->chroma_tmp_allocated_bytes = (uint64_t)n * (uint64_t)sizeof(uint32_t);
+        b->clip_allocated_bytes += b->chroma_tmp_allocated_bytes;
+    }
+
+    const uint32_t* dark_for_mix = b->d_dark;
+    const uint32_t* bright_for_mix = b->d_bright;
+    if (apply_chroma_smooth) {
+        dim3 gcs(((W / 2) + 15) / 16, ((H / 2) + 15) / 16);
+        CK(cudaMemcpy(b->d_fullres_smooth,b->d_bright,n*sizeof(uint32_t),cudaMemcpyDeviceToDevice));
+        CK(cudaMemcpy(b->d_halfres_smooth,b->d_dark,n*sizeof(uint32_t),cudaMemcpyDeviceToDevice));
+        k_chroma_smooth_2x2<<<gcs,bt>>>(b->d_bright,b->d_fullres_smooth,
+                                        b->dd_raw2ev,dd_ev2raw_origin,white_darkened,W,H);
+        k_chroma_smooth_2x2<<<gcs,bt>>>(b->d_dark,b->d_halfres_smooth,
+                                        b->dd_raw2ev,dd_ev2raw_origin,white20,W,H);
+        bright_for_mix = b->d_fullres_smooth;
+        dark_for_mix = b->d_halfres_smooth;
+    }
+
+    /* STAGE 5: fullres. CPU chroma smoothing keeps the primary fullres
+     * reconstruction on the original matched planes; smoothed source planes
+     * feed the halfres mix and secondary fullres_smooth reconstruction. */
+    if (apply_chroma_smooth) {
+        k_fullres_phase_balance<<<gt,bt>>>(b->d_fullres,b->d_dark,b->d_bright,
+                                           b->dd_raw2ev,dd_ev2raw_origin,W,H);
+    } else {
+        k_fullres<<<gt,bt>>>(b->d_fullres,b->d_dark,b->d_bright,W,H);
+    }
 
     /* STAGE 6: mix halfres */
     if (frame->apply_dither) {
-        k_mix_halfres_avx2<<<gt,bt>>>(b->d_halfres,b->d_bright,b->d_dark,
+        k_mix_halfres_avx2<<<gt,bt>>>(b->d_halfres,bright_for_mix,dark_for_mix,
                                       b->dd_raw2ev,dd_ev2raw_origin,b->dd_mix,W,H);
     } else {
-        k_mix_halfres<<<gt,bt>>>(b->d_halfres,b->d_bright,b->d_dark,
+        k_mix_halfres<<<gt,bt>>>(b->d_halfres,bright_for_mix,dark_for_mix,
                                  b->dd_raw2ev,dd_ev2raw_origin,b->dd_mix,W,H);
     }
 
-    /* STAGE 7: alias map (fullres_smooth==fullres, halfres_smooth==halfres) */
-    k_alias_init<<<gt,bt>>>(b->d_alias,b->d_fullres,b->d_halfres,b->d_bright,
-                            b->dd_raw2ev,b->dd_frc_d,W,H);
-    CK(cudaMemcpy(b->d_aliasaux,b->d_alias,n*sizeof(uint16_t),cudaMemcpyDeviceToDevice));
-    { dim3 g((W-12+15)/16,(H-12+15)/16); k_alias_rank<<<g,bt>>>(b->d_alias,b->d_aliasaux,b->d_bright,b->dd_frc_d,W,H); }
-    { dim3 g((W-12+15)/16,(H-12+15)/16); k_alias_gauss<<<g,bt>>>(b->d_alias,b->d_aliasaux,b->d_bright,b->dd_frc_d,W,H); }
-    { int nx=(W-2-2)/2+1, ny=(H-2-2)/2+1; dim3 g((nx+15)/16,(ny+15)/16); k_alias_gray<<<g,bt>>>(b->d_alias,W,H); }
+    uint32_t* fullres_for_final = b->d_fullres;
+    uint32_t* fullres_smooth = b->d_fullres;
+    uint32_t* halfres_smooth = b->d_halfres;
+    if (apply_chroma_smooth) {
+        /* CPU diso_get_full20bit calls mix_images(..., chroma_smooth_method=0)
+         * after source-plane smoothing. The only post-mix chroma input is the
+         * secondary fullres reconstruction from the smoothed source planes. */
+        k_fullres<<<gt,bt>>>(b->d_chroma_tmp,dark_for_mix,bright_for_mix,W,H);
+        fullres_smooth = b->d_chroma_tmp;
+    }
 
-    /* STAGE 8: overexposed */
-    k_over_mark<<<gt,bt>>>(b->d_overaux,b->d_bright,b->d_dark,W,H);
+    /* STAGE 7: alias map. Alias-off CPU recon blends with c=0; d_alias is
+     * already zeroed above, so skip the alias kernels for that mode. */
+    if (frame->use_alias_map) {
+        /* CPU mix_images receives dark_for_mix/bright_for_mix. With source chroma
+         * smoothing enabled, the alias-map fullres-threshold gates are therefore
+         * keyed from the smoothed bright plane, while final_blend still uses the
+         * original bright/dark planes below. */
+        k_alias_init<<<gt,bt>>>(b->d_alias,fullres_for_final,halfres_smooth,bright_for_mix,
+                                b->dd_raw2ev,b->dd_frc_d,W,H);
+        CK(cudaMemcpy(b->d_aliasaux,b->d_alias,n*sizeof(uint16_t),cudaMemcpyDeviceToDevice));
+        { dim3 g((W-12+15)/16,(H-12+15)/16); k_alias_rank<<<g,bt>>>(b->d_alias,b->d_aliasaux,bright_for_mix,b->dd_frc_d,W,H); }
+        { dim3 g((W-12+15)/16,(H-12+15)/16); k_alias_gauss<<<g,bt>>>(b->d_alias,b->d_aliasaux,bright_for_mix,b->dd_frc_d,W,H); }
+        { int nx=(W-2-2)/2+1, ny=(H-2-2)/2+1; dim3 g((nx+15)/16,(ny+15)/16); k_alias_gray<<<g,bt>>>(b->d_alias,W,H); }
+    }
+
+    /* STAGE 8: overexposed. CPU mix_images marks from the same dark/bright
+     * planes passed into the halfres mix; with source chroma smoothing those
+     * are the smoothed source planes, not the original split planes. */
+    k_over_mark<<<gt,bt>>>(b->d_overaux,bright_for_mix,dark_for_mix,W,H);
     k_over_bordercopy<<<gt,bt>>>(b->d_over,b->d_overaux,W,H);
     { dim3 g((W-6+15)/16,(H-6+15)/16); k_over_blur<<<g,bt>>>(b->d_over,b->d_overaux,W,H); }
 
-    if (frame->apply_dither) {
+    const int apply_fullres_mesh_guard =
+        frame->playback_preview_scale_factor == 1 &&
+        frame->use_fullres &&
+        !frame->use_alias_map &&
+        apply_chroma_smooth;
+
+    if (apply_fullres_mesh_guard) {
+        k_final_blend_mesh_guard<<<gt,bt>>>(b->d_raw32,b->d_bright,halfres_smooth,
+                                            fullres_for_final,fullres_smooth,
+                                            b->d_dark,b->d_over,b->d_alias,
+                                            b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,W,H);
+        CK(cudaMemcpy(b->d_fullres,b->d_raw32,n*sizeof(uint32_t),cudaMemcpyDeviceToDevice));
+        k_output_vertical_mesh_stabilize<<<gt,bt>>>(b->d_raw32,b->d_fullres,
+                                                    b->dd_raw2ev,dd_ev2raw_origin,W,H);
+        CK(cudaMemcpy(b->d_fullres,b->d_raw32,n*sizeof(uint32_t),cudaMemcpyDeviceToDevice));
+        k_source_mesh_stabilize<<<gt,bt>>>(b->d_raw32,b->d_fullres,
+                                           b->dd_raw2ev,dd_ev2raw_origin,W,H);
+        k_flat_green_cell_balance<<<gt,bt>>>(b->d_raw32,b->dd_raw2ev,dd_ev2raw_origin,W,H);
+        k_flat_chroma_guard<<<gt,bt>>>(b->d_raw32,b->dd_raw2ev,dd_ev2raw_origin,W,H);
+        k_convert16<<<gt,bt>>>(b->d_out,b->d_raw32,W,H);
+    } else if (frame->apply_dither) {
         /* STAGE 9+10: default AVX2 export shape, fused to 16-bit with row dither. */
-        k_final_blend16_avx2<<<gt,bt>>>(b->d_out,b->d_bright,b->d_halfres,b->d_fullres,b->d_fullres,
+        k_final_blend16_avx2<<<gt,bt>>>(b->d_out,b->d_bright,halfres_smooth,fullres_for_final,fullres_smooth,
                                         b->d_dark,b->d_over,b->d_alias,
                                         b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,b->df_randn05,W,H);
     } else {
         /* STAGE 9: scalar export shape, final blend to raw32. */
-        k_final_blend<<<gt,bt>>>(b->d_raw32,b->d_bright,b->d_halfres,b->d_fullres,b->d_fullres,
+        k_final_blend<<<gt,bt>>>(b->d_raw32,b->d_bright,halfres_smooth,fullres_for_final,fullres_smooth,
                                  b->d_dark,b->d_over,b->d_alias,
                                  b->dd_raw2ev,dd_ev2raw_origin,b->dd_frc_f,W,H);
 
         /* STAGE 10: convert 20->16 without AVX2 row dither. */
         k_convert16<<<gt,bt>>>(b->d_out,b->d_raw32,W,H);
     }
+
+    debug_dump_recon_stages(b, frame, fullres_smooth, halfres_smooth);
 
     CK(cudaGetLastError());
     CK(cudaEventRecord(b->ev_after_kernel, 0));

@@ -39,7 +39,15 @@ ROLE the config assigns you. The lane FILE is fixed by agent; the ROLE comes fro
    **Liveness + teardown (2026-06-27 hardening):** the helper ALSO emits a STALENESS ALERT when the
    other lane goes dark (its latest entry older than ~2x the ~30-min liveness cadence, default 60 min)
    and a DEADLOCK WATCH when a live peer has not read one of your still-OPEN items -- both gated on the
-   ABSENCE of a COLLABORATION_END entry (the collab-active gate). On a STALENESS ALERT, self-heal:
+   ABSENCE of a COLLABORATION_END entry (the collab-active gate). On a STALENESS ALERT, FIRST
+   DISTINGUISH DARK FROM HEADS-DOWN before escalating (ledger-age alone CANNOT tell a dead lane from a
+   peer mid-build): run `-Status` (authoritative), confirm the peer's watcher PID is alive, AND check
+   for active peer WORK — build/capture/analysis processes (cc1plus/g++/mingw32-make/qmake/MLVApp/python)
+   and recent writes in the peer's worktree (e.g. `C:\mlvtmp\wt-*`). If the peer is demonstrably WORKING
+   (mid-build/iterate during an implementation phase), it is a **FALSE staleness alarm** — note it
+   self-dated and KEEP WAITING; do NOT post a RESUME-REQUEST, do NOT ask the human to restart, do NOT cry
+   wolf (a long (b) build legitimately posts no ledger entry for >60 min). ONLY if the peer is genuinely
+   INERT (watcher dead, OR no active build/capture process AND no recent worktree writes) self-heal:
    surface it, post a RESUME-REQUEST in claude.md, and ask the human to restart the other agent (you
    cannot restart its process). A watcher is torn down ONLY by an explicit COLLABORATION_END control
    entry; a work-block-done STATUS is NOT teardown and MUST say "collaboration continues; keep your
@@ -104,6 +112,12 @@ review — never trust the implementer's verdict:
    what you saw, which criterion failed). `ack:` the Codex SEQ; bump `LAST_READ_CODEX_SEQ`.
 - Between handoffs you are correctly idle on review — but keep the Monitor live and process
   STATUS/ACK/QUESTION entries (a Codex QUESTION/BLOCKER is your work even with no new candidate).
+- **When YOU resolve a detour/question and the next work is the peer's, POST the explicit forward
+  HANDOFF** (TYPE HANDOFF, `YOUR ACTION:` + precise self-contained scope) — do NOT leave the direction
+  implied in a REVIEW/STATUS and then idle in gate-prep/liveness while the peer waits. "Forward on X"
+  buried in REVIEW prose is NOT a handoff; the peer holds for the ceremony. (Lesson 2026-06-29: reviewer
+  resolved the NoLA detour + built the gate but never posted the resume-HANDOFF → implementer held
+  passive for many heartbeats.)
 
 ## IMPLEMENTER loop (when the config assigns you IMPLEMENTER)
 1. Implement a change toward the objective (config's owned areas).
@@ -120,6 +134,15 @@ review — never trust the implementer's verdict:
    `ack:` it, address the named findings, and re-handoff. **Do not go idle on an open
    CHANGES_REQUESTED.** "No inbound message" ≠ "no work." If you are genuinely out of approaches,
    post a **BLOCKER/QUESTION** to the reviewer — never silently idle.
+8. **Resume ASSIGNED work when its hold clears — no fresh handoff needed.** A task assigned to you
+   that a detour or dependency interrupted RESUMES automatically once that detour/dependency resolves;
+   you do NOT need to be re-handed the same task. A clear forward direction (the reviewer naming the
+   next work, or the human's explicit instruction) IS authorization. **Liveness/ledger heartbeats are
+   not a holding pattern:** if you are emitting consecutive heartbeats with open assigned work or a
+   clear direction, you are stuck passive — RESUME, or post a concrete BLOCKER. A real HOLD names the
+   SPECIFIC thing it waits on and the exact release condition; open-ended "waiting for a handoff" is
+   forbidden. (Lesson 2026-06-29: NoLA detour resolved + reviewer said "forward on (b)", but the
+   implementer held in liveness mode awaiting a ceremonial handoff that never came.)
 
 ---
 
@@ -190,11 +213,32 @@ watcher on `claude.md` so neither side needs a manual nudge.
   ALERT when the peer goes dark, DEADLOCK WATCH on a both-lanes-wait standoff, both gated on
   COLLABORATION_END absence; self-heal a STALENESS ALERT by posting a RESUME-REQUEST and asking the
   human to restart the peer.
-- **Never go idle on an open CHANGES_REQUESTED you own** (implementer) — iterate or declare a blocker.
+- **Never go idle while you have open assigned work or a clear forward direction** — not on an open
+  CHANGES_REQUESTED, not on an assigned task whose detour/hold just cleared, not after the peer or human
+  named the next work. Liveness/ledger heartbeats are NOT a holding pattern: resume the work or post a
+  concrete BLOCKER. An assigned task resumes when its hold clears WITHOUT a fresh ceremonial handoff;
+  direction (the reviewer's "forward on X" or the human's explicit ask) IS authorization. Mirror duty for
+  the reviewer: when you resolve a detour/question whose next work is the peer's, POST the explicit forward
+  HANDOFF — do not leave it implied and idle. A legitimate HOLD names the specific thing it waits on and
+  the exact release condition. (Lesson 2026-06-29: NoLA detour resolved, no resume-HANDOFF posted →
+  implementer held passive for many heartbeats; "no new precise HANDOFF" was misread as "no work.")
 - **The direct read is the guarantee; the Monitor is best-effort.** A Monitor dies silently on
   compaction and stacks into duplicates that race the marker. So: keep EXACTLY ONE Monitor (STOP any
   existing before restart), and **directly re-read `codex.md` from your cursor at the start of every
   collaboration turn** regardless of notifications. "No notification" is never proof there is nothing new.
+- **Coordination STATE comes from the FILES, never a notification snapshot.** A WAKE / heartbeat / STALE
+  line -- the WAKE event text the harness surfaces, and any "no new entries" prose a lane writes -- is a
+  POINT-IN-TIME SNAPSHOT that lags the live ledgers (a "no new entries" claim is true only as of its own
+  timestamp; the peer may post one second later -- e.g. 2026-06-28, Codex SEQ372 "no new Claude entries"
+  was written 22s before Claude SEQ131, briefly misread as a possible lane split). NEVER conclude
+  split / stalled / message-missed / idle from a snapshot. Before drawing OR escalating ANY coordination
+  conclusion, run the authoritative one-shot and read its VERDICT line:
+  `pwsh -NoProfile -ExecutionPolicy Bypass -File .claude/skills/dual-lane/heartbeat-check.ps1 -Status -OtherLaneFile .claude-state/coordination/dual-lane/codex.md -MarkerFile .claude-state/coordination/dual-lane/.claude-marker -SelfLedgerFile .claude-state/coordination/dual-lane/claude.md -CursorKey LAST_READ_CODEX_SEQ`
+  (it prints both ledgers' max-SEQ, BOTH header cursors, the inbound/outbound gaps, peer-latest age, and a
+  verdict: IN-SYNC / INBOUND-PENDING / OUTBOUND-PENDING / BOTH-PENDING-race / STALE / ENDED). The cursors
+  are the source of truth; the snapshot is only a hint. Corollary: when YOU write a liveness / "no new
+  entries" line, self-date it -- cite your read time and the exact max-SEQ you saw -- so a later reader can
+  tell at a glance whether it is stale.
 - **Posting a verdict is NOT disengagement.** After a REVIEW / CHANGES_REQUESTED / STATUS, the other lane
   may reply with a QUESTION (which is YOUR work) or a re-handoff. Keep the Monitor live and direct-read
   `codex.md` on every resume — never treat "ball in their court" as "stop watching." (A ~4h idle on an

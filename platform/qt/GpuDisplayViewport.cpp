@@ -9,11 +9,13 @@
 #include "GpuDisplayWindow.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <QByteArray>
 #include <QColor>
 #include <QGraphicsPixmapItem>
+#include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QOpenGLContext>
 #include <QPalette>
@@ -60,6 +62,67 @@ bool viewportPresentDiagEnabled()
     static const bool enabled =
         envFlagEnabled(qgetenv("MLVAPP_VIEWPORT_PRESENT_DIAG"));
     return enabled;
+}
+
+bool rectsNearlyEqual(const QRectF &a, const QRectF &b)
+{
+    constexpr qreal kTolerance = 0.01;
+    return std::abs(a.left() - b.left()) <= kTolerance
+        && std::abs(a.top() - b.top()) <= kTolerance
+        && std::abs(a.width() - b.width()) <= kTolerance
+        && std::abs(a.height() - b.height()) <= kTolerance;
+}
+
+QSize displaySizeForWindowPresent(const QGraphicsView *view,
+                                  const QGraphicsPixmapItem *fallbackItem,
+                                  const QImage &image)
+{
+    const QRectF viewSceneRect = view ? view->sceneRect() : QRectF();
+    const QRectF sceneObjectRect =
+        ( view && view->scene() ) ? view->scene()->sceneRect() : QRectF();
+    QRectF itemRect;
+    if ( fallbackItem )
+    {
+        itemRect = fallbackItem->sceneBoundingRect();
+    }
+
+    const auto rectMatchesImage = [&image](const QRectF &rect) -> bool
+    {
+        constexpr qreal kTolerance = 0.01;
+        return !rect.isEmpty()
+            && std::abs(rect.width() - image.width()) <= kTolerance
+            && std::abs(rect.height() - image.height()) <= kTolerance;
+    };
+
+    QRectF sceneRect;
+    const QRectF candidates[3] = { sceneObjectRect, viewSceneRect, itemRect };
+    for ( const QRectF &candidate : candidates )
+    {
+        if ( !candidate.isEmpty() && !rectMatchesImage(candidate) )
+        {
+            sceneRect = candidate;
+            break;
+        }
+    }
+    if ( sceneRect.isEmpty() )
+    {
+        for ( const QRectF &candidate : candidates )
+        {
+            if ( !candidate.isEmpty() )
+            {
+                sceneRect = candidate;
+                break;
+            }
+        }
+    }
+
+    if ( sceneRect.isEmpty() )
+    {
+        return image.size();
+    }
+
+    return QSize(std::max(1, qRound(sceneRect.width())),
+                 std::max(1, qRound(sceneRect.height())));
 }
 
 /* Frame-grab telemetry: when MLVAPP_FRAME_GRAB_DIR is set, save the exact display
@@ -666,7 +729,9 @@ bool GpuDisplayViewport::presentImage(QGraphicsView *view,
     // installed in that mode.
     if ( !image.isNull() )
     {
-        if ( GpuDisplayWindow::presentImageIfActive(image) ) return true;
+        const QSize displaySize =
+            displaySizeForWindowPresent(view, fallbackItem, image);
+        if ( GpuDisplayWindow::presentImageIfActive(image, displaySize) ) return true;
     }
     else if ( GpuDisplayWindow::clearIfActive() )
     {
@@ -918,7 +983,8 @@ void GpuDisplayViewport::initializeGL()
         return;
     }
 
-    const QSurfaceFormat format = glContext->format();
+    const int requestedSwapInterval = this->format().swapInterval();
+    const QSurfaceFormat realizedFormat = glContext->format();
     QOpenGLFunctions *functions = glContext->functions();
     const GLubyte *renderer = functions ? functions->glGetString(GL_RENDERER) : nullptr;
     const GLubyte *vendor = functions ? functions->glGetString(GL_VENDOR) : nullptr;
@@ -929,11 +995,13 @@ void GpuDisplayViewport::initializeGL()
 
     qInfo().nospace()
         << "Experimental GPU viewport initialized ("
-        << format.majorVersion() << '.'
-        << format.minorVersion()
+        << realizedFormat.majorVersion() << '.'
+        << realizedFormat.minorVersion()
         << ", renderer=" << m_rendererDescription
         << ", vendor=" << (vendor ? reinterpret_cast<const char *>(vendor) : "unknown")
         << ", version=" << (version ? reinterpret_cast<const char *>(version) : "unknown")
+        << ", requested_swap_interval=" << requestedSwapInterval
+        << ", realized_swap_interval=" << realizedFormat.swapInterval()
         << ").";
 
     m_loggedContext = true;
@@ -1545,13 +1613,19 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
             const double directAmazeWallMs = elapsedMs() - directAmazeStartMs;
             if ( directAmazeOk )
             {
-                int validationCopyRc = 0;
-                const bool validationCopyOk =
+                int validationProofRc = 0;
+                llrpGpuPlaybackReconTiming_t validationProofTiming;
+                memset(&validationProofTiming, 0, sizeof(validationProofTiming));
+                const bool validationProofOk =
                     !validationProbeTexture
-                    || llrpGpuPlaybackReconCopyLastDeviceBayer16ToGlTexture(
+                    || llrpGpuPlaybackReconRunGlTexture(
+                        state,
+                        rawInputBayer14,
+                        expectedWords * sizeof(uint16_t),
                         m_gpuReconSourceTexture->textureId(),
-                        &validationCopyRc ) != 0;
-                if ( validationCopyOk )
+                        &validationProofRc,
+                        &validationProofTiming) != 0;
+                if ( validationProofOk )
                 {
                     rc = directRc;
                     reconTiming = directReconTiming;
@@ -1571,8 +1645,8 @@ bool GpuDisplayViewport::setPresentedGpuPlaybackReconAmazePostWbTexture(
                 {
                     directFailureReason =
                         QStringLiteral(
-                            "GPU playback recon direct device proof texture copy failed (rc=%1)")
-                            .arg(validationCopyRc);
+                            "GPU playback recon direct device proof texture render failed (rc=%1)")
+                            .arg(validationProofRc);
                 }
             }
             else
@@ -2094,12 +2168,20 @@ QRectF GpuDisplayViewport::targetRectInViewport() const
 {
     if ( !m_view ) return QRectF();
 
-    QRectF sceneRect = m_view->sceneRect();
+    const QRectF viewSceneRect = m_view->sceneRect();
+    QRectF itemRect;
     if ( m_fallbackItem )
     {
-        const QRectF itemRect = m_fallbackItem->sceneBoundingRect();
-        if ( !itemRect.isEmpty() ) sceneRect = itemRect;
+        itemRect = m_fallbackItem->sceneBoundingRect();
     }
+
+    QRectF sceneRect = itemRect.isEmpty() ? viewSceneRect : itemRect;
+    if ( hasPendingFrame() && !viewSceneRect.isEmpty()
+         && (itemRect.isEmpty() || !rectsNearlyEqual(viewSceneRect, itemRect)) )
+    {
+        sceneRect = viewSceneRect;
+    }
+
     if ( sceneRect.isEmpty() ) return QRectF();
 
     return m_view->mapFromScene(sceneRect).boundingRect();

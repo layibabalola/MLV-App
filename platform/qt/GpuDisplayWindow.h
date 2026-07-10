@@ -23,12 +23,16 @@
 #define GPUDISPLAYWINDOW_H
 
 #include <QImage>
+#include <QByteArray>
 #include <QSize>
 #include <QString>
 #include <QOpenGLFunctions>
 #include <QtOpenGL/qopenglshaderprogram.h>
 #include <QtOpenGL/qopengltexture.h>
 #include <QOpenGLWindow>
+#include "../../src/mlv/llrawproc/llrawproc.h"
+#include <cstddef>
+#include <cstdint>
 
 class QGraphicsView;
 
@@ -47,9 +51,31 @@ public:
     /* Route a CPU RGBA frame (or a clear) to the active window. Return true when the
      * window handled it (so the QOpenGLWidget/pixmap path can be skipped). Safe to call
      * from any thread; work is marshaled to the window's GUI thread. */
-    static bool presentImageIfActive(const QImage &image);
+    static QSize effectiveDisplaySizeForImage(const QSize &imageSize,
+                                              const QSize &requestedDisplaySize);
+    static bool presentImageIfActive(const QImage &image,
+                                     const QSize &displaySize = QSize());
     static bool clearIfActive(void);
     static QString rendererDescription(void);
+    static bool presentGpuPlaybackReconAmazePostWbTextureIfActive(
+        const uint16_t *rawInputBayer14,
+        size_t rawInputBayer14Words,
+        const llrpGpuPlaybackReconState_t *state,
+        int blackLevel,
+        const double wbMultipliers[3],
+        QString *reason = nullptr,
+        llrpGpuPlaybackReconTiming_t *timing = nullptr,
+        QString *handoffMode = nullptr,
+        bool validationProbeTexture = false,
+        const uint16_t *retainedDeviceBayer16 = nullptr,
+        int retainedDeviceWidth = 0,
+        int retainedDeviceHeight = 0,
+        int displayWidth = 0,
+        int displayHeight = 0);
+    static bool readGpuReconSourceBayer16TextureIfActive(QByteArray *textureBytes,
+                                                        int *width,
+                                                        int *height,
+                                                        QString *reason = nullptr);
     /* Logical size of the active preview window (empty if none). Used by the display
      * scene-geometry calc so the playback preview resolution tracks the QOpenGLWindow
      * surface, not the hidden QGraphicsView. GUI-thread only. */
@@ -58,8 +84,28 @@ public:
     explicit GpuDisplayWindow(QWindow *parent = nullptr);
     ~GpuDisplayWindow() override;
 
-    void setPresentedImage(const QImage &image);
+    void setPresentedImage(const QImage &image,
+                           const QSize &displaySize = QSize());
     void clearPresented(void);
+    bool setPresentedGpuPlaybackReconAmazePostWbTexture(
+        const uint16_t *rawInputBayer14,
+        size_t rawInputBayer14Words,
+        const llrpGpuPlaybackReconState_t *state,
+        int blackLevel,
+        const double wbMultipliers[3],
+        QString *reason,
+        llrpGpuPlaybackReconTiming_t *timing,
+        QString *handoffMode,
+        bool validationProbeTexture,
+        const uint16_t *retainedDeviceBayer16,
+        int retainedDeviceWidth,
+        int retainedDeviceHeight,
+        int displayWidth,
+        int displayHeight);
+    bool readGpuReconSourceBayer16Texture(QByteArray *textureBytes,
+                                          int *width,
+                                          int *height,
+                                          QString *reason);
 
 protected:
     void initializeGL() override;
@@ -69,15 +115,26 @@ private:
     void ensureProgram(void);
     void updateTextureIfNeeded(void);
     void destroyTexture(void);
+    void applySamplingMode(void);
 
     QOpenGLShaderProgram *m_program;
     QOpenGLTexture *m_texture;
+    QOpenGLTexture *m_gpuReconSourceTexture;
     QImage m_pendingImage;
+    int m_pendingTextureWidth;
+    int m_pendingTextureHeight;
+    int m_pendingDisplayWidth;
+    int m_pendingDisplayHeight;
+    bool m_gpuReconSourceTextureCurrent;
+    bool m_pendingTextureFromGpuRecon;
+    bool m_textureFromGpuRecon;
+    bool m_texturePresentationActive;
     bool m_textureDirty;
     bool m_loggedContext;
     bool m_loggedPaint;
     bool m_loggedPresented;
     bool m_loggedSetImage;
+    bool m_loggedSetGpuTexture;
     QString m_rendererDescription;
 };
 

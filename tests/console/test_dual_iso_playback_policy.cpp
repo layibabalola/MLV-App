@@ -2,7 +2,7 @@
 
 #include "../../platform/qt/DualIsoPlaybackPolicy.h"
 
-TEST(DualIsoPlaybackPolicy, PlaybackForcesFastPreviewSettingsForValidDualIso)
+TEST(DualIsoPlaybackPolicy, PlaybackFastRescueKeepsDualIsoQualityCriticalRecon)
 {
     const DualIsoPlaybackRuntimeSettings settings = effectiveDualIsoPlaybackRuntimeSettings(true,
                                                                                             true,
@@ -13,10 +13,11 @@ TEST(DualIsoPlaybackPolicy, PlaybackForcesFastPreviewSettingsForValidDualIso)
                                                                                             1);
 
     ASSERT_TRUE(settings.previewOverrideActive);
-    ASSERT_EQ(2, settings.mode);
-    ASSERT_EQ(1, settings.interpolation);
+    ASSERT_EQ(1, settings.mode);
+    ASSERT_EQ(0, settings.interpolation);
     ASSERT_EQ(0, settings.aliasMap);
-    ASSERT_EQ(0, settings.fullResBlending);
+    ASSERT_EQ(1, settings.fullResBlending);
+    ASSERT_TRUE(settings.playbackForceMean23);
 }
 
 TEST(DualIsoPlaybackPolicy, PausedPlaybackRestoresReceiptSettings)
@@ -59,6 +60,40 @@ TEST(DualIsoPlaybackPolicy, InvalidOrDisabledDualIsoDoesNotForcePreview)
     ASSERT_EQ(1, settings.mode);
 }
 
+/* Scale-aware suppression (2026-06-29): at x2 the AUTO preview-override is
+ * suppressed (it cliffs to a magenta fallback at bright-content transitions),
+ * leaving selectedMode=1 (HQ) so the mean23 override engages -- the proven
+ * neutral path. Explicit user preview (selectedMode==2) is still honored, and
+ * x1 (default effectiveScale) still records the rescue trigger while keeping
+ * HQ recon/full-res blending. */
+TEST(DualIsoPlaybackPolicy, SuppressesAutoPreviewOverrideAtScale2)
+{
+    /* x2: auto override suppressed -> HQ mode retained (mean23 then engages). */
+    const DualIsoPlaybackRuntimeSettings x2 =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 1, 0, 1, 1, false, 2);
+    ASSERT_FALSE(x2.previewOverrideActive);
+    ASSERT_EQ(1, x2.mode);
+    ASSERT_EQ(1, x2.aliasMap);
+    ASSERT_EQ(1, x2.fullResBlending);
+    ASSERT_TRUE(x2.playbackForceMean23);
+
+    /* x2 with explicit user preview (selectedMode==2): still forced to mode 2. */
+    const DualIsoPlaybackRuntimeSettings x2explicit =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 2, 0, 1, 1, false, 2);
+    ASSERT_EQ(2, x2explicit.mode);
+
+    /* x1 (default effectiveScale=1): rescue trigger remains visible, but
+     * quality-critical HQ recon/full-res blending stay enabled. */
+    const DualIsoPlaybackRuntimeSettings x1 =
+        effectiveDualIsoPlaybackRuntimeSettings(true, true, 1, 1, 0, 1, 1, false, 1);
+    ASSERT_TRUE(x1.previewOverrideActive);
+    ASSERT_EQ(1, x1.mode);
+    ASSERT_EQ(0, x1.interpolation);
+    ASSERT_EQ(0, x1.aliasMap);
+    ASSERT_EQ(1, x1.fullResBlending);
+    ASSERT_TRUE(x1.playbackForceMean23);
+}
+
 /* Phase E5 policy-header tests: the scale-aware downgrade flags are
  * opt-in via MLVAPP_PLAYBACK_DOWNGRADE_ALIAS_MAP_AT_SCALE=1. With the env
  * unset (default), the flags must always be FALSE regardless of the
@@ -73,8 +108,9 @@ TEST(DualIsoPlaybackPolicy, PhaseE5_DowngradeDefaultOffWithoutEnvOptIn)
      * the env var before invoking — true for the pipeline_tests.exe
      * default invocation. */
 
-    /* Preview override active (rowscale playback): downgrade flags must
-     * be FALSE because the HQ recon won't run anyway. */
+    /* Fast rescue active: alias_map is relaxed immediately, but HQ recon
+     * still runs and full-res blending stays on. The additional E5 scale
+     * downgrade flag remains FALSE unless the env opt-in is set. */
     {
         const DualIsoPlaybackRuntimeSettings settings = effectiveDualIsoPlaybackRuntimeSettings(
             /*playbackActive=*/true,
@@ -85,11 +121,10 @@ TEST(DualIsoPlaybackPolicy, PhaseE5_DowngradeDefaultOffWithoutEnvOptIn)
             /*selectedAliasMap=*/1,
             /*selectedFullResBlending=*/1);
         ASSERT_TRUE(settings.previewOverrideActive);
-        ASSERT_EQ(2, settings.mode);
-        /* HQ won't run -> mean23 override not needed; alias_map/FR
-         * downgrade not needed either. (The preview-rowscale path
-         * already forces aliasMap=0/FR=0.) */
-        ASSERT_FALSE(settings.playbackForceMean23);
+        ASSERT_EQ(1, settings.mode);
+        ASSERT_EQ(0, settings.aliasMap);
+        ASSERT_EQ(1, settings.fullResBlending);
+        ASSERT_TRUE(settings.playbackForceMean23);
         ASSERT_FALSE(settings.playbackDisableAliasMapAtScale);
     }
 

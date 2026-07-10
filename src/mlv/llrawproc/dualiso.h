@@ -37,6 +37,25 @@ enum
     DUALISO_MIX_CURVE_CACHE_SLOTS = 4
 };
 
+enum
+{
+    DUALISO_FULL20_PATH_NONE = 0,
+    DUALISO_FULL20_PATH_CPU_FULL20 = 1,
+    DUALISO_FULL20_PATH_GPU_PREPARE = 2
+};
+
+enum
+{
+    DUALISO_FULL20_PATTERN_SOURCE_NONE = 0,
+    DUALISO_FULL20_PATTERN_SOURCE_FRESH_AUTO = 1,
+    DUALISO_FULL20_PATTERN_SOURCE_EXPLICIT_POSITIVE = 2,
+    DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE = 3,
+    DUALISO_FULL20_PATTERN_SOURCE_CACHED_NEGATIVE_REDETECTED = 4,
+    DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DETECT = 5,
+    DUALISO_FULL20_PATTERN_SOURCE_SPECIAL_AUTO_DEFAULT = 6,
+    DUALISO_FULL20_PATTERN_SOURCE_INVALID = 7
+};
+
 typedef struct
 {
     int * data_x;
@@ -85,6 +104,18 @@ typedef struct
     double mix_curve_last_overlap[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_last_used[DUALISO_MIX_CURVE_CACHE_SLOTS];
     uint64_t mix_curve_use_counter;
+    double * fullres_curve;
+    float * fullres_curve_float;
+    double * fullres_curve_float_as_double;
+    size_t fullres_curve_capacity;
+    size_t fullres_curve_float_capacity;
+    size_t fullres_curve_float_as_double_capacity;
+    int fullres_curve_valid;
+    int fullres_curve_float_valid;
+    int fullres_curve_float_as_double_valid;
+    int fullres_curve_black;
+    int fullres_curve_float_black;
+    int fullres_curve_float_as_double_black;
 
     int * histogram_match_dark;
     int * histogram_match_bright;
@@ -261,6 +292,21 @@ typedef struct
     int final_blend_probe_mode;
     int mix_curve_rebuilt;
     int mix_curve_global_hit;
+    int path_kind;
+    int input_width;
+    int input_height;
+    int playback_preview_scale_factor;
+    int pattern_initial;
+    int pattern_resolved;
+    int pattern_source;
+    int pattern_result;
+    int phase_verify_enabled;
+    int phase_probe_attempted;
+    int phase_probe_succeeded;
+    int phase_probe_decisive;
+    int phase_probe_redetected;
+    int phase_cached_pattern;
+    int phase_implied_pattern;
     int interp_method;
     int use_alias_map;
     int use_fullres;
@@ -283,6 +329,7 @@ typedef struct
     int use_alias_map;
     int use_fullres;
     int chroma_smooth_method;
+    int playback_preview_scale_factor;
     int is_bright[4];
     const int * raw2ev;
     const int * ev2raw;
@@ -292,15 +339,20 @@ typedef struct
     int apply_dither;
 } dualiso_gpu_recon_state_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 extern DUALISO_THREAD_LOCAL dualiso_full20bit_timing_t g_dualiso_full20bit_timing;
 
 int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int32_t black, int32_t white, int * iso_pattern, int diso_check, dualiso_preview_scratch_t * scratch);
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int playback_preview_scale_factor, int threads, dualiso_full20bit_scratch_t * scratch);
-int diso_prepare_gpu_recon_state(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int threads, dualiso_full20bit_scratch_t * scratch, dualiso_gpu_recon_state_t * state);
+int diso_prepare_gpu_recon_state(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int playback_preview_scale_factor, int threads, dualiso_full20bit_scratch_t * scratch, dualiso_gpu_recon_state_t * state);
 void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch);
 int dualiso_debug_get_last_gpu_recon_state(dualiso_gpu_recon_state_t * state);
 void dualiso_debug_reset_last_gpu_recon_state(void);
 void dualiso_debug_set_gpu_recon_state_capture_enabled(int enabled);
+void dualiso_debug_reset_phase_verify_env_cache(void);
 
 /* Test-only: counts how many times the HQ recon entered AMaZE (which == 0)
  * vs mean23 (which == 1) since the last reset. Used by pipeline tests to
@@ -322,5 +374,9 @@ unsigned long long dualiso_debug_fullres_blend_taken_count(void);
 void dualiso_debug_reset_full20bit_timing(void);
 void dualiso_debug_get_full20bit_timing(dualiso_full20bit_timing_t * timing);
 int dualiso_mix_chroma_probe_mode(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

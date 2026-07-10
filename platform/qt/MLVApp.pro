@@ -299,6 +299,7 @@ macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
            CrashForensics.h \
+           PlaybackFrameRange.h \
            Phase3Breadcrumbs.h \
            Phase3Checksums.h \
            Phase3Mode.h \

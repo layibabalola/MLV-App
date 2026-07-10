@@ -118,6 +118,7 @@ static bool shouldPreferDesktopOpenGl(int argc,
     if (profile_playback) return true;
     if (hasGpuRelatedFlag(argc, argv)) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;
@@ -141,6 +142,7 @@ static bool shouldShareOpenGlContexts(int argc,
     if (batch || trim_mlv) return false;
     if (hasGpuRelatedFlag(argc, argv)) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_VIEWPORT")) return true;
+    if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GL_WINDOW_VIEWPORT")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_PROCESSING")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_DEBAYER")) return true;
     if (qEnvironmentVariableIsSet("MLVAPP_EXPERIMENTAL_GPU_AMAZE_DEBAYER")) return true;

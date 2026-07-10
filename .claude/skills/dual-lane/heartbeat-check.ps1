@@ -39,7 +39,8 @@ param(
     [int]$LivenessCadenceSeconds = 1800,                           # the ~30-min "I am alive" HEARTBEAT contract both lanes owe
     [int]$StaleAfterSeconds = 0,                                   # other lane presumed DARK after this; 0 => 2*LivenessCadence
     [int]$StaleReNudgeSeconds = 0,                                 # re-alert cadence while the other lane stays dark; 0 => LivenessCadence
-    [int]$DeadlockAfterSeconds = 0                                 # my OPEN item unread by a LIVE peer this long => nudge; 0 => 2*LivenessCadence
+    [int]$DeadlockAfterSeconds = 0,                                # my OPEN item unread by a LIVE peer this long => nudge; 0 => 2*LivenessCadence
+    [switch]$Status                                                # one-shot: print AUTHORITATIVE coordination state (both cursors + gaps + verdict), then exit
 )
 $ErrorActionPreference = 'Continue'
 
@@ -96,9 +97,11 @@ function Get-LatestEntryMeta([string]$file) {
     $c = Get-Content -LiteralPath $file -Raw
     if ([string]::IsNullOrWhiteSpace($c)) { return $r }
     $best = -1; $bestType = ''; $bestTs = ''
-    # NOTE: the type token may contain '/' (e.g. "ACK/STATUS", "HEARTBEAT/STATUS") -- the class MUST include
-    # '/', else slash-typed entries are skipped and STALE falls back to an older slash-free entry (false-positive).
-    foreach ($m in [regex]::Matches($c, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*([A-Za-z_/]+)\s*\|\s*(\S+)')) {
+    # NOTE: the type token may contain '/', spaces, AND hyphens (e.g. "ACK/STATUS", "STATUS / CORRECTED-ROOT-SCOPE",
+    # "ACK/BLOCKER/HOLD-GATES"). Match the WHOLE token up to the next '|' ([^|]+?), else hyphen/space-typed entries
+    # are skipped and STALE falls back to an older simple-typed entry (false-positive; observed 2026-06-29 keying on
+    # SEQ375 while SEQ376-391 with hyphenated types were live).
+    foreach ($m in [regex]::Matches($c, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*([^|]+?)\s*\|\s*(\S+)')) {
         $s = [int]$m.Groups[1].Value
         if ($s -gt $best) { $best = $s; $bestType = $m.Groups[2].Value; $bestTs = $m.Groups[3].Value }
     }
@@ -112,7 +115,7 @@ function Get-LatestOpenMeta([string]$file) {
     $c = Get-Content -LiteralPath $file -Raw
     if ([string]::IsNullOrWhiteSpace($c)) { return $r }
     foreach ($b in [regex]::Split($c, '(?m)(?=^##\s+SEQ\s+\d+\b)')) {
-        $hm = [regex]::Match($b, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*[A-Za-z_/]+\s*\|\s*(\S+)')
+        $hm = [regex]::Match($b, '(?m)^##\s+SEQ\s+(\d+)\s*\|\s*[^|]+?\s*\|\s*(\S+)')
         if (-not $hm.Success) { continue }
         if ([regex]::IsMatch($b, '(?m)^\s*status:\s*OPEN\b')) {
             $s = [int]$hm.Groups[1].Value
@@ -167,6 +170,60 @@ function DeadlockLine($st) {
     "(its cursor-on-you $($st.OtherCursorOnMe) < $($st.MyOpen.Seq)) for $(Min $st.MyOpen.AgeSec)m, though it posted " +
     "$(Min $st.Other.AgeSec)m ago (alive). Possible both-lanes-wait standoff -- send a direct STATUS nudge or confirm " +
     "it is processing. Re-alerting every $(Min $StaleReNudgeSeconds)m until its cursor advances or the item resolves."
+}
+
+if ($Status) {
+    # AUTHORITATIVE one-shot coordination state. Run THIS (never a lagging WAKE/heartbeat snapshot) before
+    # concluding split / stall / missed-message / idle. It reads the live ledgers NOW; the cursors are truth.
+    $st = Get-State
+    $selfName = [IO.Path]::GetFileName($SelfLedgerFile)
+    $myMax = Get-MaxSeq $SelfLedgerFile
+    # Ledger-bloat forcing function: the lane files are re-read every heartbeat, so a big OWN ledger bloats the
+    # session. Surface the size + a PRUNE nudge every -Status so it cannot be silently forgotten (it was, once:
+    # claude.md reached 108 blocks / 290KB before a prune). Threshold 45 live blocks.
+    $selfBlocks = ([regex]::Matches((Get-Content -LiteralPath $SelfLedgerFile -Raw -ErrorAction SilentlyContinue), '(?m)^##\s+SEQ\s+\d+\b')).Count
+    $selfKB = [int]((Get-Item -LiteralPath $SelfLedgerFile -ErrorAction SilentlyContinue).Length / 1024)
+    $pruneTxt = if ($selfBlocks -gt 45) { "$selfBlocks live blocks / ${selfKB}KB -- BLOATED, PRUNE NOW: archive-ledger.ps1 -LaneFile <$selfName> -OtherLaneFile <$otherName> -Apply" } else { "$selfBlocks live blocks / ${selfKB}KB (ok; prune at >45)" }
+    $inGap  = if ($st.MaxSeq -ge 0 -and $st.Cursor -ge 0)      { $st.MaxSeq - $st.Cursor }      else { 0 }
+    $outGap = if ($myMax -ge 0 -and $st.OtherCursorOnMe -ge 0) { $myMax - $st.OtherCursorOnMe } else { 0 }
+    $inTxt  = if ($inGap  -gt 0) { "$inGap UNREAD by you -- direct-read $otherName, then advance $CursorKey" } else { "in sync (you hold their latest)" }
+    $outTxt = if ($outGap -gt 0) { "$outGap of yours not yet read by $otherName" }                          else { "in sync (they hold your latest)" }
+    $aliveTxt = "age unknown"
+    if (Test-OtherAlive $st) {
+        $aliveTxt = "alive"
+    }
+    elseif ($st.Other.AgeSec -ge 0) {
+        $aliveTxt = "STALE $(Min $st.Other.AgeSec)m (>= $(Min $StaleAfterSeconds)m threshold) -- possible dark lane"
+    }
+    if ($st.Ended) {
+        $verdict = "ENDED (COLLABORATION_END recorded)"
+    }
+    elseif ($inGap -gt 0 -and $outGap -gt 0) {
+        $verdict = "BOTH-PENDING -- likely an in-flight race; re-run -Status in a few seconds before concluding anything"
+    }
+    elseif ($inGap -gt 0) {
+        $verdict = "INBOUND-PENDING -- you are behind; direct-read $otherName now"
+    }
+    elseif ($outGap -gt 0) {
+        $verdict = "OUTBOUND-PENDING -- they have not read your latest yet (race or heads-down; NOT a split)"
+    }
+    elseif (Test-Stale $st) {
+        $verdict = "STALE -- peer dark while collab active; verify its watcher, post a RESUME-REQUEST"
+    }
+    else {
+        $verdict = "IN-SYNC -- both lanes hold each other's latest; no split, no missed message"
+    }
+    Write-Output ("DUAL-LANE COORDINATION STATUS @ $(Now-Iso)")
+    Write-Output ("  AUTHORITATIVE live-file read. WAKE/heartbeat notifications and 'no new entries' prose are POINT-IN-TIME snapshots that LAG this -- trust the cursors below, not a snapshot.")
+    Write-Output ("  $otherName : max SEQ $($st.MaxSeq) | your cursor ($CursorKey)=$($st.Cursor) -> inbound: $inTxt")
+    Write-Output ("  $selfName : max SEQ $myMax | their cursor-on-you ($OtherCursorKey)=$($st.OtherCursorOnMe) -> outbound: $outTxt")
+    Write-Output ("  LEDGER (yours): $pruneTxt")
+    Write-Output ("  $otherName latest: SEQ $($st.Other.Seq) $($st.Other.Type), $(Min $st.Other.AgeSec)m ago -- $aliveTxt")
+    Write-Output ("  VERDICT: $verdict")
+    if ($verdict -like 'IN-SYNC*' -or $verdict -like 'OUTBOUND-PENDING*') {
+        Write-Output ("  ANTI-PASSIVITY: no NEW inbound is NOT no work. If you have an OPEN assigned task or a clear forward direction (peer's 'forward on X' / the human's ask / a detour that just cleared), RESUME it or post a concrete BLOCKER -- do NOT idle in liveness/ledger mode. A real HOLD must name what it waits on + the release condition.")
+    }
+    exit 0
 }
 
 if ($LoopSeconds -le 0) {

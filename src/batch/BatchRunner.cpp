@@ -456,6 +456,19 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     if( cutIn == 0 )  cutIn  = 1;
     if( cutOut == 0 || cutOut > totalFrames ) cutOut = totalFrames;
 
+    /* Hardening (audit #1): a receipt cut-in past the clip end (or past cut-out) makes the export
+     * loop run zero times yet report success -> the orchestrator would see exit 0 with zero DNGs
+     * written. Fail explicitly so run() emits [BATCH] FAIL and returns a non-zero exit code. */
+    if( cutIn > totalFrames || cutIn > cutOut )
+    {
+        result.success = false;
+        result.errorMessage = QStringLiteral("Receipt cut-in %1 is past clip end (frames=%2, cut-out=%3)")
+                    .arg( cutIn ).arg( totalFrames ).arg( cutOut );
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return result;
+    }
+
     const uint32_t unclampedCutOut = cutOut;
     cutOut = BatchRunner::cutOutClampedForMaxFrames(
         cutIn, cutOut, BatchContext::maxFrames() );
@@ -475,7 +488,22 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
     double stretchY = receipt->stretchFactorY();
     /* -1 = uninitialized (never loaded); use no-stretch defaults */
     if( stretchX <= 0 ) stretchX = STRETCH_H_100;
-    if( stretchY <= 0 ) stretchY = STRETCH_V_100;
+    if( stretchY <= 0 )
+    {
+        /* Mirror the GUI first-load auto de-squeeze (MainWindow::setSliders): when the
+         * receipt carries no explicit vertical stretch, derive it from the clip's RAWC
+         * binning/skipping aspect (getMlvAspectRatio = sampling_y/sampling_x). Without
+         * this, headless exports emit picAR={1,1,1,1} -> manual_ar=1 in the DNG writer
+         * -> the writer's own RAWC de-squeeze (dng.c) is skipped -> squeezed CDNGs for
+         * binned modes (e.g. 5D3 1080p: binning_x=3/binning_y=1 -> needs a 3:1 stretch).
+         * Bands kept identical to setSliders so batch DNGs match interactive GUI exports. */
+        float aspectV = getMlvAspectRatio( mlvObject );
+        if( aspectV == 0.0f ) aspectV = 1.0f; /* no RAWC info -> treat as square */
+        if( aspectV > 0.9f && aspectV < 1.1f )      stretchY = STRETCH_V_100;
+        else if( aspectV > 1.6f && aspectV < 1.7f ) stretchY = STRETCH_V_167;
+        else if( aspectV > 2.9f && aspectV < 3.1f ) stretchY = STRETCH_V_300;
+        else                                        stretchY = STRETCH_V_033;
+    }
 
     /* ---- Resume logic (--resume flag) ----
      * Scan the output subfolder for existing DNG files.  If the clip is
@@ -621,7 +649,12 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
         cutOut,               /* from receipt or totalFrames */
         stretchX,             /* from receipt or STRETCH_H_100 */
         stretchY,             /* from receipt or STRETCH_V_100 */
-        true,                 /* export audio if present */
+        ( effectiveCutIn == cutIn ), /* audit #2: export audio only on a full (non-resume) pass.
+                                      * On --resume, effectiveCutIn is advanced past already-exported
+                                      * frames; writeMlvAudioToWaveCut would fopen("wb")-truncate the
+                                      * already-complete <clip>.wav and rewrite it with tail-only audio
+                                      * (audio is written before frames, so the run-1 WAV is complete
+                                      * whenever resume triggers). Skip it to preserve the full WAV. */
         receipt->rawFixesEnabled(), /* from receipt */
         nullptr,
         lookAssistApplied,
