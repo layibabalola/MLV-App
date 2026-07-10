@@ -10034,6 +10034,31 @@ def cleanup_foreign_dirty_integrated_branch(repo_root: Path, config: Dict[str, A
     return result
 
 
+def detached_false_dirty_proof(worktree_path: Path, entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    proofs: List[Dict[str, Any]] = []
+    for entry in entries:
+        path = str(entry.get("path") or "")
+        status = str(entry.get("status") or "")
+        if status != " M" or not path:
+            return {"eligible": False, "proofs": proofs, "reason": "non_worktree_only_modification"}
+        working_diff = run_git(worktree_path, ["diff", "--quiet", "--", path])
+        cached_diff = run_git(worktree_path, ["diff", "--cached", "--quiet", "--", path])
+        if working_diff.returncode != 0 or cached_diff.returncode != 0:
+            return {"eligible": False, "proofs": proofs, "reason": "material_diff_present", "path": path}
+        index_object = run_git(worktree_path, ["rev-parse", f":{path}"])
+        proofs.append(
+            {
+                "path": path,
+                "status": status,
+                "workingDiffQuiet": True,
+                "cachedDiffQuiet": True,
+                "indexObjectId": index_object.stdout.strip() if index_object.returncode == 0 else None,
+                "worktreeObjectId": git_hash_object_id(worktree_path, path),
+            }
+        )
+    return {"eligible": bool(proofs), "proofs": proofs, "reason": "diff_quiet_false_dirty" if proofs else "no_entries"}
+
+
 def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
     worktree = report.get("worktree") or {}
     worktree_path = Path(str(worktree.get("path") or ""))
@@ -10056,11 +10081,49 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
     branch = str(report.get("preservationBranch") or detached_dirty_preservation_branch(config, str(report["candidateId"])))
     base_head = str(report.get("head") or worktree.get("head") or "")
     existing_branch_head = rev_parse(repo_root, f"refs/heads/{branch}", required=False)
+    preservation_path = closeout_state_root(repo_root, config) / "repo-sweep" / "detached-preserve" / safe_state_name(branch)
+    false_dirty = detached_false_dirty_proof(worktree_path, current_entries)
+    if false_dirty.get("eligible"):
+        provisional_cleanup: Dict[str, Any] = {"status": "not_present"}
+        if existing_branch_head and existing_branch_head != base_head:
+            action = {"status": "blocked", "reason": "preservation_branch_exists", "branch": branch, "head": existing_branch_head, "expected": base_head, "falseDirtyProof": false_dirty}
+            write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+            return action
+        if preservation_path.exists():
+            preservation_dirty = worktree_dirty_state(preservation_path)
+            if preservation_dirty.get("dirty"):
+                action = {"status": "blocked", "reason": "false_dirty_provisional_worktree_dirty", "path": str(preservation_path), "dirtyState": preservation_dirty, "falseDirtyProof": false_dirty}
+                write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+                return action
+            provisional_cleanup = remove_worktree(repo_root, preservation_path)
+            if provisional_cleanup.get("returncode") != 0:
+                action = {"status": "blocked", "reason": "false_dirty_provisional_cleanup_failed", "cleanup": provisional_cleanup, "falseDirtyProof": false_dirty}
+                write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+                return action
+        branch_cleanup: Dict[str, Any] = {"status": "not_present"}
+        if existing_branch_head:
+            delete_branch = run_git(repo_root, ["branch", "-D", branch])
+            branch_cleanup = {"branch": branch, "head": existing_branch_head, "returncode": delete_branch.returncode, "stderr": delete_branch.stderr[-2000:]}
+            if delete_branch.returncode != 0:
+                action = {"status": "blocked", "reason": "false_dirty_provisional_branch_cleanup_failed", "branchCleanup": branch_cleanup, "falseDirtyProof": false_dirty}
+                write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+                return action
+        original_cleanup = remove_worktree(repo_root, worktree_path)
+        result = {
+            "status": "success" if original_cleanup.get("returncode") == 0 else "blocked",
+            "action": "detached_false_dirty_prune",
+            "reason": "tracked_worktree_entries_have_no_cached_or_working_tree_diff",
+            "falseDirtyProof": false_dirty,
+            "provisionalWorktreeCleanup": provisional_cleanup,
+            "provisionalBranchCleanup": branch_cleanup,
+            "originalWorktreeCleanup": original_cleanup,
+        }
+        write_audit(repo_root, config, "orphan_quarantine", result, outcome="success" if result["status"] == "success" else "blocked")
+        return result
     if existing_branch_head and existing_branch_head != base_head:
         action = {"status": "blocked", "reason": "preservation_branch_exists", "branch": branch, "head": existing_branch_head, "expected": base_head}
         write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
         return action
-    preservation_path = closeout_state_root(repo_root, config) / "repo-sweep" / "detached-preserve" / safe_state_name(branch)
     if preservation_path.exists():
         action = {"status": "blocked", "reason": "preservation_worktree_exists", "path": str(preservation_path), "report": report}
         write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
