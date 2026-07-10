@@ -27,6 +27,7 @@ Supporting / migrated docs (reference after 01–04):
 
 | # | Document | Topic |
 |---|---|---|
+| [Roadmap](roadmap.md) | **Implementation roadmap** | canonical priority, status, execution cards, and continuous-drain prompt |
 | [10](10-build-windows.md) | Build on Windows | Qt Creator, MinGW, `windeployqt`, ffmpeg |
 | [11](11-build-macos-linux.md) | Build on macOS & Linux | Homebrew, `apt`, Qt sources, AppImage |
 | [12](12-gpu-viewport-architecture.md) | GPU viewport architecture | experimental presenter and debayer seams |

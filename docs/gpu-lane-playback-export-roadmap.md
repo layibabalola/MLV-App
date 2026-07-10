@@ -1,4 +1,9 @@
-# GPU Lane — Playback & Export Roadmap + UX (plan of record)
+# GPU Lane — Playback & Export Roadmap + UX (detail history)
+
+> **DETAIL-ONLY / NOT QUEUE AUTHORITY.** This document preserves GPU design,
+> measurements, and proof history. Current priority and status live only in
+> [the implementation roadmap](roadmap.md). If the two conflict, follow the
+> canonical roadmap and use this file only as evidence for its selected item.
 
 Status: 2026-06-19. Lane A E0-E2 export, the scoped Lane A E3 GPU
 replacement proof packet plus trusted/lossless throughput gates, P-pre GPU
@@ -7,7 +12,7 @@ gates. P3/P4 are honest-scoped, not universal:
 the RTX 4090 FastProxy proof validates the raw-fixes-enabled HQ Dual ISO
 no-readback CUDA-to-GL R16 texture path with GL/backend/oracle parity;
 unsupported states still fail closed to CPU readback or CPU presentation. The
-remaining priority order is Lane A E4 rendered export, then Lane C portable GPU
+remaining historical priority order was Lane A E4 rendered export, then Lane C portable GPU
 backends. Lane C now has named-backend loader selection plus export/playback
 proof-wrapper plumbing; actual Vulkan/Metal backend implementation remains the
 next portable-backend product step. Future P4 default-promotion work requires a

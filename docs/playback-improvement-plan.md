@@ -1,12 +1,17 @@
 # Playback Improvement Plan — approved items, executor handoff
 
-**How to use this doc (cost-saving execution model, user-directed 2026-06-11):** each item below is a
+> **HISTORICAL EXECUTION PLAN.** Do not select new work from this document.
+> Current priority and status live only in
+> [the implementation roadmap](roadmap.md); this file preserves the original
+> item specifications and validation history.
+
+**Historical execution model (superseded by `roadmap.md`):** each item below was a
 self-contained implementation spec meant to be executed by an inexpensive session (Claude Code with
 `/model sonnet`, or Codex) with NO other context. Executor prompt per item:
 "Implement item N of docs/playback-improvement-plan.md in C:\!Layi Wkspc\MLV-App, following its
 Common Rules and Validation sections exactly. Return the diff and the validation tables."
-One item per session/work block. A reviewer (the planning model or the user) checks the diff and the
-gate tables before the work block is finalized.
+The model used one item per session/work block, followed by review of the diff
+and gate tables before finalization.
 
 **Status / provenance:** all four items were user-approved 2026-06-11 from the tradeoff menu in
 [playback-max-optimization-loop.md](playback-max-optimization-loop.md) ("LOOP STOPPED" section —

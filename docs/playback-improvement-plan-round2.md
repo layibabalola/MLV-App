@@ -1,14 +1,19 @@
 # Playback Improvement Plan — Round 2 (executor handoff)
 
-**How to use this doc:** same cost-saving execution model as
+> **HISTORICAL EXECUTION PLAN.** Do not select new work from this document.
+> Current priority and status live only in
+> [the implementation roadmap](roadmap.md); this file preserves round-two
+> specifications and validation history.
+
+**Historical execution model (superseded by `roadmap.md`):** this used the same model as
 [playback-improvement-plan.md](playback-improvement-plan.md) — each item is a self-contained spec
 for an inexpensive executor session (Codex, or Claude Code on `/model sonnet`) with NO other
 context. Executor prompt per item:
 "Implement item N of docs/playback-improvement-plan-round2.md in C:\!Layi Wkspc\MLV-App, following
 its Common Rules and the item's Validation section exactly. Return the diff and the validation
 tables."
-One item per session/work block, **in order** — item 0 is a blocking prerequisite for items 1-3.
-A reviewer (the planning model or the user) checks the diff and gate tables before finalize.
+It used one item per session/work block, **in order** — item 0 was a blocking prerequisite for items 1-3.
+A reviewer checked the diff and gate tables before finalize.
 
 **Provenance:** derived from the round-1 review (2026-06-11). Round-1 verdicts: items 2a and 4
 KEEP; 1a, 1b, 2b dead ends; item 3 dead-ended — but the round-2 review found that verdict UNSOUND:

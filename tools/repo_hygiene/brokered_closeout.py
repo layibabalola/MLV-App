@@ -357,9 +357,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
     "contentReviewGate": {
         "requireClaudeApprovalForFinalize": False,
         "coordinationFile": ".claude-state/coordination/gpu-lane-impl-review-sync.md",
-        "handoffActor": "CLAUDE",
+        "handoffActor": "CODEX",
         "handoffKind": "HANDOFF",
-        "reviewActor": "CODEX",
+        "reviewActor": "CLAUDE",
         "reviewKind": "REVIEW",
         "approveTokens": ["APPROVE"],
         "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
@@ -783,6 +783,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "contentReviewGate",
             "contentReviewGate.requireClaudeApprovalForFinalize",
             "contentReviewGate.coordinationFile",
+            "contentReviewGate.handoffActor",
+            "contentReviewGate.reviewActor",
             "validation",
             "processResources",
             "powerShell",
@@ -845,8 +847,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_start_work_block_auto_branches_from_clean_protected_target",
             "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
             "test_finalize_blocks_work_block_started_from_unintegrated_base",
-            "test_finalize_blocks_review_gated_chunk_without_codex_approval",
-            "test_finalize_rejects_codex_approval_for_different_range",
+            "test_finalize_blocks_review_gated_chunk_without_claude_approval",
+            "test_finalize_rejects_claude_approval_for_different_range",
             "test_remediation_freeze_environment_is_process_scoped_and_fresh_preservation_worktree_is_exempt",
             "test_remediation_freeze_audit_packets_are_generated_exempt_and_content_addressed",
             "test_already_integrated_dirty_baseline_overlap_enters_remediation_triage",
@@ -5868,9 +5870,9 @@ def content_review_gate_block(
     # Derive the expected handoff/review actors and tokens from config so the
     # recovery guidance stays correct after a role swap (handoff/review actors
     # are configurable; do not hard-code CODEX/CLAUDE here).
-    handoff_actor = str(gate.get("handoffActor") or "CLAUDE")
+    handoff_actor = str(gate.get("handoffActor") or "CODEX")
     handoff_kind = str(gate.get("handoffKind") or "HANDOFF")
-    review_actor = str(gate.get("reviewActor") or "CODEX")
+    review_actor = str(gate.get("reviewActor") or "CLAUDE")
     review_kind = str(gate.get("reviewKind") or "REVIEW")
     approve_tokens = [str(token).upper() for token in gate.get("approveTokens", ["APPROVE"])]
     blocking_tokens = [str(token).upper() for token in gate.get("blockingTokens", ["CHANGES_REQUESTED", "BLOCKER"])]
@@ -5976,9 +5978,9 @@ def validate_content_review_approval_for_finalize(
         )
     text = coordination_path.read_text(encoding="utf-8")
     entries = coordination_entries(text)
-    handoff_actor = str(gate.get("handoffActor") or "CLAUDE")
+    handoff_actor = str(gate.get("handoffActor") or "CODEX")
     handoff_kind = str(gate.get("handoffKind") or "HANDOFF")
-    review_actor = str(gate.get("reviewActor") or "CODEX")
+    review_actor = str(gate.get("reviewActor") or "CLAUDE")
     review_kind = str(gate.get("reviewKind") or "REVIEW")
     require_handoff = bool(gate.get("requireHandoff", True))
     handoffs = [
@@ -11043,6 +11045,8 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
         "contentReviewGate",
         "contentReviewGate.requireClaudeApprovalForFinalize",
         "contentReviewGate.coordinationFile",
+        "contentReviewGate.handoffActor",
+        "contentReviewGate.reviewActor",
         "validation",
         "processResources",
         "powerShell",
