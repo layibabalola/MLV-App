@@ -32,10 +32,10 @@ finding into this file in the same work block that acts on it.
   Q7/ABI and GPU-kernel proof.
 - Fable: no active implementation or review assignment.
 - Maximum mutating WIP: **one work block**.
-- Current item: **R0 — REVIEW**.
-- Exactly one next mutating item after R0 approval: **R1 — reconcile approved
-  implementation lines into the target branch**.
-- Do not start R1 while R0 lacks a later `CLAUDE - REVIEW` entry with the exact
+- Current item: **R1 — REVIEW**.
+- Exactly one next mutating item after R1 approval: **P0-A — close the real
+  clip-lifecycle race**.
+- Do not start P0-A while R1 lacks a later `CLAUDE - REVIEW` entry with the exact
   full-40-character range and `Verdict: APPROVE`.
 
 No prompt is needed to bootstrap every historical lane. Bootstrap the Codex
@@ -61,8 +61,8 @@ queues in detail documents.
 
 | Order | ID | State | Outcome | Depends on | Completion gate |
 |---:|---|---|---|---|---|
-| 0 | R0 | REVIEW | Canonical roadmap plus Codex-handoff/Claude-review closeout contract | none | Claude approves exact range; target contains it; remote is verified |
-| 1 | R1 | QUEUED | Target branch contains every approved, still-required line without importing unreviewed WIP | R0 | ancestry matrix, conflict review, focused tests, Claude approval, push proof |
+| 0 | R0 | DONE | Canonical roadmap plus Codex-handoff/Claude-review closeout contract | none | Claude approves exact range; target contains it; remote is verified |
+| 1 | R1 | REVIEW | Target branch contains every approved, still-required line without importing unreviewed WIP | R0 | ancestry matrix, conflict review, focused tests, Claude approval, push proof |
 | 2 | P0-A | QUEUED | Clip switch/close cannot free an MLV object while render work can still touch it | R1 | deterministic lifecycle test, stop/switch stress, no hang/UAF, GUI A/B |
 | 3 | P0-B | QUEUED | CineForm export dimensions are always valid multiples of 16 | P0-A | table-driven helper tests plus odd/anamorphic export smoke |
 | 4 | P0-C | QUEUED | Rendered export launches ffmpeg without shell parsing or fragile quoting | P0-B | zero production `popen`, argument/space/quote tests, cancel/error/two-pass smoke |
