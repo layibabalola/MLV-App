@@ -47,6 +47,7 @@ from .brokered_closeout import (
     file_content_hash,
     plan_dirty_split_candidates,
     apply_dirty_split_candidate,
+    apply_detached_dirty_preserve,
     preserve_owned_dirty_split,
     record_review_approval,
     repair_missing_evidence,
@@ -4934,6 +4935,34 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:README.md").stdout, "detached dirty readme\n")
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:detached-only.txt").stdout, "another exact dirty path\n")
         self.assertIn("orphan_quarantine", self.audit_types(repo))
+
+    def test_detached_false_dirty_prunes_after_diff_quiet_proof_and_cleans_provisional_recovery(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "false-dirty-detached"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        head = git(detached, "rev-parse", "HEAD").stdout.strip()
+        branch = "closeout/recovery/detached/test-false-dirty"
+        preservation_path = repo / ".claude-state" / "closeout" / "repo-sweep" / "detached-preserve" / "closeout-recovery-detached-test-false-dirty"
+        preservation_path.parent.mkdir(parents=True, exist_ok=True)
+        git(repo, "worktree", "add", "-b", branch, str(preservation_path), head)
+        report = {
+            "candidateId": "candidate:repo-sweep-worktree-investigate:false-dirty",
+            "head": head,
+            "preservationBranch": branch,
+            "scope": {"dirtyPaths": ["README.md"]},
+            "worktree": {"path": str(detached), "head": head},
+        }
+        false_status = [{"status": " M", "path": "README.md", "originalPath": None}]
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.parse_status_paths", return_value=false_status):
+            action = apply_detached_dirty_preserve(repo, load_closeout_config(repo), {}, report)
+
+        self.assertEqual(action["status"], "success", action)
+        self.assertEqual(action["action"], "detached_false_dirty_prune")
+        self.assertTrue(action["falseDirtyProof"]["eligible"])
+        self.assertFalse(detached.exists())
+        self.assertFalse(preservation_path.exists())
+        self.assertNotEqual(git(repo, "rev-parse", "--verify", branch, check=False).returncode, 0)
 
     def test_dirty_detached_worktree_removal_refuses_missing_byte_preservation(self) -> None:
         repo = self.init_repo()
