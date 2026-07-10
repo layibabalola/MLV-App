@@ -568,7 +568,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "finalizeTimeoutMs": 600000,
         "repoSweepTimeoutMs": 600000,
         "adapterHeartbeatSeconds": 30,
-        "maxProcessOutputBytes": 1048576,
+        "maxProcessOutputBytes": 8388608,
         "boundedRunnerExitCodes": BOUNDED_RUNNER_EXIT_CODE_DEFAULTS,
         "failureTextPatterns": KNOWN_CLOSEOUT_FAILURE_TEXT,
     },
