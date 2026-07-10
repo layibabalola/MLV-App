@@ -2720,7 +2720,16 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertGreater(closeout_command_timeout_ms(config, ["finalize"]), 0)
         self.assertGreater(closeout_max_process_output_bytes(config), 0)
         self.assertGreater(config["validation"]["timeoutMs"], 0)
-        self.assertGreater(config["validation"]["maxOutputBytes"], 0)
+        self.assertGreaterEqual(
+            config["validation"]["maxOutputBytes"],
+            8 * 1024 * 1024,
+            "repo-sweep candidate reports can exceed 1 MiB in established workspaces",
+        )
+        self.assertIn("codex/f1-visible-scope-policy", config["git"]["protectedBranches"])
+        self.assertIn(
+            "**/.claude-state/worktrees/f1-visible-scope-policy",
+            config["cleanupPolicy"]["protectedWorktreeRoots"],
+        )
         validation_names = [command["name"] for command in config["validation"]["commands"]]
         self.assertEqual(
             validation_names[:3],

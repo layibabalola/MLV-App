@@ -6,7 +6,7 @@
     "targetBranch": "master",
     "remote": "fork",
     "allowLocalOnly": true,
-    "protectedBranches": ["master", "main", "develop", "release/*"],
+    "protectedBranches": ["master", "main", "develop", "release/*", "codex/f1-visible-scope-policy"],
     "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
     "fetchBeforeEvidence": true
   },
@@ -28,7 +28,7 @@
   },
   "validation": {
     "timeoutMs": 120000,
-    "maxOutputBytes": 524288,
+    "maxOutputBytes": 8388608,
     "fullSuiteEnvVar": "CLOSEOUT_RUN_FULL_VALIDATION",
     "runFullSuiteByDefault": false,
     "commands": [
@@ -193,7 +193,10 @@
     "retainOriginalWorktreeOnTreeMismatch": true,
     "removeCleanDetachedWorktreesInSweep": false,
     "dropStashesInSweep": false,
-    "protectedWorktreeRoots": [".claude/worktrees/**"]
+    "protectedWorktreeRoots": [
+      ".claude/worktrees/**",
+      "**/.claude-state/worktrees/f1-visible-scope-policy"
+    ]
   },
   "responseHookLifecycle": {
     "skipSessionWorktreeSignal": "SkipSessionWorktree",
