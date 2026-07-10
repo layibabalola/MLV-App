@@ -1,6 +1,10 @@
 # Max-Playback Optimization Loop — Ledger
 
-**Purpose.** Home document of the self-paced max-playback optimization loop (active goal set
+> **HISTORICAL MEASUREMENT LEDGER.** Preserve its baselines and attempts, but
+> do not use it to select the next mutating item. Current priority and status
+> live only in [the implementation roadmap](roadmap.md).
+
+**Historical purpose.** Home document of the self-paced max-playback optimization loop (goal set
 2026-06-10): maximize every (scale x quality-mode) playback lane on the standard M16 trio without
 regression. One loop iteration = one brokered work block = at most one candidate change. This file
 is the loop's durable ledger: the IMMUTABLE baseline below is never edited; the CURRENT column is

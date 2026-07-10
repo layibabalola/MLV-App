@@ -1,5 +1,9 @@
 # GPU Lane — Spatial-stages phase scoping (P-pre completion)
 
+> **DETAIL-ONLY / NOT QUEUE AUTHORITY.** This remains the design evidence for
+> spatial GPU stages. Activate work only through
+> [the implementation roadmap](roadmap.md), which owns order and status.
+
 Status: 2026-06-17. Scopes the stages still rejected by
 `gpuPreviewProcessingIsSupported` after the creative-parity + non-creative
 per-pixel extension landed (branch `codex/work-block/wb-2d67a6eb72414fb9`,
