@@ -6,7 +6,7 @@
     "targetBranch": "master",
     "remote": "fork",
     "allowLocalOnly": true,
-    "protectedBranches": ["master", "main", "develop", "release/*", "codex/f1-visible-scope-policy"],
+    "protectedBranches": ["master", "main", "develop", "release/*", "codex/f1-visible-scope-policy", "closeout/recovery/detached/*"],
     "featureBranchPatterns": ["codex/*", "claude/*", "hygiene/*", "work/*", "feature/*"],
     "fetchBeforeEvidence": true
   },
@@ -195,7 +195,8 @@
     "dropStashesInSweep": false,
     "protectedWorktreeRoots": [
       ".claude/worktrees/**",
-      "**/.claude-state/worktrees/f1-visible-scope-policy"
+      "**/.claude-state/worktrees/f1-visible-scope-policy",
+      "**/.claude-state/closeout/repo-sweep/detached-preserve/**"
     ]
   },
   "responseHookLifecycle": {
