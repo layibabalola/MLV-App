@@ -2725,15 +2725,14 @@ MainWindow::~MainWindow()
     m_pRenderThread->stop();
     while( !m_pRenderThread->isFinished() ) {}
     delete m_pRenderThread;
+    m_pRenderThread = nullptr;
 
     if( m_pAudioPlayback ) m_pAudioPlayback->stop();
 
     if( m_pMlvObject )
     {
-        drainLookAssistWorkers( "destructor" );
-        freeMlvObject( m_pMlvObject );
+        freeActiveMlvObjectAfterLifecycleBarrier( "destructor" );
         m_pMlvObject = nullptr;
-        m_fileLoaded = false;
     }
 
     if( m_pProcessingObject )
@@ -3952,6 +3951,31 @@ void MainWindow::waitForRenderThreadIdleBeforeCoreMutation( const char *reason )
                 .arg( bool01( m_frameStillDrawing ) ),
             true );
     }
+}
+
+void MainWindow::freeActiveMlvObjectAfterLifecycleBarrier( const char *reason )
+{
+    if( !m_pMlvObject ) return;
+
+    const QString reasonText =
+        reason && *reason ? QString::fromLatin1( reason ) : QStringLiteral("unspecified");
+    const char *barrierReason = reason && *reason ? reason : "clip-lifecycle-free";
+    const uint64_t generation = m_clipLifecycleBarrier.beginMutation();
+
+    m_fileLoaded = false;
+    m_dontDraw = true;
+    clearPresentationForClipOpen( barrierReason );
+    waitForRenderThreadIdleBeforeCoreMutation( barrierReason );
+    drainLookAssistWorkers( barrierReason );
+    m_clipLifecycleBarrier.waitForNoBorrowers();
+
+    logInteractionEvent(
+        QStringLiteral("clip_lifecycle.free"),
+        QStringLiteral("reason=%1 generation=%2")
+            .arg( reasonText )
+            .arg( static_cast<qulonglong>( generation ) ),
+        true );
+    freeMlvObject( m_pMlvObject );
 }
 
 MainWindow::PlaybackPrepResult MainWindow::buildPlaybackPrepResult( const PlaybackPrepTask &task )
@@ -5982,6 +6006,17 @@ void MainWindow::computeDisplaySceneGeometry( int sourceWidth,
 //Draw a raw picture to the gui -> start render thread
 void MainWindow::drawFrame( bool updateTimecodeLabel )
 {
+    if( !m_clipLifecycleBarrier.acceptingRequests() )
+    {
+        m_frameStillDrawing = false;
+        logInteractionEvent(
+            QStringLiteral("draw_frame.lifecycle_blocked"),
+            QStringLiteral("generation=%1")
+                .arg( static_cast<qulonglong>( m_clipLifecycleBarrier.generation() ) ),
+            true );
+        return;
+    }
+
     if( m_frameChanged )
     {
         invalidateGpuPreviewProcessingConfigCache();
@@ -8938,22 +8973,14 @@ int MainWindow::openMlvForPreview(QString fileName)
     clearPresentationForClipOpen( "clip-open-preview" );
     resetPlaybackQualityAutoRunState();
 
-    //Waiting for thread being idle for not freeing used memory
-    while( !m_pRenderThread->isIdle() ) {}
-    //Waiting for frame ready because it works with m_pMlvObject
-    while( m_frameStillDrawing ) {qApp->processEvents();}
-
     //Reset audio playback engine
     //m_pAudioPlayback->resetAudioEngine();
 
-    /* Round-4 debt block: the detached look-assist worker reads m_pMlvObject
-     * (findMlvWhiteBalance renders from raw); freeing under it is a UAF. */
-    drainLookAssistWorkers( "clip-switch" );
-
     /* Destroy it just for simplicity... and make a new one */
-    freeMlvObject( m_pMlvObject );
+    freeActiveMlvObjectAfterLifecycleBarrier( "clip-open-preview" );
     /* Set to NEW object with a NEW MLV clip! */
     m_pMlvObject = new_MlvObject;
+    m_clipLifecycleBarrier.reopen();
 
     /* If use has terminal this is useful */
 #ifndef STDOUT_SILENT
@@ -9164,22 +9191,14 @@ int MainWindow::openMlv( QString fileName )
     clearPresentationForClipOpen( "clip-open" );
     resetPlaybackQualityAutoRunState();
 
-    //Waiting for thread being idle for not freeing used memory
-    while( !m_pRenderThread->isIdle() ) {}
-    //Waiting for frame ready because it works with m_pMlvObject
-    while( m_frameStillDrawing ) {qApp->processEvents();}
-
     //Reset audio engine
     m_pAudioPlayback->resetAudioEngine();
 
-    /* Round-4 debt block: the detached look-assist worker reads m_pMlvObject
-     * (findMlvWhiteBalance renders from raw); freeing under it is a UAF. */
-    drainLookAssistWorkers( "clip-switch" );
-
     /* Destroy it just for simplicity... and make a new one */
-    freeMlvObject( m_pMlvObject );
+    freeActiveMlvObjectAfterLifecycleBarrier( "clip-open" );
     /* Set to NEW object with a NEW MLV clip! */
     m_pMlvObject = new_MlvObject;
+    m_clipLifecycleBarrier.reopen();
 
     /* If use has terminal this is useful */
 #ifndef STDOUT_SILENT
@@ -14438,6 +14457,18 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
         return;
     }
 
+    const uint64_t clipGeneration = m_clipLifecycleBarrier.generation();
+    ClipLifecycleBarrier::Borrower clipBorrower =
+        m_clipLifecycleBarrier.tryBorrow( clipGeneration );
+    if( !clipBorrower )
+    {
+        logInteractionEvent(
+            QStringLiteral("look_assist.apply.skip"),
+            QStringLiteral("reason=clip_lifecycle_mutating generation=%1")
+                .arg( static_cast<qulonglong>( clipGeneration ) ) );
+        return;
+    }
+
     if( analysisFrame < 0 )
     {
         analysisFrame = ui->horizontalSliderPosition->value();
@@ -14798,7 +14829,8 @@ void MainWindow::applyLookAssistToReceipt( ReceiptSettings *receipt,
                      displayStatsUi,
                      displayStatsValidUi,
                      receipt,
-                     restoreLookAssistSafetyBaseline]() mutable
+                     restoreLookAssistSafetyBaseline,
+                     clipBorrower = std::move( clipBorrower )]() mutable
         {
             /* RAII: the drain in the freeMlvObject paths waits on this. */
             struct WorkerScopeGuard
@@ -21029,10 +21061,9 @@ void MainWindow::deleteFileFromSession( void )
         {
             //MLV
 #ifdef Q_OS_WIN //On windows the file has to be closed before beeing able to move to trash
-            m_fileLoaded = false;
-            m_dontDraw = true;
-            freeMlvObject( m_pMlvObject );
+            freeActiveMlvObjectAfterLifecycleBarrier( "delete-clip" );
             m_pMlvObject = initMlvObject();
+            m_clipLifecycleBarrier.reopen();
 #endif
             if( MoveToTrash( GET_RECEIPT(row)->fileName() ) ) QMessageBox::critical( this, tr( "%1 - Delete clip from disk" ).arg( APPNAME ), tr( "Delete clip failed!" ) );
             //MAPP
@@ -21119,8 +21150,9 @@ void MainWindow::renameActiveClip( void )
     QString newFilePath = QFileInfo( fileName ).path() + "/" + newFileName;
 
     //Unload clip for Windows
-    freeMlvObject( m_pMlvObject );
+    freeActiveMlvObjectAfterLifecycleBarrier( "rename-clip" );
     m_pMlvObject = initMlvObject();
+    m_clipLifecycleBarrier.reopen();
 
     //MLV
     bool ok = QFile( fileName ).rename( newFilePath );
