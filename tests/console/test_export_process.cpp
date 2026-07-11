@@ -34,3 +34,24 @@ TEST( ExportProcess, MissingExecutableFailsToStartWithDiagnosticsAvailable )
 
     ASSERT_FALSE( process.start( invocation, 100 ) );
 }
+
+TEST( ExportProcess, NonzeroChildExitCapturesStderrMarker )
+{
+    export_process::Invocation invocation;
+#ifdef Q_OS_WIN
+    invocation.program = QStringLiteral("cmd.exe");
+    invocation.arguments << QStringLiteral("/D")
+                         << QStringLiteral("/S")
+                         << QStringLiteral("/C")
+                         << QStringLiteral("echo STDERR-DIAG-MARKER 1>&2 & exit /b 7");
+#else
+    invocation.program = QStringLiteral("/bin/sh");
+    invocation.arguments << QStringLiteral("-c")
+                         << QStringLiteral("echo STDERR-DIAG-MARKER 1>&2; exit 7");
+#endif
+
+    export_process::StreamingProcess process;
+    ASSERT_TRUE( process.start( invocation ) );
+    ASSERT_FALSE( process.finish() );
+    ASSERT_TRUE( process.diagnostics().contains( QStringLiteral("STDERR-DIAG-MARKER") ) );
+}

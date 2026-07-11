@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QProcess>
 #include <QString>
 #include <QStringList>
@@ -35,7 +36,7 @@ public:
     bool start( const Invocation &invocation, int timeoutMs = 10000 )
     {
         m_process.setProcessChannelMode( QProcess::SeparateChannels );
-        m_process.start( invocation.program, invocation.arguments, QIODevice::WriteOnly );
+        m_process.start( invocation.program, invocation.arguments, QIODevice::ReadWrite );
         if( m_process.waitForStarted( timeoutMs ) ) return true;
         captureDiagnostics();
         return false;
@@ -46,6 +47,7 @@ public:
         qint64 written = 0;
         while( written < size )
         {
+            captureDiagnostics();
             const qint64 accepted = m_process.write( data + written, size - written );
             if( accepted < 0 )
             {
@@ -58,6 +60,7 @@ public:
                 captureDiagnostics();
                 return false;
             }
+            captureDiagnostics();
         }
         return true;
     }
@@ -65,11 +68,19 @@ public:
     bool finish( int timeoutMs = 120000 )
     {
         m_process.closeWriteChannel();
-        if( !m_process.waitForFinished( timeoutMs ) )
+        QElapsedTimer timer;
+        timer.start();
+        while( m_process.state() != QProcess::NotRunning )
         {
-            cancel();
             captureDiagnostics();
-            return false;
+            const qint64 remaining = timeoutMs - timer.elapsed();
+            if( remaining <= 0 )
+            {
+                cancel();
+                captureDiagnostics();
+                return false;
+            }
+            m_process.waitForReadyRead( static_cast<int>( qMin<qint64>( remaining, 100 ) ) );
         }
         captureDiagnostics();
         return m_process.exitStatus() == QProcess::NormalExit && m_process.exitCode() == 0;
