@@ -25,6 +25,7 @@ from .brokered_closeout import (
     record_review_approval,
     remediate_retained_candidates,
     remediation_freeze_status,
+    retire_stale_plan_absent_agent_queue_packets,
     remove_remediation_freeze,
     remediation_packet_template,
     repair_eligibility,
@@ -121,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_queue = sub.add_parser("agent-queue", help="Plan or mark unavailable Codex agent-remediation queue shards.")
     agent_queue.add_argument("--surface", default="codex-desktop")
     agent_queue.add_argument("--mark-unavailable", action="store_true")
+    agent_queue.add_argument("--retire-stale-plan-absent", action="store_true")
 
     sub.add_parser("agent-results", help="Collect and validate agent-remediation result packets.")
 
@@ -258,11 +260,14 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "remediate-retained":
             result = remediate_retained_candidates(repo_root, apply=args.apply, candidate_id=args.candidate_id)
         elif args.command == "agent-queue":
-            result = agent_remediation_queue_consumer_plan(
-                repo_root,
-                surface=args.surface,
-                mark_unavailable=args.mark_unavailable,
-            )
+            if args.retire_stale_plan_absent:
+                result = retire_stale_plan_absent_agent_queue_packets(repo_root)
+            else:
+                result = agent_remediation_queue_consumer_plan(
+                    repo_root,
+                    surface=args.surface,
+                    mark_unavailable=args.mark_unavailable,
+                )
         elif args.command == "agent-results":
             result = collect_agent_remediation_results(repo_root)
         elif args.command == "remediation-freeze-status":
