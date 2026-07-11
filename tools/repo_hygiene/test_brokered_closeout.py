@@ -2146,6 +2146,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_agent_queue_dirty_hash_detects_same_status_byte_change", baseline["requiredTests"])
         self.assertIn("test_agent_queue_stale_packet_blocks_even_when_valid_shard_can_spawn", baseline["requiredTests"])
         self.assertIn("test_agent_queue_remote_fetch_failure_blocks_stale_check", baseline["requiredTests"])
+        self.assertIn("test_agent_queue_retirement_remote_fetch_failure_blocks_without_retiring_packet", baseline["requiredTests"])
         self.assertIn("test_agent_queue_result_path_outside_result_root_is_stale", baseline["requiredTests"])
         self.assertIn("test_agent_result_collection_rejects_out_of_scope_changed_paths", baseline["requiredTests"])
         self.assertIn("test_agent_result_collection_returns_symbolic_next_action_without_mutation", baseline["requiredTests"])
@@ -5785,6 +5786,35 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         self.assertEqual(closeout["status"], "success", closeout)
         self.assertEqual(closeout["agentRemediationState"]["packetCount"], 0)
+
+    def test_agent_queue_retirement_remote_fetch_failure_blocks_without_retiring_packet(self) -> None:
+        repo = self.init_repo()
+        config = load_closeout_config(repo)
+        pinned_refs = {"target": {"remote": "missing-remote", "branch": "master", "ref": "refs/remotes/missing-remote/master", "head": "0" * 40}}
+        exact_tuple = {
+            "candidateId": "candidate:repo-sweep-action:missing-remote-stale",
+            "actionId": "resolve_conflicts_with_agent",
+            "evidenceHash": "manual-evidence",
+            "policyHash": "stale-policy-before-reviewed-config-change",
+            "pinnedRefs": pinned_refs,
+        }
+        path = self.write_agent_queue_packet(
+            repo,
+            candidate_id="candidate:repo-sweep-action:missing-remote-stale",
+            updates={"policyHash": exact_tuple["policyHash"], "pinnedRefs": pinned_refs, "exactTuple": exact_tuple},
+        )
+
+        result = retire_stale_plan_absent_agent_queue_packets(repo)
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "remote_fetch_failed")
+        self.assertEqual(result["retiredPackets"], [])
+        self.assertEqual(result["blockers"][0]["kind"], "remote_fetch_failed")
+        self.assertIn("remote_fetch_failed", {failure["kind"] for failure in result["blockers"][0]["remoteFailures"]})
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(packet["status"], "queued")
+        self.assertNotIn("retirementProof", packet)
+        self.assertNotIn("agent_remediation_queue_packet_retired", self.audit_types(repo))
 
     def test_repo_closed_postcondition_accepts_retired_queue_after_policy_drift(self) -> None:
         repo = self.init_repo()
