@@ -321,6 +321,32 @@ $screenshotCompare = Compare-SmokeScreenshots `
     -RequestedSampleStep $SampleStep
 
 $failures = @()
+foreach ($leg in @(
+    [pscustomobject]@{ Name = "before"; Smoke = $beforeSmoke },
+    [pscustomobject]@{ Name = "after"; Smoke = $afterSmoke }
+)) {
+    $validationOk = Get-NestedValue $leg.Smoke "validation.ok"
+    $launchOnly = Get-NestedValue $leg.Smoke "validation.launchOnlyProbe"
+    $presented = Get-FirstNestedValue $leg.Smoke @(
+        "validation.presentedFrames", "log.summary.presented_frames")
+    $firstPresented = Get-FirstNestedValue $leg.Smoke @(
+        "validation.firstPresentedFrame", "log.summary.first_presented_frame")
+    $lastPresented = Get-FirstNestedValue $leg.Smoke @(
+        "validation.lastPresentedFrame", "log.summary.last_presented_frame")
+    if ($validationOk -ne $true) {
+        $failures += "$($leg.Name) smoke did not independently pass validation."
+    }
+    if ($launchOnly -eq $true) {
+        $failures += "$($leg.Name) smoke is launch-only and cannot enter a playback A/B."
+    }
+    if ($null -eq $presented -or [int64]$presented -lt 2) {
+        $failures += "$($leg.Name) smoke did not present at least two frames."
+    }
+    if ($null -eq $firstPresented -or $null -eq $lastPresented -or
+        [int64]$firstPresented -eq [int64]$lastPresented) {
+        $failures += "$($leg.Name) smoke did not prove displayed-frame advancement."
+    }
+}
 if ($FailOnScreenshotDelta) {
     if ($screenshotCompare.status -ne "compared") {
         $failures += "Screenshot comparison status was $($screenshotCompare.status)."

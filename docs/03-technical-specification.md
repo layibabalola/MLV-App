@@ -1372,9 +1372,12 @@ other. Auto's headroom-sharpening gate is narrower than the general no-readback
 telemetry latch: a Dual ISO `GPU Tex NR` observation can report validated
 no-readback observed, but non-Dual-ISO `HQ x2` promotion requires a non-Dual-ISO
 no-readback observation in the current Auto run. `run-release-gui-smoke.ps1` also
-fails default validations when
-`presented_frames` is missing or zero; `-AllowZeroPresentedFrames` is an explicit
-launch-only opt-out and does not create playback/visual proof.
+fails default validations unless at least two frames were presented, first and
+last presented frame ids differ, and the skipped/unpresented ratio stays within
+the configured limit. `-AllowZeroPresentedFrames` is accepted only alongside
+`-LaunchOnlyProbe`; that mode cannot request frame telemetry, screenshots,
+artifact detection, or lifecycle stress and never creates playback/visual or
+A/B proof.
 `compare-release-gui-smoke-ab.ps1` carries the same Auto decision fields into
 its `autoDecision` comparison object, including cadence deltas in milliseconds
 and FPS-equivalent form plus the capability consistency fields. That comparator

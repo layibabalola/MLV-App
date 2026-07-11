@@ -597,9 +597,15 @@ validated and demoted capability are both true in the same summary. The headroom
 capability is shape-scoped: Dual ISO `GPU Tex NR` telemetry does not arm
 non-Dual-ISO `HQ x2` promotion; that promotion requires a non-Dual-ISO
 no-readback observation in the current Auto run.
-Default GUI smokes also require `playback_smoke.summary.presented_frames > 0`.
-Use `-AllowZeroPresentedFrames` only for explicit launch-only probes; such runs
-must not be cited as visual playback, Auto sampler, FPS, or color proof.
+Default GUI smokes require at least two presented frames, distinct first/last
+presented frame ids, and a bounded skipped/unpresented ratio. Timeline movement
+and the GUI FPS label are diagnostic only when these presentation invariants
+pass. `-AllowZeroPresentedFrames` now requires the explicit `-LaunchOnlyProbe`
+declaration; launch-only mode is mechanically incompatible with frame telemetry,
+screenshots, artifact detection, and lifecycle stress. Such runs must not enter
+an A/B or be cited as visual playback, Auto sampler, FPS, cadence, color, or
+product-card completion proof. Baseline and candidate must each pass validation
+independently before comparison.
 For playback backend-selection evidence, pass `-GpuPlaybackReconBackend <name>`
 to `run-release-playback-profile.ps1`, `run-release-gui-smoke.ps1`, or the
 UltraMagnus P3 wrapper; the wrappers set `MLVAPP_GPU_PLAYBACK_RECON_BACKEND`.
