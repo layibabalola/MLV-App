@@ -8,6 +8,7 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
 #include "CrashForensics.h"
+#include "ExportDimensions.h"
 #include "PlaybackFrameRange.h"
 #include "debug/StageTiming.h"
 extern "C" {
@@ -11039,16 +11040,19 @@ void MainWindow::startExportPipe(QString fileName)
     }
     else if( m_codecProfile == CODEC_CINEFORM_10 || m_codecProfile == CODEC_CINEFORM_12 ) // resolution must be multiple of 16
     {
-        if( width != width + (width % 16) )
+        int alignedWidth = 0;
+        int alignedHeight = 0;
+        if( !export_dimensions::roundUpToMultiple( width, 16, &alignedWidth )
+         || !export_dimensions::roundUpToMultiple( height, 16, &alignedHeight ) )
         {
-            width += width % 16;
-            scaled = true;
+            QMessageBox::critical( this,
+                                   tr( "File export failed" ),
+                                   tr( "CineForm export dimensions are invalid or too large to align safely." ) );
+            return;
         }
-        if( height != height + (height % 16) )
-        {
-            height += height % 16;
-            scaled = true;
-        }
+        scaled = scaled || alignedWidth != width || alignedHeight != height;
+        width = alignedWidth;
+        height = alignedHeight;
     }
 
     //FFMpeg export
