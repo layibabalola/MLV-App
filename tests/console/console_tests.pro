@@ -28,6 +28,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_phase3_quality_policy.cpp \
     $$REPO_ROOT/tests/console/test_clip_lifecycle_barrier.cpp \
     $$REPO_ROOT/tests/console/test_export_dimensions.cpp \
+    $$REPO_ROOT/tests/console/test_export_process.cpp \
     $$REPO_ROOT/tests/console/test_playback_frame_range.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
@@ -43,6 +44,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/repo_paths.h \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/ExportDimensions.h \
+    $$REPO_ROOT/platform/qt/ExportProcess.h \
     $$REPO_ROOT/platform/qt/PlaybackFrameRange.h
 
 win32{
