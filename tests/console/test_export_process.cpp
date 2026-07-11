@@ -26,6 +26,32 @@ TEST( ExportProcess, UserPathsStaySingleArgumentsWithoutQuotingOrEscaping )
     ASSERT_FALSE( invocation.arguments.constLast().endsWith( QLatin1Char('"') ) );
 }
 
+TEST( ExportProcess, TemplateReplacementPreservesSpacesQuotesAndShellMetacharacters )
+{
+    const QString output = QStringLiteral("C:/shots/O'Brien & crew/quote \"test\".mov");
+    const export_process::Invocation invocation = export_process::invocationFromTemplate(
+        QStringLiteral("ffmpeg"),
+        QStringLiteral("-y -i - -c:v cfhd __MLVAPP_OUTPUT__"),
+        { { QStringLiteral("__MLVAPP_OUTPUT__"), output } } );
+
+    ASSERT_EQ( 6, invocation.arguments.size() );
+    ASSERT_TRUE( output == invocation.arguments.constLast() );
+}
+
+TEST( ExportProcess, TemplateReplacementCanInjectPathInsideFilterArgument )
+{
+    const QString transform = QStringLiteral("vidstabtransform=input=C:/take with spaces/transforms.trf:smoothing=10");
+    const export_process::Invocation invocation = export_process::invocationFromTemplate(
+        QStringLiteral("ffmpeg"),
+        QStringLiteral("-i - -vf __MLVAPP_FILTER__ __MLVAPP_OUTPUT__"),
+        { { QStringLiteral("__MLVAPP_FILTER__"), transform },
+          { QStringLiteral("__MLVAPP_OUTPUT__"), QStringLiteral("C:/out clip.mov") } } );
+
+    ASSERT_EQ( 5, invocation.arguments.size() );
+    ASSERT_TRUE( transform == invocation.arguments.at( 3 ) );
+    ASSERT_TRUE( QStringLiteral("C:/out clip.mov") == invocation.arguments.constLast() );
+}
+
 TEST( ExportProcess, MissingExecutableFailsToStartWithDiagnosticsAvailable )
 {
     export_process::StreamingProcess process;

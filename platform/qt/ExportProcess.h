@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 namespace export_process
 {
@@ -14,6 +15,27 @@ struct Invocation
     QString program;
     QStringList arguments;
 };
+
+struct ArgumentReplacement
+{
+    QString placeholder;
+    QString value;
+};
+
+inline Invocation invocationFromTemplate( const QString &program,
+                                          const QString &argumentTemplate,
+                                          const QVector<ArgumentReplacement> &replacements = {} )
+{
+    QStringList arguments = QProcess::splitCommand( argumentTemplate );
+    for( QString &argument : arguments )
+    {
+        for( const ArgumentReplacement &replacement : replacements )
+        {
+            argument.replace( replacement.placeholder, replacement.value );
+        }
+    }
+    return Invocation{ program, arguments };
+}
 
 inline Invocation rawVideoInvocation( const QString &program,
                                       const QString &fps,
@@ -88,13 +110,16 @@ public:
 
     void cancel()
     {
-        if( m_process.state() == QProcess::NotRunning ) return;
-        m_process.terminate();
-        if( !m_process.waitForFinished( 2000 ) )
+        if( m_process.state() != QProcess::NotRunning )
         {
-            m_process.kill();
-            m_process.waitForFinished( 2000 );
+            m_process.terminate();
+            if( !m_process.waitForFinished( 2000 ) )
+            {
+                m_process.kill();
+                m_process.waitForFinished( 2000 );
+            }
         }
+        captureDiagnostics();
     }
 
     QString diagnostics() const { return QString::fromUtf8( m_diagnosticTail ); }

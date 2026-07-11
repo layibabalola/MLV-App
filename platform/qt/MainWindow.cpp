@@ -9,6 +9,7 @@
 #include "ui_MainWindow.h"
 #include "CrashForensics.h"
 #include "ExportDimensions.h"
+#include "ExportProcess.h"
 #include "PlaybackFrameRange.h"
 #include "debug/StageTiming.h"
 extern "C" {
@@ -10821,9 +10822,9 @@ void MainWindow::startExportPipe(QString fileName)
         writeMlvAudioToWaveCut( m_pMlvObject, wavFileName.toLatin1().data(), m_exportQueue.first()->cutIn(), m_exportQueue.first()->cutOut() );
 #endif
         if( m_codecProfile == CODEC_H264 || m_codecProfile == CODEC_H265_8 || m_codecProfile == CODEC_H265_10 || m_codecProfile == CODEC_H265_12 )
-            ffmpegAudioCommand = QString( "-i \"%1\" -c:a aac " ).arg( wavFileName );
-        else if( m_codecProfile == CODEC_VP9 ) ffmpegAudioCommand = QString( "-i \"%1\" -c:a libopus " ).arg( wavFileName );
-        else ffmpegAudioCommand = QString( "-i \"%1\" -c:a copy " ).arg( wavFileName );
+            ffmpegAudioCommand = QStringLiteral( "-i __MLVAPP_AUDIO__ -c:a aac " );
+        else if( m_codecProfile == CODEC_VP9 ) ffmpegAudioCommand = QStringLiteral( "-i __MLVAPP_AUDIO__ -c:a libopus " );
+        else ffmpegAudioCommand = QStringLiteral( "-i __MLVAPP_AUDIO__ -c:a copy " );
     }
 
     //If audio only, exit here
@@ -11057,21 +11058,21 @@ void MainWindow::startExportPipe(QString fileName)
 
     //FFMpeg export
 #if defined __linux__ && !defined APP_IMAGE
-    QString program = QString( "ffmpeg" );
+    QString ffmpegProgram = QString( "ffmpeg" );
 #elif __WIN32__
-    QString program = QString( "ffmpeg" );
+    QString ffmpegProgram = QString( "ffmpeg" );
 #else
-    QString program = QCoreApplication::applicationDirPath();
-    program.append( QString( "/ffmpeg\"" ) );
-    program.prepend( QString( "\"" ) );
+    QString ffmpegProgram = QCoreApplication::applicationDirPath() + QStringLiteral( "/ffmpeg" );
 #endif
+
+    QString program;
 
 #ifdef STDOUT_SILENT
     program.append( QString( " -loglevel 0" ) );
 #endif
 
     //We need it later for multipass
-    QString ffmpegCommand = program;
+    QString ffmpegCommand = QStringLiteral( "\"%1\"" ).arg( ffmpegProgram );
 
     QString output = fileName.left( fileName.lastIndexOf( "." ) );
     QString resolution = QString( "%1x%2" ).arg( width ).arg( height );
@@ -11083,7 +11084,7 @@ void MainWindow::startExportPipe(QString fileName)
         if( m_exportQueue.first()->vidStabTripod() )
         {
             stabCmd = QString( "%1 -r %2 -y -f rawvideo -s %3 -pix_fmt rgb48 -i - -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf vidstabdetect=tripod=1:result=%4 -f null -" )
-                        .arg( program )
+                        .arg( ffmpegCommand )
                         .arg( fps )
                         .arg( resolution )
                         .arg( vidstabFile );
@@ -11091,7 +11092,7 @@ void MainWindow::startExportPipe(QString fileName)
         else
         {
             stabCmd = QString( "%1 -r %2 -y -f rawvideo -s %3 -pix_fmt rgb48 -i - -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf vidstabdetect=stepsize=%5:shakiness=%6:accuracy=%7:result=%4 -f null -" )
-                        .arg( program )
+                        .arg( ffmpegCommand )
                         .arg( fps )
                         .arg( resolution )
                         .arg( vidstabFile )
@@ -11217,7 +11218,7 @@ void MainWindow::startExportPipe(QString fileName)
                         .arg( m_exportQueue.first()->cutIn() - 1 )
                         .arg( colorTag )
                         .arg( resizeFilter )
-                        .arg( output ) );
+                        .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
 
             //copy wav to the location, ffmpeg does not like to do it for us :-(
             if( m_audioExportEnabled && doesMlvHaveAudio( m_pMlvObject ) )
@@ -11236,7 +11237,7 @@ void MainWindow::startExportPipe(QString fileName)
                         .arg( "rgb48" )
                         .arg( colorTag )
                         .arg( resizeFilter )
-                        .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
         }
     }
     else if( m_codecProfile == CODEC_PNG )
@@ -11267,7 +11268,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( m_exportQueue.first()->cutIn() - 1 )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
 
         //copy wav to the location, ffmpeg does not like to do it for us :-(
         if( m_audioExportEnabled && doesMlvHaveAudio( m_pMlvObject ) )
@@ -11301,7 +11302,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( m_exportQueue.first()->cutIn() - 1 )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
 
         //copy wav to the location, ffmpeg does not like to do it for us :-(
         if( m_audioExportEnabled && doesMlvHaveAudio( m_pMlvObject ) )
@@ -11321,7 +11322,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( "yuv444p" )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_AVI )
     {
@@ -11352,7 +11353,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( option3 )
                     .arg( option4 )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_MJPEG )
     {
@@ -11363,7 +11364,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( "mjpeg" )
                     .arg( "yuvj444p" )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_FFVHUFF )
     {
@@ -11390,7 +11391,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( "ffvhuff" )
                     .arg( option )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_H264 )
     {
@@ -11411,7 +11412,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( "yuv420p" )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_H265_8 || m_codecProfile == CODEC_H265_10 || m_codecProfile == CODEC_H265_12 )
     {
@@ -11437,7 +11438,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( bitdepth )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_DNXHR )
     {
@@ -11484,7 +11485,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( format )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_DNXHD )
     {
@@ -11560,7 +11561,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( resolution )
                     .arg( option )
                     .arg( colorTag )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_CINEFORM_10 || m_codecProfile == CODEC_CINEFORM_12 )
     {
@@ -11577,7 +11578,7 @@ void MainWindow::startExportPipe(QString fileName)
                            .arg( mode )
                            .arg( colorTag )
                            .arg( resizeFilter )
-                           .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else if( m_codecProfile == CODEC_VP9 )
     {
@@ -11596,7 +11597,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( "yuv420p" )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     else
     {
@@ -11616,7 +11617,7 @@ void MainWindow::startExportPipe(QString fileName)
                     .arg( pixFmt )
                     .arg( colorTag )
                     .arg( resizeFilter )
-                    .arg( output ) );
+                    .arg( QStringLiteral("__MLVAPP_OUTPUT__") ) );
     }
     //There is a %5 in the string, so another arg is not possible - so do that:
     program.insert( program.indexOf( "-c:v" ), ffmpegAudioCommand );
@@ -11637,18 +11638,51 @@ void MainWindow::startExportPipe(QString fileName)
     if( ( m_exportQueue.first()->vidStabEnabled() && staberr == false ) || !m_exportQueue.first()->vidStabEnabled() )
     {
         //Try to open pipe
-        FILE *pPipe;
+        FILE *pPipe = nullptr;
+        export_process::StreamingProcess streamingProcess;
+        const bool shellPipeline = m_smoothFilterSetting == SMOOTH_FILTER_3PASS
+                                || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM
+                                || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB;
+        bool processStarted = false;
+        bool streamWriteFailed = false;
         //qDebug() << "Call ffmpeg:" << program;
+        if( !shellPipeline )
+        {
+            const export_process::Invocation invocation = export_process::invocationFromTemplate(
+                ffmpegProgram,
+                program,
+                { { QStringLiteral("__MLVAPP_AUDIO__"), wavFileName },
+                  { QStringLiteral("__MLVAPP_OUTPUT__"), output } } );
+            processStarted = streamingProcess.start( invocation );
+        }
+        else
+        {
+            program.replace( QStringLiteral("__MLVAPP_AUDIO__"),
+                             QStringLiteral("\"%1\"").arg( wavFileName ) );
+            program.replace( QStringLiteral("__MLVAPP_OUTPUT__"), output );
+            program.prepend( ffmpegCommand + QLatin1Char(' ') );
 #ifdef Q_OS_UNIX
-        if( !( pPipe = popen( program.toUtf8().data(), "w" ) ) )
+            processStarted = ( pPipe = popen( program.toUtf8().data(), "w" ) ) != nullptr;
 #else
-    if( !( pPipe = popen( program.toLatin1().data(), "wb" ) ) )
+            processStarted = ( pPipe = popen( program.toLatin1().data(), "wb" ) ) != nullptr;
 #endif
+        }
+        if( !processStarted )
         {
             QMessageBox::critical( this, tr( "File export failed" ), tr( "Could not export with ffmpeg." ) );
         }
         else
         {
+            const auto writeFrame = [&]( const uint16_t *pixels, size_t count ) {
+                if( shellPipeline )
+                {
+                    return fwrite( pixels, sizeof( uint16_t ), count, pPipe ) == count
+                        && fflush( pPipe ) == 0;
+                }
+                return streamingProcess.writeAll(
+                    reinterpret_cast<const char *>( pixels ),
+                    static_cast<qint64>( count * sizeof( uint16_t ) ) );
+            };
             //Buffer
             uint32_t frameSize = getMlvWidth( m_pMlvObject ) * getMlvHeight( m_pMlvObject ) * 3;
             uint16_t * imgBuffer;
@@ -11690,8 +11724,7 @@ void MainWindow::startExportPipe(QString fileName)
                                                3, 0, &vars );
 
                     //Write to pipe
-                    fwrite(imgBufferScaled, sizeof( uint16_t ), width * height * 3, pPipe);
-                    fflush(pPipe);
+                    if( !writeFrame( imgBufferScaled, width * height * 3 ) ) streamWriteFailed = true;
                 }
                 else
                 {
@@ -11701,9 +11734,10 @@ void MainWindow::startExportPipe(QString fileName)
                     m_pRenderThread->unlock();
 
                     //Write to pipe
-                    fwrite(imgBuffer, sizeof( uint16_t ), frameSize, pPipe);
-                    fflush(pPipe);
+                    if( !writeFrame( imgBuffer, frameSize ) ) streamWriteFailed = true;
                 }
+
+                if( streamWriteFailed ) break;
 
                 //Set Status
                 if( !( m_exportQueue.first()->vidStabEnabled() && m_codecProfile == CODEC_H264 ) )
@@ -11726,9 +11760,34 @@ void MainWindow::startExportPipe(QString fileName)
                 if( m_exportAbortPressed ) break;
             }
             //Close pipe
-            if( pclose( pPipe ) != 0 )
+            bool processFinished = false;
+            if( shellPipeline )
             {
-                QMessageBox::critical( this, tr( "File export failed" ), tr( "FFmpeg closed unexpectedly during export.\n\nFile %1 was not exported completely." ).arg( fileName ) );
+                processFinished = pclose( pPipe ) == 0;
+            }
+            else if( m_exportAbortPressed )
+            {
+                streamingProcess.cancel();
+            }
+            else if( streamWriteFailed )
+            {
+                streamingProcess.cancel();
+            }
+            else
+            {
+                processFinished = streamingProcess.finish();
+            }
+            if( !processFinished && !m_exportAbortPressed )
+            {
+                const QString diagnostics = shellPipeline ? QString() : streamingProcess.diagnostics().trimmed();
+                QMessageBox::critical(
+                    this,
+                    tr( "File export failed" ),
+                    tr( "FFmpeg closed unexpectedly during export.\n\nFile %1 was not exported completely.%2" )
+                        .arg( fileName,
+                              diagnostics.isEmpty()
+                                  ? QString()
+                                  : tr( "\n\nFFmpeg diagnostics:\n%1" ).arg( diagnostics ) ) );
             }
             free( imgBufferScaled );
             free( imgBuffer );
