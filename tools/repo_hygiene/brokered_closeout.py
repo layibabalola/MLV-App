@@ -839,6 +839,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "dirty_split",
             "foreign_dirty_integrated_branch_prune",
             "detached_dirty_preserve",
+            "generated_only_detached_worktree_prune",
             "redundant_branch_prune",
             "explicit_protected_worktree_cleanup",
             "dirty_cluster_preservation",
@@ -868,6 +869,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_foreign_dirty_integrated_branch_detaches_linked_worktree_and_prunes",
             "test_repo_sweep_foreign_dirty_target_overlap_blocks_with_exact_path_evidence",
             "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
+            "test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof",
+            "test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked",
             "test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup",
             "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
             "test_repo_sweep_protected_locked_worktree_without_exact_policy_is_inspect_only",
@@ -1243,6 +1246,19 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "allowStaleLockedWorktreeCleanup": True,
         "lockedWorktreeStaleHours": 24,
         "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+        "detachedDirtyGeneratedOnlyPatterns": [
+            ".qmake.stash",
+            "Makefile",
+            "Makefile.*",
+            "moc/**",
+            "moc_*.cpp",
+            "qrc_*.cpp",
+            "ui/**",
+            "ui_*.h",
+            "MLVApp_resource.rc",
+            "obj/**",
+            "*.log",
+        ],
         "fetchBeforeRemoteSweep": True,
         "remoteFeaturePatterns": [],
         "pruneRemoteFeatureBranches": True,
@@ -1265,6 +1281,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "allowForeignDirtyIntegratedBranchSwitch": True,
         "allowDetachedDirtyPreservation": True,
         "allowSensitiveDetachedDirtyPreservation": False,
+        "allowLargeDetachedDirtyPreservation": True,
         "maxDetachedDirtyPaths": 25,
         "prunePatchEquivalentBranches": True,
         "maxConflictFilesForAgent": 8,
@@ -1355,6 +1372,26 @@ def locks_root(repo_root: Path, config: Dict[str, Any]) -> Path:
 def path_matches_any(path: str, patterns: Iterable[str]) -> bool:
     value = normalize_rel(path)
     return any(fnmatch.fnmatch(value, normalize_rel(pattern)) for pattern in patterns)
+
+
+def generated_only_detached_dirty_proof(config: Dict[str, Any], entries: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    paths = sorted({str(entry.get("path") or "") for entry in entries if str(entry.get("path") or "")})
+    patterns = [str(pattern) for pattern in config.get("repoSweep", {}).get("detachedDirtyGeneratedOnlyPatterns", [])]
+    matched: List[Dict[str, Any]] = []
+    unmatched: List[str] = []
+    for path in paths:
+        pattern = next((candidate for candidate in patterns if path_matches_any(path, [candidate])), None)
+        if pattern:
+            matched.append({"path": path, "pattern": pattern})
+        else:
+            unmatched.append(path)
+    return {
+        "eligible": bool(paths) and not unmatched,
+        "pathCount": len(paths),
+        "patterns": patterns,
+        "matched": matched,
+        "unmatched": unmatched,
+    }
 
 
 def clean_at_start_sensitive_auto_claim_allowed(
@@ -9051,19 +9088,24 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
     entries = parse_status_paths(path) if path.exists() else []
     paths = sorted({str(entry["path"]) for entry in entries})
     sensitive_paths = [candidate for candidate in paths if path_matches_any(candidate, config.get("paths", {}).get("sensitive", []))]
+    generated_only_proof = generated_only_detached_dirty_proof(config, entries)
     auto = blocker_auto_remediation_config(config)
     candidate_id = report_candidate_id("repo-sweep-worktree-investigate", item)
     recommended_action = "retain_with_proven_blocker"
     action_class = "dirty_detached_worktree"
     blockers: List[str] = []
     recovery_command = "preserve or remove detached dirty paths, then rerun repo sweep"
-    if len(paths) > int(auto.get("maxDetachedDirtyPaths", 25)):
+    if generated_only_proof["eligible"]:
+        recommended_action = "prune_generated_detached_dirty_now"
+        action_class = "generated_only_detached_worktree_prune"
+        recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
+    elif len(paths) > int(auto.get("maxDetachedDirtyPaths", 25)) and not bool(auto.get("allowLargeDetachedDirtyPreservation", False)):
         blockers.append("too_many_dirty_paths")
     if sensitive_paths and not bool(auto.get("allowSensitiveDetachedDirtyPreservation", False)):
         blockers.append("sensitive_dirty_paths")
     if not bool(auto.get("allowDetachedDirtyPreservation", True)):
         blockers.append("detached_dirty_preservation_disabled")
-    if not blockers and paths:
+    if not blockers and paths and recommended_action != "prune_generated_detached_dirty_now":
         recommended_action = "preserve_detached_dirty_now"
         action_class = "detached_dirty_preserve"
         recovery_command = closeout_script_command("repo-sweep-closeout.ps1", ["-Apply"], config)
@@ -9089,6 +9131,7 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
             "dirtyPaths": paths,
             "sensitivePaths": sensitive_paths,
             "entries": entries,
+            "generatedOnlyProof": generated_only_proof,
             "eligible": not blockers,
         },
         "recommendedAction": recommended_action,
@@ -9143,7 +9186,7 @@ def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: 
         action_id = "split"
     elif action == "switch_target_and_prune":
         action_id = "worktree_cleanup"
-    elif action == "preserve_detached_dirty_now":
+    elif action in {"preserve_detached_dirty_now", "prune_generated_detached_dirty_now"}:
         action_id = "orphan_quarantine"
     elif action == "prune_remote_now":
         action_id = "delete_remote_branch"
@@ -10346,6 +10389,49 @@ def apply_detached_dirty_preserve(repo_root: Path, config: Dict[str, Any], plan:
         return action
 
 
+def apply_generated_only_detached_dirty_prune(repo_root: Path, config: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+    worktree = report.get("worktree") or {}
+    worktree_path = Path(str(worktree.get("path") or ""))
+    if not worktree_path.exists():
+        action = {"status": "blocked", "reason": "detached_worktree_missing", "report": report}
+        write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+        return action
+    current_entries = parse_status_paths(worktree_path)
+    current_paths = sorted({str(item["path"]) for item in current_entries})
+    expected_paths = sorted(report.get("scope", {}).get("dirtyPaths") or [])
+    proof = generated_only_detached_dirty_proof(config, current_entries)
+    if current_paths != expected_paths:
+        action = {
+            "status": "blocked",
+            "reason": "generated_only_detached_dirty_tuple_drifted",
+            "expectedPaths": expected_paths,
+            "actualPaths": current_paths,
+            "generatedOnlyProof": proof,
+            "report": report,
+        }
+        write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
+        return action
+    if not proof["eligible"]:
+        action = {
+            "status": "blocked",
+            "reason": "generated_only_detached_dirty_unmatched_paths",
+            "generatedOnlyProof": proof,
+            "report": report,
+        }
+        write_audit(repo_root, config, "orphan_quarantine", action, outcome="blocked")
+        return action
+    cleanup = remove_worktree(repo_root, worktree_path)
+    action = {
+        "status": "success" if cleanup.get("returncode") == 0 else "blocked",
+        "action": "generated_only_detached_dirty_prune",
+        "worktree": str(worktree_path),
+        "generatedOnlyProof": proof,
+        "originalWorktreeCleanup": cleanup,
+    }
+    write_audit(repo_root, config, "orphan_quarantine", action, outcome="success" if action["status"] == "success" else "blocked")
+    return action
+
+
 def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
     target = target_ref_for(repo_root, config)
     branch = str(item["branch"])
@@ -10756,7 +10842,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         report
         for report in retained_reports
         if report.get("recommendedAction")
-        in {"clean_integrate_now", "clean_integrate_remote_now", "dispatch_conflict_remediation", "prune_now", "prune_remote_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now"}
+        in {"clean_integrate_now", "clean_integrate_remote_now", "dispatch_conflict_remediation", "prune_now", "prune_remote_now", "cleanup_worktree_and_prune", "split_now", "switch_target_and_prune", "preserve_detached_dirty_now", "prune_generated_detached_dirty_now"}
     ]
     promoted_candidates = [candidate_from_report(config, plan, report) for report in promoted_reports]
     follow_up_candidates = retained_reports
@@ -10944,6 +11030,34 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, "report": report, **quorum_result}, outcome="blocked")
                 continue
             action = apply_detached_dirty_preserve(repo_root, config, plan, report)
+            actions.append(action)
+            continue
+        if report["recommendedAction"] == "prune_generated_detached_dirty_now":
+            worktree_path = Path(str((report.get("worktree") or {}).get("path") or ""))
+            current_entries = parse_status_paths(worktree_path) if worktree_path.exists() else []
+            current_paths = sorted({str(item["path"]) for item in current_entries})
+            generated_only_proof = generated_only_detached_dirty_proof(config, current_entries)
+            blockers = list(report.get("blockers") or [])
+            if current_paths != sorted(report.get("scope", {}).get("dirtyPaths") or []):
+                blockers.append("generated_only_detached_dirty_tuple_drifted")
+            if not generated_only_proof["eligible"]:
+                blockers.append("generated_only_detached_dirty_unmatched_paths")
+            quorum_result = ensure_autonomous_quorum(
+                repo_root,
+                config,
+                candidate_id=candidate["candidateId"],
+                action_id=candidate["actionId"],
+                evidence_hash=candidate["evidenceHash"],
+                pinned_refs=candidate["pinnedRefs"],
+                evidence=candidate["evidence"],
+                action_class=candidate["actionClass"],
+                blockers=blockers,
+            )
+            quorum_results.append({"candidate": candidate, "report": report, **quorum_result})
+            if not quorum_result["quorum"]["ok"]:
+                write_audit(repo_root, config, "review_quorum_blocked", {"candidate": candidate, "report": report, **quorum_result}, outcome="blocked")
+                continue
+            action = apply_generated_only_detached_dirty_prune(repo_root, config, report)
             actions.append(action)
             continue
         if report["recommendedAction"] in {"clean_integrate_remote_now", "prune_remote_now"}:
@@ -11138,6 +11252,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
                 "remove_branch_worktree",
                 "remove_clean_detached_worktree",
                 "detached_dirty_preserve",
+                "generated_only_detached_dirty_prune",
                 "foreign_dirty_integrated_branch_prune",
             }
             for item in actions

@@ -338,6 +338,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                     "dirty_split",
                     "foreign_dirty_integrated_branch_prune",
                     "detached_dirty_preserve",
+                    "generated_only_detached_worktree_prune",
                     "redundant_branch_prune",
                     "explicit_protected_worktree_cleanup",
                     "agent_conflict_remediation",
@@ -364,6 +365,19 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowStaleLockedWorktreeCleanup": True,
                 "lockedWorktreeStaleHours": 24,
                 "backupBranchPatterns": ["*backup*", "backup/*", "*-backup", "*-backup-*"],
+                "detachedDirtyGeneratedOnlyPatterns": [
+                    ".qmake.stash",
+                    "Makefile",
+                    "Makefile.*",
+                    "moc/**",
+                    "moc_*.cpp",
+                    "qrc_*.cpp",
+                    "ui/**",
+                    "ui_*.h",
+                    "MLVApp_resource.rc",
+                    "obj/**",
+                    "*.log",
+                ],
                 "fetchBeforeRemoteSweep": True,
                 "remoteFeaturePatterns": [],
                 "pruneRemoteFeatureBranches": True,
@@ -383,6 +397,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "allowForeignDirtyIntegratedBranchSwitch": True,
                 "allowDetachedDirtyPreservation": True,
                 "allowSensitiveDetachedDirtyPreservation": False,
+                "allowLargeDetachedDirtyPreservation": True,
                 "maxDetachedDirtyPaths": 25,
                 "prunePatchEquivalentBranches": True,
                 "maxConflictFilesForAgent": 8,
@@ -2145,6 +2160,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_repo_closed_postcondition_rejects_stale_collection_retirement_tuple", baseline["requiredTests"])
         self.assertIn("test_non_ancestor_historical_branch_prune_requires_bundle_backed_recovery", baseline["requiredTests"])
         self.assertIn("test_dirty_detached_worktree_removal_refuses_missing_byte_preservation", baseline["requiredTests"])
+        self.assertIn("test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof", baseline["requiredTests"])
+        self.assertIn("test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked", baseline["requiredTests"])
         self.assertIn("test_recovery_audit_records_heads_hashes_and_reviewer_verdicts", baseline["requiredTests"])
         self.assertIn("test_stale_transaction_branch_pruned_after_recovery_evidence", baseline["requiredTests"])
         self.assertIn("test_final_repo_sweep_after_prune_reports_zero_candidates", baseline["requiredTests"])
@@ -4969,6 +4986,53 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:README.md").stdout, "detached dirty readme\n")
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:detached-only.txt").stdout, "another exact dirty path\n")
         self.assertIn("orphan_quarantine", self.audit_types(repo))
+
+    def test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "generated-only-detached"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        (detached / ".qmake.stash").write_text("qmake state\n", encoding="utf-8")
+        (detached / "Makefile.Debug").write_text("make state\n", encoding="utf-8")
+        (detached / "moc").mkdir()
+        (detached / "moc" / "moc_MainWindow.cpp").write_text("moc state\n", encoding="utf-8")
+        (detached / "ui").mkdir()
+        (detached / "ui" / "ui_MainWindow.h").write_text("ui state\n", encoding="utf-8")
+        (detached / "MLVApp_resource.rc").write_text("rc state\n", encoding="utf-8")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["sourceDisposition"] == "retain_dirty_detached_worktree")
+        self.assertEqual(report["recommendedAction"], "prune_generated_detached_dirty_now")
+        self.assertEqual(report["actionClass"], "generated_only_detached_worktree_prune")
+        proof = report["dirtyClassification"]["generatedOnlyProof"]
+        self.assertTrue(proof["eligible"])
+        self.assertEqual(proof["unmatched"], [])
+        self.assertEqual(proof["pathCount"], 5)
+        action = next(item for item in result["actions"] if item.get("action") == "generated_only_detached_dirty_prune")
+        self.assertEqual(action["status"], "success", action)
+        self.assertTrue(action["generatedOnlyProof"]["eligible"])
+        self.assertFalse(detached.exists())
+
+    def test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "large-real-evidence-detached"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        evidence_root = detached / "a5_packet"
+        evidence_root.mkdir()
+        for index in range(30):
+            (evidence_root / f"frame-{index:02d}.json").write_text(json.dumps({"index": index}) + "\n", encoding="utf-8")
+
+        result = repo_sweep(repo, apply=True)
+
+        report = next(item for item in result["retainedCandidateReports"] if item["sourceDisposition"] == "retain_dirty_detached_worktree")
+        self.assertEqual(report["recommendedAction"], "preserve_detached_dirty_now")
+        self.assertNotIn("too_many_dirty_paths", report["blockers"])
+        self.assertFalse(report["dirtyClassification"]["generatedOnlyProof"]["eligible"])
+        action = next(item for item in result["actions"] if item.get("action") == "detached_dirty_preserve")
+        self.assertEqual(action["status"], "success", action)
+        self.assertFalse(detached.exists())
+        self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-00.json").stdout, '{"index": 0}\n')
+        self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-29.json").stdout, '{"index": 29}\n')
 
     def test_detached_false_dirty_prunes_after_diff_quiet_proof_and_cleans_provisional_recovery(self) -> None:
         repo = self.init_repo()
