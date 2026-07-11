@@ -2892,6 +2892,35 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["blockers"])
 
+    def test_repo_closed_postcondition_does_not_treat_primary_root_as_stale_sibling(self) -> None:
+        repo = self.init_repo()
+        git(repo, "branch", "codex/side-inspection")
+        side = self.tempdir / "side-inspection"
+        git(repo, "worktree", "add", str(side), "codex/side-inspection")
+        git(repo, "checkout", "--detach")
+        (repo / "README.md").write_text("foreign dirty primary root\n", encoding="utf-8")
+
+        result = verify_repo_closed_postcondition(side, work_block_id=None, finalize_result={"status": "success"})
+
+        stale = result["worktreeState"]["staleManagedWorktrees"]
+        self.assertNotIn(repo.resolve(), {Path(item["path"]).resolve() for item in stale})
+        self.assertNotIn("stale_managed_worktrees", {item["kind"] for item in result["blockers"]})
+
+    def test_repo_closed_postcondition_still_blocks_genuine_stale_detached_sibling(self) -> None:
+        repo = self.init_repo()
+        git(repo, "branch", "codex/side-inspection")
+        side = self.tempdir / "side-inspection"
+        stale_sibling = self.tempdir / "stale-detached-sibling"
+        git(repo, "worktree", "add", str(side), "codex/side-inspection")
+        git(repo, "worktree", "add", "--detach", str(stale_sibling), "HEAD")
+
+        result = verify_repo_closed_postcondition(side, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(result["status"], "blocked", result)
+        stale = result["worktreeState"]["staleManagedWorktrees"]
+        self.assertIn(stale_sibling.resolve(), {Path(item["path"]).resolve() for item in stale})
+        self.assertIn("stale_managed_worktrees", {item["kind"] for item in result["blockers"]})
+
     def test_repo_closed_postcondition_blocks_linked_sibling_worktree(self) -> None:
         repo = self.init_repo()
         sibling = self.tempdir / "ordinary-sibling-worktree"
