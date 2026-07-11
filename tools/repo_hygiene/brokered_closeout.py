@@ -871,6 +871,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
             "test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof",
             "test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked",
+            "test_detached_dirty_preserve_copy_uses_extended_length_destination",
             "test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup",
             "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
             "test_repo_sweep_protected_locked_worktree_without_exact_policy_is_inspect_only",
@@ -4551,24 +4552,44 @@ def safe_repo_path(repo_root: Path, rel_path: str) -> Path:
     return resolved
 
 
+def windows_extended_path(path: Path) -> str:
+    resolved = str(path.resolve(strict=False))
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved.lstrip("\\")
+    return "\\\\?\\" + resolved
+
+
+def fs_exists(path: Path) -> bool:
+    return os.path.exists(windows_extended_path(path))
+
+
+def fs_is_dir(path: Path) -> bool:
+    return os.path.isdir(windows_extended_path(path))
+
+
+def fs_remove_path(path: Path) -> None:
+    if fs_is_dir(path):
+        shutil.rmtree(windows_extended_path(path))
+    elif fs_exists(path):
+        os.unlink(windows_extended_path(path))
+
+
 def copy_exact_path_for_split(source_root: Path, dest_root: Path, rel_path: str, status: str) -> Dict[str, Any]:
     source = safe_repo_path(source_root, rel_path)
     dest = safe_repo_path(dest_root, rel_path)
     if "D" in status:
-        if dest.is_dir():
-            shutil.rmtree(dest)
-        elif dest.exists():
-            dest.unlink()
+        fs_remove_path(dest)
         return {"path": rel_path, "operation": "delete_in_preservation"}
-    if not source.exists():
+    if not fs_exists(source):
         raise HygieneError("dirty split source path is missing: %s" % rel_path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if source.is_dir():
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(source, dest)
+    os.makedirs(windows_extended_path(dest.parent), exist_ok=True)
+    if fs_is_dir(source):
+        fs_remove_path(dest)
+        shutil.copytree(windows_extended_path(source), windows_extended_path(dest))
         return {"path": rel_path, "operation": "copy_directory"}
-    shutil.copy2(source, dest)
+    shutil.copy2(windows_extended_path(source), windows_extended_path(dest))
     return {"path": rel_path, "operation": "copy_file"}
 
 
@@ -4578,11 +4599,11 @@ def remove_exact_path_from_original(repo_root: Path, rel_path: str) -> Dict[str,
     if tracked.returncode == 0:
         restore = run_git(repo_root, ["restore", "--staged", "--worktree", "--", rel_path])
         return {"path": rel_path, "operation": "restore_tracked", "returncode": restore.returncode, "stderr": restore.stderr[-2000:]}
-    if path.is_dir():
-        shutil.rmtree(path)
+    if fs_is_dir(path):
+        shutil.rmtree(windows_extended_path(path))
         return {"path": rel_path, "operation": "remove_untracked_directory", "returncode": 0, "stderr": ""}
-    if path.exists():
-        path.unlink()
+    if fs_exists(path):
+        os.unlink(windows_extended_path(path))
     return {"path": rel_path, "operation": "remove_untracked_file", "returncode": 0, "stderr": ""}
 
 
@@ -4592,11 +4613,11 @@ def remove_exact_path_from_worktree(worktree_path: Path, rel_path: str) -> Dict[
     if tracked.returncode == 0:
         restore = run_git(worktree_path, ["restore", "--staged", "--worktree", "--", rel_path])
         return {"path": rel_path, "operation": "restore_tracked", "returncode": restore.returncode, "stderr": restore.stderr[-2000:]}
-    if path.is_dir():
-        shutil.rmtree(path)
+    if fs_is_dir(path):
+        shutil.rmtree(windows_extended_path(path))
         return {"path": rel_path, "operation": "remove_untracked_directory", "returncode": 0, "stderr": ""}
-    if path.exists():
-        path.unlink()
+    if fs_exists(path):
+        os.unlink(windows_extended_path(path))
     return {"path": rel_path, "operation": "remove_untracked_file", "returncode": 0, "stderr": ""}
 
 

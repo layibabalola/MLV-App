@@ -30,6 +30,7 @@ from .brokered_closeout import (
     enter_remediation_freeze,
     evidence_repair_commit_message,
     effective_closeout_script_command,
+    copy_exact_path_for_split,
     collect_agent_remediation_results,
     closeout_command_timeout_ms,
     closeout_max_process_output_bytes,
@@ -2163,6 +2164,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("test_dirty_detached_worktree_removal_refuses_missing_byte_preservation", baseline["requiredTests"])
         self.assertIn("test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof", baseline["requiredTests"])
         self.assertIn("test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked", baseline["requiredTests"])
+        self.assertIn("test_detached_dirty_preserve_copy_uses_extended_length_destination", baseline["requiredTests"])
         self.assertIn("test_recovery_audit_records_heads_hashes_and_reviewer_verdicts", baseline["requiredTests"])
         self.assertIn("test_stale_transaction_branch_pruned_after_recovery_evidence", baseline["requiredTests"])
         self.assertIn("test_final_repo_sweep_after_prune_reports_zero_candidates", baseline["requiredTests"])
@@ -5034,6 +5036,23 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertFalse(detached.exists())
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-00.json").stdout, '{"index": 0}\n')
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-29.json").stdout, '{"index": 29}\n')
+
+    def test_detached_dirty_preserve_copy_uses_extended_length_destination(self) -> None:
+        repo = self.init_repo()
+        (repo / "evidence.txt").write_text("evidence\n", encoding="utf-8")
+        long_component = "x" * 90
+        dest_root = self.tempdir / long_component / long_component / long_component
+        self.assertGreater(len(str((dest_root / "evidence.txt").resolve(strict=False))), 260)
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.os.makedirs") as makedirs, mock.patch(
+            "tools.repo_hygiene.brokered_closeout.shutil.copy2"
+        ) as copy2:
+            copied = copy_exact_path_for_split(repo, dest_root, "evidence.txt", "??")
+
+        self.assertEqual(copied, {"path": "evidence.txt", "operation": "copy_file"})
+        self.assertTrue(str(makedirs.call_args.args[0]).startswith("\\\\?\\"))
+        self.assertTrue(str(copy2.call_args.args[1]).startswith("\\\\?\\"))
+        self.assertGreater(len(str(copy2.call_args.args[1])), 260)
 
     def test_detached_false_dirty_prunes_after_diff_quiet_proof_and_cleans_provisional_recovery(self) -> None:
         repo = self.init_repo()

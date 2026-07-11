@@ -539,6 +539,7 @@
       "test_repo_sweep_detached_dirty_worktree_is_preserved_before_cleanup",
       "test_repo_sweep_generated_only_detached_dirty_worktree_is_pruned_with_proof",
       "test_repo_sweep_large_real_detached_evidence_is_preserved_not_count_blocked",
+      "test_detached_dirty_preserve_copy_uses_extended_length_destination",
       "test_repo_sweep_detached_dirty_preservation_refuses_stale_or_missing_commit_before_cleanup",
       "test_repo_sweep_explicit_protected_stale_worktree_cleanup_requires_exact_policy",
       "test_repo_sweep_protected_locked_worktree_without_exact_policy_is_inspect_only",
