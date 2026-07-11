@@ -425,6 +425,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_closeout_dashboard_page_preserves_configured_client_state_keys",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_dashboard_refresh_command_rejects_unsupported_configured_command",
                     "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_closed_postcondition_blocks_linked_sibling_worktree",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_closed_postcondition_does_not_treat_primary_root_as_stale_sibling",
+                    "tools.repo_hygiene.test_brokered_closeout.BrokeredCloseoutTests.test_repo_closed_postcondition_still_blocks_genuine_stale_detached_sibling",
                     "-v",
                 ],
                 "pathPatterns": ["closeout.config.json", "tools/closeout/**", "tools/repo_hygiene/**", "tools/repo-hygiene/**"],
@@ -983,6 +985,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_dirty_protected_target_recovery_owns_paths_despite_stale_claim",
             "test_repo_closed_postcondition_reports_unified_closeout_clean_truth",
             "test_repo_closed_postcondition_blocks_linked_sibling_worktree",
+            "test_repo_closed_postcondition_does_not_treat_primary_root_as_stale_sibling",
+            "test_repo_closed_postcondition_still_blocks_genuine_stale_detached_sibling",
             "test_closeout_clean_truth_preserves_raw_git_dirty_but_policy_clean_for_exempt_state",
             "test_closeout_clean_truth_contract_required",
             "test_hard_clean_blocks_retained_remote_feature_refs",
@@ -2233,6 +2237,13 @@ def git_common_dir(repo_root: Path) -> Path:
     raw = git_stdout(repo_root, ["rev-parse", "--git-common-dir"], required=False)
     path = Path(raw) if raw else repo_root / ".git"
     return path if path.is_absolute() else (repo_root / path).resolve()
+
+
+def primary_worktree_root(repo_root: Path) -> Optional[Path]:
+    common_dir = git_common_dir(repo_root)
+    if common_dir.name != ".git":
+        return None
+    return common_dir.parent.resolve()
 
 
 def remediation_hook_guard_proof(repo_root: Path) -> Dict[str, Any]:
@@ -5372,12 +5383,14 @@ def hard_clean_stale_worktrees(repo_root: Path, config: Dict[str, Any]) -> List[
     )
     stale: List[Dict[str, Any]] = []
     repo_resolved = repo_root.resolve()
+    primary_root = primary_worktree_root(repo_root)
     for item in worktree_rows(repo_root):
         path = Path(str(item.get("path") or ""))
         if not path:
             continue
         try:
-            if path.resolve() == repo_resolved:
+            resolved = path.resolve()
+            if resolved == repo_resolved or (primary_root is not None and resolved == primary_root):
                 continue
         except OSError:
             pass
