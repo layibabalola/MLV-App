@@ -59,6 +59,10 @@ param(
     [string]$GpuAmazeDebayer = "",
     [switch]$GpuAmazeTexturePresent,
     [switch]$DisableLookAssist,
+    [switch]$ExerciseClipLifecycleStress,
+    [string]$StressSwitchInput = "",
+    [int]$StressSwitchAtMs = 1000,
+    [int]$StressSeekFrame = 8,
     [switch]$EnablePhase3QualityModes,
     [string]$StageLog = "",
     [ValidateSet("", "on", "off")]
@@ -873,6 +877,14 @@ if ($GpuAmazeTexturePresent) {
 if ($DisableLookAssist) {
     $arguments += "--no-look-assist"
 }
+if ($ExerciseClipLifecycleStress) {
+    $arguments += "--exercise-clip-lifecycle-stress"
+    if (-not [string]::IsNullOrWhiteSpace($StressSwitchInput)) {
+        $arguments += @("--stress-switch-input", (Resolve-Path -LiteralPath $StressSwitchInput).Path)
+    }
+    $arguments += @("--stress-switch-at-ms", [string]$StressSwitchAtMs)
+    $arguments += @("--stress-seek-frame", [string]$StressSeekFrame)
+}
 if ($EnablePhase3QualityModes) {
     $arguments += "--enable-phase3-quality-modes"
 }
@@ -1238,6 +1250,9 @@ $playbackPolicyLine = $recentLines |
 $cpuSettleLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.cpu_settle*" } |
     Select-Object -Last 1
+$clipLifecycleStressLine = $recentLines |
+    Where-Object { $_ -like "*gui_smoke.clip_lifecycle_stress*" } |
+    Select-Object -Last 1
 $windowScreenshotLine = $recentLines |
     Where-Object { $_ -like "*gui_smoke.window_screenshot*" } |
     Select-Object -Last 1
@@ -1278,6 +1293,7 @@ $lookAssistSafetyFallback = if ($lookAssistSafetyFallbackLine) { Convert-Playbac
 $visualState = if ($visualStateLine) { Convert-PlaybackLogLineToObject $visualStateLine } else { $null }
 $playbackPolicy = if ($playbackPolicyLine) { Convert-PlaybackLogLineToObject $playbackPolicyLine } else { $null }
 $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLine } else { $null }
+$clipLifecycleStress = if ($clipLifecycleStressLine) { Convert-PlaybackLogLineToObject $clipLifecycleStressLine } else { $null }
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
 $screenshotLog = if ($screenshotLine) { Convert-PlaybackLogLineToObject $screenshotLine } else { $null }
 if ($screenshotCapture -and $screenshotLog -and (Get-ObjectPropertyValue $screenshotLog "method")) {
@@ -1615,6 +1631,16 @@ if ($DetectPlaybackArtifacts) {
     }
 }
 
+if ($ExerciseClipLifecycleStress) {
+    if ($null -eq $clipLifecycleStress) {
+        $validationFailures += "Clip lifecycle stress telemetry was missing."
+    }
+    elseif ((Get-ObjectPropertyValue $clipLifecycleStress "ok") -ne 1) {
+        $stressFailure = Get-ObjectPropertyValue $clipLifecycleStress "failure"
+        $validationFailures += "Clip lifecycle stress failed: $stressFailure."
+    }
+}
+
 $result = [pscustomobject]@{
     schema = "mlvapp-gui-smoke-result.v1"
     capturedAtUtc = $endUtc.ToString("o")
@@ -1699,6 +1725,12 @@ $result = [pscustomobject]@{
             finalTemperature = Get-ObjectPropertyValue $lookAssistApply "final_temp"
             finalTint = Get-ObjectPropertyValue $lookAssistApply "final_tint"
         }
+        clipLifecycleStress = [pscustomobject]@{
+            requested = [bool]$ExerciseClipLifecycleStress
+            telemetry = $clipLifecycleStress
+            ok = if ($clipLifecycleStress) { (Get-ObjectPropertyValue $clipLifecycleStress "ok") -eq 1 } else { $false }
+            failure = Get-ObjectPropertyValue $clipLifecycleStress "failure"
+        }
     }
     playbackFps = [pscustomobject]@{
         requestedPlaybackSeconds = $Seconds
@@ -1764,6 +1796,7 @@ $result = [pscustomobject]@{
         visualState = $visualState
         playbackPolicy = $playbackPolicy
         cpuSettle = $cpuSettle
+        clipLifecycleStress = $clipLifecycleStress
         screenshot = $screenshotCapture
         windowScreenshot = $windowScreenshotCapture
         windowScreenshotEvent = $windowScreenshotLog
@@ -1785,6 +1818,7 @@ $result = [pscustomobject]@{
             visualState = $visualStateLine
             playbackPolicy = $playbackPolicyLine
             cpuSettle = $cpuSettleLine
+            clipLifecycleStress = $clipLifecycleStressLine
             screenshot = if ($screenshotCapture) { $screenshotCapture.outputPath } else { $null }
             screenshotEvent = $screenshotLine
             windowScreenshot = if ($windowScreenshotCapture) { $windowScreenshotCapture.outputPath } else { $null }

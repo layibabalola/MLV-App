@@ -8199,6 +8199,17 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         return 3;
     }
 
+    QFileInfo stressSwitchInputInfo( options.stressSwitchInputPath.isEmpty()
+        ? options.inputPath
+        : options.stressSwitchInputPath );
+    if( options.exerciseClipLifecycleStress
+     && ( !stressSwitchInputInfo.exists() || !stressSwitchInputInfo.isFile() ) )
+    {
+        err << "[GUI-SMOKE] ERROR: stress switch input clip does not exist: "
+            << stressSwitchInputInfo.absoluteFilePath() << "\n";
+        return 3;
+    }
+
     auto forceLookAssistOffForSmoke = [&]()
     {
         if( !options.disableLookAssist ) return;
@@ -8716,10 +8727,225 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
         }
     }
 
+    bool stressAttempted = false;
+    bool stressOk = true;
+    bool stressPlayedBeforeSwitch = false;
+    bool stressSwitched = false;
+    bool stressSeekedAfterSwitch = false;
+    bool stressClosed = false;
+    bool stressReopened = false;
+    QString stressFailure = QStringLiteral("not-run");
+    qint64 stressElapsedMs = -1;
+    uint64_t stressSerialBefore = m_lastPresentedRequestSerial;
+    uint64_t stressSerialAfterSwitch = 0;
+    uint64_t stressSerialAfterReopen = 0;
+    uint64_t stressGenerationAfterSwitch = 0;
+    uint64_t stressGenerationAfterReopen = 0;
+    int stressFrameAfterSwitch = -1;
+    int stressFrameAfterReopen = -1;
+
+    auto waitForFrameSettled = [&]( int frameIndex,
+                                    const char *reason,
+                                    int timeoutMs ) -> bool
+    {
+        const uint64_t requestFloor = m_nextRenderRequestSerial;
+        requestFrameRefresh( true, reason );
+        QElapsedTimer waitClock;
+        waitClock.start();
+        qint64 nextRetryMs = 80;
+        while( waitClock.elapsed() < timeoutMs
+            && !isFrameSettledForAnalysis( frameIndex, requestFloor ) )
+        {
+            qApp->processEvents( QEventLoop::AllEvents );
+            if( m_pRenderThread
+             && m_pRenderThread->isIdle()
+             && waitClock.elapsed() >= nextRetryMs
+             && !isFrameSettledForAnalysis( frameIndex, requestFloor ) )
+            {
+                requestFrameRefresh( true, reason );
+                nextRetryMs = waitClock.elapsed() + 80;
+            }
+            QThread::msleep( 10 );
+        }
+        qApp->processEvents( QEventLoop::AllEvents );
+        return isFrameSettledForAnalysis( frameIndex, requestFloor );
+    };
+
+    auto loadedFrameCount = [&]() -> int
+    {
+        return m_pMlvObject ? getMlvFrames( m_pMlvObject ) : 0;
+    };
+
+    auto seekAndSettleLoadedClip = [&]( int requestedFrame,
+                                        const char *reason,
+                                        int *settledFrameOut ) -> bool
+    {
+        const int frameCount = loadedFrameCount();
+        if( frameCount < 2 ) return false;
+        const int frameIndex = qBound( 0, requestedFrame, frameCount - 1 );
+        if( settledFrameOut ) *settledFrameOut = frameIndex;
+        ui->horizontalSliderPosition->setValue( frameIndex );
+        m_frameChanged = true;
+        qApp->processEvents( QEventLoop::AllEvents );
+        return waitForFrameSettled( frameIndex, reason, 8000 );
+    };
+
+    auto runClipLifecycleStress = [&]() -> bool
+    {
+        stressAttempted = true;
+        stressFailure = QStringLiteral("ok");
+        stressElapsedMs = playbackClock.elapsed();
+        stressSerialBefore = m_lastPresentedRequestSerial;
+        const int stressFrame = qMax( 0, options.stressSeekFrame );
+        stressPlayedBeforeSwitch = ui->actionPlay->isChecked();
+        if( !stressPlayedBeforeSwitch )
+        {
+            stressFailure = QStringLiteral("play-not-active-before-switch");
+            return false;
+        }
+
+        openMlvSet( QStringList() << stressSwitchInputInfo.absoluteFilePath() );
+        forceLookAssistOffForSmoke();
+        qApp->processEvents( QEventLoop::AllEvents );
+        stressSwitched = m_pMlvObject && m_fileLoaded && loadedFrameCount() >= 2;
+        if( !stressSwitched )
+        {
+            stressFailure = QStringLiteral("switch-open-failed");
+            return false;
+        }
+
+        if( ui->actionPlay->isChecked() )
+        {
+            ui->actionPlay->trigger();
+            qApp->processEvents( QEventLoop::AllEvents );
+        }
+        for( int attempt = 0;
+             attempt < 400 && m_pRenderThread && !m_pRenderThread->isIdle();
+             ++attempt )
+        {
+            qApp->processEvents( QEventLoop::AllEvents );
+            QThread::msleep( 5 );
+        }
+
+        stressSeekedAfterSwitch =
+            seekAndSettleLoadedClip( stressFrame,
+                                     "gui-smoke-stress-seek-after-switch",
+                                     &stressFrameAfterSwitch );
+        stressSerialAfterSwitch = m_lastPresentedRequestSerial;
+        stressGenerationAfterSwitch =
+            m_playbackPresentationGeneration.load( std::memory_order_acquire );
+        if( m_lastPresentedRequestContextValid )
+        {
+            stressFrameAfterSwitch =
+                static_cast<int>( m_lastPresentedRequestContext.frameNumber );
+        }
+        if( !stressSeekedAfterSwitch )
+        {
+            stressFailure = QStringLiteral("seek-after-switch-timeout");
+            return false;
+        }
+
+        freeActiveMlvObjectAfterLifecycleBarrier( "gui-smoke-stress-close" );
+        m_pMlvObject = initMlvObject();
+        deleteSession();
+        qApp->processEvents( QEventLoop::AllEvents );
+        stressClosed = !m_fileLoaded && !ui->actionPlay->isChecked();
+        m_clipLifecycleBarrier.reopen();
+        if( !stressClosed )
+        {
+            stressFailure = QStringLiteral("close-unload-failed");
+            return false;
+        }
+
+        openMlvSet( QStringList() << inputInfo.absoluteFilePath() );
+        forceLookAssistOffForSmoke();
+        qApp->processEvents( QEventLoop::AllEvents );
+        stressReopened = m_pMlvObject && m_fileLoaded && loadedFrameCount() >= 2;
+        if( !stressReopened )
+        {
+            stressFailure = QStringLiteral("reopen-failed");
+            return false;
+        }
+
+        const bool reopenedSettled =
+            seekAndSettleLoadedClip( stressFrame,
+                                     "gui-smoke-stress-seek-after-reopen",
+                                     &stressFrameAfterReopen );
+        stressSerialAfterReopen = m_lastPresentedRequestSerial;
+        stressGenerationAfterReopen =
+            m_playbackPresentationGeneration.load( std::memory_order_acquire );
+        if( m_lastPresentedRequestContextValid )
+        {
+            stressFrameAfterReopen =
+                static_cast<int>( m_lastPresentedRequestContext.frameNumber );
+        }
+        if( !reopenedSettled )
+        {
+            stressFailure = QStringLiteral("seek-after-reopen-timeout");
+            return false;
+        }
+
+        if( !options.loopPlayback && ui->actionLoop->isChecked() )
+            ui->actionLoop->trigger();
+        else if( options.loopPlayback && !ui->actionLoop->isChecked() )
+            ui->actionLoop->trigger();
+        if( !ui->actionPlay->isChecked() )
+        {
+            ui->actionPlay->trigger();
+            qApp->processEvents( QEventLoop::AllEvents );
+        }
+        if( !ui->actionPlay->isChecked() )
+        {
+            stressFailure = QStringLiteral("restart-play-failed");
+            return false;
+        }
+        return true;
+    };
+
     const int durationMs = qMax( 100, options.durationMs );
     while( playbackClock.elapsed() < durationMs && ui->actionPlay->isChecked() )
     {
         qApp->processEvents( QEventLoop::AllEvents );
+        if( options.exerciseClipLifecycleStress
+         && !stressAttempted
+         && playbackClock.elapsed() >= qMax( 0, options.stressSwitchAtMs ) )
+        {
+            stressOk = runClipLifecycleStress();
+            logInteractionEvent(
+                QStringLiteral("gui_smoke.clip_lifecycle_stress"),
+                QStringLiteral(
+                    "requested=1 attempted=%1 ok=%2 failure=%3 "
+                    "elapsed_ms=%4 play_before_switch=%5 switched=%6 "
+                    "seek_after_switch=%7 closed=%8 reopened=%9 "
+                    "serial_before=%10 serial_after_switch=%11 "
+                    "serial_after_reopen=%12 generation_after_switch=%13 "
+                    "generation_after_reopen=%14 frame_after_switch=%15 "
+                    "frame_after_reopen=%16 switch_input=\"%17\" reopen_input=\"%18\"" )
+                    .arg( bool01( stressAttempted ) )
+                    .arg( bool01( stressOk ) )
+                    .arg( stressFailure )
+                    .arg( stressElapsedMs )
+                    .arg( bool01( stressPlayedBeforeSwitch ) )
+                    .arg( bool01( stressSwitched ) )
+                    .arg( bool01( stressSeekedAfterSwitch ) )
+                    .arg( bool01( stressClosed ) )
+                    .arg( bool01( stressReopened ) )
+                    .arg( static_cast<qulonglong>( stressSerialBefore ) )
+                    .arg( static_cast<qulonglong>( stressSerialAfterSwitch ) )
+                    .arg( static_cast<qulonglong>( stressSerialAfterReopen ) )
+                    .arg( static_cast<qulonglong>( stressGenerationAfterSwitch ) )
+                    .arg( static_cast<qulonglong>( stressGenerationAfterReopen ) )
+                    .arg( stressFrameAfterSwitch )
+                    .arg( stressFrameAfterReopen )
+                    .arg( stressSwitchInputInfo.absoluteFilePath() )
+                    .arg( inputInfo.absoluteFilePath() ) );
+            if( !stressOk )
+            {
+                err << "[GUI-SMOKE] ERROR: clip lifecycle stress failed: "
+                    << stressFailure << ".\n";
+                return 10;
+            }
+        }
         if( midSessionExposureChangeEnabled
          && !midSessionExposureChangeApplied
          && playbackClock.elapsed() >= midSessionExposureAtMs )
@@ -8761,6 +8987,16 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             qApp->processEvents( QEventLoop::AllEvents );
         }
         QThread::msleep( 10 );
+    }
+
+    if( options.exerciseClipLifecycleStress && !stressAttempted )
+    {
+        logInteractionEvent(
+            QStringLiteral("gui_smoke.clip_lifecycle_stress"),
+            QStringLiteral("requested=1 attempted=0 ok=0 failure=not-reached elapsed_ms=%1")
+                .arg( playbackClock.elapsed() ) );
+        err << "[GUI-SMOKE] ERROR: clip lifecycle stress was not reached.\n";
+        return 10;
     }
 
     if( !options.windowScreenshotOutputPath.isEmpty() )
