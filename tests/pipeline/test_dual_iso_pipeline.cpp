@@ -3582,6 +3582,45 @@ extern "C" int dualisoAliasMapAvx2Active(void);
 extern "C" int dualisoAmazeReinitDispatchForTesting(void);
 extern "C" int dualisoAmazeAvx2Active(void);
 
+TEST(DualIsoPipeline, DitherIsDeterministicAcrossRepeatsAndThreadCounts)
+{
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_HQ", "1");
+#else
+    setenv("MLVAPP_DISABLE_AVX2_DUALISO_HQ", "1", 1);
+#endif
+    dualisoHqReinitDispatchForTesting();
+
+    const auto render = [](int thread_count, int frame_index) {
+        OpenMpThreadCountScope threads(thread_count);
+        QString error_message;
+        MlvPipelineFixture fixture;
+        ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+        ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+                                        &error_message));
+        ASSERT_TRUE(fixture.applyReceipt(&error_message));
+        return fixture.renderFrame16(frame_index, 1);
+    };
+
+    const std::vector<uint16_t> one_thread_first = render(1, 0);
+    const std::vector<uint16_t> one_thread_repeat = render(1, 0);
+    const std::vector<uint16_t> intervening_frame = render(4, 1);
+    const std::vector<uint16_t> after_intervening_frame = render(1, 0);
+    const std::vector<uint16_t> four_threads = render(4, 0);
+    ASSERT_TRUE(!one_thread_first.empty());
+    ASSERT_TRUE(!intervening_frame.empty());
+    ASSERT_TRUE(one_thread_first == one_thread_repeat);
+    ASSERT_TRUE(one_thread_first == after_intervening_frame);
+    ASSERT_TRUE(one_thread_first == four_threads);
+
+#ifdef _WIN32
+    _putenv_s("MLVAPP_DISABLE_AVX2_DUALISO_HQ", "");
+#else
+    unsetenv("MLVAPP_DISABLE_AVX2_DUALISO_HQ");
+#endif
+    dualisoHqReinitDispatchForTesting();
+}
+
 /* Parity check for Path B Phase B1+B2: AVX2 + FMA acceleration of the
  * HQ Dual ISO recon (final_blend, mix_images, fullres_reconstruction,
  * convert_to_20bit, convert_20_to_16bit). The kernels operate on the
@@ -3651,15 +3690,11 @@ TEST(DualIsoPipeline, HQ_FullBlendAvx2ByteIdentity)
 
     ASSERT_EQ(scalar_frame.size(), avx2_frame.size());
 
-    /* Allow ±1 LSB drift on a small fraction of pixels (from FMA reordering).
+    /* Allow a bounded drift on a small fraction of pixels from FMA reordering.
      * Total pixel count: WxHx3 (debayered RGB). The Phase B0 prototype
-     * measured 0.19% drifting pixels; we allow up to 2% for headroom and
-     * cap the maximum absolute difference at 1 LSB. dither in the 20->16bit
-     * convert is intentional and changes the OMP-thread interleave between
-     * runs, so a small additional diff is structurally expected. We allow
-     * a slightly looser per-pixel bound (±3) and tighter pixel-fraction
-     * bound (5%) so the test reports a clear failure on a bug, not a
-     * flake from the dither RNG. */
+     * measured 0.19% drifting pixels. Dither now uses the same linear-pixel
+     * cache index in both paths, so scheduling jitter is not part of this
+     * tolerance. */
     std::uint64_t total_pixels = static_cast<std::uint64_t>(scalar_frame.size());
     std::uint64_t differing = 0;
     int max_abs = 0;
@@ -3676,17 +3711,11 @@ TEST(DualIsoPipeline, HQ_FullBlendAvx2ByteIdentity)
                  static_cast<unsigned long long>(differing),
                  static_cast<unsigned long long>(total_pixels),
                  max_abs);
-    /* dither RNG creates per-run variation; cap the drift bounds.
-     * The scalar fast_randn05() uses a process-wide static counter, so the
-     * scalar path itself is non-deterministic across OMP scheduling. The
-     * AVX2 path uses a per-row deterministic seed. Across-runs both paths
-     * are bounded by the dither cache amplitude (RANDN/2 ~ 0.5; with the
-     * ±0.5 cap and final clamp the drift can reach ~ALIAS_MAP_MAX/4096 ≈ 4
-     * but in practice it tops out at the cache's float amplitude).
-     * Phase B0 measured 0.19% pixels with |d|=1 from FMA alone; the
-     * differing bound covers FMA + dither schedule jitter. */
+    /* The remaining path delta is arithmetic/FMA only. The observed fixture
+     * result after deterministic dither mapping is ~0.013% differing pixels;
+     * retain 1% headroom while keeping the established absolute bound. */
     ASSERT_TRUE(max_abs <= 64);
-    ASSERT_TRUE(differing * 100ull <= total_pixels * 50ull);  /* <=50% pixels may drift */
+    ASSERT_TRUE(differing * 100ull <= total_pixels);  /* <=1% pixels may drift */
 
     /* Restore default dispatch for subsequent tests. */
 #ifdef _WIN32

@@ -1742,7 +1742,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 #define raw_get_pixel32(x,y) (raw_buffer_32[(x) + (y) * raw_info.width])
 #define raw_set_pixel32(x,y,value) raw_buffer_32[(x) + (y)*raw_info.width] = value
 #define raw_get_pixel_20to16(x,y) ((raw_get_pixel32(x,y) >> 4) & 0xFFFF)
-#define raw_set_pixel_20to16_rand(x,y,value) image_data[(x) + (y) * raw_info.width] = COERCE((int)((value) / 16.0 + fast_randn05() + 0.5), 0, 0xFFFF)
+#define raw_set_pixel_20to16_rand(x,y,value) image_data[(x) + (y) * raw_info.width] = COERCE((int)((value) / 16.0 + randn05_cache[((x) + (y) * raw_info.width) & 1023] + 0.5), 0, 0xFFFF)
 #define raw_set_pixel20(x,y,value) raw_buffer_32[(x) + (y) * raw_info.width] = COERCE((value), 0, 0xFFFFF)
 
 static const double fullres_thr = 0.8;
@@ -5376,7 +5376,7 @@ static inline int final_blend(struct raw_info raw_info,
                 const size_t row_offset = (size_t)y * (size_t)w;
                 uint32_t *raw_row = &raw_buffer_32[row_offset];
                 uint16_t *image_row = &image_data[row_offset];
-                int row_k = (y * 7) & 1023;
+                int row_k = (y * w) & 1023;
                 const uint32_t *fullres_row = &fullres[row_offset];
                 const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
                 const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
@@ -5476,7 +5476,7 @@ static inline int final_blend(struct raw_info raw_info,
                 const size_t row_offset = (size_t)y * (size_t)w;
                 uint32_t *raw_row = &raw_buffer_32[row_offset];
                 uint16_t *image_row = &image_data[row_offset];
-                int row_k = (y * 7) & 1023;
+                int row_k = (y * w) & 1023;
                 const uint32_t *fullres_row = &fullres[row_offset];
                 const uint32_t *fullres_smooth_row = &fullres_smooth[row_offset];
                 const uint32_t *halfres_smooth_row = &halfres_smooth[row_offset];
@@ -5767,16 +5767,11 @@ static inline void convert_20_to_16bit(struct raw_info raw_info, uint16_t * imag
     pthread_once(&g_dualiso_hq_dispatch_once, dualiso_hq_dispatch_init);
     if (g_dualiso_hq_use_avx2)
     {
-        /* Per-row dispatch with thread-local dither cursor. The scalar
-         * fast_randn05() uses a process-wide static counter; here we use
-         * a per-row seed so the noise distribution and amplitude are
-         * preserved while threading cleanly. The cache itself is fixed,
-         * so bit identity vs scalar is not preserved (the scalar's global
-         * counter ordering already depends on OMP scheduling) but the
-         * statistical contract of the dither is unchanged. */
+        /* Linear-pixel cursor: identical to the scalar coordinate mapping,
+         * independent of OpenMP scheduling and row dispatch order. */
         #pragma omp parallel for
         for (int y = 0; y < h; y++) {
-            int k = (y * 7) & 1023;  /* per-row cursor seed */
+            int k = (y * w) & 1023;
             convert_20_to_16bit_row_avx2(&image_data[(size_t)y*w],
                                           &raw_buffer_32[(size_t)y*w],
                                           randn05_cache, &k, w);
