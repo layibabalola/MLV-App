@@ -298,6 +298,7 @@ INCLUDEPATH += $$PWD/../../src
 macx: SOURCES += ../cocoa/avf_lib/avf_lib.m
 
 HEADERS += MainWindow.h \
+           ClipLifecycleBarrier.h \
            CrashForensics.h \
            PlaybackFrameRange.h \
            Phase3Breadcrumbs.h \

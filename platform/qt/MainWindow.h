@@ -38,6 +38,7 @@
 #include "MainWindowGpuPreviewPolicy.h"
 #include "GpuPreviewProcessing.h"
 #include "RenderFrameThread.h"
+#include "ClipLifecycleBarrier.h"
 #include "GradientElement.h"
 #include "CrossElement.h"
 #include "TimeCodeLabel.h"
@@ -959,6 +960,7 @@ private:
     // every freeMlvObject path must drainLookAssistWorkers() first or the
     // worker reads freed memory (0xC0000005 on fast clip switching).
     std::atomic<int> m_lookAssistWorkersInFlight{0};
+    ClipLifecycleBarrier m_clipLifecycleBarrier;
     QString m_phase3ClipPlaytimeFingerprint;
     qint64 m_phase3ClipPlaytimePendingMs = 0;
     qint64 m_phase3ClipPlaytimeSinceFlushMs = 0;
@@ -1426,6 +1428,7 @@ private:
     void initPlaybackPreviewModeFromSettings( void );
     void initPlaybackPreviewResolutionFromSettings( void );
     void drainLookAssistWorkers( const char *reason );
+    void freeActiveMlvObjectAfterLifecycleBarrier( const char *reason );
     void initPlaybackScaleFactorFromSettings( void );
     void seedPlaybackQualityActiveStateForCurrentContext( void );
     void resetPlaybackQualityAutoRunState( void );

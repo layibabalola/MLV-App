@@ -26,6 +26,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_dual_iso_playback_policy.cpp \
     $$REPO_ROOT/tests/console/test_frame_compare.cpp \
     $$REPO_ROOT/tests/console/test_phase3_quality_policy.cpp \
+    $$REPO_ROOT/tests/console/test_clip_lifecycle_barrier.cpp \
     $$REPO_ROOT/tests/console/test_playback_frame_range.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
@@ -39,6 +40,7 @@ HEADERS += \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
+    $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/PlaybackFrameRange.h
 
 win32{
