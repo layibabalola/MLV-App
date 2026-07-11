@@ -1,5 +1,6 @@
 #include "../common/minitest.h"
 #include "../../platform/qt/ClipLifecycleBarrier.h"
+#include "../../platform/qt/PlaybackPrepPresentationPolicy.h"
 
 #include <chrono>
 #include <future>
@@ -50,4 +51,17 @@ TEST(ClipLifecycleBarrier, MutationRejectsNewAndStaleBorrowersUntilReopened)
     auto borrower = barrier.tryBorrow( mutationGeneration );
     ASSERT_TRUE( borrower );
     ASSERT_EQ( mutationGeneration, borrower.generation() );
+}
+
+TEST(PlaybackPrepPresentationPolicy, SupersededQueuedTaskSkipsCompute)
+{
+    ASSERT_FALSE( playbackPrepTaskShouldCompute( 41, 42, 7, 7 ) );
+    ASSERT_FALSE( playbackPrepTaskShouldCompute( 42, 42, 7, 8 ) );
+    ASSERT_TRUE( playbackPrepTaskShouldCompute( 42, 42, 7, 7 ) );
+}
+
+TEST(PlaybackPrepPresentationPolicy, CompletedCurrentGenerationFrameCannotStarveOnNewerSerial)
+{
+    ASSERT_TRUE( playbackPrepCompletedResultShouldPresent( 7, 7 ) );
+    ASSERT_FALSE( playbackPrepCompletedResultShouldPresent( 7, 8 ) );
 }

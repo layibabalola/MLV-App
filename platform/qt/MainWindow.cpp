@@ -11,6 +11,7 @@
 #include "ExportDimensions.h"
 #include "ExportProcess.h"
 #include "PlaybackFrameRange.h"
+#include "PlaybackPrepPresentationPolicy.h"
 #include "debug/StageTiming.h"
 extern "C" {
 #include "../../src/mlv/pipeline_stage_capture.h"
@@ -4482,8 +4483,10 @@ void MainWindow::playbackPrepThreadLoop( void )
             m_latestRequestedSerial.load( std::memory_order_acquire );
         const uint64_t activeGenerationBeforeCompute =
             m_playbackPresentationGeneration.load( std::memory_order_acquire );
-        if( task.requestSerial != latestBeforeCompute
-         || task.presentationGeneration != activeGenerationBeforeCompute )
+        if( !playbackPrepTaskShouldCompute( task.requestSerial,
+                                            latestBeforeCompute,
+                                            task.presentationGeneration,
+                                            activeGenerationBeforeCompute ) )
         {
             std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
             ++m_playbackPrepStaleDropCount;
@@ -4498,21 +4501,17 @@ void MainWindow::playbackPrepThreadLoop( void )
         result.workerQueueMs = task.workerQueueMs;
         result.workerTotalMs = ( mlv_stage_timing_now() - workerStart ) * 1000.0;
 
-        // Post-compute staleness check: if the UI has moved on while we were
-        // building this frame, drop it at the worker and let the presenter
-        // see a clean queue. Presenter also has an independent check to cover
-        // the race between this push and the queued slot firing.
-        const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
+        // Generation changes invalidate display assumptions. Serial changes
+        // only mean a newer request exists: discarding every completed frame
+        // on that basis starves presentation under sustained overload.
         const uint64_t activeGeneration =
             m_playbackPresentationGeneration.load( std::memory_order_acquire );
-        if( result.task.requestSerial != latest
-         || result.task.presentationGeneration != activeGeneration )
+        if( !playbackPrepCompletedResultShouldPresent(
+                result.task.presentationGeneration, activeGeneration ) )
         {
             std::lock_guard<std::mutex> lk( m_playbackPrepMutex );
             ++m_playbackPrepStaleDropCount;
-            ++m_playbackPrepReplacedAfterComputeCount;
-            if( result.task.presentationGeneration != activeGeneration )
-                ++m_playbackPrepGenerationDropCount;
+            ++m_playbackPrepGenerationDropCount;
             if( m_pRenderThread )
                 m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
             continue;
@@ -4560,8 +4559,8 @@ void MainWindow::onPlaybackPrepResultReady( void )
     const uint64_t latest = m_latestRequestedSerial.load( std::memory_order_acquire );
     const uint64_t activeGeneration =
         m_playbackPresentationGeneration.load( std::memory_order_acquire );
-    if( result.task.requestSerial != latest
-     || result.task.presentationGeneration != activeGeneration )
+    if( !playbackPrepCompletedResultShouldPresent(
+            result.task.presentationGeneration, activeGeneration ) )
     {
         ++m_playbackPrepStaleDropCount;
         if( result.task.presentationGeneration != activeGeneration )
@@ -4580,6 +4579,16 @@ void MainWindow::onPlaybackPrepResultReady( void )
             m_pRenderThread->releasePresentedFrameForRequestSerial( result.task.requestSerial );
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
         return;
+    }
+    if( result.task.requestSerial != latest && interactiveTraceEnabled() )
+    {
+        logInteractionEvent(
+            QStringLiteral("playback_prep.present_completed_superseded_serial"),
+            QStringLiteral("serial=%1 latest_serial=%2 generation=%3")
+                .arg( static_cast<qulonglong>( result.task.requestSerial ) )
+                .arg( static_cast<qulonglong>( latest ) )
+                .arg( static_cast<qulonglong>( activeGeneration ) ),
+            true );
     }
 
     presentPlaybackPreparedFrame( result );

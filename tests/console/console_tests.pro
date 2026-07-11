@@ -45,7 +45,8 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/ExportDimensions.h \
     $$REPO_ROOT/platform/qt/ExportProcess.h \
-    $$REPO_ROOT/platform/qt/PlaybackFrameRange.h
+    $$REPO_ROOT/platform/qt/PlaybackFrameRange.h \
+    $$REPO_ROOT/platform/qt/PlaybackPrepPresentationPolicy.h
 
 win32{
     WINDOWS_TEST_RUNTIME_DEPLOY = $$relative_path($$REPO_ROOT/tools/testing/deploy-windows-test-runtime.ps1, $$OUT_PWD)
