@@ -168,6 +168,10 @@ public:
         bool forceZebras = false;
         bool dropFrame = true;
         bool forceDropFrame = false;
+        bool exerciseClipLifecycleStress = false;
+        QString stressSwitchInputPath;
+        int stressSwitchAtMs = 1000;
+        int stressSeekFrame = 8;
     };
 
     /* Progress-only callback for exportCdngSequence.

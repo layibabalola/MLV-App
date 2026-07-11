@@ -1298,6 +1298,31 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("Loop the clip so a short clip plays continuously for the whole --seconds window (default: play once then stop)."));
     parser.addOption(loopPlaybackOpt);
 
+    const QCommandLineOption exerciseClipLifecycleStressOpt(
+        QStringLiteral("exercise-clip-lifecycle-stress"),
+        QStringLiteral("During GUI smoke playback, seek, switch clips, close/unload, and reopen to validate clip lifecycle handoff."));
+    parser.addOption(exerciseClipLifecycleStressOpt);
+
+    const QCommandLineOption stressSwitchInputOpt(
+        QStringLiteral("stress-switch-input"),
+        QStringLiteral("Second MLV file path used by --exercise-clip-lifecycle-stress. Defaults to --input."),
+        QStringLiteral("path"));
+    parser.addOption(stressSwitchInputOpt);
+
+    const QCommandLineOption stressSwitchAtMsOpt(
+        QStringLiteral("stress-switch-at-ms"),
+        QStringLiteral("Elapsed playback milliseconds before the lifecycle stress sequence starts."),
+        QStringLiteral("milliseconds"),
+        QStringLiteral("1000"));
+    parser.addOption(stressSwitchAtMsOpt);
+
+    const QCommandLineOption stressSeekFrameOpt(
+        QStringLiteral("stress-seek-frame"),
+        QStringLiteral("Frame requested during each lifecycle stress seek step."),
+        QStringLiteral("frame"),
+        QStringLiteral("8"));
+    parser.addOption(stressSeekFrameOpt);
+
     const QCommandLineOption enablePhase3QualityModesOpt(
         QStringLiteral("enable-phase3-quality-modes"),
         QStringLiteral("Allow unattended Phase 3 quality-mode selection during this GUI smoke run."));
@@ -1387,6 +1412,20 @@ static int runGuiPlaybackSmoke(QApplication &app)
     if (!ok || settleCpuMaxMs < settleMs)
     {
         err << "[GUI-SMOKE] ERROR: --settle-cpu-max-ms must be at least --settle-ms.\n";
+        return 2;
+    }
+
+    const int stressSwitchAtMs = parser.value(stressSwitchAtMsOpt).toInt(&ok);
+    if (!ok || stressSwitchAtMs < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --stress-switch-at-ms must be 0 or greater.\n";
+        return 2;
+    }
+
+    const int stressSeekFrame = parser.value(stressSeekFrameOpt).toInt(&ok);
+    if (!ok || stressSeekFrame < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --stress-seek-frame must be 0 or greater.\n";
         return 2;
     }
 
@@ -1528,6 +1567,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
     options.forceZebras = parser.isSet(zebrasOpt) || parser.isSet(noZebrasOpt);
     options.dropFrame = dropFrameMode == QStringLiteral("on");
     options.forceDropFrame = dropFrameMode != QStringLiteral("persisted");
+    options.exerciseClipLifecycleStress =
+        parser.isSet(exerciseClipLifecycleStressOpt);
+    options.stressSwitchInputPath = parser.value(stressSwitchInputOpt).isEmpty()
+        ? options.inputPath
+        : QFileInfo(parser.value(stressSwitchInputOpt)).absoluteFilePath();
+    options.stressSwitchAtMs = stressSwitchAtMs;
+    options.stressSeekFrame = stressSeekFrame;
 
     QByteArray appName = QCoreApplication::applicationFilePath().toLocal8Bit();
     char *smokeArgv[] = { appName.data(), nullptr };
