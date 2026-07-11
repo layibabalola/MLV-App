@@ -45,9 +45,11 @@ TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
     ASSERT_TRUE(histogram->data != nullptr);
 
     hist_add(histogram, samples.data(), 65535, 0);
-    ASSERT_EQ(65535u, histogram->data[1234]);
+    ASSERT_EQ(65535u, hist_get_bin(histogram, 1234));
+    ASSERT_TRUE(histogram->overflow_data == nullptr);
     hist_add(histogram, samples.data() + 65535, 1, 0);
-    ASSERT_EQ(65536u, histogram->data[1234]);
+    ASSERT_EQ(65536u, hist_get_bin(histogram, 1234));
+    ASSERT_TRUE(histogram->overflow_data != nullptr);
     ASSERT_EQ(65536u, histogram->count);
     ASSERT_EQ(1234, hist_median(histogram));
     hist_destroy(histogram);
@@ -75,8 +77,8 @@ TEST(DualIsoPipeline, HistogramLargeUniformAndParityCorpusStayExactAndBounded)
 
     ASSERT_EQ(static_cast<uint32_t>(sample_count), histogram->count);
     for(size_t bin = 0; bin < expected.size(); ++bin)
-        ASSERT_EQ(expected[bin], histogram->data[bin]);
-    ASSERT_TRUE(histogram->data[4096] > 65535u);
+        ASSERT_EQ(expected[bin], hist_get_bin(histogram, static_cast<uint16_t>(bin)));
+    ASSERT_TRUE(hist_get_bin(histogram, 4096) > 65535u);
     ASSERT_TRUE(elapsed_ms < 2000.0);
     std::fprintf(stderr, "HistogramLargeUniformAndParityCorpus: %.3f ms, %.2f FPS-equivalent\n",
                  elapsed_ms, elapsed_ms > 0.0 ? 1000.0 / elapsed_ms : 0.0);
@@ -90,7 +92,7 @@ TEST(DualIsoPipeline, HistogramMedianHandlesFullUint16WhiteRange)
     ASSERT_TRUE(histogram != nullptr);
     ASSERT_TRUE(histogram->data != nullptr);
     hist_add(histogram, samples, 3, 0);
-    ASSERT_EQ(2u, histogram->data[65535]);
+    ASSERT_EQ(2u, hist_get_bin(histogram, 65535));
     ASSERT_EQ(65535, hist_median(histogram));
     hist_destroy(histogram);
 }

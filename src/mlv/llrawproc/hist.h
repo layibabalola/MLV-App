@@ -29,16 +29,20 @@ struct histogram
 {
     uint16_t white;
     uint32_t count;
-    /* A single bin may contain hundreds of thousands of pixels on ordinary
-     * frames. Counts must stay exact above UINT16_MAX for median selection. */
-    uint32_t * data;
+    uint32_t bin_capacity;
+    /* Saturate compact primary bins, spilling only excess counts. This keeps
+     * ordinary-bin writes 16-bit even after a hot bin crosses UINT16_MAX. */
+    uint16_t * data;
+    uint32_t * overflow_data;
 };
 
 #pragma pack(pop)
 
 struct histogram * hist_create(uint16_t white);
+int hist_reset(struct histogram * hist, uint16_t white);
 void hist_add(struct histogram * hist, uint16_t * data, uint32_t size, uint16_t skip);
 uint16_t hist_median(struct histogram * hist);
+uint32_t hist_get_bin(const struct histogram * hist, uint16_t bin);
 void hist_destroy(struct histogram * hist);
 
 #endif
