@@ -912,6 +912,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_agent_queue_remote_fetch_failure_blocks_stale_check",
             "test_agent_queue_result_path_outside_result_root_is_stale",
             "test_agent_queue_skips_completed_result_paths_before_planning_more_shards",
+            "test_agent_queue_retires_stale_plan_absent_packet_with_valid_proof",
             "test_agent_result_collection_rejects_out_of_scope_changed_paths",
             "test_agent_result_collection_returns_symbolic_next_action_without_mutation",
             "test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation",
@@ -9895,6 +9896,126 @@ def collect_agent_remediation_results(repo_root_arg: Path) -> Dict[str, Any]:
     }
     result.update(write_agent_result_collection_artifact(repo_root, config, result))
     write_audit(repo_root, config, "agent_remediation_result_collection", result, outcome="success" if status == "success" else "blocked")
+    return result
+
+
+def retire_stale_plan_absent_agent_queue_packets(repo_root_arg: Path) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root_arg)
+    config = load_closeout_config(repo_root)
+    packets = pending_agent_remediation_queue_packets(repo_root, config)
+    remote_failures = refresh_agent_queue_remote_refs(repo_root, config, packets)
+    plan_result = repo_sweep(repo_root, apply=False)
+    if plan_result.get("status") != "planned":
+        result = {
+            "status": "blocked",
+            "reason": "repo_sweep_plan_unavailable",
+            "planStatus": plan_result.get("status"),
+            "planReason": plan_result.get("reason"),
+            "packets": [],
+            "retiredPackets": [],
+            "blockers": [{"kind": "repo_sweep_plan_unavailable", "plan": plan_result}],
+        }
+        write_audit(repo_root, config, "agent_remediation_queue_plan_absent_retirement", result, outcome="blocked")
+        return result
+    apply_scope = plan_result.get("applyScope") if isinstance(plan_result.get("applyScope"), dict) else {}
+    current_candidate_ids = {str(item) for item in (apply_scope.get("candidateIds") or []) if str(item)}
+    current_candidate_ids.update(str(item.get("candidateId")) for item in plan_result.get("promotedCandidates", []) if isinstance(item, dict) and item.get("candidateId"))
+    retired: List[Dict[str, Any]] = []
+    blockers: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    for packet in packets:
+        candidate_id = str(packet.get("candidateId") or "")
+        stale_reasons = [*remote_failures, *agent_remediation_packet_stale_reasons(repo_root, config, packet)]
+        summary = {
+            "candidateId": candidate_id,
+            "queuePath": packet.get("queuePath"),
+            "actionId": packet.get("actionId"),
+            "staleReasons": stale_reasons,
+        }
+        if not stale_reasons:
+            skipped.append({**summary, "reason": "packet_not_stale"})
+            continue
+        if candidate_id in current_candidate_ids:
+            blockers.append({**summary, "kind": "stale_packet_still_present_in_current_plan"})
+            continue
+        exact_tuple = packet.get("exactTuple")
+        if not isinstance(exact_tuple, dict):
+            blockers.append({**summary, "kind": "missing_exact_tuple"})
+            continue
+        queue_path = Path(str(packet.get("queuePath") or ""))
+        if not queue_path.exists():
+            blockers.append({**summary, "kind": "queue_path_missing"})
+            continue
+        collection_payload = {
+            "status": "success",
+            "packetCount": 1,
+            "retirementReason": "stale_plan_absent_queue_packet",
+            "currentPolicyHash": config.get("policyHash"),
+            "currentPlanEvidenceHash": plan_result.get("plan", {}).get("evidenceHash"),
+            "currentApplyScope": apply_scope,
+            "collectedResults": [
+                {
+                    "candidateId": packet.get("candidateId"),
+                    "shardId": "plan-absent-retirement",
+                    "workBlockId": packet.get("workBlockId"),
+                    "actionId": packet.get("actionId"),
+                    "evidenceHash": packet.get("evidenceHash"),
+                    "policyHash": config.get("policyHash"),
+                    "pinnedRefs": packet.get("pinnedRefs"),
+                    "exactTuple": exact_tuple,
+                    "resultPath": packet.get("queuePath"),
+                    "status": "retired_plan_absent",
+                    "changedPaths": [],
+                    "blockers": [],
+                    "staleReasons": stale_reasons,
+                }
+            ],
+            "blockers": [],
+            "nextSymbolicAction": {
+                "action": "repo_owned_coordinator_revalidate_and_finalize",
+                "allowedActors": ["repo-sweep", "finalize-closeout", "remediate-retained"],
+                "mutationBoundary": "repo-owned symbolic actors only",
+            },
+        }
+        collection = write_agent_result_collection_artifact(repo_root, config, collection_payload)
+        retired_packet = dict(packet)
+        retired_packet["status"] = "retired"
+        retired_packet["retiredAt"] = utc_now()
+        retired_packet["retirementReason"] = "stale_plan_absent_queue_packet"
+        retired_packet["retirementProof"] = {
+            "candidateId": packet.get("candidateId"),
+            "actionId": packet.get("actionId"),
+            "evidenceHash": packet.get("evidenceHash"),
+            "policyHash": config.get("policyHash"),
+            "pinnedRefs": packet.get("pinnedRefs"),
+            "exactTuple": exact_tuple,
+            "resultCollectionStatus": "success",
+            "resultCollectionHash": collection["resultCollectionHash"],
+            "resultCollectionPath": collection["resultCollectionPath"],
+            "retiredPacketStatus": "retired",
+            "retirementReason": "stale_plan_absent_queue_packet",
+        }
+        write_json(queue_path, retired_packet)
+        row = {
+            **summary,
+            "status": "retired",
+            "retirementProof": retired_packet["retirementProof"],
+            "resultCollectionHash": collection["resultCollectionHash"],
+            "resultCollectionPath": collection["resultCollectionPath"],
+        }
+        retired.append(row)
+        write_audit(repo_root, config, "agent_remediation_queue_packet_retired", row, work_block_id=packet.get("workBlockId"), outcome="success")
+    status = "blocked" if blockers else ("success" if retired else "no_op")
+    result = {
+        "status": status,
+        "reason": "stale_plan_absent_queue_packet_retirement" if retired else "no_stale_plan_absent_packets_retired",
+        "packetCount": len(packets),
+        "currentCandidateIds": sorted(current_candidate_ids),
+        "retiredPackets": retired,
+        "skippedPackets": skipped,
+        "blockers": blockers,
+    }
+    write_audit(repo_root, config, "agent_remediation_queue_plan_absent_retirement", result, outcome="success" if status == "success" else ("recorded" if status == "no_op" else "blocked"))
     return result
 
 

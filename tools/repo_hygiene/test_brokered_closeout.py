@@ -54,6 +54,7 @@ from .brokered_closeout import (
     repair_target_push_failure,
     repair_eligibility,
     remediate_retained_candidates,
+    retire_stale_plan_absent_agent_queue_packets,
     repo_sweep,
     repo_sweep_tuple,
     repo_state_snapshot,
@@ -5689,6 +5690,37 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success", result)
         self.assertEqual(result["agentRemediationState"]["packetCount"], 0)
+
+    def test_agent_queue_retires_stale_plan_absent_packet_with_valid_proof(self) -> None:
+        repo = self.init_repo()
+        path = self.write_agent_queue_packet(repo, candidate_id="candidate:repo-sweep-action:orphaned-stale")
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        packet["policyHash"] = "stale-policy-before-reviewed-config-change"
+        packet["exactTuple"]["policyHash"] = packet["policyHash"]
+        path.write_text(json.dumps(packet, indent=2), encoding="utf-8")
+
+        result = retire_stale_plan_absent_agent_queue_packets(repo)
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual([item["candidateId"] for item in result["retiredPackets"]], ["candidate:repo-sweep-action:orphaned-stale"])
+        retired_packet = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(retired_packet["status"], "retired")
+        self.assertEqual(retired_packet["retirementReason"], "stale_plan_absent_queue_packet")
+        proof = retired_packet["retirementProof"]
+        self.assertEqual(proof["retiredPacketStatus"], "retired")
+        self.assertEqual(proof["resultCollectionStatus"], "success")
+        collection_path = repo / proof["resultCollectionPath"]
+        self.assertTrue(collection_path.exists())
+        collection = json.loads(collection_path.read_text(encoding="utf-8"))
+        self.assertEqual(collection["resultCollectionHash"], proof["resultCollectionHash"])
+        self.assertEqual(collection["collectedResults"][0]["status"], "retired_plan_absent")
+        self.assertEqual(collection["collectedResults"][0]["exactTuple"], retired_packet["exactTuple"])
+        self.assertIn("agent_remediation_queue_packet_retired", self.audit_types(repo))
+
+        closeout = verify_repo_closed_postcondition(repo, work_block_id=None, finalize_result={"status": "success"})
+
+        self.assertEqual(closeout["status"], "success", closeout)
+        self.assertEqual(closeout["agentRemediationState"]["packetCount"], 0)
 
     def test_repo_closed_postcondition_accepts_retired_queue_after_policy_drift(self) -> None:
         repo = self.init_repo()

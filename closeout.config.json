@@ -581,6 +581,7 @@
       "test_agent_queue_remote_fetch_failure_blocks_stale_check",
       "test_agent_queue_result_path_outside_result_root_is_stale",
       "test_agent_queue_skips_completed_result_paths_before_planning_more_shards",
+      "test_agent_queue_retires_stale_plan_absent_packet_with_valid_proof",
       "test_agent_result_collection_rejects_out_of_scope_changed_paths",
       "test_agent_result_collection_returns_symbolic_next_action_without_mutation",
       "test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation",
