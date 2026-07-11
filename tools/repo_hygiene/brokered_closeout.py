@@ -916,6 +916,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_agent_queue_result_path_outside_result_root_is_stale",
             "test_agent_queue_skips_completed_result_paths_before_planning_more_shards",
             "test_agent_queue_retires_stale_plan_absent_packet_with_valid_proof",
+            "test_agent_queue_retirement_remote_fetch_failure_blocks_without_retiring_packet",
             "test_agent_result_collection_rejects_out_of_scope_changed_paths",
             "test_agent_result_collection_returns_symbolic_next_action_without_mutation",
             "test_agent_result_collection_blocks_agent_reported_blockers_and_failed_validation",
@@ -9947,6 +9948,18 @@ def retire_stale_plan_absent_agent_queue_packets(repo_root_arg: Path) -> Dict[st
     config = load_closeout_config(repo_root)
     packets = pending_agent_remediation_queue_packets(repo_root, config)
     remote_failures = refresh_agent_queue_remote_refs(repo_root, config, packets)
+    if remote_failures:
+        result = {
+            "status": "blocked",
+            "reason": "remote_fetch_failed",
+            "packetCount": len(packets),
+            "currentCandidateIds": [],
+            "retiredPackets": [],
+            "skippedPackets": [],
+            "blockers": [{"kind": "remote_fetch_failed", "remoteFailures": remote_failures}],
+        }
+        write_audit(repo_root, config, "agent_remediation_queue_plan_absent_retirement", result, outcome="blocked")
+        return result
     plan_result = repo_sweep(repo_root, apply=False)
     if plan_result.get("status") != "planned":
         result = {
