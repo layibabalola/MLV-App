@@ -72,12 +72,28 @@ param(
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
     [switch]$AllowZeroPresentedFrames,
+    [switch]$LaunchOnlyProbe,
+    [ValidateRange(0.0, 1.0)]
+    [double]$MaxSkippedOrUnpresentedRatio = 0.5,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+
+# A zero-present result proves only that the process launched. It is never a
+# playback, cadence, lifecycle-stress, screenshot, or A/B-quality result.
+if ($AllowZeroPresentedFrames -and -not $LaunchOnlyProbe) {
+    throw "-AllowZeroPresentedFrames requires -LaunchOnlyProbe; zero-present exemptions are forbidden for playback-quality evidence."
+}
+if ($LaunchOnlyProbe -and -not $AllowZeroPresentedFrames) {
+    throw "-LaunchOnlyProbe requires -AllowZeroPresentedFrames."
+}
+if ($LaunchOnlyProbe -and ($FrameTelemetry -or $CaptureScreenshot -or
+                           $DetectPlaybackArtifacts -or $ExerciseClipLifecycleStress)) {
+    throw "-LaunchOnlyProbe cannot be combined with frame telemetry, screenshots, artifact detection, or lifecycle stress."
+}
 
 if ($UsePersistedPlaybackSettings) {
     if (-not $PSBoundParameters.ContainsKey("QualityMode")) {
@@ -1378,6 +1394,15 @@ $scaleActiveLast = Get-ObjectPropertyValue $playbackSummary "scale_active_last"
 $qualityModeStart = Get-ObjectPropertyValue $playbackStart "quality_mode"
 $qualityModeLast = Get-ObjectPropertyValue $playbackSummary "quality_mode"
 $presentedFrames = Get-ObjectPropertyValue $playbackSummary "presented_frames"
+$firstPresentedFrame = Get-ObjectPropertyValue $playbackSummary "first_presented_frame"
+$lastPresentedFrame = Get-ObjectPropertyValue $playbackSummary "last_presented_frame"
+$timelineDeltaAbs = Get-ObjectPropertyValue $playbackSummary "timeline_delta_abs"
+$skippedOrUnpresentedFrames = Get-ObjectPropertyValue $playbackSummary "skipped_or_unpresented_frames"
+$skippedOrUnpresentedRatio = $null
+if ($null -ne $timelineDeltaAbs -and [double]$timelineDeltaAbs -gt 0 -and
+    $null -ne $skippedOrUnpresentedFrames) {
+    $skippedOrUnpresentedRatio = [double]$skippedOrUnpresentedFrames / [double]$timelineDeltaAbs
+}
 $validatedScaleRequest = if ($null -ne $scaleRequestLast) { $scaleRequestLast } else { $scaleRequestStart }
 $validatedQualityMode = if ($null -ne $qualityModeLast) { $qualityModeLast } else { $qualityModeStart }
 $autoDecision = [pscustomobject]@{
@@ -1478,12 +1503,25 @@ if ($RequireCpuSettled -and
     -not $preLaunchSystemCpuSettle.settled) {
     $validationFailures += "System CPU did not settle before launching MLVApp."
 }
-if (-not $AllowZeroPresentedFrames) {
+if (-not $LaunchOnlyProbe) {
     if ($null -eq $presentedFrames) {
         $validationFailures += "Playback summary did not report presented_frames."
     }
-    elseif ([int]$presentedFrames -le 0) {
-        $validationFailures += "Playback presented 0 frames; pass -AllowZeroPresentedFrames only for launch-only probes."
+    elseif ([int]$presentedFrames -lt 2) {
+        $validationFailures += "Playback-quality evidence requires at least 2 presented frames; observed $presentedFrames."
+    }
+    if ($null -eq $firstPresentedFrame -or $null -eq $lastPresentedFrame) {
+        $validationFailures += "Playback summary did not report first and last presented frame ids."
+    }
+    elseif ([int64]$firstPresentedFrame -eq [int64]$lastPresentedFrame) {
+        $validationFailures += "Displayed playback did not advance: first and last presented frame are both $firstPresentedFrame."
+    }
+    if ($null -eq $skippedOrUnpresentedRatio) {
+        $validationFailures += "Playback summary could not establish a skipped/unpresented-frame ratio."
+    }
+    elseif ($skippedOrUnpresentedRatio -gt $MaxSkippedOrUnpresentedRatio) {
+        $validationFailures += ("Skipped/unpresented-frame ratio {0:P2} exceeds the playback-quality limit {1:P2}." -f
+            $skippedOrUnpresentedRatio, $MaxSkippedOrUnpresentedRatio)
     }
 }
 if ($FailOnColorArtifact -and
@@ -1657,6 +1695,8 @@ $result = [pscustomobject]@{
             requireCpuSettled = $RequireCpuSettled
             failOnColorArtifact = [bool]$FailOnColorArtifact
             allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
+            launchOnlyProbe = [bool]$LaunchOnlyProbe
+            maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
             expectedScaleRequest = $ExpectedScaleRequest
             expectedVisualScaleRequest = $effectiveExpectedVisualScaleRequest
             expectedQualityMode = $ExpectedQualityMode
@@ -1839,6 +1879,14 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     systemCpuSettled = [bool]$preLaunchSystemCpuSettle.settled
     presentedFrames = $presentedFrames
     allowZeroPresentedFrames = [bool]$AllowZeroPresentedFrames
+    launchOnlyProbe = [bool]$LaunchOnlyProbe
+    firstPresentedFrame = $firstPresentedFrame
+    lastPresentedFrame = $lastPresentedFrame
+    displayedFrameAdvanced = ($null -ne $firstPresentedFrame -and
+        $null -ne $lastPresentedFrame -and
+        [int64]$firstPresentedFrame -ne [int64]$lastPresentedFrame)
+    skippedOrUnpresentedRatio = $skippedOrUnpresentedRatio
+    maxSkippedOrUnpresentedRatio = $MaxSkippedOrUnpresentedRatio
     colorArtifactScanPassed = [bool]$colorArtifactScanPassed
     colorArtifactScanVerdict = $colorArtifactVerdict
     glOutputProof = $glOutputProof

@@ -29,22 +29,20 @@ struct histogram
 {
     uint16_t white;
     uint32_t count;
-    /* TODO(perf-vs-correctness): uint16_t bin counters can silently wrap
-     * when one bin sees >65535 pixels (typical for >=1080p Dual ISO
-     * where each ISO half has hundreds of thousands of pixels). Widening
-     * to uint32_t fixes the wrap but doubles the histogram's working set
-     * (~24KB -> 48KB) which falls out of L1 cache and was measured to
-     * cost ~6 ms at T8 p95 on the test clip. Keep uint16 for now;
-     * follow-up either with saturating increment (`if (x<UINT16_MAX) x++`)
-     * or a quantised bin layout that fits L1. */
+    uint32_t bin_capacity;
+    /* Saturate compact primary bins, spilling only excess counts. This keeps
+     * ordinary-bin writes 16-bit even after a hot bin crosses UINT16_MAX. */
     uint16_t * data;
+    uint32_t * overflow_data;
 };
 
 #pragma pack(pop)
 
 struct histogram * hist_create(uint16_t white);
+int hist_reset(struct histogram * hist, uint16_t white);
 void hist_add(struct histogram * hist, uint16_t * data, uint32_t size, uint16_t skip);
 uint16_t hist_median(struct histogram * hist);
+uint32_t hist_get_bin(const struct histogram * hist, uint16_t bin);
 void hist_destroy(struct histogram * hist);
 
 #endif

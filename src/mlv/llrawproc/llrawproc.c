@@ -1960,6 +1960,7 @@ static void llrawproc_free_worker_state(llrawprocWorkerState_t * worker)
     free(worker->diso_preview_scratch.data_y);
     free(worker->diso_preview_scratch.data_w);
     free(worker->diso_preview_scratch.output_image);
+    for(int i = 0; i < 4; i++) hist_destroy(worker->diso_preview_scratch.histograms[i]);
     memset(&worker->diso_preview_scratch, 0, sizeof(worker->diso_preview_scratch));
 
     free_dualiso_full20bit_scratch(&worker->diso_full20bit_scratch);
@@ -2427,6 +2428,7 @@ void freeLLRawProcObject(mlvObject_t * video)
     free(video->llrawproc->diso_preview_scratch.data_y);
     free(video->llrawproc->diso_preview_scratch.data_w);
     free(video->llrawproc->diso_preview_scratch.output_image);
+    for(int i = 0; i < 4; i++) hist_destroy(video->llrawproc->diso_preview_scratch.histograms[i]);
     free_dualiso_full20bit_scratch(&video->llrawproc->diso_full20bit_scratch);
     free_pixel_maps(&(video->llrawproc->focus_pixel_map), &(video->llrawproc->bad_pixel_map));
     free(video->llrawproc);

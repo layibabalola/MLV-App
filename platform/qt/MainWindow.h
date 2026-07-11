@@ -1302,9 +1302,10 @@ private:
 
     // Playback-prep worker: background image preparation with request-conflated
     // delivery to the UI thread.
-    // - `m_latestRequestedSerial` is the staleness baseline: any result whose
-    //   `task.requestSerial` != the latest requested is dropped at the
-    //   presenter. Accessed from UI and worker threads.
+    // - `m_latestRequestedSerial` conflates queued/pre-compute work. A frame
+    //   that already finished prep may still present when its generation is
+    //   current; latest-serial equality after compute can starve presentation
+    //   forever when requests arrive faster than prep completes.
     // - `m_playbackPresentationGeneration` invalidates in-flight work whose
     //   request serial is still current but whose display assumptions changed
     //   underneath it, such as Playback Scale x2/x4 -> x1.

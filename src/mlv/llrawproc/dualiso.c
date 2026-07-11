@@ -1446,7 +1446,21 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     }
     
     for(int i = 0; i < 4; i++)
-        hist[i] = hist_create(white);
+    {
+        if(scratch)
+        {
+            if(scratch->histograms[i] == NULL)
+                scratch->histograms[i] = hist_create((uint16_t)white);
+            else if(!hist_reset(scratch->histograms[i], (uint16_t)white))
+                return 0;
+            hist[i] = scratch->histograms[i];
+        }
+        else
+        {
+            hist[i] = hist_create((uint16_t)white);
+        }
+        if(hist[i] == NULL) return 0;
+    }
     
     for(uint16_t y = 4; y < height - 4; y += 5)
     {
@@ -1507,7 +1521,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 
             for(int i = 0; i < 4; i++)
             {
-                hist_destroy(hist[i]);
+                if(!scratch) hist_destroy(hist[i]);
             }
             if( scratch )
             {
@@ -1530,7 +1544,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 
         for(int i = 0; i < 4; i++)
         {
-            hist_destroy(hist[i]);
+            if(!scratch) hist_destroy(hist[i]);
         }
         if( scratch )
         {
@@ -1570,7 +1584,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
     {
         for(int i = 0; i < 4; i++)
         {
-            hist_destroy(hist[i]);
+            if(!scratch) hist_destroy(hist[i]);
         }
 
         if (!using_scratch)
@@ -1604,11 +1618,11 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
      * below still use hist_total correctly. */
     for (raw_hi = 0; raw_hi <= hist_hi->white; raw_hi++)
     {
-        acc_hi += hist_hi->data[raw_hi];
+        acc_hi += hist_get_bin(hist_hi, raw_hi);
 
         while (acc_lo < acc_hi)
         {
-            acc_lo += hist_lo->data[raw_lo];
+            acc_lo += hist_get_bin(hist_lo, raw_lo);
             raw_lo++;
         }
 
@@ -1683,7 +1697,7 @@ int diso_get_preview(uint16_t * image_data, uint16_t width, uint16_t height, int
 
     for(int i = 0; i < 4; i++)
     {
-        hist_destroy(hist[i]);
+        if(!scratch) hist_destroy(hist[i]);
     }
     if( scratch )
     {

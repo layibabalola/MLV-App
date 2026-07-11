@@ -58,6 +58,7 @@ enum
 
 typedef struct
 {
+    struct histogram * histograms[4];
     int * data_x;
     int * data_y;
     double * data_w;
