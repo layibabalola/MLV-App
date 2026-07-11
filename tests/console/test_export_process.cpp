@@ -81,3 +81,101 @@ TEST( ExportProcess, NonzeroChildExitCapturesStderrMarker )
     ASSERT_FALSE( process.finish() );
     ASSERT_TRUE( process.diagnostics().contains( QStringLiteral("STDERR-DIAG-MARKER") ) );
 }
+
+TEST( ExportProcess, PipelineStreamsAcrossTwoProcessesWithoutShellParsing )
+{
+    QVector<export_process::Invocation> stages;
+#ifdef Q_OS_WIN
+    stages << export_process::Invocation{ QStringLiteral("more.com"), {} }
+           << export_process::Invocation{ QStringLiteral("findstr.exe"),
+                                          { QStringLiteral("PIPELINE-MARKER") } };
+#else
+    stages << export_process::Invocation{ QStringLiteral("/bin/cat"), {} }
+           << export_process::Invocation{ QStringLiteral("/bin/grep"),
+                                          { QStringLiteral("PIPELINE-MARKER") } };
+#endif
+    export_process::StreamingPipeline pipeline;
+    const QByteArray input = QByteArrayLiteral("PIPELINE-MARKER\n");
+    ASSERT_TRUE( pipeline.start( stages ) );
+    ASSERT_TRUE( pipeline.writeAll( input.constData(), input.size() ) );
+    ASSERT_TRUE( pipeline.finish() );
+    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("PIPELINE-MARKER") ) );
+}
+
+TEST( ExportProcess, PipelineDrainsHighVolumeStderrWithoutStalling )
+{
+    QVector<export_process::Invocation> stages;
+#ifdef Q_OS_WIN
+    stages << export_process::Invocation{
+                  QStringLiteral("cmd.exe"),
+                  { QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"),
+                    QStringLiteral("(for /L %i in (1,1,4000) do @echo NOISY-STDERR-%i 1>&2) & more") } }
+           << export_process::Invocation{ QStringLiteral("findstr.exe"),
+                                          { QStringLiteral("PIPELINE-DATA") } };
+#else
+    stages << export_process::Invocation{
+                  QStringLiteral("/bin/sh"),
+                  { QStringLiteral("-c"),
+                    QStringLiteral("i=0; while [ $i -lt 4000 ]; do echo NOISY-STDERR-$i >&2; i=$((i+1)); done; cat") } }
+           << export_process::Invocation{ QStringLiteral("/bin/grep"),
+                                          { QStringLiteral("PIPELINE-DATA") } };
+#endif
+    export_process::StreamingPipeline pipeline;
+    const QByteArray input = QByteArrayLiteral("PIPELINE-DATA\n");
+    ASSERT_TRUE( pipeline.start( stages ) );
+    ASSERT_TRUE( pipeline.writeAll( input.constData(), input.size(), 10000 ) );
+    ASSERT_TRUE( pipeline.finish( 30000 ) );
+    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("NOISY-STDERR-") ) );
+    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("PIPELINE-DATA") ) );
+}
+
+TEST( ExportProcess, PipelineMidStreamChildDeathIsFailureWithDiagnostics )
+{
+    QVector<export_process::Invocation> stages;
+#ifdef Q_OS_WIN
+    stages << export_process::Invocation{
+                  QStringLiteral("cmd.exe"),
+                  { QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"),
+                    QStringLiteral("echo MIDSTREAM-CHILD-DIED 1>&2 & exit /b 7") } }
+           << export_process::Invocation{ QStringLiteral("more.com"), {} };
+#else
+    stages << export_process::Invocation{
+                  QStringLiteral("/bin/sh"),
+                  { QStringLiteral("-c"), QStringLiteral("echo MIDSTREAM-CHILD-DIED >&2; exit 7") } }
+           << export_process::Invocation{ QStringLiteral("/bin/cat"), {} };
+#endif
+    export_process::StreamingPipeline pipeline;
+    ASSERT_TRUE( pipeline.start( stages ) );
+    const QByteArray input( 1024 * 1024, 'x' );
+    const bool writeOk = pipeline.writeAll( input.constData(), input.size(), 5000 );
+    const bool finishOk = writeOk && pipeline.finish( 10000 );
+    if( !writeOk ) pipeline.cancel();
+    ASSERT_FALSE( finishOk );
+    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("MIDSTREAM-CHILD-DIED") ) );
+}
+
+TEST( ExportProcess, PipelineCancellationTerminatesAllStagesWithinBound )
+{
+    QVector<export_process::Invocation> stages;
+#ifdef Q_OS_WIN
+    stages << export_process::Invocation{
+                  QStringLiteral("cmd.exe"),
+                  { QStringLiteral("/D"), QStringLiteral("/S"), QStringLiteral("/C"),
+                    QStringLiteral("echo CANCEL-MARKER 1>&2 & more") } }
+           << export_process::Invocation{ QStringLiteral("more.com"), {} };
+#else
+    stages << export_process::Invocation{
+                  QStringLiteral("/bin/sh"),
+                  { QStringLiteral("-c"), QStringLiteral("echo CANCEL-MARKER >&2; cat") } }
+           << export_process::Invocation{ QStringLiteral("/bin/cat"), {} };
+#endif
+    export_process::StreamingPipeline pipeline;
+    ASSERT_TRUE( pipeline.start( stages ) );
+    const QByteArray input = QByteArrayLiteral("cancel-data\n");
+    ASSERT_TRUE( pipeline.writeAll( input.constData(), input.size() ) );
+    QElapsedTimer timer;
+    timer.start();
+    pipeline.cancel();
+    ASSERT_TRUE( timer.elapsed() < 6000 );
+    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("CANCEL-MARKER") ) );
+}

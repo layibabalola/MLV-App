@@ -11071,44 +11071,41 @@ void MainWindow::startExportPipe(QString fileName)
     program.append( QString( " -loglevel 0" ) );
 #endif
 
-    //We need it later for multipass
-    QString ffmpegCommand = QStringLiteral( "\"%1\"" ).arg( ffmpegProgram );
-
     QString output = fileName.left( fileName.lastIndexOf( "." ) );
     QString resolution = QString( "%1x%2" ).arg( width ).arg( height );
 
     //VidStab: First pass
     if( m_exportQueue.first()->vidStabEnabled() && m_codecProfile == CODEC_H264 )
     {
-        QString stabCmd;
+        QVector<export_process::Invocation> stabStages;
+        export_process::Invocation stabEncoder =
+            export_process::rawVideoInvocation( ffmpegProgram, fps, resolution );
+        stabEncoder.arguments << QStringLiteral("-c:v") << QStringLiteral("libx264")
+                              << QStringLiteral("-preset") << QStringLiteral("ultrafast")
+                              << QStringLiteral("-crf") << QStringLiteral("10")
+                              << QStringLiteral("-f") << QStringLiteral("matroska")
+                              << QStringLiteral("-");
+        export_process::Invocation stabDetector{ ffmpegProgram,
+            QStringList{ QStringLiteral("-i"), QStringLiteral("-"), QStringLiteral("-vf") } };
         if( m_exportQueue.first()->vidStabTripod() )
         {
-            stabCmd = QString( "%1 -r %2 -y -f rawvideo -s %3 -pix_fmt rgb48 -i - -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf vidstabdetect=tripod=1:result=%4 -f null -" )
-                        .arg( ffmpegCommand )
-                        .arg( fps )
-                        .arg( resolution )
-                        .arg( vidstabFile );
+            stabDetector.arguments << QStringLiteral("vidstabdetect=tripod=1:result=%1").arg( vidstabFile );
         }
         else
         {
-            stabCmd = QString( "%1 -r %2 -y -f rawvideo -s %3 -pix_fmt rgb48 -i - -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf vidstabdetect=stepsize=%5:shakiness=%6:accuracy=%7:result=%4 -f null -" )
-                        .arg( ffmpegCommand )
-                        .arg( fps )
-                        .arg( resolution )
-                        .arg( vidstabFile )
-                        .arg( m_exportQueue.first()->vidStabStepsize() )
-                        .arg( m_exportQueue.first()->vidStabShakiness() )
-                        .arg( m_exportQueue.first()->vidStabAccuracy() );
+            stabDetector.arguments
+                << QStringLiteral("vidstabdetect=stepsize=%1:shakiness=%2:accuracy=%3:result=%4")
+                       .arg( m_exportQueue.first()->vidStabStepsize() )
+                       .arg( m_exportQueue.first()->vidStabShakiness() )
+                       .arg( m_exportQueue.first()->vidStabAccuracy() )
+                       .arg( vidstabFile );
         }
+        stabDetector.arguments << QStringLiteral("-f") << QStringLiteral("null") << QStringLiteral("-");
+        stabStages << stabEncoder << stabDetector;
 
-        //Try to open pipe
-        FILE *pPipeStab;
-        //qDebug() << "Call ffmpeg:" << stabCmd;
-    #ifdef Q_OS_UNIX
-        if( !( pPipeStab = popen( stabCmd.toUtf8().data(), "w" ) ) )
-    #else
-        if( !( pPipeStab = popen( stabCmd.toLatin1().data(), "wb" ) ) )
-    #endif
+        export_process::StreamingPipeline stabPipeline;
+        bool stabWriteFailed = false;
+        if( !stabPipeline.start( stabStages ) )
         {
             QMessageBox::critical( this, tr( "File export failed" ), tr( "Could not export with ffmpeg." ) );
         }
@@ -11155,8 +11152,10 @@ void MainWindow::startExportPipe(QString fileName)
                                                3, 0, &vars );
 
                     //Write to pipe
-                    fwrite(imgBufferScaled, sizeof( uint16_t ), width * height * 3, pPipeStab);
-                    fflush(pPipeStab);
+                    if( !stabPipeline.writeAll(
+                            reinterpret_cast<const char *>( imgBufferScaled ),
+                            static_cast<qint64>( width * height * 3 * sizeof( uint16_t ) ) ) )
+                        stabWriteFailed = true;
                 }
                 else
                 {
@@ -11166,9 +11165,13 @@ void MainWindow::startExportPipe(QString fileName)
                     m_pRenderThread->unlock();
 
                     //Write to pipe
-                    fwrite(imgBuffer, sizeof( uint16_t ), frameSize, pPipeStab);
-                    fflush(pPipeStab);
+                    if( !stabPipeline.writeAll(
+                            reinterpret_cast<const char *>( imgBuffer ),
+                            static_cast<qint64>( frameSize * sizeof( uint16_t ) ) ) )
+                        stabWriteFailed = true;
                 }
+
+                if( stabWriteFailed ) break;
 
                 //Set Status
                 m_pStatusDialog->ui->progressBar->setValue( ( i - ( m_exportQueue.first()->cutIn() - 1 ) + 1 ) >> 1 );
@@ -11182,10 +11185,16 @@ void MainWindow::startExportPipe(QString fileName)
                 if( m_exportAbortPressed ) break;
             }
             //Close pipe
-            if( pclose( pPipeStab ) != 0 )
+            bool stabFinished = false;
+            if( m_exportAbortPressed || stabWriteFailed ) stabPipeline.cancel();
+            else stabFinished = stabPipeline.finish();
+            if( !stabFinished && !m_exportAbortPressed )
             {
                 staberr = true;
-                QMessageBox::critical( this, tr( "File export failed" ), tr( "FFmpeg closed unexpectedly during stabilization.\n\nFile %1 was not exported completely." ).arg( fileName ) );
+                QMessageBox::critical(
+                    this, tr( "File export failed" ),
+                    tr( "FFmpeg closed unexpectedly during stabilization.\n\nFile %1 was not exported completely.\n\nFFmpeg diagnostics:\n%2" )
+                        .arg( fileName, stabPipeline.diagnostics().trimmed() ) );
             }
             free( imgBufferScaled );
             free( imgBuffer );
@@ -11622,51 +11631,69 @@ void MainWindow::startExportPipe(QString fileName)
     //There is a %5 in the string, so another arg is not possible - so do that:
     program.insert( program.indexOf( "-c:v" ), ffmpegAudioCommand );
 
-    //Do 3pass filtering!
-    if( m_smoothFilterSetting == SMOOTH_FILTER_3PASS || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM )
-    {
-        QString pass3 = QString( "-vf minterpolate=%2,tblend=all_mode=average,framestep=2 -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf minterpolate=%2,tblend=all_mode=average,framestep=2 -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -y -i - " ).arg( ffmpegCommand ).arg( locale.toString( getFramerate() * 2.0 ) );
-        program.insert( program.indexOf( "-c:v" ), pass3 );
-    }
-    //Plus box blur
-    else if( m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB )
-    {
-        QString pass3 = QString( "-filter_complex \"[0:v] boxblur=1:cr=5:ar=5 [tmp]; [0:v][tmp] blend=all_mode='normal':all_opacity=0.7\" -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf minterpolate=%2,tblend=all_mode=average,framestep=2 -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -i - -vf minterpolate=%2,tblend=all_mode=average,framestep=2 -c:v libx264 -preset ultrafast -crf 10 -f matroska - | %1 -y -i - " ).arg( ffmpegCommand ).arg( locale.toString( getFramerate() * 2.0 ) );
-        program.insert( program.indexOf( "-c:v" ), pass3 );
-    }
-
     if( ( m_exportQueue.first()->vidStabEnabled() && staberr == false ) || !m_exportQueue.first()->vidStabEnabled() )
     {
-        //Try to open pipe
-        FILE *pPipe = nullptr;
-        export_process::StreamingProcess streamingProcess;
-        const bool shellPipeline = m_smoothFilterSetting == SMOOTH_FILTER_3PASS
-                                || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM
-                                || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB;
+        export_process::StreamingPipeline exportPipeline;
+        QVector<export_process::Invocation> exportStages;
+        export_process::Invocation finalInvocation = export_process::invocationFromTemplate(
+            ffmpegProgram,
+            program,
+            { { QStringLiteral("__MLVAPP_AUDIO__"), wavFileName },
+              { QStringLiteral("__MLVAPP_OUTPUT__"), output } } );
+        const bool threePass = m_smoothFilterSetting == SMOOTH_FILTER_3PASS
+                            || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM
+                            || m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB;
+        if( threePass )
+        {
+            const QString interpolation = QStringLiteral(
+                "minterpolate=%1,tblend=all_mode=average,framestep=2" )
+                    .arg( locale.toString( getFramerate() * 2.0 ) );
+            const auto intermediateStage = [&]( const QString &filterOption,
+                                                const QString &filter ) {
+                return export_process::Invocation{
+                    ffmpegProgram,
+                    QStringList{ QStringLiteral("-i"), QStringLiteral("-"), filterOption, filter,
+                                 QStringLiteral("-c:v"), QStringLiteral("libx264"),
+                                 QStringLiteral("-preset"), QStringLiteral("ultrafast"),
+                                 QStringLiteral("-crf"), QStringLiteral("10"),
+                                 QStringLiteral("-f"), QStringLiteral("matroska"),
+                                 QStringLiteral("-") } };
+            };
+            export_process::Invocation firstStage =
+                export_process::rawVideoInvocation( ffmpegProgram, fps, resolution );
+            const QString firstFilterOption = m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB
+                ? QStringLiteral("-filter_complex") : QStringLiteral("-vf");
+            const QString firstFilter = m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB
+                ? QStringLiteral("[0:v] boxblur=1:cr=5:ar=5 [tmp]; [0:v][tmp] blend=all_mode='normal':all_opacity=0.7")
+                : interpolation;
+            const export_process::Invocation firstTemplate =
+                intermediateStage( firstFilterOption, firstFilter );
+            firstStage.arguments << firstTemplate.arguments.mid( 2 );
+            exportStages << firstStage
+                         << intermediateStage( QStringLiteral("-vf"), interpolation );
+            if( m_smoothFilterSetting == SMOOTH_FILTER_3PASS_USM_BB )
+                exportStages << intermediateStage( QStringLiteral("-vf"), interpolation );
+
+            const int rawInputIndex = finalInvocation.arguments.indexOf( QStringLiteral("-i") );
+            const int rawRateIndex = finalInvocation.arguments.indexOf( QStringLiteral("-r") );
+            if( rawRateIndex < 0 || rawInputIndex < 0
+             || rawInputIndex + 1 >= finalInvocation.arguments.size()
+             || finalInvocation.arguments.at( rawInputIndex + 1 ) != QStringLiteral("-") )
+            {
+                QMessageBox::critical( this, tr( "File export failed" ),
+                                       tr( "Could not construct the final ffmpeg pipeline stage." ) );
+                return;
+            }
+            finalInvocation.arguments = finalInvocation.arguments.mid( 0, rawRateIndex )
+                                      + QStringList{ QStringLiteral("-y"),
+                                                     QStringLiteral("-i"),
+                                                     QStringLiteral("-") }
+                                      + finalInvocation.arguments.mid( rawInputIndex + 2 );
+        }
+        exportStages << finalInvocation;
         bool processStarted = false;
         bool streamWriteFailed = false;
-        //qDebug() << "Call ffmpeg:" << program;
-        if( !shellPipeline )
-        {
-            const export_process::Invocation invocation = export_process::invocationFromTemplate(
-                ffmpegProgram,
-                program,
-                { { QStringLiteral("__MLVAPP_AUDIO__"), wavFileName },
-                  { QStringLiteral("__MLVAPP_OUTPUT__"), output } } );
-            processStarted = streamingProcess.start( invocation );
-        }
-        else
-        {
-            program.replace( QStringLiteral("__MLVAPP_AUDIO__"),
-                             QStringLiteral("\"%1\"").arg( wavFileName ) );
-            program.replace( QStringLiteral("__MLVAPP_OUTPUT__"), output );
-            program.prepend( ffmpegCommand + QLatin1Char(' ') );
-#ifdef Q_OS_UNIX
-            processStarted = ( pPipe = popen( program.toUtf8().data(), "w" ) ) != nullptr;
-#else
-            processStarted = ( pPipe = popen( program.toLatin1().data(), "wb" ) ) != nullptr;
-#endif
-        }
+        processStarted = exportPipeline.start( exportStages );
         if( !processStarted )
         {
             QMessageBox::critical( this, tr( "File export failed" ), tr( "Could not export with ffmpeg." ) );
@@ -11674,12 +11701,7 @@ void MainWindow::startExportPipe(QString fileName)
         else
         {
             const auto writeFrame = [&]( const uint16_t *pixels, size_t count ) {
-                if( shellPipeline )
-                {
-                    return fwrite( pixels, sizeof( uint16_t ), count, pPipe ) == count
-                        && fflush( pPipe ) == 0;
-                }
-                return streamingProcess.writeAll(
+                return exportPipeline.writeAll(
                     reinterpret_cast<const char *>( pixels ),
                     static_cast<qint64>( count * sizeof( uint16_t ) ) );
             };
@@ -11761,25 +11783,21 @@ void MainWindow::startExportPipe(QString fileName)
             }
             //Close pipe
             bool processFinished = false;
-            if( shellPipeline )
+            if( m_exportAbortPressed )
             {
-                processFinished = pclose( pPipe ) == 0;
-            }
-            else if( m_exportAbortPressed )
-            {
-                streamingProcess.cancel();
+                exportPipeline.cancel();
             }
             else if( streamWriteFailed )
             {
-                streamingProcess.cancel();
+                exportPipeline.cancel();
             }
             else
             {
-                processFinished = streamingProcess.finish();
+                processFinished = exportPipeline.finish();
             }
             if( !processFinished && !m_exportAbortPressed )
             {
-                const QString diagnostics = shellPipeline ? QString() : streamingProcess.diagnostics().trimmed();
+                const QString diagnostics = exportPipeline.diagnostics().trimmed();
                 QMessageBox::critical(
                     this,
                     tr( "File export failed" ),
