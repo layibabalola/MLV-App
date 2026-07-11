@@ -37,10 +37,10 @@ struct histogram * hist_create(uint16_t white)
     {
         hist->white = white;
         hist->count = 0;
-        hist->data = (uint16_t *)malloc((white + 1) * sizeof(uint16_t));
+        hist->data = (uint32_t *)malloc(((size_t)white + 1) * sizeof(uint32_t));
         if(hist->data != NULL)
         {
-            memset(hist->data, 0, (white + 1) * sizeof(uint16_t));
+            memset(hist->data, 0, ((size_t)white + 1) * sizeof(uint32_t));
         }
     }
     return hist;
@@ -66,10 +66,10 @@ uint16_t hist_median(struct histogram * hist)
     uint32_t middle = hist->count / 2;
     uint32_t current = 0;
     
-    for(uint16_t i = 0; i <= hist->white; i++)
+    for(uint32_t i = 0; i <= hist->white; i++)
     {
         current += hist->data[i];
-        if(current > middle) return i;
+        if(current > middle) return (uint16_t)i;
     }
     return 0;
 }

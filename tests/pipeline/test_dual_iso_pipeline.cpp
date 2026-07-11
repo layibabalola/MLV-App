@@ -8,6 +8,9 @@
 #include "playback_path_test_state.h"
 
 #include "../../src/mlv/llrawproc/llrawproc.h"
+extern "C" {
+#include "../../src/mlv/llrawproc/hist.h"
+}
 #include "../../src/dng/dng_reader.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
@@ -33,6 +36,64 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+
+TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
+{
+    std::vector<uint16_t> samples(65536, 1234);
+    struct histogram * histogram = hist_create(16383);
+    ASSERT_TRUE(histogram != nullptr);
+    ASSERT_TRUE(histogram->data != nullptr);
+
+    hist_add(histogram, samples.data(), 65535, 0);
+    ASSERT_EQ(65535u, histogram->data[1234]);
+    hist_add(histogram, samples.data() + 65535, 1, 0);
+    ASSERT_EQ(65536u, histogram->data[1234]);
+    ASSERT_EQ(65536u, histogram->count);
+    ASSERT_EQ(1234, hist_median(histogram));
+    hist_destroy(histogram);
+}
+
+TEST(DualIsoPipeline, HistogramLargeUniformAndParityCorpusStayExactAndBounded)
+{
+    const int sample_count = 2 * 1024 * 1024;
+    std::vector<uint16_t> samples(static_cast<size_t>(sample_count));
+    std::vector<uint32_t> expected(16384, 0);
+    for(int i = 0; i < sample_count; ++i)
+    {
+        const uint16_t value = (i % 5 == 0) ? 4096 : static_cast<uint16_t>((i * 37) & 16383);
+        samples[static_cast<size_t>(i)] = value;
+        expected[value]++;
+    }
+
+    struct histogram * histogram = hist_create(16383);
+    ASSERT_TRUE(histogram != nullptr);
+    ASSERT_TRUE(histogram->data != nullptr);
+    const auto start = std::chrono::steady_clock::now();
+    hist_add(histogram, samples.data(), static_cast<uint32_t>(samples.size()), 0);
+    const double elapsed_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+
+    ASSERT_EQ(static_cast<uint32_t>(sample_count), histogram->count);
+    for(size_t bin = 0; bin < expected.size(); ++bin)
+        ASSERT_EQ(expected[bin], histogram->data[bin]);
+    ASSERT_TRUE(histogram->data[4096] > 65535u);
+    ASSERT_TRUE(elapsed_ms < 2000.0);
+    std::fprintf(stderr, "HistogramLargeUniformAndParityCorpus: %.3f ms, %.2f FPS-equivalent\n",
+                 elapsed_ms, elapsed_ms > 0.0 ? 1000.0 / elapsed_ms : 0.0);
+    hist_destroy(histogram);
+}
+
+TEST(DualIsoPipeline, HistogramMedianHandlesFullUint16WhiteRange)
+{
+    uint16_t samples[] = { 0, 65535, 65535 };
+    struct histogram * histogram = hist_create(65535);
+    ASSERT_TRUE(histogram != nullptr);
+    ASSERT_TRUE(histogram->data != nullptr);
+    hist_add(histogram, samples, 3, 0);
+    ASSERT_EQ(2u, histogram->data[65535]);
+    ASSERT_EQ(65535, hist_median(histogram));
+    hist_destroy(histogram);
+}
 #include <QString>
 #include <QTemporaryDir>
 
