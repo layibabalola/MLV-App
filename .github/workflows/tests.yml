@@ -141,15 +141,40 @@ jobs:
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden
 
-      # ------------------------------------------------------------------
-      # gui_tests: non-blocking pilot run (continue-on-error: true).
-      # After two consecutive greens on hosted runners, drop the
-      # continue-on-error flags and remove the "gui_tests stays outside
-      # that first CI cut" sentence from .claude/CLAUDE.md (see
-      # .claude/analysis/gui-tests-ci-remediation.md for the rollout plan).
-      # ------------------------------------------------------------------
+  windows-gui-pilot:
+    name: Windows GUI Pilot
+    runs-on: windows-latest
+    continue-on-error: true
+
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+
+    env:
+      QT_VERSION: 6.10.2
+      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install aqtinstall
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "aqtinstall==3.3.*"
+
+      - name: Install Qt 6.10.2 + MinGW 13.1
+        run: |
+          python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
+          python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$env:QT_OUTPUT_DIR\$env:QT_VERSION\mingw_64"
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\Tools\mingw1310_64"
+
       - name: Build gui_tests
-        continue-on-error: true
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-gui | Out-Null
@@ -159,7 +184,6 @@ jobs:
           Pop-Location
 
       - name: Run gui_tests (offscreen)
-        continue-on-error: true
         env:
           QT_QPA_PLATFORM: offscreen
           QT_OPENGL: desktop
