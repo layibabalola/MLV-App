@@ -3,6 +3,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QDebug>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -155,16 +156,24 @@ static QString build_helper(bool enable_avx)
     }
 
     QString output;
-    ASSERT_TRUE(run_process(qmake,
-                            {pro_path, QStringLiteral("CONFIG+=debug")},
-                            build_directory,
-                            environment,
-                            &output));
-    ASSERT_TRUE(run_process(make_tool,
-                            {},
-                            build_directory,
-                            environment,
-                            &output));
+    const bool qmake_ok = run_process(qmake,
+                                      {pro_path, QStringLiteral("CONFIG+=debug")},
+                                      build_directory,
+                                      environment,
+                                      &output);
+    if (!qmake_ok) {
+        qCritical().noquote() << "AVX parity qmake failed:" << output;
+    }
+    ASSERT_TRUE(qmake_ok);
+    const bool make_ok = run_process(make_tool,
+                                     {},
+                                     build_directory,
+                                     environment,
+                                     &output);
+    if (!make_ok) {
+        qCritical().noquote() << "AVX parity helper build failed:" << output;
+    }
+    ASSERT_TRUE(make_ok);
 
     const QString helper_path = find_built_helper(build_directory);
     ASSERT_FALSE(helper_path.isEmpty());

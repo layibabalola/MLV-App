@@ -10,6 +10,7 @@ DEFINES += STDOUT_SILENT
 include(../common/pipeline_runtime.pri)
 
 SOURCES += \
+    $$REPO_ROOT/src/dng/dng_reader.c \
     $$REPO_ROOT/tests/common/hash_helpers.cpp \
     $$REPO_ROOT/tests/common/repo_paths.cpp \
     $$REPO_ROOT/tests/pipeline/mlv_pipeline_fixture.cpp \
