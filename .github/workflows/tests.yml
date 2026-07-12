@@ -92,7 +92,7 @@ jobs:
 
       - name: Run agent bridge PowerShell launcher regressions
         run: |
-          py -3 -m unittest `
+          python -m unittest `
             tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks `
             tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_codex_hooks_assert_bridge_cli_contract `
             tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_wake_codex_input_size_smoke_runs_under_powershell `

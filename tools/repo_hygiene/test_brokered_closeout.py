@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -853,6 +854,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
         self.assertIn("delete-evidence", config["rollbackPolicy"]["disallowedDefaultActions"])
 
+    @unittest.skipUnless(os.name == "nt", "PowerShell path policy is Windows-specific")
     def test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands(self) -> None:
         config = load_closeout_config(ROOT)
         policy = powershell_policy(config)
@@ -1379,6 +1381,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
             )
             self.assertNotEqual(wrapper.returncode, 0)
 
+    @unittest.skipUnless(os.name == "nt", "PowerShell dashboard commands are Windows-specific")
     def test_closeout_dashboard_actions_are_read_only_and_owned(self) -> None:
         repo = self.init_repo(remote=True)
 
@@ -2042,8 +2045,13 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(sentinel_path.exists(), sentinel_path)
 
         contract_text = contract_path.read_text(encoding="utf-8")
-        expected_hash = file_content_hash(contract_path)
-        self.assertIsNotNone(expected_hash)
+        canonical_bytes = subprocess.run(
+            ["git", "show", "HEAD:CLOSEOUT-CANONICAL-CONTRACT.md"],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+        ).stdout
+        expected_hash = hashlib.sha256(canonical_bytes).hexdigest()
         self.assertEqual(sentinel_path.read_text(encoding="utf-8").strip(), expected_hash)
 
         self.assertIn("byte-for-byte identical", contract_text)
@@ -2057,12 +2065,15 @@ class BrokeredCloseoutTests(unittest.TestCase):
 
     def test_compare_result_artifact_shape_is_pinned(self) -> None:
         compare_result_path = ROOT / ".claude-state" / "closeout" / "workflow-comparison" / "compare-result.json"
-        self.assertTrue(compare_result_path.exists(), compare_result_path)
+        schema_path = ROOT / "tools" / "repo-hygiene" / "closeout.compare-result.schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(schema["properties"]["artifactType"]["const"], "closeout-compare-result.v1")
+        self.assertEqual(schema["properties"]["schemaVersion"]["const"], 1)
+        if not compare_result_path.exists():
+            self.skipTest("live compare-result artifact is generated and ignored on clean checkouts")
         compare_result = json.loads(compare_result_path.read_text(encoding="utf-8"))
         self.assertEqual(compare_result["artifactType"], "closeout-compare-result.v1")
         self.assertEqual(compare_result["schemaVersion"], 1)
-        schema_path = ROOT / "tools" / "repo-hygiene" / "closeout.compare-result.schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
         Draft202012Validator(schema).validate(compare_result)
         validate_compare_result_schema(compare_result)
 
@@ -5066,6 +5077,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-00.json").stdout, '{"index": 0}\n')
         self.assertEqual(git(repo, "show", f"{action['preservationBranch']}:a5_packet/frame-29.json").stdout, '{"index": 29}\n')
 
+    @unittest.skipUnless(os.name == "nt", "extended-length path prefixes are Windows-specific")
     def test_detached_dirty_preserve_copy_uses_extended_length_destination(self) -> None:
         repo = self.init_repo()
         (repo / "evidence.txt").write_text("evidence\n", encoding="utf-8")
