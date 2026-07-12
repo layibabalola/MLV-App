@@ -22,6 +22,8 @@ param(
     [int]$HitchFreezeMs = 250,             # any single present interval >= this = a visible freeze
     [int]$MaxPlausibleHitchMs = 2000,      # intervals above this are playback discontinuities (pause/seek/
                                            # settle/end boundary), excluded from cadence stats as long_gaps
+    [switch]$CadenceAdvisory,              # report jitter without failing correctness; stalls/flicker/frozen
+                                           # content remain fatal
     [string]$Session = 'latest'            # 'latest' (default), 'all' (legacy whole-file), or 1-based index.
                                            # The day log appends across launches; inter-launch idle reads as
                                            # a mid-playback freeze unless sessions are segmented.
@@ -210,7 +212,7 @@ $jittery   = ($hitchFrac -gt $MaxHitchFractionAllowed) -or ($maxIv -ge $HitchFre
 # enabled, the JITTER/cadence component is downgraded to ADVISORY so it does not fail the verdict,
 # while the CORRECTNESS components -- real stall, flicker, FROZEN CONTENT (the stuck-texture sensor)
 # -- stay fatal. Default OFF keeps jitter fatal for ordinary smoke runs.
-$cadenceAdvisory = $false
+$cadenceAdvisory = [bool]$CadenceAdvisory
 $advEnv = $env:MLVAPP_PLAYBACK_ARTIFACT_CADENCE_ADVISORY
 if ($advEnv -and $advEnv -ne '0' -and $advEnv -ne 'false') { $cadenceAdvisory = $true }
 $correctnessFail = $realStall -or $flicker -or $frozenContent

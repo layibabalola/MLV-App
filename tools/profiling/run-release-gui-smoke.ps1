@@ -71,6 +71,7 @@ param(
     [bool]$RequireCpuSettled = $true,
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
+    [switch]$ArtifactCadenceAdvisory,
     [switch]$AllowZeroPresentedFrames,
     [switch]$LaunchOnlyProbe,
     [ValidateRange(0.0, 1.0)]
@@ -93,6 +94,12 @@ if ($LaunchOnlyProbe -and -not $AllowZeroPresentedFrames) {
 if ($LaunchOnlyProbe -and ($FrameTelemetry -or $CaptureScreenshot -or
                            $DetectPlaybackArtifacts -or $ExerciseClipLifecycleStress)) {
     throw "-LaunchOnlyProbe cannot be combined with frame telemetry, screenshots, artifact detection, or lifecycle stress."
+}
+if ($ExerciseClipLifecycleStress -and $DetectPlaybackArtifacts) {
+    throw "-ExerciseClipLifecycleStress cannot be combined with -DetectPlaybackArtifacts; switch/close/reopen is an intentional playback discontinuity. Run lifecycle correctness and uninterrupted cadence as separate legs."
+}
+if ($ArtifactCadenceAdvisory -and -not $DetectPlaybackArtifacts) {
+    throw "-ArtifactCadenceAdvisory requires -DetectPlaybackArtifacts."
 }
 
 if ($UsePersistedPlaybackSettings) {
@@ -1634,13 +1641,17 @@ if ($DetectPlaybackArtifacts) {
     if ((Test-Path -LiteralPath $detectorScript) -and $traceLogPath -and (Test-Path -LiteralPath $traceLogPath)) {
         $detectorPwsh = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
         if (-not $detectorPwsh) { $detectorPwsh = (Get-Command powershell.exe).Source }
-        $detectorOut = & $detectorPwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $detectorScript -TraceLog $traceLogPath 2>&1
+        $detectorArgs = @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                          "-File", $detectorScript, "-TraceLog", $traceLogPath)
+        if ($ArtifactCadenceAdvisory) { $detectorArgs += "-CadenceAdvisory" }
+        $detectorOut = & $detectorPwsh @detectorArgs 2>&1
         $detectorExit = $LASTEXITCODE
         $detectorText = ($detectorOut | Out-String).Trim()
         $checkLine = ($detectorOut | Where-Object { $_ -match '^ARTIFACT-CHECK ' } | Select-Object -First 1)
         $getField = { param($text, $key) $m = [regex]::Match([string]$text, $key + '=([^\s]+)'); if ($m.Success) { $m.Groups[1].Value } else { $null } }
         $playbackArtifacts = [pscustomobject]@{
             enabled = $true
+            cadenceAdvisory = [bool]$ArtifactCadenceAdvisory
             verdict = (& $getField $checkLine 'verdict')
             presents = [int](& $getField $checkLine 'presents')
             medianFps = [double](& $getField $checkLine 'median_fps')
