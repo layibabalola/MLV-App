@@ -20,6 +20,8 @@ ScopesLabel::ScopesLabel(QWidget *parent)
     m_pHistogram = new Histogram();
     m_pVectorScope = new VectorScope( 511, 160 );
     m_pWaveFormMonitor = new WaveFormMonitor( 200 );
+    m_widthScope = 0;
+    m_heightScope = 0;
     m_widthLabel = size().width();
     m_imageScope = QImage(1, 1, QImage::Format_RGB888);
     m_imageScope.fill( Qt::black );
@@ -40,17 +42,15 @@ ScopesLabel::~ScopesLabel()
 //Prepare and paint scope
 void ScopesLabel::setScope(uint8_t *pPicture, uint16_t width, uint16_t height, bool under, bool over, ScopeType type)
 {
-    static int w = -1;
-    static int h = -1;
     m_type = type;
 
-    if( w != width || h != height )
+    if( m_widthScope != width || m_heightScope != height )
     {
         delete m_pWaveFormMonitor;
         m_pWaveFormMonitor = new WaveFormMonitor( width );
 
-        w = width;
-        h = height;
+        m_widthScope = width;
+        m_heightScope = height;
     }
 
     if( type == ScopeType::None )

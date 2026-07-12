@@ -1784,11 +1784,24 @@ void GuiSmokeTest::scopesLabelDispatchesRawParadeExactly()
 {
     const QMap<QString, QString> expected_hashes = load_expected_hashes();
     const std::vector<uint8_t> raw = make_scope_raw_pattern(16, 8);
+
+    // Prime a separate instance with the same dimensions. A function-static
+    // dimension cache used to make the fresh parade label retain its
+    // constructor's width-200 WaveFormMonitor and read unstable tail pixels.
+    const QImage priming = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeWaveForm);
+    QVERIFY(!priming.isNull());
+
     const QImage actual = render_scopes_label_output(raw, 16, 8, false, false, ScopesLabel::ScopeRgbParade);
     QVERIFY(!actual.isNull());
+    const QImage expected = render_expected_scope_label(raw, 16, 8, false, false, ScopesLabel::ScopeRgbParade);
+    const QImage actual_signature = make_scopeslabel_scope_signature(actual);
+    const QImage expected_signature = make_scopeslabel_scope_signature(expected);
+    QString difference_message;
+    QVERIFY2(image_regression::images_match_rgb888(expected_signature, actual_signature, 0, &difference_message),
+             qPrintable(difference_message));
     assert_expected_hash(expected_hashes,
                          QStringLiteral("scopeslabel.raw_parade.signature"),
-                         make_scopeslabel_scope_signature(actual));
+                         actual_signature);
 }
 
 void GuiSmokeTest::scopesLabelDispatchesRawVectorScopeExactly()
