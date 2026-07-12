@@ -34,9 +34,10 @@ finding into this file in the same work block that acts on it.
 - Maximum mutating WIP: **one work block**.
 - Current item: **CI-1 — ACTIVE**.
 - R1 and P0-A through P0-E are complete; `master`/`fork/master` are at
-  `b87616da2bd864f82634e66b63101133ba11a903`, and the per-work-block
-  `.claude-state\closeout\repo-closed\wb-74828559e9f14cdb.json` reports
-  `status: success` at that target.
+  `3855ce38148e8698e5147445662afa4930ce6500`. The latest approved CI-1
+  crash-forensics capture/remediation range is integrated and pushed; its
+  closeout artifact is `.claude-state\closeout\repo-closed\wb-a65add3674da4cce.json`
+  with `status: success`.
 - Do not start another queued item while CI-1 is active.
 
 No prompt is needed to bootstrap every historical lane. Bootstrap the Codex

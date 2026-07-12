@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/work-block/wb-52202114a32c4a91",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-07-12T23:31:33+00:00",
+  "detectorHash": "d9b3a6fb06dbf113ea0d5b7726a33a1e",
+  "featureHead": "79e16272ca25e2af6049959fb6ca7bd85b16761a",
+  "schemaVersion": "1.0",
+  "targetHead": "3855ce38148e8698e5147445662afa4930ce6500",
+  "workBlockId": "wb-52202114a32c4a91",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\roadmap-consolidation"
+}
