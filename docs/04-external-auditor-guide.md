@@ -650,7 +650,7 @@ The test-runner is the in-tree `minitest` micro-harness
 | `console_tests --check-golden` | exit code 0 | Final stderr line of the form `<n> tests / <m> assertions / <k> skips / 0 failures`; observed locally on commit `970bc389` as ~41 tests / ~160 assertions / ~17 skips with the stub build, and ~750 assertions when an `MLVApp.exe` is on `PATH` for the app-backed subprocess steps. Numbers will differ as the harness grows. |
 | `pipeline_tests --check-golden` | exit code 0 | Same final-line format; observed locally as ~46 tests / ~526 assertions / ~4 skips. The stricter Dual-ISO-only subset (`MINITEST_FILTER=DualIso`) drops to ~33 tests / ~432 assertions. |
 | `alloc_tests` | exit code 0 | Allocator tracking smoke. |
-| `gui_tests` (offscreen) | exit code 0 (**non-blocking in CI** — `continue-on-error: true`) | Skips the zebra parity seam on `llvmpipe` software GL hosts. |
+| `gui_tests` (offscreen) | exit code 0 (**independent non-blocking CI job** — job-level `continue-on-error: true`) | Skips the zebra parity seam on `llvmpipe` software GL hosts. |
 | `fuzz_receipt_loader tests/fixtures/receipts` | no crashes, no UBSan/ASan findings | Run for a meaningful wall-clock budget; check for `crash-*`/`leak-*`/`timeout-*` outputs in the working dir. |
 | `fuzz_lj92 tests/fixtures/clips/tiny_dual_iso.mlv` | no crashes | Same protocol. |
 | `fuzz_mlv_open tests/fixtures/clips/tiny_dual_iso.mlv` | no crashes | Same protocol. |
@@ -696,7 +696,7 @@ release workflows.
 | Qt version provisioned | **6.10.2** (via `aqtinstall==3.3.*`) |
 | Compiler provisioned | **MinGW 13.1** (`tools_mingw1310`) |
 | Blocking jobs | `console_tests --check-golden`, `pipeline_tests --check-golden` |
-| Non-blocking pilot | `gui_tests` offscreen with `continue-on-error: true` (`.github/workflows/tests.yml:92-114`) |
+| Non-blocking pilot | independent `windows-gui-pilot` job, offscreen, with job-level `continue-on-error: true` |
 | Intentionally **not** in CI | `perf_tests` (machine-sensitive), `fuzz_*` (local/nightly), full `gui_tests` gating |
 | Release workflows | `Windows.yml` (Win64 zip), `macOS-Intel.yml` (.dmg, `macos-13`), `macOS-Arm64.yml` (.dmg, `macos-14`), `Linux.yml` (.AppImage, `ubuntu-22.04`) |
 | Release trigger | `workflow_dispatch` on `master` only |
@@ -829,9 +829,10 @@ exec'd as a child, not linked.
   platforms build and package but do not gate on correctness. A reviewer
   evaluating Linux or macOS binaries should run the tests locally on those
   platforms before signing off.
-- **`gui_tests` is non-blocking.** `continue-on-error: true` on both build
-  and run steps ([.github/workflows/tests.yml:92-114](../.github/workflows/tests.yml)).
-  Graduation plan referenced in tests.yml comments.
+- **`gui_tests` is non-blocking.** The independent `windows-gui-pilot` job
+  carries job-level `continue-on-error: true`; its build and run steps still
+  fail normally. The graduation record is in
+  [docs/13-testing-infrastructure.md](13-testing-infrastructure.md).
 - **Perf tests are not in CI.** They are intentionally local-only because
   of runner noise; an auditor wanting a perf baseline must run
   `perf_tests --iterations 10 --require-baseline` locally (see

@@ -153,8 +153,9 @@ tree. Properties:
 - Intentionally does not run `gui_tests` yet: the fresh offscreen GUI target
   was not stable enough on this host to promote into the first workflow cut.
 
-The pilot `gui_tests` step is gated with `continue-on-error: true` on hosted
-runners; once two consecutive greens land, the workflow lifts that flag. See
+The pilot `gui_tests` job is gated with job-level `continue-on-error: true` on
+hosted runners; once two consecutive greens land, the workflow lifts that
+flag. See
 [`.claude/analysis/testing-scaffold-implementation.md`](../.claude/analysis/testing-scaffold-implementation.md)
 for the design rationale and the pilot-to-blocking promotion criteria.
 
@@ -442,3 +443,20 @@ and the main color-processing pipeline remain CPU work today.
   run details.
 - [`.github/workflows/tests.yml`](../.github/workflows/tests.yml) — the CI
   workflow that mirrors this guide.
+
+## GUI CI pilot promotion record
+
+`gui_tests` runs in the independent `windows-gui-pilot` job in
+`.github/workflows/tests.yml`. The job remains non-blocking through job-level
+`continue-on-error: true`; individual build and test steps fail normally, so a
+red pilot cannot be hidden inside an otherwise green blocking job.
+
+Promotion requires two consecutive green hosted executions for the same
+workflow shape. Record both run URLs and commit SHAs here before removing the
+job-level `continue-on-error`. The blocking `windows-scaffold` console and
+pipeline suites must remain independent of the pilot throughout promotion.
+
+The prior workflow reference to
+`.claude/analysis/gui-tests-ci-remediation.md` was invalid: repository history
+contains no committed version of that file. This tracked section is the
+promotion record and source of truth.

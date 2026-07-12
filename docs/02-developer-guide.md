@@ -1014,7 +1014,7 @@ All workflows live under `.github/workflows/`.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| [`tests.yml`](../.github/workflows/tests.yml) | `workflow_dispatch`, PR and `push` to `master` (paths filter on `tests/**`, `src/**`, `platform/qt/**`, `AGENTS.md`, `CLAUDE.md`) | Windows-only test runner. Installs Qt 6.10.2 + MinGW 13.1 via `aqtinstall` (Python 3.12), builds + runs `console_tests --check-golden`, `pipeline_tests --check-golden`, and `gui_tests` (last step is `continue-on-error` until the pilot graduates). |
+| [`tests.yml`](../.github/workflows/tests.yml) | `workflow_dispatch`, PR and `push` to `master` (paths filter on `tests/**`, `src/**`, `platform/qt/**`, `AGENTS.md`, `CLAUDE.md`) | Windows test runner. The blocking `windows-scaffold` job runs `console_tests --check-golden` and `pipeline_tests --check-golden`; the independent `windows-gui-pilot` job runs `gui_tests` with job-level `continue-on-error` until promotion. |
 | [`Windows.yml`](../.github/workflows/Windows.yml) | `workflow_dispatch` on `master` | Release artifact. Chocolatey-installs Qt 5.15.2 + MinGW 8.1 + OpenSSL, runs `qmake` + `make` + `windeployqt`, unpacks `ffmpegWin64.zip` and `raw2mlvWin64.zip` with 7-Zip, uploads `MLVApp.Win64.zip`. |
 | [`Linux.yml`](../.github/workflows/Linux.yml) | `workflow_dispatch` on `master` | Ubuntu 22.04 runner. Installs the apt dependencies listed in [§3.4](#34-linux), runs `qmake` + `make -j8`, unpacks the bundled ffmpeg/raw2mlv, wraps it all with `linuxdeploy` + the Qt plugin to produce `MLVApp.AppImage`. |
 | [`macOS-Intel.yml`](../.github/workflows/macOS-Intel.yml) | `workflow_dispatch` on `master` | macOS 13 runner. `brew install llvm qt5 openssl` (alias to `qt@5`), `qmake -r`, `make -j8`, `macdeployqt -dmg` from `/usr/local/opt/qt@5/bin`. Artifact: `MLV App.dmg`. |
@@ -1024,7 +1024,8 @@ Blocking vs. pilot status:
 
 - **Blocking** (must pass before merge): `console_tests --check-golden`,
   `pipeline_tests --check-golden`.
-- **Pilot** (non-blocking, runs with `continue-on-error: true` until two
+- **Pilot** (independent non-blocking job, runs with job-level
+  `continue-on-error: true` until two
   consecutive greens on hosted runners): `gui_tests`. Background and rationale
   for this rollout are in
   [`.claude/analysis/testing-scaffold-implementation.md`](../.claude/analysis/testing-scaffold-implementation.md).
@@ -1118,7 +1119,8 @@ Keep new artifacts under `.claude-state/` — never commit new files to
    - `gui_tests` (pilot; nice-to-have)
 4. **Open a PR against `master`**. CI will run the Windows scaffold
    (`tests.yml`). The two blocking suites must pass. `gui_tests` is the
-   non-blocking pilot — it runs with `continue-on-error: true`.
+   independent non-blocking pilot — its job runs with
+   `continue-on-error: true`.
 5. **Review**: maintainers look for style conformance (§10), no regressions
    in the golden fixtures, and that the perf harness baseline was refreshed
    if you touched a hot path. *Hot paths* are anything under
