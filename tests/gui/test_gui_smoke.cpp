@@ -1114,16 +1114,16 @@ void GuiSmokeTest::dualIsoPlaybackPolicyKeepsExplicitPreviewAndPlaybackOverrideS
 
 void GuiSmokeTest::dualIsoPatternMappingKeepsUiAndCoreConventionsAligned()
 {
-    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-1), 0);
-    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-4), 3);
-    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(1), 0);
-    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(4), 3);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-1), 1);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(-4), 4);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(1), 1);
+    QCOMPARE(dualIsoUiPatternIndexFromCorePattern(4), 4);
     QCOMPARE(dualIsoUiPatternIndexFromCorePattern(0), 0);
 
-    QCOMPARE(dualIsoCorePatternFromUiIndex(0), 1);
-    QCOMPARE(dualIsoCorePatternFromUiIndex(3), 4);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(1), 1);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(4), 4);
     QCOMPARE(dualIsoCorePatternFromUiIndex(-1), 0);
-    QCOMPARE(dualIsoCorePatternFromUiIndex(4), 0);
+    QCOMPARE(dualIsoCorePatternFromUiIndex(6), 0);
 }
 
 void GuiSmokeTest::gpuViewportFallsBackToPixmapWhenNotInstalled()

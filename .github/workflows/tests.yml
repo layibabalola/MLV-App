@@ -50,6 +50,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install repo hygiene test dependencies
+        run: python -m pip install jsonschema
+
       - name: Run repo hygiene Python tests
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
@@ -75,6 +78,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install blocking Python test dependencies
+        run: |
+          python -m pip install jsonschema
+          python -m pip install -r tools\agent-bridge\requirements.txt
 
       - name: Run repo hygiene Python tests
         run: |
