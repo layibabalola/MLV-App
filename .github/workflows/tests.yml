@@ -147,6 +147,9 @@ jobs:
       - name: Run pipeline_tests --check-golden
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
+          $env:MLVAPP_CRASH_FORENSICS_AUTOINSTALL = "1"
+          $env:MLVAPP_CRASH_FORENSICS_LOG_DIR = Join-Path $env:RUNNER_TEMP "pipeline-crash-forensics"
+          New-Item -ItemType Directory -Force $env:MLVAPP_CRASH_FORENSICS_LOG_DIR | Out-Null
           $suiteOutput = Join-Path $env:RUNNER_TEMP "pipeline-tests-output.txt"
           $PSNativeCommandUseErrorActionPreference = $false
           & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden 2>&1 |
@@ -164,6 +167,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
+
+      - name: Upload pipeline crash forensics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-scaffold-pipeline-crash-forensics
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}\pipeline-crash-forensics\**
+            ${{ runner.temp }}\pipeline-tests-output.txt
 
   windows-gui-pilot:
     name: Windows GUI Pilot

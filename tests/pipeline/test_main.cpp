@@ -7,6 +7,7 @@
 
 #include "../../src/debug/ForceSingleThread.h"
 #include "../../src/debug/StageTimingCsvSink.h"
+#include "../../platform/qt/CrashForensics.h"
 
 #include <QGuiApplication>
 #include <QFile>
@@ -260,6 +261,14 @@ int main(int argc, char ** argv)
     }
 #endif
     QGuiApplication app(argc, argv);
+
+    /* Hosted CI can opt into the existing minidump/log handler without
+     * changing the default local test-runner behavior or the CrashForensics
+     * unit-test's idempotence/setup contract. */
+    if (qEnvironmentVariableIntValue("MLVAPP_CRASH_FORENSICS_AUTOINSTALL") == 1) {
+        CrashForensics::install(argc, argv);
+        CrashForensics::logStartupMetadata();
+    }
 
     std::string hash_output_path;
     std::string stage_csv_path;

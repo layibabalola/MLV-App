@@ -119,6 +119,10 @@ private:
 
 TEST(CrashForensics, MessageHandlerCreatesLogFile)
 {
+    if (qEnvironmentVariableIntValue("MLVAPP_CRASH_FORENSICS_AUTOINSTALL") == 1) {
+        SKIP_TEST("CrashForensics was already installed at process startup; isolated install contract is covered in a fresh process");
+    }
+
     AppDataRedirect redirect;
 
     QTemporaryDir overrideDir;
@@ -161,6 +165,10 @@ TEST(CrashForensics, MessageHandlerCreatesLogFile)
 
 TEST(CrashForensics, RunMetadataContainsExpectedFields)
 {
+    if (qEnvironmentVariableIntValue("MLVAPP_CRASH_FORENSICS_AUTOINSTALL") == 1) {
+        SKIP_TEST("CrashForensics was already installed at process startup; isolated metadata contract is covered in a fresh process");
+    }
+
     AppDataRedirect redirect;
 
     QByteArray arg0 = QByteArrayLiteral("pipeline_tests");
