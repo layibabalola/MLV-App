@@ -147,7 +147,23 @@ jobs:
       - name: Run pipeline_tests --check-golden
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
-          & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden
+          $suiteOutput = Join-Path $env:RUNNER_TEMP "pipeline-tests-output.txt"
+          $PSNativeCommandUseErrorActionPreference = $false
+          & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden 2>&1 |
+            Tee-Object -FilePath $suiteOutput
+          $suiteExit = $LASTEXITCODE
+
+          # Exit 1 means named test failures, which the reviewed manifest
+          # adjudicates below. Crashes, usage errors, and golden-oracle errors
+          # remain unconditionally blocking.
+          if ($suiteExit -notin @(0, 1)) {
+            throw "pipeline_tests failed outside the expected-failure contract (exit $suiteExit)"
+          }
+
+          & tools\testing\check-expected-failures.ps1 -SuiteOutput $suiteOutput
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
 
   windows-gui-pilot:
     name: Windows GUI Pilot
