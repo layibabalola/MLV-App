@@ -60,6 +60,14 @@ Assert-Rejected -Name "launch-only cannot masquerade as lifecycle stress" `
     -Arguments @("-LaunchOnlyProbe", "-AllowZeroPresentedFrames", "-ExerciseClipLifecycleStress", "-DryRun") `
     -ExpectedText "-LaunchOnlyProbe cannot be combined with frame telemetry"
 
+Assert-Rejected -Name "lifecycle discontinuity cannot masquerade as steady cadence" `
+    -Arguments @("-ExerciseClipLifecycleStress", "-DetectPlaybackArtifacts", "-DryRun") `
+    -ExpectedText "Run lifecycle correctness and uninterrupted cadence as separate legs"
+
+Assert-Rejected -Name "cadence advisory requires artifact detection" `
+    -Arguments @("-ArtifactCadenceAdvisory", "-DryRun") `
+    -ExpectedText "-ArtifactCadenceAdvisory requires -DetectPlaybackArtifacts"
+
 $invalidSmoke = Join-Path $env:TEMP ("mlvapp-invalid-smoke-{0}.json" -f [Guid]::NewGuid())
 try {
     @{
@@ -75,4 +83,4 @@ finally {
     Remove-Item -LiteralPath $invalidSmoke -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "[SUMMARY] playback-quality contract tests=5 failed=0"
+Write-Host "[SUMMARY] playback-quality contract tests=7 failed=0"
