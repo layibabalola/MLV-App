@@ -32,13 +32,12 @@ finding into this file in the same work block that acts on it.
   Q7/ABI and GPU-kernel proof.
 - Fable: no active implementation or review assignment.
 - Maximum mutating WIP: **one work block**.
-- Current item: **P0-A — ACTIVE (presented-frame stress re-proof)**.
-- R1 and P0-B through P0-E are complete; `master`/`fork/master` are at
-  `a182fea5dbd1372652b15eac286eff3de6bd8166`, and the per-work-block
-  `.claude-state\closeout\repo-closed\wb-2d4e3c3e9da04dd7.json` reports
+- Current item: **CI-1 — ACTIVE**.
+- R1 and P0-A through P0-E are complete; `master`/`fork/master` are at
+  `b87616da2bd864f82634e66b63101133ba11a903`, and the per-work-block
+  `.claude-state\closeout\repo-closed\wb-74828559e9f14cdb.json` reports
   `status: success` at that target.
-- Do not start another queued item while the P0-A presented-frame stress
-  re-proof is active.
+- Do not start another queued item while CI-1 is active.
 
 No prompt is needed to bootstrap every historical lane. Bootstrap the Codex
 implementation loop once; send Claude one exact review request per committed
@@ -65,12 +64,12 @@ queues in detail documents.
 |---:|---|---|---|---|---|
 | 0 | R0 | DONE | Canonical roadmap plus Codex-handoff/Claude-review closeout contract | none | Claude approves exact range; target contains it; remote is verified |
 | 1 | R1 | DONE | Target branch contains every approved, still-required line without importing unreviewed WIP | R0 | ancestry matrix, conflict review, focused tests, Claude approval, push proof |
-| 2 | P0-A | ACTIVE | Clip switch/close cannot free an MLV object while render work can still touch it | R1 | deterministic lifecycle test, stop/switch stress, no hang/UAF, GUI A/B |
+| 2 | P0-A | DONE | Clip switch/close cannot free an MLV object while render work can still touch it | R1 | deterministic lifecycle test, stop/switch stress, no hang/UAF, GUI A/B |
 | 3 | P0-B | DONE | CineForm export dimensions are always valid multiples of 16 | P0-A | table-driven helper tests plus odd/anamorphic export smoke |
 | 4 | P0-C | DONE | Rendered export launches ffmpeg without shell parsing or fragile quoting | P0-B | zero production `popen`, argument/space/quote tests, cancel/error/two-pass smoke |
 | 5 | P0-D | DONE | Dual-ISO dither is deterministic for a frame regardless of scheduling | P0-C | repeat/thread/path determinism tests plus real-output baseline A/B |
 | 6 | P0-E | DONE | Histogram accumulation cannot wrap above 65,535 samples per bin | P0-D | synthetic overflow test, parity corpus, bounded performance result |
-| 7 | CI-1 | QUEUED | Required CI gives trustworthy red/green signals, including GUI smoke | P0-E | restore/correct missing promotion record, independent GUI job, two hosted greens, then blocking status |
+| 7 | CI-1 | ACTIVE | Required CI gives trustworthy red/green signals, including GUI smoke | P0-E | restore/correct missing promotion record, independent GUI job, two hosted greens, then blocking status |
 | 8 | E4-1 | QUEUED | Headless batch takes one MLV clip and emits one playable H.264 MP4 | CI-1, P0-C | end-to-end CLI test, receipt/aspect parity, cancellation/error proof, real playable output |
 | 9 | P1-A | QUEUED | GPU ABI v2 wording and extension negotiation are unambiguous before new kernels | E4-1 | header/loader/tests agree; unknown extensions fail safely; Claude + Opus design review |
 | 10 | P1-B | QUEUED | F1b/processing statistics expose stable, parser-friendly timing and fallback reasons | P1-A | schema/version tests, disabled-path silence, no hot-path regression |
