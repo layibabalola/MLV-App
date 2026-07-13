@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 VALIDATOR = ROOT / "tools" / "coordination" / "validate_and_append_handoff.py"
 WATCHDOG = ROOT / "tools" / "coordination" / "coordination_watchdog.py"
+HEARTBEAT = ROOT / "tools" / "coordination" / "coordination-heartbeat.ps1"
 
 
 def run(*args, cwd):
@@ -91,3 +92,24 @@ def test_watchdog_repairs_missing_mirror_but_requires_ack(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["state"] == "ACK_REQUIRED"
     assert payload["repairedMirrors"] == [str(codex_ledger)]
+
+
+def test_heartbeat_resolves_watchdog_beside_wrapper_not_under_repo_root(tmp_path):
+    coord = tmp_path / ".claude-state" / "coordination"
+    dual = coord / "dual-lane"
+    dual.mkdir(parents=True)
+    (coord / "gpu-lane-impl-review-sync.md").write_text("# gate\n")
+    (dual / "claude.md").write_text("# claude\n")
+    (dual / "codex.md").write_text("# codex\n")
+    result = subprocess.run(
+        [
+            "pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(HEARTBEAT),
+            "-RepoRoot", str(tmp_path), "-Once",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["state"] == "IDLE"
+    assert not (tmp_path / "tools" / "coordination" / "coordination_watchdog.py").exists()

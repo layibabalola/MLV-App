@@ -5023,9 +5023,96 @@ def remove_worktree(repo_root: Path, path: Path) -> Dict[str, Any]:
     return {"path": str(path), "returncode": result.returncode, "stderr": result.stderr[-2000:], "pruneReturncode": prune.returncode, "pruneStderr": prune.stderr[-2000:]}
 
 
+def target_branch_worktrees(repo_root: Path, target_branch: str) -> List[Dict[str, Any]]:
+    target_ref = f"refs/heads/{target_branch}"
+    return [item for item in parse_worktree_list(repo_root) if item.get("branchRef") == target_ref]
+
+
+def target_worktree_update_preflight(repo_root: Path, target_branch: str, new_head: str) -> Dict[str, Any]:
+    local_ref = f"refs/heads/{target_branch}"
+    local_head = rev_parse(repo_root, local_ref, required=False)
+    checked_out = target_branch_worktrees(repo_root, target_branch)
+    payload: Dict[str, Any] = {
+        "status": "success",
+        "targetBranch": target_branch,
+        "localHead": local_head,
+        "newHead": new_head,
+        "checkedOutWorktrees": [str(item.get("path") or "") for item in checked_out],
+    }
+    if len(checked_out) > 1:
+        return {
+            **payload,
+            "status": "blocked",
+            "reason": "target_branch_checked_out_multiple_worktrees",
+        }
+    if not checked_out:
+        return {**payload, "method": "update-ref"}
+    worktree_path = Path(str(checked_out[0]["path"]))
+    dirty = worktree_dirty_state(worktree_path)
+    payload["worktree"] = str(worktree_path)
+    payload["dirtyState"] = dirty
+    if dirty.get("dirty"):
+        return {
+            **payload,
+            "status": "blocked",
+            "reason": "target_worktree_dirty_before_ref_update",
+        }
+    if local_head and local_head != new_head and not is_ancestor(repo_root, local_head, new_head):
+        return {
+            **payload,
+            "status": "blocked",
+            "reason": "target_worktree_not_fast_forwardable",
+        }
+    return {**payload, "method": "checked-out-worktree-ff"}
+
+
 def update_local_target(repo_root: Path, target_branch: str, new_head: str) -> Dict[str, Any]:
-    result = run_git(repo_root, ["update-ref", f"refs/heads/{target_branch}", new_head])
-    return {"targetBranch": target_branch, "newHead": new_head, "returncode": result.returncode, "stderr": result.stderr[-2000:]}
+    preflight = target_worktree_update_preflight(repo_root, target_branch, new_head)
+    result_payload: Dict[str, Any] = {
+        "targetBranch": target_branch,
+        "newHead": new_head,
+        "preflight": preflight,
+        "method": preflight.get("method"),
+    }
+    if preflight["status"] != "success":
+        return {
+            **result_payload,
+            "returncode": 1,
+            "reason": preflight.get("reason"),
+            "stderr": preflight.get("reason", "target worktree preflight failed"),
+        }
+    if preflight.get("method") == "update-ref":
+        result = run_git(repo_root, ["update-ref", f"refs/heads/{target_branch}", new_head])
+        return {
+            **result_payload,
+            "returncode": result.returncode,
+            "stdout": result.stdout[-2000:],
+            "stderr": result.stderr[-2000:],
+        }
+
+    worktree_path = Path(str(preflight["worktree"]))
+    local_head = str(preflight.get("localHead") or "")
+    if local_head == new_head:
+        result_returncode = 0
+        stdout = "target ref already points at requested head"
+        stderr = ""
+    else:
+        result = run_git(worktree_path, ["merge", "--ff-only", new_head])
+        result_returncode = result.returncode
+        stdout = result.stdout[-2000:]
+        stderr = result.stderr[-2000:]
+    head_after = rev_parse(repo_root, f"refs/heads/{target_branch}", required=False)
+    dirty_after = worktree_dirty_state(worktree_path)
+    verified = result_returncode == 0 and head_after == new_head and not dirty_after.get("dirty")
+    return {
+        **result_payload,
+        "returncode": 0 if verified else (result_returncode or 1),
+        "stdout": stdout,
+        "stderr": stderr if result_returncode else ("" if verified else "target worktree did not synchronize cleanly"),
+        "headAfter": head_after,
+        "dirtyStateAfter": dirty_after,
+        "verified": verified,
+    }
 
 
 def push_failed_non_fast_forward(push_result: Dict[str, Any]) -> bool:
@@ -6226,6 +6313,7 @@ def _finalize_work_block_once(
     push_result: Optional[Dict[str, Any]] = None
     recovery: Optional[Dict[str, Any]] = None
     local_update: Optional[Dict[str, Any]] = None
+    target_worktree_preflight: Optional[Dict[str, Any]] = None
     if already_integrated:
         local_head = rev_parse(repo_root, f"refs/heads/{target_branch}", required=False)
         if local_head != target["head"]:
@@ -6283,6 +6371,22 @@ def _finalize_work_block_once(
             return {"status": "blocked", "reason": "validation_failed", "validations": validations, "runtimeLifecycle": runtime_lifecycle}
         new_target_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
         if target["mode"] == "remote":
+            target_worktree_preflight = target_worktree_update_preflight(repo_root, target_branch, new_target_head)
+            if target_worktree_preflight["status"] != "success":
+                payload = {
+                    "operation": "target_worktree_preflight",
+                    "reason": target_worktree_preflight.get("reason"),
+                    "preflight": target_worktree_preflight,
+                }
+                write_audit(repo_root, config, "blocked_repair", payload, work_block_id=block_id, outcome="blocked")
+                remove_worktree(repo_root, integration_path)
+                update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "target_worktree_not_ready_before_push"})
+                return {
+                    "status": "blocked",
+                    "reason": "target_worktree_not_ready_before_push",
+                    "detail": payload,
+                    "runtimeLifecycle": runtime_lifecycle,
+                }
             push = run_git(integration_path, ["push", str(target.get("remote")), f"HEAD:{target_branch}"])
             push_result = {"remote": target.get("remote"), "targetBranch": target_branch, "returncode": push.returncode, "stdout": push.stdout[-4000:], "stderr": push.stderr[-4000:]}
             if push.returncode != 0:
@@ -6329,6 +6433,7 @@ def _finalize_work_block_once(
         "targetHeadBefore": detection["targetHead"],
         "targetHeadAfter": new_target_head,
         "alreadyIntegrated": already_integrated,
+        "targetWorktreePreflight": target_worktree_preflight,
         "push": push_result,
         "recovery": recovery,
         "cleanup": cleanup,

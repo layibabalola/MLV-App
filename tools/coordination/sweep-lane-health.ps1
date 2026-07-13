@@ -14,16 +14,17 @@ $leasesDir = Join-Path $HealthDir 'leases'
 $journalPaths = [ordered]@{
     fable = Join-Path $dualLane 'fable.md'
     codex = Join-Path $dualLane 'codex.md'
+    sol = Join-Path $dualLane 'sol.md'
     opus = Join-Path $dualLane 'opus.md'
     'claude-review' = Join-Path (Split-Path -Parent $dualLane) 'gpu-lane-impl-review-sync.md'
 }
-$adopted = @('codex', 'claude-review')
+$adopted = @('codex', 'sol', 'claude-review')
 $lanes = @()
 foreach ($lane in $journalPaths.Keys) {
     $leasePath = Join-Path $leasesDir "$lane.json"
-    $leaseState = 'PENDING-ADOPTION'
+    $leaseState = if ($adopted -contains $lane) { 'MISSING' } else { 'PENDING-ADOPTION' }
     $leaseAge = $null
-    $leaseReason = 'no lease'
+    $leaseReason = if ($adopted -contains $lane) { 'required adopted lease is missing' } else { 'lane has not adopted lease gating' }
     if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
         try {
             $lease = Get-Content -LiteralPath $leasePath -Raw | ConvertFrom-Json
@@ -49,8 +50,8 @@ $target = [ordered]@{ state = 'NOT_CONFIGURED'; valid = $false }
 if ($AutomationPath -and $ExpectedThreadId) {
     try {
         $check = & (Join-Path $PSScriptRoot 'validate-heartbeat-target.ps1') -AutomationPath $AutomationPath -ExpectedThreadId $ExpectedThreadId 2>&1
-        if ($LASTEXITCODE -eq 0) { $target = (($check -join '') | ConvertFrom-Json); $target | Add-Member -NotePropertyName state -NotePropertyValue 'VALID' -Force }
-        else { $target = [ordered]@{ state = 'INVALID'; valid = $false; error = ($check -join ' ') } }
+        $target = (($check -join '') | ConvertFrom-Json)
+        $target | Add-Member -NotePropertyName state -NotePropertyValue 'VALID' -Force
     } catch { $target = [ordered]@{ state = 'INVALID'; valid = $false; error = $_.Exception.Message } }
 }
 $markers = @()
@@ -58,12 +59,12 @@ if ($HeartbeatMarker) {
     $markerState = if (Test-Path -LiteralPath $HeartbeatMarker -PathType Leaf) { 'PRESENT' } else { 'MISSING' }
     $markers += [ordered]@{ surface = 'heartbeat-marker'; state = $markerState; path = $HeartbeatMarker }
 }
-$badAdopted = @($lanes | Where-Object { $_.adopted -and $_.leaseState -in @('DARK','LEASE-UNPARSEABLE') })
+$badAdopted = @($lanes | Where-Object { $_.adopted -and $_.leaseState -in @('MISSING','DARK','LEASE-UNPARSEABLE') })
 $expiredAdopted = @($lanes | Where-Object { $_.adopted -and $_.leaseState -eq 'EXPIRED' })
 $overall = 'HEALTHY'
 if ($badAdopted.Count -gt 0 -or $target.state -eq 'INVALID') { $overall = 'DEGRADED' }
 elseif ($expiredAdopted.Count -gt 0 -or ($target.state -eq 'NOT_CONFIGURED' -and $ExpectedThreadId)) { $overall = 'ATTENTION' }
-$result = [ordered]@{ schema = 'lane-health.v2'; observedUtc = $now.ToString('o'); overall = $overall; target = $target; lanes = $lanes; markers = $markers; policy = [ordered]@{ journalAgeIsAdvisory = $true; adoptedLeaseRequiredFor = $adopted; pendingAdoptionIsNotDegraded = $true } }
+$result = [ordered]@{ schema = 'lane-health.v3'; observedUtc = $now.ToString('o'); overall = $overall; target = $target; lanes = $lanes; markers = $markers; policy = [ordered]@{ journalAgeIsAdvisory = $true; adoptedLeaseRequiredFor = $adopted; missingAdoptedLeaseIsDegraded = $true; unadoptedMissingLeaseIsAdvisory = $true } }
 $json = $result | ConvertTo-Json -Depth 8 -Compress
 if (-not $Quiet) { Write-Output $json }
 if (Test-Path -LiteralPath $HealthDir -PathType Container) { Add-Content -LiteralPath (Join-Path $HealthDir 'health.log') -Value $json -Encoding utf8 }
