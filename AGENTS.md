@@ -252,3 +252,10 @@ gates + residual risks: `docs/regression-prevention-program.md`. Binding rules:
   - sets `QT_OPENGL=desktop`,
   - optionally runs `windeployqt` in-place,
   - and launches `MLVApp.exe` with supplied arguments.
+
+## Tier-B lane-health contract
+- Treat liveness as a multi-surface decision: adopted lease freshness, journal activity, heartbeat-marker evidence, and heartbeat-automation target validity are separate surfaces.
+- Journal age is advisory only. A fresh journal cannot override a stale/malformed adopted lease or an invalid heartbeat target; a pending-adoption lane is not degraded solely because it has no lease yet.
+- Codex and `claude-review` are adopted lanes and must renew `health/leases/<lane>.json` with the exact lane, UTC ISO timestamp, and positive `leaseMinutes` before a sweep can report them LIVE.
+- Run `tools/coordination/validate-heartbeat-target.ps1` from CLI before trusting the 10-minute automation; ACTIVE registry state without a valid UUID target matching the current task is invalid.
+- Use `tools/coordination/sweep-lane-health.ps1` for machine-readable JSON health and preserve non-zero exit status for DEGRADED state. Do not whitelist crashes, weaken strict test exit handling, or infer hosted CI health from lane health.
