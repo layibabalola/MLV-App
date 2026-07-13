@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/coordination-guardrails",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-07-13T07:32:33+00:00",
+  "detectorHash": "7b2778349636549cd4bc046cc121d5db",
+  "featureHead": "1e48377194c9b9c881c7eb1aa4f4eee2c21d442e",
+  "schemaVersion": "1.0",
+  "targetHead": "9913c25ee11b6802ae1605f55d94be21541e6c01",
+  "workBlockId": "wb-a41aaa19d8e14794",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\roadmap-consolidation"
+}
