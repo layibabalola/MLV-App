@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/ci1-lane-health",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 4,
+  "createdAt": "2026-07-13T07:06:55+00:00",
+  "detectorHash": "48bf0c2d33e66bdae0ed9d34a585e4cd",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "92d4bfc185bb1e30913b4d67cd12279beb991548",
+  "schemaVersion": "1.0",
+  "targetHead": "6351583a63073ba222d6bb3f41bf084b7cd8309d",
+  "workBlockId": "wb-058605718aa74bbe"
+}
