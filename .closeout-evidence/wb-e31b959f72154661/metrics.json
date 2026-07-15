@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/ci1-gpu-preview-offscreen-hardening",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 2,
+  "createdAt": "2026-07-15T08:48:05+00:00",
+  "detectorHash": "bfb1c52dbd56e53d7ceaf99ccafe18ae",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "bf62b697a05ba44af16af16d38a94de1c29aa3f1",
+  "schemaVersion": "1.0",
+  "targetHead": "33e3ebfbffad5f2ebc0bdf10d64727bc2169887e",
+  "workBlockId": "wb-e31b959f72154661"
+}
