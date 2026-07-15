@@ -47,9 +47,17 @@ try {
     # so the artifact self-identifies its real commit + dirty state (not a qmake-pinned label).
     & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$SourceRoot\tools\gen-buildinfo.ps1" `
         -SrcRoot "$SourceRoot" -OutHeader (Join-Path $bd "build_buildinfo.h") 2>&1 | Out-Host
-    & "$QtBin\qmake.exe" "$SourceRoot\platform\qt\MLVApp.pro" 2>&1 | Out-Host
+    $qmakeArgsJson = ConvertTo-Json -InputObject @("$SourceRoot\platform\qt\MLVApp.pro") -Compress
+    $qmakeArgsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($qmakeArgsJson))
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$SourceRoot\tools\coordination\invoke-mlv-exclusive.ps1" `
+        -RepoRoot $SourceRoot -Owner "qmake-release:$env:USERNAME" -FilePath "$QtBin\qmake.exe" `
+        -WorkingDirectory $bd -ArgumentListBase64 $qmakeArgsBase64
     if ($LASTEXITCODE -ne 0) { throw "qmake failed ($LASTEXITCODE)" }
-    & "$MingwBin\mingw32-make.exe" -f Makefile.Release -j8 2>&1 | Out-Host
+    $makeArgsJson = ConvertTo-Json -InputObject @('-f', 'Makefile.Release', '-j8') -Compress
+    $makeArgsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($makeArgsJson))
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$SourceRoot\tools\coordination\invoke-mlv-exclusive.ps1" `
+        -RepoRoot $SourceRoot -Owner "build-release:$env:USERNAME" -FilePath "$MingwBin\mingw32-make.exe" -WorkingDirectory $bd `
+        -ArgumentListBase64 $makeArgsBase64
     if ($LASTEXITCODE -ne 0) { throw "make failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
 $builtExe = Join-Path $bd "release\MLVApp.exe"

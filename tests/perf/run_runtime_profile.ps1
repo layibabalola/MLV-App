@@ -100,9 +100,18 @@ function Ensure-PerfExe([string]$Root, [string]$RequestedPerfExe) {
 
     Push-Location $buildDir
     try {
-        & $qmake (Join-Path $Root "tests\tests.pro")
+        $runner = Join-Path $Root "tools\coordination\invoke-mlv-exclusive.ps1"
+        $qmakeArgsJson = ConvertTo-Json -InputObject @((Join-Path $Root 'tests\tests.pro')) -Compress
+        $qmakeArgsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($qmakeArgsJson))
+        & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+            -RepoRoot $Root -Owner "qmake-perf:$env:USERNAME" -FilePath $qmake -WorkingDirectory $buildDir `
+            -ArgumentListBase64 $qmakeArgsBase64
         if ($LASTEXITCODE -ne 0) { throw "qmake failed with exit code $LASTEXITCODE" }
-        & $make -j4
+        $runner = Join-Path $Root "tools\coordination\invoke-mlv-exclusive.ps1"
+        $makeArgsJson = ConvertTo-Json -InputObject @('-j4') -Compress
+        $makeArgsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($makeArgsJson))
+        & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+            -RepoRoot $Root -Owner "perf-build:$env:USERNAME" -FilePath $make -WorkingDirectory $buildDir -ArgumentListBase64 $makeArgsBase64
         if ($LASTEXITCODE -ne 0) { throw "mingw32-make failed with exit code $LASTEXITCODE" }
     }
     finally {

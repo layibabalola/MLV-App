@@ -160,5 +160,9 @@ if (-not $SkipDeployRuntime -and $env:OS -eq "Windows_NT") {
 
 Write-Host ("[run-windows-test] exe={0}" -f $exe)
 Write-Host ("[run-windows-test] path_prefix={0}" -f (($runtimeDirs | Select-Object -First 5) -join ';'))
-& $exe @TestArgs
+$runner = Join-Path $root "tools\coordination\invoke-mlv-exclusive.ps1"
+$testArgsJson = ConvertTo-Json -InputObject @($TestArgs) -Compress
+$testArgsBase64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($testArgsJson))
+& pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+    -RepoRoot $root -Owner "test:${Suite}:$env:USERNAME" -FilePath $exe -ArgumentListBase64 $testArgsBase64
 exit $LASTEXITCODE
