@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/work-block/ci1-triage",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-07-15T18:34:40+00:00",
+  "detectorHash": "a9172471297f61cdd60f515801e56aa3",
+  "featureHead": "a4c6b4fd7b1028c3eb5e03744e7b2cab8989f780",
+  "schemaVersion": "1.0",
+  "targetHead": "b9f8187511286ed4534df34701f5e356cb069f47",
+  "workBlockId": "wb-77a1f0b8853f435c",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\ci1-triage"
+}
