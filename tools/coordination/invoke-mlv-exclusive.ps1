@@ -57,7 +57,7 @@ try {
     }
     $lockText = ([System.Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Compress)))
     $stream.SetLength(0); $stream.Write($lockText, 0, $lockText.Length); $stream.Flush()
-    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $working -PassThru
+    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $working -PassThru -NoNewWindow
     $record.pid = $process.Id
     $record.outcome = 'running'
     # Cache one ownership snapshot immediately after spawn; never recursively poll CIM.
