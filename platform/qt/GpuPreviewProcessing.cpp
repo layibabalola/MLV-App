@@ -978,6 +978,54 @@ QString rendererDescriptionFromFunctions(QOpenGLFunctions * functions)
     return QString::fromLatin1(reinterpret_cast<const char *>(renderer));
 }
 
+bool previewProcessingGlDispatchIsReady(QOpenGLContext * context,
+                                        QOpenGLFunctions * functions,
+                                        QString * reason)
+{
+    auto fail = [&](const QString & why) -> bool
+    {
+        if ( reason ) *reason = why;
+        return false;
+    };
+
+    if ( !context || !context->isValid()
+      || QOpenGLContext::currentContext() != context )
+    {
+        return fail(QStringLiteral("offscreen preview GL context is not current and valid"));
+    }
+    if ( !functions )
+    {
+        return fail(QStringLiteral("offscreen preview GL dispatch object is null"));
+    }
+
+    /* QOpenGLFunctions is only a wrapper. On a broken/headless platform it can
+     * exist while one of the entry points needed by this path is unavailable.
+     * Check the dispatch table before any wrapper call that could otherwise
+     * become a null control transfer (the hosted CI-1 failure was Rip=0). */
+    static constexpr const char * requiredFunctions[] = {
+        "glGetString", "glActiveTexture", "glBindTexture", "glTexParameteri",
+        "glDrawArrays", "glReadPixels", "glFinish", "glViewport",
+        "glClear", "glClearColor", "glDisable", "glGenTextures",
+        "glDeleteTextures", "glGenFramebuffers", "glBindFramebuffer",
+        "glFramebufferTexture2D", "glCheckFramebufferStatus"
+    };
+    for (const char * name : requiredFunctions)
+    {
+        if ( !context->getProcAddress(name) )
+        {
+            return fail(QStringLiteral("offscreen preview GL dispatch unavailable: %1")
+                            .arg(QString::fromLatin1(name)));
+        }
+    }
+    return true;
+}
+
+bool previewProcessingTextureIsReady(const QOpenGLTexture * texture)
+{
+    return texture && texture->isCreated() && texture->isStorageAllocated()
+        && texture->textureId() != 0;
+}
+
 QOpenGLTexture * createLookupTexture()
 {
     QOpenGLTexture * texture = new QOpenGLTexture(QOpenGLTexture::Target2D);
@@ -1227,6 +1275,12 @@ bool makePreviewProcessingContextCurrent(QOffscreenSurface * surface,
     {
         context->doneCurrent();
         return fail(QStringLiteral("QOpenGLContext did not expose QOpenGLFunctions"));
+    }
+
+    if ( !previewProcessingGlDispatchIsReady(context, glFunctions, reason) )
+    {
+        context->doneCurrent();
+        return false;
     }
 
     const QString renderer = rendererDescriptionFromFunctions(glFunctions);
@@ -2803,6 +2857,25 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     QOpenGLTexture * gradientMaskTexture = createVignetteMaskTexture(
         gradientReady ? width : 1, gradientReady ? height : 1);
 
+    QOpenGLTexture * previewTextures[] = {
+        frameTexture, levelsTexture, matrixRTexture, matrixGTexture, matrixBTexture,
+        gammaTexture, contrastCurveTexture, gradationYTexture, gradationRTexture,
+        gradationGTexture, gradationBTexture, hueVsHueTexture, hueVsSaturationTexture,
+        hueVsLumaTexture, lumaVsSaturationTexture, inLoopContrastTexture,
+        shadowsHighlightsBlurTexture, shadowsHighlightsCurveTexture, vignetteMaskTexture,
+        lut3dTexture, lut1dTexture, gradMatrixRTexture, gradMatrixGTexture,
+        gradMatrixBTexture, gradGammaTexture, gradContrastTexture, gradientMaskTexture
+    };
+    for (QOpenGLTexture * texture : previewTextures)
+    {
+        if ( !previewProcessingTextureIsReady(texture) )
+        {
+            for (QOpenGLTexture * allocated : previewTextures) delete allocated;
+            context.doneCurrent();
+            return fail(QStringLiteral("offscreen preview texture creation/storage failed"));
+        }
+    }
+
     frameTexture->setData(QOpenGLTexture::RGBA,
                           QOpenGLTexture::UInt16,
                           packedFrame.constData());
@@ -2857,7 +2930,11 @@ bool gpuPreviewProcessingApplyGpuOffscreen(const GpuPreviewProcessingConfig & co
     gradContrastTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradContrastBytes.constData());
     gradientMaskTexture->setData(QOpenGLTexture::Red, QOpenGLTexture::Float32, gradientMaskBytes.constData());
 
-    fbo.bind();
+    if ( !fbo.bind() )
+    {
+        context.doneCurrent();
+        return fail(QStringLiteral("offscreen preview framebuffer bind failed"));
+    }
     glFunctions->glViewport(0, 0, width, height);
     glFunctions->glDisable(GL_DEPTH_TEST);
     glFunctions->glDisable(GL_BLEND);
@@ -3213,6 +3290,12 @@ bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
 
     const QByteArray packedFrame = packRgb16Texture(inputRgb16, width * height);
     QOpenGLTexture * srcTexture = createFrameTexture(width, height);
+    if ( !previewProcessingTextureIsReady(srcTexture) )
+    {
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("box blur source texture creation/storage failed"));
+    }
     srcTexture->setData(QOpenGLTexture::RGBA, QOpenGLTexture::UInt16, packedFrame.constData());
 
     QOpenGLFramebufferObjectFormat fboFormat;
@@ -3232,8 +3315,9 @@ bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
     const int texLoc = program.attributeLocation("texCoord");
 
     auto drawPass = [&](GLuint inputTexture, QOpenGLFramebufferObject & target, float horizontal)
+        -> bool
     {
-        target.bind();
+        if ( !target.bind() ) return false;
         glFunctions->glViewport(0, 0, width, height);
         glFunctions->glDisable(GL_DEPTH_TEST);
         glFunctions->glDisable(GL_BLEND);
@@ -3261,16 +3345,29 @@ bool gpuPreviewProcessingApplyBoxBlurOffscreen(const uint16_t * inputRgb16,
         program.disableAttributeArray(posLoc);
         program.disableAttributeArray(texLoc);
         target.release();
+        return true;
     };
 
     /* Horizontal pass into fboHorizontal, then vertical pass reading it into
      * fboVertical. The passes do NOT flip Y (unlike the main preview offscreen),
      * so readback row 0 maps to input row 0 -- the box is symmetric and the
      * edge clamp is position-dependent, so the orientation must match blur_image. */
-    drawPass(srcTexture->textureId(), fboHorizontal, 1.0f);
-    drawPass(fboHorizontal.texture(), fboVertical, 0.0f);
+    if ( !drawPass(srcTexture->textureId(), fboHorizontal, 1.0f)
+      || !drawPass(fboHorizontal.texture(), fboVertical, 0.0f) )
+    {
+        program.release();
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("box blur framebuffer bind failed"));
+    }
 
-    fboVertical.bind();
+    if ( !fboVertical.bind() )
+    {
+        program.release();
+        delete srcTexture;
+        context.doneCurrent();
+        return fail(QStringLiteral("box blur framebuffer readback bind failed"));
+    }
     QByteArray readback(static_cast<int>(width * height * 4u * sizeof(uint16_t)), Qt::Uninitialized);
     glFunctions->glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_SHORT, readback.data());
     fboVertical.release();
@@ -3417,6 +3514,16 @@ static bool applyChromaPostPassGpu(uint16_t * img, int width, int height, int ra
     QOpenGLTexture * fwdB = createChromaLutTexture();
     QOpenGLTexture * invCr = createChromaLutTexture();
     QOpenGLTexture * invCb = createChromaLutTexture();
+    QOpenGLTexture * chromaTextures[] = { srcTexture, fwdR, fwdG, fwdB, invCr, invCb };
+    for (QOpenGLTexture * texture : chromaTextures)
+    {
+        if ( !previewProcessingTextureIsReady(texture) )
+        {
+            for (QOpenGLTexture * allocated : chromaTextures) delete allocated;
+            context.doneCurrent();
+            return fail(QStringLiteral("chroma texture creation/storage failed"));
+        }
+    }
     {
         const QByteArray a = packChromaLutRgba32F(0.299, -0.168736, 0.0, 0);
         const QByteArray b = packChromaLutRgba32F(0.587, -0.331264, -0.418688, 0);

@@ -290,6 +290,44 @@ TEST(GpuPreviewProcessing, TinyDualIsoReceiptSubsetGoldenOutputIsStable)
                            std::to_string(frame1_config.signature));
 }
 
+TEST(GpuPreviewProcessing, OffscreenResourcesSurviveRepeatedSoftwareGlRuns)
+{
+    /* This is deliberately a resource-lifecycle contract, not a golden. The
+     * hosted CI failure was a null GL control transfer after repeated offscreen
+     * resource work. Software GL is allowed here so the contract runs in
+     * headless Session-0; production's default software-renderer rejection is
+     * unchanged because this test opts in explicitly. */
+    qputenv("MLVAPP_GPU_PREVIEW_ALLOW_SOFTWARE", QByteArrayLiteral("1"));
+    const GpuPreviewProcessingBackendAvailability availability =
+        gpuPreviewProcessingProbeGpuBackend();
+    if ( !availability.available )
+    {
+        ASSERT_TRUE(gpu_preview_skip_reason_is_known(availability.reason));
+        SKIP_TEST(availability.reason.toStdString());
+    }
+
+    constexpr int width = 8;
+    constexpr int height = 6;
+    std::vector<uint16_t> input(width * height * 3u);
+    std::vector<uint16_t> output(input.size());
+    for (size_t i = 0; i < input.size(); ++i)
+    {
+        input[i] = static_cast<uint16_t>((i * 977u + 123u) & 0xffffu);
+    }
+
+    for (int iteration = 0; iteration < 5; ++iteration)
+    {
+        QString reason;
+        QString renderer;
+        ASSERT_TRUE(gpuPreviewProcessingApplyBoxBlurOffscreen(
+            input.data(), output.data(), width, height, 2, true, true, true,
+            &reason, &renderer));
+        ASSERT_TRUE(reason.isEmpty());
+        ASSERT_TRUE(!renderer.isEmpty());
+        ASSERT_TRUE(output != input);
+    }
+}
+
 TEST(GpuPreviewProcessing, DisplayShaderDoesNotUseShadowsHighlightsFrameState)
 {
     GpuPreviewProcessingConfig config;
