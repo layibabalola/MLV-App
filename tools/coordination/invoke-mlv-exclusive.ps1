@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Owner,
     [Parameter(Mandatory = $true)][string]$FilePath,
     [string[]]$ArgumentList = @(),
+    [string]$ArgumentListBase64 = "",
     [string]$WorkingDirectory = "",
     [int]$TimeoutSeconds = 0
 )
@@ -10,6 +11,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 $working = if ($WorkingDirectory) { (Resolve-Path -LiteralPath $WorkingDirectory).Path } else { $root }
+if ($ArgumentListBase64) {
+    try {
+        $argumentJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ArgumentListBase64))
+        $ArgumentList = @($argumentJson | ConvertFrom-Json)
+    }
+    catch { throw "ArgumentListBase64 must encode a JSON array of strings: $($_.Exception.Message)" }
+    if (@($ArgumentList | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        throw "ArgumentListBase64 must encode only strings."
+    }
+}
 $coordination = Join-Path $root '.claude-state\coordination\build-ownership.jsonl'
 $lockDir = Join-Path $root '.claude-state\coordination\locks'
 $lockPath = Join-Path $lockDir 'mlvapp-exclusive.lock'
@@ -28,22 +39,36 @@ $record = [ordered]@{
 }
 $stream = $null
 $process = $null
+$stdoutTask = $null
+$stderrTask = $null
+$outputFlushed = $false
+function Write-CapturedOutput($OutTask, $ErrorTask) {
+    $stdout = if ($OutTask) { $OutTask.GetAwaiter().GetResult() } else { "" }
+    $stderr = if ($ErrorTask) { $ErrorTask.GetAwaiter().GetResult() } else { "" }
+    if ($stdout) { [Console]::Out.Write($stdout) }
+    if ($stderr) { [Console]::Error.Write($stderr) }
+}
 function Get-Snapshot {
     @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate, CommandLine)
 }
-function Get-Descendants([int]$ParentId, [object[]]$Snapshot) {
-    $children = @($Snapshot | Where-Object { [int]$_.ParentProcessId -eq $ParentId })
+function Get-Descendants([int]$ParentId, [datetime]$ParentCreation, [object[]]$Snapshot) {
+    $children = @($Snapshot | Where-Object {
+        if ([int]$_.ParentProcessId -ne $ParentId) { return $false }
+        try { return ([datetime]$_.CreationDate -ge $ParentCreation) } catch { return $false }
+    })
     $result = New-Object System.Collections.Generic.List[object]
     foreach ($child in $children) {
         $result.Add($child)
-        foreach ($nested in (Get-Descendants -ParentId ([int]$child.ProcessId) -Snapshot $Snapshot)) { $result.Add($nested) }
+        foreach ($nested in (Get-Descendants -ParentId ([int]$child.ProcessId) -ParentCreation ([datetime]$child.CreationDate) -Snapshot $Snapshot)) { $result.Add($nested) }
     }
     return $result.ToArray()
 }
 function Stop-OwnedTree([int]$RootPid) {
     # Exactly one cached process snapshot is used for this cleanup pass.
     $snapshot = Get-Snapshot
-    $descendants = @(Get-Descendants -ParentId $RootPid -Snapshot $snapshot | Sort-Object @{Expression={($_.CommandLine -split '\s+').Count};Descending=$true})
+    $rootProcess = $snapshot | Where-Object { [int]$_.ProcessId -eq $RootPid } | Select-Object -First 1
+    if (-not $rootProcess) { return @() }
+    $descendants = @(Get-Descendants -ParentId $RootPid -ParentCreation ([datetime]$rootProcess.CreationDate) -Snapshot $snapshot | Sort-Object @{Expression={($_.CommandLine -split '\s+').Count};Descending=$true})
     foreach ($child in $descendants) {
         try { Stop-Process -Id ([int]$child.ProcessId) -Force -ErrorAction Stop } catch { }
     }
@@ -57,20 +82,38 @@ try {
     }
     $lockText = ([System.Text.Encoding]::UTF8.GetBytes(($record | ConvertTo-Json -Compress)))
     $stream.SetLength(0); $stream.Write($lockText, 0, $lockText.Length); $stream.Flush()
-    $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $working -PassThru -NoNewWindow
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FilePath
+    $startInfo.WorkingDirectory = $working
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $ArgumentList) { [void]$startInfo.ArgumentList.Add($argument) }
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if (-not $process) { throw "Failed to start MLV-App exclusive command: $FilePath" }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $record.pid = $process.Id
     $record.outcome = 'running'
     # Cache one ownership snapshot immediately after spawn; never recursively poll CIM.
     $spawnSnapshot = Get-Snapshot
-    $record.pidTree = @($process.Id) + @(Get-Descendants -ParentId $process.Id -Snapshot $spawnSnapshot | ForEach-Object { [int]$_.ProcessId })
+    $spawnRoot = $spawnSnapshot | Where-Object { [int]$_.ProcessId -eq $process.Id } | Select-Object -First 1
+    $spawnCreation = if ($spawnRoot) { [datetime]$spawnRoot.CreationDate } else { $process.StartTime }
+    $record.pidTree = @($process.Id) + @(Get-Descendants -ParentId $process.Id -ParentCreation $spawnCreation -Snapshot $spawnSnapshot | ForEach-Object { [int]$_.ProcessId })
     if ($TimeoutSeconds -gt 0 -and -not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $record.outcome = 'timeout'
         $record.cleanupState = 'terminating-owned-descendants'
         [void](Stop-OwnedTree -RootPid $process.Id)
         try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch { }
+        $process.WaitForExit()
+        Write-CapturedOutput -OutTask $stdoutTask -ErrorTask $stderrTask
+        $outputFlushed = $true
         throw "MLV-App exclusive command timed out after ${TimeoutSeconds}s (pid=$($process.Id))"
     }
     $process.WaitForExit()
+    Write-CapturedOutput -OutTask $stdoutTask -ErrorTask $stderrTask
+    $outputFlushed = $true
     $record.exitCode = $process.ExitCode
     $record.outcome = if ($process.ExitCode -eq 0) { 'succeeded' } else { 'failed' }
     $record.cleanupState = 'awaited; no owned descendants expected'
@@ -80,6 +123,9 @@ try {
         $record.cleanupState = 'terminating-owned-descendants'
         [void](Stop-OwnedTree -RootPid $process.Id)
         try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch { }
+    }
+    if ($process -and -not $outputFlushed) {
+        try { $process.WaitForExit(); Write-CapturedOutput -OutTask $stdoutTask -ErrorTask $stderrTask } catch { }
     }
     if ($stream) { $stream.Dispose() }
     $record.endTimeUtc = (Get-Date).ToUniversalTime().ToString('o')
