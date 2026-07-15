@@ -160,5 +160,7 @@ if (-not $SkipDeployRuntime -and $env:OS -eq "Windows_NT") {
 
 Write-Host ("[run-windows-test] exe={0}" -f $exe)
 Write-Host ("[run-windows-test] path_prefix={0}" -f (($runtimeDirs | Select-Object -First 5) -join ';'))
-& $exe @TestArgs
+$runner = Join-Path $root "tools\coordination\invoke-mlv-exclusive.ps1"
+& pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+    -RepoRoot $root -Owner "test:${Suite}:$env:USERNAME" -FilePath $exe -ArgumentList ($TestArgs -join ' ')
 exit $LASTEXITCODE

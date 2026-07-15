@@ -47,9 +47,14 @@ try {
     # so the artifact self-identifies its real commit + dirty state (not a qmake-pinned label).
     & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$SourceRoot\tools\gen-buildinfo.ps1" `
         -SrcRoot "$SourceRoot" -OutHeader (Join-Path $bd "build_buildinfo.h") 2>&1 | Out-Host
-    & "$QtBin\qmake.exe" "$SourceRoot\platform\qt\MLVApp.pro" 2>&1 | Out-Host
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$SourceRoot\tools\coordination\invoke-mlv-exclusive.ps1" `
+        -RepoRoot $SourceRoot -Owner "qmake-release:$env:USERNAME" -FilePath "$QtBin\qmake.exe" `
+        -WorkingDirectory $bd -ArgumentList "`"$SourceRoot\platform\qt\MLVApp.pro`""
     if ($LASTEXITCODE -ne 0) { throw "qmake failed ($LASTEXITCODE)" }
-    & "$MingwBin\mingw32-make.exe" -f Makefile.Release -j8 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "qmake failed ($LASTEXITCODE)" }
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$SourceRoot\tools\coordination\invoke-mlv-exclusive.ps1" `
+        -RepoRoot $SourceRoot -Owner "build-release:$env:USERNAME" -FilePath "$MingwBin\mingw32-make.exe" -WorkingDirectory $bd `
+        -ArgumentList '-f Makefile.Release -j8'
     if ($LASTEXITCODE -ne 0) { throw "make failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
 $builtExe = Join-Path $bd "release\MLVApp.exe"

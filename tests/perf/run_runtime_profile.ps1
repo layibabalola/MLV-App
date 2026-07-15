@@ -100,9 +100,14 @@ function Ensure-PerfExe([string]$Root, [string]$RequestedPerfExe) {
 
     Push-Location $buildDir
     try {
-        & $qmake (Join-Path $Root "tests\tests.pro")
+        $runner = Join-Path $Root "tools\coordination\invoke-mlv-exclusive.ps1"
+        & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+            -RepoRoot $Root -Owner "qmake-perf:$env:USERNAME" -FilePath $qmake -WorkingDirectory $buildDir `
+            -ArgumentList "`"$(Join-Path $Root 'tests\tests.pro')`""
         if ($LASTEXITCODE -ne 0) { throw "qmake failed with exit code $LASTEXITCODE" }
-        & $make -j4
+        $runner = Join-Path $Root "tools\coordination\invoke-mlv-exclusive.ps1"
+        & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $runner `
+            -RepoRoot $Root -Owner "perf-build:$env:USERNAME" -FilePath $make -WorkingDirectory $buildDir -ArgumentList '-j4'
         if ($LASTEXITCODE -ne 0) { throw "mingw32-make failed with exit code $LASTEXITCODE" }
     }
     finally {
