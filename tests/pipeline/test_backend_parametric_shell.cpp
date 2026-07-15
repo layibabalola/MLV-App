@@ -181,7 +181,8 @@ void assert_known_gpu_skip_reason(const QString & reason)
              || reason.contains(QStringLiteral("QOpenGLContext"))
              || reason.contains(QStringLiteral("QOpenGLFramebufferObject"))
              || reason.contains(QStringLiteral("software rasterizer"))
-             || reason.contains(QStringLiteral("QOpenGLShaderProgram")));
+             || reason.contains(QStringLiteral("QOpenGLShaderProgram"))
+             || reason.contains(QStringLiteral("dispatch"), Qt::CaseInsensitive));
 }
 
 std::string processing_compare_detail(const char * variant_name,

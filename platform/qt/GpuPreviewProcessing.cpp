@@ -1280,7 +1280,8 @@ bool makePreviewProcessingContextCurrent(QOffscreenSurface * surface,
     if ( !previewProcessingGlDispatchIsReady(context, glFunctions, reason) )
     {
         context->doneCurrent();
-        return false;
+        return fail(reason ? *reason
+                           : QStringLiteral("offscreen preview GL dispatch unavailable"));
     }
 
     const QString renderer = rendererDescriptionFromFunctions(glFunctions);
