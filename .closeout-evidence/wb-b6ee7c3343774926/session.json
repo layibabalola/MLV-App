@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/work-block/wb-b6ee7c3343774926",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-07-14T15:59:42+00:00",
+  "detectorHash": "1f4492b139cd6d51dbb1bec6410f613f",
+  "featureHead": "7a88f3479ebdea08b8686c6a56a860f83af794d6",
+  "schemaVersion": "1.0",
+  "targetHead": "a2bce082fff1bd866be8c6069db74d9e8156a65c",
+  "workBlockId": "wb-b6ee7c3343774926",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\ci1-lane-health"
+}

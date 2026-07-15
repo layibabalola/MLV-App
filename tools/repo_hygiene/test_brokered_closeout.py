@@ -74,6 +74,8 @@ from .brokered_closeout import (
     stable_hash,
     start_work_block,
     stop_runtime_services_before_promotion,
+    target_worktree_update_preflight,
+    update_local_target,
     validate_rollback_manifest,
     verify_repo_closed_postcondition,
     verify_prune_recovery_artifact,
@@ -4328,6 +4330,65 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), feature_head)
         self.assertIn("partial_push_recovery", self.audit_types(repo))
         self.assertNotEqual(git(repo, "rev-parse", "--verify", "codex/test-work", check=False).returncode, 0)
+
+    def test_local_target_update_fast_forwards_checked_out_worktree_and_refreshes_files(self) -> None:
+        repo = self.init_repo(remote=False)
+        base_head = git(repo, "rev-parse", "master").stdout.strip()
+        git(repo, "checkout", "-b", "codex/target-sync", base_head)
+        target_worktree = self.tempdir / "target-master-worktree"
+        git(repo, "worktree", "add", str(target_worktree), "master")
+        (repo / "synced.txt").write_text("new target content\n", encoding="utf-8")
+        git(repo, "add", "synced.txt")
+        git(repo, "commit", "-m", "advance target")
+        new_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        preflight = target_worktree_update_preflight(repo, "master", new_head)
+        result = update_local_target(repo, "master", new_head)
+
+        self.assertEqual(preflight["status"], "success", preflight)
+        self.assertEqual(preflight["method"], "checked-out-worktree-ff")
+        self.assertEqual(result["returncode"], 0, result)
+        self.assertTrue(result["verified"], result)
+        self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), new_head)
+        self.assertEqual((target_worktree / "synced.txt").read_text(encoding="utf-8"), "new target content\n")
+        self.assertEqual(git(target_worktree, "status", "--porcelain").stdout, "")
+
+    def test_local_target_update_refuses_dirty_checked_out_worktree_without_moving_ref(self) -> None:
+        repo = self.init_repo(remote=False)
+        base_head = git(repo, "rev-parse", "master").stdout.strip()
+        git(repo, "checkout", "-b", "codex/target-sync-dirty", base_head)
+        target_worktree = self.tempdir / "dirty-target-master-worktree"
+        git(repo, "worktree", "add", str(target_worktree), "master")
+        (repo / "advance.txt").write_text("advance\n", encoding="utf-8")
+        git(repo, "add", "advance.txt")
+        git(repo, "commit", "-m", "advance target candidate")
+        new_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        (target_worktree / "README.md").write_text("local owner edit\n", encoding="utf-8")
+
+        result = update_local_target(repo, "master", new_head)
+
+        self.assertNotEqual(result["returncode"], 0, result)
+        self.assertEqual(result["reason"], "target_worktree_dirty_before_ref_update")
+        self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), base_head)
+        self.assertEqual((target_worktree / "README.md").read_text(encoding="utf-8"), "local owner edit\n")
+
+    def test_finalize_blocks_before_remote_push_when_checked_out_target_worktree_is_dirty(self) -> None:
+        repo = self.init_repo(remote=True)
+        self.make_feature(repo, "wb-dirty-target-prepush")
+        target_worktree = self.tempdir / "dirty-target-before-push"
+        git(repo, "worktree", "add", str(target_worktree), "master")
+        (target_worktree / "README.md").write_text("local owner edit\n", encoding="utf-8")
+        remote_before = git(repo, "ls-remote", "origin", "refs/heads/master").stdout.split()[0]
+        self.approve_current_tuple(repo, "wb-dirty-target-prepush")
+
+        result = finalize_work_block(repo, work_block_id="wb-dirty-target-prepush")
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "target_worktree_not_ready_before_push")
+        self.assertEqual(result["detail"]["reason"], "target_worktree_dirty_before_ref_update")
+        remote_after = git(repo, "ls-remote", "origin", "refs/heads/master").stdout.split()[0]
+        self.assertEqual(remote_after, remote_before)
+        self.assertEqual((target_worktree / "README.md").read_text(encoding="utf-8"), "local owner edit\n")
 
     def test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun(self) -> None:
         repo = self.init_repo(remote=True)
