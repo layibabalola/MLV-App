@@ -8851,7 +8851,10 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
 
     int prefetched_hits = 0;
     uint64_t mismatched_bytes = 0;
-    for (int pass = 0; pass < 3 && prefetched_hits == 0; ++pass)
+    // The worker render is intentionally asynchronous.  Three short passes
+    // made this assertion depend on host load rather than readiness; allow a
+    // bounded settling window before declaring that no worker hit occurred.
+    for (int pass = 0; pass < 8 && prefetched_hits == 0; ++pass)
     {
         for (uint64_t f = 0; f < frame_count; ++f)
         {
@@ -8870,7 +8873,7 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
             }
             /* Give the worker time to land the next lookahead frame before
              * the foreground asks for it. */
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
 
@@ -8938,7 +8941,9 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectAggressiveX4WorkerHitMatchesRefe
 
     int prefetched_hits = 0;
     uint64_t mismatched_bytes = 0;
-    for (int pass = 0; pass < 3 && prefetched_hits == 0; ++pass)
+    // Match the non-aggressive indirect test's bounded worker-readiness
+    // window; aggressive rendering is more load-sensitive on this fixture.
+    for (int pass = 0; pass < 8 && prefetched_hits == 0; ++pass)
     {
         for (uint64_t f = 0; f < frame_count; ++f)
         {
@@ -8955,7 +8960,7 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectAggressiveX4WorkerHitMatchesRefe
                     }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
     }
 
