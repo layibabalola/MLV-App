@@ -18,4 +18,3 @@
 # shadows/highlights blur pre-pass that ended the 16-bit/8-bit policy drift.)
 
 # --- [STALE?] dispatch/contract pins predating the 2026-06-10 baseline ---
-Phase3_PAR.SerialPathByteIdentity
