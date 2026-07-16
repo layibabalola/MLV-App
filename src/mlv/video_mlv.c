@@ -3672,7 +3672,7 @@ static int mlv_phase4bv4_x8_preview_compatible(const mlvObject_t * video)
 
     const int full_w = (int)getMlvWidth(video);
     const int full_h = (int)getMlvHeight(video);
-    return full_w > 0 && full_h >= 32 && (full_w % 16) == 0;
+    return full_w > 0 && full_h >= 32 && (full_w % 16) == 0 && (full_h % 32) == 0;
 }
 
 static void mlv_phase4bv2_log_rejection(const char * reason);
