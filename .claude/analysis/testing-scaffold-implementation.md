@@ -1,5 +1,35 @@
 ## Testing Scaffold Notes
 
+### CI-1 Golden and Stress Gate Redesign (2026-07-20)
+
+#### Verified locally
+
+- `tests/pipeline/test_main.cpp` now refuses `--check-golden` before test execution when the selected in-repo oracle is dirty or its cleanliness cannot be verified. This refusal has dedicated exit code `5`; exit `3` remains reserved for the golden comparison itself.
+  - A wrapper-mediated probe against dirty `tests/pipeline/test_main.cpp` returned exit `5` and named the full path exactly.
+  - The normal committed oracle stayed clean and reached the comparator: the complete seven-producer filter ran 7 tests / 75 assertions / 0 failures, then returned the expected blocking exit `3` with all 15 stale values reported.
+- `.github/workflows/tests.yml` no longer runs `--check-golden` inside partial exact-name shards. It derives one complete producer-only filter from a reviewable 15-key-to-test map and checks that map against the committed JSON key set before invoking one report-all comparison.
+  - Static source mapping resolves the open count to 7 producer tests for 15 mandatory keys.
+  - The six `.gpu_preview_subset.` keys are deliberately mandatory CPU-reference/config outputs. Capability-optional keys continue to use the literal `.gpu.` namespace.
+  - The producer job retains its actual JSON and distinguishes hash-write exit `2`, compare exit `3`, dirty-oracle refusal exit `5`, and timeout `124`.
+- The hosted stress leg now selects the complete `ProcessingFilters.AggressiveX*` family and uses four separately launched six-way batches (24 planned attempts). Every child output is written before timeout/failure classification, fixing the prior kill-before-flush loss.
+  - Power is disclosed in the workflow: historical 24-way incidence 2/72 implies N=107 for about 95% point-estimate detection, but N=885 at the 95% Clopper-Pearson lower bound. The six-way hosted N=24 leg is only about 49.1% / 7.8% at those rates and is a blocking regression signal, not a 95% acceptance claim.
+- Validation completed after rebuilding `tests/build-ci-pipeline/release/pipeline_tests.exe` through the Windows Qt/MinGW runtime path:
+  - embedded PowerShell parse: PASS
+  - workflow YAML parse: PASS
+  - `git diff --check`: PASS
+  - `ProcessingFilters.AggressiveX*`: 2 selected tests / 12 assertions / 0 failures
+
+#### Cross-checked from prior analysis
+
+- Fable 728 establishes that hosted exit `3` was strictly rejected before expected-failure adjudication; `continue-on-error` did not mask it.
+- Fable 705 requires explicit expected-key-to-producer coverage. The checked 15-key map and dedicated complete producer process implement disposition B from Fable 729 without introducing a second comparison implementation.
+- The proposed regenerated JSON and whole-artifact provenance remain outside the tree under `.claude-state/profiling/ci1-fable729-assembly-20260720/`. The committed `tests/fixtures/golden/pipeline_hashes.json` is intentionally unchanged pending dedicated review.
+
+#### Needs runtime profiling
+
+- Hosted execution is still required after the dedicated reviewer adjudicates the proposed artifact and workflow range. Until then, the complete producer job is expected to block on the committed stale artifact with exit `3`.
+- The 24-attempt hosted stress leg must report achieved attempts, load stratum, failures, and any clustering; a local two-test family smoke is syntax/mechanism validation, not replacement contention evidence.
+
 ### Windows Qt Test Runtime Wrapper (2026-06-04)
 
 #### Verified locally

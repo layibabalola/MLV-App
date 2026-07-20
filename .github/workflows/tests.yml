@@ -173,90 +173,190 @@ jobs:
             $shards += @{ Name = ("exact-{0:D2}" -f [int]($offset / $testsPerShard)); Filter = $filter }
           }
           function Invoke-BoundedPipelineShard {
-            param([string]$Name, [string]$Filter, [string]$OutputPath)
+            param(
+              [string]$Name,
+              [string[]]$Arguments,
+              [string]$OutputPath,
+              [int]$WaitMilliseconds = 240000
+            )
             $psi = [System.Diagnostics.ProcessStartInfo]::new()
             $psi.FileName = (Resolve-Path "tests\build-ci-pipeline\release\pipeline_tests.exe").Path
             $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
             $psi.UseShellExecute = $false
             $psi.RedirectStandardOutput = $true
             $psi.RedirectStandardError = $true
-            [void]$psi.ArgumentList.Add("--check-golden")
-            [void]$psi.ArgumentList.Add("--gtest_filter=$Filter")
+            foreach ($argument in $Arguments) {
+              [void]$psi.ArgumentList.Add($argument)
+            }
             $process = [System.Diagnostics.Process]::new()
             $process.StartInfo = $psi
             if (-not $process.Start()) { throw "failed to start pipeline shard $Name" }
             $stdoutTask = $process.StandardOutput.ReadToEndAsync()
             $stderrTask = $process.StandardError.ReadToEndAsync()
-            if (-not $process.WaitForExit(240000)) {
+            $timedOut = -not $process.WaitForExit($WaitMilliseconds)
+            if ($timedOut) {
               try { $process.Kill($true) } catch { }
-              throw "pipeline shard $Name exceeded 240 seconds"
             }
             $process.WaitForExit()
             $stdout = $stdoutTask.GetAwaiter().GetResult()
             $stderr = $stderrTask.GetAwaiter().GetResult()
             $combined = $stdout + $stderr
             Set-Content -Path $OutputPath -Value $combined -Encoding utf8
-            return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $combined }
+            return [pscustomobject]@{
+              ExitCode = if ($timedOut) { 124 } else { $process.ExitCode }
+              Output = $combined
+              TimedOut = $timedOut
+            }
           }
           foreach ($shard in $shards) {
             $shardOutput = Join-Path $env:RUNNER_TEMP ("pipeline-tests-{0}.txt" -f $shard.Name)
             Add-Content -Path $suiteOutput -Value ("===== SHARD {0} FILTER {1} =====" -f $shard.Name, $shard.Filter)
-            $shardResult = Invoke-BoundedPipelineShard -Name $shard.Name -Filter $shard.Filter -OutputPath $shardOutput
+            $shardResult = Invoke-BoundedPipelineShard -Name $shard.Name -Arguments @("--gtest_filter=$($shard.Filter)") -OutputPath $shardOutput
             Add-Content -Path $suiteOutput -Value ("===== SHARD {0} FILTER {1} EXIT {2} =====" -f $shard.Name, $shard.Filter, $shardResult.ExitCode)
             Add-Content -Path $suiteOutput -Value $shardResult.Output
             Write-Output ("===== SHARD {0} FILTER {1} EXIT {2} =====" -f $shard.Name, $shard.Filter, $shardResult.ExitCode)
             Write-Output $shardResult.Output
             $shardExit = $shardResult.ExitCode
 
+            if ($shardResult.TimedOut) {
+              throw "pipeline_tests shard $($shard.Name) exceeded 240 seconds (exit 124; output retained)"
+            }
             # Exit 1 means named test failures, which the reviewed manifest
-            # adjudicates after all shards. Crashes, usage errors, and
-            # golden-oracle errors remain unconditionally blocking.
+            # adjudicates after all shards. Crashes and usage errors remain
+            # unconditionally blocking. Golden comparison is deliberately not
+            # performed on partial shard actuals; one complete producer job below
+            # owns that contract.
             if ($shardExit -notin @(0, 1)) {
               throw "pipeline_tests shard $($shard.Name) failed outside the expected-failure contract (exit $shardExit)"
             }
           }
 
+          # Golden disposition B: one complete producer-only process owns the
+          # fail-closed report-all comparison. The reviewable key-to-test map is
+          # checked against the committed artifact before the filter is derived,
+          # so a key or producer cannot silently fall out of coverage.
+          $goldenKeyToProducer = [ordered]@{
+            'tiny_dual_iso.debayer.amaze.cpu.frame0' = 'BackendParametricDebayerShell.CpuRenderDebayerAmazeProducesStableHash'
+            'tiny_dual_iso.debayer.bilinear.cpu.frame0' = 'BackendParametricDebayerShell.CpuRenderDebayerBilinearProducesStableHash'
+            'tiny_dual_iso.full16.frame0' = 'DualIsoPipeline.TinyDualIsoFullFramesMatchGolden'
+            'tiny_dual_iso.full16.frame1' = 'DualIsoPipeline.TinyDualIsoFullFramesMatchGolden'
+            'tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0' = 'GpuPreviewProcessing.ExposureStopsChangesSubsetConfigAndStableOutput'
+            'tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0' = 'GpuPreviewProcessing.ExposureStopsChangesSubsetConfigAndStableOutput'
+            'tiny_dual_iso.gpu_preview_subset.frame0' = 'GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable'
+            'tiny_dual_iso.gpu_preview_subset.frame1' = 'GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable'
+            'tiny_dual_iso.gpu_preview_subset.signature.frame0' = 'GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable'
+            'tiny_dual_iso.gpu_preview_subset.signature.frame1' = 'GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable'
+            'tiny_dual_iso.preview16.frame0' = 'DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'
+            'tiny_dual_iso.preview16.frame1' = 'DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'
+            'tiny_dual_iso.preview16_vs_full_psnr.frame0' = 'DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'
+            'tiny_dual_iso.preview16_vs_full_psnr.frame1' = 'DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull'
+            'tiny_dual_iso.preview_processing.cpu.frame0' = 'BackendParametricShell.CpuRenderPreviewProcessingSubsetProducesStableHash'
+          }
+          $goldenPath = (Resolve-Path 'tests\fixtures\golden\pipeline_hashes.json').Path
+          $goldenExpected = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json -AsHashtable
+          $expectedGoldenKeys = @($goldenExpected.Keys | Sort-Object)
+          $mappedGoldenKeys = @($goldenKeyToProducer.Keys | Sort-Object)
+          $mappingDelta = @(Compare-Object -ReferenceObject $expectedGoldenKeys -DifferenceObject $mappedGoldenKeys)
+          if ($mappingDelta.Count -ne 0) {
+            throw "golden key-to-producer coverage mismatch: $($mappingDelta | Out-String)"
+          }
+          $goldenProducerTests = @($goldenKeyToProducer.Values | Sort-Object -Unique)
+          if ($goldenProducerTests.Count -ne 7) {
+            throw "golden producer count changed: expected 7, actual $($goldenProducerTests.Count)"
+          }
+          $goldenProducerFilter = $goldenProducerTests -join ':'
+          $goldenOutput = Join-Path $env:RUNNER_TEMP 'pipeline-tests-golden-producers.txt'
+          $goldenActualOutput = Join-Path $env:RUNNER_TEMP 'pipeline-golden-actual.json'
+          $goldenResult = Invoke-BoundedPipelineShard -Name 'golden-producers' -Arguments @(
+            '--check-golden',
+            '--hash-output', $goldenActualOutput,
+            "--gtest_filter=$goldenProducerFilter"
+          ) -OutputPath $goldenOutput
+          Add-Content -Path $suiteOutput -Value ("===== GOLDEN PRODUCERS FILTER {0} EXIT {1} =====" -f $goldenProducerFilter, $goldenResult.ExitCode)
+          Add-Content -Path $suiteOutput -Value $goldenResult.Output
+          Write-Output ("===== GOLDEN PRODUCERS FILTER {0} EXIT {1} =====" -f $goldenProducerFilter, $goldenResult.ExitCode)
+          Write-Output $goldenResult.Output
+          if ($goldenResult.TimedOut) {
+            throw 'pipeline golden producer job exceeded 240 seconds (exit 124; output retained)'
+          }
+          switch ($goldenResult.ExitCode) {
+            0 { }
+            2 { throw 'pipeline golden producer job could not write its actual-key artifact (exit 2)' }
+            3 { throw 'pipeline golden producer job found a missing key, mismatch, or unexpected key (exit 3)' }
+            5 { throw 'pipeline golden producer job refused a dirty or unverifiable oracle (exit 5)' }
+            default { throw "pipeline golden producer job failed outside the golden contract (exit $($goldenResult.ExitCode))" }
+          }
+
           # Criterion (v): exercise the hosted-like contention that exposed the
-          # two prefetch failures. Four concurrent repetitions are an evidence
-          # leg, not an expected-failure allowance; every nonzero result is
-          # retained in the aggregate log and blocks this job.
-          $stressFilter = 'DualIsoPipeline.Processed8PrefetchIndirect*:ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights'
-          $stressProcesses = @()
-          for ($run = 1; $run -le 4; $run++) {
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = (Resolve-Path "tests\build-ci-pipeline\release\pipeline_tests.exe").Path
-            $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            [void]$psi.ArgumentList.Add("--gtest_filter=$stressFilter")
-            $process = [System.Diagnostics.Process]::new()
-            $process.StartInfo = $psi
-            if (-not $process.Start()) { throw "failed to start stress repetition $run" }
-            $stressProcesses += [pscustomobject]@{
-              Name = "stress-{0:D2}" -f $run
-              Process = $process
-              Stdout = $process.StandardOutput.ReadToEndAsync()
-              Stderr = $process.StandardError.ReadToEndAsync()
+          # AggressiveX family under contention. Historical contended incidence
+          # was 2/72 at 24-way load: N=107 gives about 95% point-estimate
+          # detection power, while its 95% Clopper-Pearson lower bound (0.00338)
+          # would require N=885. Hosted CI deliberately runs a lower-cost N=24
+          # (four separately launched six-way batches): about 49.1% power at the
+          # point estimate and 7.8% at that lower bound. Because six-way hosted
+          # load is a different stratum from the historical 24-way evidence and
+          # siblings in one batch may be correlated, this leg is a blocking
+          # regression signal at disclosed power, never a 95% acceptance claim.
+          $stressFilter = 'ProcessingFilters.AggressiveX*'
+          $stressBatchCount = 4
+          $stressBatchSize = 6
+          $stressPlannedAttempts = $stressBatchCount * $stressBatchSize
+          $stressAchievedAttempts = 0
+          $powerDisclosure = 'STRESS-PREREG targetPower=95% historicalContendedRate=2/72 historicalLoad=24-way derivedN=107 cp95Lower=0.0033819 lowerBoundN=885 ciLoad=6-way ciN=24 pointPower=49.1% lowerBoundPower=7.8% dependence=within-batch-correlated'
+          Add-Content -Path $suiteOutput -Value $powerDisclosure
+          Write-Output $powerDisclosure
+          for ($batch = 1; $batch -le $stressBatchCount; $batch++) {
+            $stressProcesses = @()
+            for ($run = 1; $run -le $stressBatchSize; $run++) {
+              $attempt = (($batch - 1) * $stressBatchSize) + $run
+              $name = "stress-b{0:D2}-r{1:D2}-a{2:D3}" -f $batch, $run, $attempt
+              $psi = [System.Diagnostics.ProcessStartInfo]::new()
+              $psi.FileName = (Resolve-Path "tests\build-ci-pipeline\release\pipeline_tests.exe").Path
+              $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
+              $psi.UseShellExecute = $false
+              $psi.RedirectStandardOutput = $true
+              $psi.RedirectStandardError = $true
+              [void]$psi.ArgumentList.Add("--gtest_filter=$stressFilter")
+              $process = [System.Diagnostics.Process]::new()
+              $process.StartInfo = $psi
+              if (-not $process.Start()) { throw "failed to start stress repetition $name" }
+              $stressProcesses += [pscustomobject]@{
+                Name = $name
+                Process = $process
+                Stdout = $process.StandardOutput.ReadToEndAsync()
+                Stderr = $process.StandardError.ReadToEndAsync()
+              }
+            }
+
+            $batchFailures = @()
+            foreach ($stress in $stressProcesses) {
+              $timedOut = -not $stress.Process.WaitForExit(240000)
+              if ($timedOut) {
+                try { $stress.Process.Kill($true) } catch { }
+              }
+              $stress.Process.WaitForExit()
+              $stressOutput = $stress.Stdout.GetAwaiter().GetResult() + $stress.Stderr.GetAwaiter().GetResult()
+              $stressExit = if ($timedOut) { 124 } else { $stress.Process.ExitCode }
+              $stressOutputPath = Join-Path $env:RUNNER_TEMP ("pipeline-tests-{0}.txt" -f $stress.Name)
+              Set-Content -Path $stressOutputPath -Value $stressOutput -Encoding utf8
+              Add-Content -Path $suiteOutput -Value ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stressExit)
+              Add-Content -Path $suiteOutput -Value $stressOutput
+              Write-Output ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stressExit)
+              Write-Output $stressOutput
+              $stressAchievedAttempts++
+              if ($stressExit -ne 0) {
+                $batchFailures += "$($stress.Name):$stressExit"
+              }
+            }
+            if ($batchFailures.Count -ne 0) {
+              $abort = "STRESS-ABORT achieved=$stressAchievedAttempts planned=$stressPlannedAttempts failures=$($batchFailures -join ',')"
+              Add-Content -Path $suiteOutput -Value $abort
+              throw $abort
             }
           }
-          foreach ($stress in $stressProcesses) {
-            if (-not $stress.Process.WaitForExit(240000)) {
-              try { $stress.Process.Kill($true) } catch { }
-              throw "pipeline stress repetition $($stress.Name) exceeded 240 seconds"
-            }
-            $stress.Process.WaitForExit()
-            $stressOutput = $stress.Stdout.GetAwaiter().GetResult() + $stress.Stderr.GetAwaiter().GetResult()
-            $stressOutputPath = Join-Path $env:RUNNER_TEMP ("pipeline-tests-{0}.txt" -f $stress.Name)
-            Set-Content -Path $stressOutputPath -Value $stressOutput -Encoding utf8
-            Add-Content -Path $suiteOutput -Value ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stress.Process.ExitCode)
-            Add-Content -Path $suiteOutput -Value $stressOutput
-            Write-Output ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stress.Process.ExitCode)
-            Write-Output $stressOutput
-            if ($stress.Process.ExitCode -ne 0) {
-              throw "pipeline stress repetition $($stress.Name) failed (exit $($stress.Process.ExitCode))"
-            }
-          }
+          $stressComplete = "STRESS-COMPLETE achieved=$stressAchievedAttempts planned=$stressPlannedAttempts failures=0"
+          Add-Content -Path $suiteOutput -Value $stressComplete
+          Write-Output $stressComplete
 
           & tools\testing\check-expected-failures.ps1 -SuiteOutput $suiteOutput
           if ($LASTEXITCODE -ne 0) {
@@ -273,6 +373,7 @@ jobs:
             ${{ runner.temp }}\pipeline-crash-forensics\**
             ${{ runner.temp }}\pipeline-tests-output.txt
             ${{ runner.temp }}\pipeline-tests-*.txt
+            ${{ runner.temp }}\pipeline-golden-actual.json
 
   windows-gui-pilot:
     name: Windows GUI Pilot

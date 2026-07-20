@@ -10,15 +10,87 @@
 #include "../../platform/qt/CrashForensics.h"
 
 #include <QGuiApplication>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
+#include <QStringList>
 
 #include <algorithm>
 #include <iostream>
 #include <map>
 #include <string>
 #include <vector>
+
+static bool golden_oracle_is_clean(const QString & golden_path, std::string * error_message)
+{
+    const QString repo_root = find_repo_root();
+    if (repo_root.isEmpty()) {
+        if (error_message) {
+            *error_message = "Golden oracle cleanliness could not be verified: repository root not found";
+        }
+        return false;
+    }
+
+    const QString absolute_path = QFileInfo(golden_path).absoluteFilePath();
+    const QString relative_path = QDir(repo_root).relativeFilePath(absolute_path);
+    if (relative_path == QStringLiteral("..") ||
+        relative_path.startsWith(QStringLiteral("../"))) {
+        return true;
+    }
+
+    QProcess git;
+    git.setProgram(QStringLiteral("git"));
+    git.setArguments({QStringLiteral("-C"),
+                      repo_root,
+                      QStringLiteral("status"),
+                      QStringLiteral("--porcelain=v1"),
+                      QStringLiteral("--untracked-files=all"),
+                      QStringLiteral("--"),
+                      relative_path});
+    git.start();
+    if (!git.waitForStarted(10000)) {
+        if (error_message) {
+            *error_message = "Golden oracle cleanliness could not be verified: git did not start";
+        }
+        return false;
+    }
+    if (!git.waitForFinished(10000)) {
+        git.kill();
+        git.waitForFinished();
+        if (error_message) {
+            *error_message = "Golden oracle cleanliness could not be verified: git status timed out";
+        }
+        return false;
+    }
+    if (git.exitStatus() != QProcess::NormalExit || git.exitCode() != 0) {
+        if (error_message) {
+            *error_message = "Golden oracle cleanliness could not be verified: git status failed";
+        }
+        return false;
+    }
+
+    const QString dirty_output = QString::fromLocal8Bit(git.readAllStandardOutput());
+    if (dirty_output.trimmed().isEmpty()) {
+        return true;
+    }
+
+    if (error_message) {
+        std::string message = "Golden oracle is dirty; refusing --check-golden:";
+        const QStringList rows = dirty_output.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        for (QString row : rows) {
+            if (row.endsWith(QLatin1Char('\r'))) {
+                row.chop(1);
+            }
+            const QString path = row.size() > 3 ? row.mid(3).trimmed() : row.trimmed();
+            message += " " + path.toStdString();
+        }
+        *error_message = message;
+    }
+    return false;
+}
 
 static bool compare_against_golden(const QString & golden_path, std::string * error_message)
 {
@@ -289,6 +361,7 @@ int main(int argc, char ** argv)
     std::string stage_csv_path;
     std::string test_filter;
     QString golden_input_path;
+    bool check_golden_requested = false;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--hash-output" && (index + 1) < argc) {
@@ -298,6 +371,7 @@ int main(int argc, char ** argv)
         } else if (argument.rfind("--profile-stages-to-csv=", 0) == 0) {
             stage_csv_path = argument.substr(std::string("--profile-stages-to-csv=").size());
         } else if (argument == "--check-golden") {
+            check_golden_requested = true;
             if ((index + 1) < argc && std::string(argv[index + 1]).rfind("--", 0) != 0) {
                 golden_input_path = QString::fromLocal8Bit(argv[++index]);
             } else {
@@ -316,6 +390,19 @@ int main(int argc, char ** argv)
 
     if (!test_filter.empty()) {
         std::cerr << "[RECEIVED-FILTER] " << test_filter << "\n";
+    }
+
+    if (check_golden_requested) {
+        std::string error_message;
+        if (golden_input_path.isEmpty()) {
+            error_message = "Golden oracle cleanliness could not be verified: golden path is empty";
+        } else if (golden_oracle_is_clean(golden_input_path, &error_message)) {
+            error_message.clear();
+        }
+        if (!error_message.empty()) {
+            std::cerr << "[ERROR] " << error_message << "\n";
+            return 5;
+        }
     }
 
     if (!stage_csv_path.empty()
