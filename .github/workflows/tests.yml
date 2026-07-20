@@ -144,23 +144,118 @@ jobs:
           & "$env:MINGW_ROOT\bin\mingw32-make.exe" -j2
           Pop-Location
 
-      - name: Run pipeline_tests --check-golden
+      - name: Run pipeline_tests --check-golden (bounded shards)
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           $env:MLVAPP_CRASH_FORENSICS_AUTOINSTALL = "1"
           $env:MLVAPP_CRASH_FORENSICS_LOG_DIR = Join-Path $env:RUNNER_TEMP "pipeline-crash-forensics"
           New-Item -ItemType Directory -Force $env:MLVAPP_CRASH_FORENSICS_LOG_DIR | Out-Null
           $suiteOutput = Join-Path $env:RUNNER_TEMP "pipeline-tests-output.txt"
-          $PSNativeCommandUseErrorActionPreference = $false
-          & "tests\build-ci-pipeline\release\pipeline_tests.exe" --check-golden 2>&1 |
-            Tee-Object -FilePath $suiteOutput
-          $suiteExit = $LASTEXITCODE
+          New-Item -ItemType File -Force $suiteOutput | Out-Null
+          # Build deterministic exact-name shards from the source registry.
+          # The former suite-wide shard could exceed the 300-second venue bound
+          # and hide failures behind the timeout. Exact names keep every test
+          # covered while bounding each child independently.
+          $testNames = @(
+            foreach ($file in Get-ChildItem tests\pipeline -Filter *.cpp) {
+              $text = Get-Content -LiteralPath $file.FullName -Raw
+              foreach ($match in [regex]::Matches($text, 'TEST(?:_[FP])?\(\s*([A-Za-z0-9_]+)\s*,\s*([A-Za-z0-9_]+)')) {
+                "{0}.{1}" -f $match.Groups[1].Value.Trim(), $match.Groups[2].Value.Trim()
+              }
+            }
+          ) | Sort-Object -Unique
+          if ($testNames.Count -eq 0) { throw "pipeline test registry discovery returned no tests" }
+          $testsPerShard = 24
+          $shards = @()
+          for ($offset = 0; $offset -lt $testNames.Count; $offset += $testsPerShard) {
+            $end = [Math]::Min($offset + $testsPerShard, $testNames.Count)
+            $filter = ($testNames[$offset..($end - 1)] -join ':')
+            $shards += @{ Name = ("exact-{0:D2}" -f [int]($offset / $testsPerShard)); Filter = $filter }
+          }
+          function Invoke-BoundedPipelineShard {
+            param([string]$Name, [string]$Filter, [string]$OutputPath)
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = (Resolve-Path "tests\build-ci-pipeline\release\pipeline_tests.exe").Path
+            $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            [void]$psi.ArgumentList.Add("--check-golden")
+            [void]$psi.ArgumentList.Add("--gtest_filter=$Filter")
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $psi
+            if (-not $process.Start()) { throw "failed to start pipeline shard $Name" }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(240000)) {
+              try { $process.Kill($true) } catch { }
+              throw "pipeline shard $Name exceeded 240 seconds"
+            }
+            $process.WaitForExit()
+            $stdout = $stdoutTask.GetAwaiter().GetResult()
+            $stderr = $stderrTask.GetAwaiter().GetResult()
+            $combined = $stdout + $stderr
+            Set-Content -Path $OutputPath -Value $combined -Encoding utf8
+            return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $combined }
+          }
+          foreach ($shard in $shards) {
+            $shardOutput = Join-Path $env:RUNNER_TEMP ("pipeline-tests-{0}.txt" -f $shard.Name)
+            Add-Content -Path $suiteOutput -Value ("===== SHARD {0} FILTER {1} =====" -f $shard.Name, $shard.Filter)
+            $shardResult = Invoke-BoundedPipelineShard -Name $shard.Name -Filter $shard.Filter -OutputPath $shardOutput
+            Add-Content -Path $suiteOutput -Value ("===== SHARD {0} FILTER {1} EXIT {2} =====" -f $shard.Name, $shard.Filter, $shardResult.ExitCode)
+            Add-Content -Path $suiteOutput -Value $shardResult.Output
+            Write-Output ("===== SHARD {0} FILTER {1} EXIT {2} =====" -f $shard.Name, $shard.Filter, $shardResult.ExitCode)
+            Write-Output $shardResult.Output
+            $shardExit = $shardResult.ExitCode
 
-          # Exit 1 means named test failures, which the reviewed manifest
-          # adjudicates below. Crashes, usage errors, and golden-oracle errors
-          # remain unconditionally blocking.
-          if ($suiteExit -notin @(0, 1)) {
-            throw "pipeline_tests failed outside the expected-failure contract (exit $suiteExit)"
+            # Exit 1 means named test failures, which the reviewed manifest
+            # adjudicates after all shards. Crashes, usage errors, and
+            # golden-oracle errors remain unconditionally blocking.
+            if ($shardExit -notin @(0, 1)) {
+              throw "pipeline_tests shard $($shard.Name) failed outside the expected-failure contract (exit $shardExit)"
+            }
+          }
+
+          # Criterion (v): exercise the hosted-like contention that exposed the
+          # two prefetch failures. Four concurrent repetitions are an evidence
+          # leg, not an expected-failure allowance; every nonzero result is
+          # retained in the aggregate log and blocks this job.
+          $stressFilter = 'DualIsoPipeline.Processed8PrefetchIndirect*:ProcessingFilters.AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighlights'
+          $stressProcesses = @()
+          for ($run = 1; $run -le 4; $run++) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = (Resolve-Path "tests\build-ci-pipeline\release\pipeline_tests.exe").Path
+            $psi.WorkingDirectory = $env:GITHUB_WORKSPACE
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            [void]$psi.ArgumentList.Add("--gtest_filter=$stressFilter")
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $psi
+            if (-not $process.Start()) { throw "failed to start stress repetition $run" }
+            $stressProcesses += [pscustomobject]@{
+              Name = "stress-{0:D2}" -f $run
+              Process = $process
+              Stdout = $process.StandardOutput.ReadToEndAsync()
+              Stderr = $process.StandardError.ReadToEndAsync()
+            }
+          }
+          foreach ($stress in $stressProcesses) {
+            if (-not $stress.Process.WaitForExit(240000)) {
+              try { $stress.Process.Kill($true) } catch { }
+              throw "pipeline stress repetition $($stress.Name) exceeded 240 seconds"
+            }
+            $stress.Process.WaitForExit()
+            $stressOutput = $stress.Stdout.GetAwaiter().GetResult() + $stress.Stderr.GetAwaiter().GetResult()
+            $stressOutputPath = Join-Path $env:RUNNER_TEMP ("pipeline-tests-{0}.txt" -f $stress.Name)
+            Set-Content -Path $stressOutputPath -Value $stressOutput -Encoding utf8
+            Add-Content -Path $suiteOutput -Value ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stress.Process.ExitCode)
+            Add-Content -Path $suiteOutput -Value $stressOutput
+            Write-Output ("===== STRESS {0} FILTER {1} EXIT {2} =====" -f $stress.Name, $stressFilter, $stress.Process.ExitCode)
+            Write-Output $stressOutput
+            if ($stress.Process.ExitCode -ne 0) {
+              throw "pipeline stress repetition $($stress.Name) failed (exit $($stress.Process.ExitCode))"
+            }
           }
 
           & tools\testing\check-expected-failures.ps1 -SuiteOutput $suiteOutput
@@ -177,6 +272,7 @@ jobs:
           path: |
             ${{ runner.temp }}\pipeline-crash-forensics\**
             ${{ runner.temp }}\pipeline-tests-output.txt
+            ${{ runner.temp }}\pipeline-tests-*.txt
 
   windows-gui-pilot:
     name: Windows GUI Pilot

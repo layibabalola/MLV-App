@@ -191,6 +191,7 @@ int getMlvLastProcessed8CacheHit(void);
 int getMlvLastProcessed8CacheHitScaleFactor(void);
 int getMlvLastProcessed8PrefetchHit(void);
 int getMlvProcessed8PrefetchEnabledForTesting(const mlvObject_t * video);
+int mlvWaitForProcessed8PrefetchIdleForTesting(mlvObject_t * video, uint32_t timeout_ms);
 
 /* Phase 4B-v2/v3/v4 telemetry — for parity tests and diagnostics. Returns the
  * path taken on the most recent v2 entry on the calling thread:

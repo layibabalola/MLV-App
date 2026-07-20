@@ -149,6 +149,9 @@ static int g_processing_shadows_highlights_probe_mode = -1;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x1_shadows_highlights_quarterres_cache = -1;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_standard_x4_shadows_highlights_quarterres_cache = -1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_aggressive_x2_shadows_highlights_quarterres_cache = -1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_aggressive_x8_shadows_highlights_quarterres_cache = -1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_direct8_preview_quarterres_sh_cache = -1;
 
 static int processing_env_flag_enabled(const char * value)
 {
@@ -205,28 +208,22 @@ static int processing_shadows_highlights_probe_mode(void)
 
 static int processing_aggressive_x8_shadows_highlights_quarterres_enabled(void)
 {
-    static int initialized = 0;
-    static int enabled = 1;
-    if( !initialized )
+    if( g_processing_aggressive_x8_shadows_highlights_quarterres_cache < 0 )
     {
-        enabled = processing_env_flag_enabled(
+        g_processing_aggressive_x8_shadows_highlights_quarterres_cache = processing_env_flag_enabled(
             getenv("MLVAPP_DISABLE_AGGRESSIVE_X8_SH_QUARTERRES") ) ? 0 : 1;
-        initialized = 1;
     }
-    return enabled;
+    return g_processing_aggressive_x8_shadows_highlights_quarterres_cache;
 }
 
 static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
 {
-    static int initialized = 0;
-    static int enabled = 1;
-    if( !initialized )
+    if( g_processing_aggressive_x2_shadows_highlights_quarterres_cache < 0 )
     {
-        enabled = processing_env_flag_enabled(
+        g_processing_aggressive_x2_shadows_highlights_quarterres_cache = processing_env_flag_enabled(
             getenv("MLVAPP_DISABLE_AGGRESSIVE_X2_SH_QUARTERRES") ) ? 0 : 1;
-        initialized = 1;
     }
-    return enabled;
+    return g_processing_aggressive_x2_shadows_highlights_quarterres_cache;
 }
 
 /* Round-4 item 6: let the direct8 PLAYBACK lanes use the cheap preview
@@ -243,15 +240,12 @@ static int processing_aggressive_x2_shadows_highlights_quarterres_enabled(void)
  * switch restores the band-aid for A/B and safety. */
 static int processing_direct8_preview_quarterres_sh_enabled(void)
 {
-    static int initialized = 0;
-    static int enabled = 1;
-    if( !initialized )
+    if( g_processing_direct8_preview_quarterres_sh_cache < 0 )
     {
-        enabled = processing_env_flag_enabled(
+        g_processing_direct8_preview_quarterres_sh_cache = processing_env_flag_enabled(
             getenv("MLVAPP_DISABLE_DIRECT8_PREVIEW_QUARTERRES_SH") ) ? 0 : 1;
-        initialized = 1;
     }
-    return enabled;
+    return g_processing_direct8_preview_quarterres_sh_cache;
 }
 
 static int processing_standard_x1_shadows_highlights_quarterres_enabled(void)
@@ -552,6 +546,9 @@ void processingResetShadowsHighlightsQuarterresEnvCacheForTesting(void)
     g_processing_standard_x1_shadows_highlights_quarterres_cache = -1;
     g_processing_standard_x2_shadows_highlights_quarterres_cache = -1;
     g_processing_standard_x4_shadows_highlights_quarterres_cache = -1;
+    g_processing_aggressive_x2_shadows_highlights_quarterres_cache = -1;
+    g_processing_aggressive_x8_shadows_highlights_quarterres_cache = -1;
+    g_processing_direct8_preview_quarterres_sh_cache = -1;
 }
 
 static void processing_core_timing_reset(processing_core_timing_t * timing)
