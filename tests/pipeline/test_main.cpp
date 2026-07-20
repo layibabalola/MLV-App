@@ -52,35 +52,50 @@ static bool compare_against_golden(const QString & golden_path, std::string * er
         return key.find(".gpu.") != std::string::npos;
     };
 
+    std::vector<std::string> missing_keys;
+    std::vector<std::string> mismatched_keys;
+
     for (const auto & expected_entry : expected) {
         const auto actual_it = actual.find(expected_entry.first);
         if (actual_it == actual.end()) {
             if (is_optional_gpu_key(expected_entry.first)) {
                 continue;
             }
-            if (error_message) {
-                *error_message = "Golden artifact missing actual key: " + expected_entry.first;
-            }
-            return false;
+            missing_keys.push_back(expected_entry.first);
+            continue;
         }
         if (actual_it->second != expected_entry.second) {
-            if (error_message) {
-                *error_message = "Golden artifact mismatch at key: " + expected_entry.first;
-            }
-            return false;
+            mismatched_keys.push_back(expected_entry.first +
+                                      " expected=" + expected_entry.second +
+                                      " actual=" + actual_it->second);
         }
     }
 
+    std::vector<std::string> unexpected_keys;
     for (const auto & actual_entry : actual) {
         if (expected.find(actual_entry.first) == expected.end()) {
-            if (error_message) {
-                *error_message = "Golden artifact contains unexpected key: " + actual_entry.first;
-            }
-            return false;
+            unexpected_keys.push_back(actual_entry.first);
         }
     }
 
-    return true;
+    if (error_message && (!missing_keys.empty() || !mismatched_keys.empty() || !unexpected_keys.empty())) {
+        std::string message;
+        for (const auto & key : missing_keys) {
+            message += "Golden artifact missing actual key: " + key + "\n";
+        }
+        for (const auto & key : mismatched_keys) {
+            message += "Golden artifact mismatch: " + key + "\n";
+        }
+        for (const auto & key : unexpected_keys) {
+            message += "Golden artifact contains unexpected key: " + key + "\n";
+        }
+        if (!message.empty() && message.back() == '\n') {
+            message.pop_back();
+        }
+        *error_message = message;
+    }
+
+    return missing_keys.empty() && mismatched_keys.empty() && unexpected_keys.empty();
 }
 
 struct ParsedTestFilter {
