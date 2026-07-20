@@ -138,6 +138,10 @@ static MLV_PROCESSING_THREAD_LOCAL char g_processing_last_direct8_incompatibilit
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_mode = 0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_aggressive_preview_mode = 0;
 static MLV_PROCESSING_THREAD_LOCAL int g_processing_playback_preview_scale_factor = 1;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_last_shadows_highlights_quarterres_path_taken = 0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_last_shadows_highlights_quarterres_downsample_completed = 0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_last_shadows_highlights_quarterres_rbf_completed = 0;
+static MLV_PROCESSING_THREAD_LOCAL int g_processing_last_shadows_highlights_quarterres_upsample_completed = 0;
 
 static int g_processing_shadows_highlights_probe_initialized = 0;
 static int g_processing_shadows_highlights_probe_mode = -1;
@@ -410,6 +414,9 @@ void processingResetLastTimingTelemetry(void)
     g_processing_last_shadows_highlights_filter_quarterres_downsample_ms = 0.0;
     g_processing_last_shadows_highlights_filter_quarterres_rbf_ms = 0.0;
     g_processing_last_shadows_highlights_filter_quarterres_upsample_ms = 0.0;
+    g_processing_last_shadows_highlights_quarterres_downsample_completed = 0;
+    g_processing_last_shadows_highlights_quarterres_rbf_completed = 0;
+    g_processing_last_shadows_highlights_quarterres_upsample_completed = 0;
     g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
@@ -1436,6 +1443,7 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
         )
      && imageX >= 4
      && imageY >= 4;
+    g_processing_last_shadows_highlights_quarterres_path_taken = use_quarterres_rbf;
     const int use_halfres_rbf =
         halfres_even_dimensions || halfres_aggressive_preview_odd_height;
 
@@ -1468,6 +1476,7 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
             g_processing_last_shadows_highlights_filter_quarterres_downsample_ms +=
                 (omp_get_wtime() - quarterres_downsample_start) * 1000.0;
         }
+        g_processing_last_shadows_highlights_quarterres_downsample_completed = 1;
 
         const double quarterres_rbf_start =
             shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
@@ -1500,6 +1509,7 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
             g_processing_last_shadows_highlights_filter_quarterres_rbf_ms +=
                 (omp_get_wtime() - quarterres_rbf_start) * 1000.0;
         }
+        g_processing_last_shadows_highlights_quarterres_rbf_completed = 1;
 
         const double quarterres_upsample_start =
             shadows_highlights_probe_enabled ? omp_get_wtime() : 0.0;
@@ -1525,6 +1535,7 @@ static void processing_compute_shadows_highlights_blur( processingObject_t * pro
             g_processing_last_shadows_highlights_filter_quarterres_upsample_ms +=
                 (omp_get_wtime() - quarterres_upsample_start) * 1000.0;
         }
+        g_processing_last_shadows_highlights_quarterres_upsample_completed = 1;
     }
     else if( use_halfres_rbf )
     {
@@ -1675,6 +1686,9 @@ int processingRefreshShadowsHighlightsBlurFromRgb16(processingObject_t * process
     g_processing_last_shadows_highlights_filter_quarterres_downsample_ms = 0.0;
     g_processing_last_shadows_highlights_filter_quarterres_rbf_ms = 0.0;
     g_processing_last_shadows_highlights_filter_quarterres_upsample_ms = 0.0;
+    g_processing_last_shadows_highlights_quarterres_downsample_completed = 0;
+    g_processing_last_shadows_highlights_quarterres_rbf_completed = 0;
+    g_processing_last_shadows_highlights_quarterres_upsample_completed = 0;
     g_processing_last_shadows_highlights_rbf_total_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_boundary_ms = 0.0;
     g_processing_last_shadows_highlights_rbf_range_table_ms = 0.0;
@@ -4197,6 +4211,31 @@ double processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds(void)
 double processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds(void)
 {
     return g_processing_last_shadows_highlights_filter_quarterres_upsample_ms;
+}
+
+int processingGetLastShadowsHighlightsQuarterresPathTakenForTesting(void)
+{
+    return g_processing_last_shadows_highlights_quarterres_path_taken;
+}
+
+int processingGetAggressiveX2ShadowsHighlightsQuarterresCacheForTesting(void)
+{
+    return g_processing_aggressive_x2_shadows_highlights_quarterres_cache;
+}
+
+int processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting(void)
+{
+    return g_processing_last_shadows_highlights_quarterres_downsample_completed;
+}
+
+int processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting(void)
+{
+    return g_processing_last_shadows_highlights_quarterres_rbf_completed;
+}
+
+int processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting(void)
+{
+    return g_processing_last_shadows_highlights_quarterres_upsample_completed;
 }
 
 double processingGetLastShadowsHighlightsRbfTotalMilliseconds(void)

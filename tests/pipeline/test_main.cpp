@@ -299,6 +299,10 @@ int main(int argc, char ** argv)
         minitest::set_filter(test_filter);
     }
 
+    if (!test_filter.empty()) {
+        std::cerr << "[RECEIVED-FILTER] " << test_filter << "\n";
+    }
+
     if (!stage_csv_path.empty()
         && stage_timing_csv_sink_open(stage_csv_path.c_str()) == 0) {
         std::cerr << "[ERROR] Could not open stage CSV sink: " << stage_csv_path << "\n";

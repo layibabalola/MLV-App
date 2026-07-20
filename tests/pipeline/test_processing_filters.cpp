@@ -18,9 +18,12 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+
+#include <omp.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -798,13 +801,27 @@ TEST(ProcessingFilters, AggressiveX2PlaybackPreviewUsesQuarterresShadowsHighligh
                           1,
                           0);
 
+    std::fprintf(stderr,
+                 "[AGGRESSIVE-X2-DIAG] path=%d cache=%d downsample_done=%d rbf_done=%d upsample_done=%d downsample_ms=%.6f rbf_ms=%.6f upsample_ms=%.6f total_ms=%.6f\n",
+                 processingGetLastShadowsHighlightsQuarterresPathTakenForTesting(),
+                 processingGetAggressiveX2ShadowsHighlightsQuarterresCacheForTesting(),
+                 processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting(),
+                 processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting(),
+                 processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting(),
+                 processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds(),
+                 processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds(),
+                 processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds(),
+                 processingGetLastShadowsHighlightsFilterMilliseconds());
+    std::fprintf(stderr,
+                 "[AGGRESSIVE-X2-CLOCK] source=omp_get_wtime omp_get_wtick_seconds=%.12f\n",
+                 omp_get_wtick());
+
     ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterFullresMilliseconds());
     ASSERT_EQ(0.0, processingGetLastShadowsHighlightsFilterHalfresRbfMilliseconds());
-    ASSERT_TRUE(
-        processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds()
-      + processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds()
-      + processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterMilliseconds() > 0.0);
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresPathTakenForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
 
     freeProcessingObject(processing);
     unset_env_for_test("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
