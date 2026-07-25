@@ -1730,12 +1730,16 @@ def active_path_claims(repo_root: Path, config: Dict[str, Any]) -> Dict[str, str
     root = work_blocks_root(repo_root, config)
     if not root.exists():
         return claims
+    manifests: List[Tuple[Dict[str, Any], Path]] = []
     for manifest_file in root.glob("*/manifest.json"):
         manifest = read_json(manifest_file, {})
         if manifest.get("state") not in {"active", "completed", "finalizing", "blocked"}:
             continue
         if manifest_path_claims_are_stale(repo_root, config, manifest):
             continue
+        manifests.append((manifest, manifest_file))
+    # Claim conflicts must resolve by broker state, never by filesystem enumeration order.
+    for manifest, manifest_file in sorted(manifests, key=lambda item: work_block_selection_key(item[0])):
         block_id = str(manifest.get("workBlockId") or manifest_file.parent.name)
         for claim in manifest_path_claims(manifest):
             claims[claim] = block_id
