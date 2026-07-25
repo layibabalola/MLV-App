@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2642,6 +2643,7 @@ static void * mlv_processed8_prefetch_thread_main(void * opaque)
 
         pthread_mutex_lock(&video->processed8_prefetch_mutex);
         video->processed8_prefetch_worker_busy = 0;
+        pthread_cond_broadcast(&video->processed8_prefetch_cond);
         pthread_mutex_unlock(&video->processed8_prefetch_mutex);
     }
 
@@ -7531,6 +7533,44 @@ int getMlvLastProcessed8CacheHitScaleFactor(void)
 int getMlvLastProcessed8PrefetchHit(void)
 {
     return g_mlv_last_processed8_prefetch_hit;
+}
+
+int mlvWaitForProcessed8PrefetchIdleForTesting(mlvObject_t * video,
+                                               uint32_t timeout_ms)
+{
+    if (!video)
+    {
+        return 1;
+    }
+
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    {
+        return 0;
+    }
+    deadline.tv_sec += (time_t)(timeout_ms / 1000u);
+    deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L)
+    {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    while (video->processed8_prefetch_worker_busy
+           || video->processed8_prefetch_request_pending)
+    {
+        const int wait_rc = pthread_cond_timedwait(&video->processed8_prefetch_cond,
+                                                   &video->processed8_prefetch_mutex,
+                                                   &deadline);
+        if (wait_rc == ETIMEDOUT)
+        {
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    return 1;
 }
 
 int getMlvProcessed8PrefetchEnabledForTesting(const mlvObject_t * video)

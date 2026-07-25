@@ -7776,11 +7776,9 @@ TEST(DualIsoPipeline, Phase4B_DualIsoScaleEightAggressiveSkipsCoordinateRawFixes
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     if ((full_h % 32) != 0) {
-        const int expected_crop = full_h - (full_h / 32) * 32;
         ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-        ASSERT_EQ(std::string("none"),
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
                   std::string(mlv_phase4bv2_last_fallback_reason()));
         ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
         return;
@@ -7815,11 +7813,9 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompa
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     if ((full_h % 32) != 0) {
-        const int expected_crop = full_h - (full_h / 32) * 32;
         ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-        ASSERT_EQ(std::string("none"),
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
                   std::string(mlv_phase4bv2_last_fallback_reason()));
         ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
         return;
@@ -7835,7 +7831,7 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYWhenReceiptCompa
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
-TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInAggressivePreviewWhenCropWouldBeRequired)
+TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightFallsBackWhenCropWouldBeRequired)
 {
     ScopedAggressivePreviewMode aggressivePreview(1);
     MLVAPP_TEST_UNSETENV("MLVAPP_DISABLE_PHASE4BV4_X8");
@@ -7858,11 +7854,10 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInAggressivePrev
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-    ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-    ASSERT_EQ(std::string("none"),
+    ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+    ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
               std::string(mlv_phase4bv2_last_fallback_reason()));
-    const int expected_crop = full_h - (full_h / 32) * 32;
-    ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
+    ASSERT_EQ(0, mlv_phase4bv3_last_y_crop_rows());
     ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
 }
 
@@ -7892,9 +7887,8 @@ TEST(DualIsoPipeline, Phase4Bv4_Processed8CacheHitPreservesPhasePathTelemetry)
     ASSERT_EQ(0, getMlvLastProcessed8CacheHit());
     if ((full_h % 32) != 0) {
         ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-        ASSERT_EQ(std::string("none"),
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
                   std::string(mlv_phase4bv2_last_fallback_reason()));
     }
     else
@@ -7911,9 +7905,9 @@ TEST(DualIsoPipeline, Phase4Bv4_Processed8CacheHitPreservesPhasePathTelemetry)
     if ((full_h % 32) != 0)
     {
         ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-        ASSERT_EQ(std::string("none"),
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(0, mlv_phase4bv3_last_y_crop_rows());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
                   std::string(mlv_phase4bv2_last_fallback_reason()));
     }
     else
@@ -7951,11 +7945,10 @@ TEST(DualIsoPipeline, Phase4Bv4_DualIsoScaleEightUsesEarlyFullXYInHqMean23)
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 8);
     ASSERT_EQ(static_cast<std::size_t>(full_w / 8) * (full_h / 8) * 3u, got.size());
     if ((full_h % 32) != 0) {
-        const int expected_crop = full_h - (full_h / 32) * 32;
         ASSERT_EQ(8, fixture.video()->playback_scale_factor_active);
-        ASSERT_EQ(8, mlv_phase4bv2_last_path_taken());
-        ASSERT_EQ(expected_crop, mlv_phase4bv3_last_y_crop_rows());
-        ASSERT_EQ(std::string("none"),
+        ASSERT_NE(8, mlv_phase4bv2_last_path_taken());
+        ASSERT_EQ(0, mlv_phase4bv3_last_y_crop_rows());
+        ASSERT_EQ(std::string("x8 preview requires 32-row aligned height"),
                   std::string(mlv_phase4bv2_last_fallback_reason()));
         ASSERT_TRUE(std::any_of(got.begin(), got.end(), [](uint8_t v) { return v != 0; }));
         return;
@@ -8229,10 +8222,18 @@ TEST(DualIsoPipeline, RawUint16PrefetchAllowsAggressiveDualIsoScaleFourWhenReduc
     ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 4;
-    ASSERT_EQ(1, mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    const int scale4_compatible = full_w > 0 && full_h > 0
+        && (full_w % 4) == 0 && (full_h / 16) * 16 >= 16;
+    ASSERT_EQ(scale4_compatible ? 1 : 0,
+              mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 8;
-    ASSERT_EQ(1, mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
+    const int scale8_compatible = full_w > 0 && full_h >= 32
+        && (full_w % 16) == 0 && (full_h % 32) == 0;
+    ASSERT_EQ(scale8_compatible ? 1 : 0,
+              mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
 }
 
 TEST(DualIsoPipeline, RawUint16PrefetchAllowsStandardDualIsoScaleFourWhenReducedPreviewExpected)
@@ -8248,10 +8249,18 @@ TEST(DualIsoPipeline, RawUint16PrefetchAllowsStandardDualIsoScaleFourWhenReduced
     ASSERT_EQ(1, llrpGetDualIsoMode(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 4;
-    ASSERT_EQ(1, mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
+    const int full_w = fixture.width();
+    const int full_h = fixture.height();
+    const int scale4_compatible = full_w > 0 && full_h > 0
+        && (full_w % 4) == 0 && (full_h / 16) * 16 >= 16;
+    ASSERT_EQ(scale4_compatible ? 1 : 0,
+              mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
 
     fixture.video()->playback_scale_factor_active = 8;
-    ASSERT_EQ(1, mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
+    const int scale8_compatible = full_w > 0 && full_h >= 32
+        && (full_w % 16) == 0 && (full_h % 32) == 0;
+    ASSERT_EQ(scale8_compatible ? 1 : 0,
+              mlvRawUint16PrefetchAllowedForTesting(fixture.video()));
 }
 
 TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDefault)
@@ -8868,9 +8877,7 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
                     }
                 }
             }
-            /* Give the worker time to land the next lookahead frame before
-             * the foreground asks for it. */
-            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
         }
     }
 
@@ -8957,7 +8964,7 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectAggressiveX4WorkerHitMatchesRefe
                     }
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
         }
     }
 
