@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -4296,6 +4297,40 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertFalse(detection["ownedDirty"], detection)
         self.assertEqual([item["path"] for item in detection["foreignDirty"]], ["owned.txt"])
         self.assertEqual(detection["foreignDirty"][0]["ownerWorkBlockId"], "wb-z-other")
+
+    def test_newer_claim_wins_when_work_block_id_sorts_against_recency(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/claimed-delta")
+        # Pin the second-truncated broker clock so both work blocks start inside
+        # the same second. That is the case where updatedAt ties and precedence
+        # silently falls through to the workBlockId tiebreak; left to wall-clock
+        # it depends on whether the two starts straddle a second boundary.
+        with mock.patch("tools.repo_hygiene.brokered_closeout.utc_now", return_value="2026-07-26T00:00:01+00:00"):
+            start_work_block(repo, work_block_id="wb-current", actor="local-test", path_claims=["owned.txt"])
+            (repo / "owned.txt").write_text("committed\n", encoding="utf-8")
+            git(repo, "add", "owned.txt")
+            git(repo, "commit", "-m", "owned committed")
+            # "wb-a-other" sorts BEFORE "wb-current", so a workBlockId tiebreak
+            # hands the newer block's uncommitted bytes to the older block and
+            # reopens the cross-block capture path. Plain glob order throughout.
+            start_work_block(repo, work_block_id="wb-a-other", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("other dirty\n", encoding="utf-8")
+
+        detection = detect_work_block(repo, work_block_id="wb-current")
+
+        self.assertFalse(detection["ownedDirty"], detection)
+        self.assertEqual([item["path"] for item in detection["foreignDirty"]], ["owned.txt"])
+        self.assertEqual(detection["foreignDirty"][0]["ownerWorkBlockId"], "wb-a-other")
+
+    def test_work_block_recency_prefers_precise_stamp_and_falls_back(self) -> None:
+        from .brokered_closeout import work_block_recency
+
+        precise = {"updatedAt": "2026-07-26T00:00:01+00:00", "updatedAtPrecise": "2026-07-26T00:00:01.500000+00:00"}
+        coarse = {"updatedAt": "2026-07-26T00:00:01+00:00"}
+        legacy = {"startedAt": "2026-07-26T00:00:01+00:00"}
+        self.assertGreater(work_block_recency(precise), work_block_recency(coarse))
+        self.assertEqual(work_block_recency(coarse), work_block_recency(legacy))
+        self.assertEqual(work_block_recency({}), datetime.min.replace(tzinfo=timezone.utc))
 
     def test_no_origin_local_only_closeout_updates_target_and_prunes_branch(self) -> None:
         repo = self.init_repo(remote=False)
