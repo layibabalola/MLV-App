@@ -6053,10 +6053,51 @@ def coordination_entry_range(entry_body: str) -> str:
     return ""
 
 
-def coordination_entry_matches(entry: Dict[str, Any], *, actor: str, kind: str, range_token: str) -> bool:
-    heading = str(entry.get("heading") or "").upper()
-    body = str(entry.get("body") or "")
-    return actor.upper() in heading and kind.upper() in heading and coordination_entry_range(body) == range_token
+# Coordination headings follow one universal grammar across the ledger:
+#   ### [<timestamp>] ACTOR - KIND (free-text description)
+# The actor/kind must be captured from that grammar, never substring-matched against
+# the whole heading: the free-text portion routinely names other lanes and kinds
+# (189 live instances at adoption time), so a substring test lets an entry's own
+# prose satisfy actor/kind it does not declare.
+COORDINATION_HEADING_RE = re.compile(
+    r"^### \[[^\]]+\]\s*(?P<actor>[A-Za-z0-9_]+)\s*[-–—]\s*(?P<kind>[A-Za-z0-9_]+)\b"
+)
+
+COORDINATION_SEAT_GUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def coordination_entry_actor_kind(heading: str) -> Tuple[str, str]:
+    match = COORDINATION_HEADING_RE.match(str(heading or ""))
+    if not match:
+        return "", ""
+    return match.group("actor").upper(), match.group("kind").upper()
+
+
+def coordination_entry_seat_session(entry_body: str) -> str:
+    # LAST Seat: line wins (LANE-4 review B3): an entry quoting another entry's Seat line
+    # above its own footer must not mis-attribute itself to the quoted seat.
+    matches = re.findall(r"(?im)^\s*Seat:\s*(.+)$", entry_body)
+    if not matches:
+        return ""
+    guid = COORDINATION_SEAT_GUID_RE.search(matches[-1])
+    return guid.group(0).lower() if guid else ""
+
+
+def coordination_entry_matches(
+    entry: Dict[str, Any],
+    *,
+    actor: str,
+    kind: str,
+    range_token: str,
+    additional_actors: Sequence[str] = (),
+) -> bool:
+    heading_actor, heading_kind = coordination_entry_actor_kind(str(entry.get("heading") or ""))
+    allowed_actors = {actor.upper()} | {str(extra).upper() for extra in additional_actors if str(extra).strip()}
+    if heading_actor not in allowed_actors or heading_kind != kind.upper():
+        return False
+    return coordination_entry_range(str(entry.get("body") or "")) == range_token
 
 
 def content_review_gate_block(
@@ -6082,6 +6123,15 @@ def content_review_gate_block(
     blocking_tokens = [str(token).upper() for token in gate.get("blockingTokens", ["CHANGES_REQUESTED", "BLOCKER"])]
     approve_token = approve_tokens[0] if approve_tokens else "APPROVE"
     range_display = primary_range or "<targetHead>..<featureHead>"
+    authorized_sessions = [str(s).strip() for s in gate.get("authorizedReviewSessions", []) if str(s).strip()]
+    seat_note = ""
+    if authorized_sessions:
+        seat_note = (
+            " The review entry must ALSO carry a 'Seat: <GUID>' line whose GUID is one of "
+            "contentReviewGate.authorizedReviewSessions; an approving verdict without it blocks as "
+            "content_approval_unattributed_verdict, and an unlisted GUID blocks as "
+            "content_approval_unauthorized_seat."
+        )
     payload = {
         "reason": reason,
         "workBlockId": detection.get("workBlockId"),
@@ -6102,17 +6152,19 @@ def content_review_gate_block(
             "approveTokens": approve_tokens,
             "blockingTokens": blocking_tokens,
             "notes": (
-                "Append a '%s ... %s' entry, then a LATER '%s ... %s' entry. Both headings are matched "
-                "case-insensitively by substring. The review entry's Range: line value must EXACTLY equal "
+                "Append a '%s ... %s' entry, then a LATER '%s ... %s' entry. Headings are PARSED as "
+                "'### [<timestamp>] ACTOR - KIND (free text)': the DECLARED actor and kind must equal the "
+                "configured tokens case-insensitively (free-text prose no longer matches, and a heading that "
+                "does not parse fails closed). The review entry's Range: line value must EXACTLY equal "
                 "the canonical range above -- short 8/12-char ranges no longer match. The Verdict: token "
                 "must EXACTLY equal an approve/blocking token (e.g. 'Verdict: %s'); a 'Verdict: %s -- <range>' "
-                "suffix form no longer counts."
-                % (handoff_actor, handoff_kind, review_actor, review_kind, approve_token, approve_token)
+                "suffix form no longer counts.%s"
+                % (handoff_actor, handoff_kind, review_actor, review_kind, approve_token, approve_token, seat_note)
             ),
         },
         "recoveryCommand": (
             "Append a %s %s for range %s to %s, then a LATER %s %s for the SAME range with a bare "
-            "'Verdict: %s' line, then rerun %s"
+            "'Verdict: %s' line%s, then rerun %s"
             % (
                 handoff_actor,
                 handoff_kind,
@@ -6121,10 +6173,13 @@ def content_review_gate_block(
                 review_actor,
                 review_kind,
                 approve_token,
+                (" and a 'Seat: <authorized GUID>' line" if authorized_sessions else ""),
                 closeout_script_command("work-block-complete.ps1", ["-Finalize"], config),
             )
         ),
     }
+    if authorized_sessions:
+        payload["expectedEntryFormat"]["requiredSeatLine"] = "Seat: <one of contentReviewGate.authorizedReviewSessions>"
     if detail:
         payload["detail"] = detail
     if gate:
@@ -6182,15 +6237,45 @@ def validate_content_review_approval_for_finalize(
         )
     text = coordination_path.read_text(encoding="utf-8")
     entries = coordination_entries(text)
+    # (M) supersession-axis fail-closed (LANE-4 review R1): an entry that NAMES this range
+    # but whose heading does not parse under the grammar cannot be classified, so the
+    # "latest decisive verdict" ordering cannot be trusted -- a Markdown-decorated
+    # superseding BLOCK would otherwise be silently dropped and a stale APPROVE would
+    # release. Scoped to range-naming entries, this is a no-op on the live ledger
+    # (0 non-parsing headings today) and can only fail closed.
+    unparsable = [
+        entry
+        for entry in entries
+        if coordination_entry_actor_kind(str(entry.get("heading") or "")) == ("", "")
+        and coordination_entry_range(str(entry.get("body") or "")) == canonical_range
+    ]
+    if unparsable:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_unparsable_heading",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"unparsableHeadings": [str(entry.get("heading") or "") for entry in unparsable]},
+        )
     handoff_actor = str(gate.get("handoffActor") or "CODEX")
     handoff_kind = str(gate.get("handoffKind") or "HANDOFF")
     review_actor = str(gate.get("reviewActor") or "CLAUDE")
     review_kind = str(gate.get("reviewKind") or "REVIEW")
     require_handoff = bool(gate.get("requireHandoff", True))
+    additional_handoff_actors = [
+        str(actor_name) for actor_name in gate.get("additionalHandoffActors", []) if str(actor_name).strip()
+    ]
     handoffs = [
         entry
         for entry in entries
-        if coordination_entry_matches(entry, actor=handoff_actor, kind=handoff_kind, range_token=canonical_range)
+        if coordination_entry_matches(
+            entry,
+            actor=handoff_actor,
+            kind=handoff_kind,
+            range_token=canonical_range,
+            additional_actors=additional_handoff_actors,
+        )
     ]
     if require_handoff and not handoffs:
         return content_review_gate_block(
@@ -6246,6 +6331,46 @@ def validate_content_review_approval_for_finalize(
             detail={"latestReviewHeading": latest.get("heading"), "verdict": verdict},
         )
     if verdict_upper in approve_tokens:
+        # Identity check (reader-side): the DECISIVE APPROVING entry must be attributable
+        # to an authorized review session. Enforcement engages when the tracked config
+        # carries a non-empty allowlist; the allowlist lives in closeout.config.json
+        # (not the gitignored seat registry) because this validator runs inside work-block
+        # worktrees where .claude-state does not exist. Blocking verdicts deliberately
+        # skip this check: an unattributed block still blocks (fail-closed direction).
+        authorized_sessions = [
+            str(session).strip().lower()
+            for session in gate.get("authorizedReviewSessions", [])
+            if str(session).strip()
+        ]
+        if authorized_sessions:
+            seat_session = coordination_entry_seat_session(str(latest.get("body") or ""))
+            if not seat_session:
+                return content_review_gate_block(
+                    config,
+                    detection,
+                    reason="content_approval_unattributed_verdict",
+                    coordination_file=coordination_file,
+                    range_tokens=range_tokens,
+                    detail={
+                        "latestReviewHeading": latest.get("heading"),
+                        "verdict": verdict,
+                        "requiredSeatLine": "Seat: <registered review session GUID>",
+                    },
+                )
+            if seat_session not in authorized_sessions:
+                return content_review_gate_block(
+                    config,
+                    detection,
+                    reason="content_approval_unauthorized_seat",
+                    coordination_file=coordination_file,
+                    range_tokens=range_tokens,
+                    detail={
+                        "latestReviewHeading": latest.get("heading"),
+                        "verdict": verdict,
+                        "seatSession": seat_session,
+                        "authorizedReviewSessions": authorized_sessions,
+                    },
+                )
         return None
     return content_review_gate_block(
         config,
