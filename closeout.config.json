@@ -562,6 +562,9 @@
       "test_stale_integrated_claims_do_not_foreignize_clean_at_start_dirty",
       "test_baseline_dirty_claimed_path_blocks_as_mixed_and_not_checkpointed",
       "test_baseline_dirty_changed_after_start_blocks_as_mixed_without_claim",
+      "test_overlapping_claim_owner_is_stable_across_manifest_directory_order",
+      "test_newer_claim_wins_when_work_block_id_sorts_against_recency",
+      "test_work_block_recency_prefers_precise_stamp_and_falls_back",
       "test_repo_sweep_baseline_dirty_changed_is_not_pruned_as_foreign_dirty",
       "test_owned_dirty_checkpoint_stages_only_exact_owned_paths",
       "test_foreign_dirty_remains_retained_audited_and_does_not_block_independent_closeout",
@@ -688,6 +691,8 @@
     ],
     "requiredSymbols": [
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def utc_now_precise"},
+      {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def work_block_recency"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def verify_detached_preservation_commit"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repair_target_push_failure"},
