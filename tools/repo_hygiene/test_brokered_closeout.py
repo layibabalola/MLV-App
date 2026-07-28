@@ -25,6 +25,11 @@ from .brokered_closeout import (
     checkpoint_owned_work,
     checkpoint_commit_message,
     closeout_clean_truth_from_postcondition,
+    coordination_entries,
+    coordination_entry_actor_kind,
+    coordination_entry_matches,
+    coordination_entry_seat_session,
+    validate_content_review_approval_for_finalize,
     closeout_merge_commit_message,
     closeout_script_command,
     delivered_work_commit_subject,
@@ -6496,6 +6501,231 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(any(str(item).startswith("evidenceRepairFailed") for item in result["blockers"]))
         self.assertIn("evidence_repair_blocked", self.audit_types(repo))
+
+
+class CoordinationGateIdentityTests(unittest.TestCase):
+    """Reader-side gate hardening (opus SEQ 483 spec + 485 amendment, fable SEQ 950/951).
+
+    Phase 1: actor/kind are captured from the heading grammar, never substring-matched
+    against free text. Phase 2: the decisive APPROVING entry must carry a Seat GUID in
+    contentReviewGate.authorizedReviewSessions when that allowlist is configured.
+    """
+
+    START = "c" * 40
+    FEATURE = "f" * 40
+
+    # A REAL heading from the live gate file (2026-06-21): under the old substring
+    # matcher this satisfied actor=CODEX/kind=REVIEW purely from its own prose.
+    REAL_FALSE_POSITIVE_HEADING = (
+        "### [2026-06-21T14:27:05-05:00] CLAUDE - HANDOFF "
+        "(DNG-folder playback first cut; ROLE INVERSION: Codex please REVIEW + adopt + merge)"
+    )
+
+    def range_token(self) -> str:
+        return "%s..%s" % (self.START, self.FEATURE)
+
+    def entry(self, heading: str, body_lines) -> dict:
+        body = heading + "\n" + "\n".join(body_lines) + "\n"
+        return {"offset": 0, "heading": heading, "body": body}
+
+    def gate_config(self, **overrides) -> dict:
+        gate = {
+            "requireClaudeApprovalForFinalize": True,
+            "coordinationFile": "gate.md",
+            "handoffActor": "CODEX",
+            "handoffKind": "HANDOFF",
+            "reviewActor": "CLAUDE",
+            "reviewKind": "REVIEW",
+            "approveTokens": ["APPROVE"],
+            "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
+            "requireHandoff": True,
+        }
+        gate.update(overrides)
+        return {"contentReviewGate": gate}
+
+    def run_validator(self, ledger_text: str, **gate_overrides):
+        config = self.gate_config(**gate_overrides)
+        detection = {"featureHead": self.FEATURE, "targetHead": self.START, "targetBranch": "master"}
+        manifest = {"startHead": self.START}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gate.md").write_text(ledger_text, encoding="utf-8")
+            return validate_content_review_approval_for_finalize(root, config, detection, manifest)
+
+    def ledger(self, *entries) -> str:
+        return "\n".join(entries) + "\n"
+
+    def handoff_entry(self, actor: str = "CODEX") -> str:
+        return (
+            "### [2026-01-01T00:00:00Z] %s - HANDOFF (block ready)\n" % actor
+            + "Range: `%s`\n" % self.range_token()
+        )
+
+    def review_entry(self, verdict: str = "APPROVE", seat_line: str = "") -> str:
+        lines = [
+            "### [2026-01-01T01:00:00Z] CLAUDE - REVIEW (verdict)",
+            "Range: `%s`" % self.range_token(),
+            "Verdict: %s" % verdict,
+        ]
+        if seat_line:
+            lines.append(seat_line)
+        return "\n".join(lines) + "\n"
+
+    AUTHORIZED = "0801f97e-a603-4483-a871-dc6158d94c3e"
+    HISTORICAL = "d14ba9b1-e602-4756-ba92-b9e1542bbcc6"
+    UNAUTHORIZED = "9f75b735-3ab2-4c52-9bd4-7e576af859c1"
+
+    def test_anchored_capture_reads_actor_and_kind_from_grammar(self) -> None:
+        self.assertEqual(
+            coordination_entry_actor_kind("### [2026-01-01T00:00:00Z] CODEX - HANDOFF (notes)"),
+            ("CODEX", "HANDOFF"),
+        )
+        # En/em dash separators used by some composed headings must also parse.
+        self.assertEqual(
+            coordination_entry_actor_kind("### [2026-01-01T00:00:00Z] CLAUDE — REVIEW (notes)"),
+            ("CLAUDE", "REVIEW"),
+        )
+        self.assertEqual(coordination_entry_actor_kind("not a heading"), ("", ""))
+
+    def test_real_false_positive_heading_no_longer_matches_foreign_actor_kind(self) -> None:
+        entry = self.entry(self.REAL_FALSE_POSITIVE_HEADING, ["Range: `%s`" % self.range_token()])
+        self.assertFalse(
+            coordination_entry_matches(entry, actor="CODEX", kind="REVIEW", range_token=self.range_token())
+        )
+        # It still matches what it actually declares.
+        self.assertTrue(
+            coordination_entry_matches(entry, actor="CLAUDE", kind="HANDOFF", range_token=self.range_token())
+        )
+
+    def test_approve_without_seat_guid_blocks_as_unattributed(self) -> None:
+        result = self.run_validator(
+            self.ledger(self.handoff_entry(), self.review_entry()),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_unattributed_verdict")
+
+    def test_approve_with_unauthorized_seat_blocks(self) -> None:
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),
+                self.review_entry(seat_line="Seat: session %s (registered)" % self.UNAUTHORIZED),
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_unauthorized_seat")
+        self.assertEqual(result["detail"]["seatSession"], self.UNAUTHORIZED)
+
+    def test_approve_with_authorized_seat_releases(self) -> None:
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),
+                self.review_entry(seat_line="Seat: registered 'claude' seat, session %s" % self.AUTHORIZED),
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNone(result)
+
+    def test_handoff_needs_no_seat_guid(self) -> None:
+        # Phase 2 binds ONLY the decisive verdict entry; a GUID-less handoff still counts.
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),  # no Seat line anywhere in the handoff
+                self.review_entry(seat_line="Seat: session %s" % self.AUTHORIZED),
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNone(result)
+
+    def test_blocking_verdict_blocks_even_without_seat_guid(self) -> None:
+        # Fail-closed direction: identity never rescues a block.
+        result = self.run_validator(
+            self.ledger(self.handoff_entry(), self.review_entry(verdict="CHANGES_REQUESTED")),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_blocked")
+
+    def test_no_allowlist_preserves_previous_behaviour(self) -> None:
+        # Repos without authorizedReviewSessions keep the pre-identity semantics.
+        result = self.run_validator(self.ledger(self.handoff_entry(), self.review_entry()))
+        self.assertIsNone(result)
+
+    def test_additional_handoff_actor_accepted_only_when_configured(self) -> None:
+        fable_ledger = self.ledger(
+            self.handoff_entry(actor="FABLE"),
+            self.review_entry(seat_line="Seat: session %s" % self.AUTHORIZED),
+        )
+        blocked = self.run_validator(fable_ledger, authorizedReviewSessions=[self.AUTHORIZED])
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked["reason"], "content_approval_missing_handoff")
+        released = self.run_validator(
+            fable_ledger,
+            authorizedReviewSessions=[self.AUTHORIZED],
+            additionalHandoffActors=["FABLE"],
+        )
+        self.assertIsNone(released)
+
+    def test_landed_ci1_ledger_shape_still_releases(self) -> None:
+        # Regression guard (483 [7](f)): the shape of the ALREADY-LANDED CI-1 ledger --
+        # CODEX handoff, then a CLAUDE review whose Seat line names the historical
+        # verdict author -- must still release under the new code with the allowlist
+        # as committed (which deliberately retains that historical session).
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),
+                self.review_entry(
+                    seat_line=(
+                        "Seat: registered 'claude' seat, session %s, seat-registry.json v17" % self.HISTORICAL
+                    )
+                ),
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED, self.HISTORICAL],
+        )
+        self.assertIsNone(result)
+
+    def test_malformed_heading_fails_closed(self) -> None:
+        # Requirement (M) (opus 487): a heading that does not parse under the grammar
+        # must never match ANY actor/kind -- fail closed, not fall through to substring.
+        for bad in (
+            "### [2026-01-01T00:00:00Z] (no actor at all)",
+            "### CODEX - REVIEW (missing timestamp bracket)",
+            "### [2026-01-01T00:00:00Z] CODEX REVIEW (missing separator)",
+        ):
+            entry = self.entry(bad, ["Range: `%s`" % self.range_token(), "Verdict: APPROVE"])
+            self.assertFalse(
+                coordination_entry_matches(entry, actor="CLAUDE", kind="REVIEW", range_token=self.range_token()),
+                bad,
+            )
+
+    def test_kind_axis_verdict_echoing_ack_does_not_release(self) -> None:
+        # The KIND axis was the larger untested surface (235 headings, opus 487 [2]) and
+        # this is the weaponizable shape: an ACK echoing a review verdict in prose AND
+        # carrying the approve token. Under the old matcher it satisfies actor=CLAUDE
+        # (prose 'Claude'), kind=REVIEW (prose 'review'), file-order-last, and releases.
+        ack_echo = (
+            "### [2026-01-01T02:00:00Z] CODEX - ACK (Claude review APPROVE received; proceeding to finalize)\n"
+            "Range: `%s`\n" % self.range_token()
+            + "Verdict: APPROVE\n"
+        )
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),
+                self.review_entry(verdict="CHANGES_REQUESTED", seat_line="Seat: session %s" % self.AUTHORIZED),
+                ack_echo,
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        # The genuine latest CLAUDE - REVIEW verdict is CHANGES_REQUESTED; the ACK echo
+        # must not be taken as a later decisive review.
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_blocked")
+
+    def test_seat_session_extraction(self) -> None:
+        body = "Range: x\nSeat: registered 'claude' seat, session %s, re-statted\n" % self.AUTHORIZED
+        self.assertEqual(coordination_entry_seat_session(body), self.AUTHORIZED)
+        self.assertEqual(coordination_entry_seat_session("Range: x\nVerdict: APPROVE\n"), "")
 
 
 if __name__ == "__main__":

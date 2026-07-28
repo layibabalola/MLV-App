@@ -40,7 +40,12 @@
     "reviewKind": "REVIEW",
     "approveTokens": ["APPROVE"],
     "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
-    "requireHandoff": true
+    "requireHandoff": true,
+    "additionalHandoffActors": ["FABLE"],
+    "authorizedReviewSessions": [
+      "0801f97e-a603-4483-a871-dc6158d94c3e",
+      "d14ba9b1-e602-4756-ba92-b9e1542bbcc6"
+    ]
   },
   "validation": {
     "timeoutMs": 120000,

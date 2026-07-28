@@ -6053,10 +6053,49 @@ def coordination_entry_range(entry_body: str) -> str:
     return ""
 
 
-def coordination_entry_matches(entry: Dict[str, Any], *, actor: str, kind: str, range_token: str) -> bool:
-    heading = str(entry.get("heading") or "").upper()
-    body = str(entry.get("body") or "")
-    return actor.upper() in heading and kind.upper() in heading and coordination_entry_range(body) == range_token
+# Coordination headings follow one universal grammar across the ledger:
+#   ### [<timestamp>] ACTOR - KIND (free-text description)
+# The actor/kind must be captured from that grammar, never substring-matched against
+# the whole heading: the free-text portion routinely names other lanes and kinds
+# (189 live instances at adoption time), so a substring test lets an entry's own
+# prose satisfy actor/kind it does not declare.
+COORDINATION_HEADING_RE = re.compile(
+    r"^### \[[^\]]+\]\s*(?P<actor>[A-Za-z0-9_]+)\s*[-–—]\s*(?P<kind>[A-Za-z0-9_]+)\b"
+)
+
+COORDINATION_SEAT_GUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def coordination_entry_actor_kind(heading: str) -> Tuple[str, str]:
+    match = COORDINATION_HEADING_RE.match(str(heading or ""))
+    if not match:
+        return "", ""
+    return match.group("actor").upper(), match.group("kind").upper()
+
+
+def coordination_entry_seat_session(entry_body: str) -> str:
+    match = re.search(r"(?im)^\s*Seat:\s*(.+)$", entry_body)
+    if not match:
+        return ""
+    guid = COORDINATION_SEAT_GUID_RE.search(match.group(1))
+    return guid.group(0).lower() if guid else ""
+
+
+def coordination_entry_matches(
+    entry: Dict[str, Any],
+    *,
+    actor: str,
+    kind: str,
+    range_token: str,
+    additional_actors: Sequence[str] = (),
+) -> bool:
+    heading_actor, heading_kind = coordination_entry_actor_kind(str(entry.get("heading") or ""))
+    allowed_actors = {actor.upper()} | {str(extra).upper() for extra in additional_actors if str(extra).strip()}
+    if heading_actor not in allowed_actors or heading_kind != kind.upper():
+        return False
+    return coordination_entry_range(str(entry.get("body") or "")) == range_token
 
 
 def content_review_gate_block(
@@ -6187,10 +6226,19 @@ def validate_content_review_approval_for_finalize(
     review_actor = str(gate.get("reviewActor") or "CLAUDE")
     review_kind = str(gate.get("reviewKind") or "REVIEW")
     require_handoff = bool(gate.get("requireHandoff", True))
+    additional_handoff_actors = [
+        str(actor_name) for actor_name in gate.get("additionalHandoffActors", []) if str(actor_name).strip()
+    ]
     handoffs = [
         entry
         for entry in entries
-        if coordination_entry_matches(entry, actor=handoff_actor, kind=handoff_kind, range_token=canonical_range)
+        if coordination_entry_matches(
+            entry,
+            actor=handoff_actor,
+            kind=handoff_kind,
+            range_token=canonical_range,
+            additional_actors=additional_handoff_actors,
+        )
     ]
     if require_handoff and not handoffs:
         return content_review_gate_block(
@@ -6246,6 +6294,46 @@ def validate_content_review_approval_for_finalize(
             detail={"latestReviewHeading": latest.get("heading"), "verdict": verdict},
         )
     if verdict_upper in approve_tokens:
+        # Identity check (reader-side): the DECISIVE APPROVING entry must be attributable
+        # to an authorized review session. Enforcement engages when the tracked config
+        # carries a non-empty allowlist; the allowlist lives in closeout.config.json
+        # (not the gitignored seat registry) because this validator runs inside work-block
+        # worktrees where .claude-state does not exist. Blocking verdicts deliberately
+        # skip this check: an unattributed block still blocks (fail-closed direction).
+        authorized_sessions = [
+            str(session).strip().lower()
+            for session in gate.get("authorizedReviewSessions", [])
+            if str(session).strip()
+        ]
+        if authorized_sessions:
+            seat_session = coordination_entry_seat_session(str(latest.get("body") or ""))
+            if not seat_session:
+                return content_review_gate_block(
+                    config,
+                    detection,
+                    reason="content_approval_unattributed_verdict",
+                    coordination_file=coordination_file,
+                    range_tokens=range_tokens,
+                    detail={
+                        "latestReviewHeading": latest.get("heading"),
+                        "verdict": verdict,
+                        "requiredSeatLine": "Seat: <registered review session GUID>",
+                    },
+                )
+            if seat_session not in authorized_sessions:
+                return content_review_gate_block(
+                    config,
+                    detection,
+                    reason="content_approval_unauthorized_seat",
+                    coordination_file=coordination_file,
+                    range_tokens=range_tokens,
+                    detail={
+                        "latestReviewHeading": latest.get("heading"),
+                        "verdict": verdict,
+                        "seatSession": seat_session,
+                        "authorizedReviewSessions": authorized_sessions,
+                    },
+                )
         return None
     return content_review_gate_block(
         config,
