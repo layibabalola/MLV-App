@@ -4303,6 +4303,35 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in detection["foreignDirty"]], ["owned.txt"])
         self.assertEqual(detection["foreignDirty"][0]["ownerWorkBlockId"], "wb-z-other")
 
+    def test_overlapping_claim_owner_is_stable_across_manifest_directory_order(self) -> None:
+        repo = self.init_repo()
+        git(repo, "checkout", "-b", "codex/claimed-delta")
+        start_work_block(repo, work_block_id="wb-current", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("committed\n", encoding="utf-8")
+        git(repo, "add", "owned.txt")
+        git(repo, "commit", "-m", "owned committed")
+        start_work_block(repo, work_block_id="wb-z-other", actor="local-test", path_claims=["owned.txt"])
+        (repo / "owned.txt").write_text("other dirty\n", encoding="utf-8")
+
+        original_glob = Path.glob
+        owners = []
+        for reverse in (False, True):
+            def ordered_glob(self, pattern, *args, _reverse=reverse, **kwargs):
+                return iter(sorted(original_glob(self, pattern, *args, **kwargs), reverse=_reverse))
+
+            with mock.patch.object(Path, "glob", ordered_glob):
+                detection = detect_work_block(repo, work_block_id="wb-current")
+            owners.append(
+                {
+                    "reverse": reverse,
+                    "ownedDirty": [item["path"] for item in detection["ownedDirty"]],
+                    "foreignOwners": [item["ownerWorkBlockId"] for item in detection["foreignDirty"]],
+                }
+            )
+
+        self.assertEqual([item["foreignOwners"] for item in owners], [["wb-z-other"], ["wb-z-other"]], owners)
+        self.assertEqual([item["ownedDirty"] for item in owners], [[], []], owners)
+
     def test_newer_claim_wins_when_work_block_id_sorts_against_recency(self) -> None:
         repo = self.init_repo()
         git(repo, "checkout", "-b", "codex/claimed-delta")
