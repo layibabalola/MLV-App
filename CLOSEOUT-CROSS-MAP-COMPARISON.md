@@ -19,7 +19,7 @@ Principle:
 
 This round-delta note converted the cross-repo comparison idea into a durable contract and keeps the current round's delta visible beside the comparison rules:
 
-Freshness marker: Last updated: 2026-05-28 10:35 -05:00
+Freshness marker: Last updated: 2026-07-28 18:31 -05:00
 
 - Remediation-freeze thaw now distinguishes fresh freeze packets from stale markers by comparing requested work block id, branch, feature head, target head, policy hash, and dirty-path fingerprints before allowing quorum-backed marker removal.
 - `workflow-comparison` is now treated as a baseline-checked dashboard surface, not just a descriptive label.
@@ -34,6 +34,9 @@ Freshness marker: Last updated: 2026-05-28 10:35 -05:00
 - This round carries a concrete `closeout-compare-result.v1` instance file in `.claude-state/closeout/workflow-comparison/compare-result.json`, so later repos can copy the same payload shape instead of reconstructing it from the schema.
 - The repo-state feed now also advertises that artifact through a live `dashboard.workflowComparison.compareResult` pointer, which is the useful compromise between "artifact-only authority" and "dashboard can find the live source without guessing."
 - A successful closeout can still retain foreign or exempt dirty paths when the repo-closed postcondition audits them as baseline state; that should be described as retained dirty evidence, not as a failed publish.
+- Generated evidence and integration commits now carry explicit `evidence:` and `integration:` subjects, leaving the human implementation subject unambiguous in `git log`.
+- Content-review recovery payloads expose the parsed heading grammar, and the gate documentation states that a ledger seat is a claimed identity check rather than authentication.
+- The temporary `additionalHandoffActors` authority was retired after the live implementation lane resumed; only the configured primary handoff actor remains.
 
 The intent is that later repos can compare workflow changes from this tracked note instead of reconstructing the delta from chat history.
 
@@ -41,7 +44,7 @@ The intent is that later repos can compare workflow changes from this tracked no
 
 Objective: Keep the closeout workflow docs and compare artifact mechanically comparable across repos.
 
-Freshness marker: Last updated: 2026-05-26 18:12 -05:00
+Freshness marker: Last updated: 2026-07-28 18:31 -05:00
 
 Last completed work: Hardened baseline-dirty closeout classification so status/content fingerprint changes after broker start become `mixedDirty` blockers instead of retained foreign dirty, and added direct detector plus repo-sweep regression coverage.
 The next alignment step is to keep the canonical hybrid closeout contract and

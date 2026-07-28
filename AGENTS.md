@@ -21,6 +21,8 @@
 - When the user asks for "repo status" or an equivalent overall repository state, report the current branch/tracking and dirty state, plus local branches, registered worktrees, and stashes. If you intentionally omit any of those, say why.
 
 ## Active Investigation Notes
+
+- The content-review gate validates a CLAIMED identity from the ledger; it does NOT authenticate that actor or session. Its blocked `expectedEntryFormat` includes the parsed heading grammar as well as the canonical range and exact `Range:`/`Verdict:` lines.
 - `.claude/analysis/mlv-playback-investigation.md`
 - `.claude/analysis/testing-strategy.md`
 - `.claude/analysis/testing-scaffold-implementation.md`
