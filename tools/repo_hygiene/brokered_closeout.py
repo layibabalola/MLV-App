@@ -1730,23 +1730,56 @@ def active_path_claims(repo_root: Path, config: Dict[str, Any]) -> Dict[str, str
     root = work_blocks_root(repo_root, config)
     if not root.exists():
         return claims
+    manifests: List[Tuple[Dict[str, Any], Path]] = []
     for manifest_file in root.glob("*/manifest.json"):
         manifest = read_json(manifest_file, {})
         if manifest.get("state") not in {"active", "completed", "finalizing", "blocked"}:
             continue
         if manifest_path_claims_are_stale(repo_root, config, manifest):
             continue
+        manifests.append((manifest, manifest_file))
+    # State rank is intentionally the first key: an active owner outranks a
+    # completed/finalizing/blocked historical claimant before recency decides
+    # among owners in the same lifecycle state. The manifest directory name
+    # is only a final total-order fallback for legacy manifests with no id.
+    for manifest, manifest_file in sorted(
+        manifests,
+        key=lambda item: (work_block_selection_key(item[0]), item[1].parent.name),
+    ):
         block_id = str(manifest.get("workBlockId") or manifest_file.parent.name)
         for claim in manifest_path_claims(manifest):
             claims[claim] = block_id
     return claims
 
 
+def utc_now_precise() -> str:
+    """Microsecond-resolution UTC stamp for broker recency comparisons.
+
+    The shared utc_now() helper is second-truncated and is consumed by the
+    agent bridge as well, so it is not widened here. Work blocks started
+    inside the same second would otherwise tie on updatedAt and fall through
+    to the workBlockId tiebreak, which carries no recency information.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def work_block_recency(manifest: Dict[str, Any]) -> datetime:
+    """Most precise start/update instant recorded for a work block.
+
+    Manifests written before the precise fields existed fall back to the
+    second-truncated stamps, which floor to .000000 and therefore stay
+    ordered against newer precise stamps within the same second.
+    """
+    for field in ("updatedAtPrecise", "updatedAt", "startedAtPrecise", "startedAt"):
+        parsed = parse_utc(str(manifest.get(field) or ""))
+        if parsed is not None:
+            return parsed
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def work_block_selection_key(manifest: Dict[str, Any]) -> Tuple[int, datetime, str]:
     state_rank = {"active": 4, "completed": 3, "finalizing": 2, "blocked": 1}
-    updated = parse_utc(str(manifest.get("updatedAt") or manifest.get("startedAt") or ""))
-    if updated is None:
-        updated = datetime.min.replace(tzinfo=timezone.utc)
+    updated = work_block_recency(manifest)
     return (state_rank.get(str(manifest.get("state")), 0), updated, str(manifest.get("workBlockId") or ""))
 
 
@@ -3250,6 +3283,8 @@ def start_work_block(
             "pathClaims": claims,
             "startedAt": utc_now(),
             "updatedAt": utc_now(),
+            "startedAtPrecise": utc_now_precise(),
+            "updatedAtPrecise": utc_now_precise(),
             "lease": {
                 "holder": actor,
                 "seconds": lease_seconds,
@@ -3332,6 +3367,8 @@ def recover_dirty_protected_target_to_work_block(
             "pathClaims": claims,
             "startedAt": utc_now(),
             "updatedAt": utc_now(),
+            "startedAtPrecise": utc_now_precise(),
+            "updatedAtPrecise": utc_now_precise(),
             "lease": {
                 "holder": actor,
                 "seconds": lease_seconds,
@@ -3363,6 +3400,7 @@ def update_manifest(repo_root: Path, config: Dict[str, Any], work_block_id: str,
     manifest = load_manifest(repo_root, config, work_block_id)
     manifest.update(updates)
     manifest["updatedAt"] = utc_now()
+    manifest["updatedAtPrecise"] = utc_now_precise()
     write_json(work_block_dir(repo_root, config, work_block_id) / "manifest.json", manifest)
     return manifest
 
@@ -3560,6 +3598,7 @@ def bootstrap_response_broker_manifest(
         head = rev_parse(repo_root, "HEAD")
         dirty_baseline = dirty_baseline_snapshot(repo_root)
         now = utc_now()
+        now_precise = utc_now_precise()
         manifest = {
             "schemaVersion": BROKER_SCHEMA_VERSION,
             "workBlockId": block_id,
@@ -3572,6 +3611,8 @@ def bootstrap_response_broker_manifest(
             "pathClaims": claims,
             "startedAt": now,
             "updatedAt": now,
+            "startedAtPrecise": now_precise,
+            "updatedAtPrecise": now_precise,
             "lease": {"holder": actor, "seconds": lease_seconds, "createdAt": now},
             "startHead": head,
             "dirtyBaseline": dirty_baseline,
