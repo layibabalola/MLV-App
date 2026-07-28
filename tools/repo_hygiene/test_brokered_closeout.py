@@ -6727,6 +6727,73 @@ class CoordinationGateIdentityTests(unittest.TestCase):
         self.assertEqual(coordination_entry_seat_session(body), self.AUTHORIZED)
         self.assertEqual(coordination_entry_seat_session("Range: x\nVerdict: APPROVE\n"), "")
 
+    def test_seat_session_last_line_wins_over_quoted_seat(self) -> None:
+        # B3: an entry quoting another entry's Seat line above its own footer must
+        # attribute to its OWN (last) Seat line, not the quoted one.
+        body = (
+            "Quoting the prior verdict:\nSeat: session %s (quoted)\n" % self.UNAUTHORIZED
+            + "My own footer follows.\nSeat: session %s\n" % self.AUTHORIZED
+        )
+        self.assertEqual(coordination_entry_seat_session(body), self.AUTHORIZED)
+
+    def test_unparsable_superseding_block_fails_closed(self) -> None:
+        # R1: a LATER blocking review whose heading does not parse (Markdown-decorated)
+        # must not be silently dropped -- the range-naming unparsable entry blocks the
+        # whole gate as content_approval_unparsable_heading instead of releasing the
+        # stale APPROVE.
+        for bad_heading in (
+            "### [2026-01-01T02:00:00Z] **CLAUDE - REVIEW** (superseding block)",
+            "### [2026-01-01T02:00:00Z] CLAUDE / REVIEW (superseding block)",
+            "### [2026-01-01T02:00:00Z] `CLAUDE - REVIEW` (superseding block)",
+        ):
+            superseding = (
+                bad_heading + "\n"
+                + "Range: `%s`\n" % self.range_token()
+                + "Verdict: CHANGES_REQUESTED\n"
+                + "Seat: session %s\n" % self.AUTHORIZED
+            )
+            result = self.run_validator(
+                self.ledger(
+                    self.handoff_entry(),
+                    self.review_entry(seat_line="Seat: session %s" % self.AUTHORIZED),
+                    superseding,
+                ),
+                authorizedReviewSessions=[self.AUTHORIZED],
+            )
+            self.assertIsNotNone(result, bad_heading)
+            self.assertEqual(result["reason"], "content_approval_unparsable_heading", bad_heading)
+
+    def test_unparsable_heading_for_other_range_is_ignored(self) -> None:
+        # The unparsable check is scoped to entries NAMING this range, so historic
+        # decorated headings about other ranges stay inert (no-op on the live file).
+        other = "### [2026-01-01T02:00:00Z] **CLAUDE - REVIEW** (other range)\nRange: `%s..%s`\nVerdict: APPROVE\n" % ("a" * 40, "b" * 40)
+        result = self.run_validator(
+            self.ledger(
+                self.handoff_entry(),
+                self.review_entry(seat_line="Seat: session %s" % self.AUTHORIZED),
+                other,
+            ),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNone(result)
+
+    def test_blocked_payload_documents_seat_requirement_and_grammar(self) -> None:
+        # R2: the recovery guidance must describe the ACTUAL semantics -- parsed
+        # grammar, not substring -- and must name the Seat requirement when the
+        # allowlist is configured, so following it exactly cannot re-block.
+        result = self.run_validator(
+            self.ledger(self.handoff_entry()),
+            authorizedReviewSessions=[self.AUTHORIZED],
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_missing")
+        fmt = result["expectedEntryFormat"]
+        self.assertEqual(fmt["requiredSeatLine"], "Seat: <one of contentReviewGate.authorizedReviewSessions>")
+        self.assertNotIn("matched case-insensitively by substring", fmt["notes"])
+        self.assertIn("PARSED", fmt["notes"])
+        self.assertIn("Seat:", fmt["notes"])
+        self.assertIn("Seat: <authorized GUID>", result["recoveryCommand"])
+
 
 if __name__ == "__main__":
     unittest.main()

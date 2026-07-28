@@ -185,8 +185,19 @@ Codex took the implementer role for the Lane B CUDA playback recon bridge; this
 restores the original CODEX-implements / CLAUDE-reviews direction). Codex is the
 implementer, so finalize requires that CODEX first append a `CODEX — HANDOFF`
 entry and then YOU (Claude) append a matching `CLAUDE — REVIEW` entry that
-approves it — Codex's own handoff does not release the gate. Headings are matched case-insensitively by actor+kind
-substring. Both the handoff and the review entry must carry a dedicated
+approves it — Codex's own handoff does not release the gate. Headings are PARSED
+under the grammar `### [<timestamp>] ACTOR - KIND (free text)`: the DECLARED
+actor and kind must equal the configured tokens case-insensitively; free-text
+prose no longer matches, a heading that does not parse fails closed, and an
+unparsable heading that names the range under review blocks finalize as
+`content_approval_unparsable_heading`. When
+`contentReviewGate.authorizedReviewSessions` is configured (it is), the
+APPROVING review entry must ALSO carry a `Seat: <GUID>` line whose GUID is in
+that allowlist — a missing Seat line blocks as
+`content_approval_unattributed_verdict`, an unlisted GUID as
+`content_approval_unauthorized_seat`; blocking verdicts never require identity.
+`additionalHandoffActors` (currently `["FABLE"]`) admits extra handoff actors
+alongside `handoffActor`. Both the handoff and the review entry must carry a dedicated
 `Range:` line whose value EXACTLY equals the canonical full-40-char
 `startHead..featureHead` range token; the short 8/12-char range forms no longer
 match. The review entry must also carry a bare `Verdict:` line whose token

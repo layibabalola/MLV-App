@@ -6076,10 +6076,12 @@ def coordination_entry_actor_kind(heading: str) -> Tuple[str, str]:
 
 
 def coordination_entry_seat_session(entry_body: str) -> str:
-    match = re.search(r"(?im)^\s*Seat:\s*(.+)$", entry_body)
-    if not match:
+    # LAST Seat: line wins (LANE-4 review B3): an entry quoting another entry's Seat line
+    # above its own footer must not mis-attribute itself to the quoted seat.
+    matches = re.findall(r"(?im)^\s*Seat:\s*(.+)$", entry_body)
+    if not matches:
         return ""
-    guid = COORDINATION_SEAT_GUID_RE.search(match.group(1))
+    guid = COORDINATION_SEAT_GUID_RE.search(matches[-1])
     return guid.group(0).lower() if guid else ""
 
 
@@ -6121,6 +6123,15 @@ def content_review_gate_block(
     blocking_tokens = [str(token).upper() for token in gate.get("blockingTokens", ["CHANGES_REQUESTED", "BLOCKER"])]
     approve_token = approve_tokens[0] if approve_tokens else "APPROVE"
     range_display = primary_range or "<targetHead>..<featureHead>"
+    authorized_sessions = [str(s).strip() for s in gate.get("authorizedReviewSessions", []) if str(s).strip()]
+    seat_note = ""
+    if authorized_sessions:
+        seat_note = (
+            " The review entry must ALSO carry a 'Seat: <GUID>' line whose GUID is one of "
+            "contentReviewGate.authorizedReviewSessions; an approving verdict without it blocks as "
+            "content_approval_unattributed_verdict, and an unlisted GUID blocks as "
+            "content_approval_unauthorized_seat."
+        )
     payload = {
         "reason": reason,
         "workBlockId": detection.get("workBlockId"),
@@ -6141,17 +6152,19 @@ def content_review_gate_block(
             "approveTokens": approve_tokens,
             "blockingTokens": blocking_tokens,
             "notes": (
-                "Append a '%s ... %s' entry, then a LATER '%s ... %s' entry. Both headings are matched "
-                "case-insensitively by substring. The review entry's Range: line value must EXACTLY equal "
+                "Append a '%s ... %s' entry, then a LATER '%s ... %s' entry. Headings are PARSED as "
+                "'### [<timestamp>] ACTOR - KIND (free text)': the DECLARED actor and kind must equal the "
+                "configured tokens case-insensitively (free-text prose no longer matches, and a heading that "
+                "does not parse fails closed). The review entry's Range: line value must EXACTLY equal "
                 "the canonical range above -- short 8/12-char ranges no longer match. The Verdict: token "
                 "must EXACTLY equal an approve/blocking token (e.g. 'Verdict: %s'); a 'Verdict: %s -- <range>' "
-                "suffix form no longer counts."
-                % (handoff_actor, handoff_kind, review_actor, review_kind, approve_token, approve_token)
+                "suffix form no longer counts.%s"
+                % (handoff_actor, handoff_kind, review_actor, review_kind, approve_token, approve_token, seat_note)
             ),
         },
         "recoveryCommand": (
             "Append a %s %s for range %s to %s, then a LATER %s %s for the SAME range with a bare "
-            "'Verdict: %s' line, then rerun %s"
+            "'Verdict: %s' line%s, then rerun %s"
             % (
                 handoff_actor,
                 handoff_kind,
@@ -6160,10 +6173,13 @@ def content_review_gate_block(
                 review_actor,
                 review_kind,
                 approve_token,
+                (" and a 'Seat: <authorized GUID>' line" if authorized_sessions else ""),
                 closeout_script_command("work-block-complete.ps1", ["-Finalize"], config),
             )
         ),
     }
+    if authorized_sessions:
+        payload["expectedEntryFormat"]["requiredSeatLine"] = "Seat: <one of contentReviewGate.authorizedReviewSessions>"
     if detail:
         payload["detail"] = detail
     if gate:
@@ -6221,6 +6237,27 @@ def validate_content_review_approval_for_finalize(
         )
     text = coordination_path.read_text(encoding="utf-8")
     entries = coordination_entries(text)
+    # (M) supersession-axis fail-closed (LANE-4 review R1): an entry that NAMES this range
+    # but whose heading does not parse under the grammar cannot be classified, so the
+    # "latest decisive verdict" ordering cannot be trusted -- a Markdown-decorated
+    # superseding BLOCK would otherwise be silently dropped and a stale APPROVE would
+    # release. Scoped to range-naming entries, this is a no-op on the live ledger
+    # (0 non-parsing headings today) and can only fail closed.
+    unparsable = [
+        entry
+        for entry in entries
+        if coordination_entry_actor_kind(str(entry.get("heading") or "")) == ("", "")
+        and coordination_entry_range(str(entry.get("body") or "")) == canonical_range
+    ]
+    if unparsable:
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_unparsable_heading",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"unparsableHeadings": [str(entry.get("heading") or "") for entry in unparsable]},
+        )
     handoff_actor = str(gate.get("handoffActor") or "CODEX")
     handoff_kind = str(gate.get("handoffKind") or "HANDOFF")
     review_actor = str(gate.get("reviewActor") or "CLAUDE")
