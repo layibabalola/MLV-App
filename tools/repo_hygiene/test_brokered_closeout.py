@@ -3464,7 +3464,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         result = repair_missing_evidence(repo, config, detection, reason="final_push")
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(git(repo, "log", "-1", "--format=%s").stdout.strip(), "P-pre: add CUDA AMaZE debayer stage probe")
+        self.assertEqual(git(repo, "log", "-1", "--format=%s").stdout.strip(), "evidence: P-pre: add CUDA AMaZE debayer stage probe")
         self.assertIn("Closeout: repair", git(repo, "log", "-1", "--format=%B").stdout)
 
         post_evidence_detection = detect_work_block(repo, work_block_id="wb-delivered-subject")
