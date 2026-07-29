@@ -236,7 +236,10 @@ def evidence_repair_commit_message(
     )
     summary = normalize_commit_subject(work_summary) or normalize_commit_subject(configured)
     if summary:
-        return closeout_commit_message_with_details(summary, [generated_detail, "Work block: %s." % work_block_id])
+        return closeout_commit_message_with_details(
+            "evidence: %s" % summary,
+            [generated_detail, "Work block: %s." % work_block_id],
+        )
     return "chore(closeout): repair %s for %s before %s" % (
         summarize_commit_paths(paths),
         work_block_id,
@@ -275,7 +278,7 @@ def closeout_merge_commit_message(branch: str, target_branch: str, *, work_summa
         summary = normalize_commit_subject(work_summary)
         if summary:
             return closeout_commit_message_with_details(
-                summary,
+                "integration: %s" % summary,
                 ["Closeout: integrate work block %s into %s after clean validation." % (work_block_id, target_branch)],
             )
         return fallback
@@ -6145,6 +6148,7 @@ def content_review_gate_block(
         "policy": "contentReviewGate.requireClaudeApprovalForFinalize",
         "expectedEntryFormat": {
             "canonicalRange": range_display,
+            "requiredHeadingFormat": "### [<timestamp>] ACTOR - KIND (free text)",
             "handoffHeadingContains": [handoff_actor, handoff_kind],
             "reviewHeadingContains": [review_actor, review_kind],
             "requiredRangeLine": "Range: `%s`" % range_display,

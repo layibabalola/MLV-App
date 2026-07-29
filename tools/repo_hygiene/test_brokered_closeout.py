@@ -3423,10 +3423,21 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.assertEqual(
             message,
-            "export: apply Auto Look Assist raw defaults\n\n"
+            "evidence: export: apply Auto Look Assist raw defaults\n\n"
             "Closeout: repair closeout.json, metrics.json, and session.json before final push.\n"
             "Work block: wb-demo.",
         )
+
+    def test_evidence_repair_commit_message_marks_generated_commit(self) -> None:
+        config = load_closeout_config(ROOT)
+        message = evidence_repair_commit_message(
+            config,
+            reason="final_push",
+            work_block_id="wb-demo",
+            paths=[".closeout-evidence/wb-demo/closeout.json"],
+            work_summary="closeout: complete gate follow-up",
+        )
+        self.assertTrue(message.startswith("evidence: closeout: complete gate follow-up\n\n"))
 
     def test_evidence_repair_uses_delivered_subject_not_aspirational_work_block(self) -> None:
         repo = self.init_repo(config_updates={"evidenceRepair": {"enabled": True}})
@@ -3453,7 +3464,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         result = repair_missing_evidence(repo, config, detection, reason="final_push")
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(git(repo, "log", "-1", "--format=%s").stdout.strip(), "P-pre: add CUDA AMaZE debayer stage probe")
+        self.assertEqual(git(repo, "log", "-1", "--format=%s").stdout.strip(), "evidence: P-pre: add CUDA AMaZE debayer stage probe")
         self.assertIn("Closeout: repair", git(repo, "log", "-1", "--format=%B").stdout)
 
         post_evidence_detection = detect_work_block(repo, work_block_id="wb-delivered-subject")
@@ -3504,7 +3515,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.assertEqual(
             message,
-            "closeout: require human commit subjects\n\n"
+            "integration: closeout: require human commit subjects\n\n"
             "Closeout: integrate work block wb-demo into master after clean validation.",
         )
 
@@ -6714,7 +6725,7 @@ class CoordinationGateIdentityTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
-    def test_malformed_heading_fails_closed(self) -> None:
+    def test_malformed_heading_never_matches_actor_kind(self) -> None:
         # Requirement (M) (opus 487): a heading that does not parse under the grammar
         # must never match ANY actor/kind -- fail closed, not fall through to substring.
         for bad in (
@@ -6791,6 +6802,10 @@ class CoordinationGateIdentityTests(unittest.TestCase):
             )
             self.assertIsNotNone(result, bad_heading)
             self.assertEqual(result["reason"], "content_approval_unparsable_heading", bad_heading)
+            self.assertEqual(
+                result["expectedEntryFormat"]["requiredHeadingFormat"],
+                "### [<timestamp>] ACTOR - KIND (free text)",
+            )
 
     def test_unparsable_heading_for_other_range_is_ignored(self) -> None:
         # The unparsable check is scoped to entries NAMING this range, so historic
@@ -6818,6 +6833,7 @@ class CoordinationGateIdentityTests(unittest.TestCase):
         self.assertEqual(result["reason"], "content_approval_missing")
         fmt = result["expectedEntryFormat"]
         self.assertEqual(fmt["requiredSeatLine"], "Seat: <one of contentReviewGate.authorizedReviewSessions>")
+        self.assertEqual(fmt["requiredHeadingFormat"], "### [<timestamp>] ACTOR - KIND (free text)")
         self.assertNotIn("matched case-insensitively by substring", fmt["notes"])
         self.assertIn("PARSED", fmt["notes"])
         self.assertIn("Seat:", fmt["notes"])

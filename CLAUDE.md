@@ -195,9 +195,9 @@ unparsable heading that names the range under review blocks finalize as
 APPROVING review entry must ALSO carry a `Seat: <GUID>` line whose GUID is in
 that allowlist — a missing Seat line blocks as
 `content_approval_unattributed_verdict`, an unlisted GUID as
-`content_approval_unauthorized_seat`; blocking verdicts never require identity.
-`additionalHandoffActors` (currently `["FABLE"]`) admits extra handoff actors
-alongside `handoffActor`. Both the handoff and the review entry must carry a dedicated
+`content_approval_unauthorized_seat`; blocking verdicts never require identity. This
+gate validates a CLAIMED identity from the ledger; it does NOT authenticate that
+actor or session. Both the handoff and the review entry must carry a dedicated
 `Range:` line whose value EXACTLY equals the canonical full-40-char
 `startHead..featureHead` range token; the short 8/12-char range forms no longer
 match. The review entry must also carry a bare `Verdict:` line whose token
@@ -205,7 +205,7 @@ EXACTLY equals an approve token (`APPROVE`) or a blocking token
 (`CHANGES_REQUESTED`/`BLOCKER`) — a `Verdict: APPROVE -- <range>` suffix no
 longer counts as approval, and a non-decisive verdict such as `HOLD` or `IDLE`
 leaves finalize blocked as `content_approval_not_approved`. A blocked finalize
-result surfaces `expectedEntryFormat` (the canonical range and the exact
+result surfaces `expectedEntryFormat` (the canonical range, parsed heading format, and the exact
 `Range:`/`Verdict:` lines required) and a `recoveryCommand` derived from the
 configured actors. The config key `requireClaudeApprovalForFinalize` keeps its
 legacy name for compatibility; despite the name, the approval it requires comes
