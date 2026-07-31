@@ -42,8 +42,7 @@
     "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
     "requireHandoff": true,
     "authorizedReviewSessions": [
-      "d273796c-f896-4704-ba44-44661131c821",
-      "d14ba9b1-e602-4756-ba92-b9e1542bbcc6"
+      "dc7ccd09-d6ce-4577-991b-c54935a9fe3f"
     ]
   },
   "validation": {
