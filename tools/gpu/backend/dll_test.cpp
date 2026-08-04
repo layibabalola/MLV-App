@@ -71,6 +71,14 @@ typedef int                 (*pfn_set_luts)(igpu_recon_backend*, const igpu_reco
 typedef int                 (*pfn_run)(igpu_recon_backend*, const igpu_recon_frame_t*,
                                        const uint16_t*, igpu_recon_out_kind, uint16_t*, unsigned int);
 typedef int                 (*pfn_last_timing)(igpu_recon_backend*, igpu_recon_timing_t*);
+typedef int                 (*pfn_preupload_frame)(igpu_recon_backend*, uint64_t,
+                                                   const uint16_t*, size_t, int);
+typedef int                 (*pfn_run_preuploaded)(igpu_recon_backend*, uint64_t,
+                                                   const igpu_recon_frame_t*,
+                                                   const uint16_t*, igpu_recon_out_kind,
+                                                   uint16_t*, unsigned int);
+typedef int                 (*pfn_last_preupload_status)(
+    igpu_recon_backend*, igpu_recon_preupload_status_t*);
 
 static void* load_blob(const std::string& path, size_t expect_bytes)
 {
@@ -341,6 +349,9 @@ int main(int argc, char** argv)
     pfn_set_luts    f_set_luts;
     pfn_run         f_run;
     pfn_last_timing f_timing;
+    pfn_preupload_frame f_preupload;
+    pfn_run_preuploaded f_run_preuploaded;
+    pfn_last_preupload_status f_preupload_status;
     RESOLVE(f_create,   pfn_create,      "igpu_recon_create");
     RESOLVE(f_destroy,  pfn_destroy,     "igpu_recon_destroy");
     RESOLVE(f_abi,      pfn_abi_version, "igpu_recon_abi_version");
@@ -349,7 +360,11 @@ int main(int argc, char** argv)
     RESOLVE(f_set_luts, pfn_set_luts,    "igpu_recon_set_luts");
     RESOLVE(f_run,      pfn_run,         "igpu_recon_run");
     RESOLVE(f_timing,   pfn_last_timing, "igpu_recon_last_timing");
-    printf("[dll_test] resolved all 8 ABI symbols via GetProcAddress\n");
+    RESOLVE(f_preupload, pfn_preupload_frame, "igpu_recon_preupload_frame");
+    RESOLVE(f_run_preuploaded, pfn_run_preuploaded, "igpu_recon_run_preuploaded");
+    RESOLVE(f_preupload_status, pfn_last_preupload_status,
+            "igpu_recon_last_preupload_status");
+    printf("[dll_test] resolved required ABI + async-H2D extension symbols via GetProcAddress\n");
 
     /* ---- 2. load oracle in.u16 + out.u16 + the 4 LUTs ---- */
     uint16_t* h_in  = (uint16_t*)load_blob(P("in.u16"),  n * sizeof(uint16_t));
@@ -438,6 +453,73 @@ int main(int argc, char** argv)
         printf("  total    = %.3f\n", t.total_ms);
     }
 
+    /* ---- 6. async-H2D exact-match use + mismatch fail-closed fallback ---- */
+    uint16_t* preuploaded_result = (uint16_t*)malloc(n * sizeof(uint16_t));
+    memset(preuploaded_result, 0, n * sizeof(uint16_t));
+    if (f_preupload(b, 41, h_in, n * sizeof(uint16_t), 1) != 0) {
+        fprintf(stderr, "[dll_test] exact preupload rejected\n");
+        return 4;
+    }
+    rc = f_run_preuploaded(b, 41, &frame, h_in,
+                           IGPU_OUT_CPU16, preuploaded_result, 0);
+    if (rc != 0) {
+        fprintf(stderr, "[dll_test] run_preuploaded(exact) returned %d\n", rc);
+        return 4;
+    }
+    igpu_recon_preupload_status_t preupload_status;
+    memset(&preupload_status, 0, sizeof(preupload_status));
+    if (f_preupload_status(b, &preupload_status) != 0 ||
+        !preupload_status.accepted ||
+        !preupload_status.used ||
+        !preupload_status.exact_match) {
+        fprintf(stderr,
+                "[dll_test] exact preupload status invalid accepted=%d used=%d exact=%d\n",
+                preupload_status.accepted,
+                preupload_status.used,
+                preupload_status.exact_match);
+        return 4;
+    }
+    const long long preupload_maxabs =
+        compare_to_oracle("ASYNC_H2D exact", preuploaded_result,
+                          h_out, n, (size_t)clip.width);
+
+    uint16_t* mutated = (uint16_t*)malloc(n * sizeof(uint16_t));
+    uint16_t* sync_mutated = (uint16_t*)malloc(n * sizeof(uint16_t));
+    uint16_t* fallback_mutated = (uint16_t*)malloc(n * sizeof(uint16_t));
+    memcpy(mutated, h_in, n * sizeof(uint16_t));
+    mutated[n / 2] ^= 1u;
+    memset(sync_mutated, 0, n * sizeof(uint16_t));
+    memset(fallback_mutated, 0, n * sizeof(uint16_t));
+    rc = f_run(b, &frame, mutated, IGPU_OUT_CPU16, sync_mutated, 0);
+    if (rc != 0) {
+        fprintf(stderr, "[dll_test] synchronous mutated oracle returned %d\n", rc);
+        return 4;
+    }
+    if (f_preupload(b, 42, h_in, n * sizeof(uint16_t), 0) != 0) {
+        fprintf(stderr, "[dll_test] mismatch preupload rejected\n");
+        return 4;
+    }
+    rc = f_run_preuploaded(b, 42, &frame, mutated,
+                           IGPU_OUT_CPU16, fallback_mutated, 0);
+    if (rc != 0) {
+        fprintf(stderr, "[dll_test] run_preuploaded(mismatch) returned %d\n", rc);
+        return 4;
+    }
+    memset(&preupload_status, 0, sizeof(preupload_status));
+    if (f_preupload_status(b, &preupload_status) != 0 ||
+        !preupload_status.accepted ||
+        preupload_status.used ||
+        preupload_status.exact_match ||
+        memcmp(sync_mutated, fallback_mutated, n * sizeof(uint16_t)) != 0) {
+        fprintf(stderr,
+                "[dll_test] mismatch did not fail closed accepted=%d used=%d exact=%d\n",
+                preupload_status.accepted,
+                preupload_status.used,
+                preupload_status.exact_match);
+        return 4;
+    }
+    printf("[dll_test] async-H2D exact path + byte-exact mismatch fallback PASS\n");
+
     long long gl_maxabs = 0;
     if (run_gl_texture) {
         HiddenGlContext gl;
@@ -514,7 +596,9 @@ int main(int argc, char** argv)
     f_destroy(b);
     FreeLibrary(dll);
 
-    const bool pass = (maxabs == 0) && (!run_gl_texture || gl_maxabs == 0);
+    const bool pass = (maxabs == 0) &&
+                      (preupload_maxabs == 0) &&
+                      (!run_gl_texture || gl_maxabs == 0);
     printf("\n[dll_test] RESULT: %s (0 LSB target, through the ABI%s)\n",
            pass ? "PASS" : "FAIL",
            run_gl_texture ? " + GL_TEXTURE" : "");

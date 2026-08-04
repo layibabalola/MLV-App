@@ -32,6 +32,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <new>
 
 extern "C" {
@@ -155,7 +156,9 @@ bool isGpuPlaybackReconTimingTelemetryKey( const QString &key )
         || key == QStringLiteral("gpu_playback_recon_attempted")
         || key == QStringLiteral("gpu_playback_recon_used")
         || key == QStringLiteral("gpu_playback_recon_state_valid")
-        || key == QStringLiteral("gpu_playback_recon_rc");
+        || key == QStringLiteral("gpu_playback_recon_rc")
+        || key.startsWith(
+            QStringLiteral("gpu_playback_recon_async_h2d_") );
 }
 
 void preserveGpuPlaybackReconTimingTelemetry( const QJsonObject &source,
@@ -452,9 +455,35 @@ public:
     }
 };
 
+class GpuPlaybackReconFrameIdScope
+{
+public:
+    explicit GpuPlaybackReconFrameIdScope( uint64_t frameId )
+    {
+        llrpSetGpuPlaybackReconFrameIdForCurrentThread( frameId );
+    }
+
+    ~GpuPlaybackReconFrameIdScope()
+    {
+        /* The C shim stores frame+1; UINT64_MAX therefore clears the token. */
+        llrpSetGpuPlaybackReconFrameIdForCurrentThread( UINT64_MAX );
+    }
+};
+
 bool gpuPlaybackReconEnvRequested()
 {
     const QByteArray value = qgetenv("MLVAPP_GPU_PLAYBACK_RECON");
+    if( value.isEmpty() || value == QByteArrayLiteral("0") )
+    {
+        return false;
+    }
+    return value.toLower() != QByteArrayLiteral("false");
+}
+
+bool gpuPlaybackReconAsyncH2dRequested()
+{
+    const QByteArray value =
+        qgetenv("MLVAPP_GPU_PLAYBACK_RECON_ASYNC_H2D");
     if( value.isEmpty() || value == QByteArrayLiteral("0") )
     {
         return false;
@@ -479,6 +508,40 @@ void insertGpuPlaybackReconRunTelemetry( QJsonObject &target )
     target.insert(
         QStringLiteral("gpu_playback_recon_rc"),
         llrpGpuPlaybackReconLastRunRcForTesting() );
+    llrpGpuPlaybackReconPreuploadStatus_t preupload;
+    memset( &preupload, 0, sizeof( preupload ) );
+    const bool preuploadAvailable =
+        llrpGpuPlaybackReconGetLastPreuploadStatus( &preupload ) != 0;
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_env_enabled"),
+        gpuPlaybackReconAsyncH2dRequested() );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_available"),
+        preuploadAvailable );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_accepted"),
+        preupload.accepted != 0 );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_used"),
+        preupload.used != 0 );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_exact_match"),
+        preupload.exact_match != 0 );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_submitted_while_prior_run_active"),
+        preupload.submitted_while_prior_run_active != 0 );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_ready_before_run"),
+        preupload.ready_before_run != 0 );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_host_staging_ms"),
+        preupload.host_staging_ms );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_upload_ms"),
+        preupload.upload_ms );
+    target.insert(
+        QStringLiteral("gpu_playback_recon_async_h2d_upload_wait_ms"),
+        preupload.upload_wait_ms );
 }
 
 bool gpuPlaybackReconNoReadbackOutputValidationEnabled()
@@ -1857,6 +1920,15 @@ void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry )
         (void)getMlvRawFrameUint16( m_pMlvObject,
                                     entry.request.frameNumber,
                                     slot.rawImage16.data() );
+        if( entry.request.phase3Mode == Phase3Mode::DecodeReconProcess
+         && entry.request.presentationContext.playbackActive
+         && gpuPlaybackReconAsyncH2dRequested() )
+        {
+            (void)llrpGpuPlaybackReconPreuploadFrame(
+                entry.request.frameNumber,
+                slot.rawImage16.data(),
+                rawPixelCount * sizeof(uint16_t) );
+        }
     }
     const double decodeEndStageTime = mlv_stage_timing_now();
     if( playbackSmokeTimelineTelemetryEnabled() )
@@ -2022,6 +2094,8 @@ void RenderFrameThread::reconFrameForWorker( const ReconQueueEntry &entry,
         const GpuPlaybackReconTexturePrepareOnlyScope
             gpuPlaybackReconTexturePrepareOnlyScope(
                 allowGpuPlaybackReconTexturePrepareOnly );
+        const GpuPlaybackReconFrameIdScope gpuPlaybackReconFrameIdScope(
+            entry.request.frameNumber );
         stampReconStage( "phase3_recon_after_scope_setup_stage_time" );
         stampReconStage( "phase3_recon_before_capture_set_frame_stage_time" );
         mlv_pipeline_capture_set_current_frame( entry.request.frameNumber );

@@ -112,6 +112,19 @@ typedef struct
 
 typedef struct
 {
+    int available;
+    int accepted;
+    int used;
+    int exact_match;
+    int submitted_while_prior_run_active;
+    int ready_before_run;
+    double host_staging_ms;
+    double upload_ms;
+    double upload_wait_ms;
+} llrpGpuPlaybackReconPreuploadStatus_t;
+
+typedef struct
+{
     int valid;
     const uint16_t * device_bayer16;
     int width;
@@ -134,6 +147,12 @@ int llrpGpuPlaybackReconGetLastPreparedState(llrpGpuPlaybackReconState_t * state
 size_t llrpGpuPlaybackReconGetLastInputBayer16(uint16_t * output,
                                                size_t output_words);
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
+void llrpSetGpuPlaybackReconFrameIdForCurrentThread(uint64_t frame_id);
+int llrpGpuPlaybackReconPreuploadFrame(uint64_t frame_id,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size);
+int llrpGpuPlaybackReconGetLastPreuploadStatus(
+    llrpGpuPlaybackReconPreuploadStatus_t * status);
 int llrpGpuPlaybackReconResetGlTextureResources(void);
 int llrpGpuPlaybackReconRunGlTexture(const llrpGpuPlaybackReconState_t * state,
                                      const uint16_t * raw_input_bayer14,
