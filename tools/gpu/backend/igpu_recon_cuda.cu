@@ -69,6 +69,7 @@
 #define HOST_FACTOR   0.125    /* pow(2,-3); fixed for the 3 EV / 8x ISO ratio */
 #define CUDA_CONTEXT_RESERVE_BYTES (410ull * 1024ull * 1024ull)
 #define RETAINED_DEVICE_OUTPUT_SLOTS 12
+#define PREUPLOAD_SLOTS 4
 
 /* Device constants are set per set_clip()/set_luts(); kept in __constant__ so
  * the verbatim kernels reference them exactly as the parity probe did. */
@@ -1053,6 +1054,19 @@ struct CachedGlImageResource {
     unsigned int flags;
 };
 
+struct PreuploadSlot {
+    uint16_t* host_input;
+    uint16_t* device_input;
+    size_t bytes;
+    uint64_t frame_id;
+    uint64_t sequence;
+    int state; /* 0 free, 1 queued, 2 consumed by a run, 3 staging */
+    int submitted_while_prior_run_active;
+    double host_staging_ms;
+    cudaEvent_t upload_start;
+    cudaEvent_t upload_ready;
+};
+
 struct igpu_recon_backend {
     int   device;
     char  describe[256];
@@ -1094,8 +1108,29 @@ struct igpu_recon_backend {
     uint64_t retained_device_output_allocated_bytes;
     uint64_t next_retained_device_output_token;
 
+    /* Playback-only N+1 H2D lookahead.  The upload stream is non-blocking so
+     * legacy-default-stream kernels for frame N do not serialize frame N+1. */
+    PreuploadSlot preupload[PREUPLOAD_SLOTS];
+    cudaStream_t preupload_stream;
+    CRITICAL_SECTION preupload_lock;
+    int preupload_lock_initialized;
+    uint64_t next_preupload_sequence;
+    uint64_t preupload_device_allocated_bytes;
+    igpu_recon_preupload_status_t last_preupload_status;
+
     cudaEvent_t ev_start, ev_after_up, ev_after_kernel, ev_after_dl;
 };
+
+static double qpc_now_ms()
+{
+    LARGE_INTEGER counter;
+    LARGE_INTEGER frequency;
+    QueryPerformanceCounter(&counter);
+    QueryPerformanceFrequency(&frequency);
+    return frequency.QuadPart > 0
+        ? (1000.0 * (double)counter.QuadPart / (double)frequency.QuadPart)
+        : 0.0;
+}
 
 static int debug_dump_blob(const char* dir,
                            const char* name,
@@ -1316,6 +1351,60 @@ static void free_clip_buffers(igpu_recon_backend* b) {
     b->chroma_tmp_allocated_bytes = 0;
 }
 
+static void reset_preupload_slots(igpu_recon_backend* b, int release_storage)
+{
+    if (!b) return;
+    if (b->preupload_stream) cudaStreamSynchronize(b->preupload_stream);
+    if (b->preupload_lock_initialized) EnterCriticalSection(&b->preupload_lock);
+    for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+        PreuploadSlot* slot = &b->preupload[i];
+        slot->state = 0;
+        slot->frame_id = 0;
+        slot->sequence = 0;
+        slot->submitted_while_prior_run_active = 0;
+        slot->host_staging_ms = 0.0;
+        if (release_storage) {
+            if (slot->host_input) cudaFreeHost(slot->host_input);
+            if (slot->device_input) cudaFree(slot->device_input);
+            slot->host_input = NULL;
+            slot->device_input = NULL;
+            slot->bytes = 0;
+        }
+    }
+    if (release_storage) b->preupload_device_allocated_bytes = 0;
+    memset(&b->last_preupload_status, 0, sizeof(b->last_preupload_status));
+    if (b->preupload_lock_initialized) LeaveCriticalSection(&b->preupload_lock);
+}
+
+static int ensure_preupload_slot_storage(igpu_recon_backend* b,
+                                         PreuploadSlot* slot,
+                                         size_t bytes)
+{
+    if (!b || !slot || bytes == 0) return -1;
+    if (slot->host_input && slot->device_input && slot->bytes == bytes) return 0;
+    if (slot->host_input) cudaFreeHost(slot->host_input);
+    if (slot->device_input) {
+        cudaFree(slot->device_input);
+        if (b->preupload_device_allocated_bytes >= slot->bytes) {
+            b->preupload_device_allocated_bytes -= (uint64_t)slot->bytes;
+        }
+    }
+    slot->host_input = NULL;
+    slot->device_input = NULL;
+    slot->bytes = 0;
+    cudaError_t e = cudaMallocHost((void**)&slot->host_input, bytes);
+    if (e != cudaSuccess) return -1;
+    e = cudaMalloc((void**)&slot->device_input, bytes);
+    if (e != cudaSuccess) {
+        cudaFreeHost(slot->host_input);
+        slot->host_input = NULL;
+        return -1;
+    }
+    slot->bytes = bytes;
+    b->preupload_device_allocated_bytes += (uint64_t)bytes;
+    return 0;
+}
+
 static void free_retained_device_outputs(igpu_recon_backend* b) {
     if (!b) return;
     for (int i = 0; i < RETAINED_DEVICE_OUTPUT_SLOTS; ++i) {
@@ -1371,7 +1460,11 @@ igpu_recon_backend* igpu_recon_create(const char* backend_name)
     if (!b) return NULL;
     b->device = dev;
     b->next_retained_device_output_token = 1;
+    b->next_preupload_sequence = 1;
     snprintf(b->describe, sizeof(b->describe), "CUDA / %s", prop.name);
+
+    InitializeCriticalSection(&b->preupload_lock);
+    b->preupload_lock_initialized = 1;
 
     /* timing events */
     if (cudaEventCreate(&b->ev_start)        != cudaSuccess ||
@@ -1390,6 +1483,18 @@ void igpu_recon_destroy(igpu_recon_backend* b)
 {
     if (!b) return;
     cudaSetDevice(b->device);
+    reset_preupload_slots(b, 1);
+    for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+        if (b->preupload[i].upload_start)
+            cudaEventDestroy(b->preupload[i].upload_start);
+        if (b->preupload[i].upload_ready)
+            cudaEventDestroy(b->preupload[i].upload_ready);
+    }
+    if (b->preupload_stream) cudaStreamDestroy(b->preupload_stream);
+    if (b->preupload_lock_initialized) {
+        DeleteCriticalSection(&b->preupload_lock);
+        b->preupload_lock_initialized = 0;
+    }
     reset_cached_gl_resource(&b->gl_r16_resource, 1);
     free_retained_device_outputs(b);
     free_clip_buffers(b);
@@ -1438,6 +1543,7 @@ int igpu_recon_set_clip(igpu_recon_backend* b, const igpu_recon_clip_t* clip)
     CK(cudaSetDevice(b->device));
 
     /* (re)allocate device buffers sized to the clip */
+    reset_preupload_slots(b, 1);
     free_retained_device_outputs(b);
     free_clip_buffers(b);
     b->width  = clip->width;
@@ -1542,13 +1648,185 @@ int igpu_recon_set_luts(igpu_recon_backend* b, const igpu_recon_luts_t* luts)
     return 0;
 }
 
+static int ensure_preupload_runtime(igpu_recon_backend* b)
+{
+    if (!b) return -1;
+    EnterCriticalSection(&b->preupload_lock);
+    if (b->preupload_stream) {
+        LeaveCriticalSection(&b->preupload_lock);
+        return 0;
+    }
+    cudaError_t e = cudaStreamCreateWithFlags(&b->preupload_stream,
+                                               cudaStreamNonBlocking);
+    for (int i = 0; e == cudaSuccess && i < PREUPLOAD_SLOTS; ++i) {
+        e = cudaEventCreate(&b->preupload[i].upload_start);
+        if (e == cudaSuccess) {
+            e = cudaEventCreate(&b->preupload[i].upload_ready);
+        }
+    }
+    if (e != cudaSuccess) {
+        for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+            if (b->preupload[i].upload_start)
+                cudaEventDestroy(b->preupload[i].upload_start);
+            if (b->preupload[i].upload_ready)
+                cudaEventDestroy(b->preupload[i].upload_ready);
+            b->preupload[i].upload_start = NULL;
+            b->preupload[i].upload_ready = NULL;
+        }
+        if (b->preupload_stream) cudaStreamDestroy(b->preupload_stream);
+        b->preupload_stream = NULL;
+    }
+    LeaveCriticalSection(&b->preupload_lock);
+    return e == cudaSuccess ? 0 : -1;
+}
+
 IGPU_API
-int igpu_recon_run(igpu_recon_backend* b,
-                   const igpu_recon_frame_t* frame,
-                   const uint16_t* in_bayer14,
-                   igpu_recon_out_kind out_kind,
-                   uint16_t* out_bayer16,
-                   unsigned int gl_texture)
+int igpu_recon_preupload_frame(igpu_recon_backend* b,
+                               uint64_t frame_id,
+                               const uint16_t* in_bayer14,
+                               size_t input_bytes,
+                               int submitted_while_prior_run_active)
+{
+    if (!b || !in_bayer14 || !b->have_clip) return -1;
+    const size_t expected_bytes =
+        (size_t)b->width * (size_t)b->height * sizeof(uint16_t);
+    if (input_bytes != expected_bytes) return -1;
+    if (cudaSetDevice(b->device) != cudaSuccess) return -1;
+    if (ensure_preupload_runtime(b) != 0) return -1;
+
+    int selected = -1;
+    uint64_t oldest_sequence = UINT64_MAX;
+    EnterCriticalSection(&b->preupload_lock);
+    for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+        if (b->preupload[i].state == 0) {
+            selected = i;
+            break;
+        }
+    }
+    if (selected < 0) {
+        /* Seeks and cancelled lookahead can leave completed frames queued.
+         * Reclaim only completed queued slots; staging/in-use slots are never
+         * touched.  Oldest-first keeps the newest lookahead candidates. */
+        for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+            PreuploadSlot* candidate = &b->preupload[i];
+            if (candidate->state == 1 &&
+                cudaEventQuery(candidate->upload_ready) == cudaSuccess &&
+                candidate->sequence < oldest_sequence) {
+                oldest_sequence = candidate->sequence;
+                selected = i;
+            }
+        }
+    }
+    if (selected >= 0) b->preupload[selected].state = 3;
+    LeaveCriticalSection(&b->preupload_lock);
+    if (selected < 0) return 4;
+
+    PreuploadSlot* slot = &b->preupload[selected];
+    if (ensure_preupload_slot_storage(b, slot, input_bytes) != 0) {
+        EnterCriticalSection(&b->preupload_lock);
+        slot->state = 0;
+        LeaveCriticalSection(&b->preupload_lock);
+        return -1;
+    }
+
+    const double staging_start_ms = qpc_now_ms();
+    memcpy(slot->host_input, in_bayer14, input_bytes);
+    const double host_staging_ms = qpc_now_ms() - staging_start_ms;
+    cudaError_t e = cudaEventRecord(slot->upload_start, b->preupload_stream);
+    if (e == cudaSuccess) {
+        e = cudaMemcpyAsync(slot->device_input,
+                            slot->host_input,
+                            input_bytes,
+                            cudaMemcpyHostToDevice,
+                            b->preupload_stream);
+    }
+    if (e == cudaSuccess) {
+        e = cudaEventRecord(slot->upload_ready, b->preupload_stream);
+    }
+    EnterCriticalSection(&b->preupload_lock);
+    if (e == cudaSuccess) {
+        slot->bytes = input_bytes;
+        slot->frame_id = frame_id;
+        slot->sequence = b->next_preupload_sequence++;
+        slot->submitted_while_prior_run_active =
+            submitted_while_prior_run_active != 0;
+        slot->host_staging_ms = host_staging_ms;
+        slot->state = 1;
+    } else {
+        slot->state = 0;
+    }
+    LeaveCriticalSection(&b->preupload_lock);
+    return e == cudaSuccess ? 0 : -1;
+}
+
+static int take_exact_preupload(igpu_recon_backend* b,
+                                uint64_t frame_id,
+                                const uint16_t* in_bayer14,
+                                size_t input_bytes,
+                                const uint16_t** device_input,
+                                int* slot_index,
+                                igpu_recon_preupload_status_t* status)
+{
+    if (!b || !in_bayer14 || !device_input || !slot_index || !status) return 0;
+    memset(status, 0, sizeof(*status));
+    *device_input = NULL;
+    *slot_index = -1;
+
+    EnterCriticalSection(&b->preupload_lock);
+    for (int i = 0; i < PREUPLOAD_SLOTS; ++i) {
+        if (b->preupload[i].state == 1 &&
+            b->preupload[i].frame_id == frame_id) {
+            b->preupload[i].state = 2;
+            *slot_index = i;
+            status->accepted = 1;
+            status->submitted_while_prior_run_active =
+                b->preupload[i].submitted_while_prior_run_active;
+            status->host_staging_ms = b->preupload[i].host_staging_ms;
+            break;
+        }
+    }
+    LeaveCriticalSection(&b->preupload_lock);
+    if (*slot_index < 0) return 0;
+
+    PreuploadSlot* slot = &b->preupload[*slot_index];
+    const cudaError_t query = cudaEventQuery(slot->upload_ready);
+    status->ready_before_run = query == cudaSuccess;
+    const double wait_start_ms = qpc_now_ms();
+    const cudaError_t sync = cudaEventSynchronize(slot->upload_ready);
+    status->upload_wait_ms = qpc_now_ms() - wait_start_ms;
+    if (sync == cudaSuccess) {
+        float upload_ms = 0.0f;
+        if (cudaEventElapsedTime(&upload_ms,
+                                 slot->upload_start,
+                                 slot->upload_ready) == cudaSuccess) {
+            status->upload_ms = (double)upload_ms;
+        }
+    }
+    status->exact_match =
+        sync == cudaSuccess &&
+        slot->bytes == input_bytes &&
+        memcmp(slot->host_input, in_bayer14, input_bytes) == 0;
+    if (status->exact_match) {
+        status->used = 1;
+        *device_input = slot->device_input;
+        return 1;
+    }
+
+    EnterCriticalSection(&b->preupload_lock);
+    slot->state = 0;
+    LeaveCriticalSection(&b->preupload_lock);
+    *slot_index = -1;
+    return 0;
+}
+
+static int igpu_recon_run_internal(igpu_recon_backend* b,
+                                   uint64_t frame_id,
+                                   int allow_preupload,
+                                   const igpu_recon_frame_t* frame,
+                                   const uint16_t* in_bayer14,
+                                   igpu_recon_out_kind out_kind,
+                                   uint16_t* out_bayer16,
+                                   unsigned int gl_texture)
 {
     (void)gl_texture;
     if (!b || !frame || !in_bayer14) return -1;
@@ -1591,7 +1869,12 @@ int igpu_recon_run(igpu_recon_backend* b,
 
     const int W = b->width, H = b->height;
     const size_t n = (size_t)W * (size_t)H;
+    const size_t input_bytes = n * sizeof(uint16_t);
     int* dd_ev2raw_origin = b->dd_ev2raw + EV2RAW_ORIGIN;
+    const uint16_t* kernel_input = NULL;
+    int preupload_slot_index = -1;
+    igpu_recon_preupload_status_t preupload_status;
+    memset(&preupload_status, 0, sizeof(preupload_status));
 
     int black20 = b->black;
     int white20 = b->white;
@@ -1629,13 +1912,28 @@ int igpu_recon_run(igpu_recon_backend* b,
     CK(cudaMemset(b->d_overaux, 0, n*sizeof(uint16_t)));
 
     /* ---- timed: H2D upload (14-bit Bayer) ---- */
+    if (allow_preupload) {
+        (void)take_exact_preupload(b,
+                                   frame_id,
+                                   in_bayer14,
+                                   input_bytes,
+                                   &kernel_input,
+                                   &preupload_slot_index,
+                                   &preupload_status);
+    }
     CK(cudaEventRecord(b->ev_start, 0));
-    CK(cudaMemcpy(b->d_in, in_bayer14, n*sizeof(uint16_t), cudaMemcpyHostToDevice));
+    if (!kernel_input) {
+        CK(cudaMemcpy(b->d_in,
+                      in_bayer14,
+                      input_bytes,
+                      cudaMemcpyHostToDevice));
+        kernel_input = b->d_in;
+    }
     CK(cudaEventRecord(b->ev_after_up, 0));
 
     /* ---- timed: kernel chain ---- */
     /* STAGE 1+2 */
-    k_promote_match<<<gt,bt>>>(b->d_in, b->d_raw32, W, H);
+    k_promote_match<<<gt,bt>>>(kernel_input, b->d_raw32, W, H);
 
     /* STAGE 3: mean23 over even-x indices */
     {
@@ -1783,6 +2081,62 @@ int igpu_recon_run(igpu_recon_backend* b,
     b->last_timing.kernel_ms   = (double)kern;
     b->last_timing.download_ms = (double)dl;
     b->last_timing.total_ms    = (double)tot;
+    if (allow_preupload) {
+        EnterCriticalSection(&b->preupload_lock);
+        b->last_preupload_status = preupload_status;
+        if (preupload_slot_index >= 0) {
+            b->preupload[preupload_slot_index].state = 0;
+        }
+        LeaveCriticalSection(&b->preupload_lock);
+    }
+    return 0;
+}
+
+IGPU_API
+int igpu_recon_run(igpu_recon_backend* b,
+                   const igpu_recon_frame_t* frame,
+                   const uint16_t* in_bayer14,
+                   igpu_recon_out_kind out_kind,
+                   uint16_t* out_bayer16,
+                   unsigned int gl_texture)
+{
+    return igpu_recon_run_internal(b,
+                                   0,
+                                   0,
+                                   frame,
+                                   in_bayer14,
+                                   out_kind,
+                                   out_bayer16,
+                                   gl_texture);
+}
+
+IGPU_API
+int igpu_recon_run_preuploaded(igpu_recon_backend* b,
+                               uint64_t frame_id,
+                               const igpu_recon_frame_t* frame,
+                               const uint16_t* in_bayer14,
+                               igpu_recon_out_kind out_kind,
+                               uint16_t* out_bayer16,
+                               unsigned int gl_texture)
+{
+    return igpu_recon_run_internal(b,
+                                   frame_id,
+                                   1,
+                                   frame,
+                                   in_bayer14,
+                                   out_kind,
+                                   out_bayer16,
+                                   gl_texture);
+}
+
+IGPU_API
+int igpu_recon_last_preupload_status(igpu_recon_backend* b,
+                                     igpu_recon_preupload_status_t* status)
+{
+    if (!b || !status) return -1;
+    EnterCriticalSection(&b->preupload_lock);
+    *status = b->last_preupload_status;
+    LeaveCriticalSection(&b->preupload_lock);
     return 0;
 }
 
@@ -1903,7 +2257,8 @@ int igpu_recon_allocated_bytes(igpu_recon_backend* b, uint64_t* bytes)
     const uint64_t tracked =
         b->clip_allocated_bytes +
         b->lut_allocated_bytes +
-        b->retained_device_output_allocated_bytes;
+        b->retained_device_output_allocated_bytes +
+        b->preupload_device_allocated_bytes;
     *bytes = tracked ? tracked + CUDA_CONTEXT_RESERVE_BYTES : 0;
     return 0;
 }

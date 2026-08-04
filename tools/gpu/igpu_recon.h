@@ -27,6 +27,7 @@
 #ifndef IGPU_RECON_H
 #define IGPU_RECON_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -90,6 +91,20 @@ typedef struct {
     double total_ms;
 } igpu_recon_timing_t;
 
+/* Optional async-H2D lookahead status.  The extension is deliberately outside
+ * the required ABI-v2 symbol set: older deployed DLLs remain valid and callers
+ * must resolve these functions by name. */
+typedef struct {
+    int    accepted;
+    int    used;
+    int    exact_match;
+    int    submitted_while_prior_run_active;
+    int    ready_before_run;
+    double host_staging_ms;
+    double upload_ms;
+    double upload_wait_ms;
+} igpu_recon_preupload_status_t;
+
 /* ---- lifecycle ---- */
 
 /* backend_name: "cuda" | "cpu" (reference). Returns NULL on failure. */
@@ -120,6 +135,25 @@ int igpu_recon_run(igpu_recon_backend* b,
                    igpu_recon_out_kind out_kind,
                    uint16_t* out_bayer16,
                    unsigned int gl_texture);
+
+/* Optional playback extension.  preupload_frame copies a decoded candidate
+ * into backend-owned pinned memory and queues H2D on a non-blocking stream.
+ * run_preuploaded consumes it only when frame_id and every input byte match;
+ * otherwise it executes the ordinary synchronous upload path. */
+int igpu_recon_preupload_frame(igpu_recon_backend* b,
+                               uint64_t frame_id,
+                               const uint16_t* in_bayer14,
+                               size_t input_bytes,
+                               int submitted_while_prior_run_active);
+int igpu_recon_run_preuploaded(igpu_recon_backend* b,
+                               uint64_t frame_id,
+                               const igpu_recon_frame_t* frame,
+                               const uint16_t* in_bayer14,
+                               igpu_recon_out_kind out_kind,
+                               uint16_t* out_bayer16,
+                               unsigned int gl_texture);
+int igpu_recon_last_preupload_status(igpu_recon_backend* b,
+                                     igpu_recon_preupload_status_t* status);
 
 /* Fill `t` with timings from the most recent igpu_recon_run. Returns 0 on success. */
 int igpu_recon_last_timing(igpu_recon_backend* b, igpu_recon_timing_t* t);
