@@ -3,6 +3,12 @@ param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 )
 
+# ROADMAP (owner: Codex; trigger: next gate-family/tooling-baseline block):
+# Register this script in toolingBaseline.requiredSymbols. The CDX-3 correction
+# attempted that registration, but closeout.config.json is unmapped by the
+# sanctioned dual-lane commit path, so changing it in this work block fails
+# closed instead of silently broadening ownership.
+
 $ErrorActionPreference = 'Stop'
 $agentScript = Join-Path $RepoRoot 'tools\profiling\ultra-magnus-agent.ps1'
 $runnerScript = Join-Path $RepoRoot 'tools\profiling\um-run.ps1'
@@ -86,6 +92,9 @@ try {
     if ([int]$grandchildIdentity.processId -notin @($result.killedProcessIds)) {
         throw "Timeout result did not report tracked descendant PID $($grandchildIdentity.processId) as killed."
     }
+    if ($result.rootIdentitySource -ne 'Win32_Process' -or -not [bool]$result.rootIdentityHasImage -or [int]$result.rootIdentityToleranceMs -ne 0) {
+        throw "Root identity was not guarded by exact CIM creation time plus image path: $($result | ConvertTo-Json -Compress)."
+    }
 
     [pscustomobject]@{
         status = 'PASS'
@@ -93,8 +102,11 @@ try {
         timedOut = $result.timedOut
         trackedDescendantPid = [int]$grandchildIdentity.processId
         trackedDescendantKilled = $true
+        rootIdentitySource = $result.rootIdentitySource
+        rootIdentityHasImage = [bool]$result.rootIdentityHasImage
+        rootIdentityToleranceMs = [int]$result.rootIdentityToleranceMs
         nullCredentialGuard = $identityProbe.reason
-        identityContracts = @('creation-order guard', 'known-descendant cleanup', 'null-credential fail-closed')
+        identityContracts = @('exact CIM root identity', 'creation-order guard', 'known-descendant cleanup', 'null-credential fail-closed')
     } | ConvertTo-Json -Depth 5
 }
 finally {

@@ -69,14 +69,18 @@ function Get-ProcessIdentity {
 function Get-StartedProcessIdentity {
     param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
 
+    # Diagnostic fallback only. A .NET Process object cannot supply the CIM
+    # image-path credential used by the kill guard, so it must never authorize
+    # monitoring or termination on its own.
     try {
         $startUtc = $Process.StartTime.ToUniversalTime().ToString("o")
         return [pscustomobject]@{
-            exists = $true
+            exists = $false
             processId = [int]$Process.Id
             startUtc = $startUtc
             startEpochMs = [DateTimeOffset]::Parse($startUtc).ToUnixTimeMilliseconds()
             imagePath = $null
+            reason = "cim-identity-unavailable"
         }
     }
     catch {
@@ -86,16 +90,19 @@ function Get-StartedProcessIdentity {
             startUtc = $null
             startEpochMs = $null
             imagePath = $null
+            reason = "identity-unavailable"
         }
     }
 }
 
-function Test-EpochMillisClose {
-    param($ActualEpochMs, $ExpectedEpochMs, [int]$ToleranceSeconds = 2)
+function Test-EpochMillisEqual {
+    param($ActualEpochMs, $ExpectedEpochMs)
 
     try {
         if ($null -eq $ActualEpochMs -or $null -eq $ExpectedEpochMs) { return $false }
-        return ([Math]::Abs(([Int64]$ActualEpochMs) - ([Int64]$ExpectedEpochMs)) -le ($ToleranceSeconds * 1000))
+        # Both values come from Win32_Process.CreationDate and are normalized
+        # to integer milliseconds, so no cross-source tolerance is required.
+        return ([Int64]$ActualEpochMs -eq [Int64]$ExpectedEpochMs)
     }
     catch { return $false }
 }
@@ -126,7 +133,7 @@ function Test-ProcessIdentityMatch {
 
     $startMatches = $true
     if ($null -ne $ExpectedStartEpochMs) {
-        $startMatches = Test-EpochMillisClose -ActualEpochMs $identity.startEpochMs -ExpectedEpochMs $ExpectedStartEpochMs
+        $startMatches = Test-EpochMillisEqual -ActualEpochMs $identity.startEpochMs -ExpectedEpochMs $ExpectedStartEpochMs
     }
     elseif (-not [string]::IsNullOrWhiteSpace($ExpectedStartUtc)) {
         $startMatches = ([string]$identity.startUtc -eq [string]$ExpectedStartUtc)
@@ -240,12 +247,15 @@ while ($true) {
         $exit    = $null
         $timedOut = $false
         $killedProcessIds = @()
+        $rootIdentitySource = $null
+        $rootIdentityHasImage = $false
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 
         # Run the dropped script in a child PowerShell with a wall-clock timeout
         # so one hung job cannot freeze the agent. Output goes to files (no pipe
-        # deadlock). On timeout, kill the whole job process tree, not just the
-        # PowerShell wrapper, so launched app/build children do not survive.
+        # deadlock). On timeout, kill the verified root plus descendants seen
+        # while their ancestry is observable. A future Windows Job Object pass
+        # is needed to cover children that spawn and orphan within one poll gap.
         $jobProcess = $null
         $jobIdentity = $null
         $trackedDescendants = @{}
@@ -258,8 +268,24 @@ while ($true) {
                 -WindowStyle Hidden `
                 -PassThru
 
-            $jobIdentity = Get-StartedProcessIdentity -Process $jobProcess
-            if (-not $jobIdentity.exists) { throw "Failed to capture the launched job identity." }
+            $jobIdentity = Get-ProcessIdentity -ProcessId $jobProcess.Id
+            if (-not $jobIdentity.exists -or $null -eq $jobIdentity.startEpochMs -or [string]::IsNullOrWhiteSpace($jobIdentity.imagePath)) {
+                $fallbackIdentity = Get-StartedProcessIdentity -Process $jobProcess
+                $fallbackStopped = $jobProcess.HasExited
+                try {
+                    if (-not $fallbackStopped) {
+                        $jobProcess.Kill($true)
+                        [void]$jobProcess.WaitForExit(5000)
+                        $fallbackStopped = $jobProcess.HasExited
+                    }
+                } catch { }
+                if (-not $fallbackStopped) {
+                    throw "Failed closed: CIM root identity is incomplete and handle-based termination was not confirmed ($($fallbackIdentity.reason))."
+                }
+                throw "Failed closed: CIM root identity is incomplete ($($fallbackIdentity.reason))."
+            }
+            $rootIdentitySource = "Win32_Process"
+            $rootIdentityHasImage = $true
 
             $deadline = (Get-Date).AddSeconds($JobTimeoutSec)
             $waitSliceMs = [Math]::Max(250, [Math]::Min(5000, $PollSeconds * 1000))
@@ -307,6 +333,9 @@ while ($true) {
             timeoutSec = $JobTimeoutSec
             timedOut   = $timedOut
             killedProcessIds = @($killedProcessIds)
+            rootIdentitySource = $rootIdentitySource
+            rootIdentityHasImage = $rootIdentityHasImage
+            rootIdentityToleranceMs = 0
             stdout     = $stdout
             stderr     = $stderr
         }
