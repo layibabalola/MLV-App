@@ -1058,6 +1058,35 @@ static void incrementJsonCounter( QJsonObject *object, const QString &key )
     object->insert( key, object->value( key ).toInt() + 1 );
 }
 
+static QStringList gpuPlaybackReconAsyncH2dTelemetryKeys()
+{
+    return QStringList()
+        << QStringLiteral("gpu_playback_recon_async_h2d_env_enabled")
+        << QStringLiteral("gpu_playback_recon_async_h2d_available")
+        << QStringLiteral("gpu_playback_recon_async_h2d_accepted")
+        << QStringLiteral("gpu_playback_recon_async_h2d_used")
+        << QStringLiteral("gpu_playback_recon_async_h2d_exact_match")
+        << QStringLiteral(
+               "gpu_playback_recon_async_h2d_submitted_while_prior_run_active" )
+        << QStringLiteral("gpu_playback_recon_async_h2d_ready_before_run")
+        << QStringLiteral("gpu_playback_recon_async_h2d_host_staging_ms")
+        << QStringLiteral("gpu_playback_recon_async_h2d_upload_ms")
+        << QStringLiteral("gpu_playback_recon_async_h2d_upload_wait_ms");
+}
+
+static QJsonObject gpuPlaybackReconAsyncH2dTelemetry(
+    const QJsonObject &telemetry )
+{
+    QJsonObject result;
+    const QStringList keys = gpuPlaybackReconAsyncH2dTelemetryKeys();
+    for( const QString &key : keys )
+    {
+        const auto it = telemetry.constFind( key );
+        if( it != telemetry.constEnd() ) result.insert( key, it.value() );
+    }
+    return result;
+}
+
 static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
 {
     QJsonObject pipelineCounts;
@@ -1068,6 +1097,11 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
     pipelineCounts.insert( QStringLiteral("gpu_texture_no_readback"), 0 );
 
     QJsonObject fallbackReasonHistogram;
+    QJsonObject asyncH2dBooleanTrueCounts;
+    QJsonObject asyncH2dBooleanSampleCounts;
+    QJsonObject asyncH2dTimingSums;
+    QJsonObject asyncH2dTimingMaxima;
+    QJsonObject asyncH2dTimingSampleCounts;
     int fallbackCount = 0;
     for( const QJsonValue &value : frames )
     {
@@ -1083,6 +1117,58 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
             ++fallbackCount;
             incrementJsonCounter( &fallbackReasonHistogram, fallbackReason );
         }
+        const QJsonObject asyncH2d =
+            gpuPlaybackReconAsyncH2dTelemetry( sample );
+        for( auto it = asyncH2d.constBegin(); it != asyncH2d.constEnd(); ++it )
+        {
+            if( it.value().isBool() )
+            {
+                incrementJsonCounter( &asyncH2dBooleanSampleCounts, it.key() );
+                if( it.value().toBool() )
+                    incrementJsonCounter( &asyncH2dBooleanTrueCounts, it.key() );
+            }
+            else if( it.value().isDouble() )
+            {
+                const double timingMs = it.value().toDouble();
+                asyncH2dTimingSums.insert(
+                    it.key(),
+                    asyncH2dTimingSums.value( it.key() ).toDouble() + timingMs );
+                asyncH2dTimingMaxima.insert(
+                    it.key(),
+                    qMax( asyncH2dTimingMaxima.value( it.key() ).toDouble(),
+                          timingMs ) );
+                incrementJsonCounter( &asyncH2dTimingSampleCounts, it.key() );
+            }
+        }
+    }
+
+    QJsonObject asyncH2dRollup;
+    const QStringList asyncH2dKeys = gpuPlaybackReconAsyncH2dTelemetryKeys();
+    for( const QString &key : asyncH2dKeys )
+    {
+        const int booleanSamples =
+            asyncH2dBooleanSampleCounts.value( key ).toInt();
+        const int timingSamples =
+            asyncH2dTimingSampleCounts.value( key ).toInt();
+        QJsonObject field;
+        if( booleanSamples > 0 )
+        {
+            const int trueFrames = asyncH2dBooleanTrueCounts.value( key ).toInt();
+            field.insert( QStringLiteral("samples"), booleanSamples );
+            field.insert( QStringLiteral("true_frames"), trueFrames );
+            field.insert( QStringLiteral("false_frames"),
+                          booleanSamples - trueFrames );
+        }
+        else if( timingSamples > 0 )
+        {
+            field.insert( QStringLiteral("samples"), timingSamples );
+            field.insert( QStringLiteral("mean_ms"),
+                          asyncH2dTimingSums.value( key ).toDouble()
+                              / static_cast<double>( timingSamples ) );
+            field.insert( QStringLiteral("max_ms"),
+                          asyncH2dTimingMaxima.value( key ).toDouble() );
+        }
+        if( !field.isEmpty() ) asyncH2dRollup.insert( key, field );
     }
 
     QJsonObject summary;
@@ -1093,6 +1179,8 @@ static QJsonObject buildPlaybackProfileSummary( const QJsonArray &frames )
     summary.insert( QStringLiteral("fallback_count"), fallbackCount );
     summary.insert( QStringLiteral("fallback_reason_histogram"),
                     fallbackReasonHistogram );
+    summary.insert( QStringLiteral("gpu_playback_recon_async_h2d"),
+                    asyncH2dRollup );
     summary.insert( QStringLiteral("bottleneck"),
                     buildStageBottleneckSummary(
                         frames,
@@ -23610,7 +23698,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "processed16_core_math_ms=%29 processed16_local_tone_ms=%30 "
                    "processed16_threading_overhead_ms=%31 processed8_setup_ms=%32 "
                    "processed8_core_math_ms=%33 processed8_local_tone_ms=%34 "
-                   "processed8_threading_overhead_ms=%35" )
+                   "processed8_threading_overhead_ms=%35 "
+                   "gpu_playback_recon_async_h2d_env_enabled=%36 "
+                   "gpu_playback_recon_async_h2d_available=%37 "
+                   "gpu_playback_recon_async_h2d_accepted=%38 "
+                   "gpu_playback_recon_async_h2d_used=%39 "
+                   "gpu_playback_recon_async_h2d_exact_match=%40 "
+                   "gpu_playback_recon_async_h2d_submitted_while_prior_run_active=%41 "
+                   "gpu_playback_recon_async_h2d_ready_before_run=%42 "
+                   "gpu_playback_recon_async_h2d_host_staging_ms=%43 "
+                   "gpu_playback_recon_async_h2d_upload_ms=%44 "
+                   "gpu_playback_recon_async_h2d_upload_wait_ms=%45" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( elapsedMs, 0, 'f', 3 )
@@ -23645,7 +23743,31 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    .arg( processed8SetupMs, 0, 'f', 3 )
                    .arg( processed8CoreMathMs, 0, 'f', 3 )
                    .arg( processed8LocalToneMs, 0, 'f', 3 )
-                   .arg( processed8ThreadingOverheadMs, 0, 'f', 3 );
+                   .arg( processed8ThreadingOverheadMs, 0, 'f', 3 )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_env_enabled" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_available" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_accepted" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_used" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_exact_match" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing,
+                       "gpu_playback_recon_async_h2d_submitted_while_prior_run_active" ) ) )
+                   .arg( bool01( telemetryBoolValue(
+                       timing, "gpu_playback_recon_async_h2d_ready_before_run" ) ) )
+                   .arg( telemetryDoubleValue(
+                       timing, "gpu_playback_recon_async_h2d_host_staging_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "gpu_playback_recon_async_h2d_upload_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "gpu_playback_recon_async_h2d_upload_wait_ms" ),
+                       0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.request_state session=%1 index=%2 serial=%3 "
@@ -24327,7 +24449,17 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                     "gpu_tex_nr_fast_sh_debayer_ms=%49 "
                     "gpu_tex_nr_fast_sh_refresh_ms=%50 "
                     "gpu_tex_nr_fast_sh_state_reason=\"%51\" "
-                    "gpu_tex_nr_display_lut_only_sh_frame_state_bypass=%52" )
+                    "gpu_tex_nr_display_lut_only_sh_frame_state_bypass=%52 "
+                    "gpu_playback_recon_async_h2d_env_enabled=%53 "
+                    "gpu_playback_recon_async_h2d_available=%54 "
+                    "gpu_playback_recon_async_h2d_accepted=%55 "
+                    "gpu_playback_recon_async_h2d_used=%56 "
+                    "gpu_playback_recon_async_h2d_exact_match=%57 "
+                    "gpu_playback_recon_async_h2d_submitted_while_prior_run_active=%58 "
+                    "gpu_playback_recon_async_h2d_ready_before_run=%59 "
+                    "gpu_playback_recon_async_h2d_host_staging_ms=%60 "
+                    "gpu_playback_recon_async_h2d_upload_ms=%61 "
+                    "gpu_playback_recon_async_h2d_upload_wait_ms=%62" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( QString::fromLatin1(
@@ -24444,7 +24576,31 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                         .toString( QStringLiteral("none") ) )
                     .arg( bool01( telemetryBoolValue(
                         timing,
-                        "gpu_playback_recon_amaze_texture_present_skip_gate_display_lut_only_sh_frame_state_bypass" ) ) );
+                        "gpu_playback_recon_amaze_texture_present_skip_gate_display_lut_only_sh_frame_state_bypass" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_env_enabled" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_available" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_accepted" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_used" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_exact_match" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing,
+                        "gpu_playback_recon_async_h2d_submitted_while_prior_run_active" ) ) )
+                    .arg( bool01( telemetryBoolValue(
+                        timing, "gpu_playback_recon_async_h2d_ready_before_run" ) ) )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_async_h2d_host_staging_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_async_h2d_upload_ms" ),
+                        0, 'f', 3 )
+                    .arg( telemetryDoubleValue(
+                        timing, "gpu_playback_recon_async_h2d_upload_wait_ms" ),
+                        0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
                    "playback_smoke.cpu_frame session=%1 index=%2 raw_uint16_ms=%3 "
@@ -25033,6 +25189,10 @@ void MainWindow::finishPlaybackSmokeTelemetry( const char *reason )
         fieldLog.insert( QStringLiteral("fallback_reason_histogram"),
                          m_playbackSmokeFallbackReasonCounts );
         fieldLog.insert( QStringLiteral("pipeline_counts"), pipelineCounts );
+        fieldLog.insert(
+            QStringLiteral("gpu_playback_recon_async_h2d_last_presented"),
+            gpuPlaybackReconAsyncH2dTelemetry(
+                m_lastPresentedStageTimingTelemetry ) );
         fieldLog.insert( QStringLiteral("bottleneck"), bottleneck );
         fieldLog.insert( QStringLiteral("suggested_optimization"),
                          bottleneck.value(
