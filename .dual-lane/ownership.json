@@ -4,18 +4,21 @@
   "resolutionOrder": ["overrides", "shared", "laneGlobs", "unknown=BLOCK"],
   "lanes": {
     "codex": {
-      "role": "implementer (recon)",
+      "role": "implementer (playback + recon + GPU) -- owns the playback/present/GPU implementation surfaces for the beyond-36 goal (Layi 2026-07-02, to enable autonomous multi-hour Codex commits). NOTE: platform/qt/MainWindow.cpp + src/mlv/* carry FOREIGN uncommitted WIP in the MAIN tree -- Codex must commit ONLY in its side worktrees, NEVER run lane-commit in the main tree, and NEVER git add -A.",
       "globs": [
         "src/mlv/**",
         "src/processing/**",
+        "src/dng/**",
+        "platform/qt/**",
+        "tools/gpu/**",
+        "tests/pipeline/**",
         ".claude-state/coordination/dual-lane/codex.md"
       ],
       "trailer": "Dual-Lane: codex"
     },
     "claude": {
-      "role": "reviewer (GUI/tooling)",
+      "role": "reviewer + coordinator + gate/coordination tooling (platform/qt + tools/gpu reassigned to codex 2026-07-02; claude retains batch CLI, gate/profiling/testing tooling, docs, dual-lane infra)",
       "globs": [
-        "platform/qt/**",
         "src/batch/**",
         "tools/**",
         "tests/**",
@@ -27,7 +30,14 @@
       "trailer": "Dual-Lane: claude"
     }
   },
-  "overrides": { "AGENTS.md": "claude" },
+  "overrides": {
+    "AGENTS.md": "claude",
+    "tools/profiling/run-ultramagnus-p3-validation.ps1": "codex",
+    "tools/profiling/ultra-magnus-agent.ps1": "codex",
+    "tools/profiling/install-ultra-magnus-agent.ps1": "codex",
+    "tools/profiling/um-run.ps1": "codex",
+    "tools/profiling/watch-ultra-magnus-agent.ps1": "codex"
+  },
   "shared": [],
   "sharedNote": "Phase 2: cross-lane interface headers (src/mlv/video_mlv.h, src/mlv/llrawproc/llrawproc.h, *.pro) may be promoted to 'shared' to require a Two-Key: trailer when edited. Left empty initially to avoid friction on Codex's routine header edits."
 }
