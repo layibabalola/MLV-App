@@ -18,7 +18,8 @@ param(
     [string]$Root = $PSScriptRoot,
     [int]$PollSeconds = 2,
     [ValidateRange(1, 86400)]
-    [int]$JobTimeoutSec = 1800
+    [int]$JobTimeoutSec = 1800,
+    [switch]$SelfTestIdentityGuard
 )
 
 $ErrorActionPreference = "Continue"
@@ -36,37 +37,183 @@ $psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not $psExe -and (Test-Path "$env:ProgramFiles\PowerShell\7\pwsh.exe")) { $psExe = "$env:ProgramFiles\PowerShell\7\pwsh.exe" }
 if (-not $psExe) { $psExe = "powershell.exe" }
 
-function Get-DescendantProcessIds {
-    param([Parameter(Mandatory = $true)][int]$ParentProcessId)
+function Get-ProcessIdentity {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
 
-    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$ParentProcessId" -ErrorAction SilentlyContinue)
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        if (-not $process) { throw "process not found" }
+        $startUtc = if ($process.CreationDate) {
+            ([DateTime]$process.CreationDate).ToUniversalTime().ToString("o")
+        } else { $null }
+        $startEpochMs = if ($startUtc) { [DateTimeOffset]::Parse($startUtc).ToUnixTimeMilliseconds() } else { $null }
+        return [pscustomobject]@{
+            exists = $true
+            processId = [int]$process.ProcessId
+            startUtc = $startUtc
+            startEpochMs = $startEpochMs
+            imagePath = $process.ExecutablePath
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            exists = $false
+            processId = $ProcessId
+            startUtc = $null
+            startEpochMs = $null
+            imagePath = $null
+        }
+    }
+}
+
+function Get-StartedProcessIdentity {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    # Diagnostic fallback only. A .NET Process object cannot supply the CIM
+    # image-path credential used by the kill guard, so it must never authorize
+    # monitoring or termination on its own.
+    try {
+        $startUtc = $Process.StartTime.ToUniversalTime().ToString("o")
+        return [pscustomobject]@{
+            exists = $false
+            processId = [int]$Process.Id
+            startUtc = $startUtc
+            startEpochMs = [DateTimeOffset]::Parse($startUtc).ToUnixTimeMilliseconds()
+            imagePath = $null
+            reason = "cim-identity-unavailable"
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            exists = $false
+            processId = [int]$Process.Id
+            startUtc = $null
+            startEpochMs = $null
+            imagePath = $null
+            reason = "identity-unavailable"
+        }
+    }
+}
+
+function Test-EpochMillisEqual {
+    param($ActualEpochMs, $ExpectedEpochMs)
+
+    try {
+        if ($null -eq $ActualEpochMs -or $null -eq $ExpectedEpochMs) { return $false }
+        # Both values come from Win32_Process.CreationDate and are normalized
+        # to integer milliseconds, so no cross-source tolerance is required.
+        return ([Int64]$ActualEpochMs -eq [Int64]$ExpectedEpochMs)
+    }
+    catch { return $false }
+}
+
+function Test-ProcessIdentityMatch {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [string]$ExpectedStartUtc,
+        $ExpectedStartEpochMs,
+        [string]$ExpectedImagePath
+    )
+
+    $identity = Get-ProcessIdentity -ProcessId $ProcessId
+    if (-not $identity.exists) {
+        return [pscustomobject]@{ matches = $false; identity = $identity; reason = "not-running" }
+    }
+    $hasExpectedStart = ($null -ne $ExpectedStartEpochMs) -or (-not [string]::IsNullOrWhiteSpace($ExpectedStartUtc))
+    $hasExpectedImage = -not [string]::IsNullOrWhiteSpace($ExpectedImagePath)
+    if (-not $hasExpectedStart -and -not $hasExpectedImage) {
+        return [pscustomobject]@{
+            matches = $false
+            identity = $identity
+            reason = "missing-expected-identity-credentials"
+            startMatches = $false
+            imageMatches = $false
+        }
+    }
+
+    $startMatches = $true
+    if ($null -ne $ExpectedStartEpochMs) {
+        $startMatches = Test-EpochMillisEqual -ActualEpochMs $identity.startEpochMs -ExpectedEpochMs $ExpectedStartEpochMs
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($ExpectedStartUtc)) {
+        $startMatches = ([string]$identity.startUtc -eq [string]$ExpectedStartUtc)
+    }
+    $imageMatches = if ($hasExpectedImage) {
+        [string]::Equals($identity.imagePath, $ExpectedImagePath, [StringComparison]::OrdinalIgnoreCase)
+    } else { $true }
+    $reason = if ($startMatches -and $imageMatches) { "matched" } elseif (-not $startMatches) { "start-mismatch" } else { "image-mismatch" }
+    return [pscustomobject]@{
+        matches = ($startMatches -and $imageMatches)
+        identity = $identity
+        reason = $reason
+        startMatches = $startMatches
+        imageMatches = $imageMatches
+    }
+}
+
+function Test-ProcessCreationAfterParent {
+    param([Parameter(Mandatory = $true)]$ChildIdentity, [Parameter(Mandatory = $true)]$ParentIdentity)
+
+    try {
+        if ($null -eq $ChildIdentity.startEpochMs -or $null -eq $ParentIdentity.startEpochMs) { return $false }
+        return ([Int64]$ChildIdentity.startEpochMs -ge [Int64]$ParentIdentity.startEpochMs)
+    }
+    catch { return $false }
+}
+
+function Get-DescendantProcessIdentities {
+    param([Parameter(Mandatory = $true)]$ParentIdentity)
+
+    $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($ParentIdentity.processId)" -ErrorAction SilentlyContinue)
     foreach ($child in $children) {
-        $childProcessId = [int]$child.ProcessId
-        Get-DescendantProcessIds -ParentProcessId $childProcessId
-        $childProcessId
+        $childIdentity = Get-ProcessIdentity -ProcessId ([int]$child.ProcessId)
+        if (-not $childIdentity.exists) { continue }
+        if (-not (Test-ProcessCreationAfterParent -ChildIdentity $childIdentity -ParentIdentity $ParentIdentity)) {
+            continue
+        }
+        Get-DescendantProcessIdentities -ParentIdentity $childIdentity
+        $childIdentity
     }
 }
 
 function Stop-ProcessTree {
-    param([Parameter(Mandatory = $true)][int]$RootProcessId)
+    param(
+        [Parameter(Mandatory = $true)]$RootIdentity,
+        [AllowEmptyCollection()][object[]]$KnownIdentities = @()
+    )
+
+    $rootMatch = Test-ProcessIdentityMatch -ProcessId ([int]$RootIdentity.processId) -ExpectedStartUtc $RootIdentity.startUtc -ExpectedStartEpochMs $RootIdentity.startEpochMs -ExpectedImagePath $RootIdentity.imagePath
+    if (-not $rootMatch.matches) { return @() }
+
+    $identities = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new()
+    foreach ($expected in @($KnownIdentities) + @(Get-DescendantProcessIdentities -ParentIdentity $rootMatch.identity)) {
+        if ($null -eq $expected -or -not $expected.exists) { continue }
+        $key = "$($expected.processId):$($expected.startEpochMs):$($expected.startUtc)"
+        if ($seen.Add($key)) { [void]$identities.Add($expected) }
+    }
+    [void]$identities.Add($rootMatch.identity)
 
     $killed = [System.Collections.Generic.List[int]]::new()
-    $processIds = @(
-        @(Get-DescendantProcessIds -ParentProcessId $RootProcessId)
-        $RootProcessId
-    ) | Select-Object -Unique
-
-    foreach ($processIdToKill in $processIds) {
+    foreach ($expected in $identities) {
+        $match = Test-ProcessIdentityMatch -ProcessId ([int]$expected.processId) -ExpectedStartUtc $expected.startUtc -ExpectedStartEpochMs $expected.startEpochMs -ExpectedImagePath $expected.imagePath
+        if (-not $match.matches) { continue }
         try {
-            $process = Get-Process -Id $processIdToKill -ErrorAction Stop
-            Stop-Process -Id $processIdToKill -Force -ErrorAction Stop
-            [void]$killed.Add($processIdToKill)
+            Stop-Process -Id ([int]$expected.processId) -Force -ErrorAction Stop
+            [void]$killed.Add([int]$expected.processId)
         }
         catch {
-            # The child may already have exited while the tree was being walked.
+            # The process may already have exited while the verified set was stopped.
         }
     }
     return @($killed)
+}
+
+if ($SelfTestIdentityGuard) {
+    $probe = Test-ProcessIdentityMatch -ProcessId $PID
+    $probe | ConvertTo-Json -Compress
+    if ($probe.matches -or $probe.reason -ne "missing-expected-identity-credentials") { exit 1 }
+    exit 0
 }
 
 function Quote-ProcessArgument {
@@ -100,13 +247,18 @@ while ($true) {
         $exit    = $null
         $timedOut = $false
         $killedProcessIds = @()
+        $rootIdentitySource = $null
+        $rootIdentityHasImage = $false
         Remove-Item -LiteralPath $outFile, $errFile -Force -ErrorAction SilentlyContinue
 
         # Run the dropped script in a child PowerShell with a wall-clock timeout
         # so one hung job cannot freeze the agent. Output goes to files (no pipe
-        # deadlock). On timeout, kill the whole job process tree, not just the
-        # PowerShell wrapper, so launched app/build children do not survive.
+        # deadlock). On timeout, kill the verified root plus descendants seen
+        # while their ancestry is observable. A future Windows Job Object pass
+        # is needed to cover children that spawn and orphan within one poll gap.
         $jobProcess = $null
+        $jobIdentity = $null
+        $trackedDescendants = @{}
         try {
             $jobPathArgument = Quote-ProcessArgument -Value $job.FullName
             $jobProcess = Start-Process -FilePath $psExe `
@@ -116,9 +268,31 @@ while ($true) {
                 -WindowStyle Hidden `
                 -PassThru
 
+            $jobIdentity = Get-ProcessIdentity -ProcessId $jobProcess.Id
+            if (-not $jobIdentity.exists -or $null -eq $jobIdentity.startEpochMs -or [string]::IsNullOrWhiteSpace($jobIdentity.imagePath)) {
+                $fallbackIdentity = Get-StartedProcessIdentity -Process $jobProcess
+                $fallbackStopped = $jobProcess.HasExited
+                try {
+                    if (-not $fallbackStopped) {
+                        $jobProcess.Kill($true)
+                        [void]$jobProcess.WaitForExit(5000)
+                        $fallbackStopped = $jobProcess.HasExited
+                    }
+                } catch { }
+                if (-not $fallbackStopped) {
+                    throw "Failed closed: CIM root identity is incomplete and handle-based termination was not confirmed ($($fallbackIdentity.reason))."
+                }
+                throw "Failed closed: CIM root identity is incomplete ($($fallbackIdentity.reason))."
+            }
+            $rootIdentitySource = "Win32_Process"
+            $rootIdentityHasImage = $true
+
             $deadline = (Get-Date).AddSeconds($JobTimeoutSec)
             $waitSliceMs = [Math]::Max(250, [Math]::Min(5000, $PollSeconds * 1000))
             while (!$jobProcess.HasExited -and (Get-Date) -lt $deadline) {
+                foreach ($descendant in @(Get-DescendantProcessIdentities -ParentIdentity $jobIdentity)) {
+                    $trackedDescendants["$($descendant.processId):$($descendant.startEpochMs)"] = $descendant
+                }
                 Write-AgentHeartbeat -Activity "job=$jobId"
                 $remainingMs = [Math]::Max(1, [int][Math]::Min($waitSliceMs, ($deadline - (Get-Date)).TotalMilliseconds))
                 [void]$jobProcess.WaitForExit($remainingMs)
@@ -130,7 +304,7 @@ while ($true) {
             else {
                 $timedOut = $true
                 $exit = 124
-                $killedProcessIds = @(Stop-ProcessTree -RootProcessId $jobProcess.Id)
+                $killedProcessIds = @(Stop-ProcessTree -RootIdentity $jobIdentity -KnownIdentities @($trackedDescendants.Values))
                 "timed out after ${JobTimeoutSec}s; killed process tree pids=$($killedProcessIds -join ',')" |
                     Add-Content -Encoding ASCII $errFile
             }
@@ -159,6 +333,9 @@ while ($true) {
             timeoutSec = $JobTimeoutSec
             timedOut   = $timedOut
             killedProcessIds = @($killedProcessIds)
+            rootIdentitySource = $rootIdentitySource
+            rootIdentityHasImage = $rootIdentityHasImage
+            rootIdentityToleranceMs = 0
             stdout     = $stdout
             stderr     = $stderr
         }
