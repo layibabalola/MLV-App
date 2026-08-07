@@ -41,6 +41,7 @@
     "approveTokens": ["APPROVE"],
     "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
     "requireHandoff": true,
+    "additionalHandoffActors": ["CLAUDE_IMPL"],
     "authorizedReviewSessions": [
       "463c6d52-9ba7-4372-a222-0e245fee2054"
     ]
