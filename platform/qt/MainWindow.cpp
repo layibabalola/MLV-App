@@ -4696,6 +4696,9 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         ( display_start > 0.0 && prepPresentStart >= display_start )
             ? ( prepPresentStart - display_start ) * 1000.0
             : 0.0;
+    mlv_stage_timing_note_elapsed("drawFrameReady.pre_present",
+                                  display_frame,
+                                  prepElapsedBeforePresentMs);
 
     const int sourceWidth = task.sourceWidth;
     const int sourceHeight = task.sourceHeight;
@@ -6029,6 +6032,10 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         QStringLiteral("playback_prep_total_before_finish_ms"),
         ( mlv_stage_timing_now() - display_start ) * 1000.0 );
 
+    mlv_stage_timing_note_elapsed(
+        "drawFrameReady.present_to_finish",
+        display_frame,
+        ( mlv_stage_timing_now() - presentEndStageTime ) * 1000.0 );
     finishPresentedFrame( display_frame,
                           readyFrame,
                           task.requestContext,
@@ -26930,7 +26937,13 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             QStringLiteral("playback_presented_position_slider"),
             ui->horizontalSliderPosition->value() );
     }
+    const double recordPresentedFrameStart = mlv_stage_timing_now();
     recordPresentedFrame( readyFrame, requestContext );
+    mlv_stage_timing_note_elapsed(
+        "drawFrameReady.record",
+        displayFrame,
+        ( mlv_stage_timing_now() - recordPresentedFrameStart ) * 1000.0 );
+    const double qualityStart = mlv_stage_timing_now();
     m_lastPresentedFrameColorTelemetry = QJsonObject();
     double headlessPresentedColorAnalysisMs = 0.0;
     if( m_headlessPlaybackProfileActive
@@ -26974,7 +26987,12 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             headlessPresentedColorAnalysisMs );
     }
     updatePlaybackQualityIndicator();
+    mlv_stage_timing_note_elapsed(
+        "drawFrameReady.quality",
+        displayFrame,
+        ( mlv_stage_timing_now() - qualityStart ) * 1000.0 );
 
+    const double scopeDispatchStart = mlv_stage_timing_now();
     m_lastDrawFrameReadyScopesMs = 0.0;
     if( ui->actionShowEditArea->isChecked() )
     {
@@ -27057,6 +27075,10 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
     {
         m_playbackScopeLastUpdateTime = 0.0;
     }
+    mlv_stage_timing_note_elapsed(
+        "drawFrameReady.scope_dispatch",
+        displayFrame,
+        ( mlv_stage_timing_now() - scopeDispatchStart ) * 1000.0 );
 
     const double overlay_start = mlv_stage_timing_now();
     if( m_tryToSyncAudio && m_pAudioPlayback && ui->actionAudioOutput->isChecked() && ui->actionPlay->isChecked() && ui->actionDropFrameMode->isChecked() )
