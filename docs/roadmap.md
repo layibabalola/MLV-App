@@ -180,15 +180,19 @@ simplest safe design unless the measured regression justifies chunked partials.
 
 ### CI-1 — make GUI CI evidence trustworthy
 
-The workflow references `.claude/analysis/gui-tests-ci-remediation.md`, which
-was absent in the 2026-07-09 audit. First determine whether it was deleted,
-renamed, or never committed; restore the intended record by editing an existing
-tracked analysis document or correct the workflow reference. Put the pilot in
-an independent job so unrelated required suites remain blocking. Inspect hosted
-runs and collect two consecutive green executions before removing
-`continue-on-error`. If GitHub Actions access is unavailable, set
-`EXTERNAL_GATE` with the exact access/install command and continue to E4-1 only
-if local CI-equivalent proof is green and the user accepts the temporary gate.
+The 2026-07-09 audit's reference to `.claude/analysis/gui-tests-ci-remediation.md`
+was checked against the full Git history and the current workflow: that file was
+never committed and the workflow has no such reference, so no new sensitive
+analysis file is restored. This section is the durable promotion record. The GUI
+pilot was already an independent job, leaving unrelated required suites visible
+as separate blocking jobs. Before promotion, hosted runs `31180315436` and
+`30958143573` were inspected; their GUI-pilot jobs `92871754727` and
+`92155850589` each completed green with the identical result `30 passed, 0
+failed, 8 skipped, 0 blacklisted` (matching skipped-set identity). GitHub Actions
+access was available through authenticated `gh` with `workflow` scope. The
+job-level `continue-on-error` is now removed, making GUI smoke's red/green result
+blocking while preserving independent-job isolation. A future run must confirm
+the promoted blocking job remains green before CI-1 is closed.
 
 Repository-closeout debt parked for CI-1 (full sweep at
 `c6ea6a1e43451273f41cedf59428f3d193d6bb3d`, 2026-07-10): the completed sweep
