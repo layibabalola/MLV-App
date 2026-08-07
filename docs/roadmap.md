@@ -194,6 +194,11 @@ job-level `continue-on-error` is now removed, making GUI smoke's red/green resul
 blocking while preserving independent-job isolation. A future run must confirm
 the promoted blocking job remains green before CI-1 is closed.
 
+Criterion (v) scoping decision: the hosted filter change deliberately did not
+broaden coverage to the prefetch-family tests. That prefetch family is the
+dropped, separately-owned coverage gap; it is named here so its absence is an
+accepted scope decision rather than an unrecorded omission.
+
 Repository-closeout debt parked for CI-1 (full sweep at
 `c6ea6a1e43451273f41cedf59428f3d193d6bb3d`, 2026-07-10): the completed sweep
 enumerated 33 retained reports and 40 actionable candidates. Safe classes remain
