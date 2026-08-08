@@ -4696,6 +4696,15 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         ( display_start > 0.0 && prepPresentStart >= display_start )
             ? ( prepPresentStart - display_start ) * 1000.0
             : 0.0;
+    // Attribution uses the existing monotonic high-resolution timer
+    // (omp_get_wtime via mlv_stage_timing_now), not wall-clock milliseconds.
+    // Keep these regions contiguous so their sum can be audited against the
+    // complete presentPlaybackPreparedFrame body.
+    double prepRegionSetupMs = 0.0;
+    double prepRegionGpuMs = 0.0;
+    double prepRegionImageMs = 0.0;
+    double prepRegionPresentMs = 0.0;
+    double prepRegionFinishMs = 0.0;
     mlv_stage_timing_note_elapsed("drawFrameReady.pre_present",
                                   display_frame,
                                   prepElapsedBeforePresentMs);
@@ -4787,6 +4796,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         && task.gpuAmazeTextureRawFrameSize >= expectedAmazeTextureRawFloats
         && readyFrame.gpuAmazeTextureWidth == sourceWidth
         && readyFrame.gpuAmazeTextureHeight == sourceHeight;
+    prepRegionSetupMs = ( mlv_stage_timing_now() - prepPresentStart ) * 1000.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_setup_ms"),
+        prepRegionSetupMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_start_stage_time"),
+        prepPresentStart );
+    const double prepRegionGpuStart = mlv_stage_timing_now();
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_amaze_texture_present_requested"),
         gpuAmazeTexturePresentRequested );
@@ -5749,6 +5766,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                                                                     task.gpuPresentationOptions );
     }
 
+    prepRegionGpuMs = ( mlv_stage_timing_now() - prepRegionGpuStart ) * 1000.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_gpu_ms"),
+        prepRegionGpuMs );
+    const double prepRegionImageStart = mlv_stage_timing_now();
     QImage displayImage;
     bool displayImageOwnsData = false;
     QPixmap cachedPixmap;
@@ -5813,6 +5835,15 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
 
     if( !framePresentedByViewport && displayImage.isNull() )
     {
+        prepRegionImageMs = ( mlv_stage_timing_now() - prepRegionImageStart ) * 1000.0;
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_region_image_ms"),
+            prepRegionImageMs );
+        const double prepRegionTotalMs =
+            ( mlv_stage_timing_now() - prepPresentStart ) * 1000.0;
+        readyFrame.stageTimingTelemetry.insert(
+            QStringLiteral("playback_prep_region_total_ms"),
+            prepRegionTotalMs );
         if( m_pRenderThread )
             m_pRenderThread->releasePresentedFrameForRequestSerial( task.requestSerial );
         m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
@@ -5945,6 +5976,10 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         releasePresentedFrameEarly = true;
     }
 
+    prepRegionImageMs = ( mlv_stage_timing_now() - prepRegionImageStart ) * 1000.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_image_ms"),
+        prepRegionImageMs );
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
     mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
 
@@ -5997,6 +6032,10 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             presentEndStageTime );
     }
     mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
+    prepRegionPresentMs = ( presentEndStageTime - present_start ) * 1000.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_present_ms"),
+        prepRegionPresentMs );
 
     const uint8_t *scopeSourceImage = task.scopeSourceImage;
     size_t scopeSourceImageSize = task.scopeSourceImageSize;
@@ -23715,7 +23754,11 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                    "gpu_playback_recon_async_h2d_ready_before_run=%42 "
                    "gpu_playback_recon_async_h2d_host_staging_ms=%43 "
                    "gpu_playback_recon_async_h2d_upload_ms=%44 "
-                   "gpu_playback_recon_async_h2d_upload_wait_ms=%45" )
+                   "gpu_playback_recon_async_h2d_upload_wait_ms=%45 "
+                   "prep_region_setup_ms=%46 prep_region_gpu_ms=%47 "
+                   "prep_region_image_ms=%48 prep_region_present_ms=%49 "
+                   "prep_region_finish_ms=%50 prep_region_total_ms=%51 "
+                   "prep_region_unattributed_ms=%52" )
                    .arg( static_cast<qulonglong>( m_playbackSmokeSessionId ) )
                    .arg( m_playbackSmokePresentedFrames )
                    .arg( elapsedMs, 0, 'f', 3 )
@@ -23774,6 +23817,27 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        0, 'f', 3 )
                    .arg( telemetryDoubleValue(
                        timing, "gpu_playback_recon_async_h2d_upload_wait_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_setup_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_gpu_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_image_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_present_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_finish_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_total_ms" ),
+                       0, 'f', 3 )
+                   .arg( telemetryDoubleValue(
+                       timing, "playback_prep_region_unattributed_ms" ),
                        0, 'f', 3 );
         qInfo().noquote()
             << QStringLiteral(
@@ -26901,6 +26965,7 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        bool releasePresentedFrameEarly,
                                        double displayStart )
 {
+    const double prepRegionFinishStart = mlv_stage_timing_now();
     if( dualIsoWarmupInstrumentationEnabled() )
     {
         if( m_dualIsoWarmupTelemetryPresentationGeneration
@@ -27423,6 +27488,38 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             m_playbackFrameAdvancePending = true;
         }
     }
+    const double prepRegionFinishEnd = mlv_stage_timing_now();
+    const double prepRegionFinishMs =
+        ( prepRegionFinishEnd - prepRegionFinishStart ) * 1000.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_finish_ms"),
+        prepRegionFinishMs );
+    const double prepRegionStartStageTime = telemetryDoubleValue(
+        readyFrame.stageTimingTelemetry,
+        "playback_prep_region_start_stage_time" );
+    const double prepRegionTotalMs =
+        prepRegionStartStageTime > 0.0
+            ? ( prepRegionFinishEnd - prepRegionStartStageTime ) * 1000.0
+            : 0.0;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_total_ms"),
+        prepRegionTotalMs );
+    const double prepRegionAttributedMs =
+        telemetryDoubleValue( readyFrame.stageTimingTelemetry,
+                              "playback_prep_region_setup_ms" )
+        + telemetryDoubleValue( readyFrame.stageTimingTelemetry,
+                                "playback_prep_region_gpu_ms" )
+        + telemetryDoubleValue( readyFrame.stageTimingTelemetry,
+                                "playback_prep_region_image_ms" )
+        + telemetryDoubleValue( readyFrame.stageTimingTelemetry,
+                                "playback_prep_region_present_ms" )
+        + prepRegionFinishMs;
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_unattributed_ms"),
+        prepRegionTotalMs > prepRegionAttributedMs
+            ? prepRegionTotalMs - prepRegionAttributedMs
+            : 0.0 );
+    m_lastPresentedStageTimingTelemetry = readyFrame.stageTimingTelemetry;
     notePlaybackSmokePresentedFrame( displayFrame, readyFrame, requestContext );
     if( dualIsoWarmupInstrumentationEnabled() )
         ++m_dualIsoWarmupTelemetryPresentedFrames;
