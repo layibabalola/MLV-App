@@ -6,10 +6,20 @@
 #include "WorkerThreadCount.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QThread>
 #include <QElapsedTimer>
 #include <QSettings>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
+#include <QRegularExpression>
+
+#include <csignal>
+#include <cstdlib>
+#include <numeric>
 
 /* MainWindow.h gives us the static exportCdngSequence helper
  * and pulls in mlv_include.h (C API) transitively. */
@@ -17,6 +27,12 @@
 #include "../../platform/qt/ExportCodecIds.h"
 #include "../../platform/qt/StretchFactors.h"
 #include "../../platform/qt/ReceiptSettings.h"
+/* Header-only, GUI-free process seam. This is the SAME machinery the GUI drives its
+ * rendered exports through (MainWindow::startExportPipe), which is why the headless
+ * runner needs no MainWindow helper and forks no ffmpeg-invocation logic. */
+#include "../../platform/qt/ExportProcess.h"
+#include "avir/avir.h"
+#include "avir/avirthreadpool.h"
 
 static QString batchCdngCodecName(int offset)
 {
@@ -33,19 +49,6 @@ static int normalizedBatchCdngCodecOffset(int offset)
     return (offset >= 0 && offset <= 2) ? offset : 0;
 }
 
-static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromOpenMlv(
-    mlvObject_t *mlvObject,
-    ReceiptSettings &receipt)
-{
-    return BatchRunner::renderedVideoSourceMetadataFromClipState(
-        static_cast<int>(getMlvWidth( mlvObject )),
-        static_cast<int>(getMlvHeight( mlvObject )),
-        getMlvFramerate( mlvObject ),
-        receipt.stretchFactorX(),
-        receipt.stretchFactorY(),
-        static_cast<int>(getMlvFrames( mlvObject )));
-}
-
 static BatchRenderedVideoSourceAudioPlan renderedVideoSourceAudioPlanFromOpenMlv(
     mlvObject_t *mlvObject,
     const QString &clipPath)
@@ -60,6 +63,757 @@ static BatchRenderedVideoSourceAudioPlan renderedVideoSourceAudioPlanFromOpenMlv
         sourceAudioPresent
             ? static_cast<qulonglong>(getMlvAudioSize( mlvObject ))
             : 0);
+}
+
+/* ---------------------------------------------------------------------------
+ * Rendered-video (E4-1) support
+ * ------------------------------------------------------------------------- */
+
+/* Cancellation. A headless export has no Abort button, so the console signals ARE the
+ * cancel channel. The handler does the only thing a signal handler may safely do -- set a
+ * flag -- and the frame loop polls it. Combined with the atomic-write temporary this
+ * means a cancelled run leaves NO file at the caller's output path, rather than a
+ * truncated one that looks finished. */
+static volatile std::sig_atomic_t g_batchRenderCancelRequested = 0;
+
+static void batchRenderCancelSignalHandler(int /*signalNumber*/)
+{
+    g_batchRenderCancelRequested = 1;
+}
+
+namespace
+{
+
+/* Installs the cancel handlers for the lifetime of one rendered export and restores the
+ * previous dispositions afterwards, so a batch run of several clips cannot leave a stale
+ * handler behind and CDNG runs in the same process are unaffected. */
+class BatchRenderCancelScope
+{
+public:
+    BatchRenderCancelScope()
+    {
+        g_batchRenderCancelRequested = 0;
+        m_previousInt  = std::signal( SIGINT,  batchRenderCancelSignalHandler );
+        m_previousTerm = std::signal( SIGTERM, batchRenderCancelSignalHandler );
+    }
+
+    ~BatchRenderCancelScope()
+    {
+        if( m_previousInt  != SIG_ERR ) std::signal( SIGINT,  m_previousInt );
+        if( m_previousTerm != SIG_ERR ) std::signal( SIGTERM, m_previousTerm );
+    }
+
+    BatchRenderCancelScope(const BatchRenderCancelScope &) = delete;
+    BatchRenderCancelScope &operator=(const BatchRenderCancelScope &) = delete;
+
+    static bool cancelled() { return g_batchRenderCancelRequested != 0; }
+
+private:
+    void (*m_previousInt)(int)  = SIG_ERR;
+    void (*m_previousTerm)(int) = SIG_ERR;
+};
+
+/* -------- Output verification --------------------------------------------
+ *
+ * Verification runs on the ffmpeg binary the export ALREADY REQUIRES, not on ffprobe.
+ * That is a deliberate choice, not a shortcut:
+ *
+ *   - ffprobe is NOT shipped with MLVApp. platform/qt/FFmpeg/ffmpegWin64.zip contains
+ *     exactly one entry, ffmpeg.exe. Requiring ffprobe would make rendered export refuse
+ *     on a stock install, which is a worse product than one that verifies with what it
+ *     already has.
+ *   - A full DECODE pass is a stronger playability claim than reading container metadata.
+ *     ffprobe reading a plausible header does not prove the bitstream decodes; `-f null`
+ *     decodes every packet and fails on a truncated or corrupt file.
+ *   - The frame count and duration it reports are read back out of the encoded file, so
+ *     they are independent of what the writer believed it wrote.
+ *
+ * ffprobe is still used when it happens to be resolvable, purely to ADD codec, container
+ * and sample-aspect-ratio facts. Its absence downgrades the report, never the gate. */
+
+struct DecodeProbeFacts
+{
+    bool ran = false;
+    bool decoded = false;      /* every packet decoded, exit status 0, empty stderr */
+    int frameCount = 0;
+    double durationSeconds = 0.0;
+    QString diagnostics;
+};
+
+/* `-progress pipe:1` emits stable key=value lines regardless of loglevel, which is why
+ * this parses that stream rather than ffmpeg's human-readable stderr banner. */
+DecodeProbeFacts decodeProbe(const QString &ffmpegExecutable, const QString &path)
+{
+    DecodeProbeFacts facts;
+    QProcess process;
+    process.start( ffmpegExecutable,
+                   QStringList{ QStringLiteral("-hide_banner"),
+                                QStringLiteral("-v"), QStringLiteral("error"),
+                                QStringLiteral("-i"), path,
+                                QStringLiteral("-progress"), QStringLiteral("pipe:1"),
+                                QStringLiteral("-f"), QStringLiteral("null"),
+                                QStringLiteral("-") } );
+    if( !process.waitForStarted( 10000 ) || !process.waitForFinished( 600000 ) )
+    {
+        facts.diagnostics = QStringLiteral("decode probe did not run to completion");
+        return facts;
+    }
+    facts.ran = true;
+
+    const QString progress = QString::fromLocal8Bit( process.readAllStandardOutput() );
+    const QString stderrText =
+        QString::fromLocal8Bit( process.readAllStandardError() ).trimmed();
+
+    const QStringList lines = progress.split( QLatin1Char('\n'), Qt::SkipEmptyParts );
+    for( const QString &rawLine : lines )
+    {
+        const QString line = rawLine.trimmed();
+        if( line.startsWith( QStringLiteral("frame=") ) )
+        {
+            /* progress reports cumulatively; the LAST value is the total. */
+            facts.frameCount = line.mid( 6 ).trimmed().toInt();
+        }
+        else if( line.startsWith( QStringLiteral("out_time_us=") ) )
+        {
+            const qint64 micros = line.mid( 12 ).trimmed().toLongLong();
+            if( micros > 0 )
+                facts.durationSeconds = static_cast<double>( micros ) / 1000000.0;
+        }
+    }
+
+    facts.decoded = process.exitStatus() == QProcess::NormalExit
+                 && process.exitCode() == 0
+                 && stderrText.isEmpty();
+    facts.diagnostics = stderrText;
+    return facts;
+}
+
+/* Decoded pixel dimensions, read back out of the file: decode exactly one frame to raw
+ * rgb24 and count the bytes. Independent of any header field, and of what the writer
+ * thought the geometry was. Returns false when the frame could not be decoded. */
+bool decodedFrameDimensionsMatch(const QString &ffmpegExecutable,
+                                 const QString &path,
+                                 int expectedWidth,
+                                 int expectedHeight,
+                                 qint64 *actualBytes)
+{
+    QProcess process;
+    process.start( ffmpegExecutable,
+                   QStringList{ QStringLiteral("-hide_banner"),
+                                QStringLiteral("-v"), QStringLiteral("error"),
+                                QStringLiteral("-i"), path,
+                                QStringLiteral("-frames:v"), QStringLiteral("1"),
+                                QStringLiteral("-f"), QStringLiteral("rawvideo"),
+                                QStringLiteral("-pix_fmt"), QStringLiteral("rgb24"),
+                                QStringLiteral("-") } );
+    if( !process.waitForStarted( 10000 ) || !process.waitForFinished( 120000 ) )
+    {
+        if( actualBytes ) *actualBytes = -1;
+        return false;
+    }
+
+    const QByteArray raw = process.readAllStandardOutput();
+    if( actualBytes ) *actualBytes = raw.size();
+    if( process.exitCode() != 0 )
+        return false;
+
+    const qint64 expectedBytes = static_cast<qint64>(expectedWidth)
+                               * static_cast<qint64>(expectedHeight) * 3;
+    return raw.size() == expectedBytes;
+}
+
+struct MediaProbeFacts
+{
+    bool parsed = false;
+    QString codecName;
+    QString formatNames;   /* ffprobe reports a comma-separated list, e.g. "mov,mp4,..." */
+    int width = 0;
+    int height = 0;
+    QString sampleAspectRatio;
+    QString displayAspectRatio;
+    /* Which probe produced these facts, so the RENDER_VERIFIED line never leaves an
+     * operator guessing whether the aspect check was authoritative or derived. */
+    QString source;
+};
+
+MediaProbeFacts mediaProbeFactsFromJson(const QByteArray &json)
+{
+    MediaProbeFacts facts;
+    QJsonParseError err{};
+    const QJsonDocument doc = QJsonDocument::fromJson( json, &err );
+    if( err.error != QJsonParseError::NoError || !doc.isObject() )
+        return facts;
+
+    const QJsonObject root = doc.object();
+    facts.formatNames = root.value( QStringLiteral("format") ).toObject()
+                            .value( QStringLiteral("format_name") ).toString();
+
+    const QJsonArray streams = root.value( QStringLiteral("streams") ).toArray();
+    for( const QJsonValue &value : streams )
+    {
+        const QJsonObject stream = value.toObject();
+        if( stream.value( QStringLiteral("codec_type") ).toString()
+                != QStringLiteral("video") )
+            continue;
+
+        facts.codecName = stream.value( QStringLiteral("codec_name") ).toString();
+        facts.width  = stream.value( QStringLiteral("width") ).toInt();
+        facts.height = stream.value( QStringLiteral("height") ).toInt();
+        facts.sampleAspectRatio =
+            stream.value( QStringLiteral("sample_aspect_ratio") ).toString();
+        facts.displayAspectRatio =
+            stream.value( QStringLiteral("display_aspect_ratio") ).toString();
+        break; /* first video stream is the one we wrote */
+    }
+
+    facts.parsed = true;
+    facts.source = QStringLiteral("ffprobe-json");
+    return facts;
+}
+
+/* Same facts, read from `ffmpeg -i <file>` instead of ffprobe.
+ *
+ * The PARSING lives in BatchTypes.h (batchRenderedVideoFfmpegDumpFacts) so the console
+ * tests can pin the regexes without linking this GUI-dependent translation unit; this
+ * wrapper only adapts the result into MediaProbeFacts and stamps the probe source.
+ *
+ * `ffmpeg -i <file>` with no output file ALWAYS exits non-zero ("At least one output file
+ * must be specified") AFTER printing the stream dump, so the caller must read stderr
+ * regardless of exit status -- gating on exitCode()==0 would discard every result. */
+MediaProbeFacts mediaProbeFactsFromFfmpegDump(const QByteArray &dump)
+{
+    const BatchRenderedVideoFfmpegDumpFacts parsed =
+        batchRenderedVideoFfmpegDumpFacts( QString::fromUtf8( dump ) );
+
+    MediaProbeFacts facts;
+    if( !parsed.parsed )
+        return facts;
+
+    facts.parsed             = true;
+    facts.codecName          = parsed.codecName;
+    facts.formatNames        = parsed.formatNames;
+    facts.width              = parsed.width;
+    facts.height             = parsed.height;
+    facts.sampleAspectRatio  = parsed.sampleAspectRatio;
+    facts.displayAspectRatio = parsed.displayAspectRatio;
+    facts.source             = QStringLiteral("ffmpeg-dump");
+    return facts;
+}
+
+/* Optional enrichment only. Looks on PATH first, then beside the resolved ffmpeg (the two
+ * ship together in every standard distribution). Empty string means "not available", and
+ * the caller degrades its REPORT, never its verdict. */
+QString resolveOptionalMediaProbe(
+    const BatchRenderedVideoMediaProbeBinaryPlan &probePlan,
+    const BatchRenderedVideoFfmpegBinaryPlan &ffmpegPlan)
+{
+    if( probePlan.foundOnPath && !probePlan.resolvedExecutable.isEmpty() )
+        return probePlan.resolvedExecutable;
+
+    const QString siblingDir = QFileInfo( ffmpegPlan.resolvedExecutable ).absolutePath();
+    if( siblingDir.isEmpty() )
+        return QString();
+
+    for( const QString &candidate : QStringList{ siblingDir + QStringLiteral("/ffprobe.exe"),
+                                                 siblingDir + QStringLiteral("/ffprobe") } )
+    {
+        const QFileInfo info( candidate );
+        if( info.exists() && info.isFile() )
+            return QDir::cleanPath( info.absoluteFilePath() );
+    }
+    return QString();
+}
+
+} /* anonymous namespace */
+
+int BatchRunner::exportRenderedVideoFile(
+    const QString &mlvPath,
+    ReceiptSettings *receipt,
+    const BatchRenderedVideoJobPlan &preflightPlan,
+    const BatchRenderedVideoRenderSettings &renderSettings)
+{
+    QElapsedTimer clipTimer;
+    clipTimer.start();
+
+    const QString baseName = QFileInfo(mlvPath).completeBaseName();
+
+    /* ---- Open the clip ------------------------------------------------- */
+    int mlvErr = MLV_ERR_NONE;
+    char mlvErrMsg[256] = { 0 };
+
+#ifdef Q_OS_UNIX
+    mlvObject_t *mlvObject = initMlvObjectWithClip(
+        mlvPath.toUtf8().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#else
+    mlvObject_t *mlvObject = initMlvObjectWithClip(
+        mlvPath.toLatin1().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
+#endif
+
+    if( mlvErr )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: Cannot open MLV for rendered export: %1. %2\n")
+            .arg(mlvPath, QString(mlvErrMsg)));
+        if( mlvObject ) freeMlvObject( mlvObject );
+        return 3;
+    }
+
+    processingObject_t *processingObject = initProcessingObject();
+    setMlvProcessing( mlvObject, processingObject );
+    disableMlvCaching( mlvObject );
+    setMlvCpuCores( mlvObject, mlvappEffectiveWorkerThreadCount() );
+
+    const uint32_t totalFrames = getMlvFrames( mlvObject );
+    BatchLogger::out(QStringLiteral("[BATCH] FILE %1 frames=%2\n")
+        .arg( baseName ).arg( totalFrames ));
+
+    /* ---- Frame range, identical rules to the CDNG runner ---------------- */
+    uint32_t cutIn  = receipt->cutIn();
+    uint32_t cutOut = receipt->cutOut();
+    if( cutIn == 0 )  cutIn  = 1;
+    if( cutOut == 0 || cutOut > totalFrames ) cutOut = totalFrames;
+
+    if( cutIn > totalFrames || cutIn > cutOut )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: Receipt cut-in %1 is past clip end (frames=%2, cut-out=%3)\n")
+            .arg( cutIn ).arg( totalFrames ).arg( cutOut ));
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return 4;
+    }
+
+    const uint32_t unclampedCutOut = cutOut;
+    cutOut = BatchRunner::cutOutClampedForMaxFrames(
+        cutIn, cutOut, BatchContext::maxFrames() );
+    if( cutOut != unclampedCutOut )
+    {
+        BatchLogger::out(QStringLiteral("[BATCH] MAX_FRAMES %1 max=%2 cutIn=%3 cutOut=%4 originalCutOut=%5\n")
+            .arg( baseName ).arg( BatchContext::maxFrames() )
+            .arg( cutIn ).arg( cutOut ).arg( unclampedCutOut ));
+    }
+
+    /* ---- Receipt -> pipeline, the same call the CDNG runner makes ------- */
+    ReceiptApplier::applyToMlv( receipt, mlvObject, processingObject );
+
+    /* Debayer. ReceiptApplier does not set it because CDNG writes Bayer data and never
+     * debayers; a rendered export does, so this mirrors the receipt-driven branch of
+     * MainWindow::startExportPipe verbatim. (The GUI's m_exportDebayerMode override has
+     * no CLI surface, so the receipt IS the headless authority.) */
+    switch( receipt->debayer() )
+    {
+        case ReceiptSettings::None:     setMlvUseNoneDebayer( mlvObject );      break;
+        case ReceiptSettings::Simple:   setMlvUseSimpleDebayer( mlvObject );    break;
+        case ReceiptSettings::Bilinear: setMlvDontAlwaysUseAmaze( mlvObject );  break;
+        case ReceiptSettings::LMMSE:    setMlvUseLmmseDebayer( mlvObject );     break;
+        case ReceiptSettings::IGV:      setMlvUseIgvDebayer( mlvObject );       break;
+        case ReceiptSettings::AMaZE:    setMlvAlwaysUseAmaze( mlvObject );      break;
+        case ReceiptSettings::AHD:      setMlvUseAhdDebayer( mlvObject );       break;
+        default:                                                                break;
+    }
+
+    ReceiptApplier::printFingerprint( mlvObject, processingObject );
+
+    /* ---- Complete the plan against the clip's real geometry ------------- */
+    const double stretchX =
+        BatchRunner::effectiveStretchFactorX( receipt->stretchFactorX() );
+    const double stretchY =
+        BatchRunner::effectiveStretchFactorY( receipt->stretchFactorY(),
+                                              getMlvAspectRatio( mlvObject ) );
+
+    const BatchRenderedVideoSourceMetadata metadata =
+        BatchRunner::renderedVideoSourceMetadataFromClipState(
+            static_cast<int>(getMlvWidth( mlvObject )),
+            static_cast<int>(getMlvHeight( mlvObject )),
+            getMlvFramerate( mlvObject ),
+            stretchX,
+            stretchY,
+            static_cast<int>(totalFrames) );
+
+    const BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
+        renderedVideoSourceAudioPlanFromOpenMlv( mlvObject, mlvPath );
+    const BatchRenderedVideoJobPlan plan =
+        batchRenderedVideoJobPlanWithMetadata(
+            batchRenderedVideoJobPlanWithSourceAudio( preflightPlan, sourceAudioPlan ),
+            metadata,
+            renderSettings );
+
+    if( !plan.runnable )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video job is not runnable. clip=%1 %2.\n")
+            .arg(baseName)
+            .arg(batchRenderedVideoJobPlanSummary(plan)));
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return 2;
+    }
+
+    if( !plan.runnerPrerequisites.limitation.isEmpty()
+     && sourceAudioPlan.sourceAudioPresent )
+    {
+        BatchLogger::out(QStringLiteral("[BATCH] RENDER_AUDIO_DROPPED %1 reason=%2\n")
+            .arg(baseName)
+            .arg(plan.runnerPrerequisites.limitation));
+    }
+
+    /* ---- Atomic write target -------------------------------------------- */
+    const QString finalPath = plan.outputPlan.outputPath;
+    const QString partialPath = batchRenderedVideoPartialOutputPath( finalPath );
+    const QString arguments =
+        batchRenderedVideoFfmpegArgumentsWithOutputPath( plan.ffmpegCommandPlan,
+                                                         partialPath );
+    if( partialPath.isEmpty() || arguments.isEmpty() )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not build the rendered-video ffmpeg invocation. clip=%1 output=%2.\n")
+            .arg(baseName, finalPath));
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return 2;
+    }
+
+    QDir().mkpath( QFileInfo( finalPath ).absolutePath() );
+    QFile::remove( partialPath ); /* a previous cancelled run may have left one */
+
+    const uint32_t framesToExport = cutOut - cutIn + 1;
+    const int srcWidth  = static_cast<int>(getMlvWidth( mlvObject ));
+    const int srcHeight = static_cast<int>(getMlvHeight( mlvObject ));
+    const int outWidth  = plan.ffmpegFramePlan.outputWidth;
+    const int outHeight = plan.ffmpegFramePlan.outputHeight;
+    const bool scaled   = plan.ffmpegFramePlan.scaled;
+
+    BatchLogger::out(QStringLiteral("[BATCH] RENDER_START %1 codec=%2 container=%3 source=%4x%5 output=%6x%7 scaled=%8 fps=%9 frames=%10 cutIn=%11 cutOut=%12 out=%13\n")
+        .arg(baseName)
+        .arg(plan.outputVerificationPlan.expectedCodec)
+        .arg(plan.outputVerificationPlan.expectedContainer)
+        .arg(srcWidth).arg(srcHeight)
+        .arg(outWidth).arg(outHeight)
+        .arg(scaled ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(plan.ffmpegFramePlan.frameRateArgument)
+        .arg(framesToExport).arg(cutIn).arg(cutOut)
+        .arg(finalPath));
+    if( BatchContext::isVerbose() )
+    {
+        BatchLogger::out(QStringLiteral("[BATCH] RENDER_COMMAND %1 %2\n")
+            .arg(batchRenderedVideoCommandExecutableForDisplay(
+                     plan.ffmpegCommandPlan.executable))
+            .arg(arguments));
+    }
+
+    /* ---- Encode ---------------------------------------------------------- */
+    BatchRenderCancelScope cancelScope;
+
+    export_process::StreamingPipeline pipeline;
+    const export_process::Invocation invocation =
+        export_process::invocationFromTemplate( plan.ffmpegCommandPlan.executable,
+                                                arguments );
+
+    if( !pipeline.start( QVector<export_process::Invocation>{ invocation } ) )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not start ffmpeg. clip=%1 executable=%2. %3\n")
+            .arg(baseName, plan.ffmpegCommandPlan.executable,
+                 pipeline.diagnostics().trimmed()));
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return 4;
+    }
+
+    const size_t sourcePixels = static_cast<size_t>(srcWidth)
+                              * static_cast<size_t>(srcHeight) * 3u;
+    const size_t scaledPixels = static_cast<size_t>(outWidth)
+                              * static_cast<size_t>(outHeight) * 3u;
+
+    uint16_t *frameBuffer =
+        static_cast<uint16_t *>( malloc( sourcePixels * sizeof(uint16_t) ) );
+    uint16_t *scaledBuffer = scaled
+        ? static_cast<uint16_t *>( malloc( scaledPixels * sizeof(uint16_t) ) )
+        : nullptr;
+
+    if( frameBuffer == nullptr || ( scaled && scaledBuffer == nullptr ) )
+    {
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not allocate rendered-video frame buffers. clip=%1 source=%2x%3 output=%4x%5.\n")
+            .arg(baseName).arg(srcWidth).arg(srcHeight).arg(outWidth).arg(outHeight));
+        pipeline.cancel();
+        free( frameBuffer );
+        free( scaledBuffer );
+        QFile::remove( partialPath );
+        freeMlvObject( mlvObject );
+        freeProcessingObject( processingObject );
+        return 4;
+    }
+
+    const int workerThreads = mlvappEffectiveWorkerThreadCount();
+    bool writeFailed = false;
+    uint32_t framesWritten = 0;
+
+    /* Same iteration the GUI runs (MainWindow::startExportPipe): 0-based frame indices
+     * over the 1-based receipt cut range. */
+    for( uint32_t frameIndex = cutIn - 1; frameIndex < cutOut; frameIndex++ )
+    {
+        if( BatchRenderCancelScope::cancelled() ) break;
+
+        getMlvProcessedFrame16( mlvObject, frameIndex, frameBuffer, workerThreads );
+
+        if( scaled )
+        {
+            avir_scale_thread_pool scaling_pool;
+            avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;
+            avir::CImageResizerParamsUltra roptions;
+            avir::CImageResizer<> image_resizer( 16, 0, roptions );
+            image_resizer.resizeImage( frameBuffer,
+                                       srcWidth, srcHeight, 0,
+                                       scaledBuffer,
+                                       outWidth, outHeight,
+                                       3, 0, &vars );
+        }
+
+        const uint16_t *pixels = scaled ? scaledBuffer : frameBuffer;
+        const size_t pixelCount = scaled ? scaledPixels : sourcePixels;
+        if( !pipeline.writeAll( reinterpret_cast<const char *>( pixels ),
+                                static_cast<qint64>( pixelCount * sizeof(uint16_t) ) ) )
+        {
+            writeFailed = true;
+            break;
+        }
+
+        framesWritten++;
+
+        /* Progress on a bounded cadence so a long clip stays legible in a log file
+         * without emitting one line per frame. */
+        if( BatchContext::isVerbose()
+         || framesWritten == 1
+         || framesWritten == framesToExport
+         || ( framesWritten % 25 ) == 0 )
+        {
+            BatchLogger::out(QStringLiteral("[BATCH] RENDER_PROGRESS %1 frames=%2/%3 elapsed=%4\n")
+                .arg(baseName).arg(framesWritten).arg(framesToExport)
+                .arg(clipTimer.elapsed() / 1000.0, 0, 'f', 1));
+        }
+    }
+
+    const bool cancelled = BatchRenderCancelScope::cancelled();
+    bool encoded = false;
+    if( cancelled || writeFailed )
+        pipeline.cancel();
+    else
+        encoded = pipeline.finish();
+
+    const QString diagnostics = pipeline.diagnostics().trimmed();
+
+    free( frameBuffer );
+    free( scaledBuffer );
+    freeMlvObject( mlvObject );
+    freeProcessingObject( processingObject );
+
+    if( cancelled )
+    {
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] RENDER_CANCELLED %1 frames=%2/%3 partial_removed=%4\n")
+            .arg(baseName).arg(framesWritten).arg(framesToExport).arg(partialPath));
+        return 4;
+    }
+
+    if( writeFailed || !encoded )
+    {
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video encode failed. clip=%1 frames=%2/%3 write_failed=%4 ffmpeg=%5\n")
+            .arg(baseName).arg(framesWritten).arg(framesToExport)
+            .arg(writeFailed ? QStringLiteral("true") : QStringLiteral("false"))
+            .arg(diagnostics.isEmpty() ? QStringLiteral("(no diagnostics)") : diagnostics));
+        return 4;
+    }
+
+    if( framesWritten != framesToExport )
+    {
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video wrote %1 of %2 frames. clip=%3\n")
+            .arg(framesWritten).arg(framesToExport).arg(baseName));
+        return 4;
+    }
+
+    /* ---- Verify, BEFORE publishing --------------------------------------- */
+    /* [B1], LANE-4 review of e9226e1c..51f28e8e: verification used to run AFTER the
+     * rename, so a file that FAILED its own checks was left sitting at the path the
+     * caller was told to expect -- and because publishing removes any pre-existing
+     * output first, a failed RE-RUN destroyed a good file and left the bad one in its
+     * place. Five of the six failure paths in this function already removed their
+     * artefact; the verification path was the one that did not.
+     *
+     * Verifying the partial file costs nothing: decodeProbe, decodedFrameDimensionsMatch,
+     * the `ffmpeg -i` dump and QFileInfo::size() all take a path, and the partial marker
+     * sits BEFORE the extension (`clip.mlvapp-partial.mp4`), so ffmpeg selects the same
+     * demuxer it would for the final name. The publish below is then reached only by an
+     * output that has passed every check. */
+    const QString ffmpegExecutable = plan.ffmpegCommandPlan.executable;
+    QStringList failures;
+
+    const qint64 outputBytes = QFileInfo( partialPath ).size();
+    if( outputBytes < static_cast<qint64>( plan.outputVerificationPlan.nonEmptyMinimumBytes ) )
+        failures << QStringLiteral("output-bytes=%1").arg(outputBytes);
+
+    /* (a) Playability, frame count and duration, read back by decoding the file. */
+    const DecodeProbeFacts decoded = decodeProbe( ffmpegExecutable, partialPath );
+    if( !decoded.ran )
+    {
+        failures << QStringLiteral("decode-probe did-not-run (%1)").arg(decoded.diagnostics);
+    }
+    else
+    {
+        if( !decoded.decoded )
+        {
+            failures << QStringLiteral("decode-probe failed: %1")
+                .arg(decoded.diagnostics.isEmpty()
+                        ? QStringLiteral("(no diagnostics)") : decoded.diagnostics);
+        }
+        if( decoded.frameCount != static_cast<int>(framesToExport) )
+        {
+            failures << QStringLiteral("frame-count expected=%1 decoded=%2")
+                .arg(framesToExport).arg(decoded.frameCount);
+        }
+
+        const double expectedDuration =
+            metadata.frameRate > 0.0
+                ? static_cast<double>(framesToExport) / metadata.frameRate
+                : 0.0;
+        /* One frame of tolerance: container timebases round, and a single-frame
+         * difference is a representation artefact, not a lost or duplicated picture --
+         * the frame-count check above is what actually guards content. */
+        const double durationTolerance =
+            metadata.frameRate > 0.0 ? ( 1.0 / metadata.frameRate ) : 0.5;
+        if( expectedDuration > 0.0
+         && qAbs( decoded.durationSeconds - expectedDuration ) > durationTolerance )
+        {
+            failures << QStringLiteral("duration expected=%1s decoded=%2s tolerance=%3s")
+                .arg(expectedDuration, 0, 'f', 3)
+                .arg(decoded.durationSeconds, 0, 'f', 3)
+                .arg(durationTolerance, 0, 'f', 3);
+        }
+    }
+
+    /* (b) Geometry, read back from a decoded frame rather than from a header field.
+     * The frame plan bakes the receipt's stretch into the pixel dimensions and emits
+     * square pixels, so a correct decoded frame size IS the aspect check. */
+    qint64 decodedFrameBytes = 0;
+    if( !decodedFrameDimensionsMatch( ffmpegExecutable, partialPath,
+                                      outWidth, outHeight, &decodedFrameBytes ) )
+    {
+        failures << QStringLiteral("decoded-frame-bytes expected=%1 (%2x%3 rgb24) actual=%4")
+            .arg(static_cast<qint64>(outWidth) * outHeight * 3)
+            .arg(outWidth).arg(outHeight).arg(decodedFrameBytes);
+    }
+
+    /* (c) Codec / container / aspect. ffprobe is preferred when it is resolvable because
+     * its JSON is unambiguous, but it is NOT shipped with MLVApp, so the ffmpeg stream
+     * dump is the fallback that makes this check actually run on a stock install rather
+     * than degrade to `unchecked`. Either way the facts are advisory about WHICH probe
+     * spoke and binding about what it said. */
+    QString probeExecutable =
+        resolveOptionalMediaProbe( plan.mediaProbeBinaryPlan, plan.ffmpegBinaryPlan );
+    MediaProbeFacts facts;
+    /* [B2]: the plan bakes the FINAL path into mediaProbeCommandPlan.arguments, so running
+     * that string verbatim would probe the previous export on any re-run. Re-aim it at the
+     * file actually under verification. An empty result means the probe plan is not ready,
+     * in which case this branch is skipped entirely and the ffmpeg-dump fallback below
+     * still checks the right file. */
+    const QString probeArguments =
+        batchRenderedVideoMediaProbeArgumentsWithPath( plan.mediaProbeCommandPlan,
+                                                       partialPath );
+    if( !probeExecutable.isEmpty() && !probeArguments.isEmpty() )
+    {
+        QProcess probe;
+        probe.start( probeExecutable, QProcess::splitCommand( probeArguments ) );
+        if( probe.waitForStarted( 10000 ) && probe.waitForFinished( 60000 )
+         && probe.exitCode() == 0 )
+        {
+            facts = mediaProbeFactsFromJson( probe.readAllStandardOutput() );
+        }
+    }
+    if( !facts.parsed && !ffmpegExecutable.isEmpty() )
+    {
+        QProcess dump;
+        dump.start( ffmpegExecutable,
+                    QStringList{ QStringLiteral("-hide_banner"),
+                                 QStringLiteral("-i"), partialPath } );
+        /* Deliberately NOT gated on exit status: `ffmpeg -i` with no output file always
+         * exits non-zero after printing the dump this parses. */
+        if( dump.waitForStarted( 10000 ) && dump.waitForFinished( 60000 ) )
+        {
+            facts = mediaProbeFactsFromFfmpegDump( dump.readAllStandardError() );
+            if( facts.parsed )
+                probeExecutable = ffmpegExecutable;
+        }
+    }
+    if( facts.parsed )
+    {
+        if( facts.codecName != plan.outputVerificationPlan.expectedCodec )
+        {
+            failures << QStringLiteral("codec expected=%1 actual=%2")
+                .arg(plan.outputVerificationPlan.expectedCodec, facts.codecName);
+        }
+        if( !facts.formatNames.split( QLatin1Char(',') )
+                 .contains( plan.outputVerificationPlan.expectedContainer ) )
+        {
+            failures << QStringLiteral("container expected=%1 actual=%2")
+                .arg(plan.outputVerificationPlan.expectedContainer, facts.formatNames);
+        }
+        if( facts.width != outWidth || facts.height != outHeight )
+        {
+            failures << QStringLiteral("coded-dimensions expected=%1x%2 actual=%3x%4")
+                .arg(outWidth).arg(outHeight).arg(facts.width).arg(facts.height);
+        }
+        /* A non-1:1 SAR would silently re-stretch the image on playback, undoing the
+         * receipt's stretch. This is exactly the aspect defect the check exists for.
+         * The square-pixel spellings live in BatchTypes.h so the product check and the
+         * console test share ONE definition and cannot drift apart. */
+        if( !batchRenderedVideoSampleAspectIsSquare( facts.sampleAspectRatio ) )
+        {
+            failures << QStringLiteral("sample-aspect-ratio expected=1:1 actual=%1")
+                .arg(facts.sampleAspectRatio);
+        }
+    }
+
+    if( !failures.isEmpty() )
+    {
+        /* [B1]: discard the artefact instead of publishing it. Nothing is written to
+         * finalPath on this path, so a pre-existing good output at that path also
+         * SURVIVES a failed re-run -- which the previous publish-then-verify order
+         * destroyed before it knew whether the replacement was sound. */
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video output verification failed. clip=%1 out=%2 failures=[%3]\n")
+            .arg(baseName, finalPath, failures.join( QStringLiteral("; ") )));
+        return 4;
+    }
+
+    /* ---- Publish atomically, now that the output has passed every check ---- */
+    QFile::remove( finalPath ); /* rename() will not overwrite on Windows */
+    if( !QFile::rename( partialPath, finalPath ) )
+    {
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not publish the rendered-video output. clip=%1 from=%2 to=%3\n")
+            .arg(baseName, partialPath, finalPath));
+        return 4;
+    }
+
+    BatchLogger::out(QStringLiteral("[BATCH] RENDER_VERIFIED %1 decoded_frames=%2 decoded_duration=%3 decoded_frame_bytes=%4 dimensions=%5x%6 bytes=%7 container_probe=%8 probe_source=%13 codec=%9 container=%10 sar=%11 dar=%12\n")
+        .arg(baseName)
+        .arg(decoded.frameCount)
+        .arg(decoded.durationSeconds, 0, 'f', 3)
+        .arg(decodedFrameBytes)
+        .arg(outWidth).arg(outHeight)
+        .arg(outputBytes)
+        .arg(facts.parsed ? probeExecutable : QStringLiteral("unavailable"))
+        .arg(facts.parsed ? facts.codecName : QStringLiteral("unchecked"))
+        .arg(facts.parsed ? facts.formatNames : QStringLiteral("unchecked"))
+        .arg(facts.parsed
+                ? ( facts.sampleAspectRatio.isEmpty() ? QStringLiteral("unset") : facts.sampleAspectRatio )
+                : QStringLiteral("unchecked"))
+        .arg(facts.parsed
+                ? ( facts.displayAspectRatio.isEmpty() ? QStringLiteral("unset") : facts.displayAspectRatio )
+                : QStringLiteral("unchecked"))
+        .arg(facts.parsed ? facts.source : QStringLiteral("none")));
+
+    BatchLogger::out(QStringLiteral("[BATCH] DONE %1 exported=%2 skipped=0 elapsed=%3\n")
+        .arg(baseName).arg(framesWritten)
+        .arg(clipTimer.elapsed() / 1000.0, 0, 'f', 1));
+
+    return 0;
 }
 
 int BatchRunner::run(const QString &inputPath, const QString &outputPath)
@@ -280,55 +1034,46 @@ int BatchRunner::run(const QString &inputPath, const QString &outputPath)
             return 2;
         }
 
-        int mlvErr = MLV_ERR_NONE;
-        char mlvErrMsg[256] = { 0 };
-
-#ifdef Q_OS_UNIX
-        mlvObject_t *mlvObject = initMlvObjectWithClip(
-            mlvPath.toUtf8().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
-#else
-        mlvObject_t *mlvObject = initMlvObjectWithClip(
-            mlvPath.toLatin1().data(), MLV_OPEN_FULL, &mlvErr, mlvErrMsg );
-#endif
-
-        if( mlvErr )
+        /* The binary plan treats a non-empty NAME as command-ready even when nothing was
+         * found, so an --rendered-ffmpeg typo would otherwise survive preflight and only
+         * surface as a failed spawn (exit 4, "export failure"). It is a usage error:
+         * report it as one, name what was searched, and exit 2 before touching the clip. */
+        if( !ffmpegBinaryPlan.foundOnPath
+         && !QFileInfo::exists( ffmpegBinaryPlan.resolvedExecutable ) )
         {
-            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner cannot open rendered-video metadata source: %1. %2\n")
-                .arg(mlvPath, QString(mlvErrMsg)));
-            if( mlvObject ) freeMlvObject( mlvObject );
-            return 3;
-        }
-
-        const BatchRenderedVideoSourceMetadata metadata =
-            renderedVideoSourceMetadataFromOpenMlv( mlvObject, receipt );
-        const BatchRenderedVideoSourceAudioPlan sourceAudioPlan =
-            renderedVideoSourceAudioPlanFromOpenMlv( mlvObject, mlvPath );
-        const BatchRenderedVideoJobPlan audioDiscoveredPlan =
-            batchRenderedVideoJobPlanWithSourceAudio(
-                basePlan,
-                sourceAudioPlan);
-        const BatchRenderedVideoJobPlan renderedPlan =
-            batchRenderedVideoJobPlanWithMetadata(
-                audioDiscoveredPlan,
-                metadata,
-                renderSettings);
-        freeMlvObject( mlvObject );
-
-        if( !renderedPlan.preflightReady )
-        {
-            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video metadata preflight failed. clip=%1 planned-clips=%2 %3.\n")
-                .arg(baseName)
-                .arg(mlvFiles.size())
-                .arg(batchRenderedVideoJobPlanSummary(renderedPlan)));
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: rendered-video export cannot find ffmpeg. requested=%1 resolved=%2 searched=PATH. Pass --rendered-ffmpeg <path-to-ffmpeg> or put ffmpeg on PATH.\n")
+                .arg(ffmpegBinaryPlan.requestedExecutable)
+                .arg(ffmpegBinaryPlan.resolvedExecutable));
             return 2;
         }
 
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export is not implemented yet. clip=%1 planned-clips=%2 %3. Lane A E4 remains blocked until %4; use --export-format cdng.\n")
-            .arg(baseName)
-            .arg(mlvFiles.size())
-            .arg(batchRenderedVideoJobPlanSummary(renderedPlan))
-            .arg(renderedPlan.runnerPrerequisites.reason));
-        return 2;
+        /* E4-1 is deliberately ONE clip to ONE output path. A folder of clips would need
+         * per-clip output naming, a queue and restart semantics, all of which the roadmap
+         * defers to E4-2 -- so refuse rather than silently exporting only the first. */
+        if( mlvFiles.size() != 1 )
+        {
+            BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video export takes exactly one clip. found=%1 input=%2. Point --input at a single .mlv file.\n")
+                .arg(mlvFiles.size()).arg(inputPath));
+            return 2;
+        }
+
+        BatchLogger::out(QStringLiteral("[BATCH] START input=%1 output=%2 export-format=%3 rendered-codec=%4 rendered-container=%5 ffmpeg=%6\n")
+                   .arg( inputPath )
+                   .arg( basePlan.outputPlan.outputPath )
+                   .arg( batchExportFormatName( exportRequest.format ) )
+                   .arg( batchRenderedVideoCodecName( exportRequest.renderedCodec ) )
+                   .arg( batchRenderedVideoContainerName( exportRequest.renderedContainer ) )
+                   .arg( ffmpegBinaryPlan.resolvedExecutable ));
+
+        const int renderedExit = BatchRunner::exportRenderedVideoFile(
+            mlvPath, &receipt, basePlan, renderSettings );
+
+        const double totalElapsedRendered = totalTimer.elapsed() / 1000.0;
+        BatchLogger::out(QStringLiteral("[BATCH] COMPLETE files=1 succeeded=%1 failed=%2 total_elapsed=%3\n")
+                   .arg( renderedExit == 0 ? 1 : 0 )
+                   .arg( renderedExit == 0 ? 0 : 1 )
+                   .arg( totalElapsedRendered, 0, 'f', 1 ));
+        return renderedExit;
     }
 
     /* Ensure output directory exists */
@@ -484,26 +1229,17 @@ ProcessResult BatchRunner::exportSingleFile(const QString &mlvPath,
 
     uint32_t effectiveCutIn = cutIn;  /* may be adjusted by resume */
 
-    double stretchX = receipt->stretchFactorX();
-    double stretchY = receipt->stretchFactorY();
-    /* -1 = uninitialized (never loaded); use no-stretch defaults */
-    if( stretchX <= 0 ) stretchX = STRETCH_H_100;
-    if( stretchY <= 0 )
-    {
-        /* Mirror the GUI first-load auto de-squeeze (MainWindow::setSliders): when the
-         * receipt carries no explicit vertical stretch, derive it from the clip's RAWC
-         * binning/skipping aspect (getMlvAspectRatio = sampling_y/sampling_x). Without
-         * this, headless exports emit picAR={1,1,1,1} -> manual_ar=1 in the DNG writer
-         * -> the writer's own RAWC de-squeeze (dng.c) is skipped -> squeezed CDNGs for
-         * binned modes (e.g. 5D3 1080p: binning_x=3/binning_y=1 -> needs a 3:1 stretch).
-         * Bands kept identical to setSliders so batch DNGs match interactive GUI exports. */
-        float aspectV = getMlvAspectRatio( mlvObject );
-        if( aspectV == 0.0f ) aspectV = 1.0f; /* no RAWC info -> treat as square */
-        if( aspectV > 0.9f && aspectV < 1.1f )      stretchY = STRETCH_V_100;
-        else if( aspectV > 1.6f && aspectV < 1.7f ) stretchY = STRETCH_V_167;
-        else if( aspectV > 2.9f && aspectV < 3.1f ) stretchY = STRETCH_V_300;
-        else                                        stretchY = STRETCH_V_033;
-    }
+    /* -1 = uninitialized (never loaded). The vertical case mirrors the GUI first-load
+     * auto de-squeeze; without it headless exports emit picAR={1,1,1,1} -> manual_ar=1 in
+     * the DNG writer -> the writer's own RAWC de-squeeze (dng.c) is skipped -> squeezed
+     * CDNGs for binned modes (e.g. 5D3 1080p: binning_x=3/binning_y=1 needs a 3:1
+     * stretch). The rendered-video runner needs the identical answer, so both call the
+     * one definition in BatchRunner.h rather than each carrying a copy of the bands. */
+    const double stretchX =
+        BatchRunner::effectiveStretchFactorX( receipt->stretchFactorX() );
+    const double stretchY =
+        BatchRunner::effectiveStretchFactorY( receipt->stretchFactorY(),
+                                              getMlvAspectRatio( mlvObject ) );
 
     /* ---- Resume logic (--resume flag) ----
      * Scan the output subfolder for existing DNG files.  If the clip is
