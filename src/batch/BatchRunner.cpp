@@ -707,11 +707,18 @@ int BatchRunner::exportRenderedVideoFile(
     QString probeExecutable =
         resolveOptionalMediaProbe( plan.mediaProbeBinaryPlan, plan.ffmpegBinaryPlan );
     MediaProbeFacts facts;
-    if( !probeExecutable.isEmpty() )
+    /* [B2]: the plan bakes the FINAL path into mediaProbeCommandPlan.arguments, so running
+     * that string verbatim would probe the previous export on any re-run. Re-aim it at the
+     * file actually under verification. An empty result means the probe plan is not ready,
+     * in which case this branch is skipped entirely and the ffmpeg-dump fallback below
+     * still checks the right file. */
+    const QString probeArguments =
+        batchRenderedVideoMediaProbeArgumentsWithPath( plan.mediaProbeCommandPlan,
+                                                       partialPath );
+    if( !probeExecutable.isEmpty() && !probeArguments.isEmpty() )
     {
         QProcess probe;
-        probe.start( probeExecutable,
-                     QProcess::splitCommand( plan.mediaProbeCommandPlan.arguments ) );
+        probe.start( probeExecutable, QProcess::splitCommand( probeArguments ) );
         if( probe.waitForStarted( 10000 ) && probe.waitForFinished( 60000 )
          && probe.exitCode() == 0 )
         {

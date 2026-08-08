@@ -190,6 +190,84 @@ TEST( RenderedVideoRunner, ArgumentsWithOutputPathRefuseUnreadyPlanOrEmptyPath )
 }
 
 /* ---------------------------------------------------------------------------
+ * Re-aiming the MEDIA PROBE at the file actually under verification -- [B2].
+ *
+ * The plan bakes the FINAL output path into its probe arguments at plan-build time. After
+ * verification moved ahead of the publish ([B1]), executing that string verbatim meant the
+ * ffprobe branch inspected the PREVIOUS export on any re-run, and because a successful
+ * parse suppresses the ffmpeg-dump fallback, the codec / container / SAR checks passed
+ * against a file that was never the one being verified.
+ *
+ * This is the level the defect actually lives at, so it is the level that is pinned. An
+ * end-to-end test would need both a pre-existing output AND a resolvable ffprobe, which is
+ * not reachable from this suite -- MLVApp ships no ffprobe and the resolver searches PATH
+ * and the ffmpeg sibling directory, neither of which a console test controls.
+ * ------------------------------------------------------------------------- */
+
+static BatchRenderedVideoMediaProbeCommandPlan readyProbePlan()
+{
+    BatchRenderedVideoMediaProbeCommandPlan plan;
+    plan.commandReady = true;
+    plan.expectedOutputPath = QStringLiteral("C:/renders/clip.mp4");
+    plan.executable = QStringLiteral("C:/tools/ffprobe.exe");
+    plan.arguments = QStringLiteral(
+        "-v error -show_format -show_streams -of json C:/renders/clip.mp4");
+    return plan;
+}
+
+TEST( RenderedVideoRunner, MediaProbeArgumentsNameTheProbedFileNotThePlannedOutput )
+{
+    const BatchRenderedVideoMediaProbeCommandPlan plan = readyProbePlan();
+    const QString partial = QStringLiteral("C:/renders/clip.mlvapp-partial.mp4");
+    const QString args = batchRenderedVideoMediaProbeArgumentsWithPath( plan, partial );
+
+    /* The whole point: the FINAL path must NOT appear, or the probe reads the wrong file. */
+    ASSERT_TRUE( args.contains( partial ) );
+    ASSERT_FALSE( args.contains( QStringLiteral("C:/renders/clip.mp4\"") ) );
+    ASSERT_EQ( std::string("-v error -show_format -show_streams -of json C:/renders/clip.mlvapp-partial.mp4"),
+               args.toStdString() );
+    /* And the plan's own declared output path is left alone -- it correctly names the
+     * artefact the caller was promised, and the verification report depends on it. */
+    ASSERT_EQ( std::string("C:/renders/clip.mp4"), plan.expectedOutputPath.toStdString() );
+}
+
+/* Only the probed path may differ from the plan's own argument string. A drifting flag set
+ * would silently change what ffprobe reports and therefore what is checked. */
+TEST( RenderedVideoRunner, MediaProbeArgumentsDifferFromThePlanOnlyInThePath )
+{
+    const BatchRenderedVideoMediaProbeCommandPlan plan = readyProbePlan();
+    const QString rebuilt =
+        batchRenderedVideoMediaProbeArgumentsWithPath( plan, plan.expectedOutputPath );
+    ASSERT_EQ( plan.arguments.toStdString(), rebuilt.toStdString() );
+}
+
+/* A path containing spaces must be quoted, or splitCommand() would tear it into several
+ * arguments and ffprobe would read neither file. */
+TEST( RenderedVideoRunner, MediaProbeArgumentsQuoteASpacedPath )
+{
+    const QString spaced = QStringLiteral("C:/my renders/clip.mlvapp-partial.mp4");
+    const QString args = batchRenderedVideoMediaProbeArgumentsWithPath( readyProbePlan(), spaced );
+    ASSERT_EQ( std::string("-v error -show_format -show_streams -of json \"C:/my renders/clip.mlvapp-partial.mp4\""),
+               args.toStdString() );
+}
+
+/* Fail closed: an unrunnable invocation is far better than one silently aimed at the
+ * wrong file, because the caller skips the branch and the dump fallback still checks the
+ * right one. */
+TEST( RenderedVideoRunner, MediaProbeArgumentsRefuseUnreadyPlanOrEmptyPath )
+{
+    BatchRenderedVideoMediaProbeCommandPlan notReady = readyProbePlan();
+    notReady.commandReady = false;
+    ASSERT_TRUE( batchRenderedVideoMediaProbeArgumentsWithPath(
+        notReady, QStringLiteral("C:/renders/clip.mlvapp-partial.mp4") ).isEmpty() );
+
+    ASSERT_TRUE( batchRenderedVideoMediaProbeArgumentsWithPath(
+        readyProbePlan(), QString() ).isEmpty() );
+    ASSERT_TRUE( batchRenderedVideoMediaProbeArgumentsWithPath(
+        readyProbePlan(), QStringLiteral("   ") ).isEmpty() );
+}
+
+/* ---------------------------------------------------------------------------
  * Runner prerequisites.
  * ------------------------------------------------------------------------- */
 

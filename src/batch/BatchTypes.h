@@ -3494,6 +3494,46 @@ inline QString batchRenderedVideoFfmpegArgumentsWithOutputPath(
         .arg(trimmed);
 }
 
+/* Re-aim the media-probe (ffprobe) argument string at a different path.
+ *
+ * [B2], LANE-4 review of 29af0972..7144cfe9. `BatchRenderedVideoMediaProbeCommandPlan`
+ * bakes `expectedOutputPath` -- the FINAL path -- into its `arguments` at plan-build time,
+ * and the runner used to execute that string verbatim. After [B1] moved verification ahead
+ * of the publish, that meant the ffprobe branch pointed at the file from the PREVIOUS
+ * export: on any re-run where a file already existed at the final path and ffprobe was
+ * resolvable, the probe parsed the OLD file, `facts.parsed` became true, the partial-path
+ * ffmpeg-dump fallback was skipped, and the codec / container / SAR checks were evaluated
+ * against a file that was not the one being verified. **That is worse in kind than [B1]:
+ * [B1] left behind a file that FAILED verification; [B2] let a file PASS a verification
+ * that never examined it.** First runs have no pre-existing output, so the branch simply
+ * fell through to the dump -- which is why neither the suite nor the end-to-end proof
+ * could see it.
+ *
+ * `expectedOutputPath` is deliberately NOT changed at plan-build time. It is threaded
+ * through a dozen plan structs and reported in the verification report, the decision plan
+ * and ~14 summary tokens, where it correctly names the artefact the caller was promised.
+ * The path actually being INSPECTED is a property of the moment of use, so it is decided
+ * here -- the same split, for the same reason, as
+ * batchRenderedVideoFfmpegArgumentsWithOutputPath above.
+ *
+ * Returns an empty string when the plan is not ready or the path is empty, so a caller
+ * that forgets to check gets an unrunnable invocation rather than one silently aimed at
+ * the wrong file. */
+inline QString batchRenderedVideoMediaProbeArgumentsWithPath(
+    const BatchRenderedVideoMediaProbeCommandPlan & commandPlan,
+    const QString & probePath)
+{
+    const QString trimmed = probePath.trimmed();
+    if( !commandPlan.commandReady || trimmed.isEmpty() )
+        return QString();
+
+    /* Same format string and same quoting helper as
+     * batchRenderedVideoMediaProbeCommandPlanFromContracts, so the only difference from
+     * commandPlan.arguments is which file is named. */
+    return QStringLiteral("-v error -show_format -show_streams -of json %1")
+        .arg(batchRenderedVideoCommandExecutableForDisplay(trimmed));
+}
+
 inline BatchRenderedVideoFfmpegCommandPlan
 batchRenderedVideoFfmpegCommandPlanFromParts(
     const BatchRenderedVideoFfmpegFramePlan & framePlan,
