@@ -33,7 +33,8 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
     $$REPO_ROOT/tests/console/test_receipt_loader.cpp \
-    $$REPO_ROOT/tests/console/test_receipt_applier.cpp
+    $$REPO_ROOT/tests/console/test_receipt_applier.cpp \
+    $$REPO_ROOT/tests/console/test_rendered_video_runner.cpp
 
 HEADERS += \
     $$REPO_ROOT/tests/common/minitest.h \
@@ -42,6 +43,8 @@ HEADERS += \
     $$REPO_ROOT/tests/common/frame_compare.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/repo_paths.h \
+    $$REPO_ROOT/src/batch/BatchTypes.h \
+    $$REPO_ROOT/src/batch/BatchRunner.h \
     $$REPO_ROOT/platform/qt/ClipLifecycleBarrier.h \
     $$REPO_ROOT/platform/qt/ExportDimensions.h \
     $$REPO_ROOT/platform/qt/ExportProcess.h \

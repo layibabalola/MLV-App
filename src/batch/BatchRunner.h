@@ -57,6 +57,39 @@ public:
         return cutOut;
     }
 
+    /* Horizontal/vertical stretch actually used for an export, given what the receipt
+     * carries and what the clip's RAWC block reports.
+     *
+     * A receipt that was never loaded leaves stretch at -1. The GUI fills that gap on
+     * first load (MainWindow::setSliders) by deriving the vertical stretch from the
+     * clip's binning/skipping aspect, and a headless export that skips the same step
+     * emits squeezed output for binned modes (5D3 1080p is binning_x=3/binning_y=1 ->
+     * needs a 3:1 stretch). Both the CDNG runner and the rendered-video runner need the
+     * identical answer, so it lives here ONCE rather than being written twice; the bands
+     * are the same ones setSliders uses. Header-inline so console tests can pin it
+     * without linking the GUI-dependent BatchRunner.cpp.
+     *
+     * clipAspectRatio is getMlvAspectRatio() (sampling_y/sampling_x); 0 means the clip
+     * carries no RAWC info and is treated as square. */
+    static double effectiveStretchFactorX( double receiptStretchX )
+    {
+        return receiptStretchX > 0.0 ? receiptStretchX : STRETCH_H_100;
+    }
+
+    static double effectiveStretchFactorY( double receiptStretchY,
+                                           float clipAspectRatio )
+    {
+        if( receiptStretchY > 0.0 )
+            return receiptStretchY;
+
+        float aspectV = clipAspectRatio;
+        if( aspectV == 0.0f ) aspectV = 1.0f; /* no RAWC info -> treat as square */
+        if( aspectV > 0.9f && aspectV < 1.1f )      return STRETCH_V_100;
+        if( aspectV > 1.6f && aspectV < 1.7f )      return STRETCH_V_167;
+        if( aspectV > 2.9f && aspectV < 3.1f )      return STRETCH_V_300;
+        return STRETCH_V_033;
+    }
+
     static BatchRenderedVideoSourceMetadata renderedVideoSourceMetadataFromClipState(
         int width,
         int height,
@@ -88,6 +121,22 @@ private:
     static ProcessResult exportSingleFile(const QString &mlvPath,
                                           const QString &outputRoot,
                                           ReceiptSettings *receipt);
+
+    /* Export ONE clip to ONE rendered-video file (E4-1, H.264 first).
+     *
+     * Opens the clip, applies the receipt through the same ReceiptApplier the CDNG
+     * runner uses, completes the rendered job plan against the clip's real geometry,
+     * pipes RGB48 frames into ffmpeg through export_process::StreamingPipeline, writes
+     * atomically via batchRenderedVideoPartialOutputPath, then verifies the result with
+     * the planned media probe. Emits no dialog and pumps no event loop.
+     *
+     * Returns a process exit code from the CLAUDE.md table: 0 success, 2 usage/plan
+     * refusal, 3 input unreadable, 4 export failure. */
+    static int exportRenderedVideoFile(
+        const QString &mlvPath,
+        ReceiptSettings *receipt,
+        const BatchRenderedVideoJobPlan &preflightPlan,
+        const BatchRenderedVideoRenderSettings &renderSettings);
 };
 
 #endif // BATCHRUNNER_H

@@ -7,11 +7,13 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QLocale>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 #include <QStandardPaths>
 
 #include <cmath>
+#include <numeric>
 
 /* Shared type header for batch mode.
  * Include this instead of MainWindow.h to avoid circular dependencies.
@@ -538,6 +540,12 @@ struct BatchRenderedVideoFfmpegCommandPlan
     QString colorTagSource = QStringLiteral("rec709-default");
     int colorTag = 1;
     QString colorArguments;
+    /* Retained verbatim from the parts they were built from, so the runner can
+     * re-assemble a byte-identical argument string against a different output path
+     * (the atomic-write temporary) without re-deriving any encoder/filter decision.
+     * See batchRenderedVideoFfmpegArgumentsWithOutputPath. */
+    QString videoArguments;
+    QString filterArguments;
     QString arguments;
     QString commandLine;
     QString reason;
@@ -1051,7 +1059,14 @@ struct BatchRenderedVideoRunnerPrerequisites
     bool ffmpegExecutionReady = false;
     bool outputVerificationReady = false;
     bool headlessRunnerReady = false;
-    QString reason = QStringLiteral("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
+    /* The five capabilities a VIDEO-ONLY rendered export actually needs. audioMuxReady is
+     * deliberately NOT one of them -- see batchRenderedVideoRunnerPrerequisitesForCurrentBuild. */
+    bool videoOnlyRunnerReady = false;
+    /* Non-empty when the runner IS ready but ships a narrower capability than the full
+     * plan models. Unlike `reason` this is not a blocker: it is surfaced to the operator
+     * so a silently-dropped audio track can never look like a complete export. */
+    QString limitation;
+    QString reason = QStringLiteral("rendered processing parity, frame processing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
     bool ready = false;
 };
 
@@ -3288,6 +3303,9 @@ batchRenderedVideoFfmpegCommandPlanFromParts(
     plan.muxedAudioCommandReady = audioPlan.muxedAudioCommandReady;
     plan.audioInputOwned = audioPlan.audioInputOwned;
 
+    plan.videoArguments = videoPlan.videoArguments;
+    plan.filterArguments = filterPlan.filterArguments;
+
     plan.arguments =
         QStringLiteral("%1 %2 %3 %4 %5 \"%6\"")
             .arg(plan.rawInputArguments)
@@ -3312,6 +3330,168 @@ batchRenderedVideoFfmpegCommandPlanFromParts(
     if( !plan.ready )
         plan.reason = QStringLiteral("rendered ffmpeg command plan unavailable");
     return plan;
+}
+
+/* The rendered runner must never leave a half-encoded file at the path a caller was told
+ * to expect, so it encodes to this sibling path and renames on success. Sibling (not
+ * %TEMP%) because the rename has to stay on one volume to be atomic, and the marker is
+ * fixed rather than random so an interrupted run leaves an obviously-partial artefact a
+ * human or an orchestrator can identify and delete.
+ *
+ * THE MARKER GOES BEFORE THE EXTENSION, NOT AFTER IT: `clip.mp4` -> `clip.mlvapp-partial.mp4`.
+ * ffmpeg selects its muxer from the output file extension, so a trailing marker makes it
+ * fail with "Unable to find a suitable output format" -- observed exactly that way on the
+ * first end-to-end run of this path. A path with no suffix at all just gets the marker
+ * appended. Returns an empty string for empty input so callers fail closed instead of
+ * writing to a bare marker file. */
+/* Codec / container / geometry / aspect, parsed out of an `ffmpeg -i <file>` stream dump.
+ *
+ * WHY THIS IS HERE RATHER THAN IN BatchRunner.cpp. The roadmap's E4-1 blocking proof
+ * requires the export to check "frame count/duration/dimensions/ASPECT". The first three
+ * are read back from a decoded frame, but aspect was reachable only through ffprobe --
+ * and ffprobe is NOT shipped with MLVApp (platform/qt/FFmpeg/ffmpegWin64.zip contains
+ * exactly one entry, ffmpeg.exe), so on a stock install the aspect check silently
+ * degraded to `sar=unchecked`. Parsing ffmpeg's own dump closes that against the binary
+ * the export ALREADY REQUIRES. It lives in this header, GUI-free and inline, so
+ * tests/console/test_rendered_video_runner.cpp can pin the regexes directly instead of
+ * linking the GUI-dependent BatchRunner.cpp -- the same reason
+ * BatchRunner::effectiveStretchFactorY is header-inline.
+ *
+ * Text parsed, exactly as libavformat emits it:
+ *   Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'C:/out/clip.mp4':
+ *     Stream #0:0(und): Video: h264 (High) (avc1 / ...), yuv420p(tv, bt709), 5424x2268, ...
+ * and, for non-square pixels ONLY:
+ *     ... , 720x576 [SAR 16:15 DAR 4:3], ...
+ *
+ * THE ABSENCE OF THE [SAR ...] BRACKET IS ITSELF THE SQUARE-PIXEL SIGNAL, not missing
+ * data: avcodec_string() prints it only when the sample aspect ratio is set AND differs
+ * from 1:1. So absence is reported as `1:1(implied)` -- never as plain `1:1`, because the
+ * log must not claim ffmpeg asserted a value it merely declined to contradict. */
+struct BatchRenderedVideoFfmpegDumpFacts
+{
+    bool parsed = false;
+    QString codecName;
+    QString formatNames;   /* comma-separated, e.g. "mov,mp4,m4a,3gp,3g2,mj2" */
+    int width = 0;
+    int height = 0;
+    QString sampleAspectRatio;
+    QString displayAspectRatio;
+};
+
+inline BatchRenderedVideoFfmpegDumpFacts
+batchRenderedVideoFfmpegDumpFacts(const QString & dumpText)
+{
+    BatchRenderedVideoFfmpegDumpFacts facts;
+
+    const QRegularExpressionMatch inputMatch =
+        QRegularExpression( QStringLiteral( R"(^Input #\d+,\s*(.+?),\s*from )" ),
+                            QRegularExpression::MultilineOption ).match( dumpText );
+    if( !inputMatch.hasMatch() )
+        return facts;          /* no stream dump at all -> report nothing, claim nothing */
+    facts.formatNames = inputMatch.captured( 1 ).trimmed();
+
+    /* First VIDEO stream only: the one the rendered runner wrote. */
+    const QRegularExpressionMatch videoMatch =
+        QRegularExpression( QStringLiteral( R"(^\s*Stream #\d+:\d+.*?:\s*Video:\s*([A-Za-z0-9_]+))" ),
+                            QRegularExpression::MultilineOption ).match( dumpText );
+    if( !videoMatch.hasMatch() )
+        return facts;
+    facts.codecName = videoMatch.captured( 1 );
+
+    /* Geometry and the optional SAR/DAR bracket are read from THAT stream's line only, so
+     * a second stream's numbers can never be attributed to the video stream. */
+    const int lineStart = videoMatch.capturedStart( 0 );
+    int lineEnd = dumpText.indexOf( QLatin1Char('\n'), lineStart );
+    if( lineEnd < 0 ) lineEnd = dumpText.length();
+    const QString streamLine = dumpText.mid( lineStart, lineEnd - lineStart );
+
+    const QRegularExpressionMatch dimMatch =
+        QRegularExpression( QStringLiteral( R"(,\s*(\d+)x(\d+)\b)" ) ).match( streamLine );
+    if( dimMatch.hasMatch() )
+    {
+        facts.width  = dimMatch.captured( 1 ).toInt();
+        facts.height = dimMatch.captured( 2 ).toInt();
+    }
+
+    const QRegularExpressionMatch sarMatch =
+        QRegularExpression( QStringLiteral( R"(\[SAR (\d+:\d+) DAR (\d+:\d+)\])" ) )
+            .match( streamLine );
+    if( sarMatch.hasMatch() )
+    {
+        facts.sampleAspectRatio  = sarMatch.captured( 1 );
+        facts.displayAspectRatio = sarMatch.captured( 2 );
+    }
+    else
+    {
+        facts.sampleAspectRatio = QStringLiteral("1:1(implied)");
+        if( facts.width > 0 && facts.height > 0 )
+        {
+            const int divisor = std::gcd( facts.width, facts.height );
+            facts.displayAspectRatio = QStringLiteral("%1:%2")
+                .arg( facts.width / divisor ).arg( facts.height / divisor );
+        }
+    }
+
+    facts.parsed = true;
+    return facts;
+}
+
+/* The three spellings that all mean SQUARE PIXELS and must all pass an aspect check:
+ * ffprobe's "1:1", ffprobe's "0:1" (its rendering of an UNSET sample aspect ratio -- not
+ * a degenerate ratio), and this runner's "1:1(implied)" from a dump with no [SAR] bracket.
+ * An empty string means the probe reported nothing at all, which is also not a defect. */
+inline bool batchRenderedVideoSampleAspectIsSquare(const QString & sampleAspectRatio)
+{
+    return sampleAspectRatio.isEmpty()
+        || sampleAspectRatio == QStringLiteral("1:1")
+        || sampleAspectRatio == QStringLiteral("0:1")
+        || sampleAspectRatio == QStringLiteral("1:1(implied)");
+}
+
+inline QString batchRenderedVideoPartialOutputPath(const QString & outputPath)
+{
+    const QString trimmed = outputPath.trimmed();
+    if( trimmed.isEmpty() )
+        return QString();
+
+    const QString marker = QStringLiteral(".mlvapp-partial");
+    const QFileInfo info( trimmed );
+    const QString suffix = info.suffix();
+    if( suffix.isEmpty() )
+        return trimmed + marker;
+
+    /* Strip exactly the final ".<suffix>" and re-attach it after the marker, so the
+     * extension ffmpeg reads is unchanged. */
+    return trimmed.left( trimmed.length() - suffix.length() - 1 )
+         + marker + QStringLiteral(".") + suffix;
+}
+
+/* Re-assemble the ffmpeg argument string against a different output path.
+ *
+ * This exists ONLY so the runner can aim a completed command plan at the atomic-write
+ * temporary. It reuses the SAME stored parts the plan was built from and the SAME
+ * concatenation order, so the only difference from commandPlan.arguments is the output
+ * token -- no encoder, colour, filter or audio decision is re-derived here. Any drift
+ * between this and batchRenderedVideoFfmpegCommandPlanFromParts is a defect, and
+ * tests/console/test_rendered_video_runner.cpp pins the two together.
+ *
+ * Returns an empty string when the plan is not ready or the path is empty, so a caller
+ * that forgets to check gets an unrunnable invocation rather than a truncated command. */
+inline QString batchRenderedVideoFfmpegArgumentsWithOutputPath(
+    const BatchRenderedVideoFfmpegCommandPlan & commandPlan,
+    const QString & outputPath)
+{
+    const QString trimmed = outputPath.trimmed();
+    if( !commandPlan.ready || trimmed.isEmpty() )
+        return QString();
+
+    return QStringLiteral("%1 %2 %3 %4 %5 \"%6\"")
+        .arg(commandPlan.rawInputArguments)
+        .arg(commandPlan.videoArguments)
+        .arg(commandPlan.colorArguments)
+        .arg(commandPlan.filterArguments)
+        .arg(commandPlan.audioArguments)
+        .arg(trimmed);
 }
 
 inline BatchRenderedVideoFfmpegCommandPlan
@@ -4277,21 +4457,60 @@ inline BatchRenderedVideoRunnerPrerequisites
 batchRenderedVideoRunnerPrerequisitesForCurrentBuild()
 {
     BatchRenderedVideoRunnerPrerequisites prerequisites;
-    prerequisites.processingParityReady = false;
-    prerequisites.frameProcessingReady = false;
+
+    /* Receipt/aspect/colour parity: BatchRunner applies the receipt through the same
+     * ReceiptApplier the CDNG runner uses, sets the debayer mode from the receipt exactly
+     * as MainWindow::startExportPipe does, and takes every geometry decision from
+     * batchRenderedVideoFfmpegFramePlanFromGuiState, which mirrors the GUI branch by
+     * construction. Nothing is re-derived on the batch side. */
+    prerequisites.processingParityReady = true;
+
+    /* Frame processing: getMlvProcessedFrame16 into an RGB48 buffer plus the same
+     * avir::CImageResizer resize the GUI performs when the frame plan reports `scaled`. */
+    prerequisites.frameProcessingReady = true;
+
+    /* Ffmpeg execution: export_process::StreamingPipeline, the same header-only seam the
+     * GUI drives its rendered exports through. */
+    prerequisites.ffmpegExecutionReady = true;
+
+    /* Output verification: the encoded file is probed and its codec, container, geometry,
+     * frame count and duration are checked against the plan before success is reported. */
+    prerequisites.outputVerificationReady = true;
+
+    /* Headless runner: BatchRunner::exportRenderedVideoFile drives all of the above with
+     * no widget, dialog or event loop. */
+    prerequisites.headlessRunnerReady = true;
+
+    /* NOT IMPLEMENTED, and deliberately so. The roadmap's E4-1 card is a walking skeleton
+     * -- "add no new framework until one clip reaches one MP4", "H.264 first". Source audio
+     * is DISCOVERED (the source-audio plan is populated from the open MLV) but is not
+     * extracted or muxed, so the emitted file is video-only. This flag stays false so the
+     * gap is legible in every plan summary rather than implied by silence, and the runner
+     * emits a [BATCH] RENDER_AUDIO_DROPPED line whenever a clip that HAS audio is exported.
+     * Muxing belongs to E4-2 ("receipts, queues, progress, and supported codecs"). */
     prerequisites.audioMuxReady = false;
-    prerequisites.ffmpegExecutionReady = false;
-    prerequisites.outputVerificationReady = false;
-    prerequisites.headlessRunnerReady = false;
-    prerequisites.ready = prerequisites.processingParityReady
-                       && prerequisites.frameProcessingReady
-                       && prerequisites.audioMuxReady
-                       && prerequisites.ffmpegExecutionReady
-                       && prerequisites.outputVerificationReady
-                       && prerequisites.headlessRunnerReady;
+
+    /* `ready` intentionally does NOT include audioMuxReady. Requiring it would make the
+     * five implemented capabilities unreachable and keep the product goal blocked on a
+     * capability its own card defers. A video-only H.264 MP4 is the deliverable. */
+    prerequisites.videoOnlyRunnerReady = prerequisites.processingParityReady
+                                      && prerequisites.frameProcessingReady
+                                      && prerequisites.ffmpegExecutionReady
+                                      && prerequisites.outputVerificationReady
+                                      && prerequisites.headlessRunnerReady;
+    prerequisites.ready = prerequisites.videoOnlyRunnerReady;
+
     if( !prerequisites.ready )
     {
-        prerequisites.reason = QStringLiteral("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
+        prerequisites.reason = QStringLiteral("rendered processing parity, frame processing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented");
+    }
+    else
+    {
+        prerequisites.reason.clear();
+        if( !prerequisites.audioMuxReady )
+        {
+            prerequisites.limitation = QStringLiteral("rendered export is video-only; source audio is discovered but not muxed (E4-2)");
+        }
     }
     return prerequisites;
 }
@@ -6312,14 +6531,16 @@ inline QString batchRenderedVideoOutputPlanSummary(
 inline QString batchRenderedVideoRunnerPrerequisitesSummary(
     const BatchRenderedVideoRunnerPrerequisites & prerequisites)
 {
-    return QStringLiteral("runner-processing-parity-ready=%1 runner-frame-processing-ready=%2 runner-audio-mux-ready=%3 runner-ffmpeg-execution-ready=%4 runner-output-verification-ready=%5 runner-headless-export-ready=%6 runner-ready=%7 runner-reason=%8")
+    return QStringLiteral("runner-processing-parity-ready=%1 runner-frame-processing-ready=%2 runner-audio-mux-ready=%3 runner-ffmpeg-execution-ready=%4 runner-output-verification-ready=%5 runner-headless-export-ready=%6 runner-video-only-ready=%7 runner-ready=%8 runner-limitation=%9 runner-reason=%10")
         .arg(prerequisites.processingParityReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.frameProcessingReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.audioMuxReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.ffmpegExecutionReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.outputVerificationReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.headlessRunnerReady ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.videoOnlyRunnerReady ? QStringLiteral("true") : QStringLiteral("false"))
         .arg(prerequisites.ready ? QStringLiteral("true") : QStringLiteral("false"))
+        .arg(prerequisites.limitation.isEmpty() ? QStringLiteral("none") : prerequisites.limitation)
         .arg(prerequisites.reason.isEmpty() ? QStringLiteral("none") : prerequisites.reason);
 }
 

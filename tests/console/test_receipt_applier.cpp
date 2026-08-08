@@ -1873,7 +1873,7 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegBinaryResolution)
     BatchRenderedVideoJobPlan plan =
         batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_EQ( std::string("C:/tools/ffmpeg.exe"),
                std::string(plan.ffmpegCommandPlan.executable.toUtf8().constData()) );
@@ -1888,7 +1888,7 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegBinaryResolution)
         missingPlan);
     plan = batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_FALSE( plan.ffmpegBinaryPlan.foundOnPath );
     ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData())
@@ -1902,7 +1902,7 @@ TEST(BatchExportFormat, PlansRenderedVideoFfmpegBinaryResolution)
         requestedPlan);
     plan = batchRenderedVideoJobPlanWithMetadata(basePlan, metadata);
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.ffmpegCommandReady );
     ASSERT_EQ( std::string("C:/tools/ffmpeg-custom.exe"),
                std::string(plan.ffmpegBinaryPlan.requestedExecutable
@@ -1977,7 +1977,7 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeBinaryResolution)
                 foundPlan),
             metadata);
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.mediaProbeCommandReady );
     ASSERT_EQ( std::string("C:/tools/ffprobe.exe"),
                std::string(plan.outputVerificationExecutionPlan
@@ -2001,7 +2001,7 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeBinaryResolution)
             missingPlan),
         metadata);
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.mediaProbeCommandReady );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.mediaProbeFoundOnPath );
     ASSERT_TRUE( std::string(batchRenderedVideoJobPlanSummary(plan)
@@ -2077,7 +2077,7 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeCommandShape)
                 STRETCH_H_100,
                 STRETCH_V_100));
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_TRUE( plan.mediaProbeCommandContractReady );
     ASSERT_TRUE( plan.mediaProbeResultContractReady );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan
@@ -2433,8 +2433,8 @@ TEST(BatchExportFormat, PlansRenderedVideoMediaProbeValidationContract)
     ASSERT_TRUE( summary.find("output-verification-exec-probe-validation-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-probe-validation-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
-    ASSERT_TRUE( summary.find("runner-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( summary.find("runnable=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("runner-output-verification-ready=true") != std::string::npos );
+    ASSERT_TRUE( summary.find("runnable=true") != std::string::npos );
 }
 
 TEST(BatchExportFormat, PlansRenderedVideoFfmpegCommandShape)
@@ -2688,7 +2688,12 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_EQ( std::string("render-settings-source=batch-defaults render-settings-explicit-headless=false render-settings-gui-owned=false render-settings-ready=true render-settings-reason=none render-settings-resize=false render-settings-resize-width=0 render-settings-resize-height=0 render-settings-resize-height-locked=false"),
                std::string(batchRenderedVideoRenderSettingsSummary(
                    basePlan.renderSettings).toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
+    /* E4-1: the runner is implemented, so a fully-planned job reports NO blocker. This
+     * assertion is the one that fails first if the runner prerequisites are ever flipped
+     * back off, which is why it pins the empty string rather than merely "not the old
+     * text". Audio muxing remains deferred to E4-2 and is surfaced as a `limitation`,
+     * not as a blocker -- see BatchRenderedVideoRunnerPrerequisites. */
+    ASSERT_EQ( std::string(""),
                std::string(batchRenderedVideoJobPlanFirstBlocker(basePlan).toUtf8().constData()) );
 
     BatchRenderedVideoSourceMetadata metadata =
@@ -2835,12 +2840,13 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.frameCountValidationOwned );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.receiptHashValidationOwned );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
     ASSERT_EQ( 1920, plan.ffmpegFramePlan.outputWidth );
     ASSERT_EQ( 1284, plan.ffmpegFramePlan.outputHeight );
     ASSERT_EQ( std::string("23.976"),
                std::string(plan.ffmpegFramePlan.frameRateArgument.toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
+    /* E4-1: implemented, so a fully-planned job reports no blocker. */
+    ASSERT_EQ( std::string(""),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     const std::string summary =
@@ -3095,7 +3101,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( summary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-exec-contract-ready=true") != std::string::npos );
-    ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("preflight-ready=true runnable=true") != std::string::npos );
 
     BatchRenderedVideoSourceAudioPlan discoveredAudioPlan =
         batchRenderedVideoSourceAudioPlanFromDiscoveredAudio(
@@ -3211,7 +3217,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
             metadata,
             settings);
     ASSERT_TRUE( discoveredPlan.preflightReady );
-    ASSERT_FALSE( discoveredPlan.runnable );
+    ASSERT_TRUE( discoveredPlan.runnable );
     ASSERT_TRUE( discoveredPlan.ffmpegCommandReady );
     ASSERT_TRUE( discoveredPlan.ffmpegExecutionContractReady );
     ASSERT_TRUE( discoveredPlan.outputVerificationExecutionContractReady );
@@ -3456,7 +3462,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-codec-container-owned=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("output-verification-exec-ready=false") != std::string::npos );
     ASSERT_TRUE( discoveredSummary.find("runner-audio-mux-ready=false") != std::string::npos );
-    ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=false") != std::string::npos );
+    ASSERT_TRUE( discoveredSummary.find("preflight-ready=true runnable=true") != std::string::npos );
 
     BatchRenderedVideoJobPlan settingsBasePlan =
         batchRenderedVideoJobPlanFromRequest(
@@ -3478,7 +3484,7 @@ TEST(BatchExportFormat, OverlaysRenderedVideoMetadataOntoJobPlan)
     ASSERT_TRUE( implicitSettingsPlan.ffmpegExecutionContractReady );
     ASSERT_TRUE( implicitSettingsPlan.outputVerificationExecutionContractReady );
     ASSERT_TRUE( implicitSettingsPlan.preflightReady );
-    ASSERT_FALSE( implicitSettingsPlan.runnable );
+    ASSERT_TRUE( implicitSettingsPlan.runnable );
     ASSERT_EQ( 1920, implicitSettingsPlan.ffmpegFramePlan.outputWidth );
     ASSERT_EQ( 1284, implicitSettingsPlan.ffmpegFramePlan.outputHeight );
     ASSERT_TRUE( implicitSettingsPlan.renderSettings.explicitHeadlessSettings );
@@ -3597,8 +3603,9 @@ TEST(BatchRunner, BuildsRenderedVideoMetadataFromClipState)
     ASSERT_TRUE( plan.outputVerificationExecutionPlan.frameCountExpectationReady );
     ASSERT_FALSE( plan.outputVerificationExecutionPlan.frameCountValidationReady );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
-    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
+    ASSERT_TRUE( plan.runnable );
+    /* E4-1: implemented, so a fully-planned job reports no blocker. */
+    ASSERT_EQ( std::string(""),
                std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
 
     metadata = BatchRunner::renderedVideoSourceMetadataFromClipState(
@@ -3774,7 +3781,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationContract)
     ASSERT_TRUE( jobPlan.outputVerificationContractReady );
     ASSERT_TRUE( jobPlan.outputVerificationPlan.contractReady );
     ASSERT_TRUE( jobPlan.preflightReady );
-    ASSERT_FALSE( jobPlan.runnable );
+    ASSERT_TRUE( jobPlan.runnable );
     const std::string summary =
         std::string(batchRenderedVideoJobPlanSummary(jobPlan).toUtf8().constData());
     ASSERT_TRUE( summary.find("output-verification-contract-ready=true") != std::string::npos );
@@ -4103,7 +4110,7 @@ TEST(BatchExportFormat, PlansRenderedVideoReceiptHashValidationContract)
     ASSERT_FALSE( plan.outputVerificationDecisionPlan
         .receiptHashValidationReady );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
 
     const std::string receiptHashSummary =
         std::string(batchRenderedVideoReceiptHashValidationPlanSummary(
@@ -4135,8 +4142,8 @@ TEST(BatchExportFormat, PlansRenderedVideoReceiptHashValidationContract)
     ASSERT_TRUE( jobSummary.find("output-verification-exec-receipt-hash-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-decision-receipt-hash-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-decision-accepted=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runnable=true") != std::string::npos );
 
     BatchRenderedVideoReceiptHashValidationPlan blockedPlan =
         batchRenderedVideoReceiptHashValidationPlanFromExecution(
@@ -4249,7 +4256,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationDecisionContract)
         .verificationDecisionReady );
     ASSERT_FALSE( plan.outputVerificationDecisionPlan.outputAccepted );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
 
     const std::string decisionSummary =
         std::string(batchRenderedVideoOutputVerificationDecisionPlanSummary(
@@ -4295,8 +4302,8 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationDecisionContract)
         std::string(batchRenderedVideoJobPlanSummary(plan).toUtf8().constData());
     ASSERT_TRUE( jobSummary.find("output-verification-decision-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-decision-accepted=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runnable=true") != std::string::npos );
 
     BatchRenderedVideoOutputVerificationDecisionPlan blockedPlan =
         batchRenderedVideoOutputVerificationDecisionPlanFromExecution(
@@ -4372,7 +4379,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationResultContract)
                std::string(plan.outputVerificationResultPlan.failureReason
                    .toUtf8().constData()) );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
 
     const std::string resultSummary =
         std::string(batchRenderedVideoOutputVerificationResultPlanSummary(
@@ -4410,8 +4417,8 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationResultContract)
     ASSERT_TRUE( jobSummary.find("output-verification-result-contract-ready=true") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-result-accepted=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-result-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runnable=true") != std::string::npos );
 
     BatchRenderedVideoOutputVerificationResultPlan blockedPlan =
         batchRenderedVideoOutputVerificationResultPlanFromDecision(
@@ -4638,7 +4645,7 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_FALSE( plan.outputVerificationReportWriterPlan
         .outputVerificationReady );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_TRUE( plan.runnable );
 
     const std::string reportSummary =
         std::string(batchRenderedVideoOutputVerificationReportPlanSummary(
@@ -4766,8 +4773,8 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
     ASSERT_TRUE( jobSummary.find("output-verification-report-writer-json-serialization-planned=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-writer-write-planned=false") != std::string::npos );
     ASSERT_TRUE( jobSummary.find("output-verification-report-writer-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=false") != std::string::npos );
-    ASSERT_TRUE( jobSummary.find("runnable=false") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runner-output-verification-ready=true") != std::string::npos );
+    ASSERT_TRUE( jobSummary.find("runnable=true") != std::string::npos );
 
     BatchRenderedVideoOutputVerificationReportPlan blockedPlan =
         batchRenderedVideoOutputVerificationReportPlanFromResult(
@@ -4801,7 +4808,11 @@ TEST(BatchExportFormat, PlansRenderedVideoOutputVerificationReportContract)
                std::string(blockedWriterPlan.reason.toUtf8().constData()) );
 }
 
-TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
+/* Renamed at E4-1: the runner is no longer "blocked", so the old name
+ * (PlansRenderedVideoJobPreflightButKeepsRunnerBlocked) asserted something false in its
+ * title. What the test actually pins is that a CAPABLE runner does not make an
+ * INCOMPLETE job runnable. */
+TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButMetadatalessJobHasNoFfmpegCommand)
 {
     BatchExportFormatRequest request =
         batchExportFormatRequestFromString(QStringLiteral("h264"));
@@ -4922,19 +4933,46 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_FALSE( plan.outputVerificationReportContractReady );
     ASSERT_TRUE( plan.outputReady );
     ASSERT_TRUE( plan.preflightReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.processingParityReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.frameProcessingReady );
+
+    /* E4-1 CHANGED WHAT THIS TEST IS ABOUT, and the distinction is the point.
+     *
+     * The runner PREREQUISITES are a property of the BUILD -- they say the headless
+     * rendered-export runner exists -- and they are now satisfied. Whether a PARTICULAR
+     * job can run is a separate question, and this plan still cannot: it was built from a
+     * request alone, with no source metadata overlaid, so it has no frame geometry, no
+     * ffmpeg command and no receipt application contract. Before E4-1 both answers were
+     * "no" for the same reason and the test could not tell them apart. */
+    ASSERT_TRUE( plan.runnerPrerequisites.processingParityReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.frameProcessingReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.ffmpegExecutionReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.outputVerificationReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.headlessRunnerReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.videoOnlyRunnerReady );
+    ASSERT_TRUE( plan.runnerPrerequisites.ready );
+    /* Audio muxing is deferred to E4-2 and stays legible as a limitation, not a blocker. */
     ASSERT_FALSE( plan.runnerPrerequisites.audioMuxReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.ffmpegExecutionReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.outputVerificationReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.headlessRunnerReady );
-    ASSERT_FALSE( plan.runnerPrerequisites.ready );
-    ASSERT_FALSE( plan.runnable );
+    ASSERT_FALSE( plan.runnerPrerequisites.limitation.isEmpty() );
+
+    /* WHAT `runnable` ACTUALLY MEANS, pinned here because E4-1 is the first change that
+     * makes it observable: `runnable = preflightReady && runnerPrerequisites.ready`
+     * (BatchTypes.h). It says "preflight passed AND this build HAS a rendered-video
+     * runner". It does NOT say this particular plan carries a usable ffmpeg command --
+     * this plan has none, because no source metadata was ever overlaid.
+     *
+     * That is not a hole. BatchRunner re-derives the invocation after the runnable gate
+     * and refuses with exit 2 when it comes back empty
+     * (batchRenderedVideoFfmpegArgumentsWithOutputPath returns "" for an unready command
+     * plan), so a metadata-less plan cannot reach the encoder. The field is coarser than
+     * its name suggests; renaming it would ripple through the whole plan layer and
+     * belongs to E4-2, not to the walking skeleton. */
+    ASSERT_TRUE( plan.runnable );
+    ASSERT_FALSE( plan.ffmpegCommandReady );
+    ASSERT_TRUE( batchRenderedVideoFfmpegArgumentsWithOutputPath(
+                     plan.ffmpegCommandPlan,
+                     QStringLiteral("C:/renders/M16-1327.mlvapp-partial.mp4") ).isEmpty() );
     ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"),
                std::string(plan.outputPlan.outputPath.toUtf8().constData()) );
-    ASSERT_EQ( std::string("rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
-               std::string(batchRenderedVideoJobPlanFirstBlocker(plan).toUtf8().constData()) );
-    ASSERT_EQ( std::string("runner-processing-parity-ready=false runner-frame-processing-ready=false runner-audio-mux-ready=false runner-ffmpeg-execution-ready=false runner-output-verification-ready=false runner-headless-export-ready=false runner-ready=false runner-reason=rendered processing parity, frame processing, audio muxing, ffmpeg execution, output verification, and headless rendered-export runner are not implemented"),
+    ASSERT_EQ( std::string("runner-processing-parity-ready=true runner-frame-processing-ready=true runner-audio-mux-ready=false runner-ffmpeg-execution-ready=true runner-output-verification-ready=true runner-headless-export-ready=true runner-video-only-ready=true runner-ready=true runner-limitation=rendered export is video-only; source audio is discovered but not muxed (E4-2) runner-reason=none"),
                std::string(batchRenderedVideoRunnerPrerequisitesSummary(
                    plan.runnerPrerequisites).toUtf8().constData()) );
 
@@ -5097,7 +5135,7 @@ TEST(BatchExportFormat, PlansRenderedVideoJobPreflightButKeepsRunnerBlocked)
     ASSERT_TRUE( summary.find("output-verification-report-writer-write-planned=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-writer-output-verification-ready=false") != std::string::npos );
     ASSERT_TRUE( summary.find("output-verification-report-writer-contract-ready=false") != std::string::npos );
-    ASSERT_TRUE( summary.find("preflight-ready=true runnable=false") != std::string::npos );
+    ASSERT_TRUE( summary.find("preflight-ready=true runnable=true") != std::string::npos );
 
     BatchRenderedVideoRenderSettings invalidSettings =
         batchRenderedVideoRenderSettingsFromExplicitResize(
