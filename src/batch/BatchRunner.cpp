@@ -628,26 +628,28 @@ int BatchRunner::exportRenderedVideoFile(
         return 4;
     }
 
-    /* ---- Publish atomically ---------------------------------------------- */
-    QFile::remove( finalPath ); /* rename() will not overwrite on Windows */
-    if( !QFile::rename( partialPath, finalPath ) )
-    {
-        QFile::remove( partialPath );
-        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not publish the rendered-video output. clip=%1 from=%2 to=%3\n")
-            .arg(baseName, partialPath, finalPath));
-        return 4;
-    }
-
-    /* ---- Verify ---------------------------------------------------------- */
+    /* ---- Verify, BEFORE publishing --------------------------------------- */
+    /* [B1], LANE-4 review of e9226e1c..51f28e8e: verification used to run AFTER the
+     * rename, so a file that FAILED its own checks was left sitting at the path the
+     * caller was told to expect -- and because publishing removes any pre-existing
+     * output first, a failed RE-RUN destroyed a good file and left the bad one in its
+     * place. Five of the six failure paths in this function already removed their
+     * artefact; the verification path was the one that did not.
+     *
+     * Verifying the partial file costs nothing: decodeProbe, decodedFrameDimensionsMatch,
+     * the `ffmpeg -i` dump and QFileInfo::size() all take a path, and the partial marker
+     * sits BEFORE the extension (`clip.mlvapp-partial.mp4`), so ffmpeg selects the same
+     * demuxer it would for the final name. The publish below is then reached only by an
+     * output that has passed every check. */
     const QString ffmpegExecutable = plan.ffmpegCommandPlan.executable;
     QStringList failures;
 
-    const qint64 outputBytes = QFileInfo( finalPath ).size();
+    const qint64 outputBytes = QFileInfo( partialPath ).size();
     if( outputBytes < static_cast<qint64>( plan.outputVerificationPlan.nonEmptyMinimumBytes ) )
         failures << QStringLiteral("output-bytes=%1").arg(outputBytes);
 
     /* (a) Playability, frame count and duration, read back by decoding the file. */
-    const DecodeProbeFacts decoded = decodeProbe( ffmpegExecutable, finalPath );
+    const DecodeProbeFacts decoded = decodeProbe( ffmpegExecutable, partialPath );
     if( !decoded.ran )
     {
         failures << QStringLiteral("decode-probe did-not-run (%1)").arg(decoded.diagnostics);
@@ -689,7 +691,7 @@ int BatchRunner::exportRenderedVideoFile(
      * The frame plan bakes the receipt's stretch into the pixel dimensions and emits
      * square pixels, so a correct decoded frame size IS the aspect check. */
     qint64 decodedFrameBytes = 0;
-    if( !decodedFrameDimensionsMatch( ffmpegExecutable, finalPath,
+    if( !decodedFrameDimensionsMatch( ffmpegExecutable, partialPath,
                                       outWidth, outHeight, &decodedFrameBytes ) )
     {
         failures << QStringLiteral("decoded-frame-bytes expected=%1 (%2x%3 rgb24) actual=%4")
@@ -721,7 +723,7 @@ int BatchRunner::exportRenderedVideoFile(
         QProcess dump;
         dump.start( ffmpegExecutable,
                     QStringList{ QStringLiteral("-hide_banner"),
-                                 QStringLiteral("-i"), finalPath } );
+                                 QStringLiteral("-i"), partialPath } );
         /* Deliberately NOT gated on exit status: `ffmpeg -i` with no output file always
          * exits non-zero after printing the dump this parses. */
         if( dump.waitForStarted( 10000 ) && dump.waitForFinished( 60000 ) )
@@ -762,8 +764,23 @@ int BatchRunner::exportRenderedVideoFile(
 
     if( !failures.isEmpty() )
     {
+        /* [B1]: discard the artefact instead of publishing it. Nothing is written to
+         * finalPath on this path, so a pre-existing good output at that path also
+         * SURVIVES a failed re-run -- which the previous publish-then-verify order
+         * destroyed before it knew whether the replacement was sound. */
+        QFile::remove( partialPath );
         BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner rendered-video output verification failed. clip=%1 out=%2 failures=[%3]\n")
             .arg(baseName, finalPath, failures.join( QStringLiteral("; ") )));
+        return 4;
+    }
+
+    /* ---- Publish atomically, now that the output has passed every check ---- */
+    QFile::remove( finalPath ); /* rename() will not overwrite on Windows */
+    if( !QFile::rename( partialPath, finalPath ) )
+    {
+        QFile::remove( partialPath );
+        BatchLogger::err(QStringLiteral("[BATCH] ERROR: BatchRunner could not publish the rendered-video output. clip=%1 from=%2 to=%3\n")
+            .arg(baseName, partialPath, finalPath));
         return 4;
     }
 
