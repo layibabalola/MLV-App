@@ -204,31 +204,69 @@ TEST( RenderedVideoRunner, ArgumentsWithOutputPathRefuseUnreadyPlanOrEmptyPath )
  * and the ffmpeg sibling directory, neither of which a console test controls.
  * ------------------------------------------------------------------------- */
 
+/* [R-1], LANE-4 review of 29af0972..6d52f0ae, folded into this block per fable SEQ 1217 [2].
+ *
+ * This fixture is built by the REAL builder, not hand-written. The earlier version
+ * hand-wrote `plan.arguments` as a literal, which made the drift test below vacuous: the
+ * format string is duplicated between batchRenderedVideoMediaProbeCommandPlanFromContracts
+ * and batchRenderedVideoMediaProbeArgumentsWithPath, and that test is the ONLY thing
+ * holding them together -- so if the production builder gained a flag, production would
+ * drift and the test would still compare the re-aimed string against a stale literal and
+ * pass. Building the fixture through the real chain means the drift test now fails when
+ * the two actually diverge, which is the whole reason it exists. */
 static BatchRenderedVideoMediaProbeCommandPlan readyProbePlan()
 {
-    BatchRenderedVideoMediaProbeCommandPlan plan;
-    plan.commandReady = true;
-    plan.expectedOutputPath = QStringLiteral("C:/renders/clip.mp4");
-    plan.executable = QStringLiteral("C:/tools/ffprobe.exe");
-    plan.arguments = QStringLiteral(
-        "-v error -show_format -show_streams -of json C:/renders/clip.mp4");
-    return plan;
+    BatchExportFormatRequest request =
+        batchExportFormatRequestFromString(QStringLiteral("h264"));
+    BatchRenderedVideoTarget target =
+        batchRenderedVideoTargetFromRequest(request);
+    BatchRenderedVideoOutputPlan outputPlan =
+        batchRenderedVideoOutputPlanFromPaths(
+            QStringLiteral("C:/clips/M16-1327.MLV"),
+            QStringLiteral("C:/renders"),
+            target);
+    BatchRenderedVideoOutputVerificationPlan verificationPlan =
+        batchRenderedVideoOutputVerificationPlanFromOutput( outputPlan, target );
+    return batchRenderedVideoMediaProbeCommandPlanFromContracts(
+        verificationPlan,
+        batchRenderedVideoMediaProbeBinaryPlanFromResolvedPath(
+            QStringLiteral("ffprobe"),
+            QStringLiteral("C:/tools/ffprobe.exe") ) );
+}
+
+/* The fixture is only useful if the real chain actually produced a ready plan -- a builder
+ * change that made it unready would otherwise turn every assertion below into a vacuous
+ * pass against an empty string. */
+TEST( RenderedVideoRunner, ProbePlanFixtureIsBuiltByTheRealBuilderAndIsReady )
+{
+    const BatchRenderedVideoMediaProbeCommandPlan plan = readyProbePlan();
+    ASSERT_TRUE( plan.commandReady );
+    ASSERT_FALSE( plan.arguments.isEmpty() );
+    ASSERT_FALSE( plan.expectedOutputPath.isEmpty() );
+    /* The builder derives this from the output plan; pinning it keeps the path-bearing
+     * assertions below meaningful rather than accidentally true. */
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"), plan.expectedOutputPath.toStdString() );
 }
 
 TEST( RenderedVideoRunner, MediaProbeArgumentsNameTheProbedFileNotThePlannedOutput )
 {
     const BatchRenderedVideoMediaProbeCommandPlan plan = readyProbePlan();
-    const QString partial = QStringLiteral("C:/renders/clip.mlvapp-partial.mp4");
+    /* Derived from the plan's own final path via the production helper, so this stays
+     * correct if the builder's output naming ever changes. */
+    const QString partial = batchRenderedVideoPartialOutputPath( plan.expectedOutputPath );
     const QString args = batchRenderedVideoMediaProbeArgumentsWithPath( plan, partial );
 
-    /* The whole point: the FINAL path must NOT appear, or the probe reads the wrong file. */
+    /* The whole point: the FINAL path must NOT appear, or the probe reads the wrong file.
+     * Checked as a whole token, because the final path is a SUBSTRING of the partial path
+     * only if the marker were appended -- it is not, the marker goes before the extension,
+     * so an exact-token absence check is the right test. */
     ASSERT_TRUE( args.contains( partial ) );
-    ASSERT_FALSE( args.contains( QStringLiteral("C:/renders/clip.mp4\"") ) );
-    ASSERT_EQ( std::string("-v error -show_format -show_streams -of json C:/renders/clip.mlvapp-partial.mp4"),
+    ASSERT_FALSE( args.endsWith( plan.expectedOutputPath ) );
+    ASSERT_EQ( std::string("-v error -show_format -show_streams -of json C:/renders/M16-1327.mlvapp-partial.mp4"),
                args.toStdString() );
     /* And the plan's own declared output path is left alone -- it correctly names the
      * artefact the caller was promised, and the verification report depends on it. */
-    ASSERT_EQ( std::string("C:/renders/clip.mp4"), plan.expectedOutputPath.toStdString() );
+    ASSERT_EQ( std::string("C:/renders/M16-1327.mp4"), plan.expectedOutputPath.toStdString() );
 }
 
 /* Only the probed path may differ from the plan's own argument string. A drifting flag set
