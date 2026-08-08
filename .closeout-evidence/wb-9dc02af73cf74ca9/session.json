@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "claude/e4-1-rendered-export-v2",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-08T15:41:25+00:00",
+  "detectorHash": "84b7092402d7560573e79cd489a08471",
+  "featureHead": "6d52f0ae869f6eb2fef1aaf4d932c2f6c56b30f7",
+  "schemaVersion": "1.0",
+  "targetHead": "29af0972ba866130532cd958b93e52d09200119f",
+  "workBlockId": "wb-9dc02af73cf74ca9",
+  "worktree": "C:\\mlvtmp\\claude-e4-1"
+}
