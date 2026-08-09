@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "claude/gate-id-4",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-09T01:57:48+00:00",
+  "detectorHash": "68f8dbc55304ccd77851160539749491",
+  "featureHead": "fc8b97a2b8dae4261a4b2c268921d1701a22a313",
+  "schemaVersion": "1.0",
+  "targetHead": "19b9ccec4c3ce594be232930aa839c54575f8ea7",
+  "workBlockId": "wb-572cbabce569461d",
+  "worktree": "C:\\mlvtmp\\claude-sweep-class-1"
+}
