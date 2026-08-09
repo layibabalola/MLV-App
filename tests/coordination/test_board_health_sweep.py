@@ -165,6 +165,34 @@ class BoardHealthSweepTests(unittest.TestCase):
             self.assertRegex(line, r'ckid:fable=OK\(')
             self.assertRegex(line, r'ckid:codex=DRIFT\(')
 
+    def test_checkpoint_naming_other_ids_before_the_seat_is_not_drift(self):
+        """Live false positive on the detector's first day, and it was mine.
+
+        These checkpoints are prose and legitimately name OTHER identifiers first -- codex's
+        names a Codex TASK id before its session credential. Taking the first GUID in the
+        document reported DRIFT on a correctly-attributed checkpoint. DRIFT must mean the
+        registered seat is NOWHERE in the file, not merely 'not mentioned first'."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            (health.parent / 'codex-resume-CURRENT.md').write_text(
+                'rotated to successor `019fe03e-8d7f-74b2-9b73-631ff1fee2d0` while\n'
+                'preserving session credential `%s`.\n' % SESSIONS['codex'],
+                encoding='utf-8')
+            self.assertRegex(run_sweep(health).stdout, r'ckid:codex=OK\(')
+
+    def test_checkpoint_naming_only_foreign_ids_is_drift(self):
+        """The other direction, so the relaxation above cannot be vacuous: a checkpoint that
+        names identities but NOT the registered seat is exactly the condition worth waking
+        someone for -- a successor would resume from another seat's state."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            (health.parent / 'codex-resume-CURRENT.md').write_text(
+                'task `019fe03e-8d7f-74b2-9b73-631ff1fee2d0` and session\n'
+                '`99999999-9999-9999-9999-999999999999` only.\n', encoding='utf-8')
+            self.assertRegex(run_sweep(health).stdout, r'ckid:codex=DRIFT\(')
+
     def test_checkpoint_without_any_session_is_unattributed_not_ok(self):
         """A checkpoint that names no session must not read OK -- 'could not tell' is not
         the same as 'matches', and a green token that means both is worth less than none."""
@@ -319,6 +347,51 @@ class BoardHealthSweepTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(lane_state(result.stdout, 'sol'), 'LIVE')
             self.assertNotIn('INSTRUMENT-FAILED', result.stdout)
+
+    # ---- the class file must actually GOVERN, not merely be read ------------
+
+    def test_watch_heartbeat_freshness_is_governed_by_the_class_file(self):
+        """LANE-4 residual on 1f1e2264..5b3d9d2c. `$hbFresh` was read from
+        WatchHeartbeatFreshMinutes and never used -- the comparison hardcoded 5 -- so that
+        value had two authorities that happened to agree, and editing the psd1 changed
+        nothing SILENTLY.
+
+        The test is the discriminating one: it changes the class file and requires the
+        BEHAVIOUR to follow. A test that only asserted the field is read would have passed
+        against the broken code."""
+        good = CLASSES.read_text(encoding='utf-8')
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            hb = health / '.codex-inbound-watch-heartbeat'
+            hb.write_text('session=%s\n' % SESSIONS['codex'], encoding='utf-8')
+            stale = datetime.now(timezone.utc) - timedelta(minutes=8)
+            os.utime(hb, (stale.timestamp(), stale.timestamp()))
+
+            # Default is 5 minutes, so an 8-minute-old heartbeat is STALE.
+            r = self._run_isolated_copy(health, classes_text=good)
+            self.assertRegex(r.stdout, r'watchhb:codex=STALE\(')
+
+            # Raise the threshold past 8 in the CLASS FILE ONLY. If the value governs, the
+            # same heartbeat must now read OK; against the hardcoded 5 it stayed STALE.
+            widened = good.replace('WatchHeartbeatFreshMinutes = 5',
+                                   'WatchHeartbeatFreshMinutes = 20')
+            self.assertNotEqual(widened, good, 'fixture edit did not apply')
+            r2 = self._run_isolated_copy(health, classes_text=widened)
+            self.assertRegex(r2.stdout, r'watchhb:codex=OK\(')
+
+    def test_missing_heartbeat_freshness_also_fails_loud(self):
+        """Same fail-open shape as the DARK regression, one field over: without the key
+        $hbFresh would be 0 and every heartbeat would read STALE."""
+        good = CLASSES.read_text(encoding='utf-8')
+        without = '\n'.join(l for l in good.splitlines()
+                            if 'WatchHeartbeatFreshMinutes' not in l)
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            r = self._run_isolated_copy(health, classes_text=without)
+            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertIn('OVERALL=INSTRUMENT-FAILED', r.stdout)
 
     # ---- the shared class list is genuinely shared --------------------------
 
