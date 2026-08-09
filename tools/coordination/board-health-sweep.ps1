@@ -51,8 +51,11 @@ $darkGrace = if ($null -ne $classes) { [double]$classes.DarkThresholdGraceMinute
 $hbFresh = if ($null -ne $classes) { [double]$classes.WatchHeartbeatFreshMinutes } else { 0 }
 # Validate the VALUES, not merely that the file parsed: a psd1 that loads but carries a
 # missing or zero threshold produces the identical board-wide false DARK.
-if ($null -eq $classes -or $darkCap -le 0 -or $darkGrace -le 0) {
-    $why = if ($classesError) { $classesError } else { "thresholds invalid (cap=$darkCap grace=$darkGrace)" }
+# $hbFresh is validated here too, now that it is actually USED. A psd1 that loads without
+# WatchHeartbeatFreshMinutes would otherwise set it to 0 and mark every inbound-watch
+# heartbeat STALE -- the same fail-open shape as the DARK regression, one field over.
+if ($null -eq $classes -or $darkCap -le 0 -or $darkGrace -le 0 -or $hbFresh -le 0) {
+    $why = if ($classesError) { $classesError } else { "thresholds invalid (cap=$darkCap grace=$darkGrace hbFresh=$hbFresh)" }
     $failLine = "$($now.ToString('yyyy-MM-ddTHH:mm:ssZ')) OVERALL=INSTRUMENT-FAILED reason=lane-health-classes-unreadable path=$classesPath detail=$why"
     # Recorded in health.log so the outage is visible to anyone reading the board's history,
     # and deliberately NOT accompanied by any lane classification -- emitting lane states
@@ -218,7 +221,12 @@ try {
         Where-Object { $_.Name -like '.*-inbound-watch-heartbeat' } | ForEach-Object {
             $hbAge = [math]::Round(($now - $_.LastWriteTimeUtc).TotalMinutes, 1)
             $hbId = $_.Name -replace '^\.', '' -replace '-inbound-watch-heartbeat$', ''
-            $hbState = if ($hbAge -le 5) { 'OK' } else { 'STALE' }
+            # SWEEP-CLASS-1 residual, LANE-4 review of 1f1e2264..5b3d9d2c: this comparison
+            # used a hardcoded 5 while $hbFresh was read from WatchHeartbeatFreshMinutes and
+            # never used, so that value had TWO authorities that happened to agree. Editing
+            # the psd1 would have changed nothing -- silently, which is the exact disease
+            # this card set exists to cure, sitting in the file that argues for the cure.
+            $hbState = if ($hbAge -le $hbFresh) { 'OK' } else { 'STALE' }
             $hbBody = ''
             try { $hbBody = Get-Content -LiteralPath $_.FullName -Raw -ErrorAction SilentlyContinue } catch {}
             $hbSession = [regex]::Match([string]$hbBody, 'session=([0-9a-fA-F-]{36})').Groups[1].Value
@@ -321,10 +329,26 @@ try {
         $ckExpected = if ($registryState -eq 'VALID') { [string]$registry.seats.$ckSeatKey.session } else { '' }
         $ckBody = ''
         try { $ckBody = Get-Content -LiteralPath $ckPath -Raw -ErrorAction SilentlyContinue } catch {}
-        $ckFound = [regex]::Match([string]$ckBody, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}').Value
+        # CORRECTED after a live FALSE POSITIVE on its first day (my defect). The first
+        # version took the FIRST GUID anywhere in the document and compared it to the seat.
+        # These checkpoints are prose and legitimately name OTHER identifiers first --
+        # codex's names a Codex TASK id (`019fe03e-...`) at line 306 and its actual session
+        # credential (`3dd9331b-...`) at 307 -- so "first GUID wins" reported
+        # ckid:codex=DRIFT while the checkpoint was correctly attributed.
+        #
+        # The test is now PRESENCE of the registered seat id anywhere in the checkpoint.
+        # That is deliberately the weaker claim, and it is the honest one: it cannot
+        # false-positive on prose that discusses other ids, which is the actual shape of
+        # these files. DRIFT now means the registered seat is NOWHERE in the checkpoint
+        # while some other identity is -- which is the condition worth waking someone for.
+        $ckGuids = [regex]::Matches([string]$ckBody, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+        $ckMentionsSeat = $false
+        if ($ckExpected) {
+            foreach ($g in $ckGuids) { if ($g.Value -ieq $ckExpected) { $ckMentionsSeat = $true; break } }
+        }
         if (-not $ckExpected) { $ckState = 'UNKNOWN' }
-        elseif (-not $ckFound) { $ckState = 'UNATTRIBUTED' }
-        elseif ($ckFound -ieq $ckExpected) { $ckState = 'OK' }
+        elseif ($ckGuids.Count -eq 0) { $ckState = 'UNATTRIBUTED' }
+        elseif ($ckMentionsSeat) { $ckState = 'OK' }
         else { $ckState = 'DRIFT' }
         $watchHb += ('ckid:{0}={1}({2}m)' -f $ckLane, $ckState, $ckAge)
     }
