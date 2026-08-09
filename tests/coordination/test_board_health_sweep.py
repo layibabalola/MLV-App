@@ -253,6 +253,73 @@ class BoardHealthSweepTests(unittest.TestCase):
                 self.assertEqual(lane_state(run_sweep(health).stdout, 'sol'), 'DARK',
                                  'dormancy must be DECLARED with a token, not inferred: %r' % note)
 
+    # ---- SWEEP-REG-1: the instrument must fail LOUD, never invent thresholds ----
+
+    def _run_isolated_copy(self, health, classes_text=None):
+        """Run a copy of the sweep from a directory that has no class file (or a bad one).
+
+        This is a real deployment shape, not a contrivance: the sweep was first exercised
+        live by extracting the single script out of the tree, which is exactly how the
+        regression was found."""
+        with tempfile.TemporaryDirectory() as scriptdir:
+            copy = Path(scriptdir) / 'board-health-sweep.ps1'
+            copy.write_bytes(SWEEP.read_bytes())
+            if classes_text is not None:
+                (Path(scriptdir) / 'lane-health-classes.psd1').write_text(
+                    classes_text, encoding='utf-8')
+            return subprocess.run(
+                ['pwsh.exe', '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy',
+                 'Bypass', '-File', str(copy), '-HealthDir', str(health)],
+                text=True, capture_output=True)
+
+    def test_missing_class_file_fails_loud_and_classifies_nothing(self):
+        """SWEEP-REG-1. With the class file unreadable the thresholds cast to 0, the
+        boundary became min(cadence,0)+0 = 0, and EVERY lane with a positive lease age was
+        called DARK -- observed live on all five lanes, including a 0.4-minute-old lease.
+
+        A board-wide false DARK is what triggers reseats and succession, so the instrument
+        must refuse to classify rather than report a confident wrong answer."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            result = self._run_isolated_copy(health)
+
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertIn('OVERALL=INSTRUMENT-FAILED', result.stdout)
+            # The load-bearing assertion: NO lane verdict of any kind is emitted.
+            for lane in ('fable', 'codex', 'sol', 'opus', 'claude-review'):
+                self.assertIsNone(lane_state(result.stdout, lane),
+                                  'no lane may be classified when the thresholds are unknown')
+            self.assertNotIn('DARK', result.stdout)
+
+    def test_class_file_that_parses_but_carries_a_zero_threshold_also_fails_loud(self):
+        """Validating that the FILE parsed is not enough -- a psd1 that loads with a zero or
+        missing threshold produces the identical board-wide false DARK. The values are what
+        matter, so the values are what is checked."""
+        for bad in ('@{ DarkThresholdCapMinutes = 0; DarkThresholdGraceMinutes = 20 }',
+                    '@{ DarkThresholdCapMinutes = 30; DarkThresholdGraceMinutes = 0 }',
+                    '@{ LaneStateClasses = @("LIVE") }'):
+            with tempfile.TemporaryDirectory() as d:
+                health = make_tree(d)
+                all_fresh(health)
+                result = self._run_isolated_copy(health, classes_text=bad)
+                self.assertEqual(result.returncode, 3,
+                                 'must refuse to classify for %r' % bad)
+                self.assertIn('OVERALL=INSTRUMENT-FAILED', result.stdout)
+                self.assertIsNone(lane_state(result.stdout, 'sol'))
+
+    def test_a_valid_class_file_beside_an_isolated_copy_still_works(self):
+        """The failure must be attributable to the missing thresholds and nothing else --
+        the same isolated copy, given a good class file, classifies normally."""
+        good = CLASSES.read_text(encoding='utf-8')
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            result = self._run_isolated_copy(health, classes_text=good)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(lane_state(result.stdout, 'sol'), 'LIVE')
+            self.assertNotIn('INSTRUMENT-FAILED', result.stdout)
+
     # ---- the shared class list is genuinely shared --------------------------
 
     def test_both_sweeps_read_the_same_class_file(self):
