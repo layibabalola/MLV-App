@@ -738,8 +738,100 @@ typedef struct
 
 static llrawprocGpuExportBackend_t g_llrawproc_gpu_export_backend = {0};
 static pthread_mutex_t g_llrawproc_gpu_recon_backend_mutex = PTHREAD_MUTEX_INITIALIZER;
+typedef struct
+{
+    uint64_t frame_id;
+    uint16_t * raw_input_bayer14;
+    size_t raw_image_size;
+    int valid;
+} llrawprocGpuPendingPreupload_t;
+
+static pthread_mutex_t g_llrawproc_gpu_pending_preupload_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+static llrawprocGpuPendingPreupload_t g_llrawproc_gpu_pending_preupload = {0};
 static volatile LONG g_llrawproc_gpu_recon_run_active = 0;
 static volatile LONG g_llrawproc_gpu_preupload_bypass_active = 0;
+
+static void llrawproc_gpu_pending_preupload_clear(void)
+{
+    pthread_mutex_lock(&g_llrawproc_gpu_pending_preupload_mutex);
+    free(g_llrawproc_gpu_pending_preupload.raw_input_bayer14);
+    memset(&g_llrawproc_gpu_pending_preupload,
+           0,
+           sizeof(g_llrawproc_gpu_pending_preupload));
+    pthread_mutex_unlock(&g_llrawproc_gpu_pending_preupload_mutex);
+}
+
+static int llrawproc_gpu_pending_preupload_store(
+    uint64_t frame_id,
+    const uint16_t * raw_input_bayer14,
+    size_t raw_image_size)
+{
+    uint16_t * copy = NULL;
+    if(!raw_input_bayer14 || raw_image_size == 0) return 0;
+
+    copy = (uint16_t *)malloc(raw_image_size);
+    if(!copy) return 0;
+    memcpy(copy, raw_input_bayer14, raw_image_size);
+
+    pthread_mutex_lock(&g_llrawproc_gpu_pending_preupload_mutex);
+    free(g_llrawproc_gpu_pending_preupload.raw_input_bayer14);
+    g_llrawproc_gpu_pending_preupload.frame_id = frame_id;
+    g_llrawproc_gpu_pending_preupload.raw_input_bayer14 = copy;
+    g_llrawproc_gpu_pending_preupload.raw_image_size = raw_image_size;
+    g_llrawproc_gpu_pending_preupload.valid = 1;
+    pthread_mutex_unlock(&g_llrawproc_gpu_pending_preupload_mutex);
+    return 1;
+}
+
+static int llrawproc_gpu_pending_preupload_take(
+    uint64_t * frame_id,
+    uint16_t ** raw_input_bayer14,
+    size_t * raw_image_size)
+{
+    int valid = 0;
+    if(!frame_id || !raw_input_bayer14 || !raw_image_size) return 0;
+
+    pthread_mutex_lock(&g_llrawproc_gpu_pending_preupload_mutex);
+    if(g_llrawproc_gpu_pending_preupload.valid)
+    {
+        *frame_id = g_llrawproc_gpu_pending_preupload.frame_id;
+        *raw_input_bayer14 = g_llrawproc_gpu_pending_preupload.raw_input_bayer14;
+        *raw_image_size = g_llrawproc_gpu_pending_preupload.raw_image_size;
+        memset(&g_llrawproc_gpu_pending_preupload,
+               0,
+               sizeof(g_llrawproc_gpu_pending_preupload));
+        valid = 1;
+    }
+    pthread_mutex_unlock(&g_llrawproc_gpu_pending_preupload_mutex);
+    return valid;
+}
+
+static int llrawproc_gpu_submit_pending_preupload(
+    llrawprocGpuExportBackend_t * g)
+{
+    uint64_t frame_id = 0;
+    uint16_t * raw_input_bayer14 = NULL;
+    size_t raw_image_size = 0;
+    int rc = 0;
+
+    if(!g || !g->backend || !g->preupload_frame) return 0;
+    if(!llrawproc_gpu_pending_preupload_take(
+           &frame_id,
+           &raw_input_bayer14,
+           &raw_image_size))
+    {
+        return 0;
+    }
+
+    rc = g->preupload_frame(g->backend,
+                            frame_id + 1u,
+                            raw_input_bayer14,
+                            raw_image_size,
+                            1);
+    free(raw_input_bayer14);
+    return rc == 0;
+}
 
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info);
 int llrpGpuPlaybackReconGetBackendInfo(llrpGpuPlaybackReconBackendInfo_t * info)
@@ -825,6 +917,7 @@ static void llrawproc_gpu_export_backend_release(llrawprocGpuExportBackend_t * g
     {
         Sleep(0);
     }
+    llrawproc_gpu_pending_preupload_clear();
     if(g->backend && g->destroy)
     {
         g->destroy(g->backend);
@@ -1045,28 +1138,47 @@ int llrpGpuPlaybackReconPreuploadFrame(uint64_t frame_id,
     }
     run_active =
         InterlockedCompareExchange(&g_llrawproc_gpu_recon_run_active, 0, 0) != 0;
-    if(!locked && !run_active)
+    if(!g->backend
+     || !g->clip_configured
+     || !g->preupload_frame
+     || !g->run_preuploaded
+     || !g->last_preupload_status)
     {
-        InterlockedDecrement(&g_llrawproc_gpu_preupload_bypass_active);
+        if(locked) pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+        if(bypass_claimed)
+        {
+            InterlockedDecrement(&g_llrawproc_gpu_preupload_bypass_active);
+        }
         return 0;
+    }
+
+    if(!run_active)
+    {
+        /* Decode can finish in a gap between reconstructions. Keep the
+         * latest corrected frame until the next recon has claimed the active
+         * window, instead of dropping the only opportunity to submit while
+         * the previous reconstruction is in flight. */
+        const int queued = llrawproc_gpu_pending_preupload_store(
+            frame_id,
+            raw_input_bayer14,
+            raw_image_size );
+        if(locked) pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
+        if(bypass_claimed)
+        {
+            InterlockedDecrement(&g_llrawproc_gpu_preupload_bypass_active);
+        }
+        return queued;
     }
 
     /* If the mutex is held by the active recon call, the backend/function
      * pointers cannot be replaced until that call clears run_active and
      * releases the mutex.  This narrow bypass is what permits N+1 upload to
      * overlap N's kernels without racing backend teardown. */
-    if(g->backend
-     && g->clip_configured
-     && g->preupload_frame
-     && g->run_preuploaded
-     && g->last_preupload_status)
-    {
-        rc = g->preupload_frame(g->backend,
-                                frame_id + 1u,
-                                raw_input_bayer14,
-                                raw_image_size,
-                                run_active);
-    }
+    rc = g->preupload_frame(g->backend,
+                            frame_id + 1u,
+                            raw_input_bayer14,
+                            raw_image_size,
+                            run_active);
     if(locked) pthread_mutex_unlock(&g_llrawproc_gpu_recon_backend_mutex);
     if(bypass_claimed)
     {
@@ -1225,6 +1337,18 @@ static int llrawproc_gpu_recon_run_backend(const dualiso_gpu_recon_state_t * sta
     if(rc == 0)
     {
         InterlockedExchange(&g_llrawproc_gpu_recon_run_active, 1);
+        if(prefer_playback_dll
+         && llrawproc_env_truthy_value(
+                getenv("MLVAPP_GPU_PLAYBACK_RECON_ASYNC_H2D"))
+         && g->run_preuploaded
+         && g->last_preupload_status)
+        {
+            /* A decode worker can finish in the gap between recon calls.
+             * Drain that pending frame only after this reconstruction has
+             * claimed the active window, making the submit genuinely
+             * concurrent with the prior run from the backend's perspective. */
+            (void)llrawproc_gpu_submit_pending_preupload( g );
+        }
         if(prefer_playback_dll
          && llrawproc_env_truthy_value(
                 getenv("MLVAPP_GPU_PLAYBACK_RECON_ASYNC_H2D"))

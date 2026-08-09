@@ -1927,6 +1927,7 @@ void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry,
         {
             const uint16_t *preuploadInput = slot.rawImage16.data();
             bool inputPreprocessed = false;
+            double inputPreprocessMs = 0.0;
             std::vector<uint16_t> preprocessedInput;
             if( workerState )
             {
@@ -1944,12 +1945,17 @@ void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry,
                          * submitted while the previous frame is in flight,
                          * without mutating the slot that the recon worker
                          * will process. */
+                        const double inputPreprocessStart = mlv_stage_timing_now();
                         applyLLRawProcObjectWorker(
                             m_pMlvObject,
                             preprocessedInput.data(),
                             rawPixelCount * sizeof(uint16_t),
                             workerState,
                             1 );
+                        inputPreprocessMs =
+                            std::max( 0.0,
+                                       ( mlv_stage_timing_now()
+                                         - inputPreprocessStart ) * 1000.0 );
                         preuploadInput = preprocessedInput.data();
                         inputPreprocessed = true;
                     }
@@ -1962,6 +1968,9 @@ void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry,
             slot.stageTimingTelemetry.insert(
                 QStringLiteral("gpu_playback_recon_async_h2d_input_preprocessed"),
                 inputPreprocessed );
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_async_h2d_input_preprocess_ms"),
+                inputPreprocessMs );
             (void)llrpGpuPlaybackReconPreuploadFrame(
                 entry.request.frameNumber,
                 preuploadInput,
