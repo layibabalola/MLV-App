@@ -81,7 +81,26 @@ foreach ($lane in $journals.Keys) {
             $cad = [double]$lease.leaseMinutes
             if ($cad -le 0) { throw 'leaseMinutes must be positive' }
             $note = [string]$lease.note
-            $declaredDormant = $note -match '(?i)\bDORMANT-BY-BLOCKER\b|\bSEATED-UNLEASED\b|\bdeclared\b.{0,100}\b(?:dormant|dormancy)\b'
+            # [B3], LANE-4 review of 66549181..c2caf6bc. A THIRD alternative used to sit
+            # here: `\bdeclared\b.{0,100}\b(?:dormant|dormancy)\b` -- a 100-character
+            # PROXIMITY match on lane-authored free text, with NO POLARITY. It matched
+            # notes that assert the lane is NOT dormant:
+            #
+            #   'declared 20m cadence. Not dormant, not parked, actively reviewing'   -> MATCH
+            #   'declared cadence 5; no dormancy claimed by this lane'                -> MATCH
+            #
+            # and because a match lands in the SEATED-UNLEASED arm below, which is tested
+            # BEFORE DARK, every one of those would convert a genuinely dark seat into
+            # SEATED-UNLEASED. The failure direction is the expensive one: it does not
+            # raise a false alarm, it SILENCES a true one, and a dead seat reading
+            # SEATED-UNLEASED is a seat nobody goes looking for.
+            #
+            # It also contradicted this change's own thesis. lane-health-classes.psd1 says
+            # of the watch-heartbeat classes that "a green token that also means 'could not
+            # tell' is worth less than no token at all" -- SEATED-UNLEASED inferred from
+            # prose IS that failure, in the one class list this change makes canonical.
+            # A DECLARED state must be declared with a TOKEN, not inferred from sentiment.
+            $declaredDormant = $note -match '(?i)\bDORMANT-BY-BLOCKER\b|\bSEATED-UNLEASED\b'
             # SWEEP-CLASS-1 (a): ONE boundary, from the shared class file. EXPIRED is
             # deleted - it existed only to name the interval between two boundary
             # functions that agreed at exactly declared=20 and disagreed everywhere else.

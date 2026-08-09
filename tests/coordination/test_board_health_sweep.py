@@ -206,6 +206,53 @@ class BoardHealthSweepTests(unittest.TestCase):
             hb.write_text('session=%s\n' % SESSIONS['codex'], encoding='utf-8')
             self.assertIn('pair=UNRENEWED', run_sweep(health).stdout)
 
+    # ---- [B3] dormancy must be DECLARED, never inferred from prose ----------
+
+    def test_negating_notes_do_not_suppress_dark(self):
+        """[B3]. The old predicate had a 100-character proximity arm with no polarity, so
+        a note asserting the lane is NOT dormant matched and converted a genuinely dark
+        seat into SEATED-UNLEASED. That direction silences a true alarm rather than
+        raising a false one, which is the expensive way to be wrong."""
+        negating = [
+            'lane declared leaseMinutes 20; it is not dormant and is actively working',
+            'declared 20m cadence. Not dormant, not parked, actively reviewing the range',
+            'heartbeat intake complete; declared cadence 5; no dormancy claimed by this lane',
+            'the lane declared its cadence and dormancy does not apply here',
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            for note in negating:
+                all_fresh(health)
+                write_lease(health, 'sol', 90, 30, note=note)   # well past the 50m threshold
+                line = run_sweep(health).stdout
+                self.assertEqual(
+                    lane_state(line, 'sol'), 'DARK',
+                    'a note that DENIES dormancy must not suppress DARK: %r' % note)
+
+    def test_declared_dormancy_tokens_still_suppress_dark(self):
+        """The two explicit tokens remain the supported way to declare dormancy -- the
+        fix removes inference, not the feature."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            for note in ('DORMANT-BY-BLOCKER waiting on hosted CI',
+                         'SEATED-UNLEASED pending hub registration'):
+                all_fresh(health)
+                write_lease(health, 'sol', 90, 30, note=note)
+                self.assertEqual(lane_state(run_sweep(health).stdout, 'sol'), 'SEATED-UNLEASED',
+                                 'explicit token must still declare dormancy: %r' % note)
+
+    def test_dormancy_is_never_inferred_from_free_text(self):
+        """Prose that talks about dormancy without using a token is not a declaration."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            for note in ('going dormant for a while',
+                         'declared dormant by the hub earlier today',
+                         'dormancy expected overnight'):
+                all_fresh(health)
+                write_lease(health, 'sol', 90, 30, note=note)
+                self.assertEqual(lane_state(run_sweep(health).stdout, 'sol'), 'DARK',
+                                 'dormancy must be DECLARED with a token, not inferred: %r' % note)
+
     # ---- the shared class list is genuinely shared --------------------------
 
     def test_both_sweeps_read_the_same_class_file(self):
