@@ -1447,6 +1447,61 @@ def git_stdout(repo_root: Path, args: Sequence[str], *, required: bool = True) -
     return result.stdout.strip()
 
 
+def canonical_worktree_root(repo_root: Path) -> Optional[Path]:
+    """The MAIN worktree's root -- the same directory for every linked worktree.
+
+    GATE-ID-4. The content-review ledger used to be resolved against `repo_root`, which is
+    `git rev-parse --show-toplevel` and therefore PER-WORKTREE. Because `.claude-state/` is
+    gitignored, a work-block worktree is a checkout of tracked files only and never contains
+    the ledger at all, so the gate resolved a path that did not exist and blocked
+    `content_approval_file_missing` -- or, worse, was satisfied by a per-worktree COPY, which
+    means a verdict could be written somewhere the next block would never read. Four live
+    instances are on record.
+
+    `--git-common-dir` is the shared directory: in the main worktree it is `<main>/.git`, and
+    in a LINKED worktree it is still `<main>/.git` (only `--git-dir` is per-worktree). Its
+    parent is therefore the one directory every worktree agrees on, which makes the ledger
+    ONE FILE BY CONSTRUCTION rather than by everyone remembering to copy it.
+
+    `--path-format=absolute` IS MANDATORY and is not a stylistic preference. Measured on
+    git 2.40:
+
+        cwd                       bare --git-common-dir      --path-format=absolute
+        canonical root            .git                       C:/.../MLV-App/.git
+        canonical subdir (src/)   ../.git                     C:/.../MLV-App/.git
+        linked worktree           C:/.../MLV-App/.git         C:/.../MLV-App/.git
+
+    The bare form is CWD-RELATIVE, so its meaning depends on where the caller stands -- which
+    is the same cwd-dependence this function exists to remove. Resolving `../.git` against the
+    wrong base silently yields a wrong ledger, so the flag is load-bearing.
+
+    TWO FAILURE CASES, AND THEY ARE NOT THE SAME:
+
+    * `repo_root` is not a Git repository at all. Then no linked worktree can exist, so the
+      defect this function removes is impossible there, and `repo_root` IS the canonical
+      root. Returning it is not a silent fallback to the old behaviour -- it is the same
+      answer by a different route. This keeps the validator usable on a plain directory,
+      which is how the ledger-parsing tests exercise it without standing up a repo.
+    * It IS a repository but the common dir could not be resolved absolutely -- an old Git
+      without `--path-format`, or any relative answer. Then the correct root is unknown, and
+      guessing `repo_root` would restore the per-worktree behaviour while appearing fixed.
+      Returns None, and the caller FAILS CLOSED.
+    """
+    raw = git_stdout(repo_root, ["rev-parse", "--path-format=absolute", "--git-common-dir"], required=False)
+    if raw:
+        common = Path(raw.strip())
+        if common.is_absolute():
+            return common.parent
+        # A relative answer means the flag was not honoured by this Git build. Resolving it
+        # here would reintroduce exactly the cwd-dependence this exists to remove.
+        return None
+    # The first call failed. Distinguish "not a repository" from "repository, but the
+    # resolution failed" -- only the second is dangerous.
+    if not git_stdout(repo_root, ["rev-parse", "--git-dir"], required=False):
+        return repo_root
+    return None
+
+
 def run_git_longpaths(repo_root: Path, args: Sequence[str], *, check: bool = False):
     return run_git(repo_root, ["-c", "core.longpaths=true", *args], check=check)
 
@@ -6219,9 +6274,23 @@ def validate_content_review_approval_for_finalize(
             coordination_file=coordination_file,
             range_tokens=range_tokens,
         )
-    coordination_path = (repo_root / coordination_file).resolve()
+    # GATE-ID-4: resolve the ledger against the MAIN worktree root, not this work block's
+    # worktree, so every block reads and writes the same file by construction.
+    ledger_root = canonical_worktree_root(repo_root)
+    if ledger_root is None:
+        # Fail closed. Falling back to repo_root here would silently restore the
+        # per-worktree behaviour this change removes, while looking fixed.
+        return content_review_gate_block(
+            config,
+            detection,
+            reason="content_approval_ledger_root_unresolved",
+            coordination_file=coordination_file,
+            range_tokens=range_tokens,
+            detail={"repoRoot": str(repo_root)},
+        )
+    coordination_path = (ledger_root / coordination_file).resolve()
     try:
-        coordination_path.relative_to(repo_root.resolve())
+        coordination_path.relative_to(ledger_root.resolve())
     except ValueError:
         return content_review_gate_block(
             config,
