@@ -4696,8 +4696,26 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         ( display_start > 0.0 && prepPresentStart >= display_start )
             ? ( prepPresentStart - display_start ) * 1000.0
             : 0.0;
-    // Attribution uses the existing monotonic high-resolution timer
-    // (omp_get_wtime via mlv_stage_timing_now), not wall-clock milliseconds.
+    QElapsedTimer prepRegionClock;
+    prepRegionClock.start();
+    qint64 prepRegionClockLastNs = prepRegionClock.nsecsElapsed();
+    qint64 prepRegionClockResolutionNs = 0;
+    for( int sample = 0; sample < 64 && prepRegionClockResolutionNs == 0; ++sample )
+    {
+        const qint64 nowNs = prepRegionClock.nsecsElapsed();
+        if( nowNs > prepRegionClockLastNs )
+            prepRegionClockResolutionNs = nowNs - prepRegionClockLastNs;
+        prepRegionClockLastNs = nowNs;
+    }
+    const qint64 prepRegionStartNs = prepRegionClock.nsecsElapsed();
+    const auto prepRegionElapsedMs = [&prepRegionClock]( qint64 startNs )
+    {
+        return static_cast<double>( prepRegionClock.nsecsElapsed() - startNs ) / 1000000.0;
+    };
+    // Attribution uses matched QElapsedTimer nanosecond samples, not the
+    // ~1 ms floor of omp_get_wtime or wall-clock milliseconds. Bank the
+    // observed timer resolution with every frame so sub-span results carry
+    // their measurement floor and monotonic-clock identity.
     // Keep these regions contiguous so their sum can be audited against the
     // complete presentPlaybackPreparedFrame body.
     double prepRegionSetupMs = 0.0;
@@ -4747,6 +4765,12 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_elapsed_before_present_ms"),
         prepElapsedBeforePresentMs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_clock_resolution_ns"),
+        prepRegionClockResolutionNs );
+    readyFrame.stageTimingTelemetry.insert(
+        QStringLiteral("playback_prep_region_clock_monotonic"),
+        prepRegionClock.isMonotonic() );
     if( m_playbackSmokeTimelineTelemetry )
     {
         readyFrame.stageTimingTelemetry.insert(
@@ -4796,14 +4820,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         && task.gpuAmazeTextureRawFrameSize >= expectedAmazeTextureRawFloats
         && readyFrame.gpuAmazeTextureWidth == sourceWidth
         && readyFrame.gpuAmazeTextureHeight == sourceHeight;
-    prepRegionSetupMs = ( mlv_stage_timing_now() - prepPresentStart ) * 1000.0;
+    prepRegionSetupMs = prepRegionElapsedMs( prepRegionStartNs );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_setup_ms"),
         prepRegionSetupMs );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_start_stage_time"),
         prepPresentStart );
-    const double prepRegionGpuStart = mlv_stage_timing_now();
+    const qint64 prepRegionGpuStartNs = prepRegionClock.nsecsElapsed();
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("gpu_amaze_texture_present_requested"),
         gpuAmazeTexturePresentRequested );
@@ -5766,11 +5790,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                                                                     task.gpuPresentationOptions );
     }
 
-    prepRegionGpuMs = ( mlv_stage_timing_now() - prepRegionGpuStart ) * 1000.0;
+    prepRegionGpuMs = prepRegionElapsedMs( prepRegionGpuStartNs );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_gpu_ms"),
         prepRegionGpuMs );
-    const double prepRegionImageStart = mlv_stage_timing_now();
+    const qint64 prepRegionImageStartNs = prepRegionClock.nsecsElapsed();
     QImage displayImage;
     bool displayImageOwnsData = false;
     QPixmap cachedPixmap;
@@ -5835,12 +5859,11 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
 
     if( !framePresentedByViewport && displayImage.isNull() )
     {
-        prepRegionImageMs = ( mlv_stage_timing_now() - prepRegionImageStart ) * 1000.0;
+        prepRegionImageMs = prepRegionElapsedMs( prepRegionImageStartNs );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_region_image_ms"),
             prepRegionImageMs );
-        const double prepRegionTotalMs =
-            ( mlv_stage_timing_now() - prepPresentStart ) * 1000.0;
+        const double prepRegionTotalMs = prepRegionElapsedMs( prepRegionStartNs );
         readyFrame.stageTimingTelemetry.insert(
             QStringLiteral("playback_prep_region_total_ms"),
             prepRegionTotalMs );
@@ -5976,13 +5999,14 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
         releasePresentedFrameEarly = true;
     }
 
-    prepRegionImageMs = ( mlv_stage_timing_now() - prepRegionImageStart ) * 1000.0;
+    prepRegionImageMs = prepRegionElapsedMs( prepRegionImageStartNs );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_image_ms"),
         prepRegionImageMs );
     m_lastDrawFrameReadyImageMs = result.imageBuildMs;
     mlv_stage_timing_note_elapsed("drawFrameReady.image", display_frame, m_lastDrawFrameReadyImageMs);
 
+    const qint64 prepRegionPresentStartNs = prepRegionClock.nsecsElapsed();
     const double present_start = mlv_stage_timing_now();
     if( m_playbackSmokeTimelineTelemetry )
     {
@@ -6032,7 +6056,7 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
             presentEndStageTime );
     }
     mlv_stage_timing_note_elapsed("drawFrameReady.present", display_frame, m_lastDrawFrameReadyPresentMs);
-    prepRegionPresentMs = ( presentEndStageTime - present_start ) * 1000.0;
+    prepRegionPresentMs = prepRegionElapsedMs( prepRegionPresentStartNs );
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_present_ms"),
         prepRegionPresentMs );
@@ -6081,6 +6105,8 @@ void MainWindow::presentPlaybackPreparedFrame( const PlaybackPrepResult &result 
                           useScopeSourceImage ? scopeSourceImage : rgb8DisplaySource,
                           underOver,
                           releasePresentedFrameEarly,
+                          prepRegionClock,
+                          prepRegionStartNs,
                           display_start );
     m_frameStillDrawing = m_pRenderThread && !m_pRenderThread->isIdle();
 }
@@ -26963,9 +26989,11 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
                                        const uint8_t *rgb8DisplaySource,
                                        uint8_t underOver,
                                        bool releasePresentedFrameEarly,
+                                       QElapsedTimer &prepRegionClock,
+                                       qint64 prepRegionStartNs,
                                        double displayStart )
 {
-    const double prepRegionFinishStart = mlv_stage_timing_now();
+    const qint64 prepRegionFinishStartNs = prepRegionClock.nsecsElapsed();
     if( dualIsoWarmupInstrumentationEnabled() )
     {
         if( m_dualIsoWarmupTelemetryPresentationGeneration
@@ -27488,18 +27516,15 @@ void MainWindow::finishPresentedFrame( uint64_t displayFrame,
             m_playbackFrameAdvancePending = true;
         }
     }
-    const double prepRegionFinishEnd = mlv_stage_timing_now();
+    const qint64 prepRegionFinishEndNs = prepRegionClock.nsecsElapsed();
     const double prepRegionFinishMs =
-        ( prepRegionFinishEnd - prepRegionFinishStart ) * 1000.0;
+        static_cast<double>( prepRegionFinishEndNs - prepRegionFinishStartNs ) / 1000000.0;
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_finish_ms"),
         prepRegionFinishMs );
-    const double prepRegionStartStageTime = telemetryDoubleValue(
-        readyFrame.stageTimingTelemetry,
-        "playback_prep_region_start_stage_time" );
     const double prepRegionTotalMs =
-        prepRegionStartStageTime > 0.0
-            ? ( prepRegionFinishEnd - prepRegionStartStageTime ) * 1000.0
+        prepRegionStartNs >= 0
+            ? static_cast<double>( prepRegionFinishEndNs - prepRegionStartNs ) / 1000000.0
             : 0.0;
     readyFrame.stageTimingTelemetry.insert(
         QStringLiteral("playback_prep_region_total_ms"),
