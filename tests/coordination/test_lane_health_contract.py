@@ -3,7 +3,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -34,6 +34,69 @@ def write_lease(health, lane, minutes=30):
         'leaseMinutes': minutes,
     }
     (health / 'leases' / f'{lane}.json').write_text(json.dumps(payload), encoding='utf-8')
+
+
+def write_lease_at_age(health, lane, age_minutes, minutes=30):
+    renewed = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
+    payload = {
+        'lane': lane,
+        'renewed': renewed.isoformat().replace('+00:00', 'Z'),
+        'leaseMinutes': minutes,
+    }
+    (health / 'leases' / f'{lane}.json').write_text(json.dumps(payload), encoding='utf-8')
+
+
+class LaneHealthBoundaryTests(unittest.TestCase):
+    """SWEEP-CLASS-1 (a) applied to the machine-readable JSON sweep.
+
+    Both sweeps on this board now read tools/coordination/lane-health-classes.psd1, so the
+    boundary and the class list cannot diverge between them. Boundaries are checked on BOTH
+    sides -- a threshold test that only checks the side it already passes proves nothing
+    about where the boundary sits.
+    """
+
+    def test_dark_boundary_is_capped_and_expired_is_gone(self):
+        with tempfile.TemporaryDirectory() as d:
+            health = make_health_tree(d)
+            # cadence 5 -> threshold 25. The old 2*d rule made this DARK at 10m.
+            for lane in ('codex', 'sol', 'claude-review'):
+                write_lease_at_age(health, lane, 24, minutes=5)
+            live = ps(SWEEP, '-HealthDir', health)
+            self.assertEqual(live.returncode, 0, live.stderr)
+            payload = json.loads(live.stdout)
+            self.assertNotIn('EXPIRED', live.stdout)
+            self.assertEqual(payload['policy']['darkThresholdFormula'], 'min(leaseMinutes,30)+20')
+            self.assertNotIn('EXPIRED', payload['policy']['laneStateClasses'])
+            self.assertTrue(all(x['leaseState'] == 'LIVE' for x in payload['lanes'] if x['adopted']))
+
+            for lane in ('codex', 'sol', 'claude-review'):
+                write_lease_at_age(health, lane, 26, minutes=5)
+            dark = ps(SWEEP, '-HealthDir', health)
+            self.assertEqual(dark.returncode, 2, dark.stderr)
+            self.assertTrue(all(x['leaseState'] == 'DARK'
+                                for x in json.loads(dark.stdout)['lanes'] if x['adopted']))
+
+    def test_long_cadence_is_capped_at_thirty(self):
+        with tempfile.TemporaryDirectory() as d:
+            health = make_health_tree(d)
+            for lane in ('codex', 'sol', 'claude-review'):
+                write_lease_at_age(health, lane, 49, minutes=60)
+            self.assertEqual(ps(SWEEP, '-HealthDir', health).returncode, 0)
+            for lane in ('codex', 'sol', 'claude-review'):
+                write_lease_at_age(health, lane, 51, minutes=60)
+            self.assertEqual(ps(SWEEP, '-HealthDir', health).returncode, 2)
+
+    def test_thirty_minute_default_no_longer_fires_ten_minutes_late(self):
+        """Part (e), as an executable statement rather than a note: at the 30-minute
+        default the old rule held LIVE until 60m; the board threshold is 50m."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_health_tree(d)
+            for lane in ('codex', 'sol', 'claude-review'):
+                write_lease_at_age(health, lane, 55, minutes=30)
+            result = ps(SWEEP, '-HealthDir', health)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertTrue(all(x['leaseState'] == 'DARK'
+                                for x in json.loads(result.stdout)['lanes'] if x['adopted']))
 
 
 class LaneHealthContractTests(unittest.TestCase):
