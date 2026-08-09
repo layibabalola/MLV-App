@@ -6,11 +6,13 @@ DecodeWorker::DecodeWorker( RenderFrameThread *parent )
     : QThread()
     , m_parent( parent )
 {
+    llrpInitWorkerState( &m_workerState );
 }
 
 DecodeWorker::~DecodeWorker()
 {
     wait();
+    llrpFreeWorkerState( &m_workerState );
 }
 
 void DecodeWorker::run( void )
@@ -22,7 +24,7 @@ void DecodeWorker::run( void )
         {
             break;
         }
-        m_parent->decodeFrameForWorker( entry );
+        m_parent->decodeFrameForWorker( entry, &m_workerState );
         m_parent->signalDecodeDoneFromWorker( entry.slotIndex );
     }
 }

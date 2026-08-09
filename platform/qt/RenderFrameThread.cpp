@@ -1870,7 +1870,8 @@ bool RenderFrameThread::takeDecodeRequestForWorker( DecodeQueueEntry *entry )
     return true;
 }
 
-void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry )
+void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry,
+                                              llrawprocWorkerState_t *workerState )
 {
     if( entry.slotIndex < 0 || entry.slotIndex >= static_cast<int>( m_frameSlots.size() ) )
     {
@@ -1924,9 +1925,46 @@ void RenderFrameThread::decodeFrameForWorker( const DecodeQueueEntry &entry )
          && entry.request.presentationContext.playbackActive
          && gpuPlaybackReconAsyncH2dRequested() )
         {
+            const uint16_t *preuploadInput = slot.rawImage16.data();
+            bool inputPreprocessed = false;
+            std::vector<uint16_t> preprocessedInput;
+            if( workerState )
+            {
+                try
+                {
+                    preprocessedInput.assign(
+                        slot.rawImage16.begin(),
+                        slot.rawImage16.begin()
+                            + static_cast<std::ptrdiff_t>( rawPixelCount ) );
+                    if( preprocessedInput.size() == rawPixelCount )
+                    {
+                        /* The recon worker's GPU input is copied after the
+                         * pre-Dual-ISO corrections. Prepare the same stage
+                         * on a decode-owned snapshot so its H2D can be
+                         * submitted while the previous frame is in flight,
+                         * without mutating the slot that the recon worker
+                         * will process. */
+                        applyLLRawProcObjectWorker(
+                            m_pMlvObject,
+                            preprocessedInput.data(),
+                            rawPixelCount * sizeof(uint16_t),
+                            workerState,
+                            1 );
+                        preuploadInput = preprocessedInput.data();
+                        inputPreprocessed = true;
+                    }
+                }
+                catch( const std::bad_alloc & )
+                {
+                    preprocessedInput.clear();
+                }
+            }
+            slot.stageTimingTelemetry.insert(
+                QStringLiteral("gpu_playback_recon_async_h2d_input_preprocessed"),
+                inputPreprocessed );
             (void)llrpGpuPlaybackReconPreuploadFrame(
                 entry.request.frameNumber,
-                slot.rawImage16.data(),
+                preuploadInput,
                 rawPixelCount * sizeof(uint16_t) );
         }
     }

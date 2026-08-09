@@ -3,6 +3,8 @@
 
 #include <QThread>
 
+#include "../../src/mlv/llrawproc/llrawproc.h"
+
 class RenderFrameThread;
 
 class DecodeWorker : public QThread
@@ -16,6 +18,7 @@ protected:
 
 private:
     RenderFrameThread *m_parent;
+    llrawprocWorkerState_t m_workerState;
 };
 
 #endif // DECODEWORKER_H

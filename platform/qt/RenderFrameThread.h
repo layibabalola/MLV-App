@@ -613,7 +613,8 @@ private:
     bool phase3WorkInFlightLocked( void ) const;
     void queueDecodeRequestLocked( int slotIndex, const RenderRequest &request );
     bool takeDecodeRequestForWorker( DecodeQueueEntry *entry );
-    void decodeFrameForWorker( const DecodeQueueEntry &entry );
+    void decodeFrameForWorker( const DecodeQueueEntry &entry,
+                               llrawprocWorkerState_t *workerState );
     void signalDecodeDoneFromWorker( int slotIndex );
     bool takeReconRequestForWorker( ReconQueueEntry *entry );
     void reconFrameForWorker( const ReconQueueEntry &entry, llrawprocWorkerState_t *workerState );
