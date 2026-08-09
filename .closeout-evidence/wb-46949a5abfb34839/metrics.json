@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "claude/sweep-hbfresh",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 2,
+  "createdAt": "2026-08-09T01:28:45+00:00",
+  "detectorHash": "6d3b23d6c66407bbfc5097c5d21c008a",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "cdf56ee901d093bfc6052df29d455b60063ef4f8",
+  "schemaVersion": "1.0",
+  "targetHead": "953fd181dff8555748b0c62d97a46ccd63b65c2a",
+  "workBlockId": "wb-46949a5abfb34839"
+}
