@@ -43,6 +43,7 @@ from .brokered_closeout import (
     closeout_max_process_output_bytes,
     closeout_process_resource_policy,
     complete_work_block,
+    canonical_worktree_root,
     detect_work_block,
     finalize_action_id,
     finalize_candidate_id,
@@ -4023,6 +4024,108 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "master").stdout.strip(), target_head)
         self.assertNotEqual(git(repo, "cat-file", "-e", "master:e2.txt", check=False).returncode, 0)
         self.assertNotEqual(git(repo, "cat-file", "-e", "master:tool.txt", check=False).returncode, 0)
+
+    def test_canonical_worktree_root_is_stable_across_worktrees_and_subdirectories(self) -> None:
+        """GATE-ID-4. The ledger root must be the MAIN worktree for every caller.
+
+        Four live instances of the disease are on record: a work-block worktree is a checkout
+        of tracked files only, `.claude-state/` is gitignored, so the gate resolved a ledger
+        that did not exist -- or was satisfied by a per-worktree COPY, which means a verdict
+        could be written where the next block would never read it.
+
+        The subdirectory cases are the ones that matter most: `--git-common-dir` WITHOUT
+        `--path-format=absolute` returns `../.git` from a subdirectory, so resolving it
+        against the wrong base silently yields a wrong ledger -- the same cwd-dependence this
+        change exists to remove.
+        """
+        repo = self.init_repo()
+        linked = repo.parent / "gate-id-4-linked"
+        git(repo, "worktree", "add", "--detach", str(linked), "HEAD")
+
+        (repo / "sub" / "deeper").mkdir(parents=True, exist_ok=True)
+        (linked / "sub").mkdir(parents=True, exist_ok=True)
+
+        expected = repo.resolve()
+        for label, start in (
+            ("main root", repo),
+            ("main subdirectory", repo / "sub"),
+            ("main nested subdirectory", repo / "sub" / "deeper"),
+            ("linked worktree root", linked),
+            ("linked worktree subdirectory", linked / "sub"),
+        ):
+            self.assertEqual(
+                canonical_worktree_root(start).resolve(),
+                expected,
+                "%s must resolve to the main worktree root" % label,
+            )
+
+    def test_canonical_worktree_root_of_a_non_repository_is_the_path_itself(self) -> None:
+        """The two failure cases are deliberately NOT the same.
+
+        Outside a repository no linked worktree can exist, so the defect is impossible and
+        the path itself IS the canonical root -- the same answer by a different route, not a
+        silent fallback to per-worktree behaviour. This is also what lets the ledger-parsing
+        tests exercise the validator against a plain directory.
+
+        The other case -- a real repository whose common dir cannot be resolved absolutely --
+        returns None and the caller fails closed, because there the correct root is genuinely
+        unknown and guessing would restore the defect while appearing fixed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = Path(tmp)
+            self.assertFalse((plain / ".git").exists())
+            self.assertEqual(canonical_worktree_root(plain), plain)
+
+    def test_review_gate_reads_the_canonical_ledger_from_a_worktree_without_claude_state(self) -> None:
+        """GATE-ID-4, end to end: the exact shape that blocked four live work blocks.
+
+        The linked worktree has NO `.claude-state/` at all -- that is not contrived, it is
+        what every fresh work-block worktree looks like, because the directory is gitignored.
+        Before this change the gate resolved the ledger inside that worktree and blocked
+        `content_approval_file_missing`. It must now read the one canonical ledger.
+        """
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-gate-id-4")
+        detection = detect_work_block(repo, work_block_id="wb-gate-id-4")
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
+        # The verdict is written ONLY to the canonical ledger.
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n\nbody\n\n"
+            "### [2026-01-01T01:00:00Z] CLAUDE - REVIEW\n"
+            f"Range: `{range_token}`\nVerdict: APPROVE\n\nbody\n",
+        )
+
+        linked = repo.parent / "gate-id-4-nostate"
+        git(repo, "worktree", "add", "--detach", str(linked), detection["featureHead"])
+        self.assertFalse((linked / ".claude-state").exists(),
+                         "the fixture must reproduce the real shape: no .claude-state in the worktree")
+
+        config = load_closeout_config(linked)
+        result = validate_content_review_approval_for_finalize(linked, config, detection, {"startHead": detection["targetHead"]})
+        self.assertIsNone(result, result)
+
+    def test_review_gate_still_blocks_from_a_worktree_when_the_canonical_ledger_lacks_approval(self) -> None:
+        """The falsifier for the test above: resolving to the canonical ledger must not make
+        the gate permissive. Same worktree, same absent `.claude-state`, handoff only."""
+        repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
+        self.make_feature(repo, "wb-gate-id-4-neg")
+        detection = detect_work_block(repo, work_block_id="wb-gate-id-4-neg")
+        range_token = "%s..%s" % (detection["targetHead"], detection["featureHead"])
+        self.write_gpu_lane_coordination(
+            repo,
+            "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
+            f"Range: `{range_token}`\n\nbody\n",
+        )
+
+        linked = repo.parent / "gate-id-4-neg"
+        git(repo, "worktree", "add", "--detach", str(linked), detection["featureHead"])
+
+        config = load_closeout_config(linked)
+        result = validate_content_review_approval_for_finalize(linked, config, detection, {"startHead": detection["targetHead"]})
+        self.assertIsNotNone(result)
+        self.assertEqual(result["reason"], "content_approval_missing")
 
     def test_finalize_blocks_review_gated_chunk_without_claude_approval(self) -> None:
         repo = self.init_repo(config_updates={"contentReviewGate": {"requireClaudeApprovalForFinalize": True}})
