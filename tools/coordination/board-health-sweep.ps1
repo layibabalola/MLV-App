@@ -24,10 +24,44 @@ $now = [DateTime]::UtcNow
 $registryPath = Join-Path $dualLane 'seat-registry.json'
 
 # SWEEP-CLASS-1 (a): one tracked authority for the class list and the DARK boundary.
-$classes = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'lane-health-classes.psd1')
-$darkCap = [double]$classes.DarkThresholdCapMinutes
-$darkGrace = [double]$classes.DarkThresholdGraceMinutes
-$hbFresh = [double]$classes.WatchHeartbeatFreshMinutes
+#
+# SWEEP-REG-1 -- THIS LOAD MUST FAIL LOUD, AND THE FIRST VERSION DID NOT.
+# The script sets $ErrorActionPreference = 'SilentlyContinue' (inherited from the original,
+# because the lane loop below is deliberately tolerant of unreadable individual files). That
+# swallowed a failed import here: $classes became $null, both thresholds cast to 0, the
+# boundary became min(cadence,0)+0 = 0, and EVERY lane with a positive lease age was
+# classified DARK. Observed on the first live run: all five lanes DARK, including leases
+# 0.4 minutes old.
+#
+# The failure direction is the expensive one in the opposite way from [B3]: [B3] silenced a
+# true alarm, this raises a false one on every lane at once -- and a board-wide false DARK
+# is what triggers reseats and succession. **An instrument that cannot load its own
+# thresholds must say so, not invent them.** Silence would be bad; a confident wrong reading
+# is worse; an explicit instrument failure is correct.
+$classesPath = Join-Path $PSScriptRoot 'lane-health-classes.psd1'
+$classes = $null
+$classesError = ''
+try {
+    $classes = Import-PowerShellDataFile -LiteralPath $classesPath -ErrorAction Stop
+} catch {
+    $classesError = $_.Exception.Message
+}
+$darkCap = if ($null -ne $classes) { [double]$classes.DarkThresholdCapMinutes } else { 0 }
+$darkGrace = if ($null -ne $classes) { [double]$classes.DarkThresholdGraceMinutes } else { 0 }
+$hbFresh = if ($null -ne $classes) { [double]$classes.WatchHeartbeatFreshMinutes } else { 0 }
+# Validate the VALUES, not merely that the file parsed: a psd1 that loads but carries a
+# missing or zero threshold produces the identical board-wide false DARK.
+if ($null -eq $classes -or $darkCap -le 0 -or $darkGrace -le 0) {
+    $why = if ($classesError) { $classesError } else { "thresholds invalid (cap=$darkCap grace=$darkGrace)" }
+    $failLine = "$($now.ToString('yyyy-MM-ddTHH:mm:ssZ')) OVERALL=INSTRUMENT-FAILED reason=lane-health-classes-unreadable path=$classesPath detail=$why"
+    # Recorded in health.log so the outage is visible to anyone reading the board's history,
+    # and deliberately NOT accompanied by any lane classification -- emitting lane states
+    # here is exactly the defect being fixed.
+    Add-Content -Path (Join-Path $HealthDir 'health.log') -Value $failLine -Encoding utf8
+    if (-not $Quiet) { Write-Output $failLine }
+    Write-Error "board-health-sweep: cannot load $classesPath - $why. Refusing to classify lanes; no health reading was produced."
+    exit 3
+}
 
 $registryState = 'MISSING'
 $registry = $null
