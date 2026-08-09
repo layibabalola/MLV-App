@@ -1791,10 +1791,16 @@ static int take_exact_preupload(igpu_recon_backend* b,
     PreuploadSlot* slot = &b->preupload[*slot_index];
     const cudaError_t query = cudaEventQuery(slot->upload_ready);
     status->ready_before_run = query == cudaSuccess;
+
+    /* Do not block the decode thread waiting for the H2D copy.  The upload
+     * already runs on the dedicated non-blocking stream from pinned host
+     * storage; enqueue a dependency on the legacy/default compute stream so
+     * the GPU waits for the copy without turning the overlap into a CPU
+     * stall. */
     const double wait_start_ms = qpc_now_ms();
-    const cudaError_t sync = cudaEventSynchronize(slot->upload_ready);
+    const cudaError_t wait = cudaStreamWaitEvent(0, slot->upload_ready, 0);
     status->upload_wait_ms = qpc_now_ms() - wait_start_ms;
-    if (sync == cudaSuccess) {
+    if (query == cudaSuccess) {
         float upload_ms = 0.0f;
         if (cudaEventElapsedTime(&upload_ms,
                                  slot->upload_start,
@@ -1803,7 +1809,7 @@ static int take_exact_preupload(igpu_recon_backend* b,
         }
     }
     status->exact_match =
-        sync == cudaSuccess &&
+        wait == cudaSuccess &&
         slot->bytes == input_bytes &&
         memcmp(slot->host_input, in_bayer14, input_bytes) == 0;
     if (status->exact_match) {
