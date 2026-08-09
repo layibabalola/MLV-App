@@ -61,6 +61,7 @@ class MainWindow;
 }
 
 class QAction;
+class QElapsedTimer;
 
 class MainWindow : public QMainWindow
 {
@@ -1397,6 +1398,8 @@ private:
                                const uint8_t *rgb8DisplaySource,
                                uint8_t underOver,
                                bool releasePresentedFrameEarly,
+                               QElapsedTimer &prepRegionClock,
+                               qint64 prepRegionStartNs,
                                double displayStart );
     void setBadPixelCrosshairVisibility( bool visible, bool force = false );
     bool playbackPolicyActive( void ) const;
