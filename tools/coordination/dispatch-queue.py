@@ -35,6 +35,7 @@ REQUIRED_CARD_FIELDS = {
     "dispatchedSeq": int,
     "scope": str,
 }
+DISPATCH_IDENTITY_FIELDS = ("id", "dispatchedSeq")
 CARD_ID = re.compile(r"^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$")
 SEQ_HEADING = re.compile(r"^## SEQ (?P<seq>\d+)\b", re.MULTILINE)
 BOLD_BACKTICK_ID = re.compile(r"\*\*`([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)`\*\*")
@@ -193,6 +194,58 @@ def load_intents(dual_lane: Path) -> list[dict[str, Any]]:
     return intents
 
 
+def same_dispatch_identity(existing: Any, dispatched: dict[str, Any]) -> bool:
+    """Match the immutable dispatch event without freezing the card's later lifecycle.
+
+    Once a card has been materialized, the hub may legitimately change its state, owner,
+    priority, scope, or add bookkeeping fields.  The durable intent is a delivery receipt,
+    not a perpetual byte-for-byte lock on that mutable queue record.  The globally unique id
+    plus the originating Fable sequence distinguish the dispatch event while allowing normal
+    lifecycle updates to remain authoritative.
+    """
+    if not isinstance(existing, dict):
+        return False
+    existing_seq = existing.get("dispatchedSeq")
+    return (
+        isinstance(existing.get("id"), str)
+        and isinstance(existing_seq, int)
+        and not isinstance(existing_seq, bool)
+        and all(existing.get(field) == dispatched[field] for field in DISPATCH_IDENTITY_FIELDS)
+    )
+
+
+def preflight_submit(dual_lane: Path, intent: dict[str, Any]) -> None:
+    """Refuse an already-conflicting card before the durable intent is installed.
+
+    Reconciliation intentionally tolerates lifecycle changes after materialization.  At the
+    submission boundary, however, an existing same-id card must still be the exact proposed
+    dispatch; otherwise the caller may be trying to reuse an occupied queue id.
+    """
+    installed_path = dual_lane / "dispatch-intents" / f"{intent['intentId']}.json"
+    if installed_path.is_file():
+        if installed_path.read_bytes() != canonical_json(intent).encode("utf-8"):
+            raise DispatchError(f"conflicting durable intent already exists: {installed_path}")
+        # A byte-identical durable receipt makes this an idempotent retry.  Its card may
+        # already have advanced through normal lifecycle bookkeeping, which reconcile must
+        # preserve rather than re-evaluating as a brand-new submission.
+        return
+    queue_path = dual_lane / "queue.json"
+    if not queue_path.is_file():
+        return
+    queue = read_json(queue_path)
+    if queue.get("schema") != QUEUE_SCHEMA or not isinstance(queue.get("items"), list):
+        raise DispatchError("queue.json has an unsupported schema or missing items array")
+    card = intent["card"]
+    existing = [
+        item for item in queue["items"]
+        if isinstance(item, dict) and item.get("id") == card["id"]
+    ]
+    if len(existing) > 1:
+        raise DispatchError(f"queue contains duplicate target id {card['id']}")
+    if existing and existing[0] != card:
+        raise DispatchError(f"queue card conflicts with new durable intent: {card['id']}")
+
+
 def audit_prose_dispatches(
     dual_lane: Path, queue_ids: set[str], intents: list[dict[str, Any]]
 ) -> list[str]:
@@ -243,16 +296,22 @@ def build_queue_candidate(
         if len(existing) > 1:
             raise DispatchError(f"queue contains duplicate target id {card['id']}")
         if existing:
-            if existing[0] != card:
-                raise DispatchError(f"queue card conflicts with durable intent: {card['id']}")
+            if not same_dispatch_identity(existing[0], card):
+                raise DispatchError(f"queue card has a different dispatch identity: {card['id']}")
             present.append(card["id"])
         else:
             queue["items"].append(card)
             by_id[card["id"]] = [card]
             missing.append(card["id"])
     if missing:
+        current_seq = queue.get("updatedBySeq", 0)
+        if isinstance(current_seq, bool) or not isinstance(current_seq, int) or current_seq < 0:
+            raise DispatchError("queue.json updatedBySeq must be a non-negative integer")
         queue["updated"] = utc_now()
-        queue["updatedBySeq"] = max(intent["card"]["dispatchedSeq"] for intent in intents)
+        queue["updatedBySeq"] = max(
+            current_seq,
+            max(intent["card"]["dispatchedSeq"] for intent in intents),
+        )
     return queue, missing, present
 
 
@@ -329,7 +388,9 @@ def reconcile(dual_lane: Path, writer: Path, apply: bool) -> dict[str, Any]:
             item.get("id"): item for item in installed.get("items", []) if isinstance(item, dict)
         }
         for intent in intents:
-            if installed_by_id.get(intent["card"]["id"]) != intent["card"]:
+            if not same_dispatch_identity(
+                installed_by_id.get(intent["card"]["id"]), intent["card"]
+            ):
                 raise DispatchError(f"post-write queue verification failed: {intent['intentId']}")
         return {
             "status": "HEALED" if not prose_only else "PROSE_ONLY",
@@ -364,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         dual_lane = args.dual_lane_dir.resolve()
         if args.command == "submit":
+            intent = validate_intent(args.intent_file.resolve(), dual_lane)
+            preflight_submit(dual_lane, intent)
             installed = install_intent(args.intent_file.resolve(), dual_lane)
             if not args.apply:
                 raise DispatchError("submit requires --apply; the durable intent was installed for recovery")

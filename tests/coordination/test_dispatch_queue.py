@@ -129,7 +129,45 @@ class DispatchQueueTests(unittest.TestCase):
             self.assertEqual(json.loads(second.stdout)["status"], "OK")
             self.assertEqual((dual / "queue.json").read_bytes(), after_first)
 
-    def test_conflicting_existing_card_fails_closed_without_mutating_queue(self):
+    def test_reconcile_accepts_normal_card_lifecycle_without_reverting_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dual, intent_file, intent = make_fixture(temp)
+            submitted = run_tool(
+                "submit", "--dual-lane-dir", dual, "--writer", WRITER,
+                "--intent-file", intent_file, "--apply", "--json",
+            )
+            self.assertEqual(submitted.returncode, 0, submitted.stdout + submitted.stderr)
+            queue_path = dual / "queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["items"][0].update(
+                {
+                    "state": "landed",
+                    "owner": "fable",
+                    "priority": 2,
+                    "blocker": "none",
+                }
+            )
+            queue_path.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+            before = queue_path.read_bytes()
+
+            result = run_tool(
+                "reconcile", "--dual-lane-dir", dual, "--writer", WRITER,
+                "--apply", "--json",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout)["status"], "OK")
+            self.assertEqual(queue_path.read_bytes(), before)
+            self.assertNotEqual(queue["items"][0], intent["card"])
+
+            retried = run_tool(
+                "submit", "--dual-lane-dir", dual, "--writer", WRITER,
+                "--intent-file", intent_file, "--apply", "--json",
+            )
+            self.assertEqual(retried.returncode, 0, retried.stdout + retried.stderr)
+            self.assertEqual(json.loads(retried.stdout)["status"], "OK")
+            self.assertEqual(queue_path.read_bytes(), before)
+
+    def test_different_dispatch_identity_fails_closed_without_mutating_queue(self):
         with tempfile.TemporaryDirectory() as temp:
             dual, intent_file, intent = make_fixture(temp)
             intent_dir = dual / "dispatch-intents"
@@ -140,7 +178,7 @@ class DispatchQueueTests(unittest.TestCase):
             queue_path = dual / "queue.json"
             queue = json.loads(queue_path.read_text(encoding="utf-8"))
             conflicting = dict(intent["card"])
-            conflicting["owner"] = "codex"
+            conflicting["dispatchedSeq"] = 11
             queue["items"].append(conflicting)
             queue_path.write_text(json.dumps(queue, indent=2), encoding="utf-8")
             before = queue_path.read_bytes()
@@ -150,8 +188,50 @@ class DispatchQueueTests(unittest.TestCase):
                 "--apply", "--json",
             )
             self.assertEqual(result.returncode, 2)
-            self.assertIn("conflicts with durable intent", result.stdout)
+            self.assertIn("different dispatch identity", result.stdout)
             self.assertEqual(queue_path.read_bytes(), before)
+
+    def test_submit_refuses_preexisting_same_id_conflict_before_installing_intent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dual, intent_file, intent = make_fixture(temp)
+            queue_path = dual / "queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            conflicting = dict(intent["card"])
+            conflicting["owner"] = "codex"
+            queue["items"].append(conflicting)
+            queue_path.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+            before = queue_path.read_bytes()
+
+            result = run_tool(
+                "submit", "--dual-lane-dir", dual, "--writer", WRITER,
+                "--intent-file", intent_file, "--apply", "--json",
+            )
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("conflicts with new durable intent", result.stdout)
+            self.assertEqual(queue_path.read_bytes(), before)
+            self.assertFalse((dual / "dispatch-intents").exists())
+
+    def test_heal_never_regresses_updated_by_seq(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dual, _, intent = make_fixture(temp)
+            intent_dir = dual / "dispatch-intents"
+            intent_dir.mkdir()
+            (intent_dir / (intent["intentId"] + ".json")).write_text(
+                json.dumps(intent, indent=2), encoding="utf-8"
+            )
+            queue_path = dual / "queue.json"
+            queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            queue["updatedBySeq"] = 15
+            queue_path.write_text(json.dumps(queue, indent=2), encoding="utf-8")
+
+            result = run_tool(
+                "reconcile", "--dual-lane-dir", dual, "--writer", WRITER,
+                "--apply", "--json",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(json.loads(result.stdout)["status"], "HEALED")
+            healed = json.loads(queue_path.read_text(encoding="utf-8"))
+            self.assertEqual(healed["updatedBySeq"], 15)
 
     def test_prose_only_dispatch_is_reported_and_never_invented(self):
         with tempfile.TemporaryDirectory() as temp:
