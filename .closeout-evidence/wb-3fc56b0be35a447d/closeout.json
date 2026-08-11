@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/hub-dispatch-self-heal",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-11T14:55:58+00:00",
+  "detectorHash": "42b26ac94f6c46ddd6c17cec41c377c8",
+  "eligible": true,
+  "featureHead": "da3fa784beeb42d700ee4f9fefc2d0f2756640dd",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/hub-dispatch-self-heal",
+      "head": "da3fa784beeb42d700ee4f9fefc2d0f2756640dd"
+    },
+    "target": {
+      "branch": "master",
+      "head": "db6881645216ce34eb453d6b694570a89cb58b2f",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "db6881645216ce34eb453d6b694570a89cb58b2f",
+  "workBlockId": "wb-3fc56b0be35a447d"
+}
