@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "claude/work-block/sweep-lane5-2",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 1,
+  "createdAt": "2026-08-11T05:14:32+00:00",
+  "detectorHash": "51faae88db42ac3eec5be41322dc8af1",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "4027446dac3b6a5bfba8d5aee0c8e60bb8f2e070",
+  "schemaVersion": "1.0",
+  "targetHead": "6f76c7d255f1c634373a084800d50931e392944a",
+  "workBlockId": "wb-fec81e37b48b44df"
+}
