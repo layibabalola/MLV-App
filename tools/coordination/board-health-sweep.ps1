@@ -85,6 +85,7 @@ $journals = [ordered]@{
     'opus'          = Join-Path $dualLane 'opus.md'
     'sol'           = Join-Path $dualLane 'sol.md'
     'claude-review' = Join-Path (Split-Path $dualLane -Parent) 'gpu-lane-impl-review-sync.md'
+    'claude-impl'   = Join-Path $dualLane 'claude-impl.md'
 }
 $seatKeys = @{
     'fable' = 'fable'
@@ -92,6 +93,7 @@ $seatKeys = @{
     'opus' = 'opus'
     'sol' = 'sol'
     'claude-review' = 'claude'
+    'claude-impl' = 'claude-impl'
 }
 
 $laneStates = @()
