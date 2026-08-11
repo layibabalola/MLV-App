@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "claude/work-block/queue-derive-2",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 2,
+  "createdAt": "2026-08-11T05:16:59+00:00",
+  "detectorHash": "0eebfdadb1c002dbd59f8bf9350ccb53",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "366a27f32f5b17f857f744bf5936f74474aff078",
+  "schemaVersion": "1.0",
+  "targetHead": "6f76c7d255f1c634373a084800d50931e392944a",
+  "workBlockId": "wb-a48562c37e7c42f9"
+}

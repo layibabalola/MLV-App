@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "claude/work-block/queue-derive-2",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-11T05:16:59+00:00",
+  "detectorHash": "0eebfdadb1c002dbd59f8bf9350ccb53",
+  "eligible": true,
+  "featureHead": "366a27f32f5b17f857f744bf5936f74474aff078",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "claude/work-block/queue-derive-2",
+      "head": "366a27f32f5b17f857f744bf5936f74474aff078"
+    },
+    "target": {
+      "branch": "master",
+      "head": "6f76c7d255f1c634373a084800d50931e392944a",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "6f76c7d255f1c634373a084800d50931e392944a",
+  "workBlockId": "wb-a48562c37e7c42f9"
+}
