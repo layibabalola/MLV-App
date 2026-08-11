@@ -43,7 +43,7 @@
     "requireHandoff": true,
     "additionalHandoffActors": ["CLAUDE_IMPL"],
     "authorizedReviewSessions": [
-      "10cdba16-033f-44b6-bf58-1b3835fb59d4"
+      "fbc0d355-9065-4d08-a120-fe3a681a6a31"
     ]
   },
   "validation": {

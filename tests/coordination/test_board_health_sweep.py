@@ -7,6 +7,7 @@ could not be committed, gated, or tested. These are the tests that path never ha
 They are written against BOTH SIDES of every boundary. A threshold test that only checks
 the side it already passes proves nothing about where the boundary actually sits.
 """
+import hashlib
 import json
 import os
 import re
@@ -146,6 +147,81 @@ class BoardHealthSweepTests(unittest.TestCase):
             line = run_sweep(health).stdout
             self.assertNotIn('gap:sol', line)
             self.assertIn('OVERALL=HEALTHY', line)
+
+    # ---- dispatch intent self-healing --------------------------------------
+
+    def test_missing_queue_card_is_healed_from_durable_intent(self):
+        """The crash window is intent-present/card-missing. A sweep must close it without a
+        hub turn, and a second sweep must be idempotent rather than append a duplicate."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            dual = health.parent
+            coordination = dual.parent
+            artifact = coordination / 'packet.md'
+            artifact.write_text('packet\n', encoding='utf-8')
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest().upper()
+            (dual / 'fable.md').write_text(
+                '## SEQ 10 | dispatch\n**`TEST-DISPATCH-1`** -- **DISPATCHED.**\n',
+                encoding='utf-8')
+            (dual / 'queue.json').write_text(json.dumps({
+                'schema': 'dual-lane-queue.v1', 'updated': '2026-08-11T00:00:00Z',
+                'updatedBySeq': 9, 'items': []}), encoding='utf-8')
+            (dual / 'dispatch-intents.json').write_text(json.dumps({
+                'schema': 'dual-lane-dispatch-intents.v1', 'proseAuditFromSeq': 10}),
+                encoding='utf-8')
+            intents = dual / 'dispatch-intents'
+            intents.mkdir()
+            intent = {
+                'schema': 'dual-lane-dispatch-intent.v1',
+                'intentId': 'TEST-DISPATCH-1-OPUS',
+                'sourceDispatchId': 'TEST-DISPATCH-1',
+                'source': {'ledger': 'fable.md', 'seq': 10, 'artifact': 'packet.md',
+                           'artifactSha256': digest},
+                'card': {'id': 'TEST-DISPATCH-1-OPUS', 'title': 'Test dispatch',
+                         'state': 'dispatched', 'owner': 'opus', 'priority': 1,
+                         'track': 'factory', 'dispatchedSeq': 10,
+                         'scope': 'Independent test review.'},
+            }
+            (intents / 'TEST-DISPATCH-1-OPUS.json').write_text(
+                json.dumps(intent, indent=2), encoding='utf-8')
+
+            first = run_sweep(health)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            self.assertIn('dispatch-intents=HEALED(1/1)', first.stdout)
+            queue = json.loads((dual / 'queue.json').read_text(encoding='utf-8'))
+            self.assertEqual([item['id'] for item in queue['items']],
+                             ['TEST-DISPATCH-1-OPUS'])
+
+            second = run_sweep(health)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            self.assertIn('dispatch-intents=OK(1)', second.stdout)
+            queue = json.loads((dual / 'queue.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(queue['items']), 1)
+
+    def test_prose_only_dispatch_is_loud_attention_and_not_auto_invented(self):
+        """Prose lacks owner/scope/priority, so guessing a card would invent authority. The
+        sweep must be loud while leaving the queue byte-identical."""
+        with tempfile.TemporaryDirectory() as d:
+            health = make_tree(d)
+            all_fresh(health)
+            dual = health.parent
+            (dual / 'fable.md').write_text(
+                '## SEQ 10 | dispatch\n**`PROSE-ONLY-1`** -- **DISPATCHED.**\n',
+                encoding='utf-8')
+            (dual / 'queue.json').write_text(json.dumps({
+                'schema': 'dual-lane-queue.v1', 'updated': '2026-08-11T00:00:00Z',
+                'updatedBySeq': 9, 'items': []}), encoding='utf-8')
+            (dual / 'dispatch-intents.json').write_text(json.dumps({
+                'schema': 'dual-lane-dispatch-intents.v1', 'proseAuditFromSeq': 10}),
+                encoding='utf-8')
+            before = (dual / 'queue.json').read_bytes()
+
+            result = run_sweep(health)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('dispatch-intents=PROSE-ONLY(1)', result.stdout)
+            self.assertIn('OVERALL=ATTENTION', result.stdout)
+            self.assertEqual((dual / 'queue.json').read_bytes(), before)
 
     # ---- (c) checkpoint identity -------------------------------------------
 
