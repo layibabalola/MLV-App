@@ -296,6 +296,81 @@ try {
             $watchHb += ('nudge:{0}=PENDING({1}m)' -f $ndId, $ndAge)
         }
 } catch {}
+# Dispatch-intent reconciliation (DISPATCH-ATOMIC-1). A ledger sentence cannot wake a lane;
+# queue.json can. The canonical submitter therefore persists a structured intent BEFORE it
+# writes the queue, and every sweep retries the second half. This closes the crash window that
+# left FACTORY-MATURITY-1 and PROVIDER-SHADOW-FAILOVER-2 "dispatched" only in Fable prose.
+#
+# The reconciler validates the cited Fable SEQ and artifact hash, refuses conflicting cards,
+# and composes write-verified-json.ps1 for the actual queue write. Its stdout is captured so the
+# health surface remains one line. ERROR/DRIFT/PROSE_ONLY are ATTENTION, never silently green.
+$dispatchIntentAttention = $false
+try {
+    $dispatchTool = Join-Path $PSScriptRoot 'dispatch-queue.py'
+    $dispatchStateExists = (Test-Path -LiteralPath (Join-Path $dualLane 'dispatch-intents.json')) -or
+        (Test-Path -LiteralPath (Join-Path $dualLane 'dispatch-intents'))
+    if (-not (Test-Path -LiteralPath $dispatchTool)) {
+        if ($dispatchStateExists) {
+            $watchHb += 'dispatch-intents=UNAVAILABLE'
+            $dispatchIntentAttention = $true
+        }
+    } else {
+        # Prefer the interpreter named `python` only after proving it is Python 3; this host
+        # still carries C:\Python27\python.exe. Use the Windows launcher as the fallback.
+        # The hosted workflow already demonstrated why installing with one interpreter and
+        # executing with an assumed `py -3` is not a valid availability check.
+        $python = Get-Command python.exe -ErrorAction SilentlyContinue
+        $pythonIsThree = $false
+        if ($null -ne $python) {
+            $pythonMajor = @(& $python.Source -c 'import sys; print(sys.version_info[0])' 2>$null)
+            $pythonIsThree = ($LASTEXITCODE -eq 0 -and $pythonMajor.Count -eq 1 -and $pythonMajor[0] -eq '3')
+        }
+        $pyLauncher = if (-not $pythonIsThree) { Get-Command py.exe -ErrorAction SilentlyContinue } else { $null }
+        if (-not $pythonIsThree -and $null -eq $pyLauncher) {
+            throw 'no Python interpreter is available for dispatch reconciliation'
+        }
+        if ($pythonIsThree) {
+            $dispatchRaw = @(& $python.Source $dispatchTool reconcile `
+                --dual-lane-dir $dualLane `
+                --writer (Join-Path $PSScriptRoot 'write-verified-json.ps1') `
+                --apply --json 2>&1)
+        } else {
+            $dispatchRaw = @(& $pyLauncher.Source -3 $dispatchTool reconcile `
+                --dual-lane-dir $dualLane `
+                --writer (Join-Path $PSScriptRoot 'write-verified-json.ps1') `
+                --apply --json 2>&1)
+        }
+        $dispatchExit = $LASTEXITCODE
+        $dispatchReport = $null
+        if ($dispatchRaw.Count -gt 0) {
+            try { $dispatchReport = $dispatchRaw[-1] | ConvertFrom-Json -ErrorAction Stop } catch {}
+        }
+        if ($null -eq $dispatchReport) {
+            $watchHb += ('dispatch-intents=ERROR(exit={0})' -f $dispatchExit)
+            $dispatchIntentAttention = $true
+        } else {
+            $intentState = [string]$dispatchReport.status
+            $intentCount = [int]$dispatchReport.intentCount
+            $healedCount = @($dispatchReport.healed).Count
+            $proseCount = @($dispatchReport.proseOnly).Count
+            if ($intentState -eq 'HEALED') {
+                $watchHb += ('dispatch-intents=HEALED({0}/{1})' -f $healedCount, $intentCount)
+            } elseif ($intentState -eq 'OK') {
+                $watchHb += ('dispatch-intents=OK({0})' -f $intentCount)
+            } elseif ($intentState -eq 'PROSE_ONLY') {
+                $watchHb += ('dispatch-intents=PROSE-ONLY({0})' -f $proseCount)
+                $dispatchIntentAttention = $true
+            } else {
+                $watchHb += ('dispatch-intents={0}' -f $intentState)
+                $dispatchIntentAttention = $true
+            }
+            if ($dispatchExit -ne 0) { $dispatchIntentAttention = $true }
+        }
+    }
+} catch {
+    $watchHb += 'dispatch-intents=ERROR(exception)'
+    $dispatchIntentAttention = $true
+}
 # Queue-vs-dispatch check (claude SEQ 345/346 / fable SEQ 997/998): "ALIVE BUT NOT DISPATCHING
 # WHILE WORK IS QUEUED" was folded into the benign state for ~12.5h on 2026-07-29. The queue is
 # now MACHINE-READABLE (../queue.json, hub-maintained, single authority - the prose queue in
@@ -356,6 +431,7 @@ try {
     }
 } catch {}
 if ($laneGaps.Count -gt 0) { $watchHb += $laneGaps }
+if ($dispatchIntentAttention -and $overall -eq 'HEALTHY') { $overall = 'ATTENTION' }
 $hbSuffix = if ($watchHb.Count -gt 0) { ' ' + ($watchHb -join ' ') } else { '' }
 $line = "$($now.ToString('yyyy-MM-ddTHH:mm:ssZ')) OVERALL=$overall registry=$registryState watchers=$watchers " + ($parts -join ' ') + $hbSuffix
 Add-Content -Path (Join-Path $HealthDir 'health.log') -Value $line -Encoding utf8
