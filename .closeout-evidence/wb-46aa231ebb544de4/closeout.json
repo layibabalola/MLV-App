@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "claude/work-block/gate-residuals-2",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-11T05:19:21+00:00",
+  "detectorHash": "62fa5451499ef177468490a11cdc5a7a",
+  "eligible": true,
+  "featureHead": "4005ece95400d3ea790e401c00b770a4f218465c",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "claude/work-block/gate-residuals-2",
+      "head": "4005ece95400d3ea790e401c00b770a4f218465c"
+    },
+    "target": {
+      "branch": "master",
+      "head": "6f76c7d255f1c634373a084800d50931e392944a",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "6f76c7d255f1c634373a084800d50931e392944a",
+  "workBlockId": "wb-46aa231ebb544de4"
+}
