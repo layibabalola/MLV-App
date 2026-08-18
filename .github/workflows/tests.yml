@@ -3,53 +3,34 @@ name: Tests
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/tests.yml"
-      - "tests/**"
-      - "src/**"
-      - "platform/qt/**"
-      - "tools/repo_hygiene/**"
-      - "tools/repo-hygiene/**"
-      - "tools/profiling/**"
-      - "tools/agent-bridge/**"
-      - "tools/closeout/**"
-      - "closeout.config.json"
-      - "AGENTS.md"
-      - "CLAUDE.md"
   push:
     branches:
       - master
-    paths:
-      - ".github/workflows/tests.yml"
-      - "tests/**"
-      - "src/**"
-      - "platform/qt/**"
-      - "tools/repo_hygiene/**"
-      - "tools/repo-hygiene/**"
-      - "tools/profiling/**"
-      - "tools/agent-bridge/**"
-      - "tools/closeout/**"
-      - "closeout.config.json"
-      - "AGENTS.md"
-      - "CLAUDE.md"
 
 permissions:
   contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   repo-hygiene-python:
     name: Repo Hygiene Python (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -67,16 +48,19 @@ jobs:
   factory-bridge-regressions:
     name: Factory Bridge Regressions
     runs-on: windows-latest
+    timeout-minutes: 45
 
     defaults:
       run:
         shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -84,6 +68,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r tools\agent-bridge\requirements.txt
+          python -m pip install "pytest==8.4.2"
 
       - name: Verify compatible MCP runtime
         run: |
@@ -108,9 +93,17 @@ jobs:
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
             -v
 
+      - name: Run coordination and self-healing guardrails
+        run: |
+          python -m pytest `
+            tools\coordination\test_coordination_guardrails.py `
+            tests\coordination `
+            -q
+
   windows-product-oracles:
     name: Windows Product Oracles
     runs-on: windows-latest
+    timeout-minutes: 120
 
     defaults:
       run:
@@ -121,10 +114,12 @@ jobs:
       QT_OUTPUT_DIR: ${{ github.workspace }}\qt
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -384,7 +379,7 @@ jobs:
 
       - name: Upload pipeline crash forensics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-product-oracles-pipeline-crash-forensics
           if-no-files-found: ignore
@@ -397,6 +392,7 @@ jobs:
   windows-gui-pilot:
     name: Windows GUI Pilot
     runs-on: windows-latest
+    timeout-minutes: 60
 
     defaults:
       run:
@@ -407,10 +403,12 @@ jobs:
       QT_OUTPUT_DIR: ${{ github.workspace }}\qt
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -450,7 +448,7 @@ jobs:
 
       - name: Upload gui_tests log on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gui_tests_output
           path: gui_tests_output.txt
