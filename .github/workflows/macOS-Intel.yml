@@ -2,10 +2,15 @@ name: macOS Intel Release
 
 on:
   workflow_dispatch:
-    branches: [ "master" ]
 
 permissions:
+  attestations: write
   contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
@@ -15,7 +20,9 @@ env:
 jobs:
   build:
 
+    if: github.ref == 'refs/heads/master'
     runs-on: macos-15-intel
+    timeout-minutes: 120
 
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -63,7 +70,14 @@ jobs:
             ${{ env.QTDIR }}/macdeployqt MLV\ App.app -dmg
 
     - name: Save build artifact
+      id: upload
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp macOS Intel
         path: ${{ env.ARTIFACT }}
+
+    - name: Attest build provenance
+      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+      with:
+        subject-name: MLVApp macOS Intel
+        subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}

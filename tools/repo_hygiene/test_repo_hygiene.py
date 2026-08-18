@@ -439,10 +439,11 @@ class RepoHygieneTests(unittest.TestCase):
             "Repo Hygiene Python (ubuntu-latest)",
             "Factory Bridge Regressions",
             "Windows GUI Pilot",
+            "Windows Product Oracles",
         )
         protected_section = contributing.split(
             "The protected branch currently requires exactly these hosted checks:", 1
-        )[1].split("`Windows Product Oracles`", 1)[0]
+        )[1].lstrip().split("\n\n", 1)[0]
         self.assertEqual(
             tuple(re.findall(r"(?m)^- `([^`]+)`$", protected_section)),
             required_checks,
@@ -456,7 +457,8 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertIn(f"name: {workflow_name}", workflow)
 
         self.assertIn("`Windows Product Oracles` runs independently", normalized_contributing)
-        self.assertIn("not yet a branch-protection required check", normalized_contributing)
+        self.assertIn("It is a branch-protection required check", normalized_contributing)
+        self.assertNotIn("not yet a branch-protection required check", normalized_contributing)
         self.assertIn("Bachelor", normalized_contributing)
         self.assertIn(
             "CPU or factory diagnostics from this VM do not prove CUDA behavior",
@@ -703,6 +705,56 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("\n          path: |", artifact_step)
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
 
+    def test_release_workflows_are_bounded_serialized_and_attested(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        release_workflows = (
+            workflow_dir / "Linux.yml",
+            workflow_dir / "Windows.yml",
+            workflow_dir / "macOS-Arm64.yml",
+            workflow_dir / "macOS-Intel.yml",
+        )
+        attestation_revision = "977bb373ede98d70efdf65b84cb5f73e068dcc2a"
+
+        for workflow_path in release_workflows:
+            workflow = workflow_path.read_text(encoding="utf-8")
+            trigger_section = workflow[: workflow.index("\npermissions:")]
+            self.assertEqual(trigger_section.count("workflow_dispatch:"), 1)
+            self.assertNotIn("branches:", trigger_section)
+            self.assertIn(
+                "concurrency:\n"
+                "  group: release-${{ github.workflow }}-${{ github.ref }}\n"
+                "  cancel-in-progress: false",
+                workflow,
+            )
+            self.assertIn("    if: github.ref == 'refs/heads/master'", workflow)
+            self.assertIn("    timeout-minutes: 120", workflow)
+            self.assertIn("  attestations: write", workflow)
+            self.assertIn("  id-token: write", workflow)
+            self.assertIn(
+                f"uses: actions/attest-build-provenance@{attestation_revision} # v3",
+                workflow,
+            )
+            self.assertLess(
+                workflow.index("- name: Save build artifact"),
+                workflow.index("- name: Attest build provenance"),
+            )
+            self.assertIn("      id: upload", workflow)
+            attestation_step = workflow[workflow.index("- name: Attest build provenance") :]
+            self.assertIn("subject-name:", attestation_step)
+            self.assertIn(
+                "subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}",
+                attestation_step,
+            )
+            self.assertNotIn("subject-path:", attestation_step)
+
+        windows_workflow = (workflow_dir / "Windows.yml").read_text(encoding="utf-8")
+        openssl_start = windows_workflow.index("    - name: Install OpenSSL")
+        openssl_end = windows_workflow.index("    - name: Install Qt")
+        openssl_step = windows_workflow[openssl_start:openssl_end]
+        self.assertNotIn("continue-on-error", openssl_step)
+        self.assertIn("throw \"OpenSSL installation did not produce the expected bin directory\"", openssl_step)
+        self.assertEqual(windows_workflow.count("-ErrorAction Stop"), 2)
+
     def test_all_tracked_workflow_actions_are_immutably_pinned_and_inventoried(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"
         discovered_workflows = sorted(
@@ -732,6 +784,7 @@ class RepoHygieneTests(unittest.TestCase):
                 ("actions/checkout", "v5"): 8,
                 ("actions/setup-python", "v6"): 8,
                 ("actions/upload-artifact", "v7"): 6,
+                ("actions/attest-build-provenance", "v3"): 4,
                 ("ConorMacBride/install-package", "v1"): 2,
             }
         )
@@ -766,10 +819,18 @@ class RepoHygieneTests(unittest.TestCase):
                 1,
                 f"{workflow_path.relative_to(ROOT)} must declare one top-level permissions block",
             )
+            observed_permissions = [
+                line.strip() for line in permissions_blocks[0].splitlines() if line.strip()
+            ]
+            expected_permissions = (
+                ["attestations: write", "contents: read", "id-token: write"]
+                if workflow_path.name in {"Linux.yml", "Windows.yml", "macOS-Arm64.yml", "macOS-Intel.yml"}
+                else ["contents: read"]
+            )
             self.assertEqual(
-                [line.strip() for line in permissions_blocks[0].splitlines() if line.strip()],
-                ["contents: read"],
-                f"{workflow_path.relative_to(ROOT)} must grant only top-level contents: read",
+                observed_permissions,
+                expected_permissions,
+                f"{workflow_path.relative_to(ROOT)} must grant only its reviewed top-level permissions",
             )
             credential_isolated_checkout_sites += len(
                 re.findall(

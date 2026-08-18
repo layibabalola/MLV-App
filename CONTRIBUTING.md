@@ -20,12 +20,13 @@ The protected branch currently requires exactly these hosted checks:
 - `Repo Hygiene Python (ubuntu-latest)`
 - `Factory Bridge Regressions`
 - `Windows GUI Pilot`
+- `Windows Product Oracles`
 
 `Windows Product Oracles` runs independently so factory-control failures cannot
-hide product evidence. It is not yet a branch-protection required check while
-the current golden set is being ratified. That is not permission to ignore it:
-an output-affecting change remains blocked when its applicable product oracle or
-required hardware proof is missing or failing.
+hide product evidence. It is a branch-protection required check: a failing
+product oracle blocks merge even when every factory-control check is green.
+Required hardware proof remains an additional blocker when the hosted runner
+cannot exercise the applicable product path.
 
 This repository does not require a second approver for every pull request.
 Changes should still receive review proportional to risk, without creating a
