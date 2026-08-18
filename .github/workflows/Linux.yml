@@ -49,12 +49,29 @@ jobs:
             libqt5opengl5-dev libqt5designer5 libqt5svg5-dev \
             libfuse2 libxkbcommon-x11-0 appstream
 
-    - name: Inspect Qt plugin directories
+    - name: Verify required Qt multimedia plugins
       run: |
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/audio
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/mediaservice
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/playlistformats
+           set -euo pipefail
+           command -v qmake
+           qmake -v
+           command -v make
+           make --version
+           command -v g++
+           g++ --version
+           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
+           required_directories=(audio mediaservice playlistformats)
+           required_plugins=(
+             audio/libqtaudio_alsa.so
+             audio/libqtmedia_pulse.so
+             mediaservice/libgstmediaplayer.so
+             playlistformats/libqtmultimedia_m3u.so
+           )
+           for directory in "${required_directories[@]}"; do
+             test -d "${plugin_root}/${directory}"
+           done
+           for plugin in "${required_plugins[@]}"; do
+             test -f "${plugin_root}/${plugin}"
+           done
            
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build
@@ -81,12 +98,25 @@ jobs:
     - name: Copy Qt multimedia plugins
       working-directory: ${{ env.SOURCE_DIR }}/build
       run: |
-           mkdir -p image/usr/plugins/audio
-           mkdir -p image/usr/plugins/mediaservice
-           mkdir -p image/usr/plugins/playlistformats
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/audio/* image/usr/plugins/audio/ || true
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/mediaservice/* image/usr/plugins/mediaservice/ || true
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/playlistformats/* image/usr/plugins/playlistformats/ || true
+           set -euo pipefail
+           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
+           required_directories=(audio mediaservice playlistformats)
+           required_plugins=(
+             audio/libqtaudio_alsa.so
+             audio/libqtmedia_pulse.so
+             mediaservice/libgstmediaplayer.so
+             playlistformats/libqtmultimedia_m3u.so
+           )
+           for directory in "${required_directories[@]}"; do
+             source_directory="${plugin_root}/${directory}"
+             destination_directory="image/usr/plugins/${directory}"
+             test -d "${source_directory}"
+             mkdir -p "${destination_directory}"
+             cp -a "${source_directory}/." "${destination_directory}/"
+           done
+           for plugin in "${required_plugins[@]}"; do
+             test -f "image/usr/plugins/${plugin}"
+           done
 
     - name: Install pinned LinuxDeploy tools
       shell: bash
@@ -129,3 +159,4 @@ jobs:
       with:
         name: MLVApp
         path: ${{ env.ARTIFACT }}
+        if-no-files-found: error

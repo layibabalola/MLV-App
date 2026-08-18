@@ -731,14 +731,6 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertNotIn("actions/attest", workflow)
             self.assertNotIn("Attest build provenance", workflow)
 
-        windows_workflow = (workflow_dir / "Windows.yml").read_text(encoding="utf-8")
-        openssl_start = windows_workflow.index("    - name: Install OpenSSL")
-        openssl_end = windows_workflow.index("    - name: Install Qt")
-        openssl_step = windows_workflow[openssl_start:openssl_end]
-        self.assertNotIn("continue-on-error", openssl_step)
-        self.assertIn("throw \"OpenSSL installation did not produce the expected bin directory\"", openssl_step)
-        self.assertEqual(windows_workflow.count("-ErrorAction Stop"), 2)
-
     def test_all_tracked_workflow_actions_are_immutably_pinned_and_inventoried(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"
         discovered_workflows = sorted(
@@ -997,6 +989,250 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn('printf \'%s\\n\' "${tools_dir}" >> "${GITHUB_PATH}"', linux_workflow)
         self.assertLess(linux_workflow.index("sha256sum -c"), linux_workflow.index("chmod +x"))
         self.assertLess(linux_workflow.index("chmod +x"), linux_workflow.index('"${GITHUB_PATH}"'))
+
+    def test_windows_and_linux_release_toolchains_are_fail_closed(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        permissive_shell = re.compile(
+            r"(?im)(?:\|\|\s*(?:true|:)(?:\s|$)|(?:;|&&)\s*true(?:\s|$)|"
+            r"^\s*set\s+\+(?:e|o\s+errexit)\b)"
+        )
+
+        def named_step_blocks(text: str) -> list[tuple[str, str]]:
+            matches = list(re.finditer(r"(?m)^    - name:\s*([^\r\n]+)\s*$", text))
+            return [
+                (
+                    match.group(1).strip(),
+                    text[
+                        match.start() : matches[index + 1].start()
+                        if index + 1 < len(matches)
+                        else len(text)
+                    ],
+                )
+                for index, match in enumerate(matches)
+            ]
+
+        def assert_unique_order(text: str, expected_order: tuple[str, ...]) -> dict[str, str]:
+            steps = named_step_blocks(text)
+            names = [name for name, _ in steps]
+            for name in expected_order:
+                self.assertEqual(names.count(name), 1, f"expected one step named {name!r}")
+            positions = [names.index(name) for name in expected_order]
+            self.assertEqual(positions, sorted(positions))
+            return dict(steps)
+
+        def assert_common_fail_closed(text: str) -> None:
+            self.assertNotRegex(text, r"(?im)^\s*continue-on-error\s*:")
+            self.assertNotRegex(text, permissive_shell)
+
+        def assert_windows_policy(text: str) -> None:
+            assert_common_fail_closed(text)
+            blocks = assert_unique_order(
+                text,
+                (
+                    "Install OpenSSL",
+                    "Install Qt",
+                    "Verify Windows build toolchain",
+                    "Build",
+                    "Save build artifact",
+                ),
+            )
+            self.assertIn("timeout-minutes: 15", blocks["Install OpenSSL"])
+            self.assertIn("timeout-minutes: 20", blocks["Install Qt"])
+            for install_step, package, timeout in (
+                ("Install OpenSSL", "openssl", "600"),
+                ("Install Qt", "qt5-default", "900"),
+            ):
+                block = blocks[install_step]
+                self.assertIn(
+                    f"choco install {package} --yes --no-progress --limit-output "
+                    f"--execution-timeout={timeout}",
+                    block,
+                )
+                self.assertIn("if ($LASTEXITCODE -ne 0) { throw", block)
+
+            verify_block = blocks["Verify Windows build toolchain"]
+            required_executables_match = re.search(
+                r"(?ms)^\s*\$requiredExecutables\s*=\s*@\((.*?)^\s*\)",
+                verify_block,
+            )
+            self.assertIsNotNone(required_executables_match)
+            required_executables = required_executables_match.group(1)
+            for executable_token in (
+                '(Join-Path $env:OPENSSL_BIN "openssl.exe")',
+                "$env:QMAKE_EXE",
+                "$env:WINDEPLOYQT_EXE",
+                "$env:MAKE_EXE",
+                "$env:GXX_EXE",
+            ):
+                self.assertEqual(required_executables.count(executable_token), 1)
+            for required_token in (
+                "Test-Path -LiteralPath $executable -PathType Leaf",
+                "Test-Path -LiteralPath $env:LIBGOMP_DLL -PathType Leaf",
+                'Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libcrypto*.dll" -File',
+                'Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libssl*.dll" -File',
+                "if ($cryptoDlls.Count -eq 0) { throw",
+                "if ($sslDlls.Count -eq 0) { throw",
+                '"OPENSSL_CRYPTO_DLLS=$($cryptoDlls.FullName -join \';\')" >> $env:GITHUB_ENV',
+                '"OPENSSL_SSL_DLLS=$($sslDlls.FullName -join \';\')" >> $env:GITHUB_ENV',
+                "& $env:GXX_EXE --version",
+                'if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }',
+                "$makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))",
+                "$configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)",
+                "if ($makeBin -ne $configuredMingwBin)",
+                '$expectedCompiler = [IO.Path]::GetFullPath((Join-Path $makeBin "g++.exe"))',
+                "$configuredCompiler = [IO.Path]::GetFullPath($env:GXX_EXE)",
+                "if ($configuredCompiler -ne $expectedCompiler)",
+                '$env:PATH = "$makeBin;$env:PATH"',
+                "$resolvedCompiler = Get-Command g++.exe -CommandType Application -ErrorAction Stop",
+                "$actualCompiler = [IO.Path]::GetFullPath($resolvedCompiler.Source)",
+                "if ($actualCompiler -ne $expectedCompiler)",
+                "& g++.exe --version",
+                'if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }',
+                "$makeBin >> $env:GITHUB_PATH",
+            ):
+                self.assertIn(required_token, verify_block)
+
+            build_block = blocks["Build"]
+            for required_token in (
+                "& $env:QMAKE_EXE",
+                "& $env:MAKE_EXE",
+                "& $env:WINDEPLOYQT_EXE",
+                "Copy-Item -LiteralPath $env:LIBGOMP_DLL",
+                "$env:OPENSSL_CRYPTO_DLLS -split ';'",
+                "$env:OPENSSL_SSL_DLLS -split ';'",
+                "Copy-Item -LiteralPath $dll -Destination .",
+            ):
+                self.assertIn(required_token, build_block)
+            self.assertNotRegex(build_block, r"(?i)Copy-Item.*lib(?:crypto|ssl)\*")
+            self.assertEqual(blocks["Save build artifact"].count("if-no-files-found: error"), 1)
+
+        def assert_linux_policy(text: str) -> None:
+            assert_common_fail_closed(text)
+            blocks = assert_unique_order(
+                text,
+                (
+                    "Install compiler & Qt",
+                    "Verify required Qt multimedia plugins",
+                    "Build",
+                    "Copy Qt multimedia plugins",
+                    "Create Appimage",
+                    "Save build artifact",
+                ),
+            )
+            required_directories = "required_directories=(audio mediaservice playlistformats)"
+            required_plugins = (
+                "audio/libqtaudio_alsa.so",
+                "audio/libqtmedia_pulse.so",
+                "mediaservice/libgstmediaplayer.so",
+                "playlistformats/libqtmultimedia_m3u.so",
+            )
+            verify_block = blocks["Verify required Qt multimedia plugins"]
+            copy_block = blocks["Copy Qt multimedia plugins"]
+            expected_tool_probes = (
+                "command -v qmake",
+                "qmake -v",
+                "command -v make",
+                "make --version",
+                "command -v g++",
+                "g++ --version",
+            )
+            for probe in expected_tool_probes:
+                self.assertEqual(verify_block.count(probe), 1)
+            for block in (verify_block, copy_block):
+                self.assertIn("set -euo pipefail", block)
+                self.assertIn(required_directories, block)
+                for plugin in required_plugins:
+                    self.assertIn(plugin, block)
+            self.assertIn('test -d "${plugin_root}/${directory}"', verify_block)
+            self.assertIn('test -f "${plugin_root}/${plugin}"', verify_block)
+            self.assertIn('test -d "${source_directory}"', copy_block)
+            self.assertIn('cp -a "${source_directory}/." "${destination_directory}/"', copy_block)
+            self.assertIn('test -f "image/usr/plugins/${plugin}"', copy_block)
+            self.assertEqual(blocks["Save build artifact"].count("if-no-files-found: error"), 1)
+
+        windows = (workflow_dir / "Windows.yml").read_text(encoding="utf-8")
+        linux = (workflow_dir / "Linux.yml").read_text(encoding="utf-8")
+        assert_windows_policy(windows)
+        assert_linux_policy(linux)
+
+        falsifiers = (
+            (
+                "Windows continue-on-error",
+                assert_windows_policy,
+                windows.replace(
+                    "    - name: Install OpenSSL\n",
+                    "    - name: Install OpenSSL\n      continue-on-error: true\n",
+                    1,
+                ),
+            ),
+            (
+                "Windows masks install failure",
+                assert_windows_policy,
+                windows.replace("choco install openssl", "choco install openssl || true", 1),
+            ),
+            (
+                "Windows drops executable assertion",
+                assert_windows_policy,
+                windows.replace("             $env:QMAKE_EXE,\n", "", 1),
+            ),
+            (
+                "Windows drops exact compiler assertion",
+                assert_windows_policy,
+                windows.replace("             $env:GXX_EXE\n", "", 1),
+            ),
+            (
+                "Windows does not bind bare compiler",
+                assert_windows_policy,
+                windows.replace(
+                    "$resolvedCompiler = Get-Command g++.exe -CommandType Application -ErrorAction Stop\n",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                "Windows permits missing artifact",
+                assert_windows_policy,
+                windows.replace("        if-no-files-found: error\n", "", 1),
+            ),
+            (
+                "Linux disables errexit",
+                assert_linux_policy,
+                linux.replace("           set -euo pipefail", "           set +e", 1),
+            ),
+            (
+                "Linux masks plugin copy failure",
+                assert_linux_policy,
+                linux.replace(
+                    'cp -a "${source_directory}/." "${destination_directory}/"',
+                    'cp -a "${source_directory}/." "${destination_directory}/" || true',
+                    1,
+                ),
+            ),
+            (
+                "Linux drops packaged plugin assertion",
+                assert_linux_policy,
+                linux.replace('             test -f "image/usr/plugins/${plugin}"\n', "", 1),
+            ),
+            (
+                "Linux drops compiler version probe",
+                assert_linux_policy,
+                linux.replace("           g++ --version\n", "", 1),
+            ),
+            (
+                "Linux drops qmake resolution probe",
+                assert_linux_policy,
+                linux.replace("           command -v qmake\n", "", 1),
+            ),
+            (
+                "Linux permits missing artifact",
+                assert_linux_policy,
+                linux.replace("        if-no-files-found: error\n", "", 1),
+            ),
+        )
+        for label, assertion, falsified in falsifiers:
+            with self.subTest(falsifier=label):
+                with self.assertRaises(AssertionError):
+                    assertion(falsified)
 
     def test_macos_release_runners_are_supported_and_architecture_explicit(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"

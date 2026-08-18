@@ -13,6 +13,13 @@ concurrency:
 env:
   SOURCE_DIR:   ${{ github.workspace }}\platform
   ARTIFACT:     ${{ github.workspace }}\platform\build\MLVApp\MLVApp.Win64.zip
+  OPENSSL_BIN:  C:\Program Files\OpenSSL\bin
+  QMAKE_EXE:    C:\Qt\5.15.2\mingw81_64\bin\qmake.exe
+  WINDEPLOYQT_EXE: C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe
+  MINGW_BIN:    C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+  MAKE_EXE:     C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\make.exe
+  GXX_EXE:      C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\g++.exe
+  LIBGOMP_DLL:  C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\libgomp-1.dll
 
 jobs:
   build:
@@ -41,18 +48,69 @@ jobs:
       run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
 
     - name: Install OpenSSL
+      timeout-minutes: 15
       run: |
-           choco install openssl
-           if (-not (Test-Path -LiteralPath "C:\Program Files\OpenSSL\bin")) {
-             throw "OpenSSL installation did not produce the expected bin directory"
-           }
-           Get-ChildItem -LiteralPath "C:\Program Files\OpenSSL\bin"
+           choco install openssl --yes --no-progress --limit-output --execution-timeout=600
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey OpenSSL install failed with exit code $LASTEXITCODE" }
               
     - name: Install Qt
+      timeout-minutes: 20
       run: |
-           choco install qt5-default
-           dir C:\Qt\5.15.2\mingw81_64\bin
-           dir C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+           choco install qt5-default --yes --no-progress --limit-output --execution-timeout=900
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey Qt install failed with exit code $LASTEXITCODE" }
+
+    - name: Verify Windows build toolchain
+      run: |
+           $requiredExecutables = @(
+             (Join-Path $env:OPENSSL_BIN "openssl.exe"),
+             $env:QMAKE_EXE,
+             $env:WINDEPLOYQT_EXE,
+             $env:MAKE_EXE,
+             $env:GXX_EXE
+           )
+           foreach ($executable in $requiredExecutables) {
+             if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+               throw "Required release executable is missing: $executable"
+             }
+           }
+           if (-not (Test-Path -LiteralPath $env:LIBGOMP_DLL -PathType Leaf)) {
+             throw "Required release DLL is missing: $env:LIBGOMP_DLL"
+           }
+           $cryptoDlls = @(Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libcrypto*.dll" -File)
+           $sslDlls = @(Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libssl*.dll" -File)
+           if ($cryptoDlls.Count -eq 0) { throw "No libcrypto DLL found in $env:OPENSSL_BIN" }
+           if ($sslDlls.Count -eq 0) { throw "No libssl DLL found in $env:OPENSSL_BIN" }
+           "OPENSSL_CRYPTO_DLLS=$($cryptoDlls.FullName -join ';')" >> $env:GITHUB_ENV
+           "OPENSSL_SSL_DLLS=$($sslDlls.FullName -join ';')" >> $env:GITHUB_ENV
+           & (Join-Path $env:OPENSSL_BIN "openssl.exe") version
+           if ($LASTEXITCODE -ne 0) { throw "OpenSSL executable probe failed" }
+           & $env:QMAKE_EXE -v
+           if ($LASTEXITCODE -ne 0) { throw "qmake executable probe failed" }
+           & $env:WINDEPLOYQT_EXE --version
+           if ($LASTEXITCODE -ne 0) { throw "windeployqt executable probe failed" }
+           & $env:MAKE_EXE --version
+           if ($LASTEXITCODE -ne 0) { throw "make executable probe failed" }
+           & $env:GXX_EXE --version
+           if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }
+           $makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))
+           $configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)
+           if ($makeBin -ne $configuredMingwBin) {
+             throw "Configured MinGW bin '$configuredMingwBin' does not contain make '$makeBin'"
+           }
+           $expectedCompiler = [IO.Path]::GetFullPath((Join-Path $makeBin "g++.exe"))
+           $configuredCompiler = [IO.Path]::GetFullPath($env:GXX_EXE)
+           if ($configuredCompiler -ne $expectedCompiler) {
+             throw "Configured g++ '$configuredCompiler' is not beside make '$env:MAKE_EXE'"
+           }
+           $env:PATH = "$makeBin;$env:PATH"
+           $resolvedCompiler = Get-Command g++.exe -CommandType Application -ErrorAction Stop
+           $actualCompiler = [IO.Path]::GetFullPath($resolvedCompiler.Source)
+           if ($actualCompiler -ne $expectedCompiler) {
+             throw "Bare g++ resolves to '$actualCompiler', expected '$expectedCompiler'"
+           }
+           & g++.exe --version
+           if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }
+           $makeBin >> $env:GITHUB_PATH
 
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}\build
@@ -60,15 +118,21 @@ jobs:
     - name: Build
       working-directory: ${{ env.SOURCE_DIR }}\build
       run:  |
-            C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -r ${{ env.SOURCE_DIR }}\qt\MLVApp.pro
-            make.exe
-            dir
-            cd release
-            C:\Qt\5.15.2\mingw81_64\bin\windeployqt MLVApp.exe
-            copy C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\libgomp-1.dll .
-            Copy-Item -Path "C:\Program Files\OpenSSL\bin\libcrypto*" -Destination . -ErrorAction Stop
-            Copy-Item -Path "C:\Program Files\OpenSSL\bin\libssl*" -Destination . -ErrorAction Stop
-            dir
+            & $env:QMAKE_EXE -r "${{ env.SOURCE_DIR }}\qt\MLVApp.pro"
+            if ($LASTEXITCODE -ne 0) { throw "qmake failed with exit code $LASTEXITCODE" }
+            & $env:MAKE_EXE
+            if ($LASTEXITCODE -ne 0) { throw "make failed with exit code $LASTEXITCODE" }
+            Set-Location release
+            & $env:WINDEPLOYQT_EXE MLVApp.exe
+            if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
+            Copy-Item -LiteralPath $env:LIBGOMP_DLL -Destination .
+            foreach ($dll in ($env:OPENSSL_CRYPTO_DLLS -split ';')) {
+              Copy-Item -LiteralPath $dll -Destination .
+            }
+            foreach ($dll in ($env:OPENSSL_SSL_DLLS -split ';')) {
+              Copy-Item -LiteralPath $dll -Destination .
+            }
+            Get-ChildItem
 
     - name: Install verified FFMPEG
       run:  |
@@ -90,3 +154,4 @@ jobs:
       with:
         name: MLVApp Windows 64bit
         path: ${{ env.SOURCE_DIR }}\build\MLVApp
+        if-no-files-found: error
