@@ -31,6 +31,7 @@ SOURCES += \
     $$REPO_ROOT/tests/console/test_export_process.cpp \
     $$REPO_ROOT/tests/console/test_playback_frame_range.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_settings.cpp \
+    $$REPO_ROOT/tests/console/test_shipping_defaults.cpp \
     $$REPO_ROOT/tests/console/test_playback_quality_auto_mode.cpp \
     $$REPO_ROOT/tests/console/test_receipt_loader.cpp \
     $$REPO_ROOT/tests/console/test_receipt_applier.cpp \

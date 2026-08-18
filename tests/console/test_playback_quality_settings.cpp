@@ -2,7 +2,7 @@
  * env-var fallthrough behaviour.
  *
  * Verifies:
- *   1. Default mode is Auto.
+ *   1. Default mode is High Quality.
  *   2. QSettings round-trip writes and reads back the persisted choice.
  *   3. env var MLVAPP_PLAYBACK_PREFER_HQ_MEAN23 takes priority over the
  *      QSettings dial.

@@ -10,6 +10,7 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/gates/**"
       - "tools/profiling/**"
       - "tools/agent-bridge/**"
       - "tools/closeout/**"
@@ -26,6 +27,7 @@ on:
       - "platform/qt/**"
       - "tools/repo_hygiene/**"
       - "tools/repo-hygiene/**"
+      - "tools/gates/**"
       - "tools/profiling/**"
       - "tools/agent-bridge/**"
       - "tools/closeout/**"
@@ -57,6 +59,7 @@ jobs:
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python -m unittest tools.repo_hygiene.test_shipping_defaults -v
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
   windows-scaffold:
@@ -88,6 +91,7 @@ jobs:
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python -m unittest tools.repo_hygiene.test_shipping_defaults -v
           python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
 
       - name: Run agent bridge PowerShell launcher regressions
