@@ -632,7 +632,7 @@ class RepoHygieneTests(unittest.TestCase):
         expected_remote_inventory = Counter(
             {
                 ("actions/checkout", "v5"): 8,
-                ("actions/setup-python", "v6"): 4,
+                ("actions/setup-python", "v6"): 8,
                 ("actions/upload-artifact", "v7"): 6,
                 ("ConorMacBride/install-package", "v1"): 2,
             }

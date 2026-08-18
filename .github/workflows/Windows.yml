@@ -21,6 +21,20 @@ jobs:
       with:
         persist-credentials: false
 
+    - name: Set up Python for payload verification
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version-file: ".python-version"
+
+    - name: Install hash-locked payload verification dependencies
+      run: |
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+        python -m pip check
+
+    - name: Verify vendored native payload integrity
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
+
     - name: Install OpenSSL
       continue-on-error: true
       run: |

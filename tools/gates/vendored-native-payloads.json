@@ -1,0 +1,575 @@
+{
+  "schema_version": 1,
+  "integrity_policy": {
+    "tracked_artifact_suffixes": [
+      ".zip",
+      ".7z",
+      ".tar",
+      ".tar.xz",
+      ".tgz",
+      ".gz",
+      ".bz2",
+      ".xz",
+      ".rar",
+      ".cab",
+      ".msi",
+      ".dmg",
+      ".pkg",
+      ".whl",
+      ".jar",
+      ".apk",
+      ".exe",
+      ".dll",
+      ".so",
+      ".dylib",
+      ".a",
+      ".lib",
+      ".bin",
+      ".appimage"
+    ],
+    "max_archive_bytes": 100000000,
+    "max_members": 500,
+    "max_single_member_bytes": 120000000,
+    "max_total_uncompressed_bytes": 200000000,
+    "max_member_expansion_ratio": 25,
+    "max_archive_expansion_ratio": 10,
+    "binary_kind_policy": {
+      "pe": "IMAGE_FILE_DLL (0x2000) set means shared-library; clear means executable.",
+      "macho": "MH_EXECUTE (2) means executable; MH_DYLIB (6) means shared-library; every fat slice must agree.",
+      "elf": "ET_EXEC (2) means executable; ET_DYN (3) with PT_INTERP means dynamic PIE executable; ET_DYN without PT_INTERP means shared-library. Static PIE without PT_INTERP is intentionally unsupported and fails an executable kind claim."
+    }
+  },
+  "redistribution_readiness": {
+    "status": "blocked",
+    "enforcement": "advisory",
+    "blockers": [
+      "No independently verified upstream checksum or reproducible build recipe is recorded for every executable payload.",
+      "Only the Linux FFmpeg archive contains a redistributable license text; the other consumed archives lack complete bundled notices.",
+      "The macOS Arm64 release consumes the x86_64-only ffmpegOSX.zip payload.",
+      "The exact raw2mlv source commits, versions, licenses, and build recipes are not locally recoverable.",
+      "The local qmake Linux install rule extracts FFmpeg and raw2mlv without invoking the repository integrity validator."
+    ]
+  },
+  "inactive_artifacts": [
+    {
+      "path": "pixel_maps/daniel_fort-ml-focus-pixels-2020-06-28.zip",
+      "classification": "tracked-source-archive-not-consumed-by-build-or-packaging",
+      "bytes": 28764621,
+      "sha256": "f1ae77a00ffe99f7147f8d2c96e54f71b3b017424d01b9c6fb443b6aacd5b816",
+      "member_summary": {
+        "entries": 311,
+        "file_entries": 311,
+        "directory_entries": 0,
+        "total_uncompressed_bytes": 129571098
+      },
+      "provenance": {
+        "status": "partial-local-evidence",
+        "source_revision": "b777e0739f3f2dc1b698241708dc4a66af22fdcc",
+        "source_revision_evidence": "embedded .hg_archival.txt",
+        "source_repository": "unknown",
+        "license": "unknown"
+      }
+    }
+  ],
+  "payloads": [
+    {
+      "id": "ffmpeg-linux-x86_64",
+      "path": "platform/qt/FFmpeg/ffmpegLinux.tar.xz",
+      "archive_format": "tar.xz",
+      "bytes": 39577132,
+      "sha256": "ccac14abf72e8a451d823ed09b1ea953b0bdf2814ab10fc153c753afd5fb0a20",
+      "member_summary": {
+        "entries": 230,
+        "file_entries": 222,
+        "directory_entries": 8,
+        "total_uncompressed_bytes": 159090641
+      },
+      "selected_members": [
+        {
+          "path": "ffmpeg-4.4-amd64-static/ffmpeg",
+          "output_name": "ffmpeg",
+          "kind": "executable",
+          "bytes": 76645312,
+          "sha256": "f406a5eb9cd03ed776fb215096dc52a1a401798b75ab72627ae82f367c9e714e",
+          "executable": true,
+          "binary": {
+            "format": "elf",
+            "machine": "x86_64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "linux-x86_64",
+          "path": ".github/workflows/Linux.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "ffmpegLinux.tar.xz",
+          "operation_marker": "tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg",
+          "integrity_gate": {
+            "path": ".github/workflows/Linux.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg"
+          }
+        },
+        {
+          "target": "linux-x86_64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-local-install-rule-unvalidated",
+          "reference_marker": "$$_PRO_FILE_PWD_/FFmpeg/ffmpegLinux.tar.xz",
+          "operation_marker": "tar -C $$(HOME)/bin -xvJf $$_PRO_FILE_PWD_/FFmpeg/ffmpegLinux.tar.xz"
+        }
+      ],
+      "provenance": {
+        "status": "partial-local-evidence",
+        "version": "4.4-static",
+        "source": "https://johnvansickle.com/ffmpeg/",
+        "source_evidence": "embedded readme.txt and binary version string",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "GPL-3.0-or-later",
+        "license_evidence": "embedded GPLv3.txt, readme.txt, and --enable-gpl --enable-version3 configure string",
+        "license_notice_in_archive": true
+      },
+      "redistribution_readiness": "blocked-unverified-upstream-build"
+    },
+    {
+      "id": "ffmpeg-macos-x86_64",
+      "path": "platform/qt/FFmpeg/ffmpegOSX.zip",
+      "archive_format": "zip",
+      "bytes": 23998464,
+      "sha256": "04801c14527f7b9f5f3bf9cccdec587b040446014e6a674a05ef87d5d86ab807",
+      "member_summary": {
+        "entries": 3,
+        "file_entries": 2,
+        "directory_entries": 1,
+        "total_uncompressed_bytes": 75296001
+      },
+      "selected_members": [
+        {
+          "path": "ffmpeg",
+          "output_name": "ffmpeg",
+          "kind": "executable",
+          "bytes": 75295788,
+          "sha256": "3649972c2862e96b69af3ecc7654175c1b295eb92dad97abd049988a45b6e3fe",
+          "executable": true,
+          "binary": {
+            "format": "macho",
+            "machine": "x86_64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "macos-x86_64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-release-rule",
+          "reference_marker": "$$PWD/../qt/FFmpeg/ffmpegOSX.zip",
+          "operation_marker": "macx: QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip)",
+          "integrity_gate": {
+            "path": ".github/workflows/macOS-Intel.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "make -j8"
+          }
+        },
+        {
+          "target": "macos-arm64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-release-rule-architecture-mismatch",
+          "reference_marker": "$$PWD/../qt/FFmpeg/ffmpegOSX.zip",
+          "operation_marker": "macx: QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip)",
+          "integrity_gate": {
+            "path": ".github/workflows/macOS-Arm64.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "make -j8"
+          }
+        }
+      ],
+      "provenance": {
+        "status": "partial-local-evidence",
+        "version": "N-99620-g9860777516-tessus",
+        "source": "https://evermeet.cx/ffmpeg/",
+        "source_evidence": "embedded binary version and vendor strings",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "GPL-enabled-build-exact-notice-set-unverified",
+        "license_evidence": "embedded --enable-gpl --enable-version3 configure string",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-notices-and-arm64-payload"
+    },
+    {
+      "id": "ffmpeg-windows-x86",
+      "path": "platform/qt/FFmpeg/ffmpegWin32.zip",
+      "archive_format": "zip",
+      "bytes": 20383133,
+      "sha256": "4e364aaaca14129ae4f93a078e5659e28f156b23fc2de940143e034bd75a32c1",
+      "member_summary": {
+        "entries": 3,
+        "file_entries": 2,
+        "directory_entries": 1,
+        "total_uncompressed_bytes": 52176561
+      },
+      "selected_members": [
+        {
+          "path": "ffmpeg.exe",
+          "output_name": "ffmpeg.exe",
+          "kind": "executable",
+          "bytes": 52176384,
+          "sha256": "e79d9b4bd7b0420b974eb58eb15d6f072ee939f98acc93314a4cc750c6b7099d",
+          "binary": {
+            "format": "pe",
+            "machine": "x86"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "windows-x86",
+          "path": "docs/02-developer-guide.md",
+          "status": "documented-manual-packaging-only",
+          "reference_marker": "ffmpegWin32.zip"
+        }
+      ],
+      "provenance": {
+        "status": "partial-local-evidence",
+        "version": "4.2.1",
+        "source": "unknown",
+        "source_evidence": "embedded binary version string",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "GPL-enabled-build-exact-notice-set-unverified",
+        "license_evidence": "embedded --enable-gpl --enable-version3 configure string",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "ffmpeg-windows-x86_64",
+      "path": "platform/qt/FFmpeg/ffmpegWin64.zip",
+      "archive_format": "zip",
+      "bytes": 32986502,
+      "sha256": "28df0ffb871b7b3886a4ddc6ebd1e4e23b5dfc5b3743722e9ee4603f5f3da918",
+      "member_summary": {
+        "entries": 3,
+        "file_entries": 2,
+        "directory_entries": 1,
+        "total_uncompressed_bytes": 94240945
+      },
+      "selected_members": [
+        {
+          "path": "ffmpeg.exe",
+          "output_name": "ffmpeg.exe",
+          "kind": "executable",
+          "bytes": 94240768,
+          "sha256": "4a14b7d2f4b5af53553172fcb1551740ca31edae5b941ba1f44b28f4c637e7fc",
+          "binary": {
+            "format": "pe",
+            "machine": "x86_64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "windows-x86_64",
+          "path": ".github/workflows/Windows.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "ffmpegWin64.zip",
+          "operation_marker": "7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release",
+          "integrity_gate": {
+            "path": ".github/workflows/Windows.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release"
+          }
+        }
+      ],
+      "provenance": {
+        "status": "partial-local-evidence",
+        "version": "n4.4-5-ge3fb0f0c88",
+        "source": "https://github.com/BtbN/FFmpeg-Builds/releases",
+        "source_evidence": "introducing Git commit message and embedded binary version string",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "GPL-enabled-build-exact-notice-set-unverified",
+        "license_evidence": "embedded --enable-gpl --enable-version3 configure string",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "raw2mlv-linux-x86_64",
+      "path": "platform/qt/raw2mlv/raw2mlvLinux.tar.xz",
+      "archive_format": "tar.xz",
+      "bytes": 635604,
+      "sha256": "8a5a0b0c188f61c3b1e7d29012cecf38f68442dbae1e0e279dce29fb92320f14",
+      "member_summary": {
+        "entries": 3,
+        "file_entries": 2,
+        "directory_entries": 1,
+        "total_uncompressed_bytes": 2411323
+      },
+      "selected_members": [
+        {
+          "path": "raw2mlv/raw2mlv",
+          "output_name": "raw2mlv",
+          "kind": "executable",
+          "bytes": 2411136,
+          "sha256": "8c4053de7a6d303c47f7117f515d71f557d4c6c288081c4f31aa0c39ca515fe4",
+          "executable": true,
+          "binary": {
+            "format": "elf",
+            "machine": "x86_64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "linux-x86_64",
+          "path": ".github/workflows/Linux.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "raw2mlvLinux.tar.xz",
+          "operation_marker": "tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv",
+          "integrity_gate": {
+            "path": ".github/workflows/Linux.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv"
+          }
+        },
+        {
+          "target": "linux-x86_64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-local-install-rule-unvalidated",
+          "reference_marker": "$$_PRO_FILE_PWD_/raw2mlv/raw2mlvLinux.tar.xz",
+          "operation_marker": "tar -C $$(HOME)/bin -xvJf $$_PRO_FILE_PWD_/raw2mlv/raw2mlvLinux.tar.xz"
+        }
+      ],
+      "provenance": {
+        "status": "unknown",
+        "version": "unknown",
+        "source": "unknown",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "unknown",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "raw2mlv-macos-arm64",
+      "path": "platform/qt/raw2mlv/raw2mlvMacOsArm.zip",
+      "archive_format": "zip",
+      "bytes": 380867,
+      "sha256": "b77bac01a0591f985d68fbd41e95f7eb807a2d1b1ffca4b9e8223e413d985bba",
+      "member_summary": {
+        "entries": 1,
+        "file_entries": 1,
+        "directory_entries": 0,
+        "total_uncompressed_bytes": 1164516
+      },
+      "selected_members": [
+        {
+          "path": "raw2mlv",
+          "output_name": "raw2mlv",
+          "kind": "executable",
+          "bytes": 1164516,
+          "sha256": "6d710cc7763572e2a1227bab1783e78b389b5fa46c2247ec6b9ba4c9a2539403",
+          "executable": true,
+          "binary": {
+            "format": "macho",
+            "machine": "arm64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "macos-arm64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-release-rule",
+          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip",
+          "operation_marker": "macx: equals(QT_ARCH, arm64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip)",
+          "integrity_gate": {
+            "path": ".github/workflows/macOS-Arm64.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "make -j8"
+          }
+        }
+      ],
+      "provenance": {
+        "status": "unknown",
+        "version": "unknown",
+        "source": "unknown",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "unknown",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "raw2mlv-macos-x86_64",
+      "path": "platform/qt/raw2mlv/raw2mlvOSX.zip",
+      "archive_format": "zip",
+      "bytes": 378889,
+      "sha256": "e3e8d314f964b54535b175eb958e82325692298fbfd76b128390c3fd4f1694c1",
+      "member_summary": {
+        "entries": 1,
+        "file_entries": 1,
+        "directory_entries": 0,
+        "total_uncompressed_bytes": 1221976
+      },
+      "selected_members": [
+        {
+          "path": "raw2mlv",
+          "output_name": "raw2mlv",
+          "kind": "executable",
+          "bytes": 1221976,
+          "sha256": "18282da034aacfdada444cabd23c7646a8dc3f20104497cf0128b274793ce73d",
+          "executable": true,
+          "binary": {
+            "format": "macho",
+            "machine": "x86_64"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "macos-x86_64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-release-rule",
+          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvOSX.zip",
+          "operation_marker": "macx: equals(QT_ARCH, x86_64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvOSX.zip)",
+          "integrity_gate": {
+            "path": ".github/workflows/macOS-Intel.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "make -j8"
+          }
+        }
+      ],
+      "provenance": {
+        "status": "unknown",
+        "version": "unknown",
+        "source": "unknown",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "unknown",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "raw2mlv-windows-x86",
+      "path": "platform/qt/raw2mlv/raw2mlvWin32.zip",
+      "archive_format": "zip",
+      "bytes": 391259,
+      "sha256": "21309326c9982ef8104f6a613a793263307cb57dc0947eaadc47ba081a79d66a",
+      "member_summary": {
+        "entries": 2,
+        "file_entries": 2,
+        "directory_entries": 0,
+        "total_uncompressed_bytes": 1103872
+      },
+      "selected_members": [
+        {
+          "path": "Windows32/raw2mlv.exe",
+          "output_name": "raw2mlv.exe",
+          "kind": "executable",
+          "bytes": 279552,
+          "sha256": "5312cdbc0b7850df118701b4f8081726d6255b290f66389d117ae96f3a3efdd0",
+          "binary": {
+            "format": "pe",
+            "machine": "x86"
+          }
+        },
+        {
+          "path": "Windows32/libraw.dll",
+          "output_name": "libraw.dll",
+          "kind": "shared-library",
+          "bytes": 824320,
+          "sha256": "e7f187a3ed0d332bd6e6860754c413ce36e9843a14b1a8764fa06314fd81e4af",
+          "binary": {
+            "format": "pe",
+            "machine": "x86"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "windows-x86",
+          "path": "docs/02-developer-guide.md",
+          "status": "documented-manual-packaging-only",
+          "reference_marker": "raw2mlvWin32.zip"
+        }
+      ],
+      "provenance": {
+        "status": "unknown",
+        "version": "unknown",
+        "source": "unknown",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "unknown",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-and-notices"
+    },
+    {
+      "id": "raw2mlv-windows-x86-compat",
+      "path": "platform/qt/raw2mlv/raw2mlvWin64.zip",
+      "archive_format": "zip",
+      "bytes": 406359,
+      "sha256": "3e4dd71b084e41c12f2bb5df2a6a1387b96e49e6f839d3d0ca46213d61066f85",
+      "member_summary": {
+        "entries": 2,
+        "file_entries": 2,
+        "directory_entries": 0,
+        "total_uncompressed_bytes": 1141760
+      },
+      "selected_members": [
+        {
+          "path": "raw2mlv.exe",
+          "output_name": "raw2mlv.exe",
+          "kind": "executable",
+          "bytes": 304640,
+          "sha256": "c9e9882d327539f3e4011748c1f2c145a2452729b97e8ded8987d82746928526",
+          "binary": {
+            "format": "pe",
+            "machine": "x86"
+          }
+        },
+        {
+          "path": "libraw.dll",
+          "output_name": "libraw.dll",
+          "kind": "shared-library",
+          "bytes": 837120,
+          "sha256": "7274fe655d1628f11023cbbb53b8abb91b17189f3ec6b430945decc1bab185af",
+          "binary": {
+            "format": "pe",
+            "machine": "x86"
+          }
+        }
+      ],
+      "consumers": [
+        {
+          "target": "windows-x86_64",
+          "path": ".github/workflows/Windows.yml",
+          "status": "active-release-workflow-requires-wow64",
+          "reference_marker": "raw2mlvWin64.zip",
+          "operation_marker": "7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release",
+          "integrity_gate": {
+            "path": ".github/workflows/Windows.yml",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "must_precede": "7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release"
+          }
+        }
+      ],
+      "provenance": {
+        "status": "unknown",
+        "version": "unknown",
+        "source": "unknown",
+        "build_recipe": "unknown",
+        "upstream_checksum_verified": false,
+        "license": "unknown",
+        "license_notice_in_archive": false
+      },
+      "redistribution_readiness": "blocked-missing-provenance-notices-and-wow64-contract"
+    }
+  ]
+}
