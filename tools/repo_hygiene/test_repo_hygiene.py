@@ -759,7 +759,7 @@ class RepoHygieneTests(unittest.TestCase):
             {
                 ("actions/checkout", "v5"): 8,
                 ("actions/setup-python", "v6"): 8,
-                ("actions/upload-artifact", "v7"): 6,
+                ("actions/upload-artifact", "v7"): 10,
                 ("ConorMacBride/install-package", "v1"): 2,
             }
         )

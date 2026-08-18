@@ -67,8 +67,50 @@ jobs:
             PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-macos-arm64 --archive-reference raw2mlvMacOsArm.zip --output-dir "MLV App.app/Contents/MacOS" --verify-installed
             ${{ env.QTDIR }}/macdeployqt MLV\ App.app -dmg
 
+    - name: Generate single-build release evidence
+      run: |
+           QMAKE_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["QTDIR"] + "/qmake"))')"
+           export LLVM_CXX="$(brew --prefix llvm)/bin/clang++"
+           COMPILER_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["LLVM_CXX"]))')"
+           DEPLOY_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["QTDIR"] + "/macdeployqt"))')"
+           QT_VERSION="$(${QMAKE_PATH} -query QT_VERSION)"
+           COMPILER_VERSION="$("${COMPILER_PATH}" --version | head -n 1)"
+           python -m tools.release.release_evidence \
+             --repo-root "${{ github.workspace }}" \
+             --product "${{ github.workspace }}/platform/build/MLV App.dmg" \
+             --inventory-root "${{ github.workspace }}/platform/build/MLV App.app" \
+             --expected-main "Contents/MacOS/MLV App" \
+             --output-dir "${{ runner.temp }}/release-evidence" \
+             --label "macos-arm64" \
+             --target-os "macos" \
+             --target-arch "arm64" \
+             --repository "${{ github.repository }}" \
+             --source-ref "${{ github.ref }}" \
+             --commit "${{ github.sha }}" \
+             --run-id "${{ github.run_id }}" \
+             --run-attempt "${{ github.run_attempt }}" \
+             --runner-os "${{ runner.os }}" \
+             --runner-arch "${{ runner.arch }}" \
+             --runner-name "${{ runner.name }}" \
+             --runner-image-os "${ImageOS}" \
+             --runner-image-version "${ImageVersion}" \
+             --tool "qmake=${QMAKE_PATH}" \
+             --tool "compiler=${COMPILER_PATH}" \
+             --tool "macdeployqt=${DEPLOY_PATH}" \
+             --tool-version "qmake=${QT_VERSION}" \
+             --tool-version "compiler=${COMPILER_VERSION}" \
+             --tool-version "macdeployqt=qt-${QT_VERSION}"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp macOS Arm64 release evidence
+        path: ${{ runner.temp }}/release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp macOS Arm64
         path: ${{ env.ARTIFACT }}
+        if-no-files-found: error

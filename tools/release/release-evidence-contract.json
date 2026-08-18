@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "build_info_schema": "mlvapp.release-build-info.v1",
+  "contents_schema": "mlvapp.release-contents.v1",
+  "scope": "single-build-observation",
+  "required_build_bindings": [
+    "repository",
+    "source_ref",
+    "commit",
+    "run_id",
+    "run_attempt",
+    "runner.os",
+    "runner.arch",
+    "runner.name",
+    "runner.image_os",
+    "runner.image_version",
+    "target_os",
+    "target_arch",
+    "tools[].resolved_path",
+    "tools[].sha256",
+    "tools[].size",
+    "tools[].version"
+  ],
+  "canonical_json": {
+    "encoding": "UTF-8",
+    "key_order": "lexicographic",
+    "separators": [
+      ",",
+      ":"
+    ],
+    "terminal_newline": true
+  },
+  "inventory": {
+    "path_separator": "/",
+    "path_order": "UTF-8 byte order",
+    "file_digest": "SHA-256 lowercase hex",
+    "inventory_digest": "SHA-256 of canonical JSON encoding of the inventory object without a terminal newline",
+    "manifest_digest": "SHA-256 of the complete canonical contents document including its terminal newline",
+    "main_executable_architecture": "Validated from PE, ELF, or Mach-O headers and required to include declared target_arch",
+    "reject": [
+      "empty input",
+      "empty file",
+      "missing expected main executable",
+      "path traversal",
+      "absolute inventory member",
+      "symbolic link or junction in a root, member, or ancestor",
+      "product or inventory root resolving outside the repository",
+      "Unicode-normalized path collision",
+      "case-folded path collision"
+    ]
+  },
+  "assurance_limits": {
+    "redistribution_ready": false,
+    "reproducibility_claim": false,
+    "required_blocker_source": "tools/gates/vendored-native-payloads.json#redistribution_readiness"
+  },
+  "workflow_targets": {
+    "linux": {
+      "product_kind": "file",
+      "staging_kind": "directory"
+    },
+    "macos-arm64": {
+      "product_kind": "file",
+      "staging_kind": "directory"
+    },
+    "macos-x86_64": {
+      "product_kind": "file",
+      "staging_kind": "directory"
+    },
+    "windows": {
+      "product_kind": "directory",
+      "staging_kind": "directory"
+    }
+  }
+}

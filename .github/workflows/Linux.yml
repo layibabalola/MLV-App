@@ -154,6 +154,52 @@ jobs:
            linuxdeploy-x86_64.AppImage --desktop-file=image/mlvapp.desktop --executable=mlvapp --appdir=image --plugin=qt --output=appimage --verbosity=3 --icon-file=image/MLVAPP.png
            cp MLVApp-*.AppImage ${{ env.ARTIFACT }}
 
+    - name: Generate single-build release evidence
+      run: |
+           QMAKE_PATH="$(command -v qmake)"
+           COMPILER_PATH="$(command -v g++)"
+           LINUXDEPLOY_PATH="$(command -v linuxdeploy-x86_64.AppImage)"
+           LINUXDEPLOY_QT_PATH="$(command -v linuxdeploy-plugin-qt-x86_64.AppImage)"
+           LINUXDEPLOY_APPIMAGE_PATH="$(command -v linuxdeploy-plugin-appimage-x86_64.AppImage)"
+           QT_VERSION="$(${QMAKE_PATH} -query QT_VERSION)"
+           COMPILER_VERSION="$(${COMPILER_PATH} -dumpfullversion -dumpversion)"
+           python -m tools.release.release_evidence \
+             --repo-root "${{ github.workspace }}" \
+             --product "${{ env.ARTIFACT }}" \
+             --inventory-root "${{ env.SOURCE_DIR }}/build/image" \
+             --expected-main "usr/bin/mlvapp" \
+             --output-dir "${{ runner.temp }}/release-evidence" \
+             --label "linux-x86_64" \
+             --target-os "linux" \
+             --target-arch "x86_64" \
+             --repository "${{ github.repository }}" \
+             --source-ref "${{ github.ref }}" \
+             --commit "${{ github.sha }}" \
+             --run-id "${{ github.run_id }}" \
+             --run-attempt "${{ github.run_attempt }}" \
+             --runner-os "${{ runner.os }}" \
+             --runner-arch "${{ runner.arch }}" \
+             --runner-name "${{ runner.name }}" \
+             --runner-image-os "${ImageOS}" \
+             --runner-image-version "${ImageVersion}" \
+             --tool "qmake=${QMAKE_PATH}" \
+             --tool "compiler=${COMPILER_PATH}" \
+             --tool "linuxdeploy=${LINUXDEPLOY_PATH}" \
+             --tool "linuxdeploy-plugin-qt=${LINUXDEPLOY_QT_PATH}" \
+             --tool "linuxdeploy-plugin-appimage=${LINUXDEPLOY_APPIMAGE_PATH}" \
+             --tool-version "qmake=${QT_VERSION}" \
+             --tool-version "compiler=${COMPILER_VERSION}" \
+             --tool-version "linuxdeploy=1-alpha-20251107-1" \
+             --tool-version "linuxdeploy-plugin-qt=1-alpha-20250213-1" \
+             --tool-version "linuxdeploy-plugin-appimage=1-alpha-20250213-1"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp Linux release evidence
+        path: ${{ runner.temp }}/release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:

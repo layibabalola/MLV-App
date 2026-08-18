@@ -149,6 +149,46 @@ jobs:
            ren release MLVApp
            dir
 
+    - name: Generate single-build release evidence
+      run: |
+           $QmakePath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -CommandType Application -ErrorAction Stop).Source
+           $CompilerPath = (Get-Command C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\g++.exe -CommandType Application -ErrorAction Stop).Source
+           $DeployPath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe -CommandType Application -ErrorAction Stop).Source
+           $QtVersion = & $QmakePath -query QT_VERSION
+           $CompilerVersion = & $CompilerPath -dumpfullversion -dumpversion
+           python -m tools.release.release_evidence `
+             --repo-root "${{ github.workspace }}" `
+             --product "${{ env.SOURCE_DIR }}\build\MLVApp" `
+             --inventory-root "${{ env.SOURCE_DIR }}\build\MLVApp" `
+             --expected-main "MLVApp.exe" `
+             --output-dir "${{ runner.temp }}\release-evidence" `
+             --label "windows-x86_64" `
+             --target-os "windows" `
+             --target-arch "x86_64" `
+             --repository "${{ github.repository }}" `
+             --source-ref "${{ github.ref }}" `
+             --commit "${{ github.sha }}" `
+             --run-id "${{ github.run_id }}" `
+             --run-attempt "${{ github.run_attempt }}" `
+             --runner-os "${{ runner.os }}" `
+             --runner-arch "${{ runner.arch }}" `
+             --runner-name "${{ runner.name }}" `
+             --runner-image-os "$env:ImageOS" `
+             --runner-image-version "$env:ImageVersion" `
+             --tool "qmake=$QmakePath" `
+             --tool "compiler=$CompilerPath" `
+             --tool "windeployqt=$DeployPath" `
+             --tool-version "qmake=$QtVersion" `
+             --tool-version "compiler=$CompilerVersion" `
+             --tool-version "windeployqt=$QtVersion"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp Windows 64bit release evidence
+        path: ${{ runner.temp }}\release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:

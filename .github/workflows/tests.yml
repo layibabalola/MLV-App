@@ -50,6 +50,7 @@ jobs:
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
           python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v
+          python -m unittest tools.release.test_release_evidence -v
           python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
           python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
