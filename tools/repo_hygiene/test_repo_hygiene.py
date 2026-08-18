@@ -42,6 +42,38 @@ from .core import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
+CODEQL_STORAGE_MODEL_DIR = (
+    ROOT / ".github" / "codeql" / "extensions" / "agent-bridge-storage-python"
+)
+EXPECTED_CODEQL_STORAGE_PACK = {
+    "name": "layibabalola/agent-bridge-storage-python-models",
+    "version": "0.0.0",
+    "library": True,
+    "extensionTargets": {"codeql/python-all": "*"},
+    "dataExtensions": ["models/**/*.yml"],
+}
+EXPECTED_CODEQL_STORAGE_MODEL = {
+    "extensions": [
+        {
+            "addsTo": {
+                "pack": "codeql/python-all",
+                "extensible": "barrierModel",
+            },
+            "data": [
+                [
+                    "core.storage.StorageCapability",
+                    "Member[validate].ReturnValue",
+                    "path-injection",
+                ]
+            ],
+        }
+    ]
+}
+
+
+def assert_exact_codeql_storage_model(test_case: unittest.TestCase, model: dict) -> None:
+    """Keep the CodeQL exception at the reviewed capability return boundary."""
+    test_case.assertEqual(model, EXPECTED_CODEQL_STORAGE_MODEL)
 
 
 def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -203,6 +235,59 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("osx_installer/BuildInstaller.sh", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn("tools/gpu/build-cuda.ps1", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
+
+    def test_codeql_storage_model_pack_schema_and_barrier_are_exact(self) -> None:
+        """Default setup may trust only StorageCapability.validate's return value."""
+        manifest_path = CODEQL_STORAGE_MODEL_DIR / "codeql-pack.yml"
+        model_path = CODEQL_STORAGE_MODEL_DIR / "models" / "storage.model.yml"
+        self.assertTrue(manifest_path.is_file())
+        self.assertTrue(model_path.is_file())
+
+        # JSON is a strict subset of YAML, so CodeQL accepts these model-pack
+        # files while this cross-platform CI guard needs no YAML dependency.
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        model = json.loads(model_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest, EXPECTED_CODEQL_STORAGE_PACK)
+        assert_exact_codeql_storage_model(self, model)
+
+        discovered_models = [
+            path.relative_to(CODEQL_STORAGE_MODEL_DIR).as_posix()
+            for path in CODEQL_STORAGE_MODEL_DIR.glob("models/**/*.yml")
+        ]
+        self.assertEqual(discovered_models, ["models/storage.model.yml"])
+
+    def test_codeql_storage_model_rejects_broader_path_barriers(self) -> None:
+        """Path/root constructors and generic canonicalizers are not sanitizers."""
+        broader_barriers = [
+            ["pathlib.Path", "ReturnValue", "path-injection"],
+            [
+                "core.storage.StorageCapability",
+                "Member[bind_trusted].ReturnValue",
+                "path-injection",
+            ],
+            [
+                "core.storage",
+                "Member[authorize_storage_root].ReturnValue",
+                "path-injection",
+            ],
+            [
+                "core.storage",
+                "Member[_canonical_absolute_path].ReturnValue",
+                "path-injection",
+            ],
+            ["core.storage.StorageCapability", "AnyMember.ReturnValue", "path-injection"],
+            [
+                "core.storage.StorageCapability",
+                "Member[validate].ReturnValue",
+                "command-injection",
+            ],
+        ]
+        for barrier in broader_barriers:
+            with self.subTest(barrier=barrier):
+                candidate = json.loads(json.dumps(EXPECTED_CODEQL_STORAGE_MODEL))
+                candidate["extensions"][0]["data"] = [barrier]
+                with self.assertRaises(AssertionError):
+                    assert_exact_codeql_storage_model(self, candidate)
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
