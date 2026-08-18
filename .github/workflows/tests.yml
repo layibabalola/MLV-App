@@ -35,6 +35,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Fetch historical provenance witness
+        run: git fetch --no-tags origin 91774963efb4cf22c4a3b2e2b7704225f3fa2885
+
       - name: Install repo hygiene test dependencies
         run: python -m pip install jsonschema
 

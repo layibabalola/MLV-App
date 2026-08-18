@@ -112,6 +112,18 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     def test_committed_manifest_is_valid(self) -> None:
         self._validate()
 
+    def test_ci_fetches_unreachable_historical_witness(self) -> None:
+        manifest = self._manifest()
+        external = manifest["artifact"]["external_observations"]
+        self.assertEqual(1, len(external))
+        witness = external[0]["head_sha"]
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            f"git fetch --no-tags origin {witness}",
+            workflow,
+            "full-history checkout cannot recover an unreachable historical witness; CI must fetch it explicitly",
+        )
+
     def test_pipeline_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
         reviewed_range = (
