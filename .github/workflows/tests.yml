@@ -62,6 +62,7 @@ jobs:
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_shipping_defaults -v
+          python -m unittest tools.gates.test_output_budget -v
           python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
           python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
@@ -96,6 +97,7 @@ jobs:
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_shipping_defaults -v
+          python -m unittest tools.gates.test_output_budget -v
           python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
 
       - name: Run agent bridge PowerShell launcher regressions
