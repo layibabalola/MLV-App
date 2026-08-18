@@ -17,13 +17,20 @@ updates:
           - "patch"
 
   - package-ecosystem: "pip"
-    directory: "/tools/agent-bridge"
+    directories:
+      - "/.github/requirements"
+      - "/tools/agent-bridge"
     schedule:
       interval: "weekly"
       day: "tuesday"
       time: "06:00"
       timezone: "America/Chicago"
     open-pull-requests-limit: 2
+    ignore:
+      # The lock compiler is policy, not an ordinary runtime dependency. Its
+      # pin, generated bootstrap lock, updater assertion, and lock format must
+      # move together in one reviewed manual change.
+      - dependency-name: "pip-tools"
     groups:
       routine-python:
         patterns:

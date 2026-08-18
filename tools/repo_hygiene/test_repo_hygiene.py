@@ -70,6 +70,67 @@ EXPECTED_CODEQL_STORAGE_MODEL = {
     ]
 }
 
+PYTHON_LOCK_ROOTS = {
+    ".github/requirements/pip.txt": {"pip"},
+    ".github/requirements/lock-tools.txt": {"pip", "pip-tools"},
+    ".github/requirements/repo-hygiene.txt": {"jsonschema"},
+    ".github/requirements/aqtinstall.txt": {"aqtinstall"},
+    "tools/agent-bridge/requirements.txt": {
+        "hypothesis",
+        "mcp",
+        "psutil",
+        "websockets",
+    },
+    "tools/agent-bridge/requirements-test.txt": {
+        "hypothesis",
+        "mcp",
+        "psutil",
+        "pytest",
+        "websockets",
+    },
+}
+
+
+def parse_hashed_requirement_lock(path: Path) -> dict[str, str]:
+    """Return normalized package pins after enforcing the lock-file grammar."""
+    logical_lines: list[str] = []
+    current = ""
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        continued = stripped.endswith("\\")
+        fragment = stripped[:-1].strip() if continued else stripped
+        current = f"{current} {fragment}".strip()
+        if not continued:
+            logical_lines.append(current)
+            current = ""
+    if current:
+        raise AssertionError(f"unterminated continuation in {path}")
+
+    pins: dict[str, str] = {}
+    for entry in logical_lines:
+        if re.search(r"(?:^|\s)(?:-e|-[rci]|--index-url|--extra-index-url|--trusted-host)(?:\s|=)", entry):
+            raise AssertionError(f"forbidden requirement option in {path}: {entry}")
+        if " @ " in entry or "://" in entry:
+            raise AssertionError(f"direct URL or VCS requirement in {path}: {entry}")
+        pin = re.match(r"^([A-Za-z0-9_.-]+)==([^\s;]+)(?:\s*;[^\s]+(?:\s+[^\s]+)*)?\s+", entry)
+        if pin is None:
+            raise AssertionError(f"non-exact requirement in {path}: {entry}")
+        hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})(?:\s|$)", entry)
+        if not hashes:
+            raise AssertionError(f"unhashed requirement in {path}: {entry}")
+        without_hashes = re.sub(r"\s*--hash=sha256:[0-9a-f]{64}", "", entry).strip()
+        if without_hashes != entry[: pin.end()].strip():
+            raise AssertionError(f"unexpected lock token in {path}: {entry}")
+        normalized_name = re.sub(r"[-_.]+", "-", pin.group(1)).lower()
+        if normalized_name in pins:
+            raise AssertionError(f"duplicate package pin in {path}: {normalized_name}")
+        pins[normalized_name] = pin.group(2)
+    if not pins:
+        raise AssertionError(f"empty Python dependency lock: {path}")
+    return pins
+
 
 def assert_exact_codeql_storage_model(test_case: unittest.TestCase, model: dict) -> None:
     """Keep the CodeQL exception at the reviewed capability return boundary."""
@@ -354,8 +415,109 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
 
-        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.txt").read_text(encoding="utf-8")
+        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
+
+    def test_python_ci_dependencies_are_exact_hash_locked_and_reproducible(self) -> None:
+        expected_python = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
+        self.assertEqual(expected_python, "3.13.15")
+
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+        for lf_contract in (
+            ".python-version text eol=lf",
+            ".github/requirements/*.in text eol=lf",
+            ".github/requirements/*.txt text eol=lf",
+            "tools/agent-bridge/requirements*.in text eol=lf",
+            "tools/agent-bridge/requirements*.txt text eol=lf",
+            "tools/dependencies/update-python-locks.ps1 text eol=lf",
+        ):
+            self.assertIn(lf_contract, attributes)
+
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        self.assertEqual(workflow.count('python-version-file: ".python-version"'), 4)
+        self.assertNotRegex(workflow, r"(?m)^\s+python-version:\s*")
+        self.assertNotIn("pip install --upgrade", workflow)
+        self.assertNotRegex(
+            workflow,
+            r"python -m pip install\s+(?:jsonschema|pytest|aqtinstall|mcp)(?:\s|[<>=\"'])",
+        )
+
+        allowed_locks = {path.replace("/", "\\") for path in PYTHON_LOCK_ROOTS}
+        allowed_locks.update(PYTHON_LOCK_ROOTS)
+        install_lines = [
+            line.strip()
+            for line in workflow.splitlines()
+            if "-m pip install " in line
+        ]
+        self.assertEqual(len(install_lines), 9)
+        for line in install_lines:
+            for required_flag in (
+                "--disable-pip-version-check",
+                "--no-input",
+                "--only-binary=:all:",
+                "--require-hashes",
+                " -r ",
+            ):
+                self.assertIn(required_flag, line, f"unsafe Python install command: {line}")
+            lock_path = line.rsplit(" -r ", 1)[1].strip()
+            self.assertIn(lock_path, allowed_locks, f"unapproved Python lock: {lock_path}")
+        self.assertEqual(workflow.count("python -m pip check"), 4)
+
+        observed_locks: dict[str, dict[str, str]] = {}
+        for relative_path, roots in PYTHON_LOCK_ROOTS.items():
+            lock_path = ROOT / relative_path
+            self.assertTrue(lock_path.is_file(), f"missing Python lock: {relative_path}")
+            pins = parse_hashed_requirement_lock(lock_path)
+            self.assertTrue(roots.issubset(pins), f"{relative_path} lost direct roots")
+            observed_locks[relative_path] = pins
+
+        self.assertEqual(observed_locks[".github/requirements/pip.txt"]["pip"], "26.2.1")
+        self.assertEqual(
+            observed_locks[".github/requirements/lock-tools.txt"]["pip-tools"],
+            "7.5.3",
+        )
+        self.assertTrue(
+            observed_locks["tools/agent-bridge/requirements.txt"]["mcp"].startswith("1."),
+            "the reviewed bridge API requires MCP 1.x",
+        )
+        self.assertTrue(
+            observed_locks["tools/agent-bridge/requirements-test.txt"]["pytest"].startswith("8."),
+            "pytest major updates require explicit review",
+        )
+
+        updater = (ROOT / "tools" / "dependencies" / "update-python-locks.ps1").read_text(
+            encoding="utf-8"
+        )
+        for required_symbol in (
+            'pip-tools 7.5.3',
+            "[switch]$Upgrade",
+            'throw "-Check and -Upgrade are mutually exclusive"',
+            "Copy-Item -LiteralPath $outputPath -Destination $compileOutput",
+            '"--generate-hashes"',
+            '"--resolver=backtracking"',
+            '"--no-emit-index-url"',
+            '"--no-emit-trusted-host"',
+            '"--newline=lf"',
+            '$arguments += "--upgrade"',
+            "SequenceEqual[byte]",
+        ):
+            self.assertIn(required_symbol, updater)
+        self.assertLess(
+            updater.index("Copy-Item -LiteralPath $outputPath -Destination $compileOutput"),
+            updater.index("& $Python @arguments"),
+            "check mode must seed the temporary output before pip-compile resolves",
+        )
+
+        lock_policy = (ROOT / ".github" / "requirements" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        for required_policy in (
+            "A newly\npublished package therefore cannot make an unchanged commit fail.",
+            "`-Upgrade`\nis the only mode that passes `--upgrade` to pip-tools.",
+            "Dependabot intentionally ignores `pip-tools`.",
+            "synchronized policy tuple",
+        ):
+            self.assertIn(required_policy, lock_policy)
 
     def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
@@ -417,7 +579,8 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run coordination and self-healing guardrails", bridge_job)
         self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
         self.assertIn("tests\\coordination", bridge_job)
-        self.assertIn('python -m pip install "pytest==8.4.2"', bridge_job)
+        self.assertIn("tools\\agent-bridge\\requirements-test.txt", bridge_job)
+        self.assertNotIn('pip install "pytest', bridge_job)
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
         self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
@@ -923,13 +1086,37 @@ class RepoHygieneTests(unittest.TestCase):
                 assert match is not None
                 return match.group(1)
 
+            directory_match = re.search(
+                r'^    directory:\s*["\']?([^"\'\r\n]+)', block, flags=re.MULTILINE
+            )
+            directories_match = re.search(
+                r"(?ms)^    directories:\s*\r?\n(?P<body>(?:      - [^\r\n]+\r?\n)+)",
+                block,
+            )
+            self.assertNotEqual(
+                directory_match is not None,
+                directories_match is not None,
+                f"{ecosystem} must use exactly one directory form",
+            )
+            if directory_match is not None:
+                directories = (directory_match.group(1),)
+            else:
+                assert directories_match is not None
+                directories = tuple(
+                    value.strip().strip('"\'')
+                    for value in re.findall(r"(?m)^      - ([^\r\n]+)$", directories_match.group("body"))
+                )
+
             observed_updates[ecosystem] = {
-                "directory": required_field(r'^    directory:\s*["\']?([^"\'\r\n]+)', "directory"),
+                "directories": directories,
                 "interval": required_field(r'^      interval:\s*["\']?([^"\'\r\n]+)', "interval"),
                 "day": required_field(r'^      day:\s*["\']?([^"\'\r\n]+)', "schedule day"),
                 "time": required_field(r'^      time:\s*["\']?([^"\'\r\n]+)', "schedule time"),
                 "limit": required_field(r"^    open-pull-requests-limit:\s*([0-9]+)", "PR limit"),
                 "group": required_field(r"^    groups:\r?\n      ([A-Za-z0-9_-]+):", "update group"),
+                "compiler_ignore": bool(
+                    re.search(r'^      - dependency-name:\s*"pip-tools"\s*$', block, flags=re.MULTILINE)
+                ),
             }
             self.assertIn(
                 '        patterns:\n          - "*"',
@@ -946,26 +1133,28 @@ class RepoHygieneTests(unittest.TestCase):
             observed_updates,
             {
                 "github-actions": {
-                    "directory": "/",
+                    "directories": ("/",),
                     "interval": "weekly",
                     "day": "monday",
                     "time": "06:00",
                     "limit": "2",
                     "group": "routine-actions",
+                    "compiler_ignore": False,
                 },
                 "pip": {
-                    "directory": "/tools/agent-bridge",
+                    "directories": ("/.github/requirements", "/tools/agent-bridge"),
                     "interval": "weekly",
                     "day": "tuesday",
                     "time": "06:00",
                     "limit": "2",
                     "group": "routine-python",
+                    "compiler_ignore": True,
                 },
             },
         )
-        self.assertNotEqual(
-            observed_updates["pip"]["directory"],
+        self.assertNotIn(
             "/",
+            observed_updates["pip"]["directories"],
             "the repository root is not a supported pip dependency surface",
         )
 

@@ -21,6 +21,11 @@ Install the local Python dependencies:
 py -3 -m pip install -r tools\agent-bridge\requirements.txt
 ```
 
+The committed requirements file pins the complete runtime dependency graph and
+verifies downloaded artifacts by SHA-256. Maintainers regenerate it from
+`requirements.in` with `tools\dependencies\update-python-locks.ps1` rather
+than editing the lock directly.
+
 Configure the MCP server in both Codex and Claude with the same bridge root.
 Use an absolute bridge root such as `C:\Users\<you>\.agent-bridge`; do not leave
 `%USERPROFILE%` unexpanded inside Desktop config files.
