@@ -418,6 +418,104 @@ class RepoHygieneTests(unittest.TestCase):
         requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
 
+    def test_contributor_governance_routes_stay_synchronized(self) -> None:
+        documents = {
+            name: (ROOT / name).read_text(encoding="utf-8")
+            for name in ("CONTRIBUTING.md", "SUPPORT.md", "CHANGELOG.md")
+        }
+        contributing = documents["CONTRIBUTING.md"]
+        support = documents["SUPPORT.md"]
+        changelog = documents["CHANGELOG.md"]
+        normalized_contributing = " ".join(contributing.split())
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        payload_manifest = json.loads(
+            (ROOT / "tools" / "gates" / "vendored-native-payloads.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        required_checks = (
+            "Repo Hygiene Python (windows-latest)",
+            "Repo Hygiene Python (ubuntu-latest)",
+            "Factory Bridge Regressions",
+            "Windows GUI Pilot",
+        )
+        protected_section = contributing.split(
+            "The protected branch currently requires exactly these hosted checks:", 1
+        )[1].split("`Windows Product Oracles`", 1)[0]
+        self.assertEqual(
+            tuple(re.findall(r"(?m)^- `([^`]+)`$", protected_section)),
+            required_checks,
+        )
+        self.assertNotEqual(required_checks[0], required_checks[1])
+        self.assertIn("os: [windows-latest, ubuntu-latest]", workflow)
+        for required_check in required_checks:
+            self.assertIn(required_check, contributing)
+            workflow_name = required_check.replace(" (windows-latest)", " (${{ matrix.os }})")
+            workflow_name = workflow_name.replace(" (ubuntu-latest)", " (${{ matrix.os }})")
+            self.assertIn(f"name: {workflow_name}", workflow)
+
+        self.assertIn("`Windows Product Oracles` runs independently", normalized_contributing)
+        self.assertIn("not yet a branch-protection required check", normalized_contributing)
+        self.assertIn("Bachelor", normalized_contributing)
+        self.assertIn(
+            "CPU or factory diagnostics from this VM do not prove CUDA behavior",
+            normalized_contributing,
+        )
+        self.assertIn("pinned known-good build", normalized_contributing)
+        self.assertIn("real 8-bit present path", normalized_contributing)
+
+        for wrapper_command in (
+            "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+            "tools\\testing\\run-windows-test.ps1 -Suite console",
+            "pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
+            "tools\\testing\\run-windows-test.ps1 -Suite pipeline",
+        ):
+            self.assertIn(wrapper_command, contributing)
+
+        bootstrap_fragments = (
+            "$resolvedPython = py -3.13",
+            "Python 3.13.15 is required",
+            "-m venv $lockToolsVenv",
+            "--only-binary=:all: --require-hashes -r .github\\requirements\\pip.txt",
+            "--only-binary=:all: --require-hashes -r .github\\requirements\\lock-tools.txt",
+            "& $lockPython -m pip check",
+            "update-python-locks.ps1 -RepoRoot . -Python $lockPython -Check",
+            "update-python-locks.ps1 -RepoRoot . -Python $lockPython -Upgrade",
+        )
+        for bootstrap_fragment in bootstrap_fragments:
+            self.assertIn(bootstrap_fragment, contributing)
+        self.assertLess(
+            contributing.index(".github\\requirements\\pip.txt"),
+            contributing.index("update-python-locks.ps1 -RepoRoot . -Python $lockPython -Check"),
+        )
+        self.assertLess(
+            contributing.index(".github\\requirements\\lock-tools.txt"),
+            contributing.index("update-python-locks.ps1 -RepoRoot . -Python $lockPython -Check"),
+        )
+
+        self.assertEqual(payload_manifest["redistribution_readiness"]["status"], "blocked")
+        self.assertIn("--require-redistribution-ready", contributing)
+        self.assertIn("py -3.13 -m tools.repo_hygiene.vendored_native_payloads", contributing)
+        self.assertIn("PYTHON_31315=/absolute/path/to/python3.13", contributing)
+        self.assertNotRegex(
+            contributing,
+            r"(?m)^(?:python|python3) -m tools\.repo_hygiene\.vendored_native_payloads",
+        )
+        self.assertIn(
+            "currently marks redistribution readiness as `blocked`",
+            normalized_contributing,
+        )
+        self.assertIn("[SECURITY.md](SECURITY.md)", contributing)
+        self.assertIn("[SECURITY.md](SECURITY.md)", support)
+        self.assertIn("https://github.com/ilia3101/MLV-App/issues", support)
+        self.assertIn("Issues are disabled on this `layibabalola/MLV-App` fork", support)
+        self.assertNotIn("https://github.com/layibabalola/MLV-App/issues", support)
+        self.assertIn("does not promise a", support)
+        self.assertIn("service level agreement", support)
+        self.assertIn("## [Unreleased]", changelog)
+        self.assertNotRegex(changelog, r"(?m)^## \[[0-9]+\.[0-9]+")
+
     def test_python_ci_dependencies_are_exact_hash_locked_and_reproducible(self) -> None:
         expected_python = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
         self.assertEqual(expected_python, "3.13.15")
