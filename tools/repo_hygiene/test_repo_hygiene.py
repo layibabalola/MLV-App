@@ -260,8 +260,8 @@ class RepoHygieneTests(unittest.TestCase):
             )
 
         expected_remote_uses = [
-            ("actions/checkout", "11d5960a326750d5838078e36cf38b85af677262", "v4"),
-            ("actions/setup-python", "a26af69be951a213d495a4c3e4e4022e16d87065", "v5"),
+            ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
+            ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
         ] * 4 + [
             ("actions/upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
         ] * 2
@@ -294,9 +294,9 @@ class RepoHygieneTests(unittest.TestCase):
             remote_uses.append((action, revision, version_comment.strip()))
         self.assertEqual(sorted(remote_uses), sorted(expected_remote_uses))
 
-        checkout_revision = "11d5960a326750d5838078e36cf38b85af677262"
+        checkout_revision = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
         checkout_blocks = re.findall(
-            rf"(?m)^\s*- uses: actions/checkout@{checkout_revision} # v4\r?\n"
+            rf"(?m)^\s*- uses: actions/checkout@{checkout_revision} # v5\r?\n"
             r"\s+with:\r?\n"
             r"\s+persist-credentials: false\s*$",
             workflow,
