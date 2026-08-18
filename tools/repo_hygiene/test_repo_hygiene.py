@@ -179,6 +179,7 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("protected_target_noop_closeout", IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS)
         for action in IMPLEMENTED_DASHBOARD_ACTION_IDS:
             self.assertIn(action, load_config(ROOT)["portability"]["dashboard_action_ids"])
+
         self.assertTrue(load_config(ROOT)["closeout"]["auto_trigger"]["enabled"])
         self.assertFalse(load_config(ROOT)["closeout"]["allow_review_waiver"])
         self.assertIn("codex_desktop", load_config(ROOT)["closeout"]["trusted_approval_sources"])
@@ -200,6 +201,25 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("osx_installer/BuildInstaller.sh", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn("tools/gpu/build-cuda.ps1", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
+
+    def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        product_start = workflow.index("\n  windows-product-oracles:")
+        gui_start = workflow.index("\n  windows-gui-pilot:")
+        bridge_job = workflow[bridge_start:product_start]
+        product_job = workflow[product_start:gui_start]
+
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
+        self.assertIn("Verify compatible MCP runtime", bridge_job)
+        self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
+        self.assertNotIn("needs: factory-bridge-regressions", product_job)
+        self.assertIn("Run console_tests --check-golden", product_job)
+        self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
+
+        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
         script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"

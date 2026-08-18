@@ -33,6 +33,9 @@ on:
       - "AGENTS.md"
       - "CLAUDE.md"
 
+permissions:
+  contents: read
+
 jobs:
   repo-hygiene-python:
     name: Repo Hygiene Python (${{ matrix.os }})
@@ -59,17 +62,15 @@ jobs:
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
-  windows-scaffold:
-    name: Windows Scaffold
+  # Factory-control regressions must stay independent from product oracles.
+  # A bridge failure is blocking, but it must never suppress product evidence.
+  factory-bridge-regressions:
+    name: Factory Bridge Regressions
     runs-on: windows-latest
 
     defaults:
       run:
         shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
-
-    env:
-      QT_VERSION: 6.10.2
-      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
 
     steps:
       - uses: actions/checkout@v4
@@ -79,16 +80,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install blocking Python test dependencies
+      - name: Install factory bridge dependencies
         run: |
-          python -m pip install jsonschema
+          python -m pip install --upgrade pip
           python -m pip install -r tools\agent-bridge\requirements.txt
 
-      - name: Run repo hygiene Python tests
+      - name: Verify compatible MCP runtime
         run: |
-          python -m unittest tools.repo_hygiene.test_repo_hygiene -v
-          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
-          python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
+          python -c "import importlib.metadata as m; version=m.version('mcp'); major=int(version.split('.')[0]); assert major == 1, f'expected MCP 1.x, got {version}'; from mcp.server.fastmcp import FastMCP; print(f'MCP runtime verified: {version}')"
 
       - name: Run agent bridge PowerShell launcher regressions
         run: |
@@ -108,6 +107,26 @@ jobs:
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_server_wrapper_process_entry_prefers_pwsh_for_cim `
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
             -v
+
+  windows-product-oracles:
+    name: Windows Product Oracles
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+
+    env:
+      QT_VERSION: 6.10.2
+      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install aqtinstall
         run: |
@@ -367,7 +386,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-scaffold-pipeline-crash-forensics
+          name: windows-product-oracles-pipeline-crash-forensics
           if-no-files-found: ignore
           path: |
             ${{ runner.temp }}\pipeline-crash-forensics\**
