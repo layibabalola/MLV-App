@@ -632,6 +632,57 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("memcpy(", frame_caching)
         self.assertIn("memset(", frame_caching)
 
+    def test_release_processing_stores_and_gpu_stubs_are_platform_portable(self) -> None:
+        raw_processing = (ROOT / "src" / "processing" / "raw_processing.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertRegex(
+            raw_processing,
+            r"(?s)static inline void agx_store_float_triplet_fast\(.*?float \* const pix0,"
+            r".*?\*pix0 = \(float\)\(uint16_t\)LIMIT16\(out_r\);"
+            r".*?\*pix1 = \(float\)\(uint16_t\)LIMIT16\(out_g\);"
+            r".*?\*pix2 = \(float\)\(uint16_t\)LIMIT16\(out_b\);",
+            "the AgX gradient path must clamp and retain 16-bit quantization through float pointers",
+        )
+        self.assertNotRegex(
+            raw_processing,
+            r"(?s)agx_store_float_triplet_fast\(.*?agx_store_u16_fast\(",
+            "the float writer must clamp before conversion instead of inheriting the unsafe fast cast",
+        )
+        self.assertIn(
+            "agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b, "
+            "&pixg[0], &pixg[1], &pixg[2]);",
+            raw_processing,
+        )
+        self.assertNotIn(
+            "agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, "
+            "&pixg[0], &pixg[1], &pixg[2]);",
+            raw_processing,
+            "float gradient storage must never be passed to a uint16_t writer",
+        )
+
+        llrawproc = (ROOT / "src" / "mlv" / "llrawproc" / "llrawproc.c").read_text(
+            encoding="utf-8"
+        )
+        non_windows = llrawproc.split(
+            "#else\nstatic int llrawproc_gpu_export_backend_available", 1
+        )[1].split("#endif\n\nstatic int llrawproc_worker_copy_pixel_map", 1)[0]
+        for symbol in (
+            "llrpGpuPlaybackReconPreuploadFrame",
+            "llrpGpuPlaybackReconGetLastPreuploadStatus",
+        ):
+            self.assertRegex(
+                non_windows,
+                rf"(?s)int {symbol}\([^;]*?\)\s*\{{.*?return 0;\s*\}}",
+                f"{symbol} must fail closed at the non-Windows llrawproc API boundary",
+            )
+        self.assertRegex(
+            non_windows,
+            r"(?s)int llrpGpuPlaybackReconGetLastPreuploadStatus\([^;]*?\)\s*\{"
+            r".*?if\(status\) memset\(status, 0, sizeof\(\*status\)\);.*?return 0;\s*\}",
+            "unavailable preupload telemetry must be fully initialized before returning",
+        )
+
     def test_dependency_updates_and_private_security_reporting_are_bounded(self) -> None:
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         update_blocks = re.split(r"(?m)^  - package-ecosystem:\s*", dependabot)[1:]

@@ -652,6 +652,23 @@ static inline void agx_store_u16_triplet_fast(const double out_r,
     }
 }
 
+static inline void agx_store_float_triplet_fast(const double out_r,
+                                                const double out_g,
+                                                const double out_b,
+                                                float * const pix0,
+                                                float * const pix1,
+                                                float * const pix2)
+{
+    /* The gradient layer remains float until its LUT stage.  Keep its typed
+     * storage separate from the uint16_t output-pixel fast path while
+     * preserving the original per-channel 16-bit quantization for valid
+     * values. Clamp before converting so malformed negative/NaN inputs are
+     * defined instead of reaching an out-of-range float-to-integer cast. */
+    *pix0 = (float)(uint16_t)LIMIT16(out_r);
+    *pix1 = (float)(uint16_t)LIMIT16(out_g);
+    *pix2 = (float)(uint16_t)LIMIT16(out_b);
+}
+
 #ifndef __APPLE__
 #define M_PI 3.14159265358979323846 /* pi */
 #endif
@@ -3690,7 +3707,7 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
                         const double color_cam_agx_matrix_b_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, &pixg[0], &pixg[1], &pixg[2]);
+                        agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b, &pixg[0], &pixg[1], &pixg[2]);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_r_ms +=
