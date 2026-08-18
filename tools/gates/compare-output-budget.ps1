@@ -40,8 +40,26 @@ Write-OutputBudgetReportAtomic -Path $evaluationReport -Report ([ordered]@{
 })
 $preflightReport = Join-Path $resolvedOutput 'preflight.json'
 $python = Join-Path $PSScriptRoot 'output_budget.py'
+$pythonCommand = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+$pythonPrefix = @('-3')
+if ($null -eq $pythonCommand) {
+    $pythonCommand = Get-Command python3 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $pythonPrefix = @()
+}
+if ($null -eq $pythonCommand) {
+    $pythonCommand = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $pythonPrefix = @()
+}
+if ($null -eq $pythonCommand) {
+    throw 'Python 3.10+ is required (expected py, python3, or python on PATH).'
+}
+$pythonExe = $pythonCommand.Source
+& $pythonExe @pythonPrefix -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'
+if ($LASTEXITCODE -ne 0) {
+    throw 'The resolved Python interpreter is older than Python 3.10.'
+}
 
-& py -3 $python preflight --spec $resolvedSpec --repo-root $root --output $preflightReport `
+& $pythonExe @pythonPrefix $python preflight --spec $resolvedSpec --repo-root $root --output $preflightReport `
     --baseline-exe $BaselineExe --baseline-commit $BaselineCommit --baseline-sha256 $BaselineSha256 `
     --candidate-exe $CandidateExe --candidate-commit $CandidateCommit --candidate-sha256 $CandidateSha256
 $preflightExit = $LASTEXITCODE
@@ -154,7 +172,7 @@ if ([string]::IsNullOrWhiteSpace($EvidencePath)) {
     $EvidencePath = Join-Path $resolvedOutput 'evidence.json'
     $evidence | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $EvidencePath -Encoding utf8NoBOM
 }
-& py -3 $python evaluate --spec $resolvedSpec --evidence $EvidencePath --output $evaluationReport
+& $pythonExe @pythonPrefix $python evaluate --spec $resolvedSpec --evidence $EvidencePath --output $evaluationReport
 $evaluationExit = $LASTEXITCODE
 if ($EvidenceOnly -and $evaluationExit -eq 0) {
     $report = Get-Content -LiteralPath $evaluationReport -Raw | ConvertFrom-Json
