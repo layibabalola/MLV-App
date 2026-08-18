@@ -32,16 +32,26 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Install repo hygiene test dependencies
-        run: python -m pip install jsonschema
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+          python -m pip check
 
       - name: Run repo hygiene Python tests
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
+
+      - name: Verify generated Python dependency locks
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv "$env:RUNNER_TEMP\python-lock-tools"
+          & "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/lock-tools.txt
+          & tools\dependencies\update-python-locks.ps1 -RepoRoot . -Python "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -Check
 
   # Factory-control regressions must stay independent from product oracles.
   # A bridge failure is blocking, but it must never suppress product evidence.
@@ -62,13 +72,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Install factory bridge dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r tools\agent-bridge\requirements.txt
-          python -m pip install "pytest==8.4.2"
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r tools\agent-bridge\requirements-test.txt
+          python -m pip check
 
       - name: Verify compatible MCP runtime
         run: |
@@ -121,12 +131,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Install aqtinstall
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+          python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
         run: |
@@ -410,12 +421,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Install aqtinstall
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+          python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
         run: |
