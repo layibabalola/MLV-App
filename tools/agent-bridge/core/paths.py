@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from .storage import write_json
+from .storage import ensure_private_directory, ensure_private_file, open_private_read_text, write_json
 
 
 DEFAULT_BRIDGE_DIRNAME = ".agent-bridge"
@@ -122,7 +122,8 @@ def bridge_paths_for_root(bridge_root: Path) -> BridgePaths:
 
 
 def _read_json_object(path: Path) -> Dict[str, Any]:
-    with path.open("r", encoding="utf-8") as handle:
+    ensure_private_file(path)
+    with open_private_read_text(path) as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("%s must contain a JSON object" % path)
@@ -138,6 +139,7 @@ def _canonical_key(path: Path) -> str:
 
 def detect_moved_root(bridge_root: Path) -> Optional[Dict[str, Any]]:
     moved_to = Path(bridge_root) / MOVED_TO_FILENAME
+    ensure_private_file(moved_to)
     if not moved_to.exists():
         return None
     return _read_json_object(moved_to)
@@ -182,7 +184,7 @@ def utc_now() -> str:
 
 
 def ensure_bridge_root_manifest(paths: BridgePaths, *, reason: str = "initialize") -> Dict[str, Any]:
-    paths.root.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(paths.root)
     if paths.manifest.exists():
         manifest = _read_json_object(paths.manifest)
         if manifest.get("schema_version", 0) > ROOT_MANIFEST_SCHEMA_VERSION:

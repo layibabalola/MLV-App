@@ -6,8 +6,8 @@ Prunes read messages from inbox JSONL files while preserving:
   - Read messages newer than max_age_days
   - The newest keep_last_read read messages even if older
 
-Rotates messages.jsonl by month when it exceeds audit_max_mb.
-Prunes rotated audit logs older than audit_retention_days.
+Rotates messages.jsonl when it exceeds audit_max_mb or its oldest event is more
+than one day old. Prunes rotated audit logs older than audit_retention_days.
 
 Usage:
     py -3 tools/agent-bridge/compact.py --state-dir <path> [options]
@@ -17,9 +17,11 @@ Options:
     --keep-last-read N      Always keep the N newest read messages (default: 200)
     --audit-max-mb N        Rotate audit log when it exceeds N MB (default: 5)
     --audit-retention-days N
-                            Drop rotated messages.YYYY-MM.jsonl files older than N days (default: 90)
+                            Drop rotated daily/legacy-monthly audit logs older than N days (default: 90)
     --server-pid-max-age-hours N
                             Reap dead MCP server PID/runtime markers older than N hours (default: 24)
+    --audit-permissions-only
+                            Audit storage confidentiality and exit nonzero unless verified
     --dry-run               Print what would be done without writing
 
 Safe to run at any time. Uses the same .lock directory as the MCP server,
@@ -35,14 +37,29 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from core.storage import (
+    atomic_replace,
+    append_jsonl,
+    audit_private_tree,
+    ensure_private_directory,
+    ensure_private_file,
+    file_lock,
+    open_private_read_text,
+    open_private_text,
+    read_jsonl,
+    reject_link_components,
+    write_jsonl,
+)
 
 
 AGENTS = ("claude", "codex")
+AUDIT_ACTIVE_MAX_AGE_DAYS = 1
 
 
 # ---------------------------------------------------------------------------
-# I/O helpers (same as agent_bridge.py -- no import to keep compact standalone)
+# I/O helpers
 # ---------------------------------------------------------------------------
 
 def utc_now() -> str:
@@ -50,69 +67,35 @@ def utc_now() -> str:
 
 
 def parse_dt(s: Optional[str]) -> Optional[datetime]:
-    if not s:
+    if not s or not isinstance(s, str):
         return None
     try:
         return datetime.fromisoformat(s)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    quarantine: List[str] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                quarantine.append(line)
-    if quarantine:
-        qpath = path.with_suffix(".quarantine.jsonl")
-        with qpath.open("a", encoding="utf-8", newline="\n") as f:
-            for bad in quarantine:
-                f.write(bad + "\n")
-    return rows
-
-
 def read_json(path: Path, default: Any) -> Any:
+    ensure_private_file(path)
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as f:
-        for row in rows:
-            f.write(json.dumps(row, sort_keys=True))
-            f.write("\n")
-    tmp.replace(path)
-
-
-def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps(row, sort_keys=True))
-        f.write("\n")
+    with open_private_read_text(path) as handle:
+        return json.load(handle)
 
 
 @contextlib.contextmanager
 def locked(state_dir: Path, timeout: float = 30.0):
     lock_path = state_dir / ".lock"
-    state_dir.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(state_dir)
+    reject_link_components(lock_path)
     start = time.monotonic()
     while True:
         try:
-            lock_path.mkdir()
+            lock_path.mkdir(mode=0o700)
+            ensure_private_directory(lock_path)
             break
         except FileExistsError:
+            reject_link_components(lock_path)
             try:
                 age = time.time() - lock_path.stat().st_mtime
                 if age > 60:
@@ -200,46 +183,127 @@ def compact_inbox(
         return event
 
 
+def _oldest_audit_timestamp(path: Path) -> Optional[datetime]:
+    oldest: Optional[datetime] = None
+    try:
+        ensure_private_file(path)
+        with open_private_read_text(path) as source:
+            for line in source:
+                try:
+                    row = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                timestamp = parse_dt(row.get("timestamp"))
+                if timestamp is None:
+                    continue
+                normalized = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+                if oldest is None or normalized < oldest:
+                    oldest = normalized
+    except OSError:
+        return None
+    return oldest
+
+
+def _audit_rotation_plan(
+    audit_path: Path,
+    *,
+    max_mb: float,
+    max_age_days: int,
+    current: datetime,
+) -> Optional[Dict[str, Any]]:
+    reject_link_components(audit_path)
+    if not audit_path.exists():
+        return None
+    size_mb = audit_path.stat().st_size / (1024 * 1024)
+    oldest = _oldest_audit_timestamp(audit_path)
+    if oldest is None:
+        oldest = datetime.fromtimestamp(audit_path.stat().st_mtime, timezone.utc)
+    age_days = max(0.0, (current - oldest).total_seconds() / 86400.0)
+    size_triggered = size_mb >= max_mb
+    age_triggered = age_days >= max_age_days
+    if not size_triggered and not age_triggered:
+        return None
+    return {
+        "size_mb": size_mb,
+        "oldest": oldest,
+        "age_days": age_days,
+        "size_triggered": size_triggered,
+        "age_triggered": age_triggered,
+    }
+
+
 def rotate_audit_log(
     state_dir: Path,
     max_mb: float = 5.0,
+    max_age_days: int = AUDIT_ACTIVE_MAX_AGE_DAYS,
     dry_run: bool = False,
+    now: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """
-    Rotate messages.jsonl by month when it exceeds max_mb.
-    Rotated file is named messages.YYYY-MM.jsonl.
+    Rotate messages.jsonl when it exceeds max_mb or its oldest event exceeds
+    max_age_days. Rotated files use a daily name so retention has a bounded
+    one-day active-log overhang instead of an unbounded low-volume exception.
     """
     audit_path = state_dir / "messages.jsonl"
-    if not audit_path.exists():
-        return None
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
 
-    size_mb = audit_path.stat().st_size / (1024 * 1024)
-    if size_mb < max_mb:
-        return None
+    def _rotate_locked(plan: Dict[str, Any]) -> Dict[str, Any]:
+        day_tag = plan["oldest"].astimezone(timezone.utc).strftime("%Y-%m-%d")
+        rotated_path = state_dir / f"messages.{day_tag}.jsonl"
+        event = {
+            "id": str(uuid.uuid4()),
+            "timestamp": current.isoformat(timespec="seconds"),
+            "action": "rotate_audit_log",
+            "size_mb": round(plan["size_mb"], 2),
+            "age_days": round(plan["age_days"], 3),
+            "max_age_days": max_age_days,
+            "triggers": [
+                name
+                for name, active in (("size", plan["size_triggered"]), ("age", plan["age_triggered"]))
+                if active
+            ],
+            "rotated_to": str(rotated_path),
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            return event
 
-    month_tag = datetime.now(timezone.utc).strftime("%Y-%m")
-    rotated_path = state_dir / f"messages.{month_tag}.jsonl"
+        with open_private_read_text(audit_path) as source, open_private_text(rotated_path, "a") as target:
+            for line in source:
+                target.write(line)
+        temp = audit_path.with_name("%s.%s.tmp" % (audit_path.name, uuid.uuid4().hex))
+        try:
+            with open_private_text(temp, "w") as target:
+                target.write(json.dumps(event, sort_keys=True))
+                target.write("\n")
+            atomic_replace(temp, audit_path)
+            ensure_private_file(audit_path)
+        finally:
+            temp.unlink(missing_ok=True)
+        return event
 
-    # If the target month file already exists, append to it
-    event = {
-        "id": str(uuid.uuid4()),
-        "timestamp": utc_now(),
-        "action": "rotate_audit_log",
-        "size_mb": round(size_mb, 2),
-        "rotated_to": str(rotated_path),
-        "dry_run": dry_run,
-    }
+    if dry_run:
+        plan = _audit_rotation_plan(
+            audit_path,
+            max_mb=max_mb,
+            max_age_days=max_age_days,
+            current=current,
+        )
+        return None if plan is None else _rotate_locked(plan)
 
-    if not dry_run:
-        with locked(state_dir):
-            with audit_path.open("r", encoding="utf-8") as src, \
-                 rotated_path.open("a", encoding="utf-8", newline="\n") as dst:
-                for line in src:
-                    dst.write(line)
-            # Write rotation marker to fresh audit log
-            write_jsonl(audit_path, [event])
-
-    return event
+    with locked(state_dir):
+        with file_lock(audit_path):
+            plan = _audit_rotation_plan(
+                audit_path,
+                max_mb=max_mb,
+                max_age_days=max_age_days,
+                current=current,
+            )
+            return None if plan is None else _rotate_locked(plan)
 
 
 def prune_audit_logs(
@@ -250,41 +314,56 @@ def prune_audit_logs(
     """Remove rotated audit logs older than retention_days."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
     removed: List[str] = []
+    would_remove: List[str] = []
     kept = 0
     errors: List[Dict[str, str]] = []
 
-    for path in sorted(state_dir.glob("messages.*.jsonl")):
-        if not re.fullmatch(r"messages\.\d{4}-\d{2}\.jsonl", path.name):
-            continue
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-        except OSError as exc:
-            errors.append({"path": str(path), "error": str(exc)})
-            continue
-        if mtime >= cutoff:
-            kept += 1
-            continue
-        removed.append(str(path))
-        if not dry_run:
+    def _prune_locked() -> Dict[str, Any]:
+        nonlocal kept
+        for path in sorted(state_dir.glob("messages.*.jsonl")):
+            if not re.fullmatch(r"messages\.\d{4}-\d{2}(?:-\d{2})?\.jsonl", path.name):
+                continue
+            try:
+                reject_link_components(path)
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+            except OSError as exc:
+                errors.append({"path": str(path), "error": str(exc)})
+                continue
+            if mtime >= cutoff:
+                kept += 1
+                continue
+            would_remove.append(str(path))
+            if dry_run:
+                continue
             try:
                 path.unlink()
             except OSError as exc:
                 errors.append({"path": str(path), "error": str(exc)})
+                continue
+            removed.append(str(path))
 
-    event = {
-        "id": str(uuid.uuid4()),
-        "timestamp": utc_now(),
-        "action": "prune_audit_logs",
-        "retention_days": retention_days,
-        "removed": len(removed),
-        "removed_paths": removed,
-        "kept": kept,
-        "dry_run": dry_run,
-        "errors": errors,
-    }
-    if not dry_run and removed:
-        append_jsonl(state_dir / "messages.jsonl", event)
-    return event
+        event = {
+            "id": str(uuid.uuid4()),
+            "timestamp": utc_now(),
+            "action": "prune_audit_logs",
+            "retention_days": retention_days,
+            "removed": len(removed),
+            "removed_paths": removed,
+            "would_remove": len(would_remove),
+            "would_remove_paths": would_remove,
+            "kept": kept,
+            "dry_run": dry_run,
+            "errors": errors,
+        }
+        if not dry_run and removed:
+            append_jsonl(state_dir / "messages.jsonl", event)
+        return event
+
+    if dry_run:
+        reject_link_components(state_dir)
+        return _prune_locked()
+    with locked(state_dir):
+        return _prune_locked()
 
 
 def should_compact(state_dir: Path, agent: str, threshold_mb: float = 1.0) -> bool:
@@ -412,7 +491,8 @@ def reap_stale_server_pids(
             checked += 1
             runtime_marker = marker.with_suffix(".json")
             try:
-                raw = marker.read_text(encoding="utf-8").strip()
+                with open_private_read_text(marker) as handle:
+                    raw = handle.read().strip()
                 pid = int(raw)
             except (OSError, ValueError) as exc:
                 pid = 0
@@ -493,7 +573,7 @@ def reap_stale_server_pids(
 # CLI
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="agent-bridge inbox compaction")
     parser.add_argument("--state-dir", required=True, help="Bridge state directory")
     parser.add_argument("--max-age-days", type=int, default=7)
@@ -501,10 +581,18 @@ def main() -> None:
     parser.add_argument("--audit-max-mb", type=float, default=5.0)
     parser.add_argument("--audit-retention-days", type=int, default=90)
     parser.add_argument("--server-pid-max-age-hours", type=int, default=24)
+    parser.add_argument("--audit-permissions-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print actions without writing")
     args = parser.parse_args()
 
     state_dir = Path(args.state_dir)
+
+    if args.audit_permissions_only:
+        audit_root = state_dir.parent if state_dir.name.lower() == "state" else state_dir
+        report = audit_private_tree(audit_root)
+        report["scope"] = "bridge_root" if audit_root == state_dir.parent else "explicit_state_dir"
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["ok"] else 2
 
     any_work = False
     for agent in AGENTS:
@@ -559,7 +647,8 @@ def main() -> None:
 
     if not any_work:
         print("Nothing to compact.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -24,6 +24,7 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bootstrap_session
+import compact
 import powershell_runtime
 from agent_bridge import (
     PROJECT_BACKPRESSURE_LIMIT,
@@ -36,7 +37,7 @@ from agent_bridge import (
 )
 from bootstrap_session import bootstrap, detect_bootstrap_origin, restart_watcher_for_code_change, sweep_orphan_watchers, watcher_code_signature
 from codex_app_server_wake import build_wake_prompt, resolve_listen_url
-from compact import prune_audit_logs, reap_stale_server_pids
+from compact import compact_inbox, prune_audit_logs, reap_stale_server_pids, rotate_audit_log
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
@@ -46,7 +47,17 @@ from core.processes import acquire_singleton_lease, heartbeat_lease, release_lea
 from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, read_runtime_breadcrumb, write_runtime_breadcrumb
 from core.routing import RoutingStatus, resolve_route
 from core.settings import load_settings, settings_path_for_state_dir
-from core.storage import append_jsonl, read_json, read_jsonl, with_schema_version, write_json, write_jsonl
+from core.storage import (
+    UnsafeStoragePathError,
+    append_jsonl,
+    audit_private_path,
+    audit_private_tree,
+    read_json,
+    read_jsonl,
+    with_schema_version,
+    write_json,
+    write_jsonl,
+)
 from core.transport import LocalFilesystemTransport
 from dashboard_launcher import _self_heal_watcher_if_needed
 from dashboard_server import DEFAULT_DASHBOARD_PORT, start_dashboard_server
@@ -1709,6 +1720,57 @@ $result | ConvertTo-Json -Compress
         rows = read_jsonl(inbox)
         self.assertEqual(rows, [{"id": "ok"}])
         self.assertTrue(inbox.with_suffix(".quarantine.jsonl").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not Windows DACLs")
+    def test_core_storage_enforces_private_posix_modes(self) -> None:
+        state_dir = self.tempdir / "nested" / "bridge" / "state"
+        state_path = state_dir / "state.json"
+        inbox = state_dir / "inbox-codex.jsonl"
+        legacy = state_dir / "legacy.json"
+        write_json(state_path, {"paused": False})
+        append_jsonl(inbox, {"id": "ok"})
+        legacy.write_text('{"legacy": true}\n', encoding="utf-8")
+        os.chmod(legacy, 0o644)
+        self.assertEqual(read_json(legacy, {}), {"legacy": True})
+        with inbox.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("{bad json\n")
+        read_jsonl(inbox)
+
+        for path in (self.tempdir / "nested", self.tempdir / "nested" / "bridge", state_dir):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700, str(path))
+        for path in (state_path, inbox, legacy, inbox.with_suffix(".quarantine.jsonl")):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, str(path))
+        self.assertTrue(audit_private_tree(self.tempdir / "nested")["ok"])
+
+    def test_windows_storage_permission_audit_fails_closed_without_dacl_claim(self) -> None:
+        self.tempdir.mkdir(parents=True, exist_ok=True)
+        result = audit_private_path(self.tempdir, platform_name="nt")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "windows_acl_unverified")
+        self.assertIn("DACL", result["message"])
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks is privilege-dependent on Windows")
+    def test_core_storage_rejects_symlink_escape_and_audit_reports_link(self) -> None:
+        bridge_root = self.tempdir / "bridge"
+        state_dir = bridge_root / "state"
+        outside = self.tempdir / "outside"
+        write_json(state_dir / "state.json", {"paused": False})
+        outside.mkdir(mode=0o700)
+        escape = state_dir / "escape"
+        escape.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(UnsafeStoragePathError):
+            write_json(escape / "leaked.json", {"secret": True})
+
+        self.assertFalse((outside / "leaked.json").exists())
+        report = audit_private_tree(bridge_root)
+        self.assertFalse(report["ok"])
+        link_results = [
+            result for result in report["results"]
+            if result["status"] == "link_or_reparse"
+        ]
+        self.assertEqual(len(link_results), 1)
+        self.assertEqual(Path(link_results[0]["path"]), escape)
 
     def test_core_storage_corrupt_json_returns_default(self) -> None:
         state_path = self.tempdir / "corrupt-state.json"
@@ -7623,7 +7685,15 @@ for index in range(count):
         self.assertTrue(repaired["backups"])
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["sessions"], {})
         self.assertEqual(read_jsonl(inbox_path), [{"id": "ok"}])
-        self.assertTrue(inbox_path.with_suffix(".quarantine.jsonl").exists())
+        quarantine_path = inbox_path.with_suffix(".quarantine.jsonl")
+        self.assertTrue(quarantine_path.exists())
+        if os.name != "nt":
+            backup_dir = Path(repaired["backup_dir"])
+            self.assertEqual(backup_dir.stat().st_mode & 0o777, 0o700)
+            for path in (state_path, inbox_path, quarantine_path):
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600, str(path))
+            for backup in map(Path, repaired["backups"]):
+                self.assertEqual(backup.stat().st_mode & 0o777, 0o600, str(backup))
 
     def test_recover_state_scan_historical_reports_stale_root(self) -> None:
         old_root = self.tempdir / "old-root"
@@ -7742,18 +7812,138 @@ for index in range(count):
     def test_compact_prunes_old_rotated_audit_logs(self) -> None:
         self.state_dir.mkdir(parents=True)
         old_log = self.state_dir / "messages.2025-01.jsonl"
+        old_daily_log = self.state_dir / "messages.2025-01-31.jsonl"
         fresh_log = self.state_dir / "messages.2026-04.jsonl"
         quarantine = self.state_dir / "messages.quarantine.jsonl"
         old_log.write_text("{}\n", encoding="utf-8")
+        old_daily_log.write_text("{}\n", encoding="utf-8")
         fresh_log.write_text("{}\n", encoding="utf-8")
         quarantine.write_text("not-json\n", encoding="utf-8")
         os.utime(old_log, (0, 0))
+        os.utime(old_daily_log, (0, 0))
         os.utime(quarantine, (0, 0))
 
         result = prune_audit_logs(self.state_dir, retention_days=1)
-        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["removed"], 2)
         self.assertFalse(old_log.exists())
+        self.assertFalse(old_daily_log.exists())
         self.assertTrue(fresh_log.exists())
+        self.assertTrue(quarantine.exists())
+
+    def test_compact_prune_counts_only_successful_unlinks(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        old_log = self.state_dir / "messages.2025-01-01.jsonl"
+        old_log.write_text("{}\n", encoding="utf-8")
+        os.utime(old_log, (0, 0))
+        original_unlink = Path.unlink
+
+        def guarded_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == old_log:
+                raise PermissionError("test denial")
+            original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", guarded_unlink):
+            result = prune_audit_logs(self.state_dir, retention_days=1)
+
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["removed_paths"], [])
+        self.assertEqual(result["would_remove"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertTrue(old_log.exists())
+
+    def test_compact_rotates_low_volume_active_audit_by_age(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        active = self.state_dir / "messages.jsonl"
+        old_timestamp = "2026-04-01T00:00:00+00:00"
+        append_jsonl(active, {"id": "newer-first", "timestamp": "2026-04-02T12:00:00+00:00", "action": "test"})
+        append_jsonl(active, {"id": "old", "timestamp": old_timestamp, "action": "test"})
+
+        result = rotate_audit_log(
+            self.state_dir,
+            max_mb=1024,
+            max_age_days=1,
+            now=datetime(2026, 4, 3, 0, 0, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["triggers"], ["age"])
+        rotated = self.state_dir / "messages.2026-04-01.jsonl"
+        self.assertEqual([row["id"] for row in read_jsonl(rotated)], ["newer-first", "old"])
+        self.assertEqual(read_jsonl(active)[0]["action"], "rotate_audit_log")
+
+    def test_compact_rotate_and_prune_share_global_state_lock(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        active = self.state_dir / "messages.jsonl"
+        append_jsonl(
+            active,
+            {"id": "old", "timestamp": "2026-04-01T00:00:00+00:00", "action": "test"},
+        )
+        archive_opened = threading.Event()
+        release_rotation = threading.Event()
+        prune_finished = threading.Event()
+        failures: List[BaseException] = []
+        original_open_private_text = compact.open_private_text
+
+        def blocking_archive_open(path: Path, mode: str):
+            handle = original_open_private_text(path, mode)
+            if path.name == "messages.2026-04-01.jsonl" and mode == "a":
+                archive_opened.set()
+                if not release_rotation.wait(timeout=5):
+                    handle.close()
+                    raise TimeoutError("test did not release rotation")
+            return handle
+
+        def run_rotation() -> None:
+            try:
+                rotate_audit_log(
+                    self.state_dir,
+                    max_mb=1024,
+                    max_age_days=1,
+                    now=datetime(2026, 4, 3, tzinfo=timezone.utc),
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        def run_prune() -> None:
+            try:
+                prune_audit_logs(self.state_dir, retention_days=90)
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                prune_finished.set()
+
+        with patch.object(compact, "open_private_text", blocking_archive_open):
+            rotation_thread = threading.Thread(target=run_rotation)
+            rotation_thread.start()
+            self.assertTrue(archive_opened.wait(timeout=5))
+            prune_thread = threading.Thread(target=run_prune)
+            prune_thread.start()
+            self.assertFalse(prune_finished.wait(timeout=0.2))
+            release_rotation.set()
+            rotation_thread.join(timeout=5)
+            prune_thread.join(timeout=5)
+
+        self.assertFalse(rotation_thread.is_alive())
+        self.assertFalse(prune_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            read_jsonl(self.state_dir / "messages.2026-04-01.jsonl")[0]["id"],
+            "old",
+        )
+
+    def test_compact_retention_never_silently_drops_unread_or_quarantine(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        inbox = self.state_dir / "inbox-codex.jsonl"
+        stale = "2020-01-01T00:00:00+00:00"
+        append_jsonl(inbox, {"id": "unread", "created_at": stale, "read_at": None})
+        append_jsonl(inbox, {"id": "read", "created_at": stale, "read_at": stale})
+        quarantine = inbox.with_suffix(".quarantine.jsonl")
+        quarantine.write_text("recovery evidence\n", encoding="utf-8")
+
+        result = compact_inbox(self.state_dir, "codex", max_age_days=1, keep_last_read=0)
+
+        self.assertEqual(result["read_dropped"], 1)
+        self.assertEqual([row["id"] for row in read_jsonl(inbox)], ["unread"])
         self.assertTrue(quarantine.exists())
 
     def test_windows_toast_uses_expiry_and_tray_cap_settings(self) -> None:

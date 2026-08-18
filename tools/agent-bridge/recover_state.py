@@ -12,13 +12,22 @@ Default mode is dry-run/validate only.
 """
 import argparse
 import json
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from core.paths import ROOT_MANIFEST_FILENAME, resolve_moved_root_chain
+from core.storage import (
+    copy_private_file,
+    ensure_private_directory,
+    ensure_private_file,
+    open_private_read_text,
+    open_private_text,
+    reject_link_components,
+    write_json as storage_write_json,
+    write_jsonl as storage_write_jsonl,
+)
 
 
 def utc_now() -> str:
@@ -38,10 +47,11 @@ def default_session_registry() -> Dict[str, Any]:
 
 
 def read_json_object(path: Path) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    ensure_private_file(path)
     if not path.exists():
         return True, None, None
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with open_private_read_text(path) as handle:
             parsed = json.load(handle)
     except Exception as exc:
         return False, None, str(exc)
@@ -201,9 +211,10 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
 def validate_jsonl(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     valid: List[Dict[str, Any]] = []
     invalid: List[str] = []
+    ensure_private_file(path)
     if not path.exists():
         return valid, invalid
-    with path.open("r", encoding="utf-8") as handle:
+    with open_private_read_text(path) as handle:
         for line in handle:
             raw = line.rstrip("\n")
             if not raw.strip():
@@ -221,22 +232,11 @@ def validate_jsonl(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
 
 
 def write_json(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp.replace(path)
+    storage_write_json(path, value)
 
 
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
-    tmp.replace(path)
+    storage_write_jsonl(path, rows)
 
 
 def append_quarantine(path: Path, lines: Iterable[str]) -> int:
@@ -244,7 +244,7 @@ def append_quarantine(path: Path, lines: Iterable[str]) -> int:
     if not lines:
         return 0
     qpath = path.with_suffix(".quarantine.jsonl")
-    with qpath.open("a", encoding="utf-8", newline="\n") as handle:
+    with open_private_text(qpath, "a") as handle:
         for line in lines:
             handle.write(line)
             handle.write("\n")
@@ -252,15 +252,17 @@ def append_quarantine(path: Path, lines: Iterable[str]) -> int:
 
 
 def backup_files(paths: Iterable[Path], backup_root: Path) -> List[str]:
-    backup_root.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(backup_root)
     copied: List[str] = []
     for path in paths:
+        ensure_private_file(path)
         if not path.exists():
             continue
         target = backup_root / path.name
+        reject_link_components(target)
         if target.exists():
             target = backup_root / ("%s.%s" % (path.name, uuid.uuid4().hex[:8]))
-        shutil.copy2(path, target)
+        copy_private_file(path, target)
         copied.append(str(target))
     return copied
 

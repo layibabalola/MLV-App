@@ -32,7 +32,14 @@ from core.runtime import (
 )
 from core.routing import resolve_route
 from core.settings import load_settings
-from core.storage import STATE_SCHEMA_VERSION
+from core.storage import (
+    STATE_SCHEMA_VERSION,
+    ensure_private_directory,
+    ensure_private_file,
+    open_private_read_text,
+    open_private_text,
+    reject_link_components,
+)
 from core.transport import LocalFilesystemTransport
 from project_identity import derive_project_identity
 from routing_policy import evaluate_message
@@ -202,10 +209,11 @@ def normalize_classifier_text(text: str) -> str:
 
 
 def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_private_file(path)
     if not path.exists():
         return dict(default)
     with _file_lock(path):
-        with path.open("r", encoding="utf-8") as handle:
+        with open_private_read_text(path) as handle:
             return json.load(handle)
 
 
@@ -213,13 +221,16 @@ def _file_lock(path: Path, timeout_seconds: float = 30.0, stale_seconds: float =
     @contextlib.contextmanager
     def _manager():
         lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(lock_path.parent)
+        reject_link_components(lock_path)
         start = time.time()
         while True:
             try:
-                lock_path.mkdir()
+                lock_path.mkdir(mode=0o700)
+                ensure_private_directory(lock_path)
                 break
             except FileExistsError:
+                reject_link_components(lock_path)
                 try:
                     age = time.time() - lock_path.stat().st_mtime
                     if age > stale_seconds:
@@ -254,6 +265,8 @@ def _atomic_replace(src: Path, dst: Path) -> None:
     default open() does not request that sharing mode).  shutil.move() falls
     back to a copy-then-delete strategy that works regardless.
     """
+    reject_link_components(src)
+    reject_link_components(dst)
     if sys.platform == "win32":
         shutil.move(str(src), str(dst))
     else:
@@ -261,14 +274,15 @@ def _atomic_replace(src: Path, dst: Path) -> None:
 
 
 def write_json(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     with _file_lock(path):
         tmp = _temp_path_for(path)
         try:
-            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            with open_private_text(tmp, "w") as handle:
                 json.dump(value, handle, indent=2, sort_keys=True)
                 handle.write("\n")
             _atomic_replace(tmp, path)
+            ensure_private_file(path)
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -277,12 +291,13 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
 
 
 def read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    ensure_private_file(path)
     if not path.exists():
         return []
     rows: List[Dict[str, Any]] = []
     quarantine: List[str] = []
     with _file_lock(path):
-        with path.open("r", encoding="utf-8") as handle:
+        with open_private_read_text(path) as handle:
             for line in handle:
                 line = line.strip()
                 if line:
@@ -292,7 +307,7 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
                         quarantine.append(line)
         if quarantine:
             qpath = path.with_suffix(".quarantine.jsonl")
-            with qpath.open("a", encoding="utf-8", newline="\n") as handle:
+            with open_private_text(qpath, "a") as handle:
                 for bad in quarantine:
                     handle.write(bad)
                     handle.write("\n")
@@ -300,23 +315,24 @@ def read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 
 def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     with _file_lock(path):
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
+        with open_private_text(path, "a") as handle:
             handle.write(json.dumps(row, sort_keys=True))
             handle.write("\n")
 
 
 def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     with _file_lock(path):
         tmp = _temp_path_for(path)
         try:
-            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            with open_private_text(tmp, "w") as handle:
                 for row in rows:
                     handle.write(json.dumps(row, sort_keys=True))
                     handle.write("\n")
             _atomic_replace(tmp, path)
+            ensure_private_file(path)
         finally:
             try:
                 tmp.unlink(missing_ok=True)
@@ -535,7 +551,7 @@ class AgentBridge:
         return self.state_dir / ("inbox-%s.jsonl" % agent)
 
     def ensure_state_dir(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.state_dir)
 
     def _load_settings(self):
         return load_settings(self.state_dir)
@@ -548,9 +564,12 @@ class AgentBridge:
             start = time.monotonic()
             while not acquired:
                 try:
-                    self.lock_path.mkdir()
+                    reject_link_components(self.lock_path)
+                    self.lock_path.mkdir(mode=0o700)
+                    ensure_private_directory(self.lock_path)
                     acquired = True
                 except FileExistsError:
+                    reject_link_components(self.lock_path)
                     try:
                         age = time.time() - self.lock_path.stat().st_mtime
                         if age > 60:
@@ -1954,7 +1973,7 @@ class AgentBridge:
 
     def _save_cross_project_pending(self, pending: Dict[str, Any]) -> None:
         pending["updated_at"] = utc_now()
-        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.cross_project_pairs_dir)
         write_json(self.cross_project_pending_path, pending)
 
     def _hash_cross_project_nonce(self, nonce: str) -> str:
@@ -2010,7 +2029,7 @@ class AgentBridge:
     def _save_cross_project_link(self, link: Dict[str, Any]) -> None:
         link_id = self._normalize_cross_project_link_id(str(link.get("link_id") or ""))
         link["updated_at"] = utc_now()
-        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_directory(self.cross_project_pairs_dir)
         write_json(self._cross_project_link_path(link_id), link)
 
     def _cross_project_link_status(self, link: Dict[str, Any], now_dt: Optional[datetime] = None) -> str:
@@ -7228,7 +7247,8 @@ class AgentBridge:
                 watcher["stale"] = True
         if watcher_pid_path.exists():
             try:
-                pid = int(watcher_pid_path.read_text(encoding="utf-8").strip())
+                with open_private_read_text(watcher_pid_path) as handle:
+                    pid = int(handle.read().strip())
                 watcher["pid_marker"] = pid
                 if watcher["pid"] is None:
                     watcher["pid"] = pid
@@ -7254,7 +7274,8 @@ class AgentBridge:
                     entry["root_mismatch"] = True
                     entry["stale"] = True
                 try:
-                    pid = int(marker.read_text(encoding="utf-8").strip())
+                    with open_private_read_text(marker) as handle:
+                        pid = int(handle.read().strip())
                     entry["pid"] = pid
                     identity = process_runtime_identity_status(pid, entry.get("runtime"), expected_role="mcp_server")
                     entry.update(identity)
@@ -7530,7 +7551,7 @@ class AgentBridge:
         rows: List[Dict[str, Any]] = []
         bad_lines = 0
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with open_private_read_text(path) as handle:
                 for line in handle:
                     text = line.strip()
                     if not text:
