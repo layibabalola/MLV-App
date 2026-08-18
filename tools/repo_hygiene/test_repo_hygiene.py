@@ -730,6 +730,81 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("memcpy(", frame_caching)
         self.assertIn("memset(", frame_caching)
 
+    def test_console_frame_cache_linkage_has_processed8_invalidation_provider(self) -> None:
+        console_project = (ROOT / "tests" / "console" / "console_tests.pro").read_text(
+            encoding="utf-8"
+        )
+        links_frame_cache = "src/mlv/frame_caching.c" in console_project
+        links_video_mlv = "src/mlv/video_mlv.c" in console_project
+
+        if links_frame_cache and not links_video_mlv:
+            self.assertIn(
+                "tests/console/stubs/pipeline_stubs.cpp",
+                console_project,
+                "console_tests must link its test-only providers when video_mlv.c is absent",
+            )
+            pipeline_stubs = (
+                ROOT / "tests" / "console" / "stubs" / "pipeline_stubs.cpp"
+            ).read_text(encoding="utf-8")
+            provider = re.search(
+                r"(?s)void\s+mlvInvalidateProcessed8PrefetchCache\s*\(\s*mlvObject_t\s*\*\s*video\s*\)"
+                r"\s*\{(?P<body>.*?)^\}",
+                pipeline_stubs,
+                flags=re.MULTILINE,
+            )
+            self.assertIsNotNone(
+                provider,
+                "frame_caching.c requires a processed8 invalidation provider in console_tests",
+            )
+            assert provider is not None
+            provider_body = provider.group("body")
+
+            expected_scalars = {
+                "current_processed_frame_8bit_active": "0",
+                "current_processed_frame_8bit_signature": "0",
+                "current_processed_frame_8bit": "0",
+                "current_processed_frame_8bit_threads": "0",
+                "processed_8bit_cache_next_slot": "0",
+                "processed_8bit_cache_unit_size": "0",
+                "processed8_prefetch_snapshot_dirty": "1",
+            }
+            for field, value in expected_scalars.items():
+                self.assertRegex(
+                    provider_body,
+                    rf"\bvideo->{field}\s*=\s*{value}\s*;",
+                    f"console processed8 provider must set {field} to {value}",
+                )
+
+            expected_arrays = {
+                "processed_8bit_cache_active",
+                "processed_8bit_cache_frame",
+                "processed_8bit_cache_threads",
+                "processed_8bit_cache_signature",
+                "processed_8bit_cache_scale",
+                "processed_8bit_cache_phase4b_path",
+                "processed_8bit_cache_phase4b_y_crop_rows",
+                "processed_8bit_cache_state",
+                "processed_8bit_cache_prefetched",
+                "processed_8bit_cache_generation",
+            }
+            observed_arrays = set(
+                re.findall(
+                    r"std::memset\(video->(processed_8bit_cache_[a-z0-9_]+),\s*0,\s*"
+                    r"sizeof\(video->\1\)\s*\)\s*;",
+                    provider_body,
+                )
+            )
+            self.assertEqual(
+                observed_arrays,
+                expected_arrays,
+                "console processed8 provider must mirror exactly the synchronous slot arrays",
+            )
+            self.assertNotRegex(
+                provider_body,
+                r"pthread_|video->processed8_prefetch_(?:generation|request|thread|worker|stop)",
+                "async prefetch synchronization and generation behavior belongs to pipeline tests",
+            )
+
     def test_release_processing_stores_and_gpu_stubs_are_platform_portable(self) -> None:
         raw_processing = (ROOT / "src" / "processing" / "raw_processing.c").read_text(
             encoding="utf-8"
