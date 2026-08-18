@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -259,49 +260,22 @@ class RepoHygieneTests(unittest.TestCase):
                 f"{match.group(1)} must have an explicit bounded deadline",
             )
 
-        expected_remote_uses = [
-            ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
-            ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
-        ] * 4 + [
-            ("actions/upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
-        ] * 2
-        uses_entries = []
-        for line in workflow.splitlines():
-            match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
-            if not match:
-                continue
-            raw_target = match.group(1)
-            target, comment_separator, version_comment = raw_target.partition(" #")
-            uses_entries.append(
-                (target.strip().strip("\"'"), version_comment.strip() if comment_separator else "")
-            )
-        remote_uses = []
-        for target, version_comment in uses_entries:
-            self.assertFalse(
-                target.startswith("docker://"),
-                "Docker actions are forbidden absent a separately reviewed digest policy",
-            )
-            if target.startswith("./"):
-                continue
-            action, separator, revision = target.partition("@")
-            self.assertEqual(separator, "@", f"remote action lacks a revision: {target}")
-            self.assertRegex(
-                action,
-                r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
-                f"unrecognized non-local uses target: {target}",
-            )
-            self.assertRegex(revision, r"^[0-9a-f]{40}$", f"{action} must use a full immutable SHA")
-            remote_uses.append((action, revision, version_comment.strip()))
-        self.assertEqual(sorted(remote_uses), sorted(expected_remote_uses))
-
-        checkout_revision = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
         checkout_blocks = re.findall(
-            rf"(?m)^\s*- uses: actions/checkout@{checkout_revision} # v5\r?\n"
+            r"(?m)^\s*- uses: actions/checkout@([0-9a-f]{40}) # v5\r?\n"
             r"\s+with:\r?\n"
             r"\s+persist-credentials: false\s*$",
             workflow,
         )
-        self.assertEqual(len(checkout_blocks), 4)
+        self.assertEqual(
+            len(checkout_blocks),
+            4,
+            "every checkout v5 site in tests.yml must disable persisted GitHub credentials",
+        )
+        self.assertEqual(
+            len(set(checkout_blocks)),
+            1,
+            "tests.yml must use one consistent immutable checkout v5 revision",
+        )
 
         bridge_start = workflow.index("\n  factory-bridge-regressions:")
         product_start = workflow.index("\n  windows-product-oracles:")
@@ -320,6 +294,336 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("\n        uses: actions/upload-artifact@", artifact_step)
         self.assertIn("\n          path: |", artifact_step)
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
+
+    def test_all_tracked_workflow_actions_are_immutably_pinned_and_inventoried(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        discovered_workflows = sorted(
+            [*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")],
+            key=lambda path: path.as_posix().lower(),
+        )
+        tracked_result = git(
+            ROOT,
+            "ls-files",
+            "--",
+            ".github/workflows/*.yml",
+            ".github/workflows/*.yaml",
+        )
+        tracked_workflows = {
+            (ROOT / line.strip()).resolve()
+            for line in tracked_result.stdout.splitlines()
+            if line.strip()
+        }
+        self.assertEqual(
+            {path.resolve() for path in discovered_workflows},
+            tracked_workflows,
+            "the guard must scan every and only tracked top-level GitHub workflow",
+        )
+
+        expected_remote_inventory = Counter(
+            {
+                ("actions/checkout", "v5"): 8,
+                ("actions/setup-python", "v6"): 4,
+                ("actions/upload-artifact", "v7"): 6,
+                ("ConorMacBride/install-package", "v1"): 2,
+            }
+        )
+        observed_remote_inventory: Counter[tuple[str, str]] = Counter()
+        revisions_by_action_major: dict[tuple[str, str], set[str]] = {}
+        credential_isolated_checkout_sites = 0
+        local_action_pattern = re.compile(
+            r"^\./(?!\.\.(?:/|$))(?!.*(?:/)\.\.(?:/|$))[A-Za-z0-9_.\/-]+$"
+        )
+        remote_action_pattern = re.compile(
+            r"^(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
+            r"@(?P<revision>[0-9a-f]{40})$"
+        )
+
+        for workflow_path in discovered_workflows:
+            workflow_text = workflow_path.read_text(encoding="utf-8")
+            permissions_declarations = re.findall(
+                r"(?m)^(?P<indent>[ \t]*)permissions:\s*",
+                workflow_text,
+            )
+            self.assertEqual(
+                permissions_declarations,
+                [""],
+                f"{workflow_path.relative_to(ROOT)} may not add job-level token permissions",
+            )
+            permissions_blocks = re.findall(
+                r"(?m)^permissions:\s*\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))+)",
+                workflow_text,
+            )
+            self.assertEqual(
+                len(permissions_blocks),
+                1,
+                f"{workflow_path.relative_to(ROOT)} must declare one top-level permissions block",
+            )
+            self.assertEqual(
+                [line.strip() for line in permissions_blocks[0].splitlines() if line.strip()],
+                ["contents: read"],
+                f"{workflow_path.relative_to(ROOT)} must grant only top-level contents: read",
+            )
+            credential_isolated_checkout_sites += len(
+                re.findall(
+                    r"(?m)^\s*- uses: actions/checkout@[0-9a-f]{40} # v5\r?\n"
+                    r"\s+with:\r?\n"
+                    r"\s+persist-credentials: false\s*$",
+                    workflow_text,
+                )
+            )
+            for line_number, line in enumerate(workflow_text.splitlines(), start=1):
+                match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
+                if not match:
+                    continue
+                raw_target = match.group(1)
+                target, comment_separator, version_comment = raw_target.partition(" #")
+                target = target.strip().strip("\"'")
+                location = f"{workflow_path.relative_to(ROOT)}:{line_number}"
+                self.assertFalse(
+                    target.startswith("docker://"),
+                    f"{location}: Docker actions are forbidden absent a reviewed digest policy",
+                )
+                if target.startswith("./"):
+                    self.assertRegex(
+                        target,
+                        local_action_pattern,
+                        f"{location}: local actions must be explicit safe ./ paths",
+                    )
+                    continue
+
+                remote_match = remote_action_pattern.fullmatch(target)
+                self.assertIsNotNone(
+                    remote_match,
+                    f"{location}: remote actions must use owner/repo[/path]@<full-40-hex-SHA>",
+                )
+                assert remote_match is not None
+                version = version_comment.strip() if comment_separator else ""
+                version_match = re.fullmatch(r"(?P<major>v[0-9]+)(?:\.[0-9]+){0,2}", version)
+                self.assertIsNotNone(
+                    version_match,
+                    f"{location}: immutable pins require an explicit major/version comment",
+                )
+                assert version_match is not None
+                action_major = (remote_match.group("action"), version_match.group("major"))
+                observed_remote_inventory[action_major] += 1
+                revisions_by_action_major.setdefault(action_major, set()).add(
+                    remote_match.group("revision")
+                )
+
+        self.assertEqual(
+            observed_remote_inventory,
+            expected_remote_inventory,
+            "remote action additions or major changes require an explicit reviewed inventory update",
+        )
+        inconsistent_revisions = {
+            f"{action}@{major}": sorted(revisions)
+            for (action, major), revisions in revisions_by_action_major.items()
+            if len(revisions) != 1
+        }
+        self.assertFalse(
+            inconsistent_revisions,
+            "each action+major must use one consistent immutable SHA across all workflows: "
+            f"{inconsistent_revisions}",
+        )
+        self.assertEqual(
+            credential_isolated_checkout_sites,
+            expected_remote_inventory[("actions/checkout", "v5")],
+            "every checkout v5 site must set persist-credentials: false",
+        )
+        upload_artifact_majors = {
+            int(major.removeprefix("v"))
+            for action, major in observed_remote_inventory
+            if action == "actions/upload-artifact"
+        }
+        self.assertEqual(
+            upload_artifact_majors,
+            {7},
+            "all artifact uploads must use the official Node 24-capable v7 action line",
+        )
+
+    def test_linuxdeploy_downloads_are_fixed_and_checksum_verified(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        all_workflows = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in sorted([*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")])
+        )
+        self.assertNotIn(
+            "miurahr/install-linuxdeploy-action",
+            all_workflows,
+            "the retired Node 16 LinuxDeploy installer action must not return",
+        )
+
+        linux_workflow = (workflow_dir / "Linux.yml").read_text(encoding="utf-8")
+        step_headings = list(re.finditer(r"(?m)^    - name:\s*([^\r\n]+)\r?$", linux_workflow))
+
+        def named_step(name: str) -> tuple[int, str]:
+            matches = [
+                (index, heading)
+                for index, heading in enumerate(step_headings)
+                if heading.group(1).strip() == name
+            ]
+            self.assertEqual(len(matches), 1, f"Linux.yml must contain exactly one {name!r} step")
+            index, heading = matches[0]
+            end = step_headings[index + 1].start() if index + 1 < len(step_headings) else len(linux_workflow)
+            return heading.start(), linux_workflow[heading.start() : end]
+
+        install_step_offset, install_step = named_step("Install pinned LinuxDeploy tools")
+        create_step_offset, create_step = named_step("Create Appimage")
+        self.assertLess(
+            install_step_offset,
+            create_step_offset,
+            "the verified LinuxDeploy install/PATH step must run before Create Appimage",
+        )
+        self.assertIn('printf \'%s\\n\' "${tools_dir}" >> "${GITHUB_PATH}"', install_step)
+
+        def bare_linuxdeploy_invocations(step: str) -> list[str]:
+            return re.findall(
+                r"(?m)^\s*(linuxdeploy-x86_64\.AppImage)(?=\s|$)",
+                step,
+            )
+
+        self.assertEqual(
+            bare_linuxdeploy_invocations(create_step),
+            ["linuxdeploy-x86_64.AppImage"],
+            "Create Appimage must invoke the PATH-resolved LinuxDeploy binary exactly once",
+        )
+        self.assertEqual(
+            create_step.count("linuxdeploy-x86_64.AppImage"),
+            1,
+            "Create Appimage may not contain a second prefixed or absolute LinuxDeploy invocation",
+        )
+        for prefix in ("./", "/tmp/linuxdeploy-tools/"):
+            falsified_step = create_step.replace(
+                "linuxdeploy-x86_64.AppImage",
+                f"{prefix}linuxdeploy-x86_64.AppImage",
+                1,
+            )
+            self.assertEqual(
+                bare_linuxdeploy_invocations(falsified_step),
+                [],
+                f"the bare-command guard must reject the {prefix!r} prefix",
+            )
+
+        self.assertNotRegex(
+            linux_workflow,
+            r"(?i)(?:releases/download/)?continuous",
+            "LinuxDeploy downloads must never use the mutable continuous channel",
+        )
+        expected_assets = {
+            "linuxdeploy-x86_64.AppImage": (
+                "https://github.com/linuxdeploy/linuxdeploy/releases/download/"
+                "1-alpha-20251107-1/linuxdeploy-x86_64.AppImage",
+                "c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d",
+            ),
+            "linuxdeploy-plugin-qt-x86_64.AppImage": (
+                "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/"
+                "1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage",
+                "15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724",
+            ),
+            "linuxdeploy-plugin-appimage-x86_64.AppImage": (
+                "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/"
+                "1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage",
+                "992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3",
+            ),
+        }
+        observed_urls = re.findall(
+            r"https://github\.com/linuxdeploy/[A-Za-z0-9_.-]+/releases/download/"
+            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+            linux_workflow,
+        )
+        self.assertEqual(observed_urls, [asset[0] for asset in expected_assets.values()])
+        observed_checksums = {
+            filename: checksum
+            for checksum, filename in re.findall(
+                r"(?m)^\s+([0-9a-f]{64})  "
+                r"(linuxdeploy(?:-plugin-(?:qt|appimage))?-x86_64\.AppImage)\s*$",
+                linux_workflow,
+            )
+        }
+        self.assertEqual(
+            observed_checksums,
+            {filename: checksum for filename, (_, checksum) in expected_assets.items()},
+        )
+        self.assertEqual(linux_workflow.count("curl --fail --location --retry 5 --retry-all-errors"), 3)
+        self.assertIn("sha256sum -c SHA256SUMS", linux_workflow)
+        self.assertIn('printf \'%s\\n\' "${tools_dir}" >> "${GITHUB_PATH}"', linux_workflow)
+        self.assertLess(linux_workflow.index("sha256sum -c"), linux_workflow.index("chmod +x"))
+        self.assertLess(linux_workflow.index("chmod +x"), linux_workflow.index('"${GITHUB_PATH}"'))
+
+    def test_dependency_updates_and_private_security_reporting_are_bounded(self) -> None:
+        dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
+        update_blocks = re.split(r"(?m)^  - package-ecosystem:\s*", dependabot)[1:]
+        self.assertEqual(len(update_blocks), 2, "Dependabot must expose exactly two bounded ecosystems")
+
+        observed_updates: dict[str, dict[str, str]] = {}
+        for block in update_blocks:
+            ecosystem_match = re.match(r'["\']?([^"\'\r\n]+)["\']?\r?\n', block)
+            self.assertIsNotNone(ecosystem_match)
+            assert ecosystem_match is not None
+            ecosystem = ecosystem_match.group(1)
+
+            def required_field(pattern: str, label: str) -> str:
+                match = re.search(pattern, block, flags=re.MULTILINE)
+                self.assertIsNotNone(match, f"{ecosystem} is missing {label}")
+                assert match is not None
+                return match.group(1)
+
+            observed_updates[ecosystem] = {
+                "directory": required_field(r'^    directory:\s*["\']?([^"\'\r\n]+)', "directory"),
+                "interval": required_field(r'^      interval:\s*["\']?([^"\'\r\n]+)', "interval"),
+                "day": required_field(r'^      day:\s*["\']?([^"\'\r\n]+)', "schedule day"),
+                "time": required_field(r'^      time:\s*["\']?([^"\'\r\n]+)', "schedule time"),
+                "limit": required_field(r"^    open-pull-requests-limit:\s*([0-9]+)", "PR limit"),
+                "group": required_field(r"^    groups:\r?\n      ([A-Za-z0-9_-]+):", "update group"),
+            }
+            self.assertIn(
+                '        patterns:\n          - "*"',
+                block.replace("\r\n", "\n"),
+                f"{ecosystem} must group every dependency",
+            )
+            self.assertIn(
+                '        update-types:\n          - "minor"\n          - "patch"',
+                block.replace("\r\n", "\n"),
+                f"{ecosystem} must bound grouped updates to minor and patch versions",
+            )
+
+        self.assertEqual(
+            observed_updates,
+            {
+                "github-actions": {
+                    "directory": "/",
+                    "interval": "weekly",
+                    "day": "monday",
+                    "time": "06:00",
+                    "limit": "2",
+                    "group": "routine-actions",
+                },
+                "pip": {
+                    "directory": "/tools/agent-bridge",
+                    "interval": "weekly",
+                    "day": "tuesday",
+                    "time": "06:00",
+                    "limit": "2",
+                    "group": "routine-python",
+                },
+            },
+        )
+        self.assertNotEqual(
+            observed_updates["pip"]["directory"],
+            "/",
+            "the repository root is not a supported pip dependency surface",
+        )
+
+        security_policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "https://github.com/layibabalola/MLV-App/security/advisories/new",
+            security_policy,
+        )
+        self.assertRegex(
+            security_policy,
+            r"(?i)do not open a public issue",
+            "vulnerability reports must use the private advisory channel",
+        )
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
         script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"

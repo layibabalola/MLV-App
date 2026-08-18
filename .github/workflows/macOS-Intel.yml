@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
     branches: [ "master" ]
 
+permissions:
+  contents: read
+
 env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
   QTDIR:        /usr/local/opt/qt@5/bin
@@ -15,11 +18,13 @@ jobs:
     runs-on: macos-13
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        persist-credentials: false
 
     - name: Install llvm & Qt & OpenSSL
       continue-on-error: true
-      uses: ConorMacBride/install-package@v1.1.0
+      uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1.1.0
       with:
         brew: llvm qt5 openssl
               
@@ -35,7 +40,7 @@ jobs:
             ${{ env.QTDIR }}/macdeployqt MLV\ App.app -dmg
 
     - name: Save build artifact
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp macOS Intel
         path: ${{ env.ARTIFACT }}
