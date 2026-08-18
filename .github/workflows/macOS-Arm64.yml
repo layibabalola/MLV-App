@@ -22,6 +22,19 @@ jobs:
       with:
         persist-credentials: false
 
+    - name: Install llvm & Qt & OpenSSL
+      uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1.1.0
+      with:
+        brew: llvm qt5 openssl
+
+    - name: Verify macOS build toolchain
+      run: |
+        test -x "${{ env.QTDIR }}/qmake"
+        "${{ env.QTDIR }}/qmake" -v
+        LLVM_CXX="$(brew --prefix llvm)/bin/clang++"
+        test -x "$LLVM_CXX"
+        "$LLVM_CXX" --version
+
     - name: Set up Python for payload verification
       uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
       with:
@@ -35,12 +48,6 @@ jobs:
 
     - name: Verify vendored native payload integrity
       run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
-
-    - name: Install llvm & Qt & OpenSSL
-      continue-on-error: true
-      uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1.1.0
-      with:
-        brew: llvm qt5 openssl
               
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build

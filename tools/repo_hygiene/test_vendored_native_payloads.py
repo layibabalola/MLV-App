@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import stat
 import struct
 import subprocess
@@ -580,6 +581,115 @@ class VendoredNativePayloadTests(unittest.TestCase):
         tests_workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         self.assertIn("python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v", tests_workflow)
         self.assertIn("python -m tools.repo_hygiene.vendored_native_payloads --repo-root .", tests_workflow)
+
+    def test_macos_release_toolchains_install_before_python_and_fail_closed(self) -> None:
+        expected_order = (
+            "Install llvm & Qt & OpenSSL",
+            "Verify macOS build toolchain",
+            "Set up Python for payload verification",
+            "Verify vendored native payload integrity",
+            "Build",
+        )
+        expected_verify_lines = (
+            'test -x "${{ env.QTDIR }}/qmake"',
+            '"${{ env.QTDIR }}/qmake" -v',
+            'LLVM_CXX="$(brew --prefix llvm)/bin/clang++"',
+            'test -x "$LLVM_CXX"',
+            '"$LLVM_CXX" --version',
+        )
+        permissive_shell = re.compile(
+            r"(?im)(?:\|\|\s*(?:true|:)(?:\s|$)|(?:;|&&)\s*true(?:\s|$)|"
+            r"^\s*set\s+\+(?:e|o\s+errexit)\b)"
+        )
+
+        def named_step_blocks(text: str) -> list[tuple[str, str]]:
+            matches = list(re.finditer(r"(?m)^    - name:\s*([^\r\n]+)\s*$", text))
+            return [
+                (
+                    match.group(1).strip(),
+                    text[
+                        match.start() : matches[index + 1].start()
+                        if index + 1 < len(matches)
+                        else len(text)
+                    ],
+                )
+                for index, match in enumerate(matches)
+            ]
+
+        def normalized_run_lines(block: str) -> tuple[str, ...]:
+            lines = block.splitlines()
+            run_index = next(
+                index for index, line in enumerate(lines) if re.fullmatch(r"\s{6}run:\s*\|\s*", line)
+            )
+            commands: list[str] = []
+            for line in lines[run_index + 1 :]:
+                if line.startswith("        "):
+                    if line.strip():
+                        commands.append(line.strip())
+                    continue
+                if line.strip():
+                    break
+            return tuple(commands)
+
+        def assert_fail_closed_policy(text: str) -> None:
+            self.assertNotRegex(text, r"(?im)^\s*continue-on-error\s*:")
+            steps = named_step_blocks(text)
+            names = [name for name, _ in steps]
+            for name in expected_order:
+                self.assertEqual(names.count(name), 1, f"expected one step named {name!r}")
+            positions = [names.index(name) for name in expected_order]
+            self.assertEqual(positions, sorted(positions))
+
+            blocks = dict(steps)
+            install_block = blocks[expected_order[0]]
+            verify_block = blocks[expected_order[1]]
+            self.assertIn("brew: llvm qt5 openssl", install_block)
+            self.assertNotRegex(install_block, permissive_shell)
+            self.assertNotRegex(verify_block, permissive_shell)
+            self.assertEqual(normalized_run_lines(verify_block), expected_verify_lines)
+
+        for relative in (
+            ".github/workflows/macOS-Intel.yml",
+            ".github/workflows/macOS-Arm64.yml",
+        ):
+            with self.subTest(workflow=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                assert_fail_closed_policy(text)
+
+                falsifiers = (
+                    (
+                        "verify continue-on-error",
+                        text.replace(
+                            "    - name: Verify macOS build toolchain\n",
+                            "    - name: Verify macOS build toolchain\n      continue-on-error: true\n",
+                            1,
+                        ),
+                    ),
+                    (
+                        "qmake masks failure",
+                        text.replace(
+                            '"${{ env.QTDIR }}/qmake" -v',
+                            '"${{ env.QTDIR }}/qmake" -v || true',
+                            1,
+                        ),
+                    ),
+                    (
+                        "clang masks failure",
+                        text.replace('"$LLVM_CXX" --version', '"$LLVM_CXX" --version || true', 1),
+                    ),
+                    (
+                        "errexit disabled",
+                        text.replace(
+                            '        test -x "${{ env.QTDIR }}/qmake"',
+                            '        set +e\n        test -x "${{ env.QTDIR }}/qmake"',
+                            1,
+                        ),
+                    ),
+                )
+                for label, falsified in falsifiers:
+                    with self.subTest(workflow=relative, falsifier=label):
+                        with self.assertRaises(AssertionError):
+                            assert_fail_closed_policy(falsified)
 
 
 if __name__ == "__main__":
