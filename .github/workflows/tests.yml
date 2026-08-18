@@ -46,6 +46,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -60,6 +62,8 @@ jobs:
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_shipping_defaults -v
+          python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
+          python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
   windows-scaffold:
@@ -113,6 +117,9 @@ jobs:
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
             -v
 
+      - name: Test screenshot fresh-render provenance gate
+        run: |
+          & tools\profiling\test-gui-smoke-screenshot-provenance.ps1
       - name: Install aqtinstall
         run: |
           python -m pip install --upgrade pip

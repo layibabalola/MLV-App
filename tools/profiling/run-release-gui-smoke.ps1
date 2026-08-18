@@ -37,6 +37,7 @@ param(
     [switch]$RbfDetailTiming,
     [string]$GpuPlaybackReconBackend = "",
     [switch]$CaptureScreenshot,
+    [switch]$RequireFreshScreenshotRender,
     [switch]$FailOnColorArtifact,
     [switch]$SkipWindowScreenshot,
     [string]$ScreenshotOutputDir = "",
@@ -82,6 +83,11 @@ param(
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+. (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')
+
+if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
+    throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
+}
 
 # A zero-present result proves only that the process launched. It is never a
 # playback, cadence, lifecycle-stress, screenshot, or A/B-quality result.
@@ -119,7 +125,8 @@ if ($UsePersistedPlaybackSettings) {
 
 # Opt-in temporal-artifact gate: turn on the interactive trace so the post-run detector can measure
 # flicker / stalls / cadence jitter from per-present events. Auto-discounts the screenshot grab.
-if ($DetectPlaybackArtifacts -and -not ($ExtraEnvironment | Where-Object { $_ -match '^MLVAPP_INTERACTIVE_TRACE=' })) {
+if (($DetectPlaybackArtifacts -or $RequireFreshScreenshotRender) -and
+    -not ($ExtraEnvironment | Where-Object { $_ -match '^MLVAPP_INTERACTIVE_TRACE=' })) {
     $ExtraEnvironment += 'MLVAPP_INTERACTIVE_TRACE=1'
 }
 
@@ -1023,7 +1030,7 @@ $effectiveExpectedVisualScaleRequest = if ($ExpectedVisualScaleRequest -eq -2) {
 }
 
 if ($DryRun) {
-    [pscustomobject]@{
+    $dryRunResult = [pscustomobject]@{
         exePath = $exe
         workingDirectory = $root
         arguments = $arguments
@@ -1053,7 +1060,13 @@ if ($DryRun) {
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
         }
         output = $outputPath
-    } | ConvertTo-Json -Depth 5
+    }
+    if ($RequireFreshScreenshotRender) {
+        $dryRunResult.validationPolicy | Add-Member `
+            -NotePropertyName requireFreshScreenshotRender `
+            -NotePropertyValue $true
+    }
+    $dryRunResult | ConvertTo-Json -Depth 5
     return
 }
 
@@ -1319,8 +1332,19 @@ $cpuSettle = if ($cpuSettleLine) { Convert-PlaybackLogLineToObject $cpuSettleLin
 $clipLifecycleStress = if ($clipLifecycleStressLine) { Convert-PlaybackLogLineToObject $clipLifecycleStressLine } else { $null }
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
 $screenshotLog = if ($screenshotLine) { Convert-PlaybackLogLineToObject $screenshotLine } else { $null }
+$screenshotProvenance = if ($RequireFreshScreenshotRender) {
+    Get-GuiSmokeScreenshotProvenance -OrderedLogLines $recentLines
+} else {
+    $null
+}
 if ($screenshotCapture -and $screenshotLog -and (Get-ObjectPropertyValue $screenshotLog "method")) {
     $screenshotCapture.method = [string](Get-ObjectPropertyValue $screenshotLog "method")
+}
+if ($RequireFreshScreenshotRender -and $screenshotCapture) {
+    $screenshotCapture | Add-Member `
+        -NotePropertyName provenance `
+        -NotePropertyValue $screenshotProvenance `
+        -Force
 }
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
 $windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
@@ -1535,6 +1559,15 @@ if ($FailOnColorArtifact -and
     $null -ne $colorArtifactScan -and
     -not $colorArtifactScanPassed) {
     $validationFailures += "Color artifact scan verdict was $colorArtifactVerdict."
+}
+if ($RequireFreshScreenshotRender -and
+    ($null -eq $screenshotProvenance -or -not $screenshotProvenance.validFresh)) {
+    $provenanceFailures = if ($screenshotProvenance) {
+        $screenshotProvenance.failures -join ', '
+    } else {
+        'missing-provenance'
+    }
+    $validationFailures += "Screenshot fresh-render provenance failed: $provenanceFailures."
 }
 if ($glOutputValidationRequested) {
     if ($glOutputProof.activeProbeCount -le 0) {
@@ -1927,6 +1960,24 @@ $result | Add-Member -NotePropertyName validation -NotePropertyValue ([pscustomo
     warnings = $validationWarnings
     settledValidationRecommendedSeconds = $settledValidationRecommendedSeconds
 })
+
+if ($RequireFreshScreenshotRender) {
+    $result.launch.validationPolicy | Add-Member `
+        -NotePropertyName requireFreshScreenshotRender `
+        -NotePropertyValue $true
+    $result.log | Add-Member `
+        -NotePropertyName screenshotProvenance `
+        -NotePropertyValue $screenshotProvenance
+    $result.validation | Add-Member `
+        -NotePropertyName freshScreenshotRenderRequired `
+        -NotePropertyValue $true
+    $result.validation | Add-Member `
+        -NotePropertyName freshScreenshotRenderValidated `
+        -NotePropertyValue ($null -ne $screenshotProvenance -and $screenshotProvenance.validFresh)
+    $result.validation | Add-Member `
+        -NotePropertyName screenshotProvenance `
+        -NotePropertyValue $screenshotProvenance
+}
 
 $result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $outputPath -Encoding UTF8
 $result | ConvertTo-Json -Depth 8
