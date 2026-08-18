@@ -88,6 +88,11 @@ $validationWarnings = @()
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
 }
+if ($RequireFreshScreenshotRender) {
+    # V2 provenance binds the screenshot to playback frame/session/index and
+    # request serial telemetry. Make the dependency intrinsic to the policy.
+    $FrameTelemetry = $true
+}
 
 # A zero-present result proves only that the process launched. It is never a
 # playback, cadence, lifecycle-stress, screenshot, or A/B-quality result.
@@ -1333,7 +1338,9 @@ $clipLifecycleStress = if ($clipLifecycleStressLine) { Convert-PlaybackLogLineTo
 $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObject $windowScreenshotLine } else { $null }
 $screenshotLog = if ($screenshotLine) { Convert-PlaybackLogLineToObject $screenshotLine } else { $null }
 $screenshotProvenance = if ($RequireFreshScreenshotRender) {
-    Get-GuiSmokeScreenshotProvenance -OrderedLogLines $recentLines
+    Get-GuiSmokeScreenshotProvenance `
+        -OrderedLogLines $recentLines `
+        -RequestedStartFrame $StartFrame
 } else {
     $null
 }
