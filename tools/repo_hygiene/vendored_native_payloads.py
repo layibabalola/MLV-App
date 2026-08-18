@@ -483,6 +483,52 @@ def _validate_readiness(readiness: Any, payloads: list[dict[str, Any]]) -> None:
                  f"{record_id} does not carry its verified license notice")
 
 
+def _validate_provenance(record: dict[str, Any]) -> None:
+    label = str(record.get("id") or "payload")
+    provenance = record.get("provenance")
+    _require(isinstance(provenance, dict), f"{label} provenance must be an object")
+    _require(provenance.get("status") in {"unknown", "partial-local-evidence", "verified"},
+             f"{label} provenance status is invalid")
+
+    authoritative = provenance.get("authoritative_source_archive")
+    if authoritative is not None:
+        _require(isinstance(authoritative, dict),
+                 f"{label} authoritative_source_archive must be an object")
+        _require(set(authoritative) == {"url", "bytes", "sha256", "tracked_archive_match", "verified_at"},
+                 f"{label} authoritative_source_archive fields are incomplete or unexpected")
+        _require(authoritative.get("url") == provenance.get("source"),
+                 f"{label} authoritative source URL must equal provenance.source")
+        _require(authoritative.get("bytes") == record.get("bytes"),
+                 f"{label} authoritative source size must equal the tracked archive")
+        _require(authoritative.get("sha256") == record.get("sha256"),
+                 f"{label} authoritative source sha256 must equal the tracked archive")
+        _require(authoritative.get("tracked_archive_match") == "byte-for-byte",
+                 f"{label} authoritative source match must be byte-for-byte")
+        _require(re.fullmatch(r"20\d\d-[01]\d-[0-3]\d", str(authoritative.get("verified_at"))) is not None,
+                 f"{label} authoritative source verification date is invalid")
+        _require(provenance.get("status") == "partial-local-evidence",
+                 f"{label} archive equality alone must not promote provenance to verified")
+        _require(provenance.get("upstream_checksum_verified") is False,
+                 f"{label} archive equality must not claim an independently published upstream checksum")
+
+    candidate = provenance.get("candidate_source_mapping")
+    if candidate is not None:
+        _require(isinstance(candidate, dict), f"{label} candidate_source_mapping must be an object")
+        _require(candidate.get("authoritativeness") == "non-authoritative-unverified",
+                 f"{label} candidate source mapping must remain explicitly non-authoritative and unverified")
+        _require(provenance.get("status") != "verified",
+                 f"{label} candidate source mapping cannot promote provenance to verified")
+        _require(str(record.get("redistribution_readiness", "")).startswith("blocked-"),
+                 f"{label} candidate source mapping cannot reduce its redistribution blocker")
+        for key in ("repository", "evidence", "limitation"):
+            _require(isinstance(candidate.get(key), str) and candidate[key],
+                     f"{label} candidate source mapping {key} is missing")
+        revisions = [value for key, value in candidate.items() if key.endswith("revision")]
+        _require(revisions and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+                                   for value in revisions),
+                 f"{label} candidate source revisions must be full 40-character commit ids")
+
+
 def _validate_archive(repo_root: Path, record: dict[str, Any], policy: dict[str, Any], *, selected: bool) -> None:
     label = str(record.get("id") or record.get("path") or "payload")
     relative = _manifest_path(record.get("path"), label)
@@ -625,14 +671,18 @@ def _git_tracked_artifacts(repo_root: Path, suffixes: list[str]) -> set[str]:
     return artifacts
 
 
-def validate(repo_root: Path, manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
-    repo_root = repo_root.resolve()
-    manifest_file = manifest_path if manifest_path.is_absolute() else repo_root / manifest_path
+def _parse_manifest_bytes(raw: bytes, label: str) -> dict[str, Any]:
     try:
-        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PayloadIntegrityError(f"cannot read payload manifest {manifest_file}: {exc}") from exc
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PayloadIntegrityError(f"cannot parse payload manifest {label}: {exc}") from exc
     _require(isinstance(manifest, dict), "payload manifest root must be an object")
+    return manifest
+
+
+def validate_manifest(repo_root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """Validate an already-parsed immutable manifest snapshot."""
+    repo_root = repo_root.resolve()
     _require(manifest.get("schema_version") == 1, "payload manifest schema_version must be 1")
     policy = _validate_policy(manifest.get("integrity_policy"))
 
@@ -665,10 +715,7 @@ def validate(repo_root: Path, manifest_path: Path = DEFAULT_MANIFEST) -> dict[st
                 consumer,
                 f"{record['id']} consumer[{index}]",
             )
-        provenance = record.get("provenance")
-        _require(isinstance(provenance, dict), f"{record['id']} provenance must be an object")
-        _require(provenance.get("status") in {"unknown", "partial-local-evidence", "verified"},
-                 f"{record['id']} provenance status is invalid")
+        _validate_provenance(record)
     for record in inactive:
         _validate_archive(repo_root, record, policy, selected=False)
 
@@ -684,6 +731,16 @@ def validate(repo_root: Path, manifest_path: Path = DEFAULT_MANIFEST) -> dict[st
         "redistribution_enforcement": readiness["enforcement"],
         "redistribution_blockers": blockers,
     }
+
+
+def validate(repo_root: Path, manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
+    repo_root = repo_root.resolve()
+    manifest_file = manifest_path if manifest_path.is_absolute() else repo_root / manifest_path
+    try:
+        raw = manifest_file.read_bytes()
+    except OSError as exc:
+        raise PayloadIntegrityError(f"cannot read payload manifest {manifest_file}: {exc}") from exc
+    return validate_manifest(repo_root, _parse_manifest_bytes(raw, str(manifest_file)))
 
 
 def main(argv: list[str] | None = None) -> int:

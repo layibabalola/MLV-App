@@ -47,7 +47,7 @@
       "Only the Linux FFmpeg archive contains a redistributable license text; the other consumed archives lack complete bundled notices.",
       "The macOS Arm64 release consumes the x86_64-only ffmpegOSX.zip payload.",
       "The exact raw2mlv source commits, versions, licenses, and build recipes are not locally recoverable.",
-      "The local qmake Linux install rule extracts FFmpeg and raw2mlv without invoking the repository integrity validator."
+      "The local qmake Linux and macOS install rules retain legacy extraction until a portable pinned-Python discovery contract can fail closed without breaking supported local builds."
     ]
   },
   "inactive_artifacts": [
@@ -104,11 +104,11 @@
           "path": ".github/workflows/Linux.yml",
           "status": "active-release-workflow",
           "reference_marker": "ffmpegLinux.tar.xz",
-          "operation_marker": "tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-linux-x86_64 --archive-reference ffmpegLinux.tar.xz --output-dir . --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Linux.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-linux-x86_64 --archive-reference ffmpegLinux.tar.xz --output-dir . --verify-installed"
           }
         },
         {
@@ -122,8 +122,15 @@
       "provenance": {
         "status": "partial-local-evidence",
         "version": "4.4-static",
-        "source": "https://johnvansickle.com/ffmpeg/",
-        "source_evidence": "embedded readme.txt and binary version string",
+        "source": "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-4.4-amd64-static.tar.xz",
+        "source_evidence": "The tracked archive was byte-for-byte matched to the authoritative versioned John Van Sickle download on 2026-08-18; embedded readme.txt and binary version also identify ffmpeg-4.4-amd64-static.",
+        "authoritative_source_archive": {
+          "url": "https://www.johnvansickle.com/ffmpeg/old-releases/ffmpeg-4.4-amd64-static.tar.xz",
+          "bytes": 39577132,
+          "sha256": "ccac14abf72e8a451d823ed09b1ea953b0bdf2814ab10fc153c753afd5fb0a20",
+          "tracked_archive_match": "byte-for-byte",
+          "verified_at": "2026-08-18"
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "GPL-3.0-or-later",
@@ -161,27 +168,34 @@
       "consumers": [
         {
           "target": "macos-x86_64",
-          "path": "platform/qt/MLVApp.pro",
-          "status": "active-release-rule",
-          "reference_marker": "$$PWD/../qt/FFmpeg/ffmpegOSX.zip",
-          "operation_marker": "macx: QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip)",
+          "path": ".github/workflows/macOS-Intel.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "ffmpegOSX.zip",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Intel.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "make -j8"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
         },
         {
           "target": "macos-arm64",
-          "path": "platform/qt/MLVApp.pro",
-          "status": "active-release-rule-architecture-mismatch",
-          "reference_marker": "$$PWD/../qt/FFmpeg/ffmpegOSX.zip",
-          "operation_marker": "macx: QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip)",
+          "path": ".github/workflows/macOS-Arm64.yml",
+          "status": "active-release-workflow-architecture-mismatch",
+          "reference_marker": "ffmpegOSX.zip",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Arm64.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "make -j8"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
+        },
+        {
+          "target": "macos-local",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-local-install-rule-unvalidated",
+          "reference_marker": "$$PWD/../qt/FFmpeg/ffmpegOSX.zip",
+          "operation_marker": "QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip)"
         }
       ],
       "provenance": {
@@ -189,6 +203,13 @@
         "version": "N-99620-g9860777516-tessus",
         "source": "https://evermeet.cx/ffmpeg/",
         "source_evidence": "embedded binary version and vendor strings",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://git.ffmpeg.org/ffmpeg.git",
+          "candidate_revision": "9860777516d0236d6df52d006738f50704d6521b",
+          "evidence": "The embedded N-99620-g9860777516-tessus version string names this revision.",
+          "limitation": "No archived upstream artifact, signature, or build recipe was recovered, so this does not establish that the tracked binary was built from that source."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "GPL-enabled-build-exact-notice-set-unverified",
@@ -274,11 +295,11 @@
           "path": ".github/workflows/Windows.yml",
           "status": "active-release-workflow",
           "reference_marker": "ffmpegWin64.zip",
-          "operation_marker": "7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release",
+          "operation_marker": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Windows.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release"
+            "must_precede": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed"
           }
         }
       ],
@@ -327,11 +348,11 @@
           "path": ".github/workflows/Linux.yml",
           "status": "active-release-workflow",
           "reference_marker": "raw2mlvLinux.tar.xz",
-          "operation_marker": "tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-linux-x86_64 --archive-reference raw2mlvLinux.tar.xz --output-dir . --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Linux.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-linux-x86_64 --archive-reference raw2mlvLinux.tar.xz --output-dir . --verify-installed"
           }
         },
         {
@@ -346,6 +367,15 @@
         "status": "unknown",
         "version": "unknown",
         "source": "unknown",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://github.com/ilia3101/LibMLV",
+          "candidate_revision": "b2e58cba5bb478af0775b18b5e1601014a6bb514",
+          "historical_raw2mlv_tag_revision": "8c6bf3f369bf5c7f96b7683516d5adf8d7ff8624",
+          "candidate_libraw_revision": "beeb572687270d49c16734c9ca620982151dbeff",
+          "evidence": "These revisions bound plausible LibMLV/raw2mlv and LibRaw source history only.",
+          "limitation": "No embedded version identifier, reproducible build recipe, or matching upstream binary proves that this archive was built from these candidates."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "unknown",
@@ -382,21 +412,37 @@
       "consumers": [
         {
           "target": "macos-arm64",
-          "path": "platform/qt/MLVApp.pro",
-          "status": "active-release-rule",
-          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip",
-          "operation_marker": "macx: equals(QT_ARCH, arm64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip)",
+          "path": ".github/workflows/macOS-Arm64.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "raw2mlvMacOsArm.zip",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-arm64 --archive-reference raw2mlvMacOsArm.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Arm64.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "make -j8"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-arm64 --archive-reference raw2mlvMacOsArm.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
+        },
+        {
+          "target": "macos-local-arm64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-local-install-rule-unvalidated",
+          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip",
+          "operation_marker": "equals(QT_ARCH, arm64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip)"
         }
       ],
       "provenance": {
         "status": "unknown",
         "version": "unknown",
         "source": "unknown",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://github.com/ilia3101/LibMLV",
+          "candidate_revision": "b2e58cba5bb478af0775b18b5e1601014a6bb514",
+          "historical_raw2mlv_tag_revision": "8c6bf3f369bf5c7f96b7683516d5adf8d7ff8624",
+          "candidate_libraw_revision": "beeb572687270d49c16734c9ca620982151dbeff",
+          "evidence": "These revisions bound plausible LibMLV/raw2mlv and LibRaw source history only.",
+          "limitation": "No embedded version identifier, reproducible build recipe, or matching upstream binary proves that this archive was built from these candidates."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "unknown",
@@ -433,21 +479,37 @@
       "consumers": [
         {
           "target": "macos-x86_64",
-          "path": "platform/qt/MLVApp.pro",
-          "status": "active-release-rule",
-          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvOSX.zip",
-          "operation_marker": "macx: equals(QT_ARCH, x86_64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvOSX.zip)",
+          "path": ".github/workflows/macOS-Intel.yml",
+          "status": "active-release-workflow",
+          "reference_marker": "raw2mlvOSX.zip",
+          "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-x86_64 --archive-reference raw2mlvOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Intel.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "make -j8"
+            "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-x86_64 --archive-reference raw2mlvOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
+        },
+        {
+          "target": "macos-local-x86_64",
+          "path": "platform/qt/MLVApp.pro",
+          "status": "active-local-install-rule-unvalidated",
+          "reference_marker": "$$PWD/../qt/raw2mlv/raw2mlvOSX.zip",
+          "operation_marker": "equals(QT_ARCH, x86_64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvOSX.zip)"
         }
       ],
       "provenance": {
         "status": "unknown",
         "version": "unknown",
         "source": "unknown",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://github.com/ilia3101/LibMLV",
+          "candidate_revision": "b2e58cba5bb478af0775b18b5e1601014a6bb514",
+          "historical_raw2mlv_tag_revision": "8c6bf3f369bf5c7f96b7683516d5adf8d7ff8624",
+          "candidate_libraw_revision": "beeb572687270d49c16734c9ca620982151dbeff",
+          "evidence": "These revisions bound plausible LibMLV/raw2mlv and LibRaw source history only.",
+          "limitation": "No embedded version identifier, reproducible build recipe, or matching upstream binary proves that this archive was built from these candidates."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "unknown",
@@ -503,6 +565,15 @@
         "status": "unknown",
         "version": "unknown",
         "source": "unknown",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://github.com/ilia3101/LibMLV",
+          "candidate_revision": "b2e58cba5bb478af0775b18b5e1601014a6bb514",
+          "historical_raw2mlv_tag_revision": "8c6bf3f369bf5c7f96b7683516d5adf8d7ff8624",
+          "candidate_libraw_revision": "beeb572687270d49c16734c9ca620982151dbeff",
+          "evidence": "These revisions bound plausible LibMLV/raw2mlv and LibRaw source history only.",
+          "limitation": "No embedded version identifier, reproducible build recipe, or matching upstream binary proves that this archive was built from these candidates."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "unknown",
@@ -552,11 +623,11 @@
           "path": ".github/workflows/Windows.yml",
           "status": "active-release-workflow-requires-wow64",
           "reference_marker": "raw2mlvWin64.zip",
-          "operation_marker": "7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release",
+          "operation_marker": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/Windows.yml",
             "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
-            "must_precede": "7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\\build\\release"
+            "must_precede": "python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir \"${{ env.SOURCE_DIR }}\\build\\release\" --verify-installed"
           }
         }
       ],
@@ -564,6 +635,15 @@
         "status": "unknown",
         "version": "unknown",
         "source": "unknown",
+        "candidate_source_mapping": {
+          "authoritativeness": "non-authoritative-unverified",
+          "repository": "https://github.com/ilia3101/LibMLV",
+          "candidate_revision": "b2e58cba5bb478af0775b18b5e1601014a6bb514",
+          "historical_raw2mlv_tag_revision": "8c6bf3f369bf5c7f96b7683516d5adf8d7ff8624",
+          "candidate_libraw_revision": "beeb572687270d49c16734c9ca620982151dbeff",
+          "evidence": "These revisions bound plausible LibMLV/raw2mlv and LibRaw source history only.",
+          "limitation": "No embedded version identifier, reproducible build recipe, or matching upstream binary proves that this archive was built from these candidates."
+        },
         "build_recipe": "unknown",
         "upstream_checksum_verified": false,
         "license": "unknown",

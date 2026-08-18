@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 import stat
 import struct
@@ -13,6 +14,11 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from .extract_vendored_native_payload import (
+    extract_payload_record,
+    load_validated_manifest_snapshot,
+    verify_installed_payload,
+)
 from .vendored_native_payloads import (
     DEFAULT_MANIFEST,
     PayloadIntegrityError,
@@ -21,6 +27,7 @@ from .vendored_native_payloads import (
     _validate_archive,
     _validate_consumer_claim,
     _validate_policy,
+    _validate_provenance,
     _validate_readiness,
     main,
     validate,
@@ -161,6 +168,40 @@ class VendoredNativePayloadTests(unittest.TestCase):
             ],
         }
 
+    def _two_member_record(self, path: Path, executable: bytes, library: bytes) -> dict:
+        archive_bytes = path.read_bytes()
+        return {
+            "id": "fixture",
+            "path": path.name,
+            "archive_format": "zip",
+            "bytes": len(archive_bytes),
+            "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            "member_summary": {
+                "entries": 2,
+                "file_entries": 2,
+                "directory_entries": 0,
+                "total_uncompressed_bytes": len(executable) + len(library),
+            },
+            "selected_members": [
+                {
+                    "path": "tool.exe",
+                    "output_name": "tool.exe",
+                    "kind": "executable",
+                    "bytes": len(executable),
+                    "sha256": hashlib.sha256(executable).hexdigest(),
+                    "binary": {"format": "pe", "machine": "x86_64"},
+                },
+                {
+                    "path": "library.dll",
+                    "output_name": "library.dll",
+                    "kind": "shared-library",
+                    "bytes": len(library),
+                    "sha256": hashlib.sha256(library).hexdigest(),
+                    "binary": {"format": "pe", "machine": "x86_64"},
+                },
+            ],
+        }
+
     def test_committed_manifest_integrity_passes_but_redistribution_remains_blocked(self) -> None:
         result = validate(ROOT)
         self.assertEqual(result["integrity"], "pass")
@@ -177,8 +218,46 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.assertTrue(all(record["provenance"]["license"] == "unknown" for record in raw_records))
         mac_ffmpeg = next(record for record in self.manifest["payloads"] if record["id"] == "ffmpeg-macos-x86_64")
         arm_consumer = next(row for row in mac_ffmpeg["consumers"] if row["target"] == "macos-arm64")
-        self.assertEqual(arm_consumer["status"], "active-release-rule-architecture-mismatch")
+        self.assertEqual(arm_consumer["status"], "active-release-workflow-architecture-mismatch")
         self.assertEqual(mac_ffmpeg["selected_members"][0]["binary"]["machine"], "x86_64")
+
+    def test_provenance_truth_keeps_archive_equality_separate_from_upstream_checksum(self) -> None:
+        linux_ffmpeg = next(
+            record for record in self.manifest["payloads"] if record["id"] == "ffmpeg-linux-x86_64"
+        )
+        provenance = linux_ffmpeg["provenance"]
+        source_archive = provenance["authoritative_source_archive"]
+        self.assertEqual(source_archive["url"], provenance["source"])
+        self.assertEqual(source_archive["bytes"], linux_ffmpeg["bytes"])
+        self.assertEqual(source_archive["sha256"], linux_ffmpeg["sha256"])
+        self.assertEqual(source_archive["tracked_archive_match"], "byte-for-byte")
+        self.assertEqual(provenance["status"], "partial-local-evidence")
+        self.assertFalse(provenance["upstream_checksum_verified"])
+        _validate_provenance(linux_ffmpeg)
+
+        promoted = copy.deepcopy(linux_ffmpeg)
+        promoted["provenance"]["status"] = "verified"
+        with self.assertRaisesRegex(PayloadIntegrityError, "must not promote"):
+            _validate_provenance(promoted)
+
+    def test_candidate_source_mappings_are_non_authoritative_and_do_not_reduce_blockers(self) -> None:
+        candidate_records = [
+            record for record in self.manifest["payloads"]
+            if record["id"].startswith("raw2mlv-") or record["id"] == "ffmpeg-macos-x86_64"
+        ]
+        self.assertEqual(len(candidate_records), 6)
+        for record in candidate_records:
+            with self.subTest(payload=record["id"]):
+                mapping = record["provenance"]["candidate_source_mapping"]
+                self.assertEqual(mapping["authoritativeness"], "non-authoritative-unverified")
+                self.assertNotEqual(record["provenance"]["status"], "verified")
+                self.assertTrue(record["redistribution_readiness"].startswith("blocked-"))
+                _validate_provenance(record)
+
+                overstated = copy.deepcopy(record)
+                overstated["provenance"]["candidate_source_mapping"]["authoritativeness"] = "authoritative"
+                with self.assertRaisesRegex(PayloadIntegrityError, "explicitly non-authoritative"):
+                    _validate_provenance(overstated)
 
     def test_strict_redistribution_mode_stays_red_without_failing_integrity_mode(self) -> None:
         blocked = {
@@ -429,6 +508,172 @@ class VendoredNativePayloadTests(unittest.TestCase):
         path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
         _validate_archive(self.root, self._record(path, "tool.exe", content), self.policy, selected=True)
 
+    def test_verified_extraction_is_byte_identical_atomic_and_verifies_final_install(self) -> None:
+        content = _fake_pe(fill=b"byte-identical-output")
+        path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
+        record = self._record(path, "tool.exe", content)
+        output_dir = self.root / "installed"
+        result = extract_payload_record(
+            self.root,
+            record,
+            output_dir,
+            archive_reference="fixture.zip",
+            verify_installed=True,
+        )
+        installed = output_dir / "tool.exe"
+        self.assertEqual(installed.read_bytes(), content)
+        self.assertEqual(result["installed"][0]["sha256"], hashlib.sha256(content).hexdigest())
+        self.assertFalse(any(output_dir.glob(".*.tmp")))
+
+        installed.write_bytes(content + b"tampered")
+        with self.assertRaisesRegex(PayloadIntegrityError, "size mismatch"):
+            verify_installed_payload(record, output_dir)
+
+    def test_two_member_publication_commits_both_new_files(self) -> None:
+        executable = _fake_pe(fill=b"new executable")
+        library = _fake_pe(fill=b"new library", dll=True)
+        path = self._write_zip(
+            [
+                ("tool.exe", executable, stat.S_IFREG | 0o755),
+                ("library.dll", library, stat.S_IFREG | 0o755),
+            ]
+        )
+        record = self._two_member_record(path, executable, library)
+        output_dir = self.root / "installed"
+        output_dir.mkdir()
+        (output_dir / "tool.exe").write_bytes(b"old executable")
+        (output_dir / "library.dll").write_bytes(b"old library")
+
+        result = extract_payload_record(
+            self.root,
+            record,
+            output_dir,
+            archive_reference="fixture.zip",
+            verify_installed=True,
+        )
+
+        self.assertEqual((output_dir / "tool.exe").read_bytes(), executable)
+        self.assertEqual((output_dir / "library.dll").read_bytes(), library)
+        self.assertEqual(
+            [row["sha256"] for row in result["installed"]],
+            [hashlib.sha256(executable).hexdigest(), hashlib.sha256(library).hexdigest()],
+        )
+        self.assertFalse(any(output_dir.glob(".vendored-payload-transaction-*")))
+
+    def test_second_member_publication_failure_restores_both_originals(self) -> None:
+        executable = _fake_pe(fill=b"new executable")
+        library = _fake_pe(fill=b"new library", dll=True)
+        path = self._write_zip(
+            [
+                ("tool.exe", executable, stat.S_IFREG | 0o755),
+                ("library.dll", library, stat.S_IFREG | 0o755),
+            ]
+        )
+        record = self._two_member_record(path, executable, library)
+        output_dir = self.root / "installed"
+        output_dir.mkdir()
+        old_executable = b"old executable"
+        old_library = b"old library"
+        (output_dir / "tool.exe").write_bytes(old_executable)
+        (output_dir / "library.dll").write_bytes(old_library)
+
+        real_replace = os.replace
+        publication_count = 0
+
+        def fail_second_publication(source: os.PathLike | str | bytes, destination: os.PathLike | str | bytes) -> None:
+            nonlocal publication_count
+            if Path(source).name.endswith(".tmp"):
+                publication_count += 1
+                if publication_count == 2:
+                    raise OSError("deterministic second publication failure")
+            real_replace(source, destination)
+
+        with mock.patch(
+            "tools.repo_hygiene.extract_vendored_native_payload.os.replace",
+            side_effect=fail_second_publication,
+        ), self.assertRaisesRegex(PayloadIntegrityError, "all originals restored"):
+            extract_payload_record(
+                self.root,
+                record,
+                output_dir,
+                archive_reference="fixture.zip",
+                verify_installed=True,
+            )
+
+        self.assertEqual(publication_count, 2)
+        self.assertEqual((output_dir / "tool.exe").read_bytes(), old_executable)
+        self.assertEqual((output_dir / "library.dll").read_bytes(), old_library)
+        self.assertFalse(any(output_dir.glob(".vendored-payload-transaction-*")))
+        self.assertFalse(any(output_dir.glob(".*.tmp")))
+
+    def test_manifest_snapshot_hash_and_validation_share_the_same_raced_bytes(self) -> None:
+        manifest_path = self.root / "manifest.json"
+        original = json.dumps({"schema_version": 1, "snapshot": "original"}).encode("utf-8")
+        changed = json.dumps({"schema_version": 1, "snapshot": "changed"}).encode("utf-8")
+        manifest_path.write_bytes(original)
+        real_read_bytes = Path.read_bytes
+        read_count = 0
+
+        def read_then_mutate(path: Path) -> bytes:
+            nonlocal read_count
+            read_count += 1
+            snapshot = real_read_bytes(path)
+            path.write_bytes(changed)
+            return snapshot
+
+        with mock.patch.object(Path, "read_bytes", read_then_mutate), mock.patch(
+            "tools.repo_hygiene.extract_vendored_native_payload.validate_manifest"
+        ) as validate_snapshot:
+            manifest, digest = load_validated_manifest_snapshot(self.root, manifest_path)
+
+        self.assertEqual(read_count, 1)
+        self.assertEqual(manifest["snapshot"], "original")
+        self.assertEqual(digest, hashlib.sha256(original).hexdigest())
+        self.assertEqual(manifest_path.read_bytes(), changed)
+        validate_snapshot.assert_called_once_with(self.root, manifest)
+
+    def test_verified_extraction_rejects_traversal_symlink_and_output_collisions(self) -> None:
+        content = _fake_pe()
+        traversal = self._write_zip([("../tool.exe", content, stat.S_IFREG | 0o755)])
+        traversal_record = self._record(traversal, "../tool.exe", content)
+        with self.assertRaisesRegex(PayloadIntegrityError, "traverses a parent"):
+            extract_payload_record(
+                self.root, traversal_record, self.root / "traversal-out", archive_reference="fixture.zip"
+            )
+
+        symlink = self._write_zip([("tool.exe", b"target", stat.S_IFLNK | 0o777)])
+        symlink_record = self._record(symlink, "tool.exe", b"target")
+        with self.assertRaisesRegex(PayloadIntegrityError, "forbidden symlink"):
+            extract_payload_record(
+                self.root, symlink_record, self.root / "symlink-out", archive_reference="fixture.zip"
+            )
+
+        path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
+        collision_record = self._record(path, "tool.exe", content)
+        duplicate = copy.deepcopy(collision_record["selected_members"][0])
+        duplicate["output_name"] = "TOOL.EXE"
+        collision_record["selected_members"].append(duplicate)
+        with self.assertRaisesRegex(PayloadIntegrityError, "output_name collision"):
+            extract_payload_record(
+                self.root, collision_record, self.root / "collision-out", archive_reference="fixture.zip"
+            )
+
+    def test_failed_staging_does_not_replace_existing_installed_bytes(self) -> None:
+        content = _fake_pe(fill=b"new")
+        path = self._write_zip([("tool.exe", content, stat.S_IFREG | 0o755)])
+        record = self._record(path, "tool.exe", content)
+        record["selected_members"][0]["sha256"] = "0" * 64
+        output_dir = self.root / "installed"
+        output_dir.mkdir()
+        destination = output_dir / "tool.exe"
+        destination.write_bytes(b"existing")
+        with self.assertRaisesRegex(PayloadIntegrityError, "sha256 mismatch"):
+            extract_payload_record(
+                self.root, record, output_dir, archive_reference="fixture.zip", verify_installed=True
+            )
+        self.assertEqual(destination.read_bytes(), b"existing")
+        self.assertFalse(any(output_dir.glob(".*.tmp")))
+
     def test_inventory_discovers_extensionless_native_binaries_and_archives(self) -> None:
         subprocess.run(["git", "init", "--quiet"], cwd=self.root, check=True)
         (self.root / "extensionless-tool").write_bytes(_fake_pe())
@@ -555,12 +800,13 @@ class VendoredNativePayloadTests(unittest.TestCase):
         command = "python -m tools.repo_hygiene.vendored_native_payloads --repo-root ."
         self.assertEqual((ROOT / ".python-version").read_text(encoding="utf-8").strip(), "3.13.15")
         workflow_expectations = {
-            ".github/workflows/Windows.yml": (command, "7z x"),
-            ".github/workflows/Linux.yml": (command, "tar -C"),
-            ".github/workflows/macOS-Intel.yml": (command, "make -j8"),
-            ".github/workflows/macOS-Arm64.yml": (command, "make -j8"),
+            ".github/workflows/Windows.yml": (command, 2),
+            ".github/workflows/Linux.yml": (command, 2),
+            ".github/workflows/macOS-Intel.yml": (command, 2),
+            ".github/workflows/macOS-Arm64.yml": (command, 2),
         }
-        for relative, (command, boundary) in workflow_expectations.items():
+        helper = "tools.repo_hygiene.extract_vendored_native_payload"
+        for relative, (command, expected_helper_calls) in workflow_expectations.items():
             with self.subTest(workflow=relative):
                 text = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertEqual(text.count(command), 1)
@@ -576,7 +822,24 @@ class VendoredNativePayloadTests(unittest.TestCase):
                     self.assertEqual(text.count(install), 1)
                     self.assertLess(text.index(install), text.index(command))
                 self.assertEqual(text.count("python -m pip check"), 1)
-                self.assertLess(text.index(command), text.index(boundary))
+                self.assertEqual(text.count(helper), expected_helper_calls)
+                self.assertLess(text.index(command), text.index(helper))
+                self.assertEqual(text.count("--verify-installed"), expected_helper_calls)
+
+        windows = (ROOT / ".github/workflows/Windows.yml").read_text(encoding="utf-8")
+        linux = (ROOT / ".github/workflows/Linux.yml").read_text(encoding="utf-8")
+        self.assertNotIn("7z x ffmpegWin64.zip", windows)
+        self.assertNotIn("7z x raw2mlvWin64.zip", windows)
+        self.assertNotIn("tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/", linux)
+        self.assertNotIn("tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/", linux)
+        for relative in (".github/workflows/macOS-Intel.yml", ".github/workflows/macOS-Arm64.yml"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("MLVAPP_SKIP_LEGACY_PAYLOAD_EXTRACTION=1", text)
+
+        qmake = (ROOT / "platform/qt/MLVApp.pro").read_text(encoding="utf-8")
+        self.assertIn("macx:!equals(MLVAPP_SKIP_LEGACY_PAYLOAD_EXTRACTION, 1)", qmake)
+        self.assertIn("portable pinned-Python discovery contract", qmake)
+        self.assertIn("tar -C $$(HOME)/bin", qmake)
 
         tests_workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         self.assertIn("python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v", tests_workflow)

@@ -69,12 +69,8 @@ jobs:
             cd usr
             mkdir bin
             cd bin
-            tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg
-            chmod a+x ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpeg
-            mv ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpeg .
-            tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv
-            chmod a+x ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlv
-            mv ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlv .
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id ffmpeg-linux-x86_64 --archive-reference ffmpegLinux.tar.xz --output-dir . --verify-installed
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-linux-x86_64 --archive-reference raw2mlvLinux.tar.xz --output-dir . --verify-installed
             ls -al
 
     - name: Copy Qt multimedia plugins

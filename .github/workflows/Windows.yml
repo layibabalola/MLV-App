@@ -64,15 +64,13 @@ jobs:
             copy "C:\Program Files\OpenSSL\bin\libssl*" .
             dir
 
-    - name: Decompress FFMPEG
-      working-directory: ${{ env.SOURCE_DIR }}\qt\FFmpeg
+    - name: Install verified FFMPEG
       run:  |
-            7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\build\release
+            python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir "${{ env.SOURCE_DIR }}\build\release" --verify-installed
 
-    - name: Decompress RAW2MLV
-      working-directory: ${{ env.SOURCE_DIR }}\qt\raw2mlv
+    - name: Install verified RAW2MLV
       run:  |
-            7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\build\release
+            python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir "${{ env.SOURCE_DIR }}\build\release" --verify-installed
             dir ${{ env.SOURCE_DIR }}\build\release
 
     - name: Rename release folder

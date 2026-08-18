@@ -521,13 +521,20 @@ ICON_FILES.files += MARXML.icns
 ICON_FILES.path = Contents/Resources
 QMAKE_BUNDLE_DATA += ICON_FILES
 
-#unpack & install ffmpeg on OSX
-macx: QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip) $$escape_expand(\n\t)
-macx: QMAKE_POST_LINK += "mv ffmpeg MLV\ App.app/Contents/MacOS/" $$escape_expand(\n\t)
-#unpack & install raw2mlv on OSX
-macx: equals(QT_ARCH, arm64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip) $$escape_expand(\n\t)
-macx: equals(QT_ARCH, x86_64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvOSX.zip) $$escape_expand(\n\t)
-macx: QMAKE_POST_LINK += "mv raw2mlv MLV\ App.app/Contents/MacOS/" $$escape_expand(\n\t)
+# Hosted releases set MLVAPP_SKIP_LEGACY_PAYLOAD_EXTRACTION=1 and install through
+# tools.repo_hygiene.extract_vendored_native_payload with setup-python's pinned
+# interpreter. Local qmake retains its historical behavior until an explicit,
+# portable pinned-Python discovery contract exists; the manifest keeps that
+# extraction path blocked rather than silently requiring an unavailable Python.
+macx:!equals(MLVAPP_SKIP_LEGACY_PAYLOAD_EXTRACTION, 1) {
+    #unpack & install ffmpeg on OSX
+    QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/FFmpeg/ffmpegOSX.zip) $$escape_expand(\n\t)
+    QMAKE_POST_LINK += "mv ffmpeg MLV\ App.app/Contents/MacOS/" $$escape_expand(\n\t)
+    #unpack & install raw2mlv on OSX
+    equals(QT_ARCH, arm64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvMacOsArm.zip) $$escape_expand(\n\t)
+    equals(QT_ARCH, x86_64): QMAKE_POST_LINK += unzip -o $$quote($$PWD/../qt/raw2mlv/raw2mlvOSX.zip) $$escape_expand(\n\t)
+    QMAKE_POST_LINK += "mv raw2mlv MLV\ App.app/Contents/MacOS/" $$escape_expand(\n\t)
+}
 
 unix{
     OBJECTS_DIR = .obj
