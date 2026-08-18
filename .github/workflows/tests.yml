@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -41,6 +42,8 @@ jobs:
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
+          python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
   # Factory-control regressions must stay independent from product oracles.
@@ -117,6 +120,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+
+      - name: Test screenshot fresh-render provenance gate
+        run: |
+          & tools\profiling\test-gui-smoke-screenshot-provenance.ps1
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
