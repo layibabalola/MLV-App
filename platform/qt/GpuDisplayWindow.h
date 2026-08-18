@@ -27,8 +27,8 @@
 #include <QSize>
 #include <QString>
 #include <QOpenGLFunctions>
-#include <QtOpenGL/qopenglshaderprogram.h>
-#include <QtOpenGL/qopengltexture.h>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLTexture>
 #include <QOpenGLWindow>
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include <cstddef>

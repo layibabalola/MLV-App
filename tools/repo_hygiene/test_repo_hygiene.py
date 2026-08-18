@@ -550,6 +550,60 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertLess(linux_workflow.index("sha256sum -c"), linux_workflow.index("chmod +x"))
         self.assertLess(linux_workflow.index("chmod +x"), linux_workflow.index('"${GITHUB_PATH}"'))
 
+    def test_qt_opengl_headers_and_cpu_feature_probe_are_architecture_portable(self) -> None:
+        qt_dir = ROOT / "platform" / "qt"
+        for source_path in sorted(qt_dir.rglob("*")):
+            if source_path.suffix.lower() not in {".h", ".hpp", ".cpp", ".cc"}:
+                continue
+            source = source_path.read_text(encoding="utf-8")
+            self.assertNotRegex(
+                source,
+                r"(?m)^\s*#\s*include\s*<QtOpenGL(?:Widgets)?/",
+                f"{source_path.relative_to(ROOT)} must use Qt5/Qt6-compatible generic OpenGL headers",
+            )
+
+        portable_headers = {
+            "GpuDisplayViewport.h": (
+                "#include <QOpenGLShaderProgram>",
+                "#include <QOpenGLTexture>",
+                "#include <QOpenGLWidget>",
+            ),
+            "GpuDisplayWindow.h": (
+                "#include <QOpenGLShaderProgram>",
+                "#include <QOpenGLTexture>",
+                "#include <QOpenGLWindow>",
+            ),
+        }
+        for relative_path, required_includes in portable_headers.items():
+            source = (qt_dir / relative_path).read_text(encoding="utf-8")
+            for required_include in required_includes:
+                self.assertIn(required_include, source)
+
+        crash_forensics = (qt_dir / "CrashForensics.cpp").read_text(encoding="utf-8")
+        cpu_guard = re.search(
+            r"(?ms)^#if defined\(__GNUC__\) && \(defined\(__i386__\) \|\| defined\(__x86_64__\)\)\s*$"
+            r"(?P<body>.*?)"
+            r"^#endif\s*$",
+            crash_forensics,
+        )
+        self.assertIsNotNone(
+            cpu_guard,
+            "GCC/Clang x86 CPU-feature builtins must stay compile-time guarded off ARM",
+        )
+        assert cpu_guard is not None
+        guarded_builtins = re.findall(r"\b__builtin_cpu_(?:init|supports)\b", cpu_guard.group("body"))
+        self.assertEqual(
+            len(guarded_builtins),
+            5,
+            "the x86 guard must contain cpu init plus all four feature probes",
+        )
+        outside_guard = crash_forensics[: cpu_guard.start()] + crash_forensics[cpu_guard.end() :]
+        self.assertNotRegex(
+            outside_guard,
+            r"\b__builtin_cpu_(?:init|supports)\b",
+            "no x86 CPU builtin may remain reachable on ARM outside the architecture guard",
+        )
+
     def test_dependency_updates_and_private_security_reporting_are_bounded(self) -> None:
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         update_blocks = re.split(r"(?m)^  - package-ecosystem:\s*", dependabot)[1:]
