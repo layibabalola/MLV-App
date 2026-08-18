@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -214,12 +215,111 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
         self.assertIn("Verify compatible MCP runtime", bridge_job)
         self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
-        self.assertNotIn("needs: factory-bridge-regressions", product_job)
+        self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
 
         requirements = (ROOT / "tools" / "agent-bridge" / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
+
+    def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        trigger_section = workflow[: workflow.index("\npermissions:")]
+
+        self.assertIn(
+            "concurrency:\n"
+            "  group: tests-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}\n"
+            "  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
+            workflow,
+        )
+        self.assertIn("  pull_request:\n", trigger_section)
+        self.assertIn("  push:\n    branches:\n      - master\n", trigger_section)
+        self.assertNotRegex(
+            trigger_section,
+            r"(?m)^\s+paths(?:-ignore)?:",
+            "required PR and master CI must not be suppressible by path filtering",
+        )
+
+        expected_timeouts = {
+            "repo-hygiene-python": 45,
+            "factory-bridge-regressions": 45,
+            "windows-product-oracles": 120,
+            "windows-gui-pilot": 60,
+        }
+        jobs_text = workflow[workflow.index("\njobs:") :]
+        job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", jobs_text))
+        self.assertEqual({match.group(1) for match in job_matches}, set(expected_timeouts))
+        for index, match in enumerate(job_matches):
+            end = job_matches[index + 1].start() if index + 1 < len(job_matches) else len(jobs_text)
+            job = jobs_text[match.start() : end]
+            self.assertIn(
+                f"    timeout-minutes: {expected_timeouts[match.group(1)]}",
+                job,
+                f"{match.group(1)} must have an explicit bounded deadline",
+            )
+
+        expected_remote_uses = [
+            ("actions/checkout", "11d5960a326750d5838078e36cf38b85af677262", "v4"),
+            ("actions/setup-python", "a26af69be951a213d495a4c3e4e4022e16d87065", "v5"),
+        ] * 4 + [
+            ("actions/upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
+        ] * 2
+        uses_entries = []
+        for line in workflow.splitlines():
+            match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
+            if not match:
+                continue
+            raw_target = match.group(1)
+            target, comment_separator, version_comment = raw_target.partition(" #")
+            uses_entries.append(
+                (target.strip().strip("\"'"), version_comment.strip() if comment_separator else "")
+            )
+        remote_uses = []
+        for target, version_comment in uses_entries:
+            self.assertFalse(
+                target.startswith("docker://"),
+                "Docker actions are forbidden absent a separately reviewed digest policy",
+            )
+            if target.startswith("./"):
+                continue
+            action, separator, revision = target.partition("@")
+            self.assertEqual(separator, "@", f"remote action lacks a revision: {target}")
+            self.assertRegex(
+                action,
+                r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
+                f"unrecognized non-local uses target: {target}",
+            )
+            self.assertRegex(revision, r"^[0-9a-f]{40}$", f"{action} must use a full immutable SHA")
+            remote_uses.append((action, revision, version_comment.strip()))
+        self.assertEqual(sorted(remote_uses), sorted(expected_remote_uses))
+
+        checkout_revision = "11d5960a326750d5838078e36cf38b85af677262"
+        checkout_blocks = re.findall(
+            rf"(?m)^\s*- uses: actions/checkout@{checkout_revision} # v4\r?\n"
+            r"\s+with:\r?\n"
+            r"\s+persist-credentials: false\s*$",
+            workflow,
+        )
+        self.assertEqual(len(checkout_blocks), 4)
+
+        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        product_start = workflow.index("\n  windows-product-oracles:")
+        bridge_job = workflow[bridge_start:product_start]
+        self.assertIn("Run coordination and self-healing guardrails", bridge_job)
+        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
+        self.assertIn("tests\\coordination", bridge_job)
+        self.assertIn('python -m pip install "pytest==8.4.2"', bridge_job)
+
+        product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
+        self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
+        artifact_step_start = product_job.index("\n      - name: Upload pipeline crash forensics")
+        next_step = product_job.find("\n      - ", artifact_step_start + 1)
+        artifact_step = product_job[artifact_step_start : next_step if next_step != -1 else len(product_job)]
+        self.assertIn("\n        if: always()", artifact_step)
+        self.assertIn("\n        uses: actions/upload-artifact@", artifact_step)
+        self.assertIn("\n          path: |", artifact_step)
+        self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
         script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"
