@@ -1584,7 +1584,9 @@ $result | ConvertTo-Json -Compress
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            # Hosted Windows cold starts occasionally exceed 15 seconds. Keep the
+            # smoke fail-closed with a finite process-level ceiling and no retry.
+            timeout=30,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

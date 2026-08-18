@@ -604,6 +604,34 @@ class RepoHygieneTests(unittest.TestCase):
             "no x86 CPU builtin may remain reachable on ARM outside the architecture guard",
         )
 
+    def test_release_sources_remain_cxx14_and_c_memory_portable(self) -> None:
+        for source_root in (ROOT / "src", ROOT / "platform" / "qt"):
+            for source_path in sorted(source_root.rglob("*")):
+                if source_path.suffix.lower() not in {".h", ".hh", ".hpp", ".c", ".cc", ".cpp", ".cxx"}:
+                    continue
+                source = source_path.read_text(encoding="utf-8", errors="replace")
+                self.assertNotRegex(
+                    source,
+                    r"\bstd::(?:gcd|lcm)\b",
+                    f"{source_path.relative_to(ROOT)} must remain compatible with the C++14 release target",
+                )
+
+        batch_types = (ROOT / "src" / "batch" / "BatchTypes.h").read_text(encoding="utf-8")
+        self.assertRegex(
+            batch_types,
+            r"(?s)while\( remainder != 0 \).*?divisor % remainder.*?divisor = remainder.*?remainder = next",
+            "rendered-video aspect reduction must retain a C++14-compatible Euclidean divisor",
+        )
+
+        frame_caching = (ROOT / "src" / "mlv" / "frame_caching.c").read_text(encoding="utf-8")
+        self.assertRegex(
+            frame_caching,
+            r"(?m)^#include <string\.h>$",
+            "the C frame cache must declare memcpy/memset on Linux and macOS",
+        )
+        self.assertIn("memcpy(", frame_caching)
+        self.assertIn("memset(", frame_caching)
+
     def test_dependency_updates_and_private_security_reporting_are_bounded(self) -> None:
         dependabot = (ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         update_blocks = re.split(r"(?m)^  - package-ecosystem:\s*", dependabot)[1:]
