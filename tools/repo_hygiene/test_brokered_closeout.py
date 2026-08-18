@@ -4147,7 +4147,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
             f"Range: `{range_token}`\n\nbody\n\n"
             "### [2026-01-01T01:00:00Z] CLAUDE - REVIEW\n"
-            f"Range: `{range_token}`\nVerdict: APPROVE\n\nbody\n",
+            f"Range: `{range_token}`\nVerdict: APPROVE\n"
+            "Seat: 5fc3fc6e-345f-40b8-bb3d-7abd6302b459\n\nbody\n",
         )
 
         linked = repo.parent / "gate-id-4-nostate"
@@ -4257,7 +4258,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "Gate: ready for Claude review.\n\n"
             "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
             f"Range: `{range_token}`\n"
-            "Verdict: APPROVE\n\n"
+            "Verdict: APPROVE\n"
+            "Seat: 5fc3fc6e-345f-40b8-bb3d-7abd6302b459\n\n"
             "### [2026-01-01T00:02:00Z] CLAUDE - REVIEW\n"
             f"Range: `{range_token}`\n"
             "Verdict: IDLE\n",
