@@ -89,6 +89,11 @@ double getMlvLastDebayerWbUndoMilliseconds(void)
 
 void invalidateMlvProcessedPreviewCache(mlvObject_t * video)
 {
+    if (!video)
+    {
+        return;
+    }
+
     video->current_processed_frame_active = 0;
     video->current_processed_frame = 0;
     video->current_processed_frame_threads = 0;
@@ -101,18 +106,7 @@ void invalidateMlvProcessedPreviewCache(mlvObject_t * video)
         video->processed_16bit_cache_threads[slot] = 0;
         video->processed_16bit_cache_signature[slot] = 0;
     }
-    video->current_processed_frame_8bit_active = 0;
-    video->current_processed_frame_8bit_signature = 0;
-    video->current_processed_frame_8bit = 0;
-    video->current_processed_frame_8bit_threads = 0;
-    video->processed_8bit_cache_next_slot = 0;
-    for (uint32_t slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
-    {
-        video->processed_8bit_cache_active[slot] = 0;
-        video->processed_8bit_cache_frame[slot] = 0;
-        video->processed_8bit_cache_threads[slot] = 0;
-        video->processed_8bit_cache_signature[slot] = 0;
-    }
+    mlvInvalidateProcessed8PrefetchCache(video);
 }
 
 static uint64_t mlv_cache_max_start(mlvObject_t * video)
