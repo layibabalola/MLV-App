@@ -550,6 +550,19 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertLess(linux_workflow.index("sha256sum -c"), linux_workflow.index("chmod +x"))
         self.assertLess(linux_workflow.index("chmod +x"), linux_workflow.index('"${GITHUB_PATH}"'))
 
+    def test_macos_release_runners_are_supported_and_architecture_explicit(self) -> None:
+        workflow_dir = ROOT / ".github" / "workflows"
+        intel_workflow = (workflow_dir / "macOS-Intel.yml").read_text(encoding="utf-8")
+        arm_workflow = (workflow_dir / "macOS-Arm64.yml").read_text(encoding="utf-8")
+
+        self.assertIn("runs-on: macos-15-intel", intel_workflow)
+        self.assertIn("runs-on: macos-15", arm_workflow)
+        self.assertNotRegex(
+            intel_workflow + arm_workflow,
+            r"runs-on:\s*macos-(?:13|14)(?:\s|$)",
+            "retired or deprecated macOS labels must not silently queue or encode the next outage",
+        )
+
     def test_qt_opengl_headers_and_cpu_feature_probe_are_architecture_portable(self) -> None:
         qt_dir = ROOT / "platform" / "qt"
         for source_path in sorted(qt_dir.rglob("*")):
