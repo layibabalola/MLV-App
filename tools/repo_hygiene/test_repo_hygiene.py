@@ -57,6 +57,42 @@ class RepoHygieneTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tempdir, ignore_errors=True)
 
+    def test_windows_scaffold_shell_makes_native_failures_terminal(self) -> None:
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+        shell_contract = (
+            'shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+            '-Command "$ErrorActionPreference = \'Stop\'; '
+            "$PSNativeCommandUseErrorActionPreference = $true; . '{0}'\""
+        )
+        self.assertIn(shell_contract, workflow)
+        self.assertEqual(2, workflow.count(shell_contract))
+
+        attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8").splitlines()
+        for path in ("tools/gates/output-budget.json", "tools/gates/shipping-defaults.json"):
+            with self.subTest(path=path):
+                self.assertIn(f"{path} text eol=lf", attributes)
+        self.assertEqual(2, workflow.count('      - ".gitattributes"'))
+
+        pwsh = shutil.which("pwsh") or shutil.which("pwsh.exe")
+        if pwsh is None:
+            self.skipTest("PowerShell 7 is unavailable for the native failure probe")
+        sentinel = self.tempdir / "native-failure-was-masked"
+        probe = self.tempdir / "native-failure-probe.ps1"
+        probe.write_text(
+            "$ErrorActionPreference = 'Stop'\n"
+            "$PSNativeCommandUseErrorActionPreference = $true\n"
+            f'& "{sys.executable}" -c "import sys; sys.exit(7)"\n'
+            f"Set-Content -LiteralPath '{sentinel.as_posix()}' -Value masked\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse(sentinel.exists(), result.stdout + result.stderr)
+
     def init_repo(self) -> Path:
         self.repo_counter += 1
         repo = self.tempdir / ("repo" if self.repo_counter == 1 else f"repo-{self.repo_counter}")

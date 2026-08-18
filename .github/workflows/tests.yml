@@ -14,6 +14,7 @@ on:
       - "tools/profiling/**"
       - "tools/agent-bridge/**"
       - "tools/closeout/**"
+      - ".gitattributes"
       - "closeout.config.json"
       - "AGENTS.md"
       - "CLAUDE.md"
@@ -31,6 +32,7 @@ on:
       - "tools/profiling/**"
       - "tools/agent-bridge/**"
       - "tools/closeout/**"
+      - ".gitattributes"
       - "closeout.config.json"
       - "AGENTS.md"
       - "CLAUDE.md"
@@ -39,6 +41,9 @@ jobs:
   repo-hygiene-python:
     name: Repo Hygiene Python (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
     strategy:
       fail-fast: false
       matrix:
@@ -73,7 +78,7 @@ jobs:
 
     defaults:
       run:
-        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true; . '{0}'"
 
     env:
       QT_VERSION: 6.10.2
@@ -89,11 +94,14 @@ jobs:
 
       - name: Install blocking Python test dependencies
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install jsonschema
           python -m pip install -r tools\agent-bridge\requirements.txt
+          python -c "import importlib.metadata as m; version=m.version('mcp'); assert int(version.split('.')[0]) == 1, version; from mcp.server.fastmcp import FastMCP; print(f'mcp {version} FastMCP verified')"
 
       - name: Run repo hygiene Python tests
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_shipping_defaults -v
@@ -102,6 +110,7 @@ jobs:
 
       - name: Run agent bridge PowerShell launcher regressions
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m unittest `
             tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_mcp_server_watchdog_throttles_wrapper_identity_checks `
             tools.agent-bridge.test_agent_bridge.AgentBridgeTests.test_codex_hooks_assert_bridge_cli_contract `

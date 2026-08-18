@@ -1,2 +1,4 @@
 CLOSEOUT-CANONICAL-CONTRACT.md text eol=lf
 CLOSEOUT-CANONICAL-CONTRACT.sha256 text eol=lf
+tools/gates/output-budget.json text eol=lf
+tools/gates/shipping-defaults.json text eol=lf

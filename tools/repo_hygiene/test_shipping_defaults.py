@@ -32,11 +32,16 @@ class ShippingDefaultsTests(unittest.TestCase):
         verify_repository(ROOT)
 
     def test_duplicate_key_is_rejected(self) -> None:
-        payload = self.payload.replace(
-            b'{\n  "schema":', b'{\n  "schema": "mlvapp.shipping-defaults.v1",\n  "schema":', 1
-        )
-        with self.assertRaises(ShippingDefaultsError):
-            load_strict_json_bytes(payload)
+        for source in (self.payload, self.payload.replace(b"\n", b"\r\n")):
+            with self.subTest(line_endings="crlf" if b"\r\n" in source else "lf"):
+                schema_offset = source.index(b'"schema":')
+                payload = (
+                    source[:schema_offset]
+                    + b'"schema": "mlvapp.shipping-defaults.v1",\n  '
+                    + source[schema_offset:]
+                )
+                with self.assertRaises(ShippingDefaultsError):
+                    load_strict_json_bytes(payload)
 
     def test_invalid_utf8_is_rejected(self) -> None:
         with self.assertRaises(ShippingDefaultsError):
