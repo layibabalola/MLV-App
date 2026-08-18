@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")),
-    [string]$Python = "python",
+    [string]$Python,
+    [string[]]$PythonArguments = @(),
     [switch]$Check,
     [switch]$Upgrade
 )
@@ -12,14 +13,79 @@ if ($Check -and $Upgrade) {
 }
 $repo = (Resolve-Path -LiteralPath $RepoRoot).Path
 $expectedPython = (Get-Content -LiteralPath (Join-Path $repo ".python-version") -Raw).Trim()
-$actualPython = (& $Python -c "import platform; print(platform.python_version())").Trim()
-if ($LASTEXITCODE -ne 0 -or $actualPython -ne $expectedPython) {
-    throw "Python lock generation requires $expectedPython; got $actualPython"
+$expectedPythonParts = $expectedPython.Split(".")
+if ($expectedPythonParts.Count -lt 2) {
+    throw "Invalid .python-version: $expectedPython"
+}
+if ($PSBoundParameters.ContainsKey("PythonArguments") -and -not $PSBoundParameters.ContainsKey("Python")) {
+    throw "-PythonArguments requires -Python"
 }
 
-$pipToolsVersion = (& $Python -c "import importlib.metadata as m; print(m.version('pip-tools'))").Trim()
+$pythonCandidates = [System.Collections.Generic.List[object]]::new()
+if ($PSBoundParameters.ContainsKey("Python")) {
+    if ([string]::IsNullOrWhiteSpace($Python)) {
+        throw "-Python must name an executable or launcher"
+    }
+    $pythonCandidates.Add([pscustomobject]@{
+        Command = $Python
+        PrefixArguments = [string[]]$PythonArguments
+        Label = (@($Python) + @($PythonArguments)) -join " "
+    })
+} else {
+    $pythonCandidates.Add([pscustomobject]@{
+        Command = "python"
+        PrefixArguments = [string[]]@()
+        Label = "python"
+    })
+    if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
+        $pySelector = "-{0}.{1}" -f $expectedPythonParts[0], $expectedPythonParts[1]
+        $pythonCandidates.Add([pscustomobject]@{
+            Command = "py"
+            PrefixArguments = [string[]]@($pySelector)
+            Label = "py $pySelector"
+        })
+    }
+}
+
+$pythonCommand = $null
+$pythonPrefixArguments = [string[]]@()
+$pythonAttempts = [System.Collections.Generic.List[string]]::new()
+foreach ($candidate in $pythonCandidates) {
+    $candidateVersion = $null
+    $candidateCommand = $candidate.Command
+    $candidatePrefixArguments = [string[]]$candidate.PrefixArguments
+    try {
+        $versionOutput = & $candidateCommand @candidatePrefixArguments -c "import platform; print(platform.python_version())" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $candidateVersion = ($versionOutput | Select-Object -Last 1).Trim()
+        }
+    } catch {
+        $candidateVersion = $null
+    }
+    $pythonAttempts.Add("$($candidate.Label)=$(if ($candidateVersion) { $candidateVersion } else { 'unavailable' })")
+    if ($candidateVersion -eq $expectedPython) {
+        $pythonCommand = $candidate.Command
+        $pythonPrefixArguments = [string[]]$candidate.PrefixArguments
+        break
+    }
+}
+if ($null -eq $pythonCommand) {
+    throw "Python lock generation requires exact Python $expectedPython; attempts: $($pythonAttempts -join '; ')"
+}
+
+$pipToolsVersion = $null
+try {
+    $pipToolsOutput = & $pythonCommand @pythonPrefixArguments -c "import importlib.metadata as m; print(m.version('pip-tools'))" 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $pipToolsVersion = ($pipToolsOutput | Select-Object -Last 1).Trim()
+    }
+} catch {
+    $pipToolsVersion = $null
+}
 if ($LASTEXITCODE -ne 0 -or $pipToolsVersion -ne "7.5.3") {
-    throw "Python lock generation requires pip-tools 7.5.3; got $pipToolsVersion"
+    $resolvedPython = (@($pythonCommand) + @($pythonPrefixArguments)) -join " "
+    $observedPipTools = if ($pipToolsVersion) { $pipToolsVersion } else { "unavailable" }
+    throw "Python lock generation requires pip-tools 7.5.3 in '$resolvedPython'; got $observedPipTools. Install .github/requirements/lock-tools.txt into that interpreter."
 }
 
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
@@ -69,7 +135,7 @@ foreach ($lock in $locks) {
     $arguments += $inputPath
 
     try {
-        & $Python @arguments
+        & $pythonCommand @pythonPrefixArguments @arguments
         if ($LASTEXITCODE -ne 0) {
             throw "pip-compile failed for $($lock.Input) with exit $LASTEXITCODE"
         }

@@ -490,6 +490,12 @@ class RepoHygieneTests(unittest.TestCase):
         )
         for required_symbol in (
             'pip-tools 7.5.3',
+            "[string[]]$PythonArguments = @()",
+            'throw "-PythonArguments requires -Python"',
+            '[System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT',
+            '$pySelector = "-{0}.{1}"',
+            'throw "Python lock generation requires exact Python $expectedPython; attempts:',
+            "Install .github/requirements/lock-tools.txt into that interpreter.",
             "[switch]$Upgrade",
             'throw "-Check and -Upgrade are mutually exclusive"',
             "Copy-Item -LiteralPath $outputPath -Destination $compileOutput",
@@ -504,8 +510,13 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertIn(required_symbol, updater)
         self.assertLess(
             updater.index("Copy-Item -LiteralPath $outputPath -Destination $compileOutput"),
-            updater.index("& $Python @arguments"),
+            updater.index("& $pythonCommand @pythonPrefixArguments @arguments"),
             "check mode must seed the temporary output before pip-compile resolves",
+        )
+        self.assertLess(
+            updater.index('Command = "python"'),
+            updater.index('Command = "py"'),
+            "hosted setup-python should remain the first/default interpreter candidate",
         )
 
         lock_policy = (ROOT / ".github" / "requirements" / "README.md").read_text(
@@ -516,6 +527,8 @@ class RepoHygieneTests(unittest.TestCase):
             "`-Upgrade`\nis the only mode that passes `--upgrade` to pip-tools.",
             "Dependabot intentionally ignores `pip-tools`.",
             "synchronized policy tuple",
+            "Every candidate must report\nthe complete version in `.python-version`",
+            "An explicit executable or launcher is authoritative",
         ):
             self.assertIn(required_policy, lock_policy)
 
