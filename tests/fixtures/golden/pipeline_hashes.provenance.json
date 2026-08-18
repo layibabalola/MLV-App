@@ -12,6 +12,7 @@
         "kind": "hosted_golden_check_claim",
         "run_id": 25634701776,
         "head_sha": "91774963efb4cf22c4a3b2e2b7704225f3fa2885",
+        "pinned_ref": "refs/tags/evidence/pipeline-golden-run-25634701776",
         "conclusion": "success",
         "url": "https://github.com/layibabalola/MLV-App/actions/runs/25634701776",
         "verification": "externally_asserted_unvalidated",

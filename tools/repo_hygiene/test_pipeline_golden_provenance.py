@@ -21,12 +21,21 @@ ROOT = Path(__file__).resolve().parents[2]
 class OverlayGitWitness:
     """Add test-only tracked blobs while delegating real read-only history checks."""
 
-    def __init__(self, delegate: SubprocessGitWitness, blobs: dict[tuple[str, str], bytes]) -> None:
+    def __init__(
+        self,
+        delegate: SubprocessGitWitness,
+        blobs: dict[tuple[str, str], bytes],
+        refs: dict[str, str] | None = None,
+    ) -> None:
         self.delegate = delegate
         self.blobs = blobs
+        self.refs = refs or {}
 
     def commit_exists(self, commit: str) -> bool:
         return self.delegate.commit_exists(commit)
+
+    def resolve_ref(self, ref: str) -> str:
+        return self.refs[ref] if ref in self.refs else self.delegate.resolve_ref(ref)
 
     def blob(self, commit: str, relative_path: str) -> bytes:
         key = (commit, relative_path)
@@ -111,6 +120,15 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
 
     def test_committed_manifest_is_valid(self) -> None:
         self._validate()
+
+    def test_hosted_observation_requires_exact_run_specific_remote_pin(self) -> None:
+        manifest = self._manifest()
+        manifest["artifact"]["external_observations"][0]["pinned_ref"] = (
+            "refs/tags/evidence/pipeline-golden-run-1"
+        )
+        self._write_manifest(manifest)
+        with self.assertRaisesRegex(ProvenanceValidationError, "pinned_ref must exactly match its hosted run_id"):
+            self._validate()
 
     def test_pipeline_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
@@ -318,8 +336,12 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
 
     def test_hosted_evidence_tree_equivalence_is_verified(self) -> None:
         manifest = self._manifest()
-        manifest["artifact"]["external_observations"][0]["head_sha"] = (
-            "73adf6eed3dd7443123d3801ab36c20f75526b4b"
+        observation = manifest["artifact"]["external_observations"][0]
+        observation["head_sha"] = "73adf6eed3dd7443123d3801ab36c20f75526b4b"
+        self.git_witness = OverlayGitWitness(
+            self.git_witness,
+            {},
+            {observation["pinned_ref"]: observation["head_sha"]},
         )
         self._write_manifest(manifest)
         with self.assertRaisesRegex(ProvenanceValidationError, "local relevant-tree correlation is false"):
@@ -344,6 +366,12 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         observation = manifest["artifact"]["external_observations"][0]
         observation["run_id"] = 1
         observation["url"] = "https://github.com/layibabalola/MLV-App/actions/runs/1"
+        observation["pinned_ref"] = "refs/tags/evidence/pipeline-golden-run-1"
+        self.git_witness = OverlayGitWitness(
+            self.git_witness,
+            {},
+            {observation["pinned_ref"]: observation["head_sha"]},
+        )
         self._write_manifest(manifest)
         self._validate()
 

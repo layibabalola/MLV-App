@@ -36,6 +36,7 @@ class GitWitness(Protocol):
     """Read-only Git evidence surface, injectable for deterministic tests."""
 
     def commit_exists(self, commit: str) -> bool: ...
+    def resolve_ref(self, ref: str) -> str: ...
     def blob(self, commit: str, relative_path: str) -> bytes: ...
     def is_ancestor(self, ancestor: str, descendant: str) -> bool: ...
     def parents(self, commit: str) -> list[str]: ...
@@ -64,6 +65,12 @@ class SubprocessGitWitness:
 
     def commit_exists(self, commit: str) -> bool:
         return self._run(["cat-file", "-e", f"{commit}^{{commit}}"], (0, 1, 128)).returncode == 0
+
+    def resolve_ref(self, ref: str) -> str:
+        output = self._run(["rev-parse", "--verify", f"{ref}^{{commit}}"]).stdout.decode("ascii").strip()
+        if not FULL_SHA_RE.fullmatch(output):
+            raise ProvenanceValidationError(f"Git evidence ref does not resolve to a commit: {ref}")
+        return output
 
     def blob(self, commit: str, relative_path: str) -> bytes:
         return self._run(["show", f"{commit}:{relative_path}"]).stdout
@@ -286,6 +293,11 @@ def _validate_history(
         expected_url = f"https://github.com/layibabalola/MLV-App/actions/runs/{run_id}"
         _require(observation.get("url") == expected_url,
                  f"pipeline external_observations[{index}] URL must exactly match its hosted run_id")
+        expected_ref = f"refs/tags/evidence/pipeline-golden-run-{run_id}"
+        _require(observation.get("pinned_ref") == expected_ref,
+                 f"pipeline external_observations[{index}] pinned_ref must exactly match its hosted run_id")
+        _require(git.resolve_ref(expected_ref) == head,
+                 f"pipeline external_observations[{index}] pinned_ref does not resolve to head_sha")
         local_correlation = observation["local_git_correlation"]
         relevant_paths = local_correlation["relevant_paths"]
         _require(git.paths_equal(introduced_by, head, relevant_paths),
