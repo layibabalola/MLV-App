@@ -28,7 +28,6 @@ Safe to run at any time. Uses the same .lock directory as the MCP server,
 so compaction cannot race with send_to_peer / mark_read.
 """
 import argparse
-import contextlib
 import os
 import json
 import re
@@ -39,19 +38,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.storage import (
-    atomic_replace,
-    append_jsonl,
-    audit_private_tree,
-    ensure_private_directory,
-    ensure_private_file,
-    file_lock,
-    open_private_read_text,
-    open_private_text,
-    read_jsonl,
-    reject_link_components,
-    write_jsonl,
-)
+from core.paths import resolve_bridge_paths
+from core.storage import StorageCapability
 
 
 AGENTS = ("claude", "codex")
@@ -75,44 +63,17 @@ def parse_dt(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def read_json(path: Path, default: Any) -> Any:
-    ensure_private_file(path)
+def read_json(path: Path, default: Any, *, storage: StorageCapability) -> Any:
+    storage.ensure_private_file(path)
     if not path.exists():
         return default
-    with open_private_read_text(path) as handle:
+    with storage.open_private_read_text(path) as handle:
         return json.load(handle)
 
 
-@contextlib.contextmanager
-def locked(state_dir: Path, timeout: float = 30.0):
-    lock_path = state_dir / ".lock"
-    ensure_private_directory(state_dir)
-    reject_link_components(lock_path)
-    start = time.monotonic()
-    while True:
-        try:
-            lock_path.mkdir(mode=0o700)
-            ensure_private_directory(lock_path)
-            break
-        except FileExistsError:
-            reject_link_components(lock_path)
-            try:
-                age = time.time() - lock_path.stat().st_mtime
-                if age > 60:
-                    lock_path.rmdir()
-                    continue
-            except OSError:
-                pass
-            if time.monotonic() - start > timeout:
-                raise TimeoutError("timed out waiting for bridge state lock")
-            time.sleep(0.05)
-    try:
-        yield
-    finally:
-        try:
-            lock_path.rmdir()
-        except FileNotFoundError:
-            pass
+def locked(state_dir: Path, *, storage: StorageCapability, timeout: float = 30.0):
+    storage.ensure_private_directory(state_dir)
+    return storage.file_lock(state_dir / ".compact", timeout_seconds=timeout, stale_seconds=60)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +86,8 @@ def compact_inbox(
     max_age_days: int = 7,
     keep_last_read: int = 200,
     dry_run: bool = False,
+    *,
+    storage: StorageCapability,
 ) -> Dict[str, Any]:
     """
     Compact inbox-{agent}.jsonl:
@@ -138,8 +101,8 @@ def compact_inbox(
     audit_path = state_dir / "messages.jsonl"
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
 
-    with locked(state_dir):
-        rows = read_jsonl(inbox_path)
+    with locked(state_dir, storage=storage):
+        rows = storage.read_jsonl(inbox_path)
         total = len(rows)
 
         unread = [r for r in rows if not r.get("read_at")]
@@ -177,17 +140,17 @@ def compact_inbox(
         }
 
         if not dry_run and dropped_count > 0:
-            write_jsonl(inbox_path, kept)
-            append_jsonl(audit_path, event)
+            storage.write_jsonl(inbox_path, kept)
+            storage.append_jsonl(audit_path, event)
 
         return event
 
 
-def _oldest_audit_timestamp(path: Path) -> Optional[datetime]:
+def _oldest_audit_timestamp(path: Path, *, storage: StorageCapability) -> Optional[datetime]:
     oldest: Optional[datetime] = None
     try:
-        ensure_private_file(path)
-        with open_private_read_text(path) as source:
+        storage.ensure_private_file(path)
+        with storage.open_private_read_text(path) as source:
             for line in source:
                 try:
                     row = json.loads(line)
@@ -212,12 +175,13 @@ def _audit_rotation_plan(
     max_mb: float,
     max_age_days: int,
     current: datetime,
+    storage: StorageCapability,
 ) -> Optional[Dict[str, Any]]:
-    reject_link_components(audit_path)
+    storage.reject_link_components(audit_path)
     if not audit_path.exists():
         return None
     size_mb = audit_path.stat().st_size / (1024 * 1024)
-    oldest = _oldest_audit_timestamp(audit_path)
+    oldest = _oldest_audit_timestamp(audit_path, storage=storage)
     if oldest is None:
         oldest = datetime.fromtimestamp(audit_path.stat().st_mtime, timezone.utc)
     age_days = max(0.0, (current - oldest).total_seconds() / 86400.0)
@@ -240,6 +204,8 @@ def rotate_audit_log(
     max_age_days: int = AUDIT_ACTIVE_MAX_AGE_DAYS,
     dry_run: bool = False,
     now: Optional[datetime] = None,
+    *,
+    storage: StorageCapability,
 ) -> Optional[Dict[str, Any]]:
     """
     Rotate messages.jsonl when it exceeds max_mb or its oldest event exceeds
@@ -272,18 +238,18 @@ def rotate_audit_log(
         if dry_run:
             return event
 
-        with open_private_read_text(audit_path) as source, open_private_text(rotated_path, "a") as target:
+        with storage.open_private_read_text(audit_path) as source, storage.open_private_text(rotated_path, "a") as target:
             for line in source:
                 target.write(line)
         temp = audit_path.with_name("%s.%s.tmp" % (audit_path.name, uuid.uuid4().hex))
         try:
-            with open_private_text(temp, "w") as target:
+            with storage.open_private_text(temp, "w") as target:
                 target.write(json.dumps(event, sort_keys=True))
                 target.write("\n")
-            atomic_replace(temp, audit_path)
-            ensure_private_file(audit_path)
+            storage.atomic_replace(temp, audit_path)
+            storage.ensure_private_file(audit_path)
         finally:
-            temp.unlink(missing_ok=True)
+            storage.unlink(temp, missing_ok=True)
         return event
 
     if dry_run:
@@ -292,16 +258,18 @@ def rotate_audit_log(
             max_mb=max_mb,
             max_age_days=max_age_days,
             current=current,
+            storage=storage,
         )
         return None if plan is None else _rotate_locked(plan)
 
-    with locked(state_dir):
-        with file_lock(audit_path):
+    with locked(state_dir, storage=storage):
+        with storage.file_lock(audit_path):
             plan = _audit_rotation_plan(
                 audit_path,
                 max_mb=max_mb,
                 max_age_days=max_age_days,
                 current=current,
+                storage=storage,
             )
             return None if plan is None else _rotate_locked(plan)
 
@@ -310,6 +278,8 @@ def prune_audit_logs(
     state_dir: Path,
     retention_days: int = 90,
     dry_run: bool = False,
+    *,
+    storage: StorageCapability,
 ) -> Dict[str, Any]:
     """Remove rotated audit logs older than retention_days."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
@@ -324,7 +294,7 @@ def prune_audit_logs(
             if not re.fullmatch(r"messages\.\d{4}-\d{2}(?:-\d{2})?\.jsonl", path.name):
                 continue
             try:
-                reject_link_components(path)
+                storage.reject_link_components(path)
                 mtime = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             except OSError as exc:
                 errors.append({"path": str(path), "error": str(exc)})
@@ -336,7 +306,7 @@ def prune_audit_logs(
             if dry_run:
                 continue
             try:
-                path.unlink()
+                storage.unlink(path)
             except OSError as exc:
                 errors.append({"path": str(path), "error": str(exc)})
                 continue
@@ -356,18 +326,25 @@ def prune_audit_logs(
             "errors": errors,
         }
         if not dry_run and removed:
-            append_jsonl(state_dir / "messages.jsonl", event)
+            storage.append_jsonl(state_dir / "messages.jsonl", event)
         return event
 
     if dry_run:
-        reject_link_components(state_dir)
+        storage.reject_link_components(state_dir)
         return _prune_locked()
-    with locked(state_dir):
+    with locked(state_dir, storage=storage):
         return _prune_locked()
 
 
-def should_compact(state_dir: Path, agent: str, threshold_mb: float = 1.0) -> bool:
+def should_compact(
+    state_dir: Path,
+    agent: str,
+    threshold_mb: float = 1.0,
+    *,
+    storage: StorageCapability,
+) -> bool:
     path = state_dir / f"inbox-{agent}.jsonl"
+    storage.validate(path)
     if not path.exists():
         return False
     return path.stat().st_size / (1024 * 1024) >= threshold_mb
@@ -472,6 +449,8 @@ def reap_stale_server_pids(
     state_dir: Path,
     max_age_hours: int = 24,
     dry_run: bool = False,
+    *,
+    storage: StorageCapability,
 ) -> Dict[str, Any]:
     """Remove stale MCP server markers without enforcing singleton semantics."""
     server_dir = state_dir / "server-pids"
@@ -491,7 +470,7 @@ def reap_stale_server_pids(
             checked += 1
             runtime_marker = marker.with_suffix(".json")
             try:
-                with open_private_read_text(marker) as handle:
+                with storage.open_private_read_text(marker) as handle:
                     raw = handle.read().strip()
                 pid = int(raw)
             except (OSError, ValueError) as exc:
@@ -500,7 +479,7 @@ def reap_stale_server_pids(
             runtime: Optional[Dict[str, Any]] = None
             if runtime_marker.exists():
                 try:
-                    runtime = read_json(runtime_marker, {})
+                    runtime = read_json(runtime_marker, {}, storage=storage)
                 except Exception as exc:
                     errors.append({"path": str(runtime_marker), "error": str(exc)})
             identity = process_runtime_identity_status(pid, runtime, expected_role="mcp_server")
@@ -520,11 +499,11 @@ def reap_stale_server_pids(
                 removed_runtime_paths.append(str(runtime_marker))
             if not dry_run:
                 try:
-                    marker.unlink()
+                    storage.unlink(marker)
                 except OSError as exc:
                     errors.append({"path": str(marker), "error": str(exc)})
                 try:
-                    runtime_marker.unlink(missing_ok=True)
+                    storage.unlink(runtime_marker, missing_ok=True)
                 except OSError as exc:
                     errors.append({"path": str(runtime_marker), "error": str(exc)})
 
@@ -543,7 +522,7 @@ def reap_stale_server_pids(
             removed_runtime_orphans.append(str(runtime_marker))
             if not dry_run:
                 try:
-                    runtime_marker.unlink()
+                    storage.unlink(runtime_marker)
                 except OSError as exc:
                     errors.append({"path": str(runtime_marker), "error": str(exc)})
 
@@ -565,7 +544,7 @@ def reap_stale_server_pids(
         "errors": errors,
     }
     if not dry_run and removed:
-        append_jsonl(state_dir / "messages.jsonl", event)
+        storage.append_jsonl(state_dir / "messages.jsonl", event)
     return event
 
 
@@ -585,12 +564,15 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print actions without writing")
     args = parser.parse_args()
 
-    state_dir = Path(args.state_dir)
+    # CLI root selection is the trust boundary.  Resolve and authorize the
+    # canonical bridge root before the audit or any compaction storage sink.
+    paths = resolve_bridge_paths(state_dir=Path(args.state_dir))
+    state_dir = paths.state_dir
 
     if args.audit_permissions_only:
-        audit_root = state_dir.parent if state_dir.name.lower() == "state" else state_dir
-        report = audit_private_tree(audit_root)
-        report["scope"] = "bridge_root" if audit_root == state_dir.parent else "explicit_state_dir"
+        audit_root = paths.root
+        report = paths.storage.audit_private_tree()
+        report["scope"] = "bridge_root"
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0 if report["ok"] else 2
 
@@ -602,6 +584,7 @@ def main() -> int:
             max_age_days=args.max_age_days,
             keep_last_read=args.keep_last_read,
             dry_run=args.dry_run,
+            storage=paths.storage,
         )
         if result["read_dropped"] > 0 or args.dry_run:
             any_work = True
@@ -613,7 +596,12 @@ def main() -> int:
                 f"preserved {result['unread_preserved']} unread)"
             )
 
-    rotate_result = rotate_audit_log(state_dir, max_mb=args.audit_max_mb, dry_run=args.dry_run)
+    rotate_result = rotate_audit_log(
+        state_dir,
+        max_mb=args.audit_max_mb,
+        dry_run=args.dry_run,
+        storage=paths.storage,
+    )
     if rotate_result:
         any_work = True
         tag = "[DRY RUN] " if args.dry_run else ""
@@ -623,6 +611,7 @@ def main() -> int:
         state_dir,
         retention_days=args.audit_retention_days,
         dry_run=args.dry_run,
+        storage=paths.storage,
     )
     if prune_result["removed"] > 0 or args.dry_run:
         any_work = True
@@ -636,6 +625,7 @@ def main() -> int:
         state_dir,
         max_age_hours=args.server_pid_max_age_hours,
         dry_run=args.dry_run,
+        storage=paths.storage,
     )
     if reaper_result["removed"] > 0 or args.dry_run:
         any_work = True

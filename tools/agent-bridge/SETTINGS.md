@@ -85,6 +85,20 @@ inherited DACL: doing so without knowing the required Desktop/AppContainer
 principals can lock out the bridge or require unavailable privileges. Operators
 that require a verified confidentiality boundary must run this fail-closed audit:
 
+The root resolver is the storage trust boundary. It converts an explicitly
+configured relative bridge root to an absolute root and creates one immutable
+`StorageCapability` for that root. There is no process-global list of authorized
+roots: every lower-level read, write, lock, replace, and delete receives the
+owning capability explicitly. Paths must already be absolute, must not contain
+`..`, must remain beneath that capability's root, and must not traverse a
+symlink or Windows reparse point. Redirect targets use provisional local
+capabilities while the complete `MOVED_TO.json` chain is checked; a failed,
+cyclic, or overlong chain grants no authority and causes no storage mutation.
+POSIX mutations are anchored to no-follow directory descriptors. Windows opens
+verify reparse attributes and final-handle containment before writing; fully
+hostile same-user parent swaps still require an `NtCreateFile`-style root handle
+and remain a documented defense-in-depth limit rather than a claimed guarantee.
+
 ```powershell
 py -3 tools\agent-bridge\compact.py --state-dir "$env:USERPROFILE\.agent-bridge\state" --audit-permissions-only
 ```

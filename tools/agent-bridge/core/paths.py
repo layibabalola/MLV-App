@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from .storage import ensure_private_directory, ensure_private_file, open_private_read_text, write_json
+from .storage import (
+    StorageCapability,
+    authorize_storage_root,
+)
 
 
 DEFAULT_BRIDGE_DIRNAME = ".agent-bridge"
@@ -28,6 +31,7 @@ class BridgeRootMovedError(RuntimeError):
 
 @dataclasses.dataclass(frozen=True)
 class BridgePaths:
+    storage: StorageCapability
     root: Path
     state_dir: Path
     session_registry: Path
@@ -101,10 +105,11 @@ def routing_rules_path_for_state_dir(state_dir: Path) -> Path:
     return bridge_root_for_state_dir(state_dir) / "routing-rules.json"
 
 
-def bridge_paths_for_root(bridge_root: Path) -> BridgePaths:
-    root = Path(bridge_root)
+def bridge_paths_for_storage(storage: StorageCapability) -> BridgePaths:
+    root = storage.root
     state_dir = state_dir_for_bridge_root(root)
     return BridgePaths(
+        storage=storage,
         root=root,
         state_dir=state_dir,
         session_registry=root / "session.json",
@@ -121,9 +126,19 @@ def bridge_paths_for_root(bridge_root: Path) -> BridgePaths:
     )
 
 
-def _read_json_object(path: Path) -> Dict[str, Any]:
-    ensure_private_file(path)
-    with open_private_read_text(path) as handle:
+def bridge_paths_for_root(bridge_root: Path) -> BridgePaths:
+    return bridge_paths_for_storage(authorize_storage_root(Path(bridge_root)))
+
+
+def _read_json_object(
+    storage: StorageCapability, path: Path, *, readonly: bool = False
+) -> Dict[str, Any]:
+    if readonly:
+        opener = storage.open_readonly_text
+    else:
+        storage.ensure_private_file(path)
+        opener = storage.open_private_read_text
+    with opener(path) as handle:
         data = json.load(handle)
     if not isinstance(data, dict):
         raise ValueError("%s must contain a JSON object" % path)
@@ -137,12 +152,12 @@ def _canonical_key(path: Path) -> str:
         return str(path.absolute()).lower()
 
 
-def detect_moved_root(bridge_root: Path) -> Optional[Dict[str, Any]]:
-    moved_to = Path(bridge_root) / MOVED_TO_FILENAME
-    ensure_private_file(moved_to)
+def detect_moved_root(storage: StorageCapability) -> Optional[Dict[str, Any]]:
+    moved_to = storage.root / MOVED_TO_FILENAME
+    storage.validate(moved_to)
     if not moved_to.exists():
         return None
-    return _read_json_object(moved_to)
+    return _read_json_object(storage, moved_to, readonly=True)
 
 
 def _target_from_moved_manifest(root: Path, manifest: Dict[str, Any]) -> Path:
@@ -152,31 +167,51 @@ def _target_from_moved_manifest(root: Path, manifest: Dict[str, Any]) -> Path:
     return Path(value)
 
 
-def resolve_moved_root_chain(bridge_root: Path, *, max_hops: int = MAX_MOVED_ROOT_HOPS) -> Optional[Dict[str, Any]]:
-    root = Path(bridge_root)
-    first_manifest = detect_moved_root(root)
+def resolve_moved_root_chain(
+    bridge_root: Path,
+    *,
+    max_hops: int = MAX_MOVED_ROOT_HOPS,
+    storage: Optional[StorageCapability] = None,
+) -> Optional[Dict[str, Any]]:
+    """Inspect a redirect chain without retaining provisional authority.
+
+    Every hop receives a local immutable capability used only for its manifest
+    read.  Invalid, cyclic, and overlong chains therefore cannot widen any
+    later storage operation in this process.
+    """
+    expected_storage = authorize_storage_root(Path(bridge_root))
+    source_storage = storage or expected_storage
+    root = source_storage.root
+    if root != expected_storage.root:
+        raise ValueError("redirect storage capability does not match bridge root %s" % bridge_root)
+    first_manifest = detect_moved_root(source_storage)
     if not first_manifest:
         return None
 
     current = root
     manifest = first_manifest
     chain = [current]
-    seen = {str(current.resolve()) if current.exists() else str(current.absolute())}
+    seen = {_canonical_key(current)}
     for _ in range(max_hops):
-        target = _target_from_moved_manifest(current, manifest)
+        target_value = _target_from_moved_manifest(current, manifest)
+        target_storage = authorize_storage_root(target_value)
+        target = target_storage.root
         chain.append(target)
-        key = str(target.resolve()) if target.exists() else str(target.absolute())
+        key = _canonical_key(target)
         if key in seen:
             raise ValueError("MOVED_TO.json cycle detected: %s" % " -> ".join(str(path) for path in chain))
         seen.add(key)
 
-        next_manifest = detect_moved_root(target)
+        next_manifest = detect_moved_root(target_storage)
         if not next_manifest:
             return {"target": target, "manifest": first_manifest, "chain": chain}
         current = target
         manifest = next_manifest
 
-    raise ValueError("MOVED_TO.json chain exceeds %d hop(s): %s" % (max_hops, " -> ".join(str(path) for path in chain)))
+    raise ValueError(
+        "MOVED_TO.json chain exceeds %d hop(s): %s"
+        % (max_hops, " -> ".join(str(path) for path in chain))
+    )
 
 
 def utc_now() -> str:
@@ -184,9 +219,9 @@ def utc_now() -> str:
 
 
 def ensure_bridge_root_manifest(paths: BridgePaths, *, reason: str = "initialize") -> Dict[str, Any]:
-    ensure_private_directory(paths.root)
+    paths.storage.ensure_private_directory(paths.root)
     if paths.manifest.exists():
-        manifest = _read_json_object(paths.manifest)
+        manifest = _read_json_object(paths.storage, paths.manifest)
         if manifest.get("schema_version", 0) > ROOT_MANIFEST_SCHEMA_VERSION:
             raise ValueError("%s schema_version is newer than this bridge supports" % paths.manifest)
         if not manifest.get("root_id"):
@@ -213,7 +248,7 @@ def ensure_bridge_root_manifest(paths: BridgePaths, *, reason: str = "initialize
             }
         ],
     }
-    write_json(paths.manifest, manifest)
+    paths.storage.write_json(paths.manifest, manifest)
     return manifest
 
 
@@ -234,13 +269,19 @@ def resolve_bridge_paths(
     else:
         root = default_bridge_root(values)
 
+    # Root selection is the trust boundary.  Resolve relative CLI/config roots
+    # here, before any MOVED_TO probe reaches the storage layer.
+    storage = authorize_storage_root(Path(root).absolute())
+    root = storage.root
+
     if state_dir is not None and bridge_root is not None:
         expected_state = state_dir_for_bridge_root(root)
-        if expand_path_arg(state_dir, values) != expected_state:
+        supplied_state = Path(expand_path_arg(state_dir, values)).absolute()
+        if supplied_state != expected_state:
             raise ValueError("--state-dir must equal <bridge-root>\\state when --bridge-root is provided")
 
-    moved = resolve_moved_root_chain(root)
+    moved = resolve_moved_root_chain(root, storage=storage)
     if reject_moved and moved:
         raise BridgeRootMovedError(root, moved["target"], moved["manifest"], moved["chain"])
 
-    return bridge_paths_for_root(root)
+    return bridge_paths_for_storage(storage)
