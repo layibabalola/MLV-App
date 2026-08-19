@@ -33,9 +33,10 @@ R16 features are unratified and may be considered only as `SHADOW_INPUT_ONLY` wi
 - CI action inputs are pinned to exact commits. The complete `jsonschema` transitive dependency set
   is version-pinned and SHA-256 locked, and the workflow requires hashes with binary-only,
   noninteractive resolution and without upgrading pip. Checkout credentials are not persisted;
-  concurrency is event-safe and non-cancelling; jobs have a bounded timeout. Lock evidence covers
-  the intended Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only,
-  so hosted execution is still unproven.
+  concurrency is event-safe and non-cancelling; `queue: max` prevents the default single-pending-run
+  replacement behavior; jobs have a bounded timeout. Lock evidence covers the intended
+  Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only, so hosted
+  execution is still unproven.
 
 ## Cross-checked from prior analysis
 
