@@ -22,6 +22,14 @@ frozen golden** (or explicitly re-blessed with a human before/after), never asse
 a thin freeze-and-diff layer over telemetry the app ALREADY emits — the gap was never measurement
 capability, it was the absence of a pinned per-clip reference plus a parity assertion.
 
+The autonomous golden contract in `docs/autonomous-golden-authority.md` is
+currently `CANDIDATE_ZERO_AUTHORITY`: human before/after approval remains
+mandatory until a separately reviewed activation commit proves the installed
+verifier, independent signer registry/keys, immutable baseline trust root,
+one-use ledger, and recoverable two-phase broker. Once activated, an objective
+output failure still has an unconditional veto and no human or model quorum may
+override it.
+
 **Corollary — anchor on the known-good BUILD, never a same-codebase proxy.** The ground truth is
 the last build that actually looked right, measured directly on the user's real footage. A
 same-codebase *behavioral* proxy — an alternate mode or path you assume is equivalent-and-correct

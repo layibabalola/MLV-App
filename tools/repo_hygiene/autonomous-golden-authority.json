@@ -1,41 +1,44 @@
 {
-  "schema": "mlv-app/autonomous-golden-authority-policy/v1",
+  "schema": "mlv-app/autonomous-golden-authority-policy/v2",
   "status": "CANDIDATE_ZERO_AUTHORITY",
   "ownerDelegation": {
-    "routineHumanApprovalRequired": false,
+    "routineHumanApprovalRequiredUntilActivation": true,
+    "postActivationRoutineHumanApprovalRequired": false,
     "defaultOnAmbiguity": "REJECT_PRESERVE_BASELINE",
-    "notificationMode": "RECEIPT_ONLY_NO_RESPONSE_REQUIRED",
-    "humanRole": "OPTIONAL_APPEAL_OR_EMERGENCY_OVERRIDE"
+    "notificationModeAfterActivation": "RECEIPT_ONLY_NO_RESPONSE_REQUIRED",
+    "humanOverrideActions": ["REJECT", "SAFETY_CLOSE", "ROLLBACK"],
+    "humanOverrideMayPromote": false,
+    "objectiveVetoMayBeOverridden": false
   },
   "authorityBoundary": {
     "promotionActor": "BROKER_ONLY",
     "implementationProposerRecused": true,
     "providerRuntimeAuthority": false,
-    "automaticLaunchGate": "CLOSED"
+    "automaticLaunchGate": "CLOSED",
+    "goldenPromotionAuthority": "NOT_INSTALLED"
   },
-  "signerClasses": [
-    "HOSTED_PRODUCT_ORACLE",
-    "STRANGER_REVIEW",
-    "HUB_DOCTRINE",
-    "SECOND_STRANGER_REVIEW",
-    "OUTPUT_SPECIALIST"
-  ],
+  "signerClasses": ["HOSTED_PRODUCT_ORACLE", "STRANGER_REVIEW", "HUB_DOCTRINE", "SECOND_STRANGER_REVIEW", "OUTPUT_SPECIALIST"],
   "independence": {
     "distinctIdentity": true,
     "distinctKey": true,
     "distinctModelFamily": true,
     "distinctOperatorClass": true,
+    "proposerAndBrokerExcluded": true,
+    "trustedRegistryAndRevocationRequired": true,
     "commitThenReveal": true,
+    "receiptExpiryAndReplayProtectionRequired": true,
     "modelConsensusCannotOverrideOutputFailure": true
   },
   "decisionClasses": {
     "A_REPRESENTATION_ONLY": {
+      "requiredSignerClasses": ["HOSTED_PRODUCT_ORACLE", "STRANGER_REVIEW", "HUB_DOCTRINE"],
       "minimumSignerClasses": 3,
       "unanimous": true,
       "semanticOutputDelta": "ZERO",
-      "shadowCycles": 0
+      "shadowCycles": 1
     },
     "B_MECHANICALLY_PREDICTED": {
+      "requiredSignerClasses": ["HOSTED_PRODUCT_ORACLE", "STRANGER_REVIEW", "HUB_DOCTRINE"],
       "minimumSignerClasses": 3,
       "unanimous": true,
       "requiresPreexistingRatifiedSpecification": true,
@@ -43,6 +46,7 @@
       "shadowCycles": 1
     },
     "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS": {
+      "requiredSignerClasses": ["HOSTED_PRODUCT_ORACLE", "STRANGER_REVIEW", "HUB_DOCTRINE", "SECOND_STRANGER_REVIEW", "OUTPUT_SPECIALIST"],
       "minimumSignerClasses": 5,
       "unanimous": true,
       "requiresStandingBoundedPolicy": true,
@@ -60,19 +64,34 @@
     "VALUES_PIXELS_CADENCE_AB",
     "TEST_INVENTORY_FAILURES_AND_SKIPS",
     "TOOLCHAIN_AND_ENVIRONMENT",
+    "RATIFIED_PREDICTION_OR_STANDING_POLICY",
+    "SHADOW_CYCLE_RECEIPT",
     "SIGNER_RECEIPTS_AND_POLICY_DIGEST"
   ],
   "failClosedOn": [
     "MISSING_EVIDENCE",
+    "OUTPUT_GATE_FAILURE",
     "NEW_SKIP",
     "DIRTY_TREE",
     "VERIFIER_OR_POLICY_CHANGED_IN_PROPOSAL",
+    "UNKNOWN_DECISION_CLASS",
     "UNKNOWN_OUTPUT_DELTA",
     "BASELINE_MISMATCH",
+    "SIGNATURE_INVALID_OR_REVOKED",
     "SIGNER_OVERLAP",
+    "SIGNER_ABSTENTION_OR_TIMEOUT",
     "SIGNER_DISAGREEMENT",
+    "RECEIPT_EXPIRED_OR_REPLAYED",
     "UNEXPLAINED_CROSS_RUN_VARIANCE"
   ],
+  "receiptContracts": {
+    "signerReceiptSchema": "tools/repo_hygiene/autonomous-golden-signer-receipt.schema.json",
+    "promotionReceiptSchema": "tools/repo_hygiene/autonomous-golden-promotion-receipt.schema.json",
+    "proposalPolicyAndEvidenceDigestBound": true,
+    "commitRevealNonceBound": true,
+    "trustedSignerRegistryEpochBound": true,
+    "expiryAndOneUseLedgerRequired": true
+  },
   "antiLaundering": {
     "productGoldenVerifierPolicySameTransactionForbidden": true,
     "verifierAndPolicyMustLandFirst": true,
@@ -80,11 +99,26 @@
     "carryForwardRequiresAuthoritySensitiveBlobIdentity": true
   },
   "promotion": {
-    "twoPhase": true,
-    "preparedReceiptRequired": true,
+    "states": ["PREPARED", "SHADOW_PASSED", "COMMITTED", "ROLLED_BACK", "QUARANTINED"],
+    "allowedEdges": ["PREPARED->SHADOW_PASSED", "SHADOW_PASSED->COMMITTED", "PREPARED->QUARANTINED", "SHADOW_PASSED->QUARANTINED", "COMMITTED->ROLLED_BACK", "ROLLED_BACK->QUARANTINED"],
+    "durableTransactionIdRequired": true,
+    "compareAndSwapExpectedHeadRequired": true,
     "brokerOwnedAtomicCommit": true,
     "promotionCommitMayChangeOnlyGoldenAndReceipt": true,
     "exactPromotionHeadCiRequired": true,
-    "automaticRollbackOnPostPromotionMismatch": true
-  }
+    "crashRecoveryRequired": true,
+    "rollbackReceiptRequired": true,
+    "automaticRollbackOnPostPromotionMismatch": true,
+    "quarantineAfterFailureRequired": true
+  },
+  "activationPrerequisites": [
+    "SEPARATELY_REVIEWED_ACTIVATION_COMMIT",
+    "EXECUTABLE_FAIL_CLOSED_VERIFIER",
+    "PINNED_SIGNER_REGISTRY_KEYS_AND_REVOCATION",
+    "IMMUTABLE_KNOWN_GOOD_ARTIFACT_TRUST_ROOT",
+    "INSTALLED_BROKER_TWO_PHASE_CAS_AND_RECOVERY",
+    "ONE_USE_RECEIPT_LEDGER",
+    "HOSTED_HOSTILE_AND_SHADOW_PROOF",
+    "ACTIVATION_RECEIPT_BOUND_TO_EXACT_POLICY_AND_IMPLEMENTATION"
+  ]
 }

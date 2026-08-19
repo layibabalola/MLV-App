@@ -93,10 +93,14 @@ gates + residual risks: `docs/regression-prevention-program.md`. Binding rules:
   fixed-point property test -- a near-neutral target renders neutral AND a second measure is already
   neutral (single-pass code cannot satisfy it; it fails the dropped refinement loop directly).
 - Bless tooling refuses dirty/unstamped exes and requires `-Reason`; re-blessing a golden needs a
-  reviewed before/after. The review may be a human decision or the exact autonomous quorum defined
-  by `docs/autonomous-golden-authority.md` and its machine-readable policy. The proposing lane is
-  always recused, objective hosted output evidence has a veto, and ambiguous changes without a
-  standing bounded policy are rejected while preserving the old golden. Re-bless laundering
+  reviewed before/after. **Human approval remains mandatory today.** It may be replaced by the exact
+  autonomous quorum defined by `docs/autonomous-golden-authority.md` only after a separate reviewed
+  activation commit pins and proves the installed fail-closed verifier, signer registry and
+  revocation state, immutable baseline trust root, one-use receipt ledger, recoverable broker
+  transaction, and hosted shadow evidence. The proposing lane is always recused, objective hosted
+  output evidence has an unconditional veto, and ambiguous changes without a standing bounded
+  policy are rejected while preserving the old golden. Human intervention may reject, safety-close,
+  or roll back; it cannot promote after an objective veto. Re-bless laundering
   (greenlighting a regressed build by regenerating the golden) is the worst failure mode -- guard it
   structurally.
 

@@ -6,8 +6,10 @@ or automatic-launch authority. The machine-readable policy is
 
 ## Outcome
 
-Routine golden maintenance does not require the owner to approve each update.
-The safe default is preservation: when evidence is incomplete, reviewers
+After a separate activation decision, routine golden maintenance will not
+require the owner to approve each update. Human approval remains mandatory for
+the current candidate because its enforcement machinery is not installed. The
+safe default is preservation: when evidence is incomplete, reviewers
 disagree, or a change is aesthetically ambiguous without a standing policy, the
 proposal is rejected and the known-good golden remains authoritative. The owner
 receives a decision receipt and may appeal, but silence never means approval.
@@ -29,11 +31,16 @@ vote a failing output gate green.
   process or key cannot satisfy two signer classes.
 - Reviews use commit-then-reveal, so one reviewer cannot copy or converge on an
   earlier verdict before committing its own digest.
+- Signer receipts bind the proposal, policy, evidence, registry epoch, signer
+  identity/key/model/operator class, commitment nonce, verdict, and expiry.
+  The installed verifier must reject revoked keys, proposer/broker signers,
+  duplicate identities or keys, expired receipts, and replayed receipt IDs.
 
 ## Decision classes
 
 Class A covers representation-only changes with zero semantic output delta. It
-requires unanimous hosted-oracle, stranger-review, and hub/doctrine receipts.
+requires unanimous hosted-oracle, stranger-review, and hub/doctrine receipts,
+plus one shadow cycle with the old golden authoritative.
 
 Class B covers output changes predicted completely by a pre-existing ratified
 specification. It additionally requires two independently scheduled hosted
@@ -64,15 +71,18 @@ A proposal cannot change product code, golden, verifier, or promotion policy in
 one authority transaction. Verifier or policy changes land first and complete a
 separate review cycle before judging a golden proposal.
 
-Promotion is two phase:
+Promotion is a durable, broker-owned state machine:
 
-1. The broker writes a PREPARED receipt after exact-head evidence and quorum.
-2. A shadow cycle runs while the old golden remains authoritative.
-3. The broker alone writes an atomic commit containing only the golden and its
-   append-only promotion receipt.
-4. All checks rerun on that exact promotion head.
-5. Any post-promotion mismatch triggers automatic rollback and quarantines the
-   proposal class/policy tuple.
+1. The broker writes a one-use `PREPARED` transaction after exact-head evidence
+   and quorum, binding the expected Git head with compare-and-swap semantics.
+2. A shadow cycle runs while the old golden remains authoritative, producing
+   `SHADOW_PASSED`; failure transitions to `QUARANTINED`.
+3. The broker alone transitions `SHADOW_PASSED -> COMMITTED` with an atomic
+   commit containing only the golden and its append-only promotion receipt.
+4. All checks rerun on that exact promotion head. A mismatch transitions
+   `COMMITTED -> ROLLED_BACK -> QUARANTINED` with a rollback receipt.
+5. Crashes resume from the durable transaction record; unexpected states,
+   head drift, reused receipts, or failed recovery remain quarantined.
 
 Approval carries across a later commit only when a verifier proves every
 authority-sensitive blob is byte-identical and the intervening diff is an
@@ -86,6 +96,11 @@ window; timeout means rejection. Notifications contain the candidate/head,
 class, changed keys, artifact digests, signer verdicts, and promotion or rollback
 commit plus an appeal link. They are receipts, not approval requests.
 
-Until a separately reviewed broker, signer-key separation, immutable artifact
-store, and shadow/promotion machinery are installed, this policy remains a
-zero-authority design contract. It does not enable Claude or any provider lane.
+Until a separate activation commit proves the executable verifier, pinned
+signer registry and revocation state, distinct deployed keys, immutable
+artifact trust root, one-use ledger, recoverable broker/CAS transaction, and
+hosted hostile plus shadow evidence, this policy remains a zero-authority
+design contract and human golden approval remains mandatory. The activation
+receipt must bind the exact policy and implementation digests. Human emergency
+authority is safety-only: reject, close, or roll back. It can never promote
+after an objective veto. This policy does not enable Claude or any provider lane.

@@ -493,7 +493,12 @@ class RepoHygieneTests(unittest.TestCase):
         validator = Draft202012Validator(schema)
         validator.validate(policy)
 
-        self.assertFalse(policy["ownerDelegation"]["routineHumanApprovalRequired"])
+        self.assertTrue(
+            policy["ownerDelegation"]["routineHumanApprovalRequiredUntilActivation"]
+        )
+        self.assertFalse(
+            policy["ownerDelegation"]["postActivationRoutineHumanApprovalRequired"]
+        )
         self.assertEqual(
             policy["ownerDelegation"]["defaultOnAmbiguity"],
             "REJECT_PRESERVE_BASELINE",
@@ -501,6 +506,10 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertTrue(policy["authorityBoundary"]["implementationProposerRecused"])
         self.assertFalse(policy["authorityBoundary"]["providerRuntimeAuthority"])
         self.assertEqual(policy["authorityBoundary"]["automaticLaunchGate"], "CLOSED")
+        self.assertEqual(
+            policy["authorityBoundary"]["goldenPromotionAuthority"],
+            "NOT_INSTALLED",
+        )
         self.assertTrue(
             policy["independence"]["modelConsensusCannotOverrideOutputFailure"]
         )
@@ -510,11 +519,34 @@ class RepoHygieneTests(unittest.TestCase):
             ],
             2,
         )
+        required_core_signers = [
+            "HOSTED_PRODUCT_ORACLE",
+            "STRANGER_REVIEW",
+            "HUB_DOCTRINE",
+        ]
+        for decision_class in (
+            "A_REPRESENTATION_ONLY",
+            "B_MECHANICALLY_PREDICTED",
+        ):
+            self.assertEqual(
+                policy["decisionClasses"][decision_class]["requiredSignerClasses"],
+                required_core_signers,
+            )
+            self.assertGreaterEqual(
+                policy["decisionClasses"][decision_class]["shadowCycles"], 1
+            )
         class_c = policy["decisionClasses"]["C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"]
         self.assertEqual(class_c["minimumSignerClasses"], 5)
         self.assertTrue(class_c["unanimous"])
         self.assertTrue(class_c["requiresStandingBoundedPolicy"])
         self.assertEqual(class_c["whenPolicyMissing"], "REJECT_PRESERVE_BASELINE")
+        self.assertEqual(class_c["requiredSignerClasses"], policy["signerClasses"])
+        self.assertEqual(
+            policy["ownerDelegation"]["humanOverrideActions"],
+            ["REJECT", "SAFETY_CLOSE", "ROLLBACK"],
+        )
+        self.assertFalse(policy["ownerDelegation"]["humanOverrideMayPromote"])
+        self.assertFalse(policy["ownerDelegation"]["objectiveVetoMayBeOverridden"])
         self.assertTrue(
             policy["promotion"]["promotionCommitMayChangeOnlyGoldenAndReceipt"]
         )
@@ -522,8 +554,8 @@ class RepoHygieneTests(unittest.TestCase):
         hostile_mutations = (
             (
                 "routine human gate restored",
-                ("ownerDelegation", "routineHumanApprovalRequired"),
-                True,
+                ("ownerDelegation", "routineHumanApprovalRequiredUntilActivation"),
+                False,
             ),
             (
                 "ambiguity auto-approved",
@@ -559,6 +591,16 @@ class RepoHygieneTests(unittest.TestCase):
                 ("promotion", "promotionCommitMayChangeOnlyGoldenAndReceipt"),
                 False,
             ),
+            (
+                "human override promotes",
+                ("ownerDelegation", "humanOverrideMayPromote"),
+                True,
+            ),
+            (
+                "objective veto overridden",
+                ("ownerDelegation", "objectiveVetoMayBeOverridden"),
+                True,
+            ),
         )
         for label, path, value in hostile_mutations:
             with self.subTest(label=label):
@@ -569,12 +611,48 @@ class RepoHygieneTests(unittest.TestCase):
                 target[path[-1]] = value
                 self.assertTrue(list(validator.iter_errors(hostile)))
 
+        for field in ("requiredEvidence", "failClosedOn", "activationPrerequisites"):
+            for index, token in enumerate(policy[field]):
+                with self.subTest(field=field, deleted=token):
+                    hostile = json.loads(json.dumps(policy))
+                    del hostile[field][index]
+                    self.assertTrue(list(validator.iter_errors(hostile)))
+                with self.subTest(field=field, substituted=token):
+                    hostile = json.loads(json.dumps(policy))
+                    hostile[field][index] = "ARBITRARY_WEAK_LABEL"
+                    self.assertTrue(list(validator.iter_errors(hostile)))
+
+        for decision_class in (
+            "A_REPRESENTATION_ONLY",
+            "B_MECHANICALLY_PREDICTED",
+            "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS",
+        ):
+            with self.subTest(decision_class=decision_class, weakened_signers=True):
+                hostile = json.loads(json.dumps(policy))
+                hostile["decisionClasses"][decision_class]["requiredSignerClasses"] = [
+                    "STRANGER_REVIEW"
+                ]
+                self.assertTrue(list(validator.iter_errors(hostile)))
+
+        for receipt_schema_name in (
+            "autonomous-golden-signer-receipt.schema.json",
+            "autonomous-golden-promotion-receipt.schema.json",
+        ):
+            receipt_schema = json.loads(
+                (ROOT / "tools" / "repo_hygiene" / receipt_schema_name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            Draft202012Validator.check_schema(receipt_schema)
+
         docs = (ROOT / "docs" / "autonomous-golden-authority.md").read_text(
             encoding="utf-8"
         )
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("receipts, not approval requests", docs)
         self.assertRegex(docs, r"cannot\s+vote a failing output gate green")
+        self.assertIn("human golden approval remains mandatory", docs)
+        self.assertIn("Human approval remains mandatory today", agents)
         self.assertIn("docs/autonomous-golden-authority.md", agents)
 
     def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
