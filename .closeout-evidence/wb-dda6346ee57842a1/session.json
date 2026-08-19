@@ -1,0 +1,17 @@
+{
+  "actor": "brokered-closeout",
+  "artifactKind": "session",
+  "branch": "codex/ci-protected-check-router-20260819",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-19T14:56:51+00:00",
+  "detectorHash": "1c2fedc59b1838a84aa8e74d64921e41",
+  "featureHead": "f5f8964c2d54df263fd325e80915c8cf799d18c6",
+  "schemaVersion": "1.0",
+  "targetHead": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+  "workBlockId": "wb-dda6346ee57842a1",
+  "worktree": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\worktrees\\ci-protected-check-router-20260819"
+}
