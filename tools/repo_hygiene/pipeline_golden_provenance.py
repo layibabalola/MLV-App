@@ -286,10 +286,13 @@ def _validate_history(
         expected_url = f"https://github.com/layibabalola/MLV-App/actions/runs/{run_id}"
         _require(observation.get("url") == expected_url,
                  f"pipeline external_observations[{index}] URL must exactly match its hosted run_id")
-        local_correlation = observation["local_git_correlation"]
-        relevant_paths = local_correlation["relevant_paths"]
-        _require(git.paths_equal(introduced_by, head, relevant_paths),
-                 f"pipeline external_observations[{index}] local relevant-tree correlation is false")
+        observed_artifact_hash = _hash_bytes(git.blob(head, artifact_path), artifact["hash_mode"])
+        _require(observed_artifact_hash == artifact["sha256"],
+                 f"pipeline external_observations[{index}] artifact blob does not match")
+        _require(git.is_ancestor(introduced_by, head),
+                 f"pipeline external_observations[{index}] predates artifact introduction")
+        _require(git.is_ancestor(head, source_state),
+                 f"pipeline external_observations[{index}] is not ancestral to source state")
 
     phase3_review = phase3_record["review"]
     if phase3_review.get("status") in {"ratified", "git_integrated_external_review_asserted"}:
@@ -376,11 +379,13 @@ def validate(
         _require(isinstance(local_correlation, dict), f"{label} local_git_correlation must be an object")
         _require(local_correlation.get("head_commit_present") is True,
                  f"{label} local Git correlation must require head commit presence")
-        relevant_paths = local_correlation.get("relevant_paths")
-        _require(relevant_paths == ["tests", "src", "platform/qt"],
-                 f"{label} local Git correlation paths must cover tests, src, and platform/qt")
-        _require(local_correlation.get("tree_equivalent_to_introduced_by") is True,
-                 f"{label} local Git correlation must require tree equivalence")
+        for field in (
+            "artifact_blob_matches",
+            "introduced_by_is_ancestor",
+            "head_is_ancestor_of_source_state",
+        ):
+            _require(local_correlation.get(field) is True,
+                     f"{label} local Git correlation must require {field}")
 
     review = manifest.get("review")
     _require(isinstance(review, dict) and review.get("status") in REVIEW_STATUSES,

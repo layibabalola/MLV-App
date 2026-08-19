@@ -112,17 +112,15 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     def test_committed_manifest_is_valid(self) -> None:
         self._validate()
 
-    def test_ci_fetches_unreachable_historical_witness(self) -> None:
+    def test_ci_uses_full_history_for_ancestral_hosted_witness(self) -> None:
         manifest = self._manifest()
         external = manifest["artifact"]["external_observations"]
         self.assertEqual(1, len(external))
         witness = external[0]["head_sha"]
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
-        self.assertIn(
-            f"git fetch --no-tags origin {witness}",
-            workflow,
-            "full-history checkout cannot recover an unreachable historical witness; CI must fetch it explicitly",
-        )
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertNotIn("Fetch historical provenance witness", workflow)
+        self.assertTrue(self.git_witness.is_ancestor(witness, manifest["generator"]["source_state_commit"]))
 
     def test_pipeline_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
@@ -328,13 +326,13 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ProvenanceValidationError, "URL must exactly match its hosted run_id"):
             self._validate()
 
-    def test_hosted_evidence_tree_equivalence_is_verified(self) -> None:
+    def test_hosted_evidence_artifact_blob_is_verified(self) -> None:
         manifest = self._manifest()
         manifest["artifact"]["external_observations"][0]["head_sha"] = (
             "73adf6eed3dd7443123d3801ab36c20f75526b4b"
         )
         self._write_manifest(manifest)
-        with self.assertRaisesRegex(ProvenanceValidationError, "local relevant-tree correlation is false"):
+        with self.assertRaisesRegex(ProvenanceValidationError, "artifact blob does not match"):
             self._validate()
 
     def test_hosted_observation_cannot_claim_verified_without_local_run_witness(self) -> None:

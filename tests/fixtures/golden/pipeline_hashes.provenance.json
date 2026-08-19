@@ -2,48 +2,66 @@
   "schema_version": 1,
   "artifact": {
     "path": "tests/fixtures/golden/pipeline_hashes.json",
-    "sha256": "73cc6333162c654ed44eaa9f2e33b3418cd993e0a91b1d304cfd125d85057ae2",
+    "sha256": "89ce4ad45e378f38db8bab1efe3660056dc14c16bd71d8e3ec6da08fbac01f4a",
     "hash_mode": "lf_normalized_sha256",
     "key_count": 15,
     "content_state": "committed_historical_golden",
-    "introduced_by": "15eae08623efe3bdaf05f19c7efc4cfc639f9a9d",
+    "introduced_by": "fc9c0a6d6d97cc885b92236333209504530f326b",
     "external_observations": [
       {
         "kind": "hosted_golden_check_claim",
-        "run_id": 25634701776,
-        "head_sha": "91774963efb4cf22c4a3b2e2b7704225f3fa2885",
+        "run_id": 32273540367,
+        "head_sha": "08f38ea73887e9ae3b3e84673f03d82267473fab",
         "conclusion": "success",
-        "url": "https://github.com/layibabalola/MLV-App/actions/runs/25634701776",
+        "url": "https://github.com/layibabalola/MLV-App/actions/runs/32273540367",
         "verification": "externally_asserted_unvalidated",
         "local_git_correlation": {
           "head_commit_present": true,
-          "relevant_paths": [
-            "tests",
-            "src",
-            "platform/qt"
-          ],
-          "tree_equivalent_to_introduced_by": true
+          "artifact_blob_matches": true,
+          "introduced_by_is_ancestor": true,
+          "head_is_ancestor_of_source_state": true
         }
       }
     ]
   },
   "review": {
-    "status": "unratified",
+    "status": "ratified",
     "scope": {
-      "artifact": "none",
-      "keys": []
+      "artifact": "complete",
+      "keys": [
+        "tiny_dual_iso.debayer.amaze.cpu.frame0",
+        "tiny_dual_iso.debayer.bilinear.cpu.frame0",
+        "tiny_dual_iso.full16.frame0",
+        "tiny_dual_iso.full16.frame1",
+        "tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0",
+        "tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0",
+        "tiny_dual_iso.gpu_preview_subset.frame0",
+        "tiny_dual_iso.gpu_preview_subset.frame1",
+        "tiny_dual_iso.gpu_preview_subset.signature.frame0",
+        "tiny_dual_iso.gpu_preview_subset.signature.frame1",
+        "tiny_dual_iso.preview_processing.cpu.frame0",
+        "tiny_dual_iso.preview16.frame0",
+        "tiny_dual_iso.preview16.frame1",
+        "tiny_dual_iso.preview16_vs_full_psnr.frame0",
+        "tiny_dual_iso.preview16_vs_full_psnr.frame1"
+      ]
     },
-    "reason": "No durable whole-artifact review was found for the committed 15-key pipeline golden. This manifest records the committed state only; it does not bless later observed actuals."
+    "reason": "The repository owner approved the exact 15-key before/after synchronization at 08f38ea73887e9ae3b3e84673f03d82267473fab after the deterministic hosted producer and frozen known-good output agreed.",
+    "approval_witness": {
+      "path": "receipts/pipeline-golden-sync-human-approval-20260819.json",
+      "sha256": "9d6e9dfba29d9b45d3049f23b8d3075124989cdf58339b6bb2aec527c3266825",
+      "hash_mode": "lf_normalized_sha256"
+    }
   },
   "unknowns": {
     "original_generation_run": null,
     "generator_executable_sha256": null,
     "runner_image_revision": null,
-    "whole_artifact_review_range": null
+    "whole_artifact_review_range": "e87b5133397240d5ebf3307625e8379be81e48f4..08f38ea73887e9ae3b3e84673f03d82267473fab"
   },
   "generator": {
     "executable": "pipeline_tests.exe",
-    "source_state_commit": "17ef0209f739beee36f5ad21b3e39d7f19e74d5f",
+    "source_state_commit": "c7b299b46ef35510f8dd36eeb5a47eb49f608e03",
     "dependency_snapshot": {
       "complete": false,
       "scope": "listed_generator_sources_and_declared_fixture_receipt_inputs_only",
@@ -66,7 +84,7 @@
       "compiler": "MinGW 13.1",
       "evidence": {
         "path": ".github/workflows/tests.yml",
-        "sha256": "ebd878d1cd29a844eea036d2448d69fa1116bf5ba6a4d700747c740cbae3ba0f",
+        "sha256": "1825963c161c2b361fc3fd88db06173a2f4abbf5b545e325c4685a851fd7eec6",
         "hash_mode": "lf_normalized_sha256"
       }
     },
@@ -88,7 +106,7 @@
       },
       {
         "path": "tests/pipeline/test_dual_iso_pipeline.cpp",
-        "sha256": "be1ce14b5e47511049176c9bd34768efa2a922d5b549c86bdf7a7d19415c91e7",
+        "sha256": "c47c9d2a94b78c48f5637dde6903c27eb026633b534d2c1ee5d5ee2b4f53e347",
         "hash_mode": "lf_normalized_sha256"
       },
       {
@@ -147,14 +165,14 @@
         "phase3_clip": "tiny_dual_iso_hq",
         "phase3_frame": 0,
         "phase3_format": "rgb16",
-        "status": "known_mismatch"
+        "status": "aligned"
       },
       {
         "pipeline_key": "tiny_dual_iso.full16.frame1",
         "phase3_clip": "tiny_dual_iso_hq",
         "phase3_frame": 1,
         "phase3_format": "rgb16",
-        "status": "known_mismatch"
+        "status": "aligned"
       }
     ]
   }
