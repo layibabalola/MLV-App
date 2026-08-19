@@ -442,6 +442,50 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
         raise ValueError("JUnit profile outcome mismatch")
     if bool(repository_case.find("error") is not None) != (not repository["cleanAfter"]):
         raise ValueError("JUnit repository outcome mismatch")
+    expected_case_keys = {
+        tuple(str(record["id"]).rpartition(".")[::2]) for record in records
+    } | {
+        ("provider_control.profile", "validation"),
+        ("provider_control.repository", "clean_after"),
+    }
+    if set(cases) != expected_case_keys:
+        raise ValueError("JUnit testcase identities disagree with hosted result")
+
+    outcome_tag = {
+        "passed": None,
+        "failed": "failure",
+        "unexpected-success": "failure",
+        "error": "error",
+        "skipped": "skipped",
+        "expected-failure": "skipped",
+    }
+    actual_child_counts = {"failure": 0, "error": 0, "skipped": 0}
+    for case in cases.values():
+        children = list(case)
+        if any(child.tag not in actual_child_counts for child in children) or len(children) > 1:
+            raise ValueError("JUnit testcase has invalid outcome children")
+        if children:
+            actual_child_counts[children[0].tag] += 1
+    if actual_child_counts != {
+        "failure": junit_counts["failures"],
+        "error": junit_counts["errors"],
+        "skipped": junit_counts["skipped"],
+    }:
+        raise ValueError("JUnit outcome children disagree with root counters")
+    for record in records:
+        class_name, _, test_name = str(record["id"]).rpartition(".")
+        case = cases[(class_name, test_name)]
+        expected_tag = outcome_tag[record["status"]]
+        children = list(case)
+        actual_tag = children[0].tag if children else None
+        if actual_tag != expected_tag:
+            raise ValueError(f"JUnit outcome disagrees for {record['id']}")
+        try:
+            junit_duration = float(case.attrib["time"])
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"JUnit duration is invalid for {record['id']}") from error
+        if junit_duration != round(float(record["durationSeconds"]), 6):
+            raise ValueError(f"JUnit duration disagrees for {record['id']}")
 
 
 def _write_fatal_diagnostic(args, error: Exception) -> None:

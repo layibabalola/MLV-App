@@ -48,7 +48,8 @@ result fail the job and appear in JUnit. JSON and JUnit are accepted only with a
 manifest that binds their exact SHA-256, byte count, head, and tree; partial bundles are not uploaded.
 The verifier also parses both files, recomputes counters and the CLOSED verdict, requires the profile
 and repository-cleanliness JUnit cases, refuses authority claims, and rejects any sibling fatal
-diagnostic while preserving the original fatal cause.
+diagnostic while preserving the original fatal cause. Every JSON test ID, status, and rounded
+duration must map to exactly one JUnit testcase with the matching outcome child.
 Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
 written to the hosted step summary, and runner exceptions after argument parsing produce a separate
 non-authoritative fatal diagnostic rather than a partial bundle. The narrowly scoped dot-directory

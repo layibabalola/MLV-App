@@ -1148,6 +1148,38 @@ class SupervisorTests(unittest.TestCase):
         )
         hosted_runner._verify_evidence_bundle(manifest_path)
 
+        renamed_root = hosted_runner.ET.fromstring(junit_bytes)
+        ordinary = next(
+            case for case in renamed_root.findall("testcase")
+            if case.attrib.get("classname") == "example.Case"
+        )
+        ordinary.set("name", "forged_identity")
+        renamed_junit = hosted_runner.ET.tostring(
+            renamed_root, encoding="utf-8", xml_declaration=True
+        )
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes, renamed_junit, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "testcase identities"):
+            hosted_runner._verify_evidence_bundle(manifest_path)
+
+        contradictory_root = hosted_runner.ET.fromstring(junit_bytes)
+        ordinary = next(
+            case for case in contradictory_root.findall("testcase")
+            if case.attrib.get("classname") == "example.Case"
+        )
+        hosted_runner.ET.SubElement(ordinary, "failure").text = "forged failure"
+        contradictory_junit = hosted_runner.ET.tostring(
+            contradictory_root, encoding="utf-8", xml_declaration=True
+        )
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes, contradictory_junit, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "outcome children"):
+            hosted_runner._verify_evidence_bundle(manifest_path)
+
         hostile_result = json.loads(result_bytes)
         hostile_result["authority"] = True
         hosted_runner._write_evidence_bundle(
