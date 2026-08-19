@@ -1,0 +1,36 @@
+{
+  "schema": "mlv-provider-supervisor-profile/v1",
+  "project": "mlv-app",
+  "phase": "PHASE_1",
+  "doctrine": {
+    "generation": "R14",
+    "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
+    "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"
+  },
+  "disposition": "DISTINGUISH",
+  "automaticLaunchGate": "CLOSED",
+  "authority": {
+    "productionLaunch": false,
+    "providerInvocation": false,
+    "canary": false,
+    "adoption": false
+  },
+  "proofModes": ["SHADOW", "CONTAINMENT"],
+  "contractDigests": {
+    "universalProfileSha256": "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
+    "laneBindingsSha256": "sha256:f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531",
+    "observedInventorySha256": "sha256:7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"
+  },
+  "unknownPolicy": "BLOCK",
+  "pending": [
+    "COMPLETE_EXACT_INVENTORY",
+    "SUPERVISOR_ACTION_GRAPH",
+    "CLOSED_SHADOW_CONTAINMENT_PROOF",
+    "INDEPENDENT_REVIEW",
+    "SIGNED_INSTALLATION",
+    "EXPLICIT_ONE_USE_CANARY_AUTHORITY"
+  ],
+  "unratifiedInputs": [
+    {"generation": "R16", "treatment": "SHADOW_INPUT_ONLY", "authority": false}
+  ]
+}

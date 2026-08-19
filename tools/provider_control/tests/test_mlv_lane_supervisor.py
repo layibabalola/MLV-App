@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import unittest
@@ -18,9 +17,8 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import mlv_lane_supervisor as supervisor  # noqa: E402
 from vendor.universal_provider_control import (  # noqa: E402
-    ControlError, strict_json_file, validate_contract, validate_project_profile,
+    ControlError, strict_json_file, validate_project_profile,
 )
-
 
 ZERO = "sha256:" + "0" * 64
 VENDOR_BLOBS = {
@@ -72,236 +70,256 @@ class SupervisorTests(unittest.TestCase):
     def write_demand(self, value):
         self.demand.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
-    def test_01_vendor_is_exact_canonical_doctrine_bytes(self):
-        self.assertEqual(supervisor.DOCTRINE_COMMIT, "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d")
+    def fake_env(self):
+        return {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+
+    def test_01_exact_r14_subject_and_ratification_are_distinct_and_vendor_is_pinned(self):
+        self.assertEqual(supervisor.TECHNICAL_SUBJECT, "874605e43531c9aa230ee16851f8107a8e0d9cec")
+        self.assertEqual(supervisor.RATIFICATION_MERGE, "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d")
+        self.assertNotEqual(supervisor.TECHNICAL_SUBJECT, supervisor.RATIFICATION_MERGE)
         for relative, expected in VENDOR_BLOBS.items():
             with self.subTest(relative=relative):
                 self.assertEqual(git_blob_sha1(ROOT / relative), expected)
+        engine = (ROOT / "vendor/universal_provider_control.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_CAPSULE_POISON_OWNERS = 259", engine)
+        self.assertIn("target-directory-descriptor", engine)
+        self.assertIn("target_directory_fd=directory", engine)
 
-    def test_02_profile_and_intended_inventory_validate(self):
-        profile = strict_json_file(ROOT / "mlv-project-profile.candidate.json")
+    def test_02_strict_local_profile_and_observed_inventory_validate(self):
+        profile, bindings, local, inventory = supervisor.load_contracts()
         validate_project_profile(profile)
-        inventory = strict_json_file(ROOT / "inventory-post-install.candidate.json")
-        validate_contract("inventory", inventory)
+        self.assertEqual(bindings["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
+        self.assertEqual(bindings["ratificationMerge"], supervisor.RATIFICATION_MERGE)
+        self.assertEqual(local["disposition"], "DISTINGUISH")
+        self.assertEqual(local["automaticLaunchGate"], "CLOSED")
+        self.assertEqual(inventory["authority"], "OBSERVED_NON_AUTHORITATIVE")
+        self.assertFalse(inventory["complete"])
 
-    def test_03_default_missing_state_is_closed(self):
+    def test_03_missing_state_defaults_closed(self):
         self.assertEqual(supervisor.UniversalProviderBroker(self.state).gate_state(), "CLOSED")
 
-    def test_04_one_thousand_no_work_ticks_are_zero_provider(self):
+    def test_04_one_thousand_unchanged_production_no_work_ticks_are_zero_provider(self):
         self.write_demand(demand())
         with mock.patch.object(supervisor.subprocess, "Popen", side_effect=AssertionError("provider invoked")):
-            first = supervisor.tick(self.state, self.demand)
-            self.assertEqual(first["status"], "IDLE_RECORDED")
             for _ in range(1000):
                 result = supervisor.tick(self.state, self.demand)
-                self.assertEqual(result["status"], "IDLE_SKIPPED")
-                self.assertEqual(result["providerCalls"], 0)
-                self.assertEqual(result["providerProcesses"], 0)
-                self.assertEqual(result["inputTokens"], 0)
-                self.assertEqual(result["outputTokens"], 0)
-        self.assertFalse((self.state / "universal-provider-control.sqlite3").exists())
-        self.assertFalse((self.state / "claude-shared-account.quota.lock").exists())
+                self.assertEqual(result["reason"], "ACTIVATION_EVIDENCE_BLOCKED")
+                for field in ("providerCalls", "providerProcesses", "inputTokens",
+                              "cachedInputTokens", "reasoningTokens", "outputTokens"):
+                    self.assertEqual(result[field], 0)
+        self.assertFalse(self.state.exists(), "blocked production tick wrote state")
 
-    def test_05_work_refuses_closed_before_provider_resolution(self):
+    def test_05_shadow_no_work_distinguishes_first_changed_and_unchanged(self):
+        self.write_demand(demand(contextTokens=32000))
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False):
+            first = supervisor.shadow_tick(self.state, self.demand)
+            self.assertEqual(first["status"], "IDLE_RECORDED")
+            prior = strict_json_file(self.state / "idle-fingerprint.json")
+            self.assertEqual(prior["fingerprintType"], "CANONICAL_DEMAND_V1")
+            self.write_demand(demand(contextTokens=32001))
+            changed = supervisor.shadow_tick(self.state, self.demand)
+            unchanged = supervisor.shadow_tick(self.state, self.demand)
+        self.assertEqual(changed["status"], "IDLE_CHANGED")
+        self.assertEqual(unchanged["status"], "IDLE_SKIPPED")
+        self.assertNotEqual(first["demandFingerprint"], changed["demandFingerprint"])
+
+    def test_06_work_refuses_before_any_provider_resolution(self):
         self.write_demand(demand(hasWork=True))
         with mock.patch.object(supervisor.subprocess, "Popen", side_effect=AssertionError("provider invoked")):
             result = supervisor.tick(self.state, self.demand)
-        self.assertEqual(result["reason"], "AUTOMATIC_LAUNCH_GATE_CLOSED")
-        self.assertEqual(result["providerCalls"], 0)
+        self.assertEqual(result["reason"], "ACTIVATION_EVIDENCE_BLOCKED")
+        self.assertIn("DIRECT_LAUNCHER_OBSERVED", result["blockers"])
         self.assertEqual(result["automaticLaunchGate"], "CLOSED")
+        self.assertFalse(self.state.exists())
 
-    def test_06_auth_reset_capacity_and_refusal_cannot_open(self):
+    def test_07_auth_reset_capacity_and_refusal_are_non_mutating(self):
         for event in ("AUTH_SUCCESS", "RESET_OBSERVED", "CAPACITY_RETURNED", "QUOTA_REFUSAL"):
             with self.subTest(event=event):
                 result = supervisor.observe_signal(self.state, event)
+                self.assertEqual(result["status"], "REFUSED")
                 self.assertEqual(result["automaticLaunchGate"], "CLOSED")
-        self.assertEqual(supervisor.UniversalProviderBroker(self.state).gate_state(), "CLOSED")
+        self.assertFalse((self.state / "provider-signals.jsonl").exists())
 
-    def test_07_fake_seam_is_disabled_without_explicit_test_environment(self):
+    def test_08_fake_seams_require_explicit_test_environment(self):
         self.write_demand(demand(hasWork=True))
         with mock.patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(ControlError, "TEST_SEAM_DISABLED"):
                 supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
+            with self.assertRaisesRegex(ControlError, "TEST_SEAM_DISABLED"):
+                supervisor.shadow_tick(self.state, self.demand)
 
-    def test_08_capacity_reserve_refuses_before_fake_provider(self):
+    def test_09_capacity_reserve_refuses_before_fake_provider(self):
         self.write_demand(demand(hasWork=True, availableFraction=0.4, estimateFraction=0.1))
-        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
-        with mock.patch.dict(os.environ, env, clear=False):
-            with mock.patch.object(supervisor.subprocess, "Popen", side_effect=AssertionError("provider invoked")):
-                with self.assertRaisesRegex(ControlError, "CAPACITY_RESERVE_REFUSED"):
-                    supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor.subprocess, "Popen",
+                                  side_effect=AssertionError("provider invoked")):
+            with self.assertRaisesRegex(ControlError, "CAPACITY_RESERVE_REFUSED"):
+                supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
 
-    def test_09_fake_receipt_binds_model_effort_role_subject_and_argv(self):
+    def test_10_shadow_and_containment_fake_receipts_have_zero_provider_authority(self):
         self.write_demand(demand(hasWork=True))
-        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
-        with mock.patch.dict(os.environ, env, clear=False):
-            result = supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
-        self.assertEqual(result["status"], "TEST_FAKE_COMPLETED")
-        self.assertEqual(result["providerCalls"], 1)
-        self.assertEqual(result["binding"]["model"], "claude-opus-5")
-        self.assertEqual(result["binding"]["effort"], "high")
-        self.assertEqual(result["binding"]["role"], "HUB")
-        for field in ("subjectSha256", "executableSha256", "argvSha256"):
-            self.assertRegex(result["binding"][field], r"^sha256:[0-9a-f]{64}$")
+        for mode in ("SHADOW", "CONTAINMENT"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, self.fake_env(), clear=False):
+                result = supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0, mode
+                )
+            self.assertEqual(result["harnessMode"], mode)
+            self.assertEqual(result["automaticLaunchGate"], "CLOSED")
+            self.assertEqual(result["providerCalls"], 0)
+            self.assertEqual(result["providerProcesses"], 0)
+            self.assertEqual(result["fakeProviderCalls"], 1)
+            self.assertEqual(result["fakeReceipt"]["provider"], "FAKE_ONLY")
+            self.assertEqual(result["containedHostileAuthorityClaim"], mode == "CONTAINMENT")
+            if mode == "CONTAINMENT":
+                self.assertEqual(result["fakeReceipt"]["requestedAuthority"],
+                                 "OPEN_GATE_AND_ADOPT")
 
-    def test_10_quota_lock_lives_for_entire_fake_child(self):
+    def test_11_quota_lock_lives_for_entire_fake_child(self):
         self.write_demand(demand(hasWork=True))
-        command = [sys.executable, str(ROOT / "mlv_lane_supervisor.py"), "--state-root", str(self.state),
-                   "test-fake-provider", "--demand", str(self.demand), "--fake-provider",
-                   str(HERE / "fake_provider.py"), "--sleep", "0.8"]
+        command = [sys.executable, str(ROOT / "mlv_lane_supervisor.py"), "--state-root",
+                   str(self.state), "test-fake-provider", "--demand", str(self.demand),
+                   "--fake-provider", str(HERE / "fake_provider.py"), "--sleep", "0.8",
+                   "--mode", "CONTAINMENT"]
         marker = self.base / "fake-started"
-        env = dict(os.environ); env[supervisor.FAKE_ENV] = "1"
-        env[supervisor.TEST_STATE_ROOT_ENV] = str(self.state)
-        env["MLV_FAKE_STARTED_MARKER"] = str(marker)
+        env = dict(os.environ); env.update(self.fake_env()); env["MLV_FAKE_STARTED_MARKER"] = str(marker)
         first = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-        deadline = time.monotonic() + 3
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(marker.exists(), "first fake child did not start")
-        second = subprocess.run(command[:-1] + ["0"], capture_output=True, text=True, env=env, timeout=5)
-        first_out, first_err = first.communicate(timeout=5)
-        self.assertEqual(first.returncode, 0, first_err)
-        self.assertEqual(json.loads(first_out)["status"], "TEST_FAKE_COMPLETED")
-        self.assertEqual(second.returncode, 2)
-        self.assertEqual(json.loads(second.stdout)["reason"], "QUOTA_DOMAIN_BUSY")
+        try:
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists(), "first fake child did not start")
+            second_command = command.copy(); second_command[second_command.index("0.8")] = "0"
+            second = subprocess.run(second_command, capture_output=True, text=True, env=env, timeout=5)
+            first_out, first_err = first.communicate(timeout=5)
+            self.assertEqual(first.returncode, 0, first_err)
+            self.assertEqual(json.loads(first_out)["harnessMode"], "CONTAINMENT")
+            self.assertEqual(json.loads(second.stdout)["reason"], "QUOTA_DOMAIN_BUSY")
+        finally:
+            if first.poll() is None:
+                first.kill(); first.communicate()
 
-    def test_11_turn_and_context_ceilings_refuse(self):
-        for values, reason in (({"turns": 13}, "TURN_BUDGET_REFUSED"),
-                               ({"contextTokens": 120001}, "CONTEXT_BUDGET_REFUSED")):
-            with self.subTest(reason=reason):
-                self.write_demand(demand(**values))
-                with self.assertRaisesRegex(ControlError, reason):
-                    supervisor.tick(self.state, self.demand)
+    def test_12_turn_context_unknown_fields_and_model_injection_refuse(self):
+        cases = [({"turns": 13}, "TURN_BUDGET_REFUSED"),
+                 ({"contextTokens": 120001}, "CONTEXT_BUDGET_REFUSED"),
+                 ({"capsuleSha256": "raw-account-or-secret"}, "DEMAND_BINDING_INVALID")]
+        for values, reason in cases:
+            self.write_demand(demand(**values))
+            with self.subTest(reason=reason), self.assertRaisesRegex(ControlError, reason):
+                supervisor.tick(self.state, self.demand)
+        for field in ("model", "effort", "provider"):
+            value = demand(); value[field] = "injected"; self.write_demand(value)
+            with self.subTest(field=field), self.assertRaisesRegex(ControlError, "DEMAND_INVALID"):
+                supervisor.tick(self.state, self.demand)
 
-    def test_12_unknown_fields_and_bad_bindings_refuse(self):
-        value = demand(); value["surprise"] = True; self.write_demand(value)
-        with self.assertRaisesRegex(ControlError, "DEMAND_INVALID"):
-            supervisor.tick(self.state, self.demand)
-        self.write_demand(demand(capsuleSha256="raw-account-or-secret"))
-        with self.assertRaisesRegex(ControlError, "DEMAND_BINDING_INVALID"):
-            supervisor.tick(self.state, self.demand)
-
-    def test_13_author_packet_binds_every_candidate_subject(self):
-        packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R2_ZERO_AUTHORITY")
-        self.assertEqual(packet["doctrineCommit"], supervisor.DOCTRINE_COMMIT)
-        self.assertEqual(packet["r1Commit"], supervisor.R1_COMMIT)
-        self.assertEqual(packet["profileSha256"], supervisor.sha256_file(supervisor.PROFILE)[7:])
-        self.assertEqual(packet["bindingsSha256"], supervisor.sha256_file(supervisor.BINDINGS)[7:])
-        for subject in packet["subjects"]:
-            path = ROOT.parents[1] / subject["path"]
-            with self.subTest(path=subject["path"]):
-                self.assertEqual(path.stat().st_size, subject["bytes"])
-                self.assertEqual(supervisor.sha256_file(path)[7:], subject["sha256"])
-
-    def test_14_alternate_root_is_refused_before_quota_lock(self):
+    def test_13_alternate_root_is_refused_before_quota_lock(self):
         self.write_demand(demand(hasWork=True))
         alternate = self.base / "alternate-state"
-        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
-        with mock.patch.dict(os.environ, env, clear=False):
-            with mock.patch.object(supervisor, "quota_lock",
-                                   side_effect=AssertionError("quota lock reached")):
-                with self.assertRaisesRegex(ControlError, "STATE_ROOT_IDENTITY_MISMATCH"):
-                    supervisor.run_test_fake(alternate, self.demand, HERE / "fake_provider.py", 0)
-        self.assertFalse((alternate / "claude-shared-account.quota.lock").exists())
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor, "quota_lock",
+                                  side_effect=AssertionError("quota lock reached")):
+            with self.assertRaisesRegex(ControlError, "STATE_ROOT_IDENTITY_MISMATCH"):
+                supervisor.run_test_fake(alternate, self.demand, HERE / "fake_provider.py", 0)
+        self.assertFalse(alternate.exists())
 
-    def test_15_first_and_changed_no_work_are_distinct_and_typed(self):
-        self.write_demand(demand(contextTokens=32000))
-        first = supervisor.tick(self.state, self.demand)
-        self.assertEqual(first["status"], "IDLE_RECORDED")
-        prior = strict_json_file(self.state / "idle-fingerprint.json")
-        self.assertEqual(prior["fingerprintType"], "CANONICAL_DEMAND_V1")
-        self.assertEqual(prior["demandType"], "NO_WORK")
-        self.write_demand(demand(contextTokens=32001))
-        changed = supervisor.tick(self.state, self.demand)
-        self.assertEqual(changed["status"], "IDLE_CHANGED")
-        self.assertNotEqual(first["demandFingerprint"], changed["demandFingerprint"])
-        unchanged = supervisor.tick(self.state, self.demand)
-        self.assertEqual(unchanged["status"], "IDLE_SKIPPED")
-
-    def test_16_binding_bytes_and_subject_digests_are_hash_pinned(self):
-        original = strict_json_file(supervisor.BINDINGS)
-        for mutation in ("model", "role", "subject"):
-            changed = json.loads(json.dumps(original))
-            if mutation == "model":
-                changed["lanes"]["fable"]["model"] = "redirected-model"
-            elif mutation == "role":
-                changed["lanes"]["fable"]["role"] = "REDIRECTED_ROLE"
-            else:
-                changed["lanes"]["fable"]["subject"] = "subjects/seat-opus.md"
-            path = self.base / (mutation + ".json")
-            path.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
-            with self.subTest(mutation=mutation), mock.patch.object(supervisor, "BINDINGS", path):
-                with self.assertRaisesRegex(ControlError, "LANE_BINDINGS_DIGEST_MISMATCH"):
+    def test_14_candidate_contracts_and_subjects_are_hash_pinned(self):
+        targets = (("BINDINGS", "LANE_BINDINGS_DIGEST_MISMATCH"),
+                   ("INVENTORY", "OBSERVED_INVENTORY_DIGEST_MISMATCH"),
+                   ("SUPERVISOR_PROFILE", "SUPERVISOR_PROFILE_DIGEST_MISMATCH"))
+        for attribute, reason in targets:
+            source = getattr(supervisor, attribute); changed = self.base / source.name
+            changed.write_bytes(source.read_bytes() + b" ")
+            with self.subTest(attribute=attribute), mock.patch.object(supervisor, attribute, changed):
+                with self.assertRaisesRegex(ControlError, reason):
                     supervisor.load_contracts()
-        changed = json.loads(json.dumps(original))
-        changed["lanes"]["fable"]["subjectSha256"] = ZERO
-        path = self.base / "subject-digest.json"
-        path.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
-        with mock.patch.object(supervisor, "BINDINGS", path), \
-                mock.patch.object(supervisor, "EXPECTED_BINDINGS_SHA256",
-                                  supervisor.sha256_file(path)):
-            with self.assertRaisesRegex(ControlError, "LANE_BINDINGS_INVALID"):
-                supervisor.load_contracts()
+        _, bindings, _, _ = supervisor.load_contracts()
+        for binding in bindings["lanes"].values():
+            self.assertEqual(supervisor.sha256_file(ROOT / binding["subject"]),
+                             binding["subjectSha256"])
 
-    def test_17_binding_is_revalidated_immediately_before_child_boundary(self):
+    def test_15_binding_is_revalidated_immediately_before_fake_boundary(self):
         self.write_demand(demand(hasWork=True))
-        profile, bindings = supervisor.load_contracts()
-        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+        profile, bindings, local, inventory = supervisor.load_contracts()
         for mutation in ("model", "role", "subject"):
-            changed = json.loads(json.dumps(bindings))
-            changed["lanes"]["fable"][mutation] = "redirected"
-            with self.subTest(mutation=mutation), mock.patch.dict(os.environ, env, clear=False), \
-                    mock.patch.object(supervisor, "load_contracts",
-                                      side_effect=[(profile, bindings), (profile, changed)]), \
-                    mock.patch.object(supervisor.subprocess, "Popen",
-                                      side_effect=AssertionError("provider invoked")):
+            changed = json.loads(json.dumps(bindings)); changed["lanes"]["fable"][mutation] = "redirected"
+            with self.subTest(mutation=mutation), mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                    mock.patch.object(supervisor, "load_contracts", side_effect=[
+                        (profile, bindings, local, inventory), (profile, changed, local, inventory),
+                    ]), mock.patch.object(supervisor.subprocess, "Popen",
+                                          side_effect=AssertionError("provider invoked")):
                 with self.assertRaisesRegex(ControlError, "LAUNCH_BINDING_CHANGED"):
                     supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
 
-    def test_18_exact_r1_red_r2_green_discriminators(self):
-        expected_blob = "49289959fd7fa526acbb0123a6a55584ad2ce089"
-        actual_blob = subprocess.run(
-            ["git", "rev-parse", supervisor.R1_COMMIT + ":tools/provider_control/mlv_lane_supervisor.py"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        self.assertEqual(actual_blob, expected_blob)
-        archive = subprocess.run(
-            ["git", "archive", "--format=tar", supervisor.R1_COMMIT, "tools/provider_control"],
-            capture_output=True, check=True,
-        ).stdout
-        extracted = self.base / "r1"
-        extracted.mkdir()
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
-            members = bundle.getmembers()
-            self.assertTrue(members)
-            self.assertTrue(all(not Path(item.name).is_absolute() and ".." not in Path(item.name).parts
-                                for item in members))
-            bundle.extractall(extracted, members=members, filter="data")
-        script = (
-            "import json,sys,tempfile;from pathlib import Path;"
-            "root=Path(sys.argv[1]);sys.path.insert(0,str(root/'tools/provider_control'));"
-            "import mlv_lane_supervisor as s;"
-            "a=root/'state-a';b=root/'state-b';"
-            "l1=s.quota_lock(a);l1.__enter__();l2=s.quota_lock(b);l2.__enter__();"
-            "l2.__exit__(None,None,None);l1.__exit__(None,None,None);"
-            "d=root/'d.json';"
-            "base={'schema':'mlv-provider-demand/v1','project':'mlv-app','hasWork':False,"
-            "'lane':'fable','priority':'PRODUCT_WORK','estimateFraction':0.1,"
-            "'availableFraction':0.9,'turns':4,'contextTokens':32000,"
-            "'capsuleSha256':'" + ZERO + "','checkpointSha256':'" + ZERO + "',"
-            "'cacheAffinitySha256':'" + ZERO + "'};"
-            "d.write_text(json.dumps(base));x=s.tick(a,d);base['contextTokens']=32001;"
-            "d.write_text(json.dumps(base));y=s.tick(a,d);"
-            "print(json.dumps({'alternateRootsLocked':True,'first':x['status'],'changed':y['status']}))"
-        )
-        red = subprocess.run([sys.executable, "-c", script, str(extracted)],
-                             capture_output=True, text=True, check=True, timeout=20)
-        evidence = json.loads(red.stdout)
-        self.assertTrue(evidence["alternateRootsLocked"])
-        self.assertEqual(evidence["first"], "IDLE_SKIPPED")
-        self.assertEqual(evidence["changed"], "IDLE_SKIPPED")
-        # R2 greens for the exact red behaviors are asserted by tests 14 and 15.
+    def test_16_zero_null_direct_graph_and_xml_unknown_all_block(self):
+        profile, bindings, local, inventory = supervisor.load_contracts()
+        blockers = supervisor.activation_blockers(profile, bindings, local, inventory)
+        expected = {"SHARED_BROKER_IDENTITY_UNKNOWN", "PLACEHOLDER_IDENTITY_BLOCKED",
+                    "DIRECT_LAUNCHER_OBSERVED", "ACTION_GRAPH_INCOMPLETE",
+                    "INVENTORY_INCOMPLETE", "TASK_XML_CANONICALIZATION_UNKNOWN"}
+        self.assertTrue(expected.issubset(blockers))
+
+    def test_17_hostile_complete_zero_digest_and_graph_omission_are_schema_invalid(self):
+        original = strict_json_file(supervisor.INVENTORY)
+        complete = json.loads(json.dumps(original)); complete["complete"] = True
+        zero = json.loads(json.dumps(original)); zero["scheduledTask"]["physicalTaskFile"]["sha256"] = ZERO
+        omission = json.loads(json.dumps(original)); omission.pop("actionGraph")
+        for index, value in enumerate((complete, zero, omission)):
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
+                supervisor.validate_local_contract(value, "mlv-provider-observed-inventory-v1.schema.json")
+
+    def test_18_observed_task_launcher_prompt_and_cli_hash_changes_fail(self):
+        original = strict_json_file(supervisor.INVENTORY)
+        mutations = [
+            lambda value: value["scheduledTask"]["physicalTaskFile"].update(sha256="sha256:" + "1" * 64),
+            lambda value: value["ignitionLauncher"]["identity"].update(sha256="sha256:" + "2" * 64),
+            lambda value: value["livePromptObservations"][0]["identity"].update(sha256="sha256:" + "3" * 64),
+            lambda value: value["claudeCliObservations"][0]["identity"].update(sha256="sha256:" + "4" * 64),
+        ]
+        for index, mutate in enumerate(mutations):
+            changed = json.loads(json.dumps(original)); mutate(changed)
+            path = self.base / f"inventory-{index}.json"; path.write_text(json.dumps(changed), encoding="utf-8")
+            with self.subTest(index=index), mock.patch.object(supervisor, "INVENTORY", path):
+                with self.assertRaisesRegex(ControlError, "OBSERVED_INVENTORY_DIGEST_MISMATCH"):
+                    supervisor.load_contracts()
+
+    def test_19_direct_provider_canary_and_adopt_commands_do_not_exist(self):
+        for command in ("direct-provider", "launch-provider", "canary", "adopt"):
+            stdout = io.StringIO()
+            with self.subTest(command=command), mock.patch("sys.stdout", stdout), \
+                    mock.patch.object(supervisor.subprocess, "Popen",
+                                      side_effect=AssertionError("provider invoked")):
+                self.assertEqual(supervisor.main([command]), 2)
+                self.assertEqual(json.loads(stdout.getvalue())["reason"], "ARGUMENT_ERROR")
+
+    def test_20_installer_is_non_installable_and_has_no_mutating_task_verbs(self):
+        text = (ROOT / "install-mlv-lane-supervisor.ps1").read_text(encoding="utf-8")
+        for forbidden in ("Enable-ScheduledTask", "Start-ScheduledTask", "Register-ScheduledTask",
+                          "Set-ScheduledTask", "Unregister-ScheduledTask"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("INSTALL_NOT_IN_AUTHOR_SCOPE", text)
+        self.assertIn("R16_BROKER_OWNED_DEMAND", text)
+
+    def test_21_rollback_contract_leaves_task_disabled_and_gate_closed(self):
+        inventory = strict_json_file(supervisor.INVENTORY); rollback = inventory["rollback"]
+        self.assertEqual(rollback["requiredTaskState"], "Disabled")
+        self.assertFalse(rollback["requiredTaskEnabled"])
+        self.assertEqual(rollback["automaticLaunchGate"], "CLOSED")
+        self.assertEqual(rollback["restorePhysicalTaskFileSha256"],
+                         inventory["scheduledTask"]["physicalTaskFile"]["sha256"])
+
+    def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
+        packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
+        self.assertEqual(packet["status"], "DISTINGUISH_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
+        self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
+        self.assertFalse(packet["authority"]["adoption"])
+        self.assertEqual(packet["localEvidence"]["hostedMatrix"], "NOT_RUN")
+        repo = ROOT.parents[1]
+        for subject in packet["subjects"]:
+            path = repo / subject["path"]
+            with self.subTest(path=subject["path"]):
+                self.assertEqual(path.stat().st_size, subject["bytes"])
+                self.assertEqual(supervisor.sha256_file(path)[7:], subject["sha256"])
 
 
 if __name__ == "__main__":

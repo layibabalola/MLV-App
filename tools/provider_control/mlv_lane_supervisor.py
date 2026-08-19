@@ -12,21 +12,31 @@ import subprocess
 import sys
 from typing import Any, Iterator
 
+try:
+    import jsonschema
+except Exception:  # pragma: no cover - normalized to a fail-closed reason
+    jsonschema = None
+
 from vendor.universal_provider_control import (
-    ControlError, UniversalProviderBroker, canonical_json, digest_json,
+    ControlError, SafeArgumentParser, UniversalProviderBroker, canonical_json, digest_json,
     route_demand_tick, strict_json_file, validate_project_profile,
 )
 
-DOCTRINE_COMMIT = "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"
+TECHNICAL_SUBJECT = "874605e43531c9aa230ee16851f8107a8e0d9cec"
+RATIFICATION_MERGE = "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"
 DOCTRINE_ENGINE_GIT_BLOB = "0e26b15f249f89972e2fc7807ccd0d98a0bd4954"
-R1_COMMIT = "97f64b161f4015eb579ad731e9cdf41dc7c951e7"
 EXPECTED_PROFILE_SHA256 = "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"
-EXPECTED_BINDINGS_SHA256 = "sha256:c97986125afaa677caca50dd9ee3802fb083a7a61a8a992e6d43b151381f08db"
+EXPECTED_BINDINGS_SHA256 = "sha256:f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"
+EXPECTED_INVENTORY_SHA256 = "sha256:7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"
+EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:2bb2a952e226dbb6d268fb67f8bf0acbf3d6eb7c9928f67e4c8cdd54e4bf29d0"
 PRODUCTION_STATE_ROOT = Path(r"C:\ProgramData\MLV-App\provider-control-v1")
 DEFAULT_STATE_ROOT = PRODUCTION_STATE_ROOT
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "mlv-project-profile.candidate.json"
 BINDINGS = ROOT / "lane-bindings.candidate.json"
+INVENTORY = ROOT / "mlv-observed-inventory.candidate.json"
+SUPERVISOR_PROFILE = ROOT / "mlv-supervisor-profile.candidate.json"
+SCHEMAS = ROOT / "schemas"
 FAKE_ENV = "MLV_PROVIDER_CONTROL_TEST_ONLY"
 TEST_STATE_ROOT_ENV = "MLV_PROVIDER_CONTROL_TEST_STATE_ROOT"
 DEMAND_KEYS = {"schema", "project", "hasWork", "lane", "priority", "estimateFraction",
@@ -34,6 +44,9 @@ DEMAND_KEYS = {"schema", "project", "hasWork", "lane", "priority", "estimateFrac
                "checkpointSha256", "cacheAffinitySha256"}
 PRIORITIES = {"OWNER_FOREGROUND", "REQUIRED_REVIEW", "PRODUCT_WORK",
               "ADJUDICATION", "MAINTENANCE"}
+TEST_MODES = {"SHADOW", "CONTAINMENT"}
+ZERO_SHA256 = "sha256:" + "0" * 64
+ZERO_HMAC_SHA256 = "hmac-sha256:" + "0" * 64
 
 
 def sha256_file(path: Path) -> str:
@@ -52,18 +65,83 @@ def require_digest(value: Any) -> str:
     return value
 
 
-def load_contracts() -> tuple[dict[str, Any], dict[str, Any]]:
+def validate_local_contract(value: Any, schema_name: str) -> None:
+    if jsonschema is None:
+        raise ControlError("SCHEMA_VALIDATOR_UNAVAILABLE")
+    schema = strict_json_file(SCHEMAS / schema_name)
+    try:
+        jsonschema.Draft202012Validator.check_schema(schema)
+        validator = jsonschema.Draft202012Validator(
+            schema, format_checker=jsonschema.FormatChecker()
+        )
+        if next(iter(validator.iter_errors(value)), None) is not None:
+            raise ControlError("MLV_CONTRACT_SCHEMA_INVALID")
+    except ControlError:
+        raise
+    except Exception as exc:
+        raise ControlError("MLV_CONTRACT_SCHEMA_UNEVALUABLE") from exc
+
+
+def _contains_placeholder_digest(value: Any) -> bool:
+    if isinstance(value, str) and value in {ZERO_SHA256, ZERO_HMAC_SHA256}:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_placeholder_digest(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_placeholder_digest(item) for item in value)
+    return False
+
+
+def activation_blockers(
+    profile: dict[str, Any], bindings: dict[str, Any],
+    supervisor_profile: dict[str, Any], inventory: dict[str, Any],
+) -> list[str]:
+    blockers: list[str] = []
+    coordination = profile["coordination"]
+    if profile["independenceClass"] == "SHARED_QUOTA_DOMAIN" and \
+            coordination["sharedBrokerIdentitySha256"] is None:
+        blockers.append("SHARED_BROKER_IDENTITY_UNKNOWN")
+    if _contains_placeholder_digest(profile) or _contains_placeholder_digest(bindings):
+        blockers.append("PLACEHOLDER_IDENTITY_BLOCKED")
+    if inventory["complete"] is not True or inventory["status"] != "READY":
+        blockers.append("INVENTORY_INCOMPLETE")
+    if inventory["actionGraph"]["complete"] is not True:
+        blockers.append("ACTION_GRAPH_INCOMPLETE")
+    if inventory["ignitionLauncher"]["brokerRouted"] is not True or \
+            inventory["ignitionLauncher"]["directProviderInvocation"] is not False:
+        blockers.append("DIRECT_LAUNCHER_OBSERVED")
+    if any(item["identity"]["status"] != "EXACT"
+           for item in inventory["livePromptObservations"] + inventory["claudeCliObservations"]):
+        blockers.append("OBSERVED_IDENTITY_UNKNOWN")
+    if inventory["scheduledTask"]["exportedXml"]["status"] != "EXACT":
+        blockers.append("TASK_XML_CANONICALIZATION_UNKNOWN")
+    if supervisor_profile["pending"]:
+        blockers.append("SUPERVISOR_PROFILE_PENDING")
+    return blockers
+
+
+def load_contracts() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     if sha256_file(PROFILE) != EXPECTED_PROFILE_SHA256:
         raise ControlError("PROJECT_PROFILE_DIGEST_MISMATCH")
     if sha256_file(BINDINGS) != EXPECTED_BINDINGS_SHA256:
         raise ControlError("LANE_BINDINGS_DIGEST_MISMATCH")
+    if sha256_file(INVENTORY) != EXPECTED_INVENTORY_SHA256:
+        raise ControlError("OBSERVED_INVENTORY_DIGEST_MISMATCH")
+    if sha256_file(SUPERVISOR_PROFILE) != EXPECTED_SUPERVISOR_PROFILE_SHA256:
+        raise ControlError("SUPERVISOR_PROFILE_DIGEST_MISMATCH")
     profile, bindings = strict_json_file(PROFILE), strict_json_file(BINDINGS)
+    inventory = strict_json_file(INVENTORY)
+    supervisor_profile = strict_json_file(SUPERVISOR_PROFILE)
     validate_project_profile(profile)
-    if (set(bindings) != {"schema", "doctrineCommit", "doctrineEngineGitBlob", "provider",
+    validate_local_contract(inventory, "mlv-provider-observed-inventory-v1.schema.json")
+    validate_local_contract(supervisor_profile, "mlv-provider-supervisor-profile-v1.schema.json")
+    if (set(bindings) != {"schema", "technicalSubject", "ratificationMerge",
+                          "doctrineEngineGitBlob", "provider",
                           "adapter", "quotaDomain", "canonicalStateRoot", "profileSha256",
                           "stateRootIdentity", "lanes"} or
             bindings["schema"] != "mlv-provider-lane-bindings/v1" or
-            bindings["doctrineCommit"] != DOCTRINE_COMMIT or
+            bindings["technicalSubject"] != TECHNICAL_SUBJECT or
+            bindings["ratificationMerge"] != RATIFICATION_MERGE or
             bindings["doctrineEngineGitBlob"] != DOCTRINE_ENGINE_GIT_BLOB or
             bindings["provider"] != "claude" or bindings["adapter"] != "claude-code/1.0" or
             bindings["quotaDomain"] != "claude-shared-account" or
@@ -86,7 +164,15 @@ def load_contracts() -> tuple[dict[str, Any], dict[str, Any]]:
                 not all(isinstance(binding[k], str) and binding[k] for k in keys) or
                 sha256_file(subject) != binding["subjectSha256"]):
             raise ControlError("LANE_BINDINGS_INVALID")
-    return profile, bindings
+    digests = supervisor_profile["contractDigests"]
+    if (supervisor_profile["doctrine"] != {
+            "generation": "R14", "technicalSubject": TECHNICAL_SUBJECT,
+            "ratificationMerge": RATIFICATION_MERGE,
+        } or digests["universalProfileSha256"] != EXPECTED_PROFILE_SHA256 or
+            digests["laneBindingsSha256"] != EXPECTED_BINDINGS_SHA256 or
+            digests["observedInventorySha256"] != EXPECTED_INVENTORY_SHA256):
+        raise ControlError("SUPERVISOR_PROFILE_BINDING_INVALID")
+    return profile, bindings, supervisor_profile, inventory
 
 
 def enforce_state_root(
@@ -175,11 +261,22 @@ def closed_result(broker: UniversalProviderBroker, fingerprint: str) -> dict[str
             "cachedInputTokens": 0, "reasoningTokens": 0, "outputTokens": 0}
 
 
-def tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
-    profile, bindings = load_contracts()
-    enforce_state_root(state_root, profile, bindings)
+def blocked_result(fingerprint: str, blockers: list[str]) -> dict[str, Any]:
+    return {"status": "REFUSED", "reason": "ACTIVATION_EVIDENCE_BLOCKED",
+            "automaticLaunchGate": "CLOSED", "disposition": "DISTINGUISH",
+            "blockers": blockers, "demandFingerprint": fingerprint,
+            "providerCalls": 0, "providerProcesses": 0, "inputTokens": 0,
+            "cachedInputTokens": 0, "reasoningTokens": 0, "outputTokens": 0}
+
+
+def _tick(state_root: Path, demand_path: Path, *, shadow: bool) -> dict[str, Any]:
+    profile, bindings, supervisor_profile, inventory = load_contracts()
+    enforce_state_root(state_root, profile, bindings, test_only=shadow)
     demand = validate_demand(strict_json_file(demand_path), profile, bindings)
     fingerprint = digest_json(demand)
+    blockers = activation_blockers(profile, bindings, supervisor_profile, inventory)
+    if blockers and not shadow:
+        return blocked_result(fingerprint, blockers)
     if not demand["hasWork"]:
         prior = read_prior_idle(state_root)
         if prior is None:
@@ -198,6 +295,16 @@ def tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
     prior_fingerprint = None if prior is None else prior["demandFingerprint"]
     return route_demand_tick(fingerprint, prior_fingerprint,
                              lambda: closed_result(broker, fingerprint))
+
+
+def tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
+    return _tick(state_root, demand_path, shadow=False)
+
+
+def shadow_tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
+    if os.environ.get(FAKE_ENV) != "1":
+        raise ControlError("TEST_SEAM_DISABLED")
+    return _tick(state_root, demand_path, shadow=True)
 
 
 @contextmanager
@@ -236,11 +343,17 @@ def quota_lock(state_root: Path) -> Iterator[None]:
             handle.close()
 
 
-def run_test_fake(state_root: Path, demand_path: Path, fake_path: Path, delay: float) -> dict[str, Any]:
+def run_test_fake(
+    state_root: Path, demand_path: Path, fake_path: Path, delay: float, mode: str = "SHADOW",
+) -> dict[str, Any]:
     if os.environ.get(FAKE_ENV) != "1":
         raise ControlError("TEST_SEAM_DISABLED")
-    profile, bindings = load_contracts()
+    if mode not in TEST_MODES:
+        raise ControlError("TEST_MODE_INVALID")
+    profile, bindings, supervisor_profile, inventory = load_contracts()
     enforce_state_root(state_root, profile, bindings, test_only=True)
+    if not activation_blockers(profile, bindings, supervisor_profile, inventory):
+        raise ControlError("TEST_REQUIRES_BLOCKED_ACTIVATION")
     demand = validate_demand(strict_json_file(demand_path), profile, bindings)
     if not demand["hasWork"]:
         raise ControlError("TEST_WORK_REQUIRED")
@@ -257,10 +370,14 @@ def run_test_fake(state_root: Path, demand_path: Path, fake_path: Path, delay: f
     subject_digest = sha256_file(subject)
     fake_digest = sha256_file(fake)
     argv = [sys.executable, str(fake), "--model", binding["model"], "--effort", binding["effort"],
-            "--role", binding["role"], "--subject", str(subject), "--sleep", str(delay)]
+            "--role", binding["role"], "--subject", str(subject), "--sleep", str(delay),
+            "--harness-mode", mode]
     with quota_lock(state_root):
-        fresh_profile, fresh_bindings = load_contracts()
+        fresh_profile, fresh_bindings, fresh_supervisor_profile, fresh_inventory = load_contracts()
         enforce_state_root(state_root, fresh_profile, fresh_bindings, test_only=True)
+        if not activation_blockers(
+                fresh_profile, fresh_bindings, fresh_supervisor_profile, fresh_inventory):
+            raise ControlError("ACTIVATION_EVIDENCE_CHANGED")
         fresh_binding = fresh_bindings["lanes"].get(demand["lane"])
         if fresh_binding != binding:
             raise ControlError("LAUNCH_BINDING_CHANGED")
@@ -273,23 +390,54 @@ def run_test_fake(state_root: Path, demand_path: Path, fake_path: Path, delay: f
             raise ControlError("LAUNCH_BINDING_CHANGED")
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
-        stdout, stderr = process.communicate(timeout=10)
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.communicate()
+            raise ControlError("FAKE_PROVIDER_TIMEOUT_CONTAINED") from exc
         if process.returncode != 0 or stderr:
             raise ControlError("TEST_PROVIDER_FAILED")
-        return {"status": "TEST_FAKE_COMPLETED", "automaticLaunchGate": "TEST_ONLY",
-                "providerCalls": 1, "providerProcesses": 1, "exitCode": process.returncode,
+        try:
+            receipt = json.loads(stdout)
+        except (TypeError, ValueError) as exc:
+            raise ControlError("TEST_PROVIDER_RECEIPT_INVALID") from exc
+        expected_receipt = {
+            "model": binding["model"], "effort": binding["effort"],
+            "role": binding["role"], "subject": str(subject), "harnessMode": mode,
+            "provider": "FAKE_ONLY",
+            "requestedAuthority": "OPEN_GATE_AND_ADOPT" if mode == "CONTAINMENT" else "NONE",
+        }
+        if receipt != expected_receipt:
+            raise ControlError("TEST_PROVIDER_RECEIPT_INVALID")
+        if UniversalProviderBroker(state_root).gate_state() != "CLOSED":
+            raise ControlError("TEST_CHANGED_AUTOMATIC_GATE")
+        return {"status": "TEST_FAKE_COMPLETED", "harnessMode": mode,
+                "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
+                "automaticLaunchGate": "CLOSED",
+                "providerCalls": 0, "providerProcesses": 0,
+                "fakeProviderCalls": 1, "fakeProviderProcesses": 1,
+                "inputTokens": 0, "cachedInputTokens": 0,
+                "reasoningTokens": 0, "outputTokens": 0,
+                "containedHostileAuthorityClaim": mode == "CONTAINMENT",
+                "exitCode": process.returncode,
                 "binding": {"model": binding["model"], "effort": binding["effort"],
                             "role": binding["role"], "subjectSha256": sha256_file(subject),
                             "executableSha256": sha256_file(fake),
                             "argvSha256": "sha256:" + hashlib.sha256(canonical_json(argv).encode()).hexdigest()},
-                "fakeReceipt": json.loads(stdout)}
+                "fakeReceipt": receipt}
 
 
 def observe_signal(state_root: Path, event: str) -> dict[str, Any]:
     if event not in {"AUTH_SUCCESS", "RESET_OBSERVED", "CAPACITY_RETURNED", "QUOTA_REFUSAL"}:
         raise ControlError("SIGNAL_INVALID")
-    profile, bindings = load_contracts()
+    profile, bindings, supervisor_profile, inventory = load_contracts()
     enforce_state_root(state_root, profile, bindings)
+    blockers = activation_blockers(profile, bindings, supervisor_profile, inventory)
+    if blockers:
+        return {"status": "REFUSED", "reason": "ACTIVATION_EVIDENCE_BLOCKED",
+                "event": event, "blockers": blockers, "automaticLaunchGate": "CLOSED",
+                "providerCalls": 0, "providerProcesses": 0}
     broker = UniversalProviderBroker(state_root)
     before = broker.gate_state()
     path = state_root / "provider-signals.jsonl"
@@ -303,7 +451,7 @@ def observe_signal(state_root: Path, event: str) -> dict[str, Any]:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser()
+    result = SafeArgumentParser()
     result.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     commands = result.add_subparsers(dest="command", required=True)
     tick_cmd = commands.add_parser("tick"); tick_cmd.add_argument("--demand", type=Path, required=True)
@@ -313,6 +461,9 @@ def parser() -> argparse.ArgumentParser:
     fake.add_argument("--demand", type=Path, required=True)
     fake.add_argument("--fake-provider", type=Path, required=True)
     fake.add_argument("--sleep", type=float, default=0)
+    fake.add_argument("--mode", choices=sorted(TEST_MODES), default="SHADOW")
+    shadow = commands.add_parser("test-shadow-tick")
+    shadow.add_argument("--demand", type=Path, required=True)
     return result
 
 
@@ -321,16 +472,27 @@ def main(argv: list[str] | None = None) -> int:
         args = parser().parse_args(argv)
         if args.command == "tick": result = tick(args.state_root, args.demand)
         elif args.command == "status":
-            profile, bindings = load_contracts()
+            profile, bindings, supervisor_profile, inventory = load_contracts()
             enforce_state_root(args.state_root, profile, bindings)
-            result = {"status": "PASS",
-                      "automaticLaunchGate": UniversalProviderBroker(args.state_root).gate_state(),
-                      "doctrineCommit": DOCTRINE_COMMIT,
+            blockers = activation_blockers(profile, bindings, supervisor_profile, inventory)
+            if not blockers and UniversalProviderBroker(args.state_root).gate_state() != "CLOSED":
+                raise ControlError("AUTOMATIC_GATE_NOT_CLOSED")
+            result = {"status": "BLOCKED", "disposition": "DISTINGUISH",
+                      "automaticLaunchGate": "CLOSED", "blockers": blockers,
+                      "technicalSubject": TECHNICAL_SUBJECT,
+                      "ratificationMerge": RATIFICATION_MERGE,
                       "doctrineEngineGitBlob": DOCTRINE_ENGINE_GIT_BLOB,
-                      "profileSha256": sha256_file(PROFILE), "bindingsSha256": sha256_file(BINDINGS)}
+                      "profileSha256": sha256_file(PROFILE),
+                      "bindingsSha256": sha256_file(BINDINGS),
+                      "inventorySha256": sha256_file(INVENTORY),
+                      "supervisorProfileSha256": sha256_file(SUPERVISOR_PROFILE)}
         elif args.command == "observe-signal": result = observe_signal(args.state_root, args.event)
         elif args.command == "test-fake-provider":
-            result = run_test_fake(args.state_root, args.demand, args.fake_provider, args.sleep)
+            result = run_test_fake(
+                args.state_root, args.demand, args.fake_provider, args.sleep, args.mode
+            )
+        elif args.command == "test-shadow-tick":
+            result = shadow_tick(args.state_root, args.demand)
         else: raise ControlError("ARGUMENT_ERROR")
         sys.stdout.write(canonical_json(result) + "\n"); return 0
     except ControlError as exc:

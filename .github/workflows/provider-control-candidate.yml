@@ -23,8 +23,5 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install jsonschema==4.25.1
-      - run: git cat-file -e "97f64b161f4015eb579ad731e9cdf41dc7c951e7^{commit}"
-      - run: git cat-file -e "97f64b161f4015eb579ad731e9cdf41dc7c951e7:tools/provider_control/mlv_lane_supervisor.py"
       - run: python -m unittest tools.provider_control.tests.test_mlv_lane_supervisor -v
       - run: python tools/provider_control/vendor/universal_provider_control.py validate profile tools/provider_control/mlv-project-profile.candidate.json
-      - run: python tools/provider_control/vendor/universal_provider_control.py validate inventory tools/provider_control/inventory-post-install.candidate.json

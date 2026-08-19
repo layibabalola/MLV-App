@@ -1,0 +1,61 @@
+{
+  "schema": "mlv-provider-observed-inventory/v1",
+  "capturedAt": "2026-08-19T00:45:19Z",
+  "authority": "OBSERVED_NON_AUTHORITATIVE",
+  "status": "BLOCKED",
+  "complete": false,
+  "unknownBlocksAuthority": true,
+  "actionGraph": {
+    "status": "INCOMPLETE_BLOCKED",
+    "complete": false,
+    "observedEdges": [
+      {"from": "MLV-LaneIgnitionWatchdog", "to": "ignite-dead-lanes.ps1"},
+      {"from": "ignite-dead-lanes.ps1", "to": "claude.cmd"}
+    ],
+    "missingRequiredEdges": [
+      "R16_BROKER_OWNED_DEMAND_TO_SUPERVISOR",
+      "SUPERVISOR_SUSPENDED_CHILD_RESUME_BOUNDARY"
+    ]
+  },
+  "scheduledTask": {
+    "name": "MLV-LaneIgnitionWatchdog",
+    "state": "Disabled",
+    "enabled": false,
+    "repetitionInterval": "PT5M",
+    "logonMode": "INTERACTIVE",
+    "runLevel": "LIMITED",
+    "physicalTaskFile": {"status": "EXACT", "path": "C:\\Windows\\System32\\Tasks\\MLV-LaneIgnitionWatchdog", "bytes": 3790, "sha256": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275"},
+    "exportedXml": {"status": "UNKNOWN_BLOCKED", "sha256": null, "observedValue": "02be19305250ab00ac77f3d39252184a116c0edb3ce4f4275c4c40195d015a94", "reason": "CANONICALIZATION_UNVERIFIED"},
+    "actionExecutable": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+    "actionArguments": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\""
+  },
+  "ignitionLauncher": {
+    "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1",
+    "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1", "bytes": 17082, "sha256": "sha256:f8c83535754fa6e009596ea6c0bb4f99673261f2c40128afb9072fd7fb3177ed"},
+    "brokerRouted": false,
+    "directProviderInvocation": true,
+    "unreadableLeaseBehavior": "FAIL_TOWARD_IGNITION"
+  },
+  "livePromptObservations": [
+    {"lane": "fable", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-fable-hub.md", "bytes": 4103, "sha256": "sha256:1f36622f741f8176166bbb98975ce3baaf253c0cfae9c72a842356dd4bff4f8d"}},
+    {"lane": "claude-review", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-lane4-review.md", "bytes": 5535, "sha256": "sha256:c8b1fa6502e9199df1ea555500554626ef09f4d12b802f57229a1f9b9743f409"}},
+    {"lane": "opus", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-opus.md", "bytes": 4877, "sha256": "sha256:f98792a1cee5fab0644490f7f38defd20702f9c97330f02470e49d637238cda0"}},
+    {"lane": "sonnet-impl", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-sonnet-impl.md", "bytes": 4590, "sha256": "sha256:f33d2fd9c91a58c33863a3e23b5f0b310635e912aa76dceebe70dd0e18131e85"}}
+  ],
+  "claudeCliObservations": [
+    {"component": "claude.cmd", "version": null, "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\claude.cmd", "bytes": 160, "sha256": "sha256:7999fba95dbffe167d9e0a043f29057979a0518ebe89b60c4fcfc6401ea8c424"}},
+    {"component": "claude-code-executable", "version": "2.1.220", "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe", "bytes": 265720480, "sha256": "sha256:af5bf1f1b2aadffc768eccd787084c6fdf9ba81624cbe96c1c6d9ac1a1550231"}},
+    {"component": "package-manifest", "version": "2.1.220", "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\package.json", "bytes": 1476, "sha256": "sha256:bfceea6ab13280e0fa6bdd3d76ced5e0386f848cfd8db10b5bec28ddfa0ca016"}}
+  ],
+  "liveRecheck": {
+    "taskState": "Disabled",
+    "taskEnabled": false,
+    "externalClaudePromptProcessObserved": false
+  },
+  "rollback": {
+    "requiredTaskState": "Disabled",
+    "requiredTaskEnabled": false,
+    "restorePhysicalTaskFileSha256": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275",
+    "automaticLaunchGate": "CLOSED"
+  }
+}

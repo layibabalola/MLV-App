@@ -1,6 +1,7 @@
 {
   "schema": "mlv-provider-lane-bindings/v1",
-  "doctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
+  "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
+  "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
   "doctrineEngineGitBlob": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
   "provider": "claude",
   "adapter": "claude-code/1.0",

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app.invalid/schemas/mlv-provider-supervisor-profile-v1.schema.json",
+  "title": "MLV-App fail-closed provider supervisor profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "project", "phase", "doctrine", "disposition", "automaticLaunchGate",
+    "authority", "proofModes", "contractDigests", "unknownPolicy", "pending", "unratifiedInputs"
+  ],
+  "properties": {
+    "schema": {"const": "mlv-provider-supervisor-profile/v1"},
+    "project": {"const": "mlv-app"},
+    "phase": {"enum": ["PHASE_0", "PHASE_1"]},
+    "doctrine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "technicalSubject", "ratificationMerge"],
+      "properties": {
+        "generation": {"const": "R14"},
+        "technicalSubject": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "ratificationMerge": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "disposition": {"const": "DISTINGUISH"},
+    "automaticLaunchGate": {"const": "CLOSED"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productionLaunch", "providerInvocation", "canary", "adoption"],
+      "properties": {
+        "productionLaunch": {"const": false},
+        "providerInvocation": {"const": false},
+        "canary": {"const": false},
+        "adoption": {"const": false}
+      }
+    },
+    "proofModes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"enum": ["SHADOW", "CONTAINMENT"]}
+    },
+    "contractDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["universalProfileSha256", "laneBindingsSha256", "observedInventorySha256"],
+      "properties": {
+        "universalProfileSha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "laneBindingsSha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "observedInventorySha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"}
+      }
+    },
+    "unknownPolicy": {"const": "BLOCK"},
+    "pending": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "COMPLETE_EXACT_INVENTORY",
+          "SUPERVISOR_ACTION_GRAPH",
+          "CLOSED_SHADOW_CONTAINMENT_PROOF",
+          "INDEPENDENT_REVIEW",
+          "SIGNED_INSTALLATION",
+          "EXPLICIT_ONE_USE_CANARY_AUTHORITY"
+        ]
+      }
+    },
+    "unratifiedInputs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["generation", "treatment", "authority"],
+        "properties": {
+          "generation": {"type": "string", "pattern": "^R[0-9]+$"},
+          "treatment": {"const": "SHADOW_INPUT_ONLY"},
+          "authority": {"const": false}
+        }
+      }
+    }
+  }
+}
