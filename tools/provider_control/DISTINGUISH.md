@@ -39,7 +39,8 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   concurrency is event-safe and non-cancelling; `queue: max` prevents the default single-pending-run
   replacement behavior; jobs have a bounded timeout. Lock evidence covers the intended
   Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only. The R10 tree
-  passed all four hosted legs in run `32208720831`; R11 exact-tree hosted execution is unproven.
+  passed all four hosted legs in run `32208720831`; R11 and R12 exact-tree hosted execution is
+  unproven.
 - The project profile is version 2 and raises the owner-foreground reserve floor to 20 percent. The
   canonical attended rotation and numeric token policy are pinned by exact external Git blob and
   SHA-256 identities. They are `MOTIVATION_ONLY`: author-attested, not provider-authenticated, not
@@ -48,20 +49,38 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
 
 ## Cross-checked from prior analysis
 
-`mlv-observed-inventory.candidate.json` preserves the read-only Phase-0 observation: the
+`mlv-observed-inventory.candidate.json` v2 preserves the read-only Phase-0 observation: the
 `MLV-LaneIgnitionWatchdog` task was Disabled (`Enabled=false`, `PT5M`, interactive/limited), its
 physical task file had an exact full SHA-256, and it still targeted the ignored-state
 `ignite-dead-lanes.ps1` launcher. Full path/length/SHA-256 observations are recorded for that
 launcher, the four live prompts, `claude.cmd`, Claude Code 2.1.220, and its package manifest. These
 are observations, never install or launch authority.
 
-The prior exported-task XML hash is retained only as `UNKNOWN_BLOCKED`: current in-memory export
-encodings did not reproduce its byte stream, so it is not accepted as an exact rollback identity.
-The physical task-file bytes are the current rollback anchor.
+The MLV exported-task XML is now an exact observed identity under one explicit convention:
+`Export-ScheduledTask` string bytes encoded as UTF-8 without BOM while preserving CRLF. Two
+consecutive exports were byte-identical at 1,894 bytes and SHA-256
+`d4f5e9dbcfe86555a244aa3e4a0a6bbf220dc132b6887790062963d19c250af3`. This repairs only the XML
+canonicalization observation; the physical task-file bytes remain the rollback anchor and the
+inventory/action graph remain incomplete.
+
+Inventory v2 also binds the active MLV Codex automation and prompt, four paused definitions,
+related disabled tasks, the enabled diagnostic-only Claude shadow task, and both Agent Bridge MCP
+source chains. Codex loads the external `agent-bridge` repository while Claude loads the MLV-App
+copy; both point at the same mutable `.agent-bridge` state root. That is divergent source identity,
+not a unified or certified choke point. The watcher configuration retains two retired MLV Codex
+direct-wake entries as dormant evidence, `wake_claude.ps1` remains diagnostic/fail-closed, and no
+watcher process was observed in the dynamic snapshot.
+
+The services and startup-folder scans found no matching provider launcher. The HKCU `Claude` Run
+entry is explicitly classified as attended Claude Desktop startup, not a headless Claude CLI
+provider route. Those absences, paused definitions, task state, process counts, and shared state are
+snapshot evidence only. The inventory explicitly forbids inferring historical/future absence,
+permanent inertness, source-chain equivalence, production authority, or graph completeness from
+them; mutable, dynamic, unreadable, and unbound surfaces remain `BLOCKED`.
 
 ## Needs runtime profiling or independent evidence
 
-- A complete four-surface census and complete broker-owned action graph.
+- A complete, independently reproduced surface census and complete broker-owned action graph.
 - Non-placeholder state-root and shared-broker identities.
 - The separately reviewed production suspended-child observer/resume boundary.
 - Exact CLOSED + SHADOW + CONTAINMENT evidence on the final committed tree and hosted matrix.

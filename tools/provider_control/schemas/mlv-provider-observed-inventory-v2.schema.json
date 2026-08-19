@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app.invalid/schemas/mlv-provider-observed-inventory-v2.schema.json",
+  "title": "MLV-App observed provider launcher inventory v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "capturedAt", "authority", "status", "complete", "unknownBlocksAuthority",
+    "actionGraph", "scheduledTasks", "ignitionLauncher", "codexAutomations", "agentBridge",
+    "persistenceSurfaces", "livePromptObservations", "claudeCliObservations", "processSnapshot",
+    "surfaceClosure", "observerExclusions", "rollback"
+  ],
+  "properties": {
+    "schema": {"const": "mlv-provider-observed-inventory/v2"},
+    "capturedAt": {"type": "string", "format": "date-time"},
+    "authority": {"const": "OBSERVED_NON_AUTHORITATIVE"},
+    "status": {"const": "BLOCKED"},
+    "complete": {"const": false},
+    "unknownBlocksAuthority": {"const": true},
+    "actionGraph": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "complete", "observedEdges", "missingRequiredEdges"],
+      "properties": {
+        "status": {"const": "INCOMPLETE_BLOCKED"},
+        "complete": {"const": false},
+        "observedEdges": {"type": "array", "minItems": 10, "maxItems": 64, "items": {"$ref": "#/$defs/edge"}},
+        "missingRequiredEdges": {
+          "type": "array", "minItems": 6, "uniqueItems": true,
+          "contains": {"const": "CANONICAL_BROKER_OWNED_DEMAND_TO_INSTALLED_MLV_SUPERVISOR"},
+          "items": {"type": "string", "minLength": 1, "maxLength": 256}
+        }
+      }
+    },
+    "scheduledTasks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["closureStatus", "primary", "diagnosticShadow", "disabledRelated"],
+      "properties": {
+        "closureStatus": {"const": "PARTIAL_EXACT_BLOCKED"},
+        "primary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "state", "enabled", "repetitionInterval", "logonMode", "runLevel", "physicalTaskFile", "exportedXml", "actionExecutable", "actionArguments"],
+          "properties": {
+            "name": {"const": "MLV-LaneIgnitionWatchdog"},
+            "state": {"const": "Disabled"},
+            "enabled": {"const": false},
+            "repetitionInterval": {"const": "PT5M"},
+            "logonMode": {"const": "INTERACTIVE"},
+            "runLevel": {"const": "LIMITED"},
+            "physicalTaskFile": {"$ref": "#/$defs/mlvTaskPhysical"},
+            "exportedXml": {
+              "type": "object", "additionalProperties": false,
+              "required": ["status", "convention", "bytes", "sha256", "twoExportStability"],
+              "properties": {
+                "status": {"const": "EXACT"},
+                "convention": {"const": "EXPORT_SCHEDULED_TASK_STRING_UTF8_NO_BOM_PRESERVE_CRLF"},
+                "bytes": {"const": 1894},
+                "sha256": {"const": "sha256:d4f5e9dbcfe86555a244aa3e4a0a6bbf220dc132b6887790062963d19c250af3"},
+                "twoExportStability": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["exports", "byteIdentical", "sameSha256"],
+                  "properties": {"exports": {"const": 2}, "byteIdentical": {"const": true}, "sameSha256": {"const": true}}
+                }
+              }
+            },
+            "actionExecutable": {"$ref": "#/$defs/pwshExecutable"},
+            "actionArguments": {"const": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\""}
+          }
+        },
+        "diagnosticShadow": {
+          "type": "object", "additionalProperties": false,
+          "required": ["name", "stateAtTaskCapture", "enabled", "classification", "authority", "physicalTaskFile", "actionScript"],
+          "properties": {
+            "name": {"const": "AgentBridgeClaudeGovernorShadow"},
+            "stateAtTaskCapture": {"enum": ["Ready", "Running"]},
+            "enabled": {"const": true},
+            "classification": {"const": "DIAGNOSTIC_SHADOW_ONLY"},
+            "authority": {"const": false},
+            "physicalTaskFile": {"$ref": "#/$defs/exactEvidence"},
+            "actionScript": {"$ref": "#/$defs/exactEvidence"}
+          }
+        },
+        "disabledRelated": {
+          "type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "state", "enabled", "physicalTaskFileSha256", "actionScriptSha256"],
+            "properties": {
+              "name": {"enum": ["AdobeIngesterFactory-SolIgnitionWarden", "agent-bridge-warden", "AgentBridgeLaneLifecycleSupervisor", "AudioMile-LaneIgnition", "AudioMile-LaneIgnition-OPUS", "CodexGpuLaneHeartbeat"]},
+              "state": {"const": "Disabled"}, "enabled": {"const": false},
+              "physicalTaskFileSha256": {"$ref": "#/$defs/nonzeroDigest"},
+              "actionScriptSha256": {"$ref": "#/$defs/nonzeroDigest"}
+            }
+          }
+        }
+      }
+    },
+    "ignitionLauncher": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "identity", "brokerRouted", "directProviderInvocation", "unreadableLeaseBehavior"],
+      "properties": {
+        "path": {"const": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1"},
+        "identity": {"$ref": "#/$defs/ignitionIdentity"},
+        "brokerRouted": {"const": false}, "directProviderInvocation": {"const": true},
+        "unreadableLeaseBehavior": {"const": "FAIL_TOWARD_IGNITION"}
+      }
+    },
+    "codexAutomations": {
+      "type": "object", "additionalProperties": false,
+      "required": ["closureStatus", "active", "paused"],
+      "properties": {
+        "closureStatus": {"const": "PARTIAL_EXACT_MUTABLE_BLOCKED"},
+        "active": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "status", "rrule", "targetThreadId", "definition", "promptBytes", "promptSha256", "providerAuthority"],
+          "properties": {
+            "id": {"const": "mlv-app-dual-lane-codex-liveness"}, "status": {"const": "ACTIVE"},
+            "rrule": {"const": "FREQ=MINUTELY;INTERVAL=5"},
+            "targetThreadId": {"const": "019fe3a5-0538-7351-bbaa-55f1d34987db"},
+            "definition": {"$ref": "#/$defs/activeAutomationDefinition"},
+            "promptBytes": {"const": 2447},
+            "promptSha256": {"const": "sha256:c9963355773fa8acc5ee8c8def4c1c060299129e1949d0c6273ca5373c04ed7f"},
+            "providerAuthority": {"const": false}
+          }
+        },
+        "paused": {
+          "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["id", "status", "definitionSha256", "promptSha256"],
+            "properties": {
+              "id": {"enum": ["finish-mlv-dispatch-self-heal-closeout", "mlv-app-outage-bank-luna-conveyor", "mlv-app-outage-bank-sol-review-conveyor", "mlv-app-provider-failover-closeout"]},
+              "status": {"const": "PAUSED"}, "definitionSha256": {"$ref": "#/$defs/nonzeroDigest"}, "promptSha256": {"$ref": "#/$defs/nonzeroDigest"}
+            }
+          }
+        }
+      }
+    },
+    "agentBridge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["closureStatus", "complete", "sharedStateRoot", "sharedStateRootStatus", "sourceChainsIdentical", "codexMcp", "claudeMcp", "watcher"],
+      "properties": {
+        "closureStatus": {"const": "DIVERGENT_SOURCE_SHARED_STATE_BLOCKED"}, "complete": {"const": false},
+        "sharedStateRoot": {"const": "C:\\Users\\obabalola\\.agent-bridge"},
+        "sharedStateRootStatus": {"const": "MUTABLE_SHARED_NON_AUTHORITATIVE"},
+        "sourceChainsIdentical": {"const": false},
+        "codexMcp": {"$ref": "#/$defs/mcpChain"}, "claudeMcp": {"$ref": "#/$defs/mcpChain"},
+        "watcher": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "config", "source", "processObserved", "retiredMlvCodexDirectWakeEntries", "retiredEntriesEvidenceOnly", "wakeScripts"],
+          "properties": {
+            "status": {"const": "DORMANT_OR_NONLIVE_SNAPSHOT_BLOCKED"},
+            "config": {"$ref": "#/$defs/watcherConfig"}, "source": {"$ref": "#/$defs/exactEvidence"},
+            "processObserved": {"const": false}, "retiredMlvCodexDirectWakeEntries": {"const": 2},
+            "retiredEntriesEvidenceOnly": {"const": true},
+            "wakeScripts": {
+              "type": "array", "minItems": 2, "maxItems": 2,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["role", "identity"],
+                "properties": {"role": {"enum": ["CODEX_DIRECT_SCRIPT_DORMANT", "CLAUDE_DIAGNOSTIC_FAIL_CLOSED"]}, "identity": {"$ref": "#/$defs/exactEvidence"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    "persistenceSurfaces": {
+      "type": "object", "additionalProperties": false, "required": ["services", "startupFolders", "runKeys"],
+      "properties": {
+        "services": {"$ref": "#/$defs/noMatchSurface"},
+        "startupFolders": {
+          "type": "object", "additionalProperties": false, "required": ["status", "inspectedEntryCount", "inference"],
+          "properties": {"status": {"const": "NO_PROVIDER_MATCH_OBSERVED"}, "inspectedEntryCount": {"type": "integer", "minimum": 1}, "inference": {"const": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"}}
+        },
+        "runKeys": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "attendedClaude", "foreignCodexHeartbeatObserved", "foreignCodexHeartbeatExcludedFromMlvAuthority"],
+          "properties": {
+            "status": {"const": "PARTIAL_EXACT_MUTABLE_BLOCKED"},
+            "attendedClaude": {
+              "type": "object", "additionalProperties": false,
+              "required": ["hive", "name", "command", "classification", "authority", "launcher"],
+              "properties": {
+                "hive": {"const": "HKCU"}, "name": {"const": "Claude"},
+                "command": {"const": "\"C:\\Users\\obabalola\\AppData\\Local\\AnthropicClaude\\claude.exe\" --startup"},
+                "classification": {"const": "ATTENDED_DESKTOP_STARTUP_NOT_HEADLESS_PROVIDER"}, "authority": {"const": false},
+                "launcher": {"$ref": "#/$defs/exactEvidence"}
+              }
+            },
+            "foreignCodexHeartbeatObserved": {"const": true}, "foreignCodexHeartbeatExcludedFromMlvAuthority": {"const": true}
+          }
+        }
+      }
+    },
+    "livePromptObservations": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/namedIdentity"}},
+    "claudeCliObservations": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/cliIdentity"}},
+    "processSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["capturedAt", "status", "attendedClaudeDesktopCount", "externalClaudeCliProviderCount", "agentBridgeMcpTrampolineCount", "agentBridgeMcpWrapperCount", "agentBridgeWatcherCount", "diagnosticShadowProcessCount", "absenceIsHistoricalProof", "absenceIsFutureProof"],
+      "properties": {
+        "capturedAt": {"type": "string", "format": "date-time"}, "status": {"const": "DYNAMIC_SNAPSHOT_BLOCKED"},
+        "attendedClaudeDesktopCount": {"type": "integer", "minimum": 0}, "externalClaudeCliProviderCount": {"const": 0},
+        "agentBridgeMcpTrampolineCount": {"type": "integer", "minimum": 0}, "agentBridgeMcpWrapperCount": {"type": "integer", "minimum": 0},
+        "agentBridgeWatcherCount": {"type": "integer", "minimum": 0}, "diagnosticShadowProcessCount": {"type": "integer", "minimum": 0},
+        "absenceIsHistoricalProof": {"const": false}, "absenceIsFutureProof": {"const": false}
+      }
+    },
+    "surfaceClosure": {
+      "type": "object", "additionalProperties": false, "required": ["status", "mutable", "dynamic", "unreadableOrUnbound"],
+      "properties": {
+        "status": {"const": "BLOCKED"},
+        "mutable": {"type": "array", "minItems": 4, "uniqueItems": true, "items": {"type": "string"}},
+        "dynamic": {"type": "array", "minItems": 3, "uniqueItems": true, "items": {"type": "string"}},
+        "unreadableOrUnbound": {
+          "type": "array", "minItems": 4, "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["surface", "status"],
+            "properties": {"surface": {"type": "string", "minLength": 1}, "status": {"enum": ["UNREADABLE_BLOCKED", "UNBOUND_BLOCKED"]}}
+          }
+        }
+      }
+    },
+    "observerExclusions": {
+      "type": "array", "minItems": 8, "uniqueItems": true,
+      "contains": {"const": "OBSERVER_DID_NOT_INFER_COMPLETE_GRAPH_FROM_OBSERVED_EDGES"},
+      "items": {"type": "string", "minLength": 1}
+    },
+    "rollback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requiredTaskState", "requiredTaskEnabled", "restorePhysicalTaskFileSha256", "automaticLaunchGate"],
+      "properties": {
+        "requiredTaskState": {"const": "Disabled"}, "requiredTaskEnabled": {"const": false},
+        "restorePhysicalTaskFileSha256": {"const": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275"},
+        "automaticLaunchGate": {"const": "CLOSED"}
+      }
+    }
+  },
+  "$defs": {
+    "nonzeroDigest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "edge": {
+      "type": "object", "additionalProperties": false, "required": ["from", "to"],
+      "properties": {"from": {"type": "string", "minLength": 1, "maxLength": 256}, "to": {"type": "string", "minLength": 1, "maxLength": 1024}}
+    },
+    "exactEvidence": {
+      "type": "object", "additionalProperties": false, "required": ["status", "path", "bytes", "sha256"],
+      "properties": {"status": {"const": "EXACT"}, "path": {"type": "string", "minLength": 3, "maxLength": 1024}, "bytes": {"type": "integer", "minimum": 1, "maximum": 1073741824}, "sha256": {"$ref": "#/$defs/nonzeroDigest"}}
+    },
+    "mlvTaskPhysical": {
+      "allOf": [{"$ref": "#/$defs/exactEvidence"}, {"properties": {"path": {"const": "C:\\Windows\\System32\\Tasks\\MLV-LaneIgnitionWatchdog"}, "bytes": {"const": 3790}, "sha256": {"const": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275"}}}]
+    },
+    "pwshExecutable": {
+      "allOf": [{"$ref": "#/$defs/exactEvidence"}, {"properties": {"path": {"const": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"}, "bytes": {"const": 301408}, "sha256": {"const": "sha256:8737aa78bdbe2941083c2c3674da3a9c3ab4cabd2cac040d39d1d0c19f9fc20d"}}}]
+    },
+    "ignitionIdentity": {
+      "allOf": [{"$ref": "#/$defs/exactEvidence"}, {"properties": {"bytes": {"const": 17082}, "sha256": {"const": "sha256:f8c83535754fa6e009596ea6c0bb4f99673261f2c40128afb9072fd7fb3177ed"}}}]
+    },
+    "activeAutomationDefinition": {
+      "allOf": [{"$ref": "#/$defs/exactEvidence"}, {"properties": {"bytes": {"const": 2746}, "sha256": {"const": "sha256:ac0b32e9f40c3c805d16a56a5726b0ad52f29eb614df9735478024be7d6ac524"}}}]
+    },
+    "watcherConfig": {
+      "allOf": [{"$ref": "#/$defs/exactEvidence"}, {"properties": {"bytes": {"const": 6314}, "sha256": {"const": "sha256:6cc37e76c815dbd276521f0d9a1a7518a0ca32d2c53705ac1278e3c45edebb22"}}}]
+    },
+    "mcpChain": {
+      "type": "object", "additionalProperties": false, "required": ["config", "sourceRoot", "chain"],
+      "properties": {"config": {"$ref": "#/$defs/exactEvidence"}, "sourceRoot": {"type": "string", "minLength": 3}, "chain": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/exactEvidence"}}}
+    },
+    "noMatchSurface": {
+      "type": "object", "additionalProperties": false, "required": ["status", "matchingServiceCount", "inference"],
+      "properties": {"status": {"const": "NO_MATCH_OBSERVED"}, "matchingServiceCount": {"const": 0}, "inference": {"const": "SNAPSHOT_ONLY_NOT_ABSENCE_PROOF"}}
+    },
+    "namedIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["lane", "identity"],
+      "properties": {"lane": {"enum": ["fable", "claude-review", "opus", "sonnet-impl"]}, "identity": {"$ref": "#/$defs/exactEvidence"}}
+    },
+    "cliIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["component", "version", "identity"],
+      "properties": {"component": {"enum": ["claude.cmd", "claude-code-executable", "package-manifest"]}, "version": {"type": ["string", "null"], "maxLength": 128}, "identity": {"$ref": "#/$defs/exactEvidence"}}
+    }
+  }
+}

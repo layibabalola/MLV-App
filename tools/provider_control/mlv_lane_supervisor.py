@@ -36,8 +36,8 @@ TOKEN_POLICY_GIT_BLOB = "33b75cfb61b8c8934009ff987f2ea90ef5f74eb5"
 TOKEN_POLICY_SHA256 = "sha256:b5eca2ef60a86d87e2ca96d34569035aef510387de7ea204ab7cbf98ce5f5192"
 EXPECTED_PROFILE_SHA256 = "sha256:2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"
 EXPECTED_BINDINGS_SHA256 = "sha256:8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"
-EXPECTED_INVENTORY_SHA256 = "sha256:7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"
-EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:4a295f43863943e399f3b8ee823201b5d12c0707176299310e9584b5f0c52b43"
+EXPECTED_INVENTORY_SHA256 = "sha256:0de24e33b83ed7ca21e3e36fb410d1c6eb703f317f0c05add85efc29764f76ba"
+EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:a7a804a61c004b4d0c5b7bf5333a5050849ac9233d50909df2fabda4edbb2ba3"
 PRODUCTION_STATE_ROOT = Path(r"C:\ProgramData\MLV-App\provider-control-v1")
 DEFAULT_STATE_ROOT = PRODUCTION_STATE_ROOT
 ROOT = Path(__file__).resolve().parent
@@ -143,8 +143,12 @@ def activation_blockers(
     if any(item["identity"]["status"] != "EXACT"
            for item in inventory["livePromptObservations"] + inventory["claudeCliObservations"]):
         blockers.append("OBSERVED_IDENTITY_UNKNOWN")
-    if inventory["scheduledTask"]["exportedXml"]["status"] != "EXACT":
+    if inventory["scheduledTasks"]["primary"]["exportedXml"]["status"] != "EXACT":
         blockers.append("TASK_XML_CANONICALIZATION_UNKNOWN")
+    if inventory["agentBridge"]["complete"] is not True:
+        blockers.append("AGENT_BRIDGE_SOURCE_DIVERGENCE")
+    if inventory["surfaceClosure"]["status"] != "READY":
+        blockers.append("SURFACE_CLOSURE_BLOCKED")
     if supervisor_profile["pending"]:
         blockers.append("SUPERVISOR_PROFILE_PENDING")
     return blockers
@@ -163,7 +167,7 @@ def load_contracts() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], di
     inventory = strict_json_file(INVENTORY)
     supervisor_profile = strict_json_file(SUPERVISOR_PROFILE)
     validate_project_profile(profile)
-    validate_local_contract(inventory, "mlv-provider-observed-inventory-v1.schema.json")
+    validate_local_contract(inventory, "mlv-provider-observed-inventory-v2.schema.json")
     validate_local_contract(supervisor_profile, "mlv-provider-supervisor-profile-v1.schema.json")
     if (set(bindings) != {"schema", "technicalSubject", "ratificationMerge",
                           "doctrineEngineGitBlob", "provider",

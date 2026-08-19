@@ -116,6 +116,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(local["disposition"], "DISTINGUISH")
         self.assertEqual(local["automaticLaunchGate"], "CLOSED")
         self.assertEqual(inventory["authority"], "OBSERVED_NON_AUTHORITATIVE")
+        self.assertEqual(inventory["schema"], "mlv-provider-observed-inventory/v2")
         self.assertFalse(inventory["complete"])
 
     def test_03_missing_state_defaults_closed(self):
@@ -292,23 +293,25 @@ class SupervisorTests(unittest.TestCase):
         blockers = supervisor.activation_blockers(profile, bindings, local, inventory)
         expected = {"SHARED_BROKER_IDENTITY_UNKNOWN", "PLACEHOLDER_IDENTITY_BLOCKED",
                     "DIRECT_LAUNCHER_OBSERVED", "ACTION_GRAPH_INCOMPLETE",
-                    "INVENTORY_INCOMPLETE", "TASK_XML_CANONICALIZATION_UNKNOWN"}
+                    "INVENTORY_INCOMPLETE", "AGENT_BRIDGE_SOURCE_DIVERGENCE",
+                    "SURFACE_CLOSURE_BLOCKED"}
         self.assertTrue(expected.issubset(blockers))
+        self.assertNotIn("TASK_XML_CANONICALIZATION_UNKNOWN", blockers)
 
     def test_17_hostile_complete_zero_digest_and_graph_omission_are_schema_invalid(self):
         original = strict_json_file(supervisor.INVENTORY)
         complete = json.loads(json.dumps(original)); complete["complete"] = True
-        zero = json.loads(json.dumps(original)); zero["scheduledTask"]["physicalTaskFile"]["sha256"] = ZERO
+        zero = json.loads(json.dumps(original)); zero["scheduledTasks"]["primary"]["physicalTaskFile"]["sha256"] = ZERO
         omission = json.loads(json.dumps(original)); omission.pop("actionGraph")
         for index, value in enumerate((complete, zero, omission)):
             with self.subTest(index=index), self.assertRaisesRegex(
                     ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
-                supervisor.validate_local_contract(value, "mlv-provider-observed-inventory-v1.schema.json")
+                supervisor.validate_local_contract(value, "mlv-provider-observed-inventory-v2.schema.json")
 
     def test_18_observed_task_launcher_prompt_and_cli_hash_changes_fail(self):
         original = strict_json_file(supervisor.INVENTORY)
         mutations = [
-            lambda value: value["scheduledTask"]["physicalTaskFile"].update(sha256="sha256:" + "1" * 64),
+            lambda value: value["scheduledTasks"]["primary"]["physicalTaskFile"].update(sha256="sha256:" + "1" * 64),
             lambda value: value["ignitionLauncher"]["identity"].update(sha256="sha256:" + "2" * 64),
             lambda value: value["livePromptObservations"][0]["identity"].update(sha256="sha256:" + "3" * 64),
             lambda value: value["claudeCliObservations"][0]["identity"].update(sha256="sha256:" + "4" * 64),
@@ -343,11 +346,11 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(rollback["requiredTaskEnabled"])
         self.assertEqual(rollback["automaticLaunchGate"], "CLOSED")
         self.assertEqual(rollback["restorePhysicalTaskFileSha256"],
-                         inventory["scheduledTask"]["physicalTaskFile"]["sha256"])
+                         inventory["scheduledTasks"]["primary"]["physicalTaskFile"]["sha256"])
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R11_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R12_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(
             packet["canonicalDoctrine"]["technicalSubject"],
             supervisor.CANONICAL_TECHNICAL_SUBJECT,
@@ -363,7 +366,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(packet["authority"]["adoption"])
         self.assertEqual(
             packet["localEvidence"]["hostedMatrix"],
-            "R10_4_OF_4_GREEN_RUN_32208720831;R11_NOT_RUN",
+            "R10_4_OF_4_GREEN_RUN_32208720831;R11_NOT_RUN;R12_NOT_RUN",
         )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
@@ -539,6 +542,80 @@ class SupervisorTests(unittest.TestCase):
                     ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
                 supervisor.validate_local_contract(
                     changed, "mlv-provider-supervisor-profile-v1.schema.json")
+
+    def test_29_r12_inventory_v2_binds_partial_graph_and_two_export_xml_stability(self):
+        inventory = strict_json_file(supervisor.INVENTORY)
+        self.assertEqual(inventory["schema"], "mlv-provider-observed-inventory/v2")
+        self.assertEqual(inventory["status"], "BLOCKED")
+        self.assertFalse(inventory["complete"])
+        self.assertEqual(inventory["actionGraph"]["status"], "INCOMPLETE_BLOCKED")
+        self.assertFalse(inventory["actionGraph"]["complete"])
+        xml = inventory["scheduledTasks"]["primary"]["exportedXml"]
+        self.assertEqual(xml["status"], "EXACT")
+        self.assertEqual(
+            xml["convention"],
+            "EXPORT_SCHEDULED_TASK_STRING_UTF8_NO_BOM_PRESERVE_CRLF",
+        )
+        self.assertEqual(
+            xml["sha256"],
+            "sha256:d4f5e9dbcfe86555a244aa3e4a0a6bbf220dc132b6887790062963d19c250af3",
+        )
+        self.assertEqual(xml["twoExportStability"], {
+            "exports": 2, "byteIdentical": True, "sameSha256": True,
+        })
+        active = inventory["codexAutomations"]["active"]
+        self.assertEqual(
+            active["definition"]["sha256"],
+            "sha256:ac0b32e9f40c3c805d16a56a5726b0ad52f29eb614df9735478024be7d6ac524",
+        )
+        self.assertEqual(
+            active["promptSha256"],
+            "sha256:c9963355773fa8acc5ee8c8def4c1c060299129e1949d0c6273ca5373c04ed7f",
+        )
+        self.assertFalse(active["providerAuthority"])
+        self.assertEqual(len(inventory["codexAutomations"]["paused"]), 4)
+        bridge = inventory["agentBridge"]
+        self.assertEqual(bridge["closureStatus"],
+                         "DIVERGENT_SOURCE_SHARED_STATE_BLOCKED")
+        self.assertFalse(bridge["sourceChainsIdentical"])
+        self.assertEqual(bridge["codexMcp"]["sourceRoot"],
+                         r"C:\!Layi Wkspc\agent-bridge")
+        self.assertEqual(bridge["claudeMcp"]["sourceRoot"],
+                         r"C:\!Layi Wkspc\MLV-App\tools\agent-bridge")
+        self.assertEqual(
+            inventory["persistenceSurfaces"]["runKeys"]["attendedClaude"]["classification"],
+            "ATTENDED_DESKTOP_STARTUP_NOT_HEADLESS_PROVIDER",
+        )
+        self.assertEqual(inventory["processSnapshot"]["externalClaudeCliProviderCount"], 0)
+        self.assertFalse(inventory["processSnapshot"]["absenceIsHistoricalProof"])
+
+    def test_30_r12_inventory_v2_closure_or_identity_weakening_is_schema_invalid(self):
+        original = strict_json_file(supervisor.INVENTORY)
+        mutations = [
+            lambda value: value["scheduledTasks"]["primary"]["exportedXml"].update(
+                convention="UNSPECIFIED"),
+            lambda value: value["scheduledTasks"]["primary"]["exportedXml"]
+            ["twoExportStability"].update(exports=1),
+            lambda value: value["scheduledTasks"]["primary"]["exportedXml"]
+            ["twoExportStability"].update(byteIdentical=False),
+            lambda value: value["codexAutomations"]["active"]["definition"].update(
+                sha256="sha256:" + "1" * 64),
+            lambda value: value["codexAutomations"]["active"].update(
+                providerAuthority=True),
+            lambda value: value["agentBridge"].update(sourceChainsIdentical=True),
+            lambda value: value["agentBridge"].update(complete=True),
+            lambda value: value["processSnapshot"].update(absenceIsHistoricalProof=True),
+            lambda value: value["observerExclusions"].pop(),
+            lambda value: value["codexAutomations"]["paused"][0].update(
+                definitionSha256=ZERO),
+        ]
+        for index, mutate in enumerate(mutations):
+            changed = json.loads(json.dumps(original))
+            mutate(changed)
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
+                supervisor.validate_local_contract(
+                    changed, "mlv-provider-observed-inventory-v2.schema.json")
 
 
 if __name__ == "__main__":

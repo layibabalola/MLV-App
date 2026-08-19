@@ -12,12 +12,16 @@ Local proof:
     py -3 -m unittest tools.provider_control.tests.test_mlv_lane_supervisor -v
     py -3 tools/provider_control/vendor/universal_provider_control.py validate profile tools/provider_control/mlv-project-profile.candidate.json
 
-The unit suite validates both strict MLV schemas, hostile inventory/profile inputs, 1,000 unchanged
+The unit suite validates the strict MLV profile and observed-inventory v2 schemas, hostile
+inventory/profile inputs, 1,000 unchanged
 ticks, production-root alias/reparse refusal, nonzero demand bindings, separate process-image/script
 receipts, the SHADOW/CONTAINMENT fake-provider harness, and exact fail-closed bindings for canonical
 doctrine, the author-attested attended rotation, and the numeric token-saving policy. The imported
 receipt and policy are motivation only and grant no provider, installation, canary, or adoption
-authority. The imported universal profile is a
+authority. Inventory v2 records the observed task, Codex automation, dual Agent Bridge MCP,
+watcher, persistence, and process surfaces as partial evidence. It binds the stable two-export MLV
+task XML convention while keeping the action graph incomplete and every mutable, dynamic, or
+unreadable closure fail-closed. The imported universal profile is a
 CLOSED-only template: its null/all-zero identities are intentional activation blockers, not
 placeholders that may be treated as evidence.
 
@@ -28,8 +32,8 @@ resolution; the source intent and explicit Windows/Ubuntu Python 3.13/3.14 wheel
 beside the lock. Checkout credentials are not persisted, concurrency is event-safe and
 non-cancelling, `queue: max` preserves up to GitHub's documented pending-run limit, and each job has
 a bounded timeout. Local dry resolution proves the Windows legs only. R10 passed all four hosted
-legs; R11 still needs its own exact-tree hosted matrix and does not inherit authority from that
-predecessor result.
+legs; R11 and R12 still need their own exact-tree hosted matrices and do not inherit authority from
+that predecessor result.
 
 The disposition remains
 `DISTINGUISH(PENDING_INSTALLED_CHOKE_POINT_COMPLETE_ACTION_GRAPH_SHADOW_CONTAINMENT)`. The installer
