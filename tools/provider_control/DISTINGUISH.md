@@ -65,7 +65,9 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   and repository checks, refuses authority claims or a sibling fatal diagnostic, and preserves the
   first fatal cause. Each JSON test ID/status/duration/detail must match exactly one JUnit testcase
   and outcome child; suite timestamp/duration/hostname and synthetic-case duration/detail are also
-  cross-checked. The exact 45-test sorted-ID digest rejects zero, partial, or renamed discovery;
+  cross-checked. Raw JUnit children must be exactly the expected testcase count, with no duplicate
+  identities or non-testcase root children. The exact 45-test sorted-ID digest rejects zero,
+  partial, or renamed discovery;
   environment/run fields must equal the live matrix process; canonical UTC timing is type-checked;
   and non-finite JSON/JUnit durations are forbidden. The verifier performs a fresh live
   index/worktree cleanliness check immediately before routing. Partial bundles are

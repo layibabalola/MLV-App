@@ -515,12 +515,17 @@ def _verify_evidence_bundle(
     }
     if junit_counts != expected_junit:
         raise ValueError("JUnit counters disagree with hosted result")
+    raw_cases = list(junit_root)
+    if any(case.tag != "testcase" for case in raw_cases):
+        raise ValueError("JUnit root contains a non-testcase child")
+    if len(raw_cases) != expected_junit["tests"]:
+        raise ValueError("JUnit raw testcase cardinality disagrees with hosted result")
     cases = {
         (case.attrib.get("classname"), case.attrib.get("name")): case
-        for case in junit_root.findall("testcase")
+        for case in raw_cases
     }
-    if len(cases) != expected_junit["tests"]:
-        raise ValueError("JUnit testcase identities are duplicated or incomplete")
+    if len(cases) != len(raw_cases):
+        raise ValueError("JUnit testcase identities are duplicated")
     profile_case = cases.get(("provider_control.profile", "validation"))
     repository_case = cases.get(("provider_control.repository", "clean_after"))
     if profile_case is None or repository_case is None:

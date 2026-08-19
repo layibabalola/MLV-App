@@ -399,6 +399,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(local["hostedFatalDiagnosticSeparatelyVerified"])
         self.assertTrue(local["hostedNonFiniteJsonForbidden"])
         self.assertTrue(local["hostedJunitFullSemanticCrossCheck"])
+        self.assertTrue(local["hostedJunitExactRootChildren"])
         self.assertEqual(
             local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
@@ -1284,6 +1285,36 @@ class SupervisorTests(unittest.TestCase):
             result_bytes, contradictory_junit, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "outcome children"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        duplicate_root = hosted_runner.ET.fromstring(junit_bytes)
+        duplicate_case = hosted_runner.ET.fromstring(
+            hosted_runner.ET.tostring(duplicate_root.find("testcase"), encoding="utf-8")
+        )
+        hosted_runner.ET.SubElement(duplicate_case, "failure").text = "forged duplicate"
+        duplicate_root.insert(0, duplicate_case)
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes,
+            hosted_runner.ET.tostring(
+                duplicate_root, encoding="utf-8", xml_declaration=True
+            ),
+            head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "raw testcase cardinality"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        extra_root = hosted_runner.ET.fromstring(junit_bytes)
+        hosted_runner.ET.SubElement(extra_root, "properties")
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes,
+            hosted_runner.ET.tostring(
+                extra_root, encoding="utf-8", xml_declaration=True
+            ),
+            head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "non-testcase child"):
             hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         for attribute, forged_value, message in (
