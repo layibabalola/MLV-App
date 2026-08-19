@@ -8298,9 +8298,12 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
     processingSetPlaybackPreviewScaleFactor(2);
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 2);
     ASSERT_TRUE(!got.empty());
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
+    /* Completion, not elapsed time, is the behavioral oracle.  Windows CI's
+     * OpenMP clock can have a 1 ms tick, so a completed sub-millisecond stage
+     * may legitimately report 0.0 ms. */
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
 
     processingSetPlaybackPreviewScaleFactor(previous_preview_scale_factor);
     processingSetPlaybackPreviewMode(0);
@@ -8334,9 +8337,9 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneCanUseQuarterResShadowsHighlightsWh
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 1);
     ASSERT_TRUE(!got.empty());
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
 
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
     MLVAPP_TEST_UNSETENV("MLVAPP_ENABLE_STANDARD_X1_SH_QUARTERRES");
@@ -8368,9 +8371,9 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneUsesQuarterResShadowsHighlightsByDe
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 1);
     ASSERT_TRUE(!got.empty());
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresDownsampleMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresRbfMilliseconds() > 0.0);
-    ASSERT_TRUE(processingGetLastShadowsHighlightsFilterQuarterresUpsampleMilliseconds() > 0.0);
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
 
     MLVAPP_TEST_UNSETENV("MLVAPP_SHADOWS_HIGHLIGHTS_PROBE");
     processingSetPlaybackPreviewMode(0);
