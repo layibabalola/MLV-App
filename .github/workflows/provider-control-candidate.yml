@@ -49,11 +49,31 @@ jobs:
           python tools/provider_control/tests/hosted_runner.py
           --junit .claude-state/provider-control-results/junit.xml
           --result .claude-state/provider-control-results/result.json
-      - name: Upload CLOSED-gate evidence
+          --manifest .claude-state/provider-control-results/evidence-manifest.json
+      - name: Verify CLOSED-gate evidence bundle
+        id: evidence-verify
         if: ${{ always() }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --verify-manifest .claude-state/provider-control-results/evidence-manifest.json
+      - name: Upload CLOSED-gate evidence
+        if: ${{ always() && steps.evidence-verify.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: provider-control-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .claude-state/provider-control-results/
+          path: |
+            .claude-state/provider-control-results/result.json
+            .claude-state/provider-control-results/junit.xml
+            .claude-state/provider-control-results/evidence-manifest.json
           if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+      - name: Upload fatal runner diagnostic
+        if: ${{ always() && steps.evidence-verify.outcome != 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provider-control-fatal-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .claude-state/provider-control-results/fatal-diagnostic.json
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30

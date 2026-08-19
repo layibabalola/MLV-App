@@ -58,9 +58,14 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   Windows/Ubuntu × Python 3.13/3.14 legs with 42 tests per leg in run `32238122126`. That run had
   no uploaded artifacts. The additive R15 workflow emits JUnit and strict JSON evidence with exact
   head/tree/run binding, per-test outcomes and durations, profile-validation output, and explicit
-  zero provider calls/processes/tokens under CLOSED. Skips fail closed; evidence uploads always and
-  missing evidence is an error; the exact verdict is also written to the hosted step summary. R15 is
-  not hosted yet and may not inherit R14's console-only result.
+  zero provider calls/processes/tokens under CLOSED as asserted suite invariants, not independent
+  provider telemetry. Subtest failures, fixture errors, profile failure, skips, and other non-passes
+  are encoded and fail closed. A last-written manifest binds the JSON/JUnit byte counts, SHA-256s,
+  head, and tree; partial bundles are refused rather than uploaded. Complete failure bundles use a
+  full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
+  non-authoritative fatal diagnostic. Evidence remains retained for 30 days rather than permanently
+  archived, and the exact verdict is written to the hosted step summary. R15 is not hosted yet and
+  may not inherit R14's result.
   Matching pushes to `master` now receive the same evidence run. The repository's distinct missing
   protected-check topology remains a merge prerequisite and is not treated as repaired here.
 - The project profile is version 2 and raises the owner-foreground reserve floor to 20 percent. The

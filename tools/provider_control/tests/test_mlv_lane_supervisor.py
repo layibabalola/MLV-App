@@ -975,12 +975,34 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn("--junit .claude-state/provider-control-results/junit.xml", workflow)
         self.assertIn("--result .claude-state/provider-control-results/result.json", workflow)
         self.assertIn(
+            "--manifest .claude-state/provider-control-results/evidence-manifest.json",
+            workflow,
+        )
+        self.assertIn(
+            "--verify-manifest .claude-state/provider-control-results/evidence-manifest.json",
+            workflow,
+        )
+        self.assertIn(
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
             workflow,
         )
-        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertEqual(
+            workflow.count(
+                "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7"
+            ),
+            2,
+        )
+        self.assertIn("if: ${{ always() && steps.evidence-verify.outcome == 'success' }}", workflow)
+        self.assertIn("if: ${{ always() && steps.evidence-verify.outcome != 'success' }}", workflow)
+        self.assertIn(".claude-state/provider-control-results/fatal-diagnostic.json", workflow)
         self.assertIn("if-no-files-found: error", workflow)
+        self.assertEqual(workflow.count("include-hidden-files: true"), 2)
         self.assertIn("retention-days: 30", workflow)
+        self.assertEqual(workflow.count(".claude-state/provider-control-results/result.json"), 2)
+        self.assertEqual(workflow.count(".claude-state/provider-control-results/junit.xml"), 2)
+        self.assertEqual(
+            workflow.count(".claude-state/provider-control-results/evidence-manifest.json"), 3
+        )
         self.assertNotRegex(workflow, r"uses:\s+actions/upload-artifact@v\d+")
 
     def test_43_hosted_result_rejects_skips_and_writes_junit_outcomes(self):
@@ -1004,7 +1026,7 @@ class SupervisorTests(unittest.TestCase):
         xml = hosted_runner._junit_bytes(
             list(skipped.records.values()), "2026-08-19T00:00:00Z", 0.1
         ).decode("utf-8")
-        self.assertIn('tests="1"', xml)
+        self.assertIn('tests="3"', xml)
         self.assertIn('skipped="1"', xml)
         self.assertIn("skip must fail the hosted gate", xml)
         summary = self.base / "summary.md"
@@ -1023,6 +1045,75 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn("Provider control CLOSED gate", summary_text)
         self.assertIn("Result: **FAIL**", summary_text)
         self.assertIn("Provider calls/processes/tokens: 0/0/0", summary_text)
+
+    def test_44_hosted_evidence_captures_subtest_fixture_profile_and_bundle_failures(self):
+        class SubTestFailure(unittest.TestCase):
+            def runTest(self):
+                with self.subTest(value=1):
+                    self.assertEqual(1, 2)
+
+        class FixtureError(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                raise RuntimeError("fixture exploded")
+
+            def test_never_runs(self):
+                self.fail("fixture error did not stop test")
+
+        failed_subtest = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=hosted_runner.EvidenceResult
+        ).run(unittest.TestSuite([SubTestFailure()]))
+        self.assertFalse(hosted_runner._closed_gate_passed(failed_subtest, 0))
+        subtest_xml = hosted_runner._junit_bytes(
+            list(failed_subtest.records.values()), "2026-08-19T00:00:00Z", 0.1
+        ).decode("utf-8")
+        self.assertIn('failures="1"', subtest_xml)
+        self.assertIn("subtest", subtest_xml)
+
+        fixture_error = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=hosted_runner.EvidenceResult
+        ).run(unittest.defaultTestLoader.loadTestsFromTestCase(FixtureError))
+        self.assertFalse(hosted_runner._closed_gate_passed(fixture_error, 0))
+        fixture_xml = hosted_runner._junit_bytes(
+            list(fixture_error.records.values()), "2026-08-19T00:00:00Z", 0.1
+        ).decode("utf-8")
+        self.assertIn('errors="1"', fixture_xml)
+        self.assertIn("fixture exploded", fixture_xml)
+
+        passed = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=hosted_runner.EvidenceResult
+        ).run(unittest.TestSuite([unittest.FunctionTestCase(lambda: None)]))
+        profile_xml = hosted_runner._junit_bytes(
+            list(passed.records.values()),
+            "2026-08-19T00:00:00Z",
+            0.1,
+            profile_exit_code=7,
+            profile_detail="profile invalid",
+        ).decode("utf-8")
+        self.assertIn('errors="1"', profile_xml)
+        self.assertIn('classname="provider_control.profile" name="validation"', profile_xml)
+        self.assertIn("profile invalid", profile_xml)
+
+        bundle = self.base / "bundle"
+        result_path = bundle / "result.json"
+        junit_path = bundle / "junit.xml"
+        manifest_path = bundle / "evidence-manifest.json"
+        result_bytes = b'{"closedGatePassed":false,"authority":false}\n'
+        junit_bytes = b'<?xml version="1.0"?><testsuite tests="1"/>\n'
+        head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT.parents[1], text=True
+        ).strip()
+        tree = subprocess.check_output(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT.parents[1], text=True
+        ).strip()
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes, junit_bytes, head, tree,
+        )
+        hosted_runner._verify_evidence_bundle(manifest_path)
+        result_path.write_bytes(result_bytes + b" ")
+        with self.assertRaisesRegex(ValueError, "byte count mismatch"):
+            hosted_runner._verify_evidence_bundle(manifest_path)
 
 
 if __name__ == "__main__":

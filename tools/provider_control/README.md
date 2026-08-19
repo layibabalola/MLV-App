@@ -42,9 +42,15 @@ four Windows/Ubuntu × Python 3.13/3.14 legs in run `32238122126`. That run uplo
 The additive R15 evidence workflow therefore runs the CLOSED suite through a standard-library
 runner that emits fail-closed JUnit plus a strict JSON result binding the checked-out Git head/tree,
 runtime, GitHub run identity, every test outcome and duration, profile validation, zero provider
-calls/processes/tokens, and the CLOSED gate. Any skip or non-pass result fails the job. Artifacts are
-uploaded even after failure with a full-commit action pin, the same verdict is written to the hosted
-step summary, and missing files are an error. R15 itself
+calls/processes/tokens as suite-contract assertions rather than independent provider telemetry, and
+the CLOSED gate. Subtest failures, fixture errors, profile failure, skips, and every other non-pass
+result fail the job and appear in JUnit. JSON and JUnit are accepted only with a last-written
+manifest that binds their exact SHA-256, byte count, head, and tree; partial bundles are not uploaded.
+Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
+written to the hosted step summary, and runner exceptions after argument parsing produce a separate
+non-authoritative fatal diagnostic rather than a partial bundle. The narrowly scoped dot-directory
+files are explicitly included by the pinned upload action; missing files are an error. Retention is
+30 days and is not a permanent evidence archive. R15 itself
 remains unhosted until its own four legs produce those artifacts; the R14 console-only run cannot be
 relabeled as R15 evidence. The workflow now runs for matching pull requests and matching pushes to
 `master`. This does not repair the separate repository protected-check topology.
