@@ -39,8 +39,9 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   concurrency is event-safe and non-cancelling; `queue: max` prevents the default single-pending-run
   replacement behavior; jobs have a bounded timeout. Lock evidence covers the intended
   Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only. The R10 tree
-  passed all four hosted legs in run `32208720831`; R11 and R12 exact-tree hosted execution is
-  unproven.
+  passed all four hosted legs in run `32208720831`. The R11 technical head `9e3ee4d8` was not run;
+  the distinct R11 evidence/closeout head `152f1e5f` passed all four hosted legs in run
+  `32228841343`. R12 and R13 exact-tree hosted execution is unproven.
 - The project profile is version 2 and raises the owner-foreground reserve floor to 20 percent. The
   canonical attended rotation and numeric token policy are pinned by exact external Git blob and
   SHA-256 identities. They are `MOTIVATION_ONLY`: author-attested, not provider-authenticated, not
@@ -63,6 +64,12 @@ consecutive exports were byte-identical at 1,894 bytes and SHA-256
 canonicalization observation; the physical task-file bytes remain the rollback anchor and the
 inventory/action graph remain incomplete.
 
+The task action has a separate canonical receipt: an insertion-ordered compact JSON object with
+fields `Execute`, `Arguments`, and `WorkingDirectory`, encoded as UTF-8 without BOM or trailing
+newline. The observed null working directory receipt is 257 bytes with SHA-256
+`5fb03548103724f4827acdb0ef3e9e9ae6d022471354078b0badaf4a252ab087`. This binds the observed action
+only; it is not installation or launch authority.
+
 Inventory v2 also binds the active MLV Codex automation and prompt, four paused definitions,
 related disabled tasks, the enabled diagnostic-only Claude shadow task, and both Agent Bridge MCP
 source chains. Codex loads the external `agent-bridge` repository while Claude loads the MLV-App
@@ -71,7 +78,10 @@ not a unified or certified choke point. The watcher configuration retains two re
 direct-wake entries as dormant evidence, `wake_claude.ps1` remains diagnostic/fail-closed, and no
 watcher process was observed in the dynamic snapshot.
 
-The services and startup-folder scans found no matching provider launcher. The HKCU `Claude` Run
+The services and startup-folder scans found no matching provider launcher. The startup census
+inspected all five regular files across the user and common Startup folders, of which three were
+`.lnk` launchable shortcuts; exact file identities and resolved shortcut targets are recorded, and
+none matched the explicit Claude/Codex/Agent Bridge/MLV filter. The HKCU `Claude` Run
 entry is explicitly classified as attended Claude Desktop startup, not a headless Claude CLI
 provider route. Those absences, paused definitions, task state, process counts, and shared state are
 snapshot evidence only. The inventory explicitly forbids inferring historical/future absence,

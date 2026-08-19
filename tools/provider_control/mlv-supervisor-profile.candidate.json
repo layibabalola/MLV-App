@@ -64,7 +64,7 @@
   "contractDigests": {
     "universalProfileSha256": "sha256:2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d",
     "laneBindingsSha256": "sha256:8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6",
-    "observedInventorySha256": "sha256:0de24e33b83ed7ca21e3e36fb410d1c6eb703f317f0c05add85efc29764f76ba"
+    "observedInventorySha256": "sha256:ce43663977e10d262632405078a3cb9e86dce8c123b064406e7b83e130bc760c"
   },
   "unknownPolicy": "BLOCK",
   "pending": [

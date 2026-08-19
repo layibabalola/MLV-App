@@ -350,7 +350,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R12_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R13_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(
             packet["canonicalDoctrine"]["technicalSubject"],
             supervisor.CANONICAL_TECHNICAL_SUBJECT,
@@ -366,7 +366,10 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(packet["authority"]["adoption"])
         self.assertEqual(
             packet["localEvidence"]["hostedMatrix"],
-            "R10_4_OF_4_GREEN_RUN_32208720831;R11_NOT_RUN;R12_NOT_RUN",
+            "R10_4_OF_4_GREEN_RUN_32208720831;"
+            "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
+            "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
+            "R12_NOT_RUN;R13_NOT_RUN",
         )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
@@ -563,6 +566,21 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(xml["twoExportStability"], {
             "exports": 2, "byteIdentical": True, "sameSha256": True,
         })
+        primary = inventory["scheduledTasks"]["primary"]
+        action_bytes = json.dumps({
+            "Execute": primary["actionExecutable"]["path"],
+            "Arguments": primary["actionArguments"],
+            "WorkingDirectory": None,
+        }, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        self.assertEqual(len(action_bytes), 257)
+        self.assertEqual(
+            "sha256:" + hashlib.sha256(action_bytes).hexdigest(),
+            primary["actionReceipt"]["sha256"],
+        )
+        self.assertEqual(
+            primary["actionReceipt"]["convention"],
+            "ORDERED_JSON_EXECUTE_ARGUMENTS_WORKING_DIRECTORY_UTF8_NO_BOM_NO_TRAILING_NEWLINE",
+        )
         active = inventory["codexAutomations"]["active"]
         self.assertEqual(
             active["definition"]["sha256"],
@@ -586,6 +604,22 @@ class SupervisorTests(unittest.TestCase):
             inventory["persistenceSurfaces"]["runKeys"]["attendedClaude"]["classification"],
             "ATTENDED_DESKTOP_STARTUP_NOT_HEADLESS_PROVIDER",
         )
+        startup = inventory["persistenceSurfaces"]["startupFolders"]
+        self.assertEqual(startup["totalInspectedFileCount"], 5)
+        self.assertEqual(startup["inspectedLaunchableShortcutCount"], 3)
+        self.assertEqual(startup["providerMatchCount"], 0)
+        self.assertEqual(len(startup["entries"]), 5)
+        self.assertEqual(
+            sum(entry["launchableShortcut"] for entry in startup["entries"]), 3,
+        )
+        self.assertFalse(any(entry["providerMatch"] for entry in startup["entries"]))
+        self.assertEqual(
+            [(entry["scope"], entry["name"]) for entry in startup["entries"]],
+            [("USER", "caffeine.lnk"), ("USER", "desktop.ini"),
+             ("COMMON", "desktop.ini"),
+             ("COMMON", "Run Notification Viewer in background.lnk"),
+             ("COMMON", "Tailscale.lnk")],
+        )
         self.assertEqual(inventory["processSnapshot"]["externalClaudeCliProviderCount"], 0)
         self.assertFalse(inventory["processSnapshot"]["absenceIsHistoricalProof"])
 
@@ -598,6 +632,10 @@ class SupervisorTests(unittest.TestCase):
             ["twoExportStability"].update(exports=1),
             lambda value: value["scheduledTasks"]["primary"]["exportedXml"]
             ["twoExportStability"].update(byteIdentical=False),
+            lambda value: value["scheduledTasks"]["primary"]["actionReceipt"].update(
+                sha256="sha256:" + "2" * 64),
+            lambda value: value["scheduledTasks"]["primary"]["actionReceipt"].update(
+                convention="UNSPECIFIED"),
             lambda value: value["codexAutomations"]["active"]["definition"].update(
                 sha256="sha256:" + "1" * 64),
             lambda value: value["codexAutomations"]["active"].update(
@@ -608,6 +646,12 @@ class SupervisorTests(unittest.TestCase):
             lambda value: value["observerExclusions"].pop(),
             lambda value: value["codexAutomations"]["paused"][0].update(
                 definitionSha256=ZERO),
+            lambda value: value["persistenceSurfaces"]["startupFolders"].update(
+                totalInspectedFileCount=3),
+            lambda value: value["persistenceSurfaces"]["startupFolders"].update(
+                filter="SHORTCUTS_ONLY"),
+            lambda value: value["persistenceSurfaces"]["startupFolders"]["entries"][0].update(
+                providerMatch=True),
         ]
         for index, mutate in enumerate(mutations):
             changed = json.loads(json.dumps(original))
@@ -616,6 +660,18 @@ class SupervisorTests(unittest.TestCase):
                     ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
                 supervisor.validate_local_contract(
                     changed, "mlv-provider-observed-inventory-v2.schema.json")
+
+    def test_31_r13_hosted_evidence_distinguishes_technical_and_closeout_heads(self):
+        packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
+        hosted = packet["localEvidence"]["hostedMatrix"]
+        self.assertEqual(
+            hosted,
+            "R10_4_OF_4_GREEN_RUN_32208720831;"
+            "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
+            "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
+            "R12_NOT_RUN;R13_NOT_RUN",
+        )
+        self.assertNotIn("R11_4_OF_4_GREEN", hosted)
 
 
 if __name__ == "__main__":

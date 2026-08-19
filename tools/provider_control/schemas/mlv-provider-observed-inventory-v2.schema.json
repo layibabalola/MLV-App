@@ -38,7 +38,7 @@
         "closureStatus": {"const": "PARTIAL_EXACT_BLOCKED"},
         "primary": {
           "type": "object", "additionalProperties": false,
-          "required": ["name", "state", "enabled", "repetitionInterval", "logonMode", "runLevel", "physicalTaskFile", "exportedXml", "actionExecutable", "actionArguments"],
+          "required": ["name", "state", "enabled", "repetitionInterval", "logonMode", "runLevel", "physicalTaskFile", "exportedXml", "actionExecutable", "actionArguments", "actionReceipt"],
           "properties": {
             "name": {"const": "MLV-LaneIgnitionWatchdog"},
             "state": {"const": "Disabled"},
@@ -63,7 +63,18 @@
               }
             },
             "actionExecutable": {"$ref": "#/$defs/pwshExecutable"},
-            "actionArguments": {"const": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\""}
+            "actionArguments": {"const": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\""},
+            "actionReceipt": {
+              "type": "object", "additionalProperties": false,
+              "required": ["status", "convention", "fieldOrder", "bytes", "sha256"],
+              "properties": {
+                "status": {"const": "EXACT"},
+                "convention": {"const": "ORDERED_JSON_EXECUTE_ARGUMENTS_WORKING_DIRECTORY_UTF8_NO_BOM_NO_TRAILING_NEWLINE"},
+                "fieldOrder": {"const": ["Execute", "Arguments", "WorkingDirectory"]},
+                "bytes": {"const": 257},
+                "sha256": {"const": "sha256:5fb03548103724f4827acdb0ef3e9e9ae6d022471354078b0badaf4a252ab087"}
+              }
+            }
           }
         },
         "diagnosticShadow": {
@@ -168,8 +179,32 @@
       "properties": {
         "services": {"$ref": "#/$defs/noMatchSurface"},
         "startupFolders": {
-          "type": "object", "additionalProperties": false, "required": ["status", "inspectedEntryCount", "inference"],
-          "properties": {"status": {"const": "NO_PROVIDER_MATCH_OBSERVED"}, "inspectedEntryCount": {"type": "integer", "minimum": 1}, "inference": {"const": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"}}
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "filter", "totalInspectedFileCount", "inspectedLaunchableShortcutCount", "providerMatchCount", "entries", "inference"],
+          "properties": {
+            "status": {"const": "NO_PROVIDER_MATCH_OBSERVED"},
+            "filter": {"const": "ALL_REGULAR_FILES_IN_USER_AND_COMMON_STARTUP_FOLDERS;_LAUNCHABLE_SHORTCUT_IF_EXTENSION_CASEFOLD_EQUALS_.LNK;_PROVIDER_MATCH_IF_NAME_OR_RESOLVED_TARGET_MATCHES_CLAUDE_CODEX_AGENT_BRIDGE_OR_MLV"},
+            "totalInspectedFileCount": {"const": 5},
+            "inspectedLaunchableShortcutCount": {"const": 3},
+            "providerMatchCount": {"const": 0},
+            "entries": {
+              "type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true,
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["scope", "name", "bytes", "sha256", "launchableShortcut", "resolvedTarget", "providerMatch"],
+                "properties": {
+                  "scope": {"enum": ["USER", "COMMON"]},
+                  "name": {"enum": ["caffeine.lnk", "desktop.ini", "Run Notification Viewer in background.lnk", "Tailscale.lnk"]},
+                  "bytes": {"type": "integer", "minimum": 1},
+                  "sha256": {"$ref": "#/$defs/nonzeroDigest"},
+                  "launchableShortcut": {"type": "boolean"},
+                  "resolvedTarget": {"type": ["string", "null"]},
+                  "providerMatch": {"const": false}
+                }
+              }
+            },
+            "inference": {"const": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"}
+          }
         },
         "runKeys": {
           "type": "object", "additionalProperties": false,

@@ -47,7 +47,14 @@
         "twoExportStability": {"exports": 2, "byteIdentical": true, "sameSha256": true}
       },
       "actionExecutable": {"status": "EXACT", "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "bytes": 301408, "sha256": "sha256:8737aa78bdbe2941083c2c3674da3a9c3ab4cabd2cac040d39d1d0c19f9fc20d"},
-      "actionArguments": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\""
+      "actionArguments": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\"",
+      "actionReceipt": {
+        "status": "EXACT",
+        "convention": "ORDERED_JSON_EXECUTE_ARGUMENTS_WORKING_DIRECTORY_UTF8_NO_BOM_NO_TRAILING_NEWLINE",
+        "fieldOrder": ["Execute", "Arguments", "WorkingDirectory"],
+        "bytes": 257,
+        "sha256": "sha256:5fb03548103724f4827acdb0ef3e9e9ae6d022471354078b0badaf4a252ab087"
+      }
     },
     "diagnosticShadow": {
       "name": "AgentBridgeClaudeGovernorShadow",
@@ -132,7 +139,21 @@
   },
   "persistenceSurfaces": {
     "services": {"status": "NO_MATCH_OBSERVED", "matchingServiceCount": 0, "inference": "SNAPSHOT_ONLY_NOT_ABSENCE_PROOF"},
-    "startupFolders": {"status": "NO_PROVIDER_MATCH_OBSERVED", "inspectedEntryCount": 3, "inference": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"},
+    "startupFolders": {
+      "status": "NO_PROVIDER_MATCH_OBSERVED",
+      "filter": "ALL_REGULAR_FILES_IN_USER_AND_COMMON_STARTUP_FOLDERS;_LAUNCHABLE_SHORTCUT_IF_EXTENSION_CASEFOLD_EQUALS_.LNK;_PROVIDER_MATCH_IF_NAME_OR_RESOLVED_TARGET_MATCHES_CLAUDE_CODEX_AGENT_BRIDGE_OR_MLV",
+      "totalInspectedFileCount": 5,
+      "inspectedLaunchableShortcutCount": 3,
+      "providerMatchCount": 0,
+      "entries": [
+        {"scope": "USER", "name": "caffeine.lnk", "bytes": 1065, "sha256": "sha256:6b47b28dd5555bab3ef9774b4eb420a85314107770a6082dec2579e2adcf9f5e", "launchableShortcut": true, "resolvedTarget": "C:\\caffeine\\caffeine.exe", "providerMatch": false},
+        {"scope": "USER", "name": "desktop.ini", "bytes": 174, "sha256": "sha256:cdb11958506a5ba5478e22ed472fa3ae422fe9916d674f290207e1fc29ae5a76", "launchableShortcut": false, "resolvedTarget": null, "providerMatch": false},
+        {"scope": "COMMON", "name": "desktop.ini", "bytes": 174, "sha256": "sha256:cdb11958506a5ba5478e22ed472fa3ae422fe9916d674f290207e1fc29ae5a76", "launchableShortcut": false, "resolvedTarget": null, "providerMatch": false},
+        {"scope": "COMMON", "name": "Run Notification Viewer in background.lnk", "bytes": 2984, "sha256": "sha256:6b3cb910aff8a707105023dc0cb06657543cb595bd756839dda394ce3d8cbba1", "launchableShortcut": true, "resolvedTarget": "C:\\WINDOWS\\Installer\\{0A3238D7-AC64-1210-B717-F3E3F18B4A8C}\\ico_notifyviewer.exe", "providerMatch": false},
+        {"scope": "COMMON", "name": "Tailscale.lnk", "bytes": 1981, "sha256": "sha256:594906fd3b6c966b0244c69623ae5cdcb455d131ebddda1dfe2eda04edc14c01", "launchableShortcut": true, "resolvedTarget": "C:\\Program Files\\Tailscale\\tailscale-ipn.exe", "providerMatch": false}
+      ],
+      "inference": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"
+    },
     "runKeys": {
       "status": "PARTIAL_EXACT_MUTABLE_BLOCKED",
       "attendedClaude": {

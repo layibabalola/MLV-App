@@ -32,8 +32,10 @@ resolution; the source intent and explicit Windows/Ubuntu Python 3.13/3.14 wheel
 beside the lock. Checkout credentials are not persisted, concurrency is event-safe and
 non-cancelling, `queue: max` preserves up to GitHub's documented pending-run limit, and each job has
 a bounded timeout. Local dry resolution proves the Windows legs only. R10 passed all four hosted
-legs; R11 and R12 still need their own exact-tree hosted matrices and do not inherit authority from
-that predecessor result.
+legs. The R11 technical head `9e3ee4d8` was not hosted; its later evidence/closeout head `152f1e5f`
+passed all four legs in run `32228841343`. That result must not be relabeled as a run of the earlier
+technical head. R12 and R13 still need their own exact-tree hosted matrices and inherit no authority
+from either predecessor result.
 
 The disposition remains
 `DISTINGUISH(PENDING_INSTALLED_CHOKE_POINT_COMPLETE_ACTION_GRAPH_SHADOW_CONTAINMENT)`. The installer
