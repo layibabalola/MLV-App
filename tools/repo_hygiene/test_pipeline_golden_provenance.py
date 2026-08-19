@@ -11,6 +11,7 @@ from tools.repo_hygiene.pipeline_golden_provenance import (
     DEFAULT_MANIFEST,
     ProvenanceValidationError,
     SubprocessGitWitness,
+    TRUSTED_APPROVAL_WITNESSES,
     validate,
 )
 
@@ -115,29 +116,19 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     @staticmethod
     def _approval_witness(kind: str, artifact_path: str, artifact_sha256: str,
                           reviewed_range: str, key_count: int) -> dict:
-        reviewed_head = reviewed_range.split("..", 1)[1]
         if kind == "tracked_whole_artifact_approval":
-            source = {
-                "kind": "github_issue_comment",
-                "repository": "layibabalola/MLV-App",
-                "pull_request": 6,
-                "comment_id": 5347847988,
-                "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
-                "created_at": "2026-08-19T20:51:23Z",
-                "author_association": "OWNER",
-                "body_sha256": "adbba554147e3ac4afb7328a242d379e890913716df687b99b7cab4a578d4726",
-            }
-        else:
-            source = {
-                "kind": "github_issue_comment",
-                "repository": "layibabalola/MLV-App",
-                "pull_request": 999,
-                "comment_id": 999,
-                "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
-                "created_at": "2026-01-01T00:00:00Z",
-                "author_association": "OWNER",
-                "body_sha256": "a" * 64,
-            }
+            return json.loads(json.dumps(TRUSTED_APPROVAL_WITNESSES[kind]))
+        reviewed_head = reviewed_range.split("..", 1)[1]
+        source = {
+            "kind": "github_issue_comment",
+            "repository": "layibabalola/MLV-App",
+            "pull_request": 999,
+            "comment_id": 999,
+            "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
+            "created_at": "2026-01-01T00:00:00Z",
+            "author_association": "OWNER",
+            "body_sha256": "a" * 64,
+        }
         return {
             "schema_version": 1,
             "kind": kind,
@@ -171,15 +162,12 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
 
     def test_pipeline_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
-        reviewed_range = (
-            "3e02eaea7a39b1a86b22f61e43017af3cd4f14f6.."
-            "cbae456144e2dc9092d78c87853de37d1bbe937a"
-        )
         artifact = manifest["artifact"]
         witness = self._approval_witness(
             "tracked_whole_artifact_approval", artifact["path"], artifact["sha256"],
-            reviewed_range, len(self._read_json(self.repo / artifact["path"])),
+            "unused-for-exact-trusted-witness", len(self._read_json(self.repo / artifact["path"])),
         )
+        reviewed_range = witness["reviewed_range"]
         manifest["review"] = {
             "status": "ratified",
             "scope": {
@@ -244,6 +232,30 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             self._write_manifest(original_manifest)
             self.git_witness = base_git_witness
 
+    def test_trusted_owner_comment_cannot_be_replayed_for_another_review_range(self) -> None:
+        manifest = self._manifest()
+        witness_record = manifest["review"]["approval_witness"]
+        witness_path = self.repo / witness_record["path"]
+        witness = self._read_json(witness_path)
+        replayed_range = (
+            "3e02eaea7a39b1a86b22f61e43017af3cd4f14f6.."
+            "cbae456144e2dc9092d78c87853de37d1bbe937a"
+        )
+        witness["reviewed_range"] = replayed_range
+        witness["reviewed_head"] = replayed_range.split("..", 1)[1]
+        content = (json.dumps(witness, indent=2) + "\n").encode("utf-8")
+        witness_path.write_bytes(content)
+        witness_record["sha256"] = hashlib.sha256(content).hexdigest()
+        manifest["unknowns"]["whole_artifact_review_range"] = replayed_range
+        source_state = manifest["generator"]["source_state_commit"]
+        self.git_witness = OverlayGitWitness(
+            self.git_witness,
+            {(source_state, witness_record["path"]): content},
+        )
+        self._write_manifest(manifest)
+        with self.assertRaisesRegex(ProvenanceValidationError, "complete independently verified approval claim"):
+            self._validate()
+
     def test_phase3_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
         phase3 = manifest["cross_golden"]["phase3"]
@@ -258,29 +270,13 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "tests/fixtures/golden/test-only-phase3-approval.json", witness
         )
         self._write_manifest(manifest)
-        self._validate()
+        with self.assertRaisesRegex(ProvenanceValidationError, "no independently verified trusted approval claim"):
+            self._validate()
 
     def test_two_locally_ratified_artifacts_must_agree_on_full16_hashes(self) -> None:
         manifest = self._manifest()
-        artifact = manifest["artifact"]
         phase3 = manifest["cross_golden"]["phase3"]
         reviewed_range = phase3["review"]["reviewed_range"]
-        pipeline_witness = self._approval_witness(
-            "tracked_whole_artifact_approval", artifact["path"], artifact["sha256"],
-            reviewed_range, len(self._read_json(self.repo / artifact["path"])),
-        )
-        manifest["review"] = {
-            "status": "ratified",
-            "scope": {
-                "artifact": "complete",
-                "keys": sorted(self._read_json(self.repo / artifact["path"])),
-            },
-            "reason": "test-only future transition",
-            "approval_witness": self._add_tracked_witness(
-                "tests/fixtures/golden/test-only-pipeline-approval.json", pipeline_witness
-            ),
-        }
-        manifest["unknowns"]["whole_artifact_review_range"] = reviewed_range
         phase3_path = self.repo / phase3["path"]
         phase3_content = self._read_json(phase3_path)
         phase3_content["clips"][0]["frames"][0]["sha256"] = "0" * 64
@@ -307,10 +303,14 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "tests/fixtures/golden/test-only-phase3-approval.json", phase3_witness
         )
         self._write_manifest(manifest)
-        with self.assertRaisesRegex(
-            ProvenanceValidationError, "ratified pipeline and Phase3 full16 hashes must agree"
-        ):
-            self._validate()
+        TRUSTED_APPROVAL_WITNESSES["tracked_phase3_approval"] = phase3_witness
+        try:
+            with self.assertRaisesRegex(
+                ProvenanceValidationError, "ratified pipeline and Phase3 full16 hashes must agree"
+            ):
+                self._validate()
+        finally:
+            TRUSTED_APPROVAL_WITNESSES.pop("tracked_phase3_approval", None)
 
     def test_artifact_hash_drift_fails_closed(self) -> None:
         artifact = self.repo / self._manifest()["artifact"]["path"]

@@ -26,15 +26,36 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SIGNATURE_RE = re.compile(r"^[0-9]+$")
 PSNR_RE = re.compile(r"^[0-9]+\.[0-9]{4}$")
-TRUSTED_WHOLE_ARTIFACT_APPROVAL_SOURCE = {
-    "kind": "github_issue_comment",
-    "repository": "layibabalola/MLV-App",
-    "pull_request": 6,
-    "comment_id": 5347847988,
-    "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
-    "created_at": "2026-08-19T20:51:23Z",
-    "author_association": "OWNER",
-    "body_sha256": "adbba554147e3ac4afb7328a242d379e890913716df687b99b7cab4a578d4726",
+TRUSTED_APPROVAL_WITNESSES = {
+    "tracked_whole_artifact_approval": {
+        "schema_version": 1,
+        "kind": "tracked_whole_artifact_approval",
+        "verdict": "APPROVE",
+        "artifact_path": "tests/fixtures/golden/pipeline_hashes.json",
+        "artifact_sha256": "89ce4ad45e378f38db8bab1efe3660056dc14c16bd71d8e3ec6da08fbac01f4a",
+        "reviewed_range": (
+            "e87b5133397240d5ebf3307625e8379be81e48f4.."
+            "08f38ea73887e9ae3b3e84673f03d82267473fab"
+        ),
+        "reviewer": "layibabalola",
+        "reviewer_role": "repository_owner",
+        "reviewed_head": "08f38ea73887e9ae3b3e84673f03d82267473fab",
+        "source": {
+            "kind": "github_issue_comment",
+            "repository": "layibabalola/MLV-App",
+            "pull_request": 6,
+            "comment_id": 5347847988,
+            "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
+            "created_at": "2026-08-19T20:51:23Z",
+            "author_association": "OWNER",
+            "body_sha256": "adbba554147e3ac4afb7328a242d379e890913716df687b99b7cab4a578d4726",
+        },
+        "scope": {
+            "key_count": 15,
+            "provider_authority": False,
+            "automatic_launch_gate": "CLOSED",
+        },
+    },
 }
 
 
@@ -307,9 +328,6 @@ def _validate_approval_witness(
     _require(isinstance(source.get("body_sha256"), str)
              and re.fullmatch(r"[0-9a-f]{64}", source["body_sha256"]) is not None,
              f"{label} source body_sha256 must bind the exact approval text")
-    if kind == "tracked_whole_artifact_approval":
-        _require(source == TRUSTED_WHOLE_ARTIFACT_APPROVAL_SOURCE,
-                 f"{label} source must equal the independently verified owner approval tuple")
 
     scope = witness.get("scope")
     _require(isinstance(scope, dict)
@@ -321,6 +339,11 @@ def _validate_approval_witness(
              f"{label} must not grant provider authority")
     _require(scope.get("automatic_launch_gate") == "CLOSED",
              f"{label} automatic launch gate must remain CLOSED")
+    trusted_witness = TRUSTED_APPROVAL_WITNESSES.get(kind)
+    _require(trusted_witness is not None,
+             f"{label} has no independently verified trusted approval claim registered")
+    _require(witness == trusted_witness,
+             f"{label} must equal the complete independently verified approval claim")
 
 
 def _validate_history(
