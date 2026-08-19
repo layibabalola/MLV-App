@@ -1,17 +1,27 @@
 {
-  "schema": "mlv-provider-control-author-packet/v1",
-  "status": "ADOPT_CANDIDATE_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T00:23:35.2065351Z",
+  "schema": "mlv-provider-control-author-packet/v2",
+  "status": "DISTINGUISH_R2_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T00:45:19.1702518Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+  "r1Commit": "97f64b161f4015eb579ad731e9cdf41dc7c951e7",
+  "r1Tree": "f95cb6cf95c0b1791b8d71cf11b0602675ad8950",
   "doctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
   "doctrineEngineGitBlob": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
   "profileSha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
-  "bindingsSha256": "d3c3b816b7af89a3d56a0a6cce22b169e52dcd9656df88ebe05994154818853e",
+  "bindingsSha256": "c97986125afaa677caca50dd9ee3802fb083a7a61a8a992e6d43b151381f08db",
   "localEvidence": {
-    "universalTests": "13/13 PASS",
-    "noWorkTicks": 1000,
+    "controls": "18/18 PASS on Python 3.13 and 3.14",
+    "exactR1Red": "alternate roots both lock; first and changed no-work both IDLE_SKIPPED",
+    "r2Green": "alternate root refused before quota lock; typed first/changed/unchanged distinct",
+    "noWorkUnchangedTicks": 1000,
     "noWorkProviderCalls": 0,
-    "fakeConcurrentLoser": "QUOTA_DOMAIN_BUSY",
+    "bindingMutations": [
+      "model",
+      "role",
+      "subject-path",
+      "subject-digest"
+    ],
+    "immediateBoundaryRevalidation": true,
     "profileSchema": "PASS",
     "intendedInventorySchema": "PASS",
     "scheduledTaskState": "Disabled",
@@ -19,7 +29,23 @@
     "providerOrAuthInvoked": false,
     "installAttempted": false
   },
-  "disposition": "DISTINGUISH(488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d, PENDING_REVIEWED_PRODUCTION_SUSPENDED_RESUME_AND_POST_INSTALL_HASHED_CENSUS)",
+  "distinguish": {
+    "doctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
+    "reasons": [
+      {
+        "reason": "PENDING_PRODUCTION_SUSPENDED_RESUME_BOUNDARY",
+        "proof": "Production work is CLOSED/refused and only the explicit byte-identified fake seam has a child boundary."
+      },
+      {
+        "reason": "PENDING_SIGNED_INSTALL_AND_COMPLETE_CENSUS",
+        "proof": "Profile state-root HMAC and intended inventory deployment hashes are placeholders; the current Disabled task still targets the direct fail-toward launcher."
+      },
+      {
+        "reason": "PENDING_EXPLICIT_ONE_USE_CANARY_AUTHORITY",
+        "proof": "No install/final-profile review/manual authorization/provider/auth/canary receipt exists."
+      }
+    ]
+  },
   "subjects": [
     {
       "path": ".gitattributes",
@@ -28,18 +54,18 @@
     },
     {
       "path": ".github/workflows/provider-control-candidate.yml",
-      "sha256": "2362cde1151aba008571703867d3bd567b1b49509e7656455dbcfa404ac1385f",
-      "bytes": 991
+      "sha256": "03903ef05ef188836050c8ae25e08c210bf824a3b2fa1e17aea0aacd70103321",
+      "bytes": 1229
     },
     {
       "path": "tools/provider_control/ADOPTION-CANDIDATE.md",
-      "sha256": "359a3cf28d19b4d0579ce9531e18686646c76bdf64837ce46889638dba29bed2",
-      "bytes": 4004
+      "sha256": "d2ec3ced8920017fcf1c29f0591dd6c0150f791a3da2513ca068055a12cc2a24",
+      "bytes": 6249
     },
     {
       "path": "tools/provider_control/CURRENT-SAFETY-EVIDENCE.json",
-      "sha256": "0867a6236ba09431a189adfedcbca4c32504ad5e4e1a7a8a7523b25da6a073cd",
-      "bytes": 1506
+      "sha256": "330b5a021efa2ab237a7835adf86d10ae886ceae7c453ba612f878298251f038",
+      "bytes": 1595
     },
     {
       "path": "tools/provider_control/install-mlv-lane-supervisor.ps1",
@@ -58,13 +84,13 @@
     },
     {
       "path": "tools/provider_control/lane-bindings.candidate.json",
-      "sha256": "d3c3b816b7af89a3d56a0a6cce22b169e52dcd9656df88ebe05994154818853e",
-      "bytes": 808
+      "sha256": "c97986125afaa677caca50dd9ee3802fb083a7a61a8a992e6d43b151381f08db",
+      "bytes": 1446
     },
     {
       "path": "tools/provider_control/mlv_lane_supervisor.py",
-      "sha256": "010aa4f3b52628eaeda9111310f7c9ef048584778000dc0c4e30a43263dfdbc6",
-      "bytes": 12888
+      "sha256": "6201ed2e64c7c10e7f7be30a83cdbc5ac2316ae660eae2d8fbb34ba56d0a2318",
+      "bytes": 17053
     },
     {
       "path": "tools/provider_control/mlv-project-profile.candidate.json",
@@ -163,8 +189,8 @@
     },
     {
       "path": "tools/provider_control/tests/test_mlv_lane_supervisor.py",
-      "sha256": "f7ada353fed11426c13ae974cd6d2a1146ab805610b7007fe29806caae2b6b78",
-      "bytes": 10126
+      "sha256": "c3258348c08f0358df59c46d452e9f22521b7c2f7fd292e56f1d3d0f1e778e3d",
+      "bytes": 17412
     },
     {
       "path": "tools/provider_control/vendor/universal_provider_control.py",

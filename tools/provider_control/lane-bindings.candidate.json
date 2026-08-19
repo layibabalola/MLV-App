@@ -5,10 +5,13 @@
   "provider": "claude",
   "adapter": "claude-code/1.0",
   "quotaDomain": "claude-shared-account",
+  "canonicalStateRoot": "C:\\ProgramData\\MLV-App\\provider-control-v1",
+  "profileSha256": "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
+  "stateRootIdentity": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "lanes": {
-    "claude-review": {"model": "claude-opus-5", "effort": "high", "role": "INDEPENDENT_REVIEW", "subject": "subjects/seat-lane4-review.md"},
-    "fable": {"model": "claude-opus-5", "effort": "high", "role": "HUB", "subject": "subjects/seat-fable-hub.md"},
-    "opus": {"model": "claude-opus-5", "effort": "high", "role": "CRITERION_OWNER", "subject": "subjects/seat-opus.md"},
-    "sonnet-impl": {"model": "claude-sonnet-5", "effort": "high", "role": "IMPLEMENTER", "subject": "subjects/seat-sonnet-impl.md"}
+    "claude-review": {"model": "claude-opus-5", "effort": "high", "role": "INDEPENDENT_REVIEW", "subject": "subjects/seat-lane4-review.md", "subjectSha256": "sha256:c8b1fa6502e9199df1ea555500554626ef09f4d12b802f57229a1f9b9743f409"},
+    "fable": {"model": "claude-opus-5", "effort": "high", "role": "HUB", "subject": "subjects/seat-fable-hub.md", "subjectSha256": "sha256:1f36622f741f8176166bbb98975ce3baaf253c0cfae9c72a842356dd4bff4f8d"},
+    "opus": {"model": "claude-opus-5", "effort": "high", "role": "CRITERION_OWNER", "subject": "subjects/seat-opus.md", "subjectSha256": "sha256:f98792a1cee5fab0644490f7f38defd20702f9c97330f02470e49d637238cda0"},
+    "sonnet-impl": {"model": "claude-sonnet-5", "effort": "high", "role": "IMPLEMENTER", "subject": "subjects/seat-sonnet-impl.md", "subjectSha256": "sha256:f33d2fd9c91a58c33863a3e23b5f0b310635e912aa76dceebe70dd0e18131e85"}
   }
 }

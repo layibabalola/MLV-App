@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -60,8 +62,11 @@ class SupervisorTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.state = self.base / "state"
         self.demand = self.base / "demand.json"
+        self.default_root = mock.patch.object(supervisor, "DEFAULT_STATE_ROOT", self.state)
+        self.default_root.start()
 
     def tearDown(self):
+        self.default_root.stop()
         self.temp.cleanup()
 
     def write_demand(self, value):
@@ -85,6 +90,8 @@ class SupervisorTests(unittest.TestCase):
     def test_04_one_thousand_no_work_ticks_are_zero_provider(self):
         self.write_demand(demand())
         with mock.patch.object(supervisor.subprocess, "Popen", side_effect=AssertionError("provider invoked")):
+            first = supervisor.tick(self.state, self.demand)
+            self.assertEqual(first["status"], "IDLE_RECORDED")
             for _ in range(1000):
                 result = supervisor.tick(self.state, self.demand)
                 self.assertEqual(result["status"], "IDLE_SKIPPED")
@@ -118,14 +125,16 @@ class SupervisorTests(unittest.TestCase):
 
     def test_08_capacity_reserve_refuses_before_fake_provider(self):
         self.write_demand(demand(hasWork=True, availableFraction=0.4, estimateFraction=0.1))
-        with mock.patch.dict(os.environ, {supervisor.FAKE_ENV: "1"}, clear=False):
+        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+        with mock.patch.dict(os.environ, env, clear=False):
             with mock.patch.object(supervisor.subprocess, "Popen", side_effect=AssertionError("provider invoked")):
                 with self.assertRaisesRegex(ControlError, "CAPACITY_RESERVE_REFUSED"):
                     supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
 
     def test_09_fake_receipt_binds_model_effort_role_subject_and_argv(self):
         self.write_demand(demand(hasWork=True))
-        with mock.patch.dict(os.environ, {supervisor.FAKE_ENV: "1"}, clear=False):
+        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+        with mock.patch.dict(os.environ, env, clear=False):
             result = supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
         self.assertEqual(result["status"], "TEST_FAKE_COMPLETED")
         self.assertEqual(result["providerCalls"], 1)
@@ -142,6 +151,7 @@ class SupervisorTests(unittest.TestCase):
                    str(HERE / "fake_provider.py"), "--sleep", "0.8"]
         marker = self.base / "fake-started"
         env = dict(os.environ); env[supervisor.FAKE_ENV] = "1"
+        env[supervisor.TEST_STATE_ROOT_ENV] = str(self.state)
         env["MLV_FAKE_STARTED_MARKER"] = str(marker)
         first = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         deadline = time.monotonic() + 3
@@ -173,8 +183,9 @@ class SupervisorTests(unittest.TestCase):
 
     def test_13_author_packet_binds_every_candidate_subject(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "ADOPT_CANDIDATE_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R2_ZERO_AUTHORITY")
         self.assertEqual(packet["doctrineCommit"], supervisor.DOCTRINE_COMMIT)
+        self.assertEqual(packet["r1Commit"], supervisor.R1_COMMIT)
         self.assertEqual(packet["profileSha256"], supervisor.sha256_file(supervisor.PROFILE)[7:])
         self.assertEqual(packet["bindingsSha256"], supervisor.sha256_file(supervisor.BINDINGS)[7:])
         for subject in packet["subjects"]:
@@ -182,6 +193,115 @@ class SupervisorTests(unittest.TestCase):
             with self.subTest(path=subject["path"]):
                 self.assertEqual(path.stat().st_size, subject["bytes"])
                 self.assertEqual(supervisor.sha256_file(path)[7:], subject["sha256"])
+
+    def test_14_alternate_root_is_refused_before_quota_lock(self):
+        self.write_demand(demand(hasWork=True))
+        alternate = self.base / "alternate-state"
+        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(supervisor, "quota_lock",
+                                   side_effect=AssertionError("quota lock reached")):
+                with self.assertRaisesRegex(ControlError, "STATE_ROOT_IDENTITY_MISMATCH"):
+                    supervisor.run_test_fake(alternate, self.demand, HERE / "fake_provider.py", 0)
+        self.assertFalse((alternate / "claude-shared-account.quota.lock").exists())
+
+    def test_15_first_and_changed_no_work_are_distinct_and_typed(self):
+        self.write_demand(demand(contextTokens=32000))
+        first = supervisor.tick(self.state, self.demand)
+        self.assertEqual(first["status"], "IDLE_RECORDED")
+        prior = strict_json_file(self.state / "idle-fingerprint.json")
+        self.assertEqual(prior["fingerprintType"], "CANONICAL_DEMAND_V1")
+        self.assertEqual(prior["demandType"], "NO_WORK")
+        self.write_demand(demand(contextTokens=32001))
+        changed = supervisor.tick(self.state, self.demand)
+        self.assertEqual(changed["status"], "IDLE_CHANGED")
+        self.assertNotEqual(first["demandFingerprint"], changed["demandFingerprint"])
+        unchanged = supervisor.tick(self.state, self.demand)
+        self.assertEqual(unchanged["status"], "IDLE_SKIPPED")
+
+    def test_16_binding_bytes_and_subject_digests_are_hash_pinned(self):
+        original = strict_json_file(supervisor.BINDINGS)
+        for mutation in ("model", "role", "subject"):
+            changed = json.loads(json.dumps(original))
+            if mutation == "model":
+                changed["lanes"]["fable"]["model"] = "redirected-model"
+            elif mutation == "role":
+                changed["lanes"]["fable"]["role"] = "REDIRECTED_ROLE"
+            else:
+                changed["lanes"]["fable"]["subject"] = "subjects/seat-opus.md"
+            path = self.base / (mutation + ".json")
+            path.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
+            with self.subTest(mutation=mutation), mock.patch.object(supervisor, "BINDINGS", path):
+                with self.assertRaisesRegex(ControlError, "LANE_BINDINGS_DIGEST_MISMATCH"):
+                    supervisor.load_contracts()
+        changed = json.loads(json.dumps(original))
+        changed["lanes"]["fable"]["subjectSha256"] = ZERO
+        path = self.base / "subject-digest.json"
+        path.write_text(json.dumps(changed, sort_keys=True), encoding="utf-8")
+        with mock.patch.object(supervisor, "BINDINGS", path), \
+                mock.patch.object(supervisor, "EXPECTED_BINDINGS_SHA256",
+                                  supervisor.sha256_file(path)):
+            with self.assertRaisesRegex(ControlError, "LANE_BINDINGS_INVALID"):
+                supervisor.load_contracts()
+
+    def test_17_binding_is_revalidated_immediately_before_child_boundary(self):
+        self.write_demand(demand(hasWork=True))
+        profile, bindings = supervisor.load_contracts()
+        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+        for mutation in ("model", "role", "subject"):
+            changed = json.loads(json.dumps(bindings))
+            changed["lanes"]["fable"][mutation] = "redirected"
+            with self.subTest(mutation=mutation), mock.patch.dict(os.environ, env, clear=False), \
+                    mock.patch.object(supervisor, "load_contracts",
+                                      side_effect=[(profile, bindings), (profile, changed)]), \
+                    mock.patch.object(supervisor.subprocess, "Popen",
+                                      side_effect=AssertionError("provider invoked")):
+                with self.assertRaisesRegex(ControlError, "LAUNCH_BINDING_CHANGED"):
+                    supervisor.run_test_fake(self.state, self.demand, HERE / "fake_provider.py", 0)
+
+    def test_18_exact_r1_red_r2_green_discriminators(self):
+        expected_blob = "49289959fd7fa526acbb0123a6a55584ad2ce089"
+        actual_blob = subprocess.run(
+            ["git", "rev-parse", supervisor.R1_COMMIT + ":tools/provider_control/mlv_lane_supervisor.py"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(actual_blob, expected_blob)
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", supervisor.R1_COMMIT, "tools/provider_control"],
+            capture_output=True, check=True,
+        ).stdout
+        extracted = self.base / "r1"
+        extracted.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+            members = bundle.getmembers()
+            self.assertTrue(members)
+            self.assertTrue(all(not Path(item.name).is_absolute() and ".." not in Path(item.name).parts
+                                for item in members))
+            bundle.extractall(extracted, members=members, filter="data")
+        script = (
+            "import json,sys,tempfile;from pathlib import Path;"
+            "root=Path(sys.argv[1]);sys.path.insert(0,str(root/'tools/provider_control'));"
+            "import mlv_lane_supervisor as s;"
+            "a=root/'state-a';b=root/'state-b';"
+            "l1=s.quota_lock(a);l1.__enter__();l2=s.quota_lock(b);l2.__enter__();"
+            "l2.__exit__(None,None,None);l1.__exit__(None,None,None);"
+            "d=root/'d.json';"
+            "base={'schema':'mlv-provider-demand/v1','project':'mlv-app','hasWork':False,"
+            "'lane':'fable','priority':'PRODUCT_WORK','estimateFraction':0.1,"
+            "'availableFraction':0.9,'turns':4,'contextTokens':32000,"
+            "'capsuleSha256':'" + ZERO + "','checkpointSha256':'" + ZERO + "',"
+            "'cacheAffinitySha256':'" + ZERO + "'};"
+            "d.write_text(json.dumps(base));x=s.tick(a,d);base['contextTokens']=32001;"
+            "d.write_text(json.dumps(base));y=s.tick(a,d);"
+            "print(json.dumps({'alternateRootsLocked':True,'first':x['status'],'changed':y['status']}))"
+        )
+        red = subprocess.run([sys.executable, "-c", script, str(extracted)],
+                             capture_output=True, text=True, check=True, timeout=20)
+        evidence = json.loads(red.stdout)
+        self.assertTrue(evidence["alternateRootsLocked"])
+        self.assertEqual(evidence["first"], "IDLE_SKIPPED")
+        self.assertEqual(evidence["changed"], "IDLE_SKIPPED")
+        # R2 greens for the exact red behaviors are asserted by tests 14 and 15.
 
 
 if __name__ == "__main__":
