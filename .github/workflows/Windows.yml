@@ -16,10 +16,6 @@ env:
   OPENSSL_BIN:  C:\Program Files\OpenSSL\bin
   QMAKE_EXE:    C:\Qt\5.15.2\mingw81_64\bin\qmake.exe
   WINDEPLOYQT_EXE: C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe
-  MINGW_BIN:    C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
-  MAKE_EXE:     C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\make.exe
-  GXX_EXE:      C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\g++.exe
-  LIBGOMP_DLL:  C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\libgomp-1.dll
 
 jobs:
   build:
@@ -52,14 +48,36 @@ jobs:
            choco install openssl --yes --no-progress --limit-output --execution-timeout=600
            if ($LASTEXITCODE -ne 0) { throw "Chocolatey OpenSSL install failed with exit code $LASTEXITCODE" }
               
+    - name: Install MinGW 8.1
+      timeout-minutes: 15
+      run: |
+           choco install mingw --version=8.1.0 --exact --allow-downgrade --yes --no-progress --limit-output --execution-timeout=600
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey MinGW 8.1 install failed with exit code $LASTEXITCODE" }
+
     - name: Install Qt
       timeout-minutes: 20
       run: |
-           choco install qt5-default --yes --no-progress --limit-output --execution-timeout=900
+           choco install qt5-default --version=5.15.2.20240623 --exact --yes --no-progress --limit-output --execution-timeout=900
            if ($LASTEXITCODE -ne 0) { throw "Chocolatey Qt install failed with exit code $LASTEXITCODE" }
 
     - name: Verify Windows build toolchain
       run: |
+           $mingwRoot = Join-Path $env:ChocolateyInstall "lib\mingw\tools\install"
+           $makeCandidates = @(
+             Get-ChildItem -LiteralPath $mingwRoot -Filter "mingw32-make.exe" -File -Recurse |
+               Where-Object {
+                 $bin = $_.DirectoryName
+                 (Test-Path -LiteralPath (Join-Path $bin "g++.exe") -PathType Leaf) -and
+                 (Test-Path -LiteralPath (Join-Path $bin "libgomp-1.dll") -PathType Leaf)
+               }
+           )
+           if ($makeCandidates.Count -ne 1) {
+             throw "Expected exactly one complete MinGW 8.1 toolchain under '$mingwRoot'; found $($makeCandidates.Count)"
+           }
+           $env:MINGW_BIN = [IO.Path]::GetFullPath($makeCandidates[0].DirectoryName)
+           $env:MAKE_EXE = [IO.Path]::GetFullPath($makeCandidates[0].FullName)
+           $env:GXX_EXE = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "g++.exe"))
+           $env:LIBGOMP_DLL = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "libgomp-1.dll"))
            $requiredExecutables = @(
              (Join-Path $env:OPENSSL_BIN "openssl.exe"),
              $env:QMAKE_EXE,
@@ -91,6 +109,18 @@ jobs:
            if ($LASTEXITCODE -ne 0) { throw "make executable probe failed" }
            & $env:GXX_EXE --version
            if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }
+           $compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()
+           if ($LASTEXITCODE -ne 0 -or $compilerVersion -ne "8.1.0") {
+             throw "MinGW compiler version mismatch: expected 8.1.0, observed '$compilerVersion'"
+           }
+           $compilerTarget = (& $env:GXX_EXE -dumpmachine).Trim()
+           if ($LASTEXITCODE -ne 0 -or $compilerTarget -ne "x86_64-w64-mingw32") {
+             throw "MinGW compiler target mismatch: expected x86_64-w64-mingw32, observed '$compilerTarget'"
+           }
+           $qtVersion = (& $env:QMAKE_EXE -query QT_VERSION).Trim()
+           if ($LASTEXITCODE -ne 0 -or $qtVersion -ne "5.15.2") {
+             throw "Qt version mismatch: expected 5.15.2, observed '$qtVersion'"
+           }
            $makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))
            $configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)
            if ($makeBin -ne $configuredMingwBin) {
@@ -109,6 +139,10 @@ jobs:
            }
            & g++.exe --version
            if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }
+           "MINGW_BIN=$env:MINGW_BIN" >> $env:GITHUB_ENV
+           "MAKE_EXE=$env:MAKE_EXE" >> $env:GITHUB_ENV
+           "GXX_EXE=$env:GXX_EXE" >> $env:GITHUB_ENV
+           "LIBGOMP_DLL=$env:LIBGOMP_DLL" >> $env:GITHUB_ENV
            $makeBin >> $env:GITHUB_PATH
 
     - name: Create build directory
@@ -151,10 +185,11 @@ jobs:
     - name: Generate single-build release evidence
       run: |
            $QmakePath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -CommandType Application -ErrorAction Stop).Source
-           $CompilerPath = (Get-Command C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\g++.exe -CommandType Application -ErrorAction Stop).Source
+           $CompilerPath = (Get-Command $env:GXX_EXE -CommandType Application -ErrorAction Stop).Source
            $DeployPath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe -CommandType Application -ErrorAction Stop).Source
            $QtVersion = & $QmakePath -query QT_VERSION
            $CompilerVersion = & $CompilerPath -dumpfullversion -dumpversion
+           $CompilerTarget = & $CompilerPath -dumpmachine
            python -m tools.release.release_evidence `
              --repo-root "${{ github.workspace }}" `
              --product "${{ env.SOURCE_DIR }}\build\MLVApp" `
@@ -178,7 +213,7 @@ jobs:
              --tool "compiler=$CompilerPath" `
              --tool "windeployqt=$DeployPath" `
              --tool-version "qmake=$QtVersion" `
-             --tool-version "compiler=$CompilerVersion" `
+             --tool-version "compiler=$CompilerVersion|$CompilerTarget" `
              --tool-version "windeployqt=$QtVersion"
 
     - name: Save release evidence

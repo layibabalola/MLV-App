@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from .release_evidence import (
@@ -14,6 +16,9 @@ from .release_evidence import (
     EvidenceError,
     _canonical_bytes,
     _inspect_executable_architecture,
+    _revalidate_symlink_records,
+    _resolve_symlink_target,
+    _symlink_record,
     _tool_record,
     _validate_member_names,
     generate_evidence,
@@ -126,6 +131,8 @@ class ReleaseEvidenceTests(unittest.TestCase):
         product = self._directory_product()
         inventory = inventory_path(product, logical_name="MLVApp")
         self.assertEqual([row["path"] for row in inventory["files"]], ["MLVApp.exe", "plugins/image.dll"])
+        self.assertEqual(inventory["links"], [])
+        self.assertEqual(inventory["link_count"], 0)
         document = inventory_document(inventory)
         self.assertEqual(document["schema"], CONTENTS_SCHEMA)
         self.assertEqual(
@@ -267,7 +274,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(EvidenceError, "invalid SHA-256 evidence"):
                 _tool_record(str(self.tool_dir / "compiler"), "8.1", "compiler")
 
-    def test_empty_directory_and_empty_file_fail_closed(self) -> None:
+    def test_empty_directory_and_standalone_empty_product_fail_closed(self) -> None:
         empty_directory = self.repo / "empty"
         empty_directory.mkdir()
         with self.assertRaisesRegex(EvidenceError, "contains no files"):
@@ -276,6 +283,16 @@ class ReleaseEvidenceTests(unittest.TestCase):
         empty_file.touch()
         with self.assertRaisesRegex(EvidenceError, "is empty"):
             inventory_path(empty_file, logical_name="empty.bin")
+
+    def test_zero_byte_directory_member_is_recorded(self) -> None:
+        product = self._directory_product()
+        placeholder = product / "Contents" / "Resources" / "empty.lproj"
+        placeholder.parent.mkdir(parents=True)
+        placeholder.touch()
+        inventory = inventory_path(product, logical_name="MLVApp")
+        row = next(item for item in inventory["files"] if item["path"].endswith("empty.lproj"))
+        self.assertEqual(row["size"], 0)
+        self.assertEqual(row["sha256"], hashlib.sha256(b"").hexdigest())
 
     def test_missing_expected_main_fails_closed(self) -> None:
         product = self._directory_product()
@@ -342,18 +359,97 @@ class ReleaseEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(EvidenceError, "symbolic-link or junction ancestor"):
                 self._generate(product=product)
 
-    def test_symbolic_link_member_fails_closed(self) -> None:
+    def test_relative_in_tree_file_symlink_is_bound_without_following(self) -> None:
         product = self._directory_product()
-        linked = product / "linked.dll"
-        linked.write_bytes(b"placeholder")
-        original = Path.is_symlink
+        linked = product / "MLVAPP.png"
+        try:
+            linked.symlink_to("plugins/image.dll")
+        except OSError as exc:
+            self.skipTest(f"file symlinks are unavailable: {exc}")
+        inventory = inventory_path(product, logical_name="MLVApp")
+        self.assertEqual(
+            inventory["links"],
+            [
+                {
+                    "path": "MLVAPP.png",
+                    "resolved_path": "plugins/image.dll",
+                    "target": "plugins/image.dll",
+                }
+            ],
+        )
+        self.assertEqual(inventory["link_count"], 1)
 
-        def pretend_link(path: Path) -> bool:
-            return path == linked or original(path)
+    def test_absolute_and_escaping_symlink_members_fail_closed(self) -> None:
+        product = self._directory_product()
+        self.assertEqual(
+            _resolve_symlink_target(
+                product / "MLVAPP.png",
+                product,
+                "plugins/image.dll",
+                "MLVAPP.png",
+            ),
+            "plugins/image.dll",
+        )
+        outside = self.repo / "outside-link-target"
+        outside.write_bytes(b"outside")
+        for name, target, error in (
+            ("absolute-link", str(outside), "must be relative"),
+            ("escaping-link", f"../../{outside.name}", "escapes the inventory root"),
+        ):
+            linked = product / name
+            with self.subTest(name=name), self.assertRaisesRegex(EvidenceError, error):
+                _resolve_symlink_target(linked, product, target, name)
 
-        with mock.patch("pathlib.Path.is_symlink", autospec=True, side_effect=pretend_link):
-            with self.assertRaisesRegex(EvidenceError, "symbolic link or junction"):
-                inventory_path(product, logical_name="MLVApp")
+    def test_link_change_during_inventory_completion_fails_closed(self) -> None:
+        product = self._directory_product()
+        recorded = {
+            "path": "MLVAPP.png",
+            "resolved_path": "plugins/image.dll",
+            "target": "plugins/image.dll",
+        }
+        changed = {**recorded, "target": "MLVApp.exe", "resolved_path": "MLVApp.exe"}
+        with mock.patch(
+            "tools.release.release_evidence._symlink_record", return_value=changed
+        ), self.assertRaisesRegex(EvidenceError, "changed before inventory completion"):
+            _revalidate_symlink_records(product, [recorded])
+
+    def test_link_identity_change_during_snapshot_fails_closed(self) -> None:
+        product = self._directory_product()
+        linked = product / "MLVAPP.png"
+
+        def link_stat(inode: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                st_dev=1,
+                st_ino=inode,
+                st_mode=stat.S_IFLNK | 0o777,
+                st_size=17,
+                st_mtime_ns=1,
+            )
+
+        with self.subTest(stage="after-readlink"), mock.patch.object(
+            Path, "lstat", side_effect=(link_stat(1), link_stat(2))
+        ), mock.patch("os.readlink", return_value="plugins/image.dll"), self.assertRaisesRegex(
+            EvidenceError, "changed while being inspected"
+        ):
+            _symlink_record(linked, product, "MLVAPP.png")
+
+        with self.subTest(stage="after-resolution"), mock.patch.object(
+            Path, "lstat", side_effect=(link_stat(1), link_stat(1), link_stat(2))
+        ), mock.patch("os.readlink", return_value="plugins/image.dll"), mock.patch(
+            "tools.release.release_evidence._resolve_symlink_target",
+            return_value="plugins/image.dll",
+        ), self.assertRaisesRegex(EvidenceError, "changed while resolving"):
+            _symlink_record(linked, product, "MLVAPP.png")
+
+    def test_symlink_directory_member_fails_closed(self) -> None:
+        product = self._directory_product()
+        linked = product / "linked-plugins"
+        try:
+            linked.symlink_to(product / "plugins", target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+        with self.assertRaisesRegex(EvidenceError, "symbolic-link or junction directory"):
+            inventory_path(product, logical_name="MLVApp")
 
     def test_output_inside_inventory_is_rejected(self) -> None:
         product = self._directory_product()
@@ -397,6 +493,14 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertFalse(contract["assurance_limits"]["redistribution_ready"])
         self.assertFalse(contract["assurance_limits"]["reproducibility_claim"])
         self.assertEqual(set(contract["workflow_targets"]), {"linux", "macos-arm64", "macos-x86_64", "windows"})
+        inventory = contract["inventory"]
+        self.assertIn("size 0", inventory["zero_byte_directory_members"])
+        self.assertIn("Relative file symlinks", inventory["file_symlinks"])
+        self.assertIn("empty standalone product file", inventory["reject"])
+        self.assertIn(
+            "absolute, escaping, broken, non-file, unrecorded, or concurrently changed file symlink",
+            inventory["reject"],
+        )
 
 
 class ReleaseWorkflowEvidenceTests(unittest.TestCase):

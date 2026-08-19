@@ -1042,22 +1042,33 @@ class RepoHygieneTests(unittest.TestCase):
                 text,
                 (
                     "Install OpenSSL",
+                    "Install MinGW 8.1",
                     "Install Qt",
                     "Verify Windows build toolchain",
                     "Build",
+                    "Generate single-build release evidence",
                     "Save build artifact",
                 ),
             )
             self.assertIn("timeout-minutes: 15", blocks["Install OpenSSL"])
+            self.assertIn("timeout-minutes: 15", blocks["Install MinGW 8.1"])
             self.assertIn("timeout-minutes: 20", blocks["Install Qt"])
-            for install_step, package, timeout in (
-                ("Install OpenSSL", "openssl", "600"),
-                ("Install Qt", "qt5-default", "900"),
+            for install_step, command, timeout in (
+                ("Install OpenSSL", "choco install openssl", "600"),
+                (
+                    "Install MinGW 8.1",
+                    "choco install mingw --version=8.1.0 --exact --allow-downgrade",
+                    "600",
+                ),
+                (
+                    "Install Qt",
+                    "choco install qt5-default --version=5.15.2.20240623 --exact",
+                    "900",
+                ),
             ):
                 block = blocks[install_step]
                 self.assertIn(
-                    f"choco install {package} --yes --no-progress --limit-output "
-                    f"--execution-timeout={timeout}",
+                    f"{command} --yes --no-progress --limit-output --execution-timeout={timeout}",
                     block,
                 )
                 self.assertIn("if ($LASTEXITCODE -ne 0) { throw", block)
@@ -1078,6 +1089,13 @@ class RepoHygieneTests(unittest.TestCase):
             ):
                 self.assertEqual(required_executables.count(executable_token), 1)
             for required_token in (
+                '$mingwRoot = Join-Path $env:ChocolateyInstall "lib\\mingw\\tools\\install"',
+                'Get-ChildItem -LiteralPath $mingwRoot -Filter "mingw32-make.exe" -File -Recurse',
+                "if ($makeCandidates.Count -ne 1)",
+                "$env:MINGW_BIN = [IO.Path]::GetFullPath($makeCandidates[0].DirectoryName)",
+                "$env:MAKE_EXE = [IO.Path]::GetFullPath($makeCandidates[0].FullName)",
+                '$env:GXX_EXE = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "g++.exe"))',
+                '$env:LIBGOMP_DLL = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "libgomp-1.dll"))',
                 "Test-Path -LiteralPath $executable -PathType Leaf",
                 "Test-Path -LiteralPath $env:LIBGOMP_DLL -PathType Leaf",
                 'Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libcrypto*.dll" -File',
@@ -1088,6 +1106,12 @@ class RepoHygieneTests(unittest.TestCase):
                 '"OPENSSL_SSL_DLLS=$($sslDlls.FullName -join \';\')" >> $env:GITHUB_ENV',
                 "& $env:GXX_EXE --version",
                 'if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }',
+                "$compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()",
+                '$compilerVersion -ne "8.1.0"',
+                "$compilerTarget = (& $env:GXX_EXE -dumpmachine).Trim()",
+                '$compilerTarget -ne "x86_64-w64-mingw32"',
+                "$qtVersion = (& $env:QMAKE_EXE -query QT_VERSION).Trim()",
+                '$qtVersion -ne "5.15.2"',
                 "$makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))",
                 "$configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)",
                 "if ($makeBin -ne $configuredMingwBin)",
@@ -1100,6 +1124,9 @@ class RepoHygieneTests(unittest.TestCase):
                 "if ($actualCompiler -ne $expectedCompiler)",
                 "& g++.exe --version",
                 'if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }',
+                '"MAKE_EXE=$env:MAKE_EXE" >> $env:GITHUB_ENV',
+                '"GXX_EXE=$env:GXX_EXE" >> $env:GITHUB_ENV',
+                '"LIBGOMP_DLL=$env:LIBGOMP_DLL" >> $env:GITHUB_ENV',
                 "$makeBin >> $env:GITHUB_PATH",
             ):
                 self.assertIn(required_token, verify_block)
@@ -1116,6 +1143,14 @@ class RepoHygieneTests(unittest.TestCase):
             ):
                 self.assertIn(required_token, build_block)
             self.assertNotRegex(build_block, r"(?i)Copy-Item.*lib(?:crypto|ssl)\*")
+            evidence_block = blocks["Generate single-build release evidence"]
+            for required_token in (
+                "$CompilerPath = (Get-Command $env:GXX_EXE -CommandType Application -ErrorAction Stop).Source",
+                "$CompilerTarget = & $CompilerPath -dumpmachine",
+                '--tool-version "compiler=$CompilerVersion|$CompilerTarget"',
+            ):
+                self.assertIn(required_token, evidence_block)
+            self.assertNotIn("ProgramData\\chocolatey\\lib\\mingw", evidence_block)
             self.assertEqual(blocks["Save build artifact"].count("if-no-files-found: error"), 1)
 
         def assert_linux_policy(text: str) -> None:
@@ -1186,6 +1221,39 @@ class RepoHygieneTests(unittest.TestCase):
                 "Windows drops executable assertion",
                 assert_windows_policy,
                 windows.replace("             $env:QMAKE_EXE,\n", "", 1),
+            ),
+            (
+                "Windows floats MinGW toolchain",
+                assert_windows_policy,
+                windows.replace(" --version=8.1.0 --exact --allow-downgrade", "", 1),
+            ),
+            (
+                "Windows hard-codes stale make name",
+                assert_windows_policy,
+                windows.replace(' -Filter "mingw32-make.exe"', ' -Filter "make.exe"', 1),
+            ),
+            (
+                "Windows skips compiler version binding",
+                assert_windows_policy,
+                windows.replace('$compilerVersion -ne "8.1.0"', '$compilerVersion -ne ""', 1),
+            ),
+            (
+                "Windows skips compiler target binding",
+                assert_windows_policy,
+                windows.replace(
+                    '$compilerTarget -ne "x86_64-w64-mingw32"',
+                    '$compilerTarget -ne ""',
+                    1,
+                ),
+            ),
+            (
+                "Windows evidence hashes stale compiler path",
+                assert_windows_policy,
+                windows.replace(
+                    "Get-Command $env:GXX_EXE -CommandType Application",
+                    "Get-Command C:\\stale\\g++.exe -CommandType Application",
+                    1,
+                ),
             ),
             (
                 "Windows drops exact compiler assertion",

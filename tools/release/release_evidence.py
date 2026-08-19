@@ -152,9 +152,11 @@ def _validate_member_names(paths: Iterable[str]) -> None:
         normalized[unicode_key] = path
 
 
-def _file_record(path: Path, logical_path: str) -> dict[str, Any]:
+def _file_record(
+    path: Path, logical_path: str, *, allow_empty: bool = False
+) -> dict[str, Any]:
     size, digest, _ = _read_file_snapshot(path)
-    if size <= 0:
+    if size <= 0 and not allow_empty:
         raise EvidenceError(f"inventory member is empty: {logical_path}")
     return {
         "path": logical_path,
@@ -163,12 +165,67 @@ def _file_record(path: Path, logical_path: str) -> dict[str, Any]:
     }
 
 
+def _resolve_symlink_target(path: Path, root: Path, target: str, logical_path: str) -> str:
+    if not target or "\x00" in target or Path(target).is_absolute() or re.match(r"^[A-Za-z]:", target):
+        raise EvidenceError(f"inventory link target must be relative: {logical_path} -> {target!r}")
+    try:
+        resolved = (path.parent / target).resolve(strict=True)
+        resolved_relative = resolved.relative_to(root.resolve(strict=True)).as_posix()
+    except (OSError, ValueError) as exc:
+        raise EvidenceError(
+            f"inventory link target escapes the inventory root or is missing: {logical_path} -> {target!r}"
+        ) from exc
+    if not resolved.is_file():
+        raise EvidenceError(
+            f"inventory link target is not a regular file: {logical_path} -> {target!r}"
+        )
+    return resolved_relative
+
+
+def _symlink_record(path: Path, root: Path, logical_path: str) -> dict[str, Any]:
+    """Snapshot one relative, in-tree file symlink without following it."""
+    before = path.lstat()
+    if not stat.S_ISLNK(before.st_mode):
+        raise EvidenceError(f"inventory link changed before inspection: {logical_path}")
+    target = os.readlink(path)
+    after = path.lstat()
+    identity_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns")
+    if (
+        not stat.S_ISLNK(after.st_mode)
+        or any(getattr(before, field) != getattr(after, field) for field in identity_fields)
+    ):
+        raise EvidenceError(f"inventory link changed while being inspected: {logical_path}")
+    resolved_relative = _resolve_symlink_target(path, root, target, logical_path)
+    final = path.lstat()
+    if (
+        not stat.S_ISLNK(final.st_mode)
+        or any(getattr(after, field) != getattr(final, field) for field in identity_fields)
+    ):
+        raise EvidenceError(f"inventory link changed while resolving its target: {logical_path}")
+    return {
+        "path": logical_path,
+        "resolved_path": resolved_relative,
+        "target": target,
+    }
+
+
+def _revalidate_symlink_records(root: Path, links: list[dict[str, Any]]) -> None:
+    for recorded in links:
+        current = _symlink_record(root / recorded["path"], root, recorded["path"])
+        if current != recorded:
+            raise EvidenceError(
+                "inventory link changed before inventory completion: "
+                f"{recorded['path']}"
+            )
+
+
 def inventory_path(path: Path, *, logical_name: str) -> dict[str, Any]:
     """Return a canonical inventory object for a regular file or directory."""
     path = Path(path)
     _require_plain_root(path, "inventory root")
     logical_name = _safe_relative_path(logical_name, "logical name")
     records: list[dict[str, Any]] = []
+    links: list[dict[str, Any]] = []
     if path.is_file():
         records.append(_file_record(path, logical_name))
         kind = "file"
@@ -176,27 +233,45 @@ def inventory_path(path: Path, *, logical_name: str) -> dict[str, Any]:
         kind = "directory"
         for current, directory_names, file_names in os.walk(path, followlinks=False):
             current_path = Path(current)
-            for name in [*directory_names, *file_names]:
+            for name in directory_names:
                 candidate = current_path / name
                 if _is_link_or_junction(candidate):
                     relative = candidate.relative_to(path).as_posix()
                     raise EvidenceError(
-                        f"inventory contains a symbolic link or junction: {relative}"
+                        f"inventory contains a symbolic-link or junction directory: {relative}"
                     )
             for name in file_names:
                 candidate = current_path / name
                 relative = candidate.relative_to(path).as_posix()
-                records.append(_file_record(candidate, relative))
+                if candidate.is_symlink():
+                    links.append(_symlink_record(candidate, path, relative))
+                elif _is_link_or_junction(candidate):
+                    raise EvidenceError(
+                        f"inventory contains a junction or unsupported link: {relative}"
+                    )
+                else:
+                    records.append(_file_record(candidate, relative, allow_empty=True))
     else:
         raise EvidenceError(f"inventory root is neither a file nor a directory: {path}")
     if not records:
         raise EvidenceError(f"inventory root contains no files: {path}")
-    _validate_member_names(record["path"] for record in records)
+    _validate_member_names(record["path"] for record in [*records, *links])
     records.sort(key=lambda record: record["path"].encode("utf-8"))
+    links.sort(key=lambda record: record["path"].encode("utf-8"))
+    _revalidate_symlink_records(path, links)
+    file_paths = {record["path"] for record in records}
+    for link in links:
+        if link["resolved_path"] not in file_paths:
+            raise EvidenceError(
+                "inventory link target is not represented by a regular-file record: "
+                f"{link['path']} -> {link['resolved_path']}"
+            )
     return {
         "file_count": len(records),
         "files": records,
         "kind": kind,
+        "link_count": len(links),
+        "links": links,
         "logical_name": logical_name,
         "total_size": sum(record["size"] for record in records),
     }
@@ -542,7 +617,7 @@ def generate_evidence(
             "tools": tool_records,
         },
         "contents": {
-            "count": contents_inventory["file_count"],
+            "count": contents_inventory["file_count"] + contents_inventory["link_count"],
             "expected_main_executable": expected_main,
             "main_executable": main_executable,
             "inventory_sha256": contents["inventory_sha256"],
