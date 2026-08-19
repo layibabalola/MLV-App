@@ -330,13 +330,14 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R9_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R10_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
         self.assertFalse(packet["authority"]["adoption"])
         self.assertEqual(
             packet["localEvidence"]["hostedMatrix"],
-            "R7_INVALID_YAML;R8_UBUNTU_PY314_INTERPRETER_SYMLINK_RED;R9_NOT_RUN",
+            "R7_INVALID_YAML;R8_UBUNTU_PY314_SYMLINK_RED;"
+            "R9_WINDOWS_CRLF_PROVENANCE_RED;R10_NOT_RUN",
         )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
@@ -367,8 +368,10 @@ class SupervisorTests(unittest.TestCase):
 
     def test_25_ci_actions_and_hashed_install_are_immutable(self):
         repo = ROOT.parents[1]
+        attributes = (repo / ".gitattributes").read_text(encoding="utf-8")
         workflow = (repo / ".github/workflows/provider-control-candidate.yml").read_text(
             encoding="utf-8")
+        self.assertIn(".github/requirements/provider-control* text eol=lf", attributes)
         self.assertIn(
             "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5",
             workflow,
@@ -384,6 +387,7 @@ class SupervisorTests(unittest.TestCase):
             "-r .github/requirements/provider-control.txt"
         )
         self.assertIn(install, " ".join(workflow.split()))
+        self.assertIn('      - ".gitattributes"', workflow)
         self.assertIn(
             "      - run: >-\n"
             "          python -m pip install --disable-pip-version-check --no-input\n"

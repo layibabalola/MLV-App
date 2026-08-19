@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v3",
-  "status": "DISTINGUISH_R9_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T02:25:00Z",
+  "status": "DISTINGUISH_R10_PHASE_0_1_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T02:30:00Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
   "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
@@ -20,7 +20,7 @@
     "python314ProfileValidation": "PASS",
     "python313RequireHashesDryRun": "PASS_WINDOWS_ONLY",
     "python314RequireHashesDryRun": "PASS_WINDOWS_ONLY",
-    "hostedMatrix": "R7_INVALID_YAML;R8_UBUNTU_PY314_INTERPRETER_SYMLINK_RED;R9_NOT_RUN",
+    "hostedMatrix": "R7_INVALID_YAML;R8_UBUNTU_PY314_SYMLINK_RED;R9_WINDOWS_CRLF_PROVENANCE_RED;R10_NOT_RUN",
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -49,7 +49,7 @@
   ],
   "subjects": [
     {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 27330, "sha256": "17b588f7a4661fa3007246f4eded0fc0c6cbd91a246af7ca7b648795e1ae4f81"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 26772, "sha256": "865a9a5755aec4910d93c99a5db3c75e17d421d5cf1312ee636a1daa3c896437"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 27031, "sha256": "779ce5b0e14a060ca8c610ae23c2a50c292959e32ffaa67e417186aafe348ba3"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 966, "sha256": "a9c7fbf4efcf11c625a45484496552feb39749705d69579dce18275594777507"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"},
@@ -61,9 +61,10 @@
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
     {"path": "tools/provider_control/README.md", "bytes": 1917, "sha256": "786f514cc68b1e1590a0b2b6554af43f2a0ed690f392f00dd402c4e9a786cc4c"},
     {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 4684, "sha256": "e1e1433fac720f8ed8f998108d479960904b88492f96a6a4fa1cb33a8da40497"},
+    {"path": ".gitattributes", "bytes": 267, "sha256": "a54a31bbb6bdb0b34a3871f9d3a80fa0d5df04cb204dcbbe107b5009c8885e60"},
     {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
     {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},
     {"path": ".github/requirements/provider-control-platform-evidence.json", "bytes": 1857, "sha256": "81659e3ff6a624c3d63d1384911a5eb2bbcfea6cdcb272be3ea92cb9f0423f42"},
-    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 1408, "sha256": "a1babf9101e41bad3070e88ebd83836a42aaa10ea01a39952671e43827dabbe7"}
+    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 1433, "sha256": "25c69a27315439041999afa382f9b6db74e7909b249432426fe06466538c3e31"}
   ]
 }

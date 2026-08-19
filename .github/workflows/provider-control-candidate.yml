@@ -2,6 +2,7 @@ name: Provider control candidate
 on:
   pull_request:
     paths:
+      - ".gitattributes"
       - "tools/provider_control/**"
       - ".github/requirements/provider-control*"
       - ".github/workflows/provider-control-candidate.yml"
