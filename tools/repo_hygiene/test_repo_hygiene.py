@@ -1486,6 +1486,28 @@ class RepoHygieneTests(unittest.TestCase):
                     f"{source_path.relative_to(ROOT)} must remain compatible with the C++14 release target",
                 )
 
+        pattern_noise = (ROOT / "src" / "mlv" / "llrawproc" / "patternnoise.c").read_text(
+            encoding="utf-8"
+        )
+
+        def assert_pattern_noise_end_label_is_c99(source: str) -> None:
+            self.assertEqual(
+                len(re.findall(r"(?m)^end:[ \t]*;[ \t]*$", source)),
+                1,
+                "pattern-noise cleanup must retain the explicit C99 null statement after its end label",
+            )
+            self.assertNotRegex(
+                source,
+                r"(?ms)^end:[ \t]*(?:/\*.*?\*/[ \t]*)?\r?\n(?:[ \t]*\r?\n|[ \t]*/\*.*?\*/[ \t]*\r?\n)*[ \t]*\}",
+                "the pattern-noise end label must never become an empty label before the function close",
+            )
+
+        assert_pattern_noise_end_label_is_c99(pattern_noise)
+        with self.assertRaises(AssertionError):
+            assert_pattern_noise_end_label_is_c99(
+                pattern_noise.replace("end: ;\n}", "end:\n/* no statement */\n\n}", 1)
+            )
+
         batch_types = (ROOT / "src" / "batch" / "BatchTypes.h").read_text(encoding="utf-8")
         self.assertRegex(
             batch_types,
