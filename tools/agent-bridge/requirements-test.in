@@ -1,2 +1,2 @@
 -r requirements.in
-pytest>=8.4.2,<9.0.0
+pytest>=9.0.3,<10.0.0
