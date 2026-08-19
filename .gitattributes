@@ -6,3 +6,4 @@ CLOSEOUT-CANONICAL-CONTRACT.sha256 text eol=lf
 tools/agent-bridge/requirements*.in text eol=lf
 tools/agent-bridge/requirements*.txt text eol=lf
 tools/dependencies/update-python-locks.ps1 text eol=lf
+src/debayer/basic.c whitespace=cr-at-eol

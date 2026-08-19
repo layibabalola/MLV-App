@@ -235,6 +235,7 @@ def _validate_approval_witness(
     artifact_path: str,
     artifact_sha256: str,
     reviewed_range: str,
+    reviewed_key_count: int,
 ) -> None:
     witness_path = _validate_hashed_file(repo_root, record, label)
     _validate_snapshot_blob(git, source_state, record, label)
@@ -256,6 +257,57 @@ def _validate_approval_witness(
     _require(git.is_ancestor(base, head), f"{label} review range is not ancestral")
     _require(git.is_ancestor(head, source_state),
              f"{label} review head is not an ancestor of source_state_commit")
+
+    reviewer = witness.get("reviewer")
+    _require(reviewer == "layibabalola",
+             f"{label} reviewer must be the repository owner layibabalola")
+    _require(witness.get("reviewer_role") == "repository_owner",
+             f"{label} reviewer_role must be repository_owner")
+    reviewed_head = _require_commit(git, witness.get("reviewed_head"), f"{label} reviewed_head")
+    _require(reviewed_head == head, f"{label} reviewed_head must equal the review range head")
+
+    source = witness.get("source")
+    expected_source_fields = {
+        "kind", "repository", "pull_request", "comment_id", "url", "created_at",
+        "author_association", "body_sha256",
+    }
+    _require(isinstance(source, dict) and set(source) == expected_source_fields,
+             f"{label} source must contain the exact GitHub authority fields")
+    _require(source.get("kind") == "github_issue_comment",
+             f"{label} source kind must be github_issue_comment")
+    _require(source.get("repository") == "layibabalola/MLV-App",
+             f"{label} source repository must be layibabalola/MLV-App")
+    pull_request = source.get("pull_request")
+    comment_id = source.get("comment_id")
+    _require(isinstance(pull_request, int) and not isinstance(pull_request, bool) and pull_request > 0,
+             f"{label} source pull_request must be a positive integer")
+    _require(isinstance(comment_id, int) and not isinstance(comment_id, bool) and comment_id > 0,
+             f"{label} source comment_id must be a positive integer")
+    expected_url = (
+        f"https://github.com/layibabalola/MLV-App/pull/{pull_request}"
+        f"#issuecomment-{comment_id}"
+    )
+    _require(source.get("url") == expected_url,
+             f"{label} source URL must exactly bind pull_request and comment_id")
+    _require(isinstance(source.get("created_at"), str)
+             and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", source["created_at"]) is not None,
+             f"{label} source created_at must be an RFC3339 UTC timestamp")
+    _require(source.get("author_association") == "OWNER",
+             f"{label} source author_association must be OWNER")
+    _require(isinstance(source.get("body_sha256"), str)
+             and re.fullmatch(r"[0-9a-f]{64}", source["body_sha256"]) is not None,
+             f"{label} source body_sha256 must bind the exact approval text")
+
+    scope = witness.get("scope")
+    _require(isinstance(scope, dict)
+             and set(scope) == {"key_count", "provider_authority", "automatic_launch_gate"},
+             f"{label} scope must contain the exact authority-boundary fields")
+    _require(scope.get("key_count") == reviewed_key_count,
+             f"{label} scope key_count does not match the reviewed artifact")
+    _require(scope.get("provider_authority") is False,
+             f"{label} must not grant provider authority")
+    _require(scope.get("automatic_launch_gate") == "CLOSED",
+             f"{label} automatic launch gate must remain CLOSED")
 
 
 def _validate_history(
@@ -439,6 +491,7 @@ def validate(
             artifact_path=artifact["path"],
             artifact_sha256=artifact["sha256"],
             reviewed_range=whole_review_range,
+            reviewed_key_count=len(pipeline),
         )
     dependency_snapshot = generator.get("dependency_snapshot")
     _require(isinstance(dependency_snapshot, dict), "generator dependency_snapshot must be an object")
@@ -527,6 +580,7 @@ def validate(
             artifact_path=phase3_record["path"],
             artifact_sha256=phase3_record["sha256"],
             reviewed_range=phase3_review.get("reviewed_range"),
+            reviewed_key_count=len(phase3_scope),
         )
     else:
         _require(not phase3_scope,

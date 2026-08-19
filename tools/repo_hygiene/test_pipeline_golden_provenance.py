@@ -112,6 +112,37 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "hash_mode": "lf_normalized_sha256",
         }
 
+    @staticmethod
+    def _approval_witness(kind: str, artifact_path: str, artifact_sha256: str,
+                          reviewed_range: str, key_count: int) -> dict:
+        reviewed_head = reviewed_range.split("..", 1)[1]
+        return {
+            "schema_version": 1,
+            "kind": kind,
+            "verdict": "APPROVE",
+            "artifact_path": artifact_path,
+            "artifact_sha256": artifact_sha256,
+            "reviewed_range": reviewed_range,
+            "reviewer": "layibabalola",
+            "reviewer_role": "repository_owner",
+            "reviewed_head": reviewed_head,
+            "source": {
+                "kind": "github_issue_comment",
+                "repository": "layibabalola/MLV-App",
+                "pull_request": 999,
+                "comment_id": 999,
+                "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
+                "created_at": "2026-01-01T00:00:00Z",
+                "author_association": "OWNER",
+                "body_sha256": "a" * 64,
+            },
+            "scope": {
+                "key_count": key_count,
+                "provider_authority": False,
+                "automatic_launch_gate": "CLOSED",
+            },
+        }
+
     def test_committed_manifest_is_valid(self) -> None:
         self._validate()
 
@@ -132,14 +163,10 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "cbae456144e2dc9092d78c87853de37d1bbe937a"
         )
         artifact = manifest["artifact"]
-        witness = {
-            "schema_version": 1,
-            "kind": "tracked_whole_artifact_approval",
-            "verdict": "APPROVE",
-            "artifact_path": artifact["path"],
-            "artifact_sha256": artifact["sha256"],
-            "reviewed_range": reviewed_range,
-        }
+        witness = self._approval_witness(
+            "tracked_whole_artifact_approval", artifact["path"], artifact["sha256"],
+            reviewed_range, len(self._read_json(self.repo / artifact["path"])),
+        )
         manifest["review"] = {
             "status": "ratified",
             "scope": {
@@ -155,18 +182,52 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         self._write_manifest(manifest)
         self._validate()
 
+    def test_ratified_pipeline_rejects_fictional_or_expanded_approval_authority(self) -> None:
+        original_manifest = self._manifest()
+        witness_record = original_manifest["review"]["approval_witness"]
+        witness_path = self.repo / witness_record["path"]
+        original_witness = self._read_json(witness_path)
+        base_git_witness = self.git_witness
+        mutations = {
+            "fictional reviewer": lambda item: item.__setitem__("reviewer", "fictional-reviewer"),
+            "non-owner role": lambda item: item.__setitem__("reviewer_role", "contributor"),
+            "wrong reviewed head": lambda item: item.__setitem__("reviewed_head", "0" * 40),
+            "wrong repository": lambda item: item["source"].__setitem__("repository", "someone/else"),
+            "non-owner association": lambda item: item["source"].__setitem__("author_association", "CONTRIBUTOR"),
+            "zero key scope": lambda item: item["scope"].__setitem__("key_count", 0),
+            "provider authority": lambda item: item["scope"].__setitem__("provider_authority", True),
+            "open automatic gate": lambda item: item["scope"].__setitem__("automatic_launch_gate", "OPEN"),
+        }
+        try:
+            for label, mutate in mutations.items():
+                with self.subTest(label=label):
+                    manifest = json.loads(json.dumps(original_manifest))
+                    witness = json.loads(json.dumps(original_witness))
+                    mutate(witness)
+                    content = (json.dumps(witness, indent=2) + "\n").encode("utf-8")
+                    witness_path.write_bytes(content)
+                    manifest["review"]["approval_witness"]["sha256"] = hashlib.sha256(content).hexdigest()
+                    source_state = manifest["generator"]["source_state_commit"]
+                    self.git_witness = OverlayGitWitness(
+                        base_git_witness,
+                        {(source_state, witness_record["path"]): content},
+                    )
+                    self._write_manifest(manifest)
+                    with self.assertRaises(ProvenanceValidationError):
+                        self._validate()
+        finally:
+            self._write_json(witness_path, original_witness)
+            self._write_manifest(original_manifest)
+            self.git_witness = base_git_witness
+
     def test_phase3_can_transition_to_ratified_with_tracked_approval(self) -> None:
         manifest = self._manifest()
         phase3 = manifest["cross_golden"]["phase3"]
         review = phase3["review"]
-        witness = {
-            "schema_version": 1,
-            "kind": "tracked_phase3_approval",
-            "verdict": "APPROVE",
-            "artifact_path": phase3["path"],
-            "artifact_sha256": phase3["sha256"],
-            "reviewed_range": review["reviewed_range"],
-        }
+        witness = self._approval_witness(
+            "tracked_phase3_approval", phase3["path"], phase3["sha256"],
+            review["reviewed_range"], len(review["scope"]),
+        )
         review["status"] = "ratified"
         review.pop("external_review_witness")
         review["approval_witness"] = self._add_tracked_witness(
@@ -180,14 +241,10 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         artifact = manifest["artifact"]
         phase3 = manifest["cross_golden"]["phase3"]
         reviewed_range = phase3["review"]["reviewed_range"]
-        pipeline_witness = {
-            "schema_version": 1,
-            "kind": "tracked_whole_artifact_approval",
-            "verdict": "APPROVE",
-            "artifact_path": artifact["path"],
-            "artifact_sha256": artifact["sha256"],
-            "reviewed_range": reviewed_range,
-        }
+        pipeline_witness = self._approval_witness(
+            "tracked_whole_artifact_approval", artifact["path"], artifact["sha256"],
+            reviewed_range, len(self._read_json(self.repo / artifact["path"])),
+        )
         manifest["review"] = {
             "status": "ratified",
             "scope": {
@@ -216,14 +273,10 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
                 (reviewed_head, phase3["path"]): phase3_bytes,
             },
         )
-        phase3_witness = {
-            "schema_version": 1,
-            "kind": "tracked_phase3_approval",
-            "verdict": "APPROVE",
-            "artifact_path": phase3["path"],
-            "artifact_sha256": phase3["sha256"],
-            "reviewed_range": reviewed_range,
-        }
+        phase3_witness = self._approval_witness(
+            "tracked_phase3_approval", phase3["path"], phase3["sha256"],
+            reviewed_range, len(phase3["review"]["scope"]),
+        )
         phase3["review"]["status"] = "ratified"
         phase3["review"].pop("external_review_witness")
         phase3["review"]["approval_witness"] = self._add_tracked_witness(
