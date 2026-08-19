@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v3",
   "status": "DISTINGUISH_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T02:20:00Z",
+  "capturedAt": "2026-08-19T01:18:00Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
   "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
