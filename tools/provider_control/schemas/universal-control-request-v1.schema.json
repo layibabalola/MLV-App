@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-control-request-v1.schema.json",
+  "title": "Universal provider-control request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "requestId", "project", "issuedAt", "expiresAt", "provider", "adapterVersion",
+    "quotaDomainId", "priority", "model", "effort", "role", "seatIdHash", "seatEpoch", "sessionIdHash", "subjectPath", "subjectSha256",
+    "executablePath", "executableSha256", "argv", "argvSha256", "argvBindings",
+    "launcherConfigPath", "launcherConfigSha256", "actionableWork", "demandFingerprint",
+    "priorIdleFingerprint", "maxWallSeconds", "maxTurns", "maxContextTokens", "contextCapsuleSha256",
+    "contextCapsulePath", "compactionCheckpointPath", "compactionCheckpointSha256",
+    "cacheAffinityManifestPath", "cacheAffinityKeySha256", "windowEstimates", "canary", "manualAuthorizationSha256"
+  ],
+  "properties": {
+    "schema": {"const": "fleet-universal-control-request/v1"},
+    "requestId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"},
+    "project": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,62}$"},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "provider": {"enum": ["claude", "openai", "kimi", "grok"]},
+    "adapterVersion": {"enum": ["claude-code/1.0", "openai-responses/1.0", "kimi-code/1.0", "xai-api/1.0"]},
+    "quotaDomainId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/hmac-sha256:[0-9a-f]{64}$"},
+    "priority": {"enum": ["OWNER_FOREGROUND", "REQUIRED_REVIEW", "PRODUCT_WORK", "ADJUDICATION", "MAINTENANCE"]},
+    "model": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
+    "effort": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"},
+    "role": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,31}$"},
+    "seatIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "seatEpoch": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "sessionIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "subjectPath": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "subjectSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "executablePath": {"type": "string", "minLength": 3, "maxLength": 1024},
+    "executableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "argv": {
+      "type": "array", "minItems": 4, "maxItems": 64,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+    },
+    "argvSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "argvBindings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modelIndex", "effortIndex", "subjectIndex"],
+      "properties": {
+        "modelIndex": {"type": "integer", "minimum": 1, "maximum": 63},
+        "effortIndex": {"type": "integer", "minimum": 1, "maximum": 63},
+        "subjectIndex": {"type": "integer", "minimum": 1, "maximum": 63}
+      }
+    },
+    "launcherConfigPath": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "launcherConfigSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "actionableWork": {"const": true},
+    "demandFingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "priorIdleFingerprint": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      ]
+    },
+    "maxWallSeconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+    "maxTurns": {"type": "integer", "minimum": 1, "maximum": 64},
+    "maxContextTokens": {"type": "integer", "minimum": 1024, "maximum": 1000000},
+    "contextCapsuleSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "contextCapsulePath": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "compactionCheckpointPath": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "compactionCheckpointSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "cacheAffinityManifestPath": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "cacheAffinityKeySha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "windowEstimates": {
+      "type": "object", "minProperties": 2, "maxProperties": 16,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{1,31}$"},
+      "additionalProperties": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+    },
+    "canary": {"type": "boolean"},
+    "manualAuthorizationSha256": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      ]
+    }
+  }
+}

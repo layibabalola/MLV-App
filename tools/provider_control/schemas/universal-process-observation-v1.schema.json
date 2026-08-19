@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-process-observation-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "phase", "requestId", "leaseId", "observedAt", "status", "processId", "processStartTime", "imagePath", "imageSha256", "actualArgv", "actualArgvSha256", "seatIdHash", "seatEpoch", "sessionIdHash", "observerHmacSha256"],
+  "properties": {
+    "schema": {"const": "fleet-universal-process-observation/v1"},
+    "phase": {"enum": ["ADMISSION", "RESUME", "TERMINAL", "RECOVERY"]},
+    "requestId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"},
+    "leaseId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"}
+      ]
+    },
+    "observedAt": {"type": "string", "format": "date-time"},
+    "status": {"enum": ["SUSPENDED", "EXITED", "FAILED", "DEAD", "LIVE", "AMBIGUOUS"]},
+    "processId": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+    "processStartTime": {"type": "string", "format": "date-time"},
+    "imagePath": {"type": "string", "minLength": 3, "maxLength": 1024},
+    "imageSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "actualArgv": {
+      "type": "array", "minItems": 4, "maxItems": 64,
+      "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+    },
+    "actualArgvSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "seatIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "seatEpoch": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "sessionIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "observerHmacSha256": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"phase": {"const": "ADMISSION"}}}, "then": {"properties": {"leaseId": {"type": "null"}, "status": {"const": "SUSPENDED"}}}},
+    {"if": {"properties": {"phase": {"const": "RESUME"}}}, "then": {"properties": {"leaseId": {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"}, "status": {"const": "SUSPENDED"}}}},
+    {"if": {"properties": {"phase": {"const": "TERMINAL"}}}, "then": {"properties": {"leaseId": {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"}, "status": {"enum": ["EXITED", "FAILED", "AMBIGUOUS"]}}}},
+    {"if": {"properties": {"phase": {"const": "RECOVERY"}}}, "then": {"properties": {"leaseId": {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"}, "status": {"enum": ["DEAD", "LIVE", "AMBIGUOUS"]}}}}
+  ]
+}

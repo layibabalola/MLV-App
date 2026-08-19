@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app.invalid/schemas/mlv-provider-supervisor-profile-v1.schema.json",
+  "title": "MLV-App fail-closed provider supervisor profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "project", "phase", "doctrine", "tokenSavingEvidence", "disposition", "automaticLaunchGate",
+    "authority", "proofModes", "contractDigests", "unknownPolicy", "pending", "unratifiedInputs"
+  ],
+  "properties": {
+    "schema": {"const": "mlv-provider-supervisor-profile/v1"},
+    "project": {"const": "mlv-app"},
+    "phase": {"enum": ["PHASE_0", "PHASE_1"]},
+    "doctrine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalUniversal", "mechanicsDependency"],
+      "properties": {
+        "canonicalUniversal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation", "technicalSubject", "doctrineMerge", "automaticLaunchGate", "authority"],
+          "properties": {
+            "generation": {"const": "R26"},
+            "technicalSubject": {"const": "e70a044f31dd2f43ab7c716d63a4eb89318c61b6"},
+            "doctrineMerge": {"const": "909f769d02e8412e51e28e242cfa8d00dadc9a3d"},
+            "automaticLaunchGate": {"const": "CLOSED"},
+            "authority": {"const": false}
+          }
+        },
+        "mechanicsDependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation", "technicalSubject", "ratificationMerge", "scope", "authority"],
+          "properties": {
+            "generation": {"const": "R14"},
+            "technicalSubject": {"const": "874605e43531c9aa230ee16851f8107a8e0d9cec"},
+            "ratificationMerge": {"const": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"},
+            "scope": {"const": "EXACT_VENDOR_ENGINE_AND_LANE_BINDINGS_ONLY"},
+            "authority": {"const": false}
+          }
+        }
+      }
+    },
+    "tokenSavingEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["treatment", "authority", "attendedRotation", "policy"],
+      "properties": {
+        "treatment": {"const": "MOTIVATION_ONLY"},
+        "authority": {"const": false},
+        "attendedRotation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "gitBlobOid", "sha256", "provenance", "credit", "providerAuthenticated", "independentObserver", "rawProviderReceiptCommitted", "inputTokens", "cacheCreateTokens", "cacheReadTokens", "outputTokens"],
+          "properties": {
+            "path": {"const": "receipts/attended-provider-rotation-20260819.json"},
+            "gitBlobOid": {"const": "41d7b4c6ae56f8efb880a1f36f4c3225f3112251"},
+            "sha256": {"const": "sha256:b3c69cdd972b694bd37e914b6c8f11ec452ac3c8c14ed230c2a23215e1e01307"},
+            "provenance": {"const": "AUTHOR_ATTESTED_LOCAL_CLI_MEASUREMENT"},
+            "credit": {"const": "MOTIVATION_AND_MEASUREMENT_ONLY"},
+            "providerAuthenticated": {"const": false},
+            "independentObserver": {"const": false},
+            "rawProviderReceiptCommitted": {"const": false},
+            "inputTokens": {"const": 7},
+            "cacheCreateTokens": {"const": 59319},
+            "cacheReadTokens": {"const": 10723},
+            "outputTokens": {"const": 7540}
+          }
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "gitBlobOid", "sha256", "policyId", "providerAuthority", "noWorkDecisionPoint", "requestAccountingScope", "cacheReadEnvelopeWeight", "maxAssembledPrefixTokens", "maxAddressedWorkCapsuleTokens", "cacheAffinityTtlSeconds", "maxProviderRetries", "completionReserveFloor", "directLaunchSeparateCertificationRequired"],
+          "properties": {
+            "path": {"const": "policy/universal-provider-token-control-r22.json"},
+            "gitBlobOid": {"const": "33b75cfb61b8c8934009ff987f2ea90ef5f74eb5"},
+            "sha256": {"const": "sha256:b5eca2ef60a86d87e2ca96d34569035aef510387de7ea204ab7cbf98ce5f5192"},
+            "policyId": {"const": "universal-provider-token-control-r22"},
+            "providerAuthority": {"const": false},
+            "noWorkDecisionPoint": {"const": "BEFORE_PROCESS_OR_SESSION_CREATION"},
+            "requestAccountingScope": {"const": "PROVIDER_REQUEST"},
+            "cacheReadEnvelopeWeight": {"const": 1.0},
+            "maxAssembledPrefixTokens": {"const": 32768},
+            "maxAddressedWorkCapsuleTokens": {"const": 8192},
+            "cacheAffinityTtlSeconds": {"const": 300},
+            "maxProviderRetries": {"const": 1},
+            "completionReserveFloor": {"const": 0.20},
+            "directLaunchSeparateCertificationRequired": {"const": true}
+          }
+        }
+      }
+    },
+    "disposition": {"const": "DISTINGUISH"},
+    "automaticLaunchGate": {"const": "CLOSED"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productionLaunch", "providerInvocation", "canary", "adoption"],
+      "properties": {
+        "productionLaunch": {"const": false},
+        "providerInvocation": {"const": false},
+        "canary": {"const": false},
+        "adoption": {"const": false}
+      }
+    },
+    "proofModes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "uniqueItems": true,
+      "items": {"enum": ["SHADOW", "CONTAINMENT"]}
+    },
+    "contractDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["universalProfileSha256", "laneBindingsSha256", "observedInventorySha256"],
+      "properties": {
+        "universalProfileSha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "laneBindingsSha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+        "observedInventorySha256": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"}
+      }
+    },
+    "unknownPolicy": {"const": "BLOCK"},
+    "pending": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "COMPLETE_EXACT_INVENTORY",
+          "SUPERVISOR_ACTION_GRAPH",
+          "CLOSED_SHADOW_CONTAINMENT_PROOF",
+          "INDEPENDENT_REVIEW",
+          "SIGNED_INSTALLATION",
+          "EXPLICIT_ONE_USE_CANARY_AUTHORITY",
+          "CITABLE_FABLE_SEQUENCE"
+        ]
+      }
+    },
+    "unratifiedInputs": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["generation", "treatment", "authority"],
+        "properties": {
+          "generation": {"type": "string", "pattern": "^R[0-9]+$"},
+          "treatment": {"const": "SHADOW_INPUT_ONLY"},
+          "authority": {"const": false}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# Source intent for the provider-control CI lock.
+# Regeneration precedent: repository commit 5e01d5c35f8f468a07521e13c62b945be7bac7c5.
+jsonschema==4.26.0

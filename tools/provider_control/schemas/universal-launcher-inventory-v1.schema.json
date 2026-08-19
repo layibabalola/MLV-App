@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-launcher-inventory-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "capturedAt", "complete", "surfaceClasses", "configuredSurfaceCounts", "observedSurfaceCounts", "censusMethodSha256", "configuredLauncherCount", "observedLauncherCount", "brokerExecutableSha256", "launchers"],
+  "properties": {
+    "schema": {"const": "fleet-universal-launcher-inventory/v1"},
+    "capturedAt": {"type": "string", "format": "date-time"},
+    "complete": {"const": true},
+    "surfaceClasses": {
+      "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
+      "items": {"enum": ["SCHEDULED_TASK", "APP_SCHEDULER", "REPOSITORY_WRAPPER", "SERVICE"]}
+    },
+    "configuredSurfaceCounts": {"$ref": "#/$defs/surfaceCounts"},
+    "observedSurfaceCounts": {"$ref": "#/$defs/surfaceCounts"},
+    "censusMethodSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "configuredLauncherCount": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "observedLauncherCount": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "brokerExecutableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "launchers": {
+      "type": "array", "minItems": 1, "maxItems": 4096,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["surfaceClass", "discoverySha256", "executablePath", "executableSha256", "brokerRouted", "directProviderInvocation"],
+        "properties": {
+          "surfaceClass": {"enum": ["SCHEDULED_TASK", "APP_SCHEDULER", "REPOSITORY_WRAPPER", "SERVICE"]},
+          "discoverySha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "executablePath": {"type": "string", "minLength": 3, "maxLength": 1024},
+          "executableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "brokerRouted": {"const": true},
+          "directProviderInvocation": {"const": false}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "surfaceCounts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["SCHEDULED_TASK", "APP_SCHEDULER", "REPOSITORY_WRAPPER", "SERVICE"],
+      "properties": {
+        "SCHEDULED_TASK": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "APP_SCHEDULER": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "REPOSITORY_WRAPPER": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "SERVICE": {"type": "integer", "minimum": 0, "maximum": 4096}
+      }
+    }
+  }
+}

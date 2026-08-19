@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/mlv-provider-supervisor-20260819",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 36,
+  "createdAt": "2026-08-19T07:39:18+00:00",
+  "detectorHash": "7964d11f06a896e28295248e1cce2895",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "9e3ee4d8d710f875d55cfce520701a5eb33de06b",
+  "schemaVersion": "1.0",
+  "targetHead": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+  "workBlockId": "wb-24e08b8617064192"
+}

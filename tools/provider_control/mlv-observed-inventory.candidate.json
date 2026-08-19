@@ -1,0 +1,221 @@
+{
+  "schema": "mlv-provider-observed-inventory/v2",
+  "capturedAt": "2026-08-19T08:01:15Z",
+  "authority": "OBSERVED_NON_AUTHORITATIVE",
+  "status": "BLOCKED",
+  "complete": false,
+  "unknownBlocksAuthority": true,
+  "actionGraph": {
+    "status": "INCOMPLETE_BLOCKED",
+    "complete": false,
+    "observedEdges": [
+      {"from": "MLV-LaneIgnitionWatchdog", "to": "pwsh.exe"},
+      {"from": "pwsh.exe", "to": "ignite-dead-lanes.ps1"},
+      {"from": "ignite-dead-lanes.ps1", "to": "claude.cmd"},
+      {"from": "claude.cmd", "to": "claude-code-executable"},
+      {"from": "mlv-app-dual-lane-codex-liveness", "to": "Codex Desktop automation executor"},
+      {"from": "Codex MCP config", "to": "agent-bridge external-repository trampoline"},
+      {"from": "Claude MCP config", "to": "MLV-App repository trampoline"},
+      {"from": "both Agent Bridge MCP source chains", "to": "C:\\Users\\obabalola\\.agent-bridge"},
+      {"from": "AgentBridgeClaudeGovernorShadow", "to": "Invoke-AgentBridgeClaudeShadow.ps1"},
+      {"from": "HKCU Run Claude", "to": "attended Claude Desktop"}
+    ],
+    "missingRequiredEdges": [
+      "CANONICAL_BROKER_OWNED_DEMAND_TO_INSTALLED_MLV_SUPERVISOR",
+      "INSTALLED_MLV_SUPERVISOR_TO_CERTIFIED_PROVIDER_WRAPPER",
+      "COMPLETE_CODEX_AUTOMATION_EXECUTOR_INTERNAL_CHAIN",
+      "COMPLETE_AGENT_BRIDGE_WATCHER_LAUNCH_CHAIN",
+      "SUPERVISOR_SUSPENDED_CHILD_RESUME_BOUNDARY",
+      "INDEPENDENT_OBSERVER_TO_PROVIDER_RECEIPT"
+    ]
+  },
+  "scheduledTasks": {
+    "closureStatus": "PARTIAL_EXACT_BLOCKED",
+    "primary": {
+      "name": "MLV-LaneIgnitionWatchdog",
+      "state": "Disabled",
+      "enabled": false,
+      "repetitionInterval": "PT5M",
+      "logonMode": "INTERACTIVE",
+      "runLevel": "LIMITED",
+      "physicalTaskFile": {"status": "EXACT", "path": "C:\\Windows\\System32\\Tasks\\MLV-LaneIgnitionWatchdog", "bytes": 3790, "sha256": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275"},
+      "exportedXml": {
+        "status": "EXACT",
+        "convention": "EXPORT_SCHEDULED_TASK_STRING_UTF8_NO_BOM_PRESERVE_CRLF",
+        "bytes": 1894,
+        "sha256": "sha256:d4f5e9dbcfe86555a244aa3e4a0a6bbf220dc132b6887790062963d19c250af3",
+        "twoExportStability": {"exports": 2, "byteIdentical": true, "sameSha256": true}
+      },
+      "actionExecutable": {"status": "EXACT", "path": "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "bytes": 301408, "sha256": "sha256:8737aa78bdbe2941083c2c3674da3a9c3ab4cabd2cac040d39d1d0c19f9fc20d"},
+      "actionArguments": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\"",
+      "actionReceipt": {
+        "status": "EXACT",
+        "convention": "ORDERED_JSON_EXECUTE_ARGUMENTS_WORKING_DIRECTORY_UTF8_NO_BOM_NO_TRAILING_NEWLINE",
+        "fieldOrder": ["Execute", "Arguments", "WorkingDirectory"],
+        "bytes": 257,
+        "sha256": "sha256:5fb03548103724f4827acdb0ef3e9e9ae6d022471354078b0badaf4a252ab087"
+      }
+    },
+    "diagnosticShadow": {
+      "name": "AgentBridgeClaudeGovernorShadow",
+      "stateAtTaskCapture": "Running",
+      "enabled": true,
+      "classification": "DIAGNOSTIC_SHADOW_ONLY",
+      "authority": false,
+      "physicalTaskFile": {"status": "EXACT", "path": "C:\\Windows\\System32\\Tasks\\AgentBridgeClaudeGovernorShadow", "bytes": 4684, "sha256": "sha256:ed6198c37ffe9453d2ecfa99fd7a247460a56aae184a67e962a0eb87de152375"},
+      "actionScript": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\.claude-state\\coordination\\fleet-capacity\\Invoke-AgentBridgeClaudeShadow.ps1", "bytes": 8018, "sha256": "sha256:88c67b921cba2b4b8d9ffcd7854c410b3ea3aeadbf731d7ed698cd9d0a6978bf"}
+    },
+    "disabledRelated": [
+      {"name": "AdobeIngesterFactory-SolIgnitionWarden", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:7b6e97de403bb1e7bdf46cb956912b201786455fdd9f774bb7482979ddacd037", "actionScriptSha256": "sha256:bb83af70166e0aace3ff5d74da79ca9aeab0c2d69d2647ee6d12884e7d8cd713"},
+      {"name": "agent-bridge-warden", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:4dd73bab9b12dfd3f5e5e3e0edad16f7c1154bd57eb652544035ba6a2feb2522", "actionScriptSha256": "sha256:be23319a57d4752e9a8aa345893fe96dc37e7e6f42b34630f6755af6eb5011ac"},
+      {"name": "AgentBridgeLaneLifecycleSupervisor", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:7b9b29bdc3a189399f23a6da2a4182736fc3754dffe4ae1ef14b8f4b9c855e33", "actionScriptSha256": "sha256:be23319a57d4752e9a8aa345893fe96dc37e7e6f42b34630f6755af6eb5011ac"},
+      {"name": "AudioMile-LaneIgnition", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:620d7b3db58aabd69898913fc49f89526aa0bafb86c7b283c2faf5b321b15a68", "actionScriptSha256": "sha256:d8f97bd9be7d47e65e4d57d6cc46a3740de7931e9ee26cc2d32fdba34af1a2f0"},
+      {"name": "AudioMile-LaneIgnition-OPUS", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:c36a8b3fae4b6de1c710a60e0b4755af5a231a131db26d30f4983ab9bd2977a2", "actionScriptSha256": "sha256:d8f97bd9be7d47e65e4d57d6cc46a3740de7931e9ee26cc2d32fdba34af1a2f0"},
+      {"name": "CodexGpuLaneHeartbeat", "state": "Disabled", "enabled": false, "physicalTaskFileSha256": "sha256:a74c1b43d8d98f8b0ad2e967c9019c03e38e6d26f615ae68b4e072bfd06b6504", "actionScriptSha256": "sha256:8ebfe18fe0aa1329a4ffafb6c3d0ee18782a40a5a7e5a91ad828256252c32e03"}
+    ]
+  },
+  "ignitionLauncher": {
+    "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1",
+    "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1", "bytes": 17082, "sha256": "sha256:f8c83535754fa6e009596ea6c0bb4f99673261f2c40128afb9072fd7fb3177ed"},
+    "brokerRouted": false,
+    "directProviderInvocation": true,
+    "unreadableLeaseBehavior": "FAIL_TOWARD_IGNITION"
+  },
+  "codexAutomations": {
+    "closureStatus": "PARTIAL_EXACT_MUTABLE_BLOCKED",
+    "active": {
+      "id": "mlv-app-dual-lane-codex-liveness",
+      "status": "ACTIVE",
+      "rrule": "FREQ=MINUTELY;INTERVAL=5",
+      "targetThreadId": "019fe3a5-0538-7351-bbaa-55f1d34987db",
+      "definition": {"status": "EXACT", "path": "C:\\Users\\obabalola\\.codex\\automations\\mlv-app-dual-lane-codex-liveness\\automation.toml", "bytes": 2746, "sha256": "sha256:ac0b32e9f40c3c805d16a56a5726b0ad52f29eb614df9735478024be7d6ac524"},
+      "promptBytes": 2447,
+      "promptSha256": "sha256:c9963355773fa8acc5ee8c8def4c1c060299129e1949d0c6273ca5373c04ed7f",
+      "providerAuthority": false
+    },
+    "paused": [
+      {"id": "finish-mlv-dispatch-self-heal-closeout", "status": "PAUSED", "definitionSha256": "sha256:e50d1c9bdcb5903f9af61abed1b11c6a395c8b6766edd80dc799bbbb955ea7e9", "promptSha256": "sha256:62eb43696f6cf87a2aa2d1b70ff9ebfecf2db3737c4f2a7e85aec36a6a622939"},
+      {"id": "mlv-app-outage-bank-luna-conveyor", "status": "PAUSED", "definitionSha256": "sha256:dfb79834d371383be3f3f5b8bee2da337d1646c63d3f89ab9ee1d72cdd6fed95", "promptSha256": "sha256:4d283fb5659024ae88176a4b673b8ca90f80beef10493254fc71bce8db985089"},
+      {"id": "mlv-app-outage-bank-sol-review-conveyor", "status": "PAUSED", "definitionSha256": "sha256:d8fdfc31f52b73e82c18c56a77c637f58d8081e2b5ef02fbe3c433262d03d958", "promptSha256": "sha256:a67ae9ecddd15843622962db322076a70075ffa95b85079ca8725ef86e492425"},
+      {"id": "mlv-app-provider-failover-closeout", "status": "PAUSED", "definitionSha256": "sha256:09ce07bc45eb99fa4cc5a5a8035f72641f4c94051f56bc7ef35395c4d3640395", "promptSha256": "sha256:ff9aa781be9b01bc7357cb58eadf01125bce6a28452e8f1de3c44f0d6b08b6e3"}
+    ]
+  },
+  "agentBridge": {
+    "closureStatus": "DIVERGENT_SOURCE_SHARED_STATE_BLOCKED",
+    "complete": false,
+    "sharedStateRoot": "C:\\Users\\obabalola\\.agent-bridge",
+    "sharedStateRootStatus": "MUTABLE_SHARED_NON_AUTHORITATIVE",
+    "sourceChainsIdentical": false,
+    "codexMcp": {
+      "config": {"status": "EXACT", "path": "C:\\Users\\obabalola\\.codex\\config.toml", "bytes": 6348, "sha256": "sha256:886bdb2e6b813817288c41980fd5e60faa2779274a590aee859dddb014a285fd"},
+      "sourceRoot": "C:\\!Layi Wkspc\\agent-bridge",
+      "chain": [
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\server_wrapper_trampoline.py", "bytes": 4234, "sha256": "sha256:15698f6beebdac34fb1c7b5d499c8df428570870e7bf6f38a06e1eeb89bf7e49"},
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\server_wrapper.py", "bytes": 96140, "sha256": "sha256:5275fd93bd220746111a86368e836c8a6a8466d02b5638dad869f95641cb8f27"},
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\server.py", "bytes": 61963, "sha256": "sha256:9dd1298961f70f33d219c38df36140b3ac57574094891b6962b09f5ad0a57fee"}
+      ]
+    },
+    "claudeMcp": {
+      "config": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\Claude\\claude_desktop_config.json", "bytes": 2531, "sha256": "sha256:27b7328c091f51c724a2ce7b507a2cf5eebe4f9a8f8b1eb1bfba786c190232c6"},
+      "sourceRoot": "C:\\!Layi Wkspc\\MLV-App\\tools\\agent-bridge",
+      "chain": [
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\tools\\agent-bridge\\server_wrapper_trampoline.py", "bytes": 3764, "sha256": "sha256:cd9231097ede834c89d643de197d6dacc8fb5849ac88cf192059c56827f5d992"},
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\tools\\agent-bridge\\server_wrapper.py", "bytes": 89469, "sha256": "sha256:5e5b7b93276d2d6e80305ec71e3a5d0cabd235f312cebe1bc23a67589f34821c"},
+        {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\tools\\agent-bridge\\server.py", "bytes": 52415, "sha256": "sha256:2a5a8f1f58469938fb36ca082342eaa9ef5a853c2ba8c9e7c44a597e8aa3f8b3"}
+      ]
+    },
+    "watcher": {
+      "status": "DORMANT_OR_NONLIVE_SNAPSHOT_BLOCKED",
+      "config": {"status": "EXACT", "path": "C:\\Users\\obabalola\\.agent-bridge\\watcher-config.json", "bytes": 6314, "sha256": "sha256:6cc37e76c815dbd276521f0d9a1a7518a0ca32d2c53705ac1278e3c45edebb22"},
+      "source": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\watcher.py", "bytes": 165982, "sha256": "sha256:1bf295d3c3fd3a934a5a7c17906d8baa9c8e37878cb71c3fbd49c25d63df19dc"},
+      "processObserved": false,
+      "retiredMlvCodexDirectWakeEntries": 2,
+      "retiredEntriesEvidenceOnly": true,
+      "wakeScripts": [
+        {"role": "CODEX_DIRECT_SCRIPT_DORMANT", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\wake_codex.ps1", "bytes": 93308, "sha256": "sha256:3186b5465ef3cb442f9a4290d7d70c9f33c3f500274db46b31e8efa248a8818f"}},
+        {"role": "CLAUDE_DIAGNOSTIC_FAIL_CLOSED", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\agent-bridge\\wake_claude.ps1", "bytes": 2720, "sha256": "sha256:2aae6e5740e5347bc7702e2b69f132dfa39014fd71cb569e573dccf74bb79c86"}}
+      ]
+    }
+  },
+  "persistenceSurfaces": {
+    "services": {"status": "NO_MATCH_OBSERVED", "matchingServiceCount": 0, "inference": "SNAPSHOT_ONLY_NOT_ABSENCE_PROOF"},
+    "startupFolders": {
+      "status": "NO_PROVIDER_MATCH_OBSERVED",
+      "filter": "ALL_REGULAR_FILES_IN_USER_AND_COMMON_STARTUP_FOLDERS;_LAUNCHABLE_SHORTCUT_IF_EXTENSION_CASEFOLD_EQUALS_.LNK;_PROVIDER_MATCH_IF_NAME_OR_RESOLVED_TARGET_MATCHES_CLAUDE_CODEX_AGENT_BRIDGE_OR_MLV",
+      "totalInspectedFileCount": 5,
+      "inspectedLaunchableShortcutCount": 3,
+      "providerMatchCount": 0,
+      "entries": [
+        {"scope": "USER", "name": "caffeine.lnk", "bytes": 1065, "sha256": "sha256:6b47b28dd5555bab3ef9774b4eb420a85314107770a6082dec2579e2adcf9f5e", "launchableShortcut": true, "resolvedTarget": "C:\\caffeine\\caffeine.exe", "providerMatch": false},
+        {"scope": "USER", "name": "desktop.ini", "bytes": 174, "sha256": "sha256:cdb11958506a5ba5478e22ed472fa3ae422fe9916d674f290207e1fc29ae5a76", "launchableShortcut": false, "resolvedTarget": null, "providerMatch": false},
+        {"scope": "COMMON", "name": "desktop.ini", "bytes": 174, "sha256": "sha256:cdb11958506a5ba5478e22ed472fa3ae422fe9916d674f290207e1fc29ae5a76", "launchableShortcut": false, "resolvedTarget": null, "providerMatch": false},
+        {"scope": "COMMON", "name": "Run Notification Viewer in background.lnk", "bytes": 2984, "sha256": "sha256:6b3cb910aff8a707105023dc0cb06657543cb595bd756839dda394ce3d8cbba1", "launchableShortcut": true, "resolvedTarget": "C:\\WINDOWS\\Installer\\{0A3238D7-AC64-1210-B717-F3E3F18B4A8C}\\ico_notifyviewer.exe", "providerMatch": false},
+        {"scope": "COMMON", "name": "Tailscale.lnk", "bytes": 1981, "sha256": "sha256:594906fd3b6c966b0244c69623ae5cdcb455d131ebddda1dfe2eda04edc14c01", "launchableShortcut": true, "resolvedTarget": "C:\\Program Files\\Tailscale\\tailscale-ipn.exe", "providerMatch": false}
+      ],
+      "inference": "SNAPSHOT_ONLY_NOT_ALTERNATE_LAUNCH_PROOF"
+    },
+    "runKeys": {
+      "status": "PARTIAL_EXACT_MUTABLE_BLOCKED",
+      "attendedClaude": {
+        "hive": "HKCU",
+        "name": "Claude",
+        "command": "\"C:\\Users\\obabalola\\AppData\\Local\\AnthropicClaude\\claude.exe\" --startup",
+        "classification": "ATTENDED_DESKTOP_STARTUP_NOT_HEADLESS_PROVIDER",
+        "authority": false,
+        "launcher": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Local\\AnthropicClaude\\claude.exe", "bytes": 363168, "sha256": "sha256:e34851cb93b4d46648166ad8cdefac6c9e0f081d3aa3860ee534ff04875bcb88"}
+      },
+      "foreignCodexHeartbeatObserved": true,
+      "foreignCodexHeartbeatExcludedFromMlvAuthority": true
+    }
+  },
+  "livePromptObservations": [
+    {"lane": "fable", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-fable-hub.md", "bytes": 4103, "sha256": "sha256:1f36622f741f8176166bbb98975ce3baaf253c0cfae9c72a842356dd4bff4f8d"}},
+    {"lane": "claude-review", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-lane4-review.md", "bytes": 5535, "sha256": "sha256:c8b1fa6502e9199df1ea555500554626ef09f4d12b802f57229a1f9b9743f409"}},
+    {"lane": "opus", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-opus.md", "bytes": 4877, "sha256": "sha256:f98792a1cee5fab0644490f7f38defd20702f9c97330f02470e49d637238cda0"}},
+    {"lane": "sonnet-impl", "identity": {"status": "EXACT", "path": "C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\seat-sonnet-impl.md", "bytes": 4590, "sha256": "sha256:f33d2fd9c91a58c33863a3e23b5f0b310635e912aa76dceebe70dd0e18131e85"}}
+  ],
+  "claudeCliObservations": [
+    {"component": "claude.cmd", "version": null, "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\claude.cmd", "bytes": 160, "sha256": "sha256:7999fba95dbffe167d9e0a043f29057979a0518ebe89b60c4fcfc6401ea8c424"}},
+    {"component": "claude-code-executable", "version": "2.1.220", "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe", "bytes": 265720480, "sha256": "sha256:af5bf1f1b2aadffc768eccd787084c6fdf9ba81624cbe96c1c6d9ac1a1550231"}},
+    {"component": "package-manifest", "version": "2.1.220", "identity": {"status": "EXACT", "path": "C:\\Users\\obabalola\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\package.json", "bytes": 1476, "sha256": "sha256:bfceea6ab13280e0fa6bdd3d76ced5e0386f848cfd8db10b5bec28ddfa0ca016"}}
+  ],
+  "processSnapshot": {
+    "capturedAt": "2026-08-19T08:01:15Z",
+    "status": "DYNAMIC_SNAPSHOT_BLOCKED",
+    "attendedClaudeDesktopCount": 9,
+    "externalClaudeCliProviderCount": 0,
+    "agentBridgeMcpTrampolineCount": 2,
+    "agentBridgeMcpWrapperCount": 2,
+    "agentBridgeWatcherCount": 0,
+    "diagnosticShadowProcessCount": 0,
+    "absenceIsHistoricalProof": false,
+    "absenceIsFutureProof": false
+  },
+  "surfaceClosure": {
+    "status": "BLOCKED",
+    "mutable": ["CODEX_AUTOMATION_DEFINITIONS", "RUN_KEYS", "WATCHER_CONFIG", "SHARED_AGENT_BRIDGE_STATE"],
+    "dynamic": ["SCHEDULED_TASK_RUNTIME_STATE", "PROCESS_LIST", "MCP_CHILDREN"],
+    "unreadableOrUnbound": [
+      {"surface": "CODEX_AUTOMATION_EXECUTOR_INTERNAL_SCHEDULER", "status": "UNREADABLE_BLOCKED"},
+      {"surface": "SCHEDULED_TASK_EXECUTION_HISTORY", "status": "UNBOUND_BLOCKED"},
+      {"surface": "ALTERNATE_USER_PROFILES_AND_OFFLINE_HIVES", "status": "UNREADABLE_BLOCKED"},
+      {"surface": "PROVIDER_BACKEND_AND_ACCOUNT_TELEMETRY", "status": "UNREADABLE_BLOCKED"}
+    ]
+  },
+  "observerExclusions": [
+    "NO_MATCHING_SERVICE_DOES_NOT_PROVE_NO_LAUNCHER_EXISTS",
+    "NO_STARTUP_FOLDER_MATCH_DOES_NOT_PROVE_NO_ALTERNATE_PERSISTENCE",
+    "ATTENDED_CLAUDE_DESKTOP_IS_NOT_A_CLAUDE_CLI_PROVIDER_ROUTE",
+    "PROCESS_ABSENCE_IS_NOT_HISTORICAL_OR_FUTURE_PROCESS_PROOF",
+    "SHARED_AGENT_BRIDGE_STATE_ROOT_DOES_NOT_UNIFY_DIVERGENT_SOURCE_IDENTITIES",
+    "ENABLED_OR_RUNNING_DIAGNOSTIC_SHADOW_IS_NOT_PRODUCTION_AUTHORITY",
+    "PAUSED_AUTOMATION_DEFINITION_IS_NOT_DELETION_OR_PERMANENT_INERTNESS",
+    "OBSERVER_DID_NOT_INFER_COMPLETE_GRAPH_FROM_OBSERVED_EDGES"
+  ],
+  "rollback": {
+    "requiredTaskState": "Disabled",
+    "requiredTaskEnabled": false,
+    "restorePhysicalTaskFileSha256": "sha256:41860727a6254a999c4fab1eae13d1c6a57da4cd7686fd4fd4a2923fbae83275",
+    "automaticLaunchGate": "CLOSED"
+  }
+}

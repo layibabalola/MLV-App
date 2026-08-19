@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-launch-attestation-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "requestId", "leaseId", "quotaDomainId", "issuedAt", "expiresAt", "gateEpoch", "gateTransitionSha256", "processId", "processStartTime", "seatIdHash", "seatEpoch", "sessionIdHash", "executablePath", "executableSha256", "argvSha256", "launcherConfigSha256", "windowEstimates", "windowEstimatesSha256", "bindingSha256", "profileSha256", "inventorySha256", "observationSha256", "processObservationSha256", "artifactHandleSetSha256"],
+  "properties": {
+    "schema": {"const": "fleet-universal-launch-attestation/v1"},
+    "status": {"enum": ["PREPARED_SUSPENDED", "ALLOW_ATTESTED"]},
+    "requestId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"},
+    "leaseId": {"type": "string", "pattern": "^lease-[0-9a-f]{32}$"},
+    "quotaDomainId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/hmac-sha256:[0-9a-f]{64}$"},
+    "issuedAt": {"type": "string", "format": "date-time"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "gateEpoch": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "gateTransitionSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "processId": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+    "processStartTime": {"type": "string", "format": "date-time"},
+    "seatIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "seatEpoch": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+    "sessionIdHash": {"type": "string", "pattern": "^hmac-sha256:[0-9a-f]{64}$"},
+    "executablePath": {"type": "string", "minLength": 3, "maxLength": 1024},
+    "executableSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "argvSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "launcherConfigSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "windowEstimates": {
+      "type": "object", "minProperties": 2, "maxProperties": 16,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{1,31}$"},
+      "additionalProperties": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+    },
+    "windowEstimatesSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "bindingSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "profileSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "inventorySha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "observationSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "processObservationSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "artifactHandleSetSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
