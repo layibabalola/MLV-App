@@ -1,0 +1,22 @@
+{
+  "artifactKind": "metrics",
+  "branch": "codex/autonomous-golden-authority-20260819",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "committedDeltaPathCount": 0,
+  "createdAt": "2026-08-19T22:52:01+00:00",
+  "detectorHash": "4b0cefbae23665d2fe8127fbd5ab202c",
+  "dirtyCounts": {
+    "foreignDirty": 0,
+    "mixedDirty": 0,
+    "ownedDirty": 0,
+    "unownedDirty": 0
+  },
+  "featureHead": "f0380c134ea415d624bda8d2ef8a2e9ad08eb6bc",
+  "schemaVersion": "1.0",
+  "targetHead": "e02554beba090262e74830f10ddb79c536e347d1",
+  "workBlockId": "wb-ba5f170421a4466f"
+}
