@@ -1681,15 +1681,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 {key: value for key, value in bound_request.items() if key != "helperObservedAtMs"},
                 server_process_id=4321,
             )
-        with self.assertRaisesRegex(HygieneError, "timestamp is in the future"):
-            dashboard_action_request_payload(
-                repo,
-                {
-                    **bound_request,
-                    "helperObservedAtMs": now_ms + 60000,
-                },
-                server_process_id=4321,
-            )
+        # Freeze the validator clock so this negative cannot age into the
+        # accepted window while a contended repo-state snapshot is prepared.
+        with mock.patch("tools.repo_hygiene.closeout_dashboard.time.time", return_value=now_ms / 1000.0):
+            with self.assertRaisesRegex(HygieneError, "timestamp is in the future"):
+                dashboard_action_request_payload(
+                    repo,
+                    {
+                        **bound_request,
+                        "helperObservedAtMs": now_ms + 60000,
+                    },
+                    server_process_id=4321,
+                )
         with self.assertRaisesRegex(HygieneError, "serverProcessId must be an integer"):
             dashboard_action_request_payload(
                 repo,
