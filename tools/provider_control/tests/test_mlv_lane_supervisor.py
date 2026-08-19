@@ -398,6 +398,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(local["hostedStrictRunProvenance"])
         self.assertTrue(local["hostedFatalDiagnosticSeparatelyVerified"])
         self.assertTrue(local["hostedNonFiniteJsonForbidden"])
+        self.assertTrue(local["hostedJunitFullSemanticCrossCheck"])
         self.assertEqual(
             local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
@@ -1283,6 +1284,61 @@ class SupervisorTests(unittest.TestCase):
             result_bytes, contradictory_junit, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "outcome children"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        for attribute, forged_value, message in (
+            ("timestamp", "1900-01-01T00:00:00.000000Z", "timestamp"),
+            ("time", "nan", "suite duration"),
+        ):
+            forged_root = hosted_runner.ET.fromstring(junit_bytes)
+            forged_root.set(attribute, forged_value)
+            forged_junit = hosted_runner.ET.tostring(
+                forged_root, encoding="utf-8", xml_declaration=True
+            )
+            hosted_runner._write_evidence_bundle(
+                result_path, junit_path, manifest_path,
+                result_bytes, forged_junit, head, tree,
+            )
+            with self.assertRaisesRegex(ValueError, message):
+                hosted_runner._verify_evidence_bundle(
+                    manifest_path, require_live_clean=False
+                )
+
+        forged_root = hosted_runner.ET.fromstring(junit_bytes)
+        profile_case = next(
+            case for case in forged_root.findall("testcase")
+            if case.attrib.get("classname") == "provider_control.profile"
+        )
+        profile_case.set("time", "999.000000")
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes,
+            hosted_runner.ET.tostring(
+                forged_root, encoding="utf-8", xml_declaration=True
+            ),
+            head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "synthetic testcase metadata"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        failed_result = json.loads(result_bytes)
+        failed_result["closedGatePassed"] = False
+        failed_result["tests"]["passed"] -= 1
+        failed_result["tests"]["failed"] = 1
+        failed_result["tests"]["records"][0].update(
+            {"status": "failed", "detail": "JSON_DIFFERENT_DETAIL"}
+        )
+        junit_failed_records = json.loads(json.dumps(failed_result["tests"]["records"]))
+        junit_failed_records[0]["detail"] = "JUNIT_ORIGINAL_DETAIL"
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(failed_result, sort_keys=True) + "\n").encode(),
+            hosted_runner._junit_bytes(
+                junit_failed_records, "2026-08-19T00:00:00.000000Z", 0.1
+            ),
+            head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "outcome detail"):
             hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         hostile_result = json.loads(result_bytes)

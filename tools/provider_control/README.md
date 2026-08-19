@@ -49,7 +49,9 @@ manifest that binds their exact SHA-256, byte count, head, and tree; partial bun
 The verifier also parses both files, recomputes counters and the CLOSED verdict, requires the profile
 and repository-cleanliness JUnit cases, refuses authority claims, and rejects any sibling fatal
 diagnostic while preserving the original fatal cause. Every JSON test ID, status, and rounded
-duration must map to exactly one JUnit testcase with the matching outcome child. The committed
+duration must map to exactly one JUnit testcase with the matching outcome type and detail. The JUnit
+suite timestamp/duration/hostname and both synthetic-case durations/details are also cross-checked
+against the JSON and live process. The committed
 45-test inventory is bound by its sorted-ID digest, so zero, partial, or renamed discovery cannot
 become a green run. Environment fields, canonical UTC start time, and finite nonnegative duration
 are type-checked; JSON non-finite constants are forbidden; and the environment/GitHub matrix claims

@@ -63,8 +63,9 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   are encoded and fail closed. A last-written manifest binds the JSON/JUnit byte counts, SHA-256s,
   head, and tree; semantic verification recomputes counters/verdicts, requires the synthetic profile
   and repository checks, refuses authority claims or a sibling fatal diagnostic, and preserves the
-  first fatal cause. Each JSON test ID/status/duration must match exactly one JUnit testcase and
-  outcome child. The exact 45-test sorted-ID digest rejects zero, partial, or renamed discovery;
+  first fatal cause. Each JSON test ID/status/duration/detail must match exactly one JUnit testcase
+  and outcome child; suite timestamp/duration/hostname and synthetic-case duration/detail are also
+  cross-checked. The exact 45-test sorted-ID digest rejects zero, partial, or renamed discovery;
   environment/run fields must equal the live matrix process; canonical UTC timing is type-checked;
   and non-finite JSON/JUnit durations are forbidden. The verifier performs a fresh live
   index/worktree cleanliness check immediately before routing. Partial bundles are

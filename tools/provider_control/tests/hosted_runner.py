@@ -484,6 +484,23 @@ def _verify_evidence_bundle(
     junit_root = ET.parse(manifest_path.parent / "junit.xml").getroot()
     if junit_root.tag != "testsuite":
         raise ValueError("JUnit root is not testsuite")
+    expected_root_attributes = {
+        "name", "tests", "failures", "errors", "skipped", "time", "timestamp", "hostname"
+    }
+    if set(junit_root.attrib) != expected_root_attributes:
+        raise ValueError("JUnit root attributes are not exact")
+    if junit_root.attrib["name"] != "mlv-provider-control-closed-gate":
+        raise ValueError("JUnit suite name is invalid")
+    if junit_root.attrib["timestamp"] != started:
+        raise ValueError("JUnit timestamp disagrees with hosted result")
+    if junit_root.attrib["hostname"] != socket.gethostname():
+        raise ValueError("JUnit hostname disagrees with the live verifier process")
+    try:
+        junit_suite_duration = float(junit_root.attrib["time"])
+    except ValueError as error:
+        raise ValueError("JUnit suite duration is invalid") from error
+    if not math.isfinite(junit_suite_duration) or junit_suite_duration != round(duration, 6):
+        raise ValueError("JUnit suite duration disagrees with hosted result")
     try:
         junit_counts = {
             key: int(junit_root.attrib[key]) for key in ("tests", "failures", "errors", "skipped")
@@ -508,10 +525,25 @@ def _verify_evidence_bundle(
     repository_case = cases.get(("provider_control.repository", "clean_after"))
     if profile_case is None or repository_case is None:
         raise ValueError("JUnit synthetic checks are missing")
+    for name, case in (("profile", profile_case), ("repository", repository_case)):
+        if set(case.attrib) != {"classname", "name", "time"} or case.attrib["time"] != "0.000000":
+            raise ValueError(f"JUnit {name} synthetic testcase metadata is invalid")
     if bool(profile_case.find("error") is not None) != (profile["exitCode"] != 0):
         raise ValueError("JUnit profile outcome mismatch")
     if bool(repository_case.find("error") is not None) != (not repository["cleanAfter"]):
         raise ValueError("JUnit repository outcome mismatch")
+    if profile["exitCode"] != 0:
+        profile_error = profile_case.find("error")
+        if profile_error.attrib != {"type": "error"} or (profile_error.text or "") != (
+            profile["stdout"] + profile["stderr"]
+        ):
+            raise ValueError("JUnit profile detail mismatch")
+    if not repository["cleanAfter"]:
+        repository_error = repository_case.find("error")
+        if repository_error.attrib != {"type": "error"} or (
+            repository_error.text or ""
+        ) != repository["statusAfter"]:
+            raise ValueError("JUnit repository detail mismatch")
     expected_case_keys = {
         tuple(str(record["id"]).rpartition(".")[::2]) for record in records
     } | {
@@ -550,6 +582,18 @@ def _verify_evidence_bundle(
         actual_tag = children[0].tag if children else None
         if actual_tag != expected_tag:
             raise ValueError(f"JUnit outcome disagrees for {record['id']}")
+        if set(case.attrib) != {"classname", "name", "time"}:
+            raise ValueError(f"JUnit testcase metadata is invalid for {record['id']}")
+        if expected_tag is not None:
+            child = children[0]
+            expected_type = "error" if expected_tag == "error" else record["status"]
+            if child.attrib != {"type": expected_type}:
+                raise ValueError(f"JUnit outcome type disagrees for {record['id']}")
+            expected_detail = str(record.get("detail", record["status"]))
+            if (child.text or "") != expected_detail:
+                raise ValueError(f"JUnit outcome detail disagrees for {record['id']}")
+        elif "detail" in record:
+            raise ValueError(f"passed test record must not claim detail: {record['id']}")
         try:
             junit_duration = float(case.attrib["time"])
         except (KeyError, ValueError) as error:
