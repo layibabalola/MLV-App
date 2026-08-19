@@ -204,12 +204,19 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(result["fakeReceipt"]["provider"], "FAKE_ONLY")
             image = Path(result["binding"]["processImagePath"])
             script = Path(result["binding"]["scriptPath"])
+            source_script = Path(result["binding"]["sourceScriptPath"])
             self.assertEqual(image, Path(sys.executable).resolve())
-            self.assertEqual(script, (HERE / "fake_provider.py").resolve())
+            self.assertEqual(source_script, (HERE / "fake_provider.py").resolve())
+            self.assertEqual(script.parent.name, "test-launch-artifacts")
+            self.assertEqual(result["fakeReceipt"]["scriptPath"], str(script))
             self.assertEqual(result["binding"]["processImageSha256"],
                              supervisor.sha256_file(image))
             self.assertEqual(result["binding"]["scriptSha256"],
                              supervisor.sha256_file(script))
+            self.assertEqual(result["binding"]["sourceScriptSha256"],
+                             supervisor.sha256_file(source_script))
+            self.assertEqual(result["binding"]["scriptSha256"],
+                             result["binding"]["sourceScriptSha256"])
             self.assertNotEqual(result["binding"]["processImageSha256"],
                                 result["binding"]["scriptSha256"])
             self.assertEqual(result["containedHostileAuthorityClaim"], mode == "CONTAINMENT")
@@ -365,7 +372,8 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_SLOT_SLICE_1_ZERO_AUTHORITY")
+        self.assertEqual(
+            packet["status"], "DISTINGUISH_PROJECT_R14_SLOT_REFERENCE_ZERO_AUTHORITY")
         self.assertEqual(
             packet["canonicalDoctrine"]["technicalSubject"],
             supervisor.CANONICAL_TECHNICAL_SUBJECT,
@@ -384,13 +392,21 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_NOT_RUN",
         )
         slot = packet["referenceSlotSlice"]
         self.assertEqual(slot["rotationOrder"], list(supervisor.TEST_SLOT_ORDER))
         self.assertEqual(slot["maxConcurrency"], 1)
         self.assertEqual(slot["maxRetries"], 1)
         self.assertEqual(slot["completionReserveFraction"], 0.20)
+        self.assertEqual(
+            slot["hashToExecBoundary"],
+            "BROKER_PRIVATE_CONTENT_ADDRESSED_SCRIPT_ARTIFACT",
+        )
+        self.assertTrue(slot["fullArgvAndDigestComparedOnReload"])
+        self.assertTrue(slot["failedAttemptConservativelyChargedBeforeRetry"])
+        self.assertTrue(slot["cursorPublishedBeforeReplayFenceRemoval"])
+        self.assertTrue(slot["cursorFailureLeavesRestartFenced"])
         self.assertFalse(slot["installed"])
         self.assertFalse(slot["productionReachable"])
         self.assertFalse(slot["shadowPassClaimed"])
@@ -693,7 +709,7 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_NOT_RUN",
         )
         self.assertNotIn("R11_4_OF_4_GREEN", hosted)
 
@@ -727,8 +743,10 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(envelope["completionReserveFraction"], 0.2)
         self.assertEqual(envelope["envelopeTotalFraction"], 0.5)
         self.assertEqual(envelope["priorityReserveFloorFraction"], 0.35)
-        self.assertEqual(envelope["priorityGuardTotal"], 0.45)
-        self.assertEqual(envelope["requiredAvailableFraction"], 0.5)
+        self.assertEqual(envelope["consumptiveFractionPerAttempt"], 0.3)
+        self.assertEqual(envelope["protectedReserveFraction"], 0.35)
+        self.assertEqual(envelope["requiredAvailableFraction"], 0.65)
+        self.assertEqual(envelope["maximumAttemptsRequiredAvailableFraction"], 0.95)
         self.assertEqual(envelope["maxRetries"], 1)
 
     def test_34_serial_slot_rotates_in_fixed_order_and_refuses_wrong_claimant(self):
@@ -781,7 +799,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse((self.state / "test-request-envelope-active.json").exists())
 
     def test_36_one_retry_maximum_and_terminal_cleanup_on_success_and_failure(self):
-        self.write_demand(demand(hasWork=True))
+        self.write_demand(demand(hasWork=True, availableFraction=1.0))
         success_log = self.base / "success-attempts.txt"
         success_env = self.fake_env()
         success_env.update({"MLV_FAKE_FAIL_ATTEMPTS": "1",
@@ -791,12 +809,18 @@ class SupervisorTests(unittest.TestCase):
                 self.state, self.demand, HERE / "fake_provider.py", 0)
         self.assertEqual(result["retryCount"], 1)
         self.assertEqual(result["fakeProviderCalls"], 2)
+        self.assertEqual(result["conservativeChargedFraction"], 0.6)
+        self.assertEqual(result["availableAfterConservativeChargeFraction"], 0.4)
+        self.assertEqual(result["attemptReservation"]["attempt"], 2)
+        self.assertEqual(result["attemptReservation"]["availableBeforeAttemptFraction"], 0.7)
+        self.assertEqual(
+            result["attemptReservation"]["availableAfterConservativeChargeFraction"], 0.4)
         self.assertEqual(success_log.read_text(encoding="utf-8").splitlines(), ["1", "2"])
         self.assertFalse((self.state / "test-claude-slot-active.json").exists())
         self.assertFalse((self.state / "test-request-envelope-active.json").exists())
 
         failed_state = self.base / "failed-state"
-        self.write_demand(demand(hasWork=True))
+        self.write_demand(demand(hasWork=True, availableFraction=1.0))
         failed_log = self.base / "failed-attempts.txt"
         failed_env = self.fake_env(failed_state)
         failed_env.update({"MLV_FAKE_FAIL_ATTEMPTS": "99",
@@ -826,6 +850,101 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(result["automaticLaunchGate"], "CLOSED")
         self.assertEqual((result["providerCalls"], result["providerProcesses"]), (0, 0))
         self.assertFalse(self.state.exists())
+
+    def test_38_source_path_race_executes_bound_content_addressed_artifact(self):
+        self.write_demand(demand(hasWork=True))
+        source = (HERE / "fake_provider.py").resolve()
+        original = source.read_bytes()
+        original_digest = supervisor.sha256_file(source)
+        real_popen = supervisor.subprocess.Popen
+
+        def racing_popen(*args, **kwargs):
+            source.write_bytes(b"raise SystemExit(91)\n")
+            return real_popen(*args, **kwargs)
+
+        try:
+            with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                    mock.patch.object(supervisor.subprocess, "Popen", side_effect=racing_popen):
+                result = supervisor.run_test_fake(
+                    self.state, self.demand, source, 0)
+        finally:
+            source.write_bytes(original)
+        self.assertEqual(supervisor.sha256_file(source), original_digest)
+        self.assertEqual(result["status"], "TEST_FAKE_COMPLETED")
+        self.assertEqual(result["binding"]["sourceScriptSha256"], original_digest)
+        self.assertEqual(result["binding"]["scriptSha256"], original_digest)
+        self.assertNotEqual(Path(result["binding"]["scriptPath"]), source)
+        self.assertEqual(result["fakeReceipt"]["scriptPath"],
+                         result["binding"]["scriptPath"])
+
+    def test_39_full_argv_and_digest_drift_on_reload_block_before_child(self):
+        self.write_demand(demand(hasWork=True))
+        for update_digest in (False, True):
+            state = self.base / f"argv-drift-{update_digest}"
+            real_plan = supervisor._broker_owned_test_plan
+            launch_counts = {}
+
+            def drifting_plan(*args, **kwargs):
+                value = real_plan(*args, **kwargs)
+                if Path(value["scriptPath"]).parent.name == "test-launch-artifacts":
+                    attempt = value["attempt"]
+                    launch_counts[attempt] = launch_counts.get(attempt, 0) + 1
+                    if launch_counts[attempt] == 2:
+                        value["argv"] = [*value["argv"], "--unbound-argv"]
+                        if update_digest:
+                            value["argvSha256"] = "sha256:" + hashlib.sha256(
+                                supervisor.canonical_json(value["argv"]).encode()).hexdigest()
+                return value
+
+            with self.subTest(update_digest=update_digest), \
+                    mock.patch.dict(os.environ, self.fake_env(state), clear=False), \
+                    mock.patch.object(supervisor, "_broker_owned_test_plan",
+                                      side_effect=drifting_plan), \
+                    mock.patch.object(supervisor.subprocess, "Popen",
+                                      side_effect=AssertionError("drifted argv reached child")):
+                with self.assertRaisesRegex(ControlError, "LAUNCH_BINDING_CHANGED"):
+                    supervisor.run_test_fake(
+                        state, self.demand, HERE / "fake_provider.py", 0)
+
+    def test_40_cursor_publication_failure_leaves_restart_replay_fenced(self):
+        self.write_demand(demand(hasWork=True))
+        real_write = supervisor._write_owned_json
+
+        def fail_cursor(path, value):
+            if path.name == "test-claude-slot-cursor.json":
+                raise ControlError("INJECTED_CURSOR_WRITE_FAILURE")
+            return real_write(path, value)
+
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor, "_write_owned_json", side_effect=fail_cursor):
+            with self.assertRaisesRegex(ControlError, "INJECTED_CURSOR_WRITE_FAILURE"):
+                supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertTrue((self.state / "test-claude-slot-active.json").exists())
+        self.assertTrue((self.state / "test-request-envelope-active.json").exists())
+        self.assertFalse((self.state / "test-claude-slot-cursor.json").exists())
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor.subprocess, "Popen",
+                                  side_effect=AssertionError("fenced generation replayed")):
+            with self.assertRaisesRegex(ControlError, "TEST_TERMINAL_CLEANUP_INCOMPLETE"):
+                supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0)
+
+    def test_41_failed_attempt_is_charged_and_retry_must_preserve_priority_floor(self):
+        self.write_demand(demand(hasWork=True, estimateFraction=0.1, availableFraction=0.9))
+        attempts = self.base / "reserve-refused-attempts.txt"
+        env = self.fake_env()
+        env.update({"MLV_FAKE_FAIL_ATTEMPTS": "1",
+                    "MLV_FAKE_ATTEMPT_LOG": str(attempts)})
+        with mock.patch.dict(os.environ, env, clear=False):
+            with self.assertRaisesRegex(ControlError, "CAPACITY_RETRY_RESERVE_REFUSED"):
+                supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertEqual(attempts.read_text(encoding="utf-8").splitlines(), ["1"])
+        self.assertFalse((self.state / "test-claude-slot-active.json").exists())
+        self.assertFalse((self.state / "test-request-envelope-active.json").exists())
+        cursor = strict_json_file(self.state / "test-claude-slot-cursor.json")
+        self.assertEqual((cursor["nextLane"], cursor["generation"]), ("claude-review", 1))
 
 
 if __name__ == "__main__":

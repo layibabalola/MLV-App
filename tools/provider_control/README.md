@@ -40,10 +40,15 @@ from either predecessor result.
 The smallest next choke-point slice is deliberately reachable only through the explicit test-fake
 seam. It serializes one fake Claude slot in fixed lane order, constructs the child executable and
 argv exclusively from broker-owned identities, returns deterministic no-work before identity,
-reservation, lock, or child creation, and reserves a conservative request envelope containing the
-fresh estimate, full cache-read estimate, full cache-create estimate, and a 20 percent completion
-reserve. It permits at most one retry and removes the active slot and request reservation on every
-terminal path. The caller's fake-script path is an exact identity witness, never launch authority.
+reservation, lock, or child creation, and reserves a conservative per-attempt consumptive envelope
+containing the fresh estimate, full cache-read estimate, and full cache-create estimate while
+preserving the larger of the 20 percent completion reserve and named priority floor. A failed
+attempt is conservatively charged before the one permitted retry is admitted. Full argv and its
+digest must match on every reload. The broker executes a private content-addressed copy of the bound
+fake source, so a source-path byte race cannot change the executed bytes. Slot completion publishes
+the next lane/generation before deleting active-slot and reservation fences; a cursor-write failure
+therefore blocks restart replay. The caller's fake-script path is an exact identity witness, never
+launch authority.
 These are local fake-provider reference tests only: the slice is not installed or reachable from a
 production command and does not establish SHADOW PASS, CONTAINMENT PASS, canary, adoption, or
 activation.

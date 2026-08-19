@@ -443,9 +443,12 @@ def conservative_test_envelope(
     cache_create = estimate
     completion = float(policy["completionReserveFloor"])
     envelope_total = round(fresh_input + cache_read + cache_create + completion, 12)
+    consumptive_total = round(fresh_input + cache_read + cache_create, 12)
     priority_floor = float(profile["policy"]["reserveFloorByPriority"][demand["priority"]])
-    priority_guard_total = round(estimate + priority_floor, 12)
-    required = max(envelope_total, priority_guard_total)
+    protected_reserve = max(completion, priority_floor)
+    required = round(consumptive_total + protected_reserve, 12)
+    maximum_attempts = int(policy["maxProviderRetries"]) + 1
+    maximum_required = round(consumptive_total * maximum_attempts + protected_reserve, 12)
     result = {
         "schema": "mlv-test-request-envelope/v1",
         "freshInputFraction": fresh_input,
@@ -454,8 +457,10 @@ def conservative_test_envelope(
         "completionReserveFraction": completion,
         "priorityReserveFloorFraction": priority_floor,
         "envelopeTotalFraction": envelope_total,
-        "priorityGuardTotal": priority_guard_total,
+        "consumptiveFractionPerAttempt": consumptive_total,
+        "protectedReserveFraction": protected_reserve,
         "requiredAvailableFraction": required,
+        "maximumAttemptsRequiredAvailableFraction": maximum_required,
         "availableFraction": float(demand["availableFraction"]),
         "maxRetries": int(policy["maxProviderRetries"]),
         "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
@@ -463,6 +468,31 @@ def conservative_test_envelope(
     if result["availableFraction"] < result["requiredAvailableFraction"]:
         raise ControlError("CAPACITY_RESERVE_REFUSED")
     return result
+
+
+def _publish_test_attempt_reservation(
+    state_root: Path, envelope: dict[str, Any], attempt: int,
+    available_before: float, consumed_before: float,
+) -> dict[str, Any]:
+    active = state_root / "test-claude-slot-active.json"
+    reservation = state_root / "test-request-envelope-active.json"
+    if not active.is_file() or not reservation.is_file():
+        raise ControlError("TEST_TERMINAL_CLEANUP_INCOMPLETE")
+    required = float(envelope["requiredAvailableFraction"])
+    if available_before < required:
+        raise ControlError(
+            "CAPACITY_RETRY_RESERVE_REFUSED" if attempt > 1 else "CAPACITY_RESERVE_REFUSED")
+    value = {
+        **envelope,
+        "attempt": attempt,
+        "availableBeforeAttemptFraction": available_before,
+        "consumedBeforeAttemptFraction": consumed_before,
+        "conservativeChargeFraction": envelope["consumptiveFractionPerAttempt"],
+        "availableAfterConservativeChargeFraction": round(
+            available_before - float(envelope["consumptiveFractionPerAttempt"]), 12),
+    }
+    _write_owned_json(reservation, value)
+    return value
 
 
 def _write_owned_json(path: Path, value: dict[str, Any]) -> None:
@@ -520,26 +550,66 @@ def _begin_test_slot(
 def _finish_test_slot(state_root: Path, cursor: dict[str, Any]) -> None:
     active = state_root / "test-claude-slot-active.json"
     reservation = state_root / "test-request-envelope-active.json"
-    try:
-        active.unlink(missing_ok=True)
-        reservation.unlink(missing_ok=True)
-    except OSError as exc:
-        raise ControlError("TEST_TERMINAL_CLEANUP_FAILED") from exc
     current = TEST_SLOT_ORDER.index(cursor["nextLane"])
     next_value = {
         "schema": "mlv-test-claude-slot-cursor/v1",
         "nextLane": TEST_SLOT_ORDER[(current + 1) % len(TEST_SLOT_ORDER)],
         "generation": cursor["generation"] + 1,
     }
+    # Publish rotation before removing either replay fence. A failed cursor write must leave
+    # both records behind so restart cannot claim the same lane/generation again.
     _write_owned_json(state_root / "test-claude-slot-cursor.json", next_value)
+    try:
+        active.unlink(missing_ok=True)
+        reservation.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ControlError("TEST_TERMINAL_CLEANUP_FAILED") from exc
+
+
+def _materialize_test_launch_artifact(
+    state_root: Path, source: Path, expected_sha256: str,
+) -> Path:
+    try:
+        source_bytes = source.read_bytes()
+    except OSError as exc:
+        raise ControlError("TEST_PROVIDER_IDENTITY_INVALID") from exc
+    actual = "sha256:" + hashlib.sha256(source_bytes).hexdigest()
+    if actual != expected_sha256:
+        raise ControlError("LAUNCH_BINDING_CHANGED")
+    directory = state_root / "test-launch-artifacts"
+    try:
+        directory.mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise ControlError("TEST_LAUNCH_ARTIFACT_UNEVALUABLE") from exc
+    artifact = directory / (actual[7:] + ".py")
+    if artifact.exists():
+        if artifact.is_symlink() or not artifact.is_file() or sha256_file(artifact) != actual:
+            raise ControlError("TEST_LAUNCH_ARTIFACT_INVALID")
+        return artifact
+    try:
+        with artifact.open("xb") as handle:
+            handle.write(source_bytes); handle.flush(); os.fsync(handle.fileno())
+        artifact.chmod(0o400)
+    except FileExistsError:
+        if artifact.is_symlink() or not artifact.is_file() or sha256_file(artifact) != actual:
+            raise ControlError("TEST_LAUNCH_ARTIFACT_INVALID")
+    except OSError as exc:
+        artifact.unlink(missing_ok=True)
+        raise ControlError("TEST_LAUNCH_ARTIFACT_UNEVALUABLE") from exc
+    if sha256_file(artifact) != actual:
+        raise ControlError("TEST_LAUNCH_ARTIFACT_INVALID")
+    return artifact
 
 
 def _broker_owned_test_plan(
     binding: dict[str, str], subject: Path, delay: float, mode: str, attempt: int,
+    launch_script: Path | None = None,
 ) -> dict[str, Any]:
-    fake = (ROOT / "tests" / "fake_provider.py").resolve(strict=True)
+    source = (ROOT / "tests" / "fake_provider.py").resolve(strict=True)
+    fake = (launch_script or source).resolve(strict=True)
     process_image = Path(sys.executable).resolve(strict=True)
-    if not process_image.is_file() or fake.is_symlink() or not fake.is_file():
+    if (not process_image.is_file() or source.is_symlink() or not source.is_file() or
+            fake.is_symlink() or not fake.is_file()):
         raise ControlError("TEST_PROVIDER_IDENTITY_INVALID")
     argv = [str(process_image), str(fake), "--model", binding["model"],
             "--effort", binding["effort"], "--role", binding["role"],
@@ -550,6 +620,7 @@ def _broker_owned_test_plan(
         "processImagePath": str(process_image),
         "processImageSha256": sha256_file(process_image),
         "scriptPath": str(fake), "scriptSha256": sha256_file(fake),
+        "sourceScriptPath": str(source), "sourceScriptSha256": sha256_file(source),
         "subjectPath": str(subject), "subjectSha256": sha256_file(subject),
         "argv": argv,
         "argvSha256": "sha256:" + hashlib.sha256(canonical_json(argv).encode()).hexdigest(),
@@ -593,10 +664,6 @@ def run_test_fake(
     initial_plan = _broker_owned_test_plan(binding, subject, delay, mode, 1)
     if initial_plan["subjectSha256"] != binding["subjectSha256"]:
         raise ControlError("LAUNCH_BINDING_CHANGED")
-    fixed_plan_keys = (
-        "ownership", "processImagePath", "processImageSha256", "scriptPath",
-        "scriptSha256", "subjectPath", "subjectSha256",
-    )
     with quota_lock(state_root):
         fresh_profile, fresh_bindings, fresh_supervisor_profile, fresh_inventory = load_contracts()
         enforce_state_root(state_root, fresh_profile, fresh_bindings, test_only=True)
@@ -612,22 +679,39 @@ def run_test_fake(
         fresh_plan = _broker_owned_test_plan(fresh_binding, fresh_subject, delay, mode, 1)
         if (fresh_subject != subject or fresh_envelope != envelope or
                 fake_path.is_symlink() or fake_path.resolve(strict=True) != caller_fake or
-                any(fresh_plan[key] != initial_plan[key] for key in fixed_plan_keys) or
+                fresh_plan != initial_plan or
                 fresh_plan["subjectSha256"] != fresh_binding["subjectSha256"]):
             raise ControlError("LAUNCH_BINDING_CHANGED")
 
+        launch_artifact = _materialize_test_launch_artifact(
+            state_root, broker_fake, initial_plan["sourceScriptSha256"])
+        expected_plans = [
+            _broker_owned_test_plan(binding, subject, delay, mode, attempt, launch_artifact)
+            for attempt in range(1, envelope["maxRetries"] + 2)
+        ]
+
         binding_digest = "sha256:" + hashlib.sha256(canonical_json({
             "binding": binding,
-            "fixedPlan": {key: initial_plan[key] for key in fixed_plan_keys},
+            "sourcePlan": initial_plan,
+            "launchPlans": expected_plans,
             "requestEnvelope": envelope,
         }).encode()).hexdigest()
         cursor = _begin_test_slot(state_root, demand["lane"], envelope, binding_digest)
         try:
             attempt_bindings = []
             max_attempts = envelope["maxRetries"] + 1
+            consumed_fraction = 0.0
             for attempt in range(1, max_attempts + 1):
-                plan = _broker_owned_test_plan(binding, subject, delay, mode, attempt)
-                if (any(plan[key] != initial_plan[key] for key in fixed_plan_keys) or
+                available_before = round(
+                    float(envelope["availableFraction"]) - consumed_fraction, 12)
+                attempt_reservation = _publish_test_attempt_reservation(
+                    state_root, envelope, attempt, available_before, consumed_fraction)
+                plan = _broker_owned_test_plan(
+                    binding, subject, delay, mode, attempt, launch_artifact)
+                computed_argv_digest = "sha256:" + hashlib.sha256(
+                    canonical_json(plan["argv"]).encode()).hexdigest()
+                if (plan != expected_plans[attempt - 1] or
+                        plan["argvSha256"] != computed_argv_digest or
                         fake_path.is_symlink() or fake_path.resolve(strict=True) != caller_fake):
                     raise ControlError("LAUNCH_BINDING_CHANGED")
                 attempt_bindings.append({
@@ -644,9 +728,13 @@ def run_test_fake(
                 except subprocess.TimeoutExpired as exc:
                     process.kill()
                     process.communicate()
+                    consumed_fraction = round(
+                        consumed_fraction + float(envelope["consumptiveFractionPerAttempt"]), 12)
                     if attempt < max_attempts:
                         continue
                     raise ControlError("FAKE_PROVIDER_TIMEOUT_CONTAINED") from exc
+                consumed_fraction = round(
+                    consumed_fraction + float(envelope["consumptiveFractionPerAttempt"]), 12)
                 if process.returncode != 0 or stderr:
                     if attempt < max_attempts:
                         continue
@@ -680,6 +768,10 @@ def run_test_fake(
                     "containedHostileAuthorityClaim": mode == "CONTAINMENT",
                     "exitCode": process.returncode,
                     "requestEnvelope": envelope,
+                    "attemptReservation": attempt_reservation,
+                    "conservativeChargedFraction": consumed_fraction,
+                    "availableAfterConservativeChargeFraction": round(
+                        float(envelope["availableFraction"]) - consumed_fraction, 12),
                     "retryCount": attempt - 1, "maxRetries": envelope["maxRetries"],
                     "slot": {"lane": demand["lane"], "generation": cursor["generation"],
                              "rotationOrder": list(TEST_SLOT_ORDER)},
@@ -692,6 +784,8 @@ def run_test_fake(
                         "processImageSha256": plan["processImageSha256"],
                         "scriptPath": plan["scriptPath"],
                         "scriptSha256": plan["scriptSha256"],
+                        "sourceScriptPath": plan["sourceScriptPath"],
+                        "sourceScriptSha256": plan["sourceScriptSha256"],
                         "argvSha256": plan["argvSha256"],
                         "bindingSha256": binding_digest,
                     },

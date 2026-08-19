@@ -25,10 +25,13 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   calls/processes/tokens.
 - The test-only reference slot serializes a fixed `fable`, `claude-review`, `opus`, `sonnet-impl`
   rotation. A no-work demand returns before fake identity, reservation, quota lock, or process
-  creation. Work reserves fresh input, full cache read, full cache create, and a 20 percent
-  completion reserve; the stricter of that envelope and the lane priority guard controls admission.
-  The broker constructs the exact process image, script, subject, and argv, permits one retry at
-  most, and removes its active-slot and reservation records after success or terminal failure.
+  creation. Each attempt charges fresh input, full cache read, and full cache create while preserving
+  the larger of the 20 percent completion reserve and the named priority floor. A failed attempt is
+  charged and reconciled before a retry can be admitted. The broker constructs the exact process
+  image, script, subject, and argv, compares the full argv and digest on every reload, and permits one
+  retry at most. It launches a private content-addressed fake artifact rather than reopening the
+  observed source path. Rotation publishes the next cursor before removing active/reservation replay
+  fences, so cursor-publication failure leaves restart blocked instead of replaying a generation.
 - Those fake-only checks are reference mechanics, not an installed choke point and not a claim that
   CLOSED + SHADOW + CONTAINMENT proof has passed. Production commands cannot reach the reference
   slot, and the caller-supplied fake path is used only as an exact witness.
