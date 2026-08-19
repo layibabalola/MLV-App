@@ -171,13 +171,13 @@ def _resolve_symlink_target(path: Path, root: Path, target: str, logical_path: s
     try:
         resolved = (path.parent / target).resolve(strict=True)
         resolved_relative = resolved.relative_to(root.resolve(strict=True)).as_posix()
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         raise EvidenceError(
             f"inventory link target escapes the inventory root or is missing: {logical_path} -> {target!r}"
         ) from exc
-    if not resolved.is_file():
+    if resolved_relative == "." or not (resolved.is_file() or resolved.is_dir()):
         raise EvidenceError(
-            f"inventory link target is not a regular file: {logical_path} -> {target!r}"
+            f"inventory link target is not a regular file or directory: {logical_path} -> {target!r}"
         )
     return resolved_relative
 
@@ -196,6 +196,8 @@ def _symlink_record(path: Path, root: Path, logical_path: str) -> dict[str, Any]
     ):
         raise EvidenceError(f"inventory link changed while being inspected: {logical_path}")
     resolved_relative = _resolve_symlink_target(path, root, target, logical_path)
+    resolved = root.joinpath(*PurePosixPath(resolved_relative).parts)
+    target_kind = "file" if resolved.is_file() else "directory"
     final = path.lstat()
     if (
         not stat.S_ISLNK(final.st_mode)
@@ -206,6 +208,7 @@ def _symlink_record(path: Path, root: Path, logical_path: str) -> dict[str, Any]
         "path": logical_path,
         "resolved_path": resolved_relative,
         "target": target,
+        "target_kind": target_kind,
     }
 
 
@@ -226,6 +229,7 @@ def inventory_path(path: Path, *, logical_name: str) -> dict[str, Any]:
     logical_name = _safe_relative_path(logical_name, "logical name")
     records: list[dict[str, Any]] = []
     links: list[dict[str, Any]] = []
+    directories: set[str] = set()
     if path.is_file():
         records.append(_file_record(path, logical_name))
         kind = "file"
@@ -233,12 +237,19 @@ def inventory_path(path: Path, *, logical_name: str) -> dict[str, Any]:
         kind = "directory"
         for current, directory_names, file_names in os.walk(path, followlinks=False):
             current_path = Path(current)
-            for name in directory_names:
+            current_relative = current_path.relative_to(path).as_posix()
+            if current_relative != ".":
+                directories.add(current_relative)
+            for name in list(directory_names):
                 candidate = current_path / name
-                if _is_link_or_junction(candidate):
+                if candidate.is_symlink():
+                    relative = candidate.relative_to(path).as_posix()
+                    links.append(_symlink_record(candidate, path, relative))
+                    directory_names.remove(name)
+                elif _is_link_or_junction(candidate):
                     relative = candidate.relative_to(path).as_posix()
                     raise EvidenceError(
-                        f"inventory contains a symbolic-link or junction directory: {relative}"
+                        f"inventory contains a junction or unsupported directory link: {relative}"
                     )
             for name in file_names:
                 candidate = current_path / name
@@ -261,9 +272,10 @@ def inventory_path(path: Path, *, logical_name: str) -> dict[str, Any]:
     _revalidate_symlink_records(path, links)
     file_paths = {record["path"] for record in records}
     for link in links:
-        if link["resolved_path"] not in file_paths:
+        represented = file_paths if link["target_kind"] == "file" else directories
+        if link["resolved_path"] not in represented:
             raise EvidenceError(
-                "inventory link target is not represented by a regular-file record: "
+                "inventory link target is not represented by a traversed in-tree member: "
                 f"{link['path']} -> {link['resolved_path']}"
             )
     return {

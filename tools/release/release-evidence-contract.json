@@ -38,7 +38,7 @@
     "manifest_digest": "SHA-256 of the complete canonical contents document including its terminal newline",
     "main_executable_architecture": "Validated from PE, ELF, or Mach-O headers and required to include declared target_arch",
     "zero_byte_directory_members": "Recorded with size 0 and the SHA-256 digest of empty content",
-    "file_symlinks": "Relative file symlinks are recorded with path, raw target, and resolved in-tree regular-file path; they are revalidated after file traversal",
+    "symlinks": "Relative file and directory symlinks are recorded with path, raw target, target kind, and resolved in-tree path; they are revalidated after tree traversal",
     "reject": [
       "empty input",
       "empty standalone product file",
@@ -46,8 +46,8 @@
       "path traversal",
       "absolute inventory member",
       "symbolic link or junction in a root or ancestor",
-      "symbolic-link or junction directory member",
-      "absolute, escaping, broken, non-file, unrecorded, or concurrently changed file symlink",
+      "junction or unsupported link member",
+      "absolute, escaping, broken, non-file-or-directory, unrecorded, cyclic, or concurrently changed symlink",
       "product or inventory root resolving outside the repository",
       "Unicode-normalized path collision",
       "case-folded path collision"

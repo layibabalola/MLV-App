@@ -103,8 +103,11 @@ jobs:
            if ($LASTEXITCODE -ne 0) { throw "OpenSSL executable probe failed" }
            & $env:QMAKE_EXE -v
            if ($LASTEXITCODE -ne 0) { throw "qmake executable probe failed" }
-           & $env:WINDEPLOYQT_EXE --version
-           if ($LASTEXITCODE -ne 0) { throw "windeployqt executable probe failed" }
+           $qmakeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:QMAKE_EXE))
+           $deployBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:WINDEPLOYQT_EXE))
+           if ($deployBin -ne $qmakeBin) {
+             throw "windeployqt '$env:WINDEPLOYQT_EXE' is not beside verified qmake '$env:QMAKE_EXE'"
+           }
            & $env:MAKE_EXE --version
            if ($LASTEXITCODE -ne 0) { throw "make executable probe failed" }
            & $env:GXX_EXE --version

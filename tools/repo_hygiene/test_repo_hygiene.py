@@ -1104,6 +1104,9 @@ class RepoHygieneTests(unittest.TestCase):
                 "if ($sslDlls.Count -eq 0) { throw",
                 '"OPENSSL_CRYPTO_DLLS=$($cryptoDlls.FullName -join \';\')" >> $env:GITHUB_ENV',
                 '"OPENSSL_SSL_DLLS=$($sslDlls.FullName -join \';\')" >> $env:GITHUB_ENV',
+                "$qmakeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:QMAKE_EXE))",
+                "$deployBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:WINDEPLOYQT_EXE))",
+                "if ($deployBin -ne $qmakeBin)",
                 "& $env:GXX_EXE --version",
                 'if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }',
                 "$compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()",
@@ -1143,6 +1146,7 @@ class RepoHygieneTests(unittest.TestCase):
             ):
                 self.assertIn(required_token, build_block)
             self.assertNotRegex(build_block, r"(?i)Copy-Item.*lib(?:crypto|ssl)\*")
+            self.assertNotIn("WINDEPLOYQT_EXE --version", verify_block)
             evidence_block = blocks["Generate single-build release evidence"]
             for required_token in (
                 "$CompilerPath = (Get-Command $env:GXX_EXE -CommandType Application -ErrorAction Stop).Source",
@@ -1221,6 +1225,11 @@ class RepoHygieneTests(unittest.TestCase):
                 "Windows drops executable assertion",
                 assert_windows_policy,
                 windows.replace("             $env:QMAKE_EXE,\n", "", 1),
+            ),
+            (
+                "Windows does not bind deploy tool to Qt kit",
+                assert_windows_policy,
+                windows.replace("if ($deployBin -ne $qmakeBin)", "if ($false)", 1),
             ),
             (
                 "Windows floats MinGW toolchain",

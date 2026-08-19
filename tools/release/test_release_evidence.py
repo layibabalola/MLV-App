@@ -374,6 +374,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
                     "path": "MLVAPP.png",
                     "resolved_path": "plugins/image.dll",
                     "target": "plugins/image.dll",
+                    "target_kind": "file",
                 }
             ],
         )
@@ -390,6 +391,15 @@ class ReleaseEvidenceTests(unittest.TestCase):
             ),
             "plugins/image.dll",
         )
+        self.assertEqual(
+            _resolve_symlink_target(
+                product / "Resources",
+                product,
+                "plugins",
+                "Resources",
+            ),
+            "plugins",
+        )
         outside = self.repo / "outside-link-target"
         outside.write_bytes(b"outside")
         for name, target, error in (
@@ -399,6 +409,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
             linked = product / name
             with self.subTest(name=name), self.assertRaisesRegex(EvidenceError, error):
                 _resolve_symlink_target(linked, product, target, name)
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("symlink loop")), self.assertRaisesRegex(
+            EvidenceError, "escapes the inventory root or is missing"
+        ):
+            _resolve_symlink_target(product / "loop", product, "loop", "loop")
 
     def test_link_change_during_inventory_completion_fails_closed(self) -> None:
         product = self._directory_product()
@@ -406,6 +420,7 @@ class ReleaseEvidenceTests(unittest.TestCase):
             "path": "MLVAPP.png",
             "resolved_path": "plugins/image.dll",
             "target": "plugins/image.dll",
+            "target_kind": "file",
         }
         changed = {**recorded, "target": "MLVApp.exe", "resolved_path": "MLVApp.exe"}
         with mock.patch(
@@ -441,15 +456,36 @@ class ReleaseEvidenceTests(unittest.TestCase):
         ), self.assertRaisesRegex(EvidenceError, "changed while resolving"):
             _symlink_record(linked, product, "MLVAPP.png")
 
-    def test_symlink_directory_member_fails_closed(self) -> None:
+    def test_macos_framework_directory_symlinks_are_bound(self) -> None:
         product = self._directory_product()
-        linked = product / "linked-plugins"
+        framework = product / "Contents" / "Frameworks" / "QtCore.framework"
+        version_resources = framework / "Versions" / "A" / "Resources"
+        version_resources.mkdir(parents=True)
+        (version_resources / "Info.plist").write_bytes(b"plist")
+        current = framework / "Versions" / "Current"
+        resources = framework / "Resources"
         try:
-            linked.symlink_to(product / "plugins", target_is_directory=True)
+            current.symlink_to("A", target_is_directory=True)
+            resources.symlink_to("Versions/Current/Resources", target_is_directory=True)
         except OSError as exc:
             self.skipTest(f"directory symlinks are unavailable: {exc}")
-        with self.assertRaisesRegex(EvidenceError, "symbolic-link or junction directory"):
-            inventory_path(product, logical_name="MLVApp")
+        inventory = inventory_path(product, logical_name="MLVApp")
+        framework_links = {
+            row["path"]: row for row in inventory["links"] if "QtCore.framework" in row["path"]
+        }
+        self.assertEqual(
+            framework_links["Contents/Frameworks/QtCore.framework/Versions/Current"],
+            {
+                "path": "Contents/Frameworks/QtCore.framework/Versions/Current",
+                "resolved_path": "Contents/Frameworks/QtCore.framework/Versions/A",
+                "target": "A",
+                "target_kind": "directory",
+            },
+        )
+        self.assertEqual(
+            framework_links["Contents/Frameworks/QtCore.framework/Resources"]["resolved_path"],
+            "Contents/Frameworks/QtCore.framework/Versions/A/Resources",
+        )
 
     def test_output_inside_inventory_is_rejected(self) -> None:
         product = self._directory_product()
@@ -495,10 +531,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertEqual(set(contract["workflow_targets"]), {"linux", "macos-arm64", "macos-x86_64", "windows"})
         inventory = contract["inventory"]
         self.assertIn("size 0", inventory["zero_byte_directory_members"])
-        self.assertIn("Relative file symlinks", inventory["file_symlinks"])
+        self.assertIn("Relative file and directory symlinks", inventory["symlinks"])
         self.assertIn("empty standalone product file", inventory["reject"])
         self.assertIn(
-            "absolute, escaping, broken, non-file, unrecorded, or concurrently changed file symlink",
+            "absolute, escaping, broken, non-file-or-directory, unrecorded, cyclic, or concurrently changed symlink",
             inventory["reject"],
         )
 
