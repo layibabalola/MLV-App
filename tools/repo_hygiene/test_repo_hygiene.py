@@ -723,6 +723,65 @@ class RepoHygieneTests(unittest.TestCase):
             "tests.yml must use one consistent immutable checkout v5 revision",
         )
 
+        aqt_steps = re.findall(
+            r"(?ms)^      - name: Install Qt 6\.10\.2 \+ MinGW 13\.1\r?\n"
+            r"        run: \|\r?\n(.*?)(?=^      - )",
+            workflow,
+        )
+        self.assertEqual(len(aqt_steps), 2, "both Windows jobs require the guarded aqt installer")
+
+        def assert_aqt_install_is_bounded_and_fail_closed(step: str) -> None:
+            active_step = "\n".join(line.split("#", 1)[0] for line in step.splitlines())
+            self.assertIn('$ErrorActionPreference = "Stop"', active_step)
+            self.assertEqual(
+                active_step.count("for ($attempt = 1; $attempt -le 3; $attempt++) {"),
+                2,
+                "Qt and MinGW installs each require exactly three bounded clean retries",
+            )
+            for required in (
+                "if (Test-Path -LiteralPath $qtInstallRoot) { Remove-Item -LiteralPath $qtInstallRoot "
+                "-Recurse -Force -ErrorAction Stop }",
+                'if (Test-Path -LiteralPath $qtInstallRoot) { throw "Qt retry cleanup did not remove',
+                "$qtExit = $LASTEXITCODE",
+                "$qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)",
+                'if (-not $qtReady) { throw "aqt Qt install failed',
+                "if (Test-Path -LiteralPath $mingwRoot) { Remove-Item -LiteralPath $mingwRoot "
+                "-Recurse -Force -ErrorAction Stop }",
+                'if (Test-Path -LiteralPath $mingwRoot) { throw "MinGW retry cleanup did not remove',
+                "$mingwExit = $LASTEXITCODE",
+                "$mingwExit -eq 0 -and (Test-Path -LiteralPath $mingwMake -PathType Leaf) "
+                "-and (Test-Path -LiteralPath $mingwGxx -PathType Leaf)",
+                'if (-not $mingwReady) { throw "aqt MinGW install failed',
+            ):
+                self.assertIn(required, active_step)
+            self.assertNotRegex(
+                active_step,
+                r"(?im)^\s*continue-on-error\s*:|\|\|\s*true|set \+e|ErrorAction\s+SilentlyContinue",
+            )
+
+        for aqt_step in aqt_steps:
+            assert_aqt_install_is_bounded_and_fail_closed(aqt_step)
+
+        representative_aqt_step = aqt_steps[0]
+        aqt_falsifiers = (
+            representative_aqt_step.replace("$qtExit = $LASTEXITCODE", "# $qtExit = $LASTEXITCODE", 1),
+            representative_aqt_step.replace("$attempt -le 3", "$attempt -le 1", 1),
+            representative_aqt_step.replace(
+                "$qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)",
+                "$qtExit -eq 0",
+                1,
+            ),
+            representative_aqt_step.replace(
+                'if (-not $mingwReady) { throw "aqt MinGW install failed',
+                'if (-not $mingwReady) { Write-Warning "aqt MinGW install failed',
+                1,
+            ),
+            representative_aqt_step.replace("-ErrorAction Stop", "-ErrorAction SilentlyContinue", 1),
+        )
+        for falsified_step in aqt_falsifiers:
+            with self.assertRaises(AssertionError):
+                assert_aqt_install_is_bounded_and_fail_closed(falsified_step)
+
         bridge_start = workflow.index("\n  factory-bridge-regressions:")
         product_start = workflow.index("\n  windows-product-oracles:")
         bridge_job = workflow[bridge_start:product_start]
