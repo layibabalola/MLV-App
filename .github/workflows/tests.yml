@@ -203,7 +203,7 @@ jobs:
             }
           ) | Sort-Object -Unique
           if ($testNames.Count -eq 0) { throw "pipeline test registry discovery returned no tests" }
-          $testsPerShard = 24
+          $testsPerShard = 12
           $shards = @()
           for ($offset = 0; $offset -lt $testNames.Count; $offset += $testsPerShard) {
             $end = [Math]::Min($offset + $testsPerShard, $testNames.Count)

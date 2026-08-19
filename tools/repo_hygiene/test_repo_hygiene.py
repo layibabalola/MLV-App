@@ -414,6 +414,43 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
+        def assert_product_oracle_process_bounds(job: str) -> None:
+            active_job = "\n".join(line.split("#", 1)[0] for line in job.splitlines())
+            shard_mutations = re.findall(
+                r"(?m)^\s*\$testsPerShard\s*(=|\+=|-=|\*=|/=|\+\+|--)\s*([^\r\n]*)$",
+                active_job,
+            )
+            self.assertEqual(
+                shard_mutations,
+                [("=", "12")],
+                "exact-name shards require one active literal 12 assignment and no later mutation",
+            )
+            wait_mutations = re.findall(
+                r"(?m)^\s*(\[[^\]\r\n]+\])?\s*\$WaitMilliseconds\s*"
+                r"(=|\+=|-=|\*=|/=|\+\+|--)\s*([^\r\n]*)$",
+                active_job,
+            )
+            self.assertEqual(
+                wait_mutations,
+                [("[int]", "=", "240000")],
+                "bounded children require one active typed 240-second default and no later mutation",
+            )
+
+        assert_product_oracle_process_bounds(product_job)
+        shard_assignment = "          $testsPerShard = 12"
+        wait_assignment = "              [int]$WaitMilliseconds = 240000"
+        bound_falsifiers = (
+            product_job.replace(shard_assignment, f"          # {shard_assignment.strip()}"),
+            product_job.replace(shard_assignment, f"{shard_assignment}\n          $testsPerShard = 12 * 2"),
+            product_job.replace(shard_assignment, f"{shard_assignment}\n          $testsPerShard += 12"),
+            product_job.replace(
+                wait_assignment,
+                f"              # {wait_assignment.strip()}\n              [int]$WaitMilliseconds = 300000",
+            ),
+        )
+        for falsified_job in bound_falsifiers:
+            with self.assertRaises(AssertionError):
+                assert_product_oracle_process_bounds(falsified_job)
 
         requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
