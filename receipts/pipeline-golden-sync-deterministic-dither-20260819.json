@@ -1,0 +1,51 @@
+{
+  "schema": "mlv-app/pipeline-golden-sync-receipt/v1",
+  "capturedAtUtc": "2026-08-19T15:14:41.759Z",
+  "disposition": "STALE_ORACLE_SYNC",
+  "cause": {
+    "behaviorCommit": "047c768c4a520fc5757867c29b8f94a02f5482e9",
+    "behavior": "deterministic linear-pixel Dual-ISO dither mapping",
+    "knownGoodReviewCommit": "e59d8f9f7db769e197f5d24205ef14c1f7b50b89",
+    "knownGoodReview": "ci-1: rebless CPU golden for causal Dual-ISO stabilization"
+  },
+  "producerContract": {
+    "testCount": 7,
+    "assertionCount": 75,
+    "keyCount": 15,
+    "filter": "BackendParametricDebayerShell.CpuRenderDebayerAmazeProducesStableHash:BackendParametricDebayerShell.CpuRenderDebayerBilinearProducesStableHash:BackendParametricShell.CpuRenderPreviewProcessingSubsetProducesStableHash:DualIsoPipeline.TinyDualIsoFullFramesMatchGolden:DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull:GpuPreviewProcessing.ExposureStopsChangesSubsetConfigAndStableOutput:GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable"
+  },
+  "knownGoodArtifact": {
+    "sourceCommit": "e59d8f9f7db769e197f5d24205ef14c1f7b50b89",
+    "platform": "windows",
+    "qtVersion": "6.10.2",
+    "mingwVersion": "13.1.0",
+    "executableSha256": "d2d9cd99d0672be4f67c2bcd3d5276de10d1725cee0d14aeecfe665881bd510d",
+    "actualJsonSha256": "4a22c3789012deb5bc40513b751622aaa0fa3889aa6bbd0b655b02e65389bf2c",
+    "canonicalActualSha256": "35e3efcb22c31f26a99249053d4314e1e80e226a7da30f3a7421167784b5ce52",
+    "result": "PRODUCERS_PASS_7_OF_7_ASSERTIONS_75_OF_75_EXPECTED_STALE_GOLDEN_EXIT_3"
+  },
+  "hostedCandidateArtifact": {
+    "head": "f5f8964c2d54df263fd325e80915c8cf799d18c6",
+    "tree": "5909be4e6fb9ab40dcba005706e00905d5410527",
+    "runId": 32264648478,
+    "runUrl": "https://github.com/layibabalola/MLV-App/actions/runs/32264648478",
+    "artifactId": 9370571877,
+    "artifactName": "windows-product-oracles-pipeline-crash-forensics",
+    "actualJsonSha256": "4a22c3789012deb5bc40513b751622aaa0fa3889aa6bbd0b655b02e65389bf2c",
+    "canonicalActualSha256": "35e3efcb22c31f26a99249053d4314e1e80e226a7da30f3a7421167784b5ce52"
+  },
+  "equivalence": {
+    "knownGoodAndHostedActualByteIdentical": true,
+    "semanticDeltaCount": 0,
+    "updatedGoldenCanonicalSha256": "35e3efcb22c31f26a99249053d4314e1e80e226a7da30f3a7421167784b5ce52",
+    "updatedGoldenRawSha256LfCheckout": "1a4bc6b4a967052b28a10bbae3f575344be1008cd57fb4cec380821bff6333bf"
+  },
+  "scope": {
+    "productSourceChanged": false,
+    "runtimeBehaviorChanged": false,
+    "providerAuthority": false,
+    "automaticLaunchGate": "CLOSED",
+    "reblessAuthority": false,
+    "humanBeforeAfterReviewRequired": true
+  }
+}

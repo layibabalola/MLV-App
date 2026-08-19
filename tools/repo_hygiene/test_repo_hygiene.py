@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -402,6 +403,70 @@ class RepoHygieneTests(unittest.TestCase):
             classify_paths([])
         with self.assertRaises(RouteError):
             classify_paths(["tools/provider_control/../src/escape.c"])
+
+    def test_pipeline_golden_sync_is_bound_to_frozen_known_good_output(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests" / "fixtures" / "golden" / "pipeline_hashes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        phase3 = json.loads(
+            (ROOT / "tests" / "fixtures" / "phase3_baselines" / "golden.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt = json.loads(
+            (
+                ROOT
+                / "receipts"
+                / "pipeline-golden-sync-deterministic-dither-20260819.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        canonical = json.dumps(
+            golden,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        canonical_sha256 = hashlib.sha256(canonical).hexdigest()
+        self.assertEqual(len(golden), 15)
+        self.assertEqual(receipt["schema"], "mlv-app/pipeline-golden-sync-receipt/v1")
+        self.assertEqual(receipt["disposition"], "STALE_ORACLE_SYNC")
+        self.assertEqual(receipt["producerContract"]["keyCount"], len(golden))
+        self.assertEqual(receipt["producerContract"]["testCount"], 7)
+        self.assertEqual(receipt["producerContract"]["assertionCount"], 75)
+        self.assertEqual(
+            receipt["knownGoodArtifact"]["canonicalActualSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["hostedCandidateArtifact"]["canonicalActualSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["equivalence"]["updatedGoldenCanonicalSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["knownGoodArtifact"]["actualJsonSha256"],
+            receipt["hostedCandidateArtifact"]["actualJsonSha256"],
+        )
+        self.assertTrue(receipt["equivalence"]["knownGoodAndHostedActualByteIdentical"])
+        self.assertEqual(receipt["equivalence"]["semanticDeltaCount"], 0)
+
+        phase3_frames = {
+            frame["frame"]: frame["sha256"]
+            for frame in phase3["clips"][0]["frames"]
+        }
+        self.assertEqual(golden["tiny_dual_iso.full16.frame0"], phase3_frames[0])
+        self.assertEqual(golden["tiny_dual_iso.full16.frame1"], phase3_frames[1])
+        self.assertFalse(receipt["scope"]["productSourceChanged"])
+        self.assertFalse(receipt["scope"]["runtimeBehaviorChanged"])
+        self.assertFalse(receipt["scope"]["providerAuthority"])
+        self.assertFalse(receipt["scope"]["reblessAuthority"])
+        self.assertEqual(receipt["scope"]["automaticLaunchGate"], "CLOSED")
+        self.assertTrue(receipt["scope"]["humanBeforeAfterReviewRequired"])
 
     def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
         repo = self.init_repo()
