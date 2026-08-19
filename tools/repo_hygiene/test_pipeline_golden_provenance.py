@@ -116,6 +116,28 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     def _approval_witness(kind: str, artifact_path: str, artifact_sha256: str,
                           reviewed_range: str, key_count: int) -> dict:
         reviewed_head = reviewed_range.split("..", 1)[1]
+        if kind == "tracked_whole_artifact_approval":
+            source = {
+                "kind": "github_issue_comment",
+                "repository": "layibabalola/MLV-App",
+                "pull_request": 6,
+                "comment_id": 5347847988,
+                "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
+                "created_at": "2026-08-19T20:51:23Z",
+                "author_association": "OWNER",
+                "body_sha256": "adbba554147e3ac4afb7328a242d379e890913716df687b99b7cab4a578d4726",
+            }
+        else:
+            source = {
+                "kind": "github_issue_comment",
+                "repository": "layibabalola/MLV-App",
+                "pull_request": 999,
+                "comment_id": 999,
+                "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
+                "created_at": "2026-01-01T00:00:00Z",
+                "author_association": "OWNER",
+                "body_sha256": "a" * 64,
+            }
         return {
             "schema_version": 1,
             "kind": kind,
@@ -126,16 +148,7 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "reviewer": "layibabalola",
             "reviewer_role": "repository_owner",
             "reviewed_head": reviewed_head,
-            "source": {
-                "kind": "github_issue_comment",
-                "repository": "layibabalola/MLV-App",
-                "pull_request": 999,
-                "comment_id": 999,
-                "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
-                "created_at": "2026-01-01T00:00:00Z",
-                "author_association": "OWNER",
-                "body_sha256": "a" * 64,
-            },
+            "source": source,
             "scope": {
                 "key_count": key_count,
                 "provider_authority": False,
@@ -188,7 +201,18 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         witness_path = self.repo / witness_record["path"]
         original_witness = self._read_json(witness_path)
         base_git_witness = self.git_witness
+
+        def fabricate_owner_comment(item: dict) -> None:
+            item["source"].update({
+                "pull_request": 999,
+                "comment_id": 999,
+                "url": "https://github.com/layibabalola/MLV-App/pull/999#issuecomment-999",
+                "created_at": "2026-01-01T00:00:00Z",
+                "body_sha256": "a" * 64,
+            })
+
         mutations = {
+            "fabricated owner comment tuple": fabricate_owner_comment,
             "fictional reviewer": lambda item: item.__setitem__("reviewer", "fictional-reviewer"),
             "non-owner role": lambda item: item.__setitem__("reviewer_role", "contributor"),
             "wrong reviewed head": lambda item: item.__setitem__("reviewed_head", "0" * 40),

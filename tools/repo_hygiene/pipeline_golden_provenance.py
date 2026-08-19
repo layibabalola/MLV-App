@@ -26,6 +26,16 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SIGNATURE_RE = re.compile(r"^[0-9]+$")
 PSNR_RE = re.compile(r"^[0-9]+\.[0-9]{4}$")
+TRUSTED_WHOLE_ARTIFACT_APPROVAL_SOURCE = {
+    "kind": "github_issue_comment",
+    "repository": "layibabalola/MLV-App",
+    "pull_request": 6,
+    "comment_id": 5347847988,
+    "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
+    "created_at": "2026-08-19T20:51:23Z",
+    "author_association": "OWNER",
+    "body_sha256": "adbba554147e3ac4afb7328a242d379e890913716df687b99b7cab4a578d4726",
+}
 
 
 class ProvenanceValidationError(ValueError):
@@ -297,6 +307,9 @@ def _validate_approval_witness(
     _require(isinstance(source.get("body_sha256"), str)
              and re.fullmatch(r"[0-9a-f]{64}", source["body_sha256"]) is not None,
              f"{label} source body_sha256 must bind the exact approval text")
+    if kind == "tracked_whole_artifact_approval":
+        _require(source == TRUSTED_WHOLE_ARTIFACT_APPROVAL_SOURCE,
+                 f"{label} source must equal the independently verified owner approval tuple")
 
     scope = witness.get("scope")
     _require(isinstance(scope, dict)
