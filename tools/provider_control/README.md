@@ -56,7 +56,8 @@ identities and non-testcase root children are refused before identity mapping. T
 45-test inventory is bound by its sorted-ID digest, so zero, partial, or renamed discovery cannot
 become a green run. Environment fields, canonical UTC start time, and finite nonnegative duration
 are type-checked; JSON non-finite constants are forbidden; and the environment/GitHub matrix claims
-must equal the live verifier process. The verifier also rechecks the live index/worktree immediately
+must equal the live verifier process. The pinned profile validator is rerun during verification and
+its exact exit/stdout/stderr must match the result. The verifier also rechecks the live index/worktree immediately
 before artifact routing instead of trusting only the runner's earlier cleanliness statement.
 Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
 written to the hosted step summary, and runner exceptions after argument parsing produce a separate

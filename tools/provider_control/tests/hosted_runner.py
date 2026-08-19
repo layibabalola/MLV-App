@@ -272,6 +272,19 @@ def _runtime_environment() -> dict[str, object]:
     }
 
 
+def _run_profile_validation() -> dict[str, object]:
+    completed = subprocess.run(
+        [sys.executable, str(VALIDATOR), "validate", "profile", str(PROFILE)],
+        cwd=REPO, text=True, encoding="utf-8", stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False,
+    )
+    return {
+        "exitCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
+
+
 def _strict_json(path: Path) -> dict[str, object]:
     def no_duplicates(pairs):
         value = {}
@@ -438,6 +451,8 @@ def _verify_evidence_bundle(
         isinstance(profile[key], str) for key in ("stdout", "stderr")
     ):
         raise ValueError("hosted result profile validation types are invalid")
+    if profile != _run_profile_validation():
+        raise ValueError("hosted result profile validation disagrees with the live verifier")
     tests = result["tests"]
     status_names = {
         "passed", "failed", "error", "skipped", "expected-failure", "unexpected-success"
@@ -737,11 +752,7 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
     test_result = runner.run(suite)
     records = [test_result.records[key] for key in sorted(test_result.records)]
 
-    profile = subprocess.run(
-        [sys.executable, str(VALIDATOR), "validate", "profile", str(PROFILE)],
-        cwd=REPO, text=True, encoding="utf-8", stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
-    )
+    profile = _run_profile_validation()
     elapsed = time.perf_counter() - started_clock
     status_after = _git("status", "--porcelain=v1", "--untracked-files=all")
     repository_clean = not status_after
@@ -749,7 +760,7 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
         "passed", "failed", "error", "skipped", "expected-failure", "unexpected-success"
     }}
     closed_gate_passed = _closed_gate_passed(
-        test_result, profile.returncode, repository_clean
+        test_result, profile["exitCode"], repository_clean
     )
     result = {
         "schema": "mlv-provider-control-hosted-result/v1",
@@ -775,11 +786,7 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
         "startedAtUtc": started_text,
         "durationSeconds": round(elapsed, 6),
         "tests": {"total": len(records), **statuses, "records": records},
-        "profileValidation": {
-            "exitCode": profile.returncode,
-            "stdout": profile.stdout,
-            "stderr": profile.stderr,
-        },
+        "profileValidation": profile,
         "declaredZeroActivityInvariant": {
             "basis": "CLOSED_TEST_SUITE_CONTRACT_ASSERTIONS_NOT_PROVIDER_TELEMETRY",
             "providerCalls": 0,
@@ -794,8 +801,8 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
         records,
         started_text,
         elapsed,
-        profile.returncode,
-        profile.stdout + profile.stderr,
+        profile["exitCode"],
+        profile["stdout"] + profile["stderr"],
         repository_clean,
         status_after,
     )

@@ -401,6 +401,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(local["hostedJunitFullSemanticCrossCheck"])
         self.assertTrue(local["hostedJunitExactRootChildren"])
         self.assertTrue(local["hostedFatalRequiresLiveGitBinding"])
+        self.assertTrue(local["hostedProfileValidationRerun"])
         self.assertEqual(
             local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
@@ -1166,7 +1167,7 @@ class SupervisorTests(unittest.TestCase):
                 "expected-failure": 0, "unexpected-success": 0,
                 "records": bundle_records,
             },
-            "profileValidation": {"exitCode": 0, "stdout": "PASS\n", "stderr": ""},
+            "profileValidation": hosted_runner._run_profile_validation(),
             "declaredZeroActivityInvariant": {
                 "basis": "CLOSED_TEST_SUITE_CONTRACT_ASSERTIONS_NOT_PROVIDER_TELEMETRY",
                 "providerCalls": 0, "providerProcesses": 0, "tokens": 0,
@@ -1229,6 +1230,16 @@ class SupervisorTests(unittest.TestCase):
             junit_bytes, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "live verifier process"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        forged_result = json.loads(result_bytes)
+        forged_result["profileValidation"]["stdout"] += "FORGED\n"
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(forged_result, sort_keys=True) + "\n").encode(),
+            junit_bytes, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "live verifier"):
             hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         infinite_result = json.loads(result_bytes)

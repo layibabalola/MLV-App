@@ -69,7 +69,8 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   identities or non-testcase root children. The exact 45-test sorted-ID digest rejects zero,
   partial, or renamed discovery;
   environment/run fields must equal the live matrix process; canonical UTC timing is type-checked;
-  and non-finite JSON/JUnit durations are forbidden. The verifier performs a fresh live
+  non-finite JSON/JUnit durations are forbidden; and the pinned profile validator is rerun with an
+  exact exit/stdout/stderr comparison. The verifier performs a fresh live
   index/worktree cleanliness check immediately before routing. Partial bundles are
   refused rather than uploaded. Complete failure bundles use a
   full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
