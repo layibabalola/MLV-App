@@ -437,6 +437,14 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertEqual(receipt["producerContract"]["testCount"], 7)
         self.assertEqual(receipt["producerContract"]["assertionCount"], 75)
         self.assertEqual(
+            receipt["hostedCandidateArtifact"]["head"],
+            "f5f8964c2d54df263fd325e80915c8cf799d18c6",
+        )
+        self.assertEqual(
+            receipt["hostedCandidateArtifact"]["tree"],
+            "5909be4d4c063a7da0c6b1147ac5b825e65db78b",
+        )
+        self.assertEqual(
             receipt["knownGoodArtifact"]["canonicalActualSha256"],
             canonical_sha256,
         )
