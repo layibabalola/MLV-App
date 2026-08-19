@@ -18,6 +18,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 import mlv_lane_supervisor as supervisor  # noqa: E402
+from tools.provider_control.tests import hosted_runner  # noqa: E402
 from vendor.universal_provider_control import (  # noqa: E402
     ControlError, strict_json_file, validate_project_profile,
 )
@@ -373,7 +374,7 @@ class SupervisorTests(unittest.TestCase):
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
         self.assertEqual(
-            packet["status"], "DISTINGUISH_PROJECT_R14_SLOT_REFERENCE_ZERO_AUTHORITY")
+            packet["status"], "DISTINGUISH_PROJECT_R15_HOSTED_EVIDENCE_ZERO_AUTHORITY")
         self.assertEqual(
             packet["canonicalDoctrine"]["technicalSubject"],
             supervisor.CANONICAL_TECHNICAL_SUBJECT,
@@ -392,7 +393,10 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;"
+            "PROJECT_R14_4_OF_4_GREEN_RUN_32238122126_"
+            "HEAD_13707bd203340e5c0336d31212e996d6880aeb72;"
+            "PROJECT_R15_OBSERVABILITY_NOT_RUN",
         )
         slot = packet["referenceSlotSlice"]
         self.assertEqual(slot["rotationOrder"], list(supervisor.TEST_SLOT_ORDER))
@@ -701,7 +705,7 @@ class SupervisorTests(unittest.TestCase):
                 supervisor.validate_local_contract(
                     changed, "mlv-provider-observed-inventory-v2.schema.json")
 
-    def test_31_r13_hosted_evidence_distinguishes_technical_and_closeout_heads(self):
+    def test_31_hosted_evidence_distinguishes_every_exact_generation(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
         hosted = packet["localEvidence"]["hostedMatrix"]
         self.assertEqual(
@@ -709,9 +713,21 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;"
+            "PROJECT_R14_4_OF_4_GREEN_RUN_32238122126_"
+            "HEAD_13707bd203340e5c0336d31212e996d6880aeb72;"
+            "PROJECT_R15_OBSERVABILITY_NOT_RUN",
         )
         self.assertNotIn("R11_4_OF_4_GREEN", hosted)
+        prior = packet["localEvidence"]["priorExactHeadHostedEvidence"]
+        self.assertEqual(prior["head"], "13707bd203340e5c0336d31212e996d6880aeb72")
+        self.assertEqual(prior["tree"], "9b793858508d5f63462618aa43bba5844b7a5753")
+        self.assertEqual(prior["runId"], 32238122126)
+        self.assertEqual(prior["successfulLegs"], 4)
+        self.assertEqual(prior["testsPerLeg"], 42)
+        self.assertEqual(prior["artifactsUploaded"], 0)
+        self.assertFalse(prior["authority"])
+        self.assertFalse(packet["localEvidence"]["currentObservabilityHeadHosted"])
 
     def test_32_test_no_work_skips_before_provider_identity_slot_or_reservation(self):
         self.write_demand(demand(hasWork=False))
@@ -945,6 +961,68 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse((self.state / "test-request-envelope-active.json").exists())
         cursor = strict_json_file(self.state / "test-claude-slot-cursor.json")
         self.assertEqual((cursor["nextLane"], cursor["generation"]), ("claude-review", 1))
+
+    def test_42_hosted_workflow_emits_exact_head_machine_readable_evidence(self):
+        repo = ROOT.parents[1]
+        workflow = (repo / ".github/workflows/provider-control-candidate.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("  push:\n    branches: [master]", workflow)
+        self.assertEqual(workflow.count('      - "tools/provider_control/**"'), 2)
+        self.assertIn("ref: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
+        self.assertIn("EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}", workflow)
+        self.assertIn("python tools/provider_control/tests/hosted_runner.py", workflow)
+        self.assertIn("--junit .claude-state/provider-control-results/junit.xml", workflow)
+        self.assertIn("--result .claude-state/provider-control-results/result.json", workflow)
+        self.assertIn(
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
+            workflow,
+        )
+        self.assertIn("if: ${{ always() }}", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+        self.assertIn("retention-days: 30", workflow)
+        self.assertNotRegex(workflow, r"uses:\s+actions/upload-artifact@v\d+")
+
+    def test_43_hosted_result_rejects_skips_and_writes_junit_outcomes(self):
+        class PassCase(unittest.TestCase):
+            def runTest(self):
+                self.assertTrue(True)
+
+        class SkipCase(unittest.TestCase):
+            def runTest(self):
+                self.skipTest("skip must fail the hosted gate")
+
+        passed = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=hosted_runner.EvidenceResult
+        ).run(unittest.TestSuite([PassCase()]))
+        self.assertTrue(hosted_runner._closed_gate_passed(passed, 0))
+        skipped = unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=hosted_runner.EvidenceResult
+        ).run(unittest.TestSuite([SkipCase()]))
+        self.assertFalse(hosted_runner._closed_gate_passed(skipped, 0))
+        self.assertFalse(hosted_runner._closed_gate_passed(passed, 1))
+        xml = hosted_runner._junit_bytes(
+            list(skipped.records.values()), "2026-08-19T00:00:00Z", 0.1
+        ).decode("utf-8")
+        self.assertIn('tests="1"', xml)
+        self.assertIn('skipped="1"', xml)
+        self.assertIn("skip must fail the hosted gate", xml)
+        summary = self.base / "summary.md"
+        summary_result = {
+            "closedGatePassed": False,
+            "authority": False,
+            "git": {"head": "a" * 40, "tree": "b" * 40},
+            "tests": {
+                "passed": 0, "total": 1, "failed": 0, "error": 0, "skipped": 1
+            },
+            "profileValidation": {"exitCode": 0},
+        }
+        with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+            hosted_runner._append_github_summary(summary_result)
+        summary_text = summary.read_text(encoding="utf-8")
+        self.assertIn("Provider control CLOSED gate", summary_text)
+        self.assertIn("Result: **FAIL**", summary_text)
+        self.assertIn("Provider calls/processes/tokens: 0/0/0", summary_text)
 
 
 if __name__ == "__main__":

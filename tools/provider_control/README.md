@@ -37,6 +37,18 @@ passed all four legs in run `32228841343`. That result must not be relabeled as 
 technical head. R12 and R13 still need their own exact-tree hosted matrices and inherit no authority
 from either predecessor result.
 
+Project R14 head `13707bd203340e5c0336d31212e996d6880aeb72` passed 42 tests in each of
+four Windows/Ubuntu × Python 3.13/3.14 legs in run `32238122126`. That run uploaded no artifacts.
+The additive R15 evidence workflow therefore runs the CLOSED suite through a standard-library
+runner that emits fail-closed JUnit plus a strict JSON result binding the checked-out Git head/tree,
+runtime, GitHub run identity, every test outcome and duration, profile validation, zero provider
+calls/processes/tokens, and the CLOSED gate. Any skip or non-pass result fails the job. Artifacts are
+uploaded even after failure with a full-commit action pin, the same verdict is written to the hosted
+step summary, and missing files are an error. R15 itself
+remains unhosted until its own four legs produce those artifacts; the R14 console-only run cannot be
+relabeled as R15 evidence. The workflow now runs for matching pull requests and matching pushes to
+`master`. This does not repair the separate repository protected-check topology.
+
 The smallest next choke-point slice is deliberately reachable only through the explicit test-fake
 seam. It serializes one fake Claude slot in fixed lane order, constructs the child executable and
 argv exclusively from broker-owned identities, returns deterministic no-work before identity,

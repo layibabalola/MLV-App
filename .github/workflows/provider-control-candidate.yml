@@ -6,6 +6,13 @@ on:
       - "tools/provider_control/**"
       - ".github/requirements/provider-control*"
       - ".github/workflows/provider-control-candidate.yml"
+  push:
+    branches: [master]
+    paths:
+      - ".gitattributes"
+      - "tools/provider_control/**"
+      - ".github/requirements/provider-control*"
+      - ".github/workflows/provider-control-candidate.yml"
   workflow_dispatch:
 permissions:
   contents: read
@@ -27,6 +34,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python }}
@@ -34,5 +42,18 @@ jobs:
           python -m pip install --disable-pip-version-check --no-input
           --only-binary=:all: --require-hashes
           -r .github/requirements/provider-control.txt
-      - run: python -m unittest tools.provider_control.tests.test_mlv_lane_supervisor -v
-      - run: python tools/provider_control/vendor/universal_provider_control.py validate profile tools/provider_control/mlv-project-profile.candidate.json
+      - name: Run CLOSED gate and write evidence
+        env:
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --junit .claude-state/provider-control-results/junit.xml
+          --result .claude-state/provider-control-results/result.json
+      - name: Upload CLOSED-gate evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: provider-control-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .claude-state/provider-control-results/
+          if-no-files-found: error
+          retention-days: 30

@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v6",
-  "status": "DISTINGUISH_PROJECT_R14_SLOT_REFERENCE_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T09:18:46Z",
+  "status": "DISTINGUISH_PROJECT_R15_HOSTED_EVIDENCE_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T12:10:00Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "canonicalDoctrine": {
     "generation": "R26",
@@ -86,13 +86,26 @@
     "providerInvocation": false
   },
   "localEvidence": {
-    "python313": "42/42 PASS",
-    "python314": "42/42 PASS",
+    "python313": "44/44 PASS",
+    "python314": "44/44 PASS",
     "python313ProfileValidation": "PASS",
     "python314ProfileValidation": "PASS",
     "python313RequireHashesDryRun": "PASS_WINDOWS_ONLY",
     "python314RequireHashesDryRun": "PASS_WINDOWS_ONLY",
-    "hostedMatrix": "R10_4_OF_4_GREEN_RUN_32208720831;R11_TECHNICAL_HEAD_9e3_NOT_RUN;R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_NOT_RUN",
+    "hostedMatrix": "R10_4_OF_4_GREEN_RUN_32208720831;R11_TECHNICAL_HEAD_9e3_NOT_RUN;R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN;PROJECT_R14_4_OF_4_GREEN_RUN_32238122126_HEAD_13707bd203340e5c0336d31212e996d6880aeb72;PROJECT_R15_OBSERVABILITY_NOT_RUN",
+    "priorExactHeadHostedEvidence": {
+      "head": "13707bd203340e5c0336d31212e996d6880aeb72",
+      "tree": "9b793858508d5f63462618aa43bba5844b7a5753",
+      "runId": 32238122126,
+      "matrix": "WINDOWS_UBUNTU_X_PYTHON_3_13_3_14",
+      "successfulLegs": 4,
+      "testsPerLeg": 42,
+      "artifactsUploaded": 0,
+      "authority": false
+    },
+    "currentObservabilityHeadHosted": false,
+    "hostedResultSchema": "mlv-provider-control-hosted-result/v1",
+    "hostedEvidenceArtifactsRequired": true,
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -124,7 +137,8 @@
   ],
   "subjects": [
     {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 43884, "sha256": "0bd4116a29304c86fe124f692efa81fe4904506731c58f1a1e05761ac9e9da04"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 54231, "sha256": "9cc27e46075358ca9e9a001611cccfca8bdb41789939829bc7718b36763adbe2"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 58367, "sha256": "ffd2a6245b495c818ee27f6e0a14bd0f04582e40801878b471042fb4dc7887ef"},
+    {"path": "tools/provider_control/tests/hosted_runner.py", "bytes": 9407, "sha256": "48c6ec7661415f306738c067fec546fabc20b2bfff9d7fe911b65436ded868e7"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 1367, "sha256": "2ee4213711eeadc5eb4ece0ab161557ee123751e50aaa72f61150a5b4ed41f59"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"},
@@ -135,12 +149,12 @@
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v2.schema.json", "bytes": 18842, "sha256": "c7edee3dc6973a9aa398c8425c9c85c09d3370ad0706df22e2438fcf01a6b4d3"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/README.md", "bytes": 4346, "sha256": "fb1b42228f25c297ea23cf681bbb4595e0708c249c27c32688d650ae0a36cb4d"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 8932, "sha256": "571edabd2218be48271fdbf5d159887660d2c3fb53b39808e117fc68cc685160"},
+    {"path": "tools/provider_control/README.md", "bytes": 5366, "sha256": "e6780f424aef254124fe6dc86a54302e8510d851e14e652d2ee99cb6dfef1bb5"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 9776, "sha256": "71bd1782c4d94d44f1278cdd5d674579797fd3fd25e54d9bd0e7cf6ed140c0df"},
     {"path": ".gitattributes", "bytes": 267, "sha256": "a54a31bbb6bdb0b34a3871f9d3a80fa0d5df04cb204dcbbe107b5009c8885e60"},
     {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
     {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},
     {"path": ".github/requirements/provider-control-platform-evidence.json", "bytes": 1857, "sha256": "81659e3ff6a624c3d63d1384911a5eb2bbcfea6cdcb272be3ea92cb9f0423f42"},
-    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 1433, "sha256": "25c69a27315439041999afa382f9b6db74e7909b249432426fe06466538c3e31"}
+    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 2242, "sha256": "89f3343ec7b3c402c409e4f64b45eeb4ea6b022965f0c915179675501cf609b6"}
   ]
 }

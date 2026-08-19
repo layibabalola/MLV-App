@@ -54,6 +54,15 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   passed all four hosted legs in run `32208720831`. The R11 technical head `9e3ee4d8` was not run;
   the distinct R11 evidence/closeout head `152f1e5f` passed all four hosted legs in run
   `32228841343`. R12 and R13 exact-tree hosted execution is unproven.
+- Project R14 exact head `13707bd203340e5c0336d31212e996d6880aeb72` passed all four hosted
+  Windows/Ubuntu × Python 3.13/3.14 legs with 42 tests per leg in run `32238122126`. That run had
+  no uploaded artifacts. The additive R15 workflow emits JUnit and strict JSON evidence with exact
+  head/tree/run binding, per-test outcomes and durations, profile-validation output, and explicit
+  zero provider calls/processes/tokens under CLOSED. Skips fail closed; evidence uploads always and
+  missing evidence is an error; the exact verdict is also written to the hosted step summary. R15 is
+  not hosted yet and may not inherit R14's console-only result.
+  Matching pushes to `master` now receive the same evidence run. The repository's distinct missing
+  protected-check topology remains a merge prerequisite and is not treated as repaired here.
 - The project profile is version 2 and raises the owner-foreground reserve floor to 20 percent. The
   canonical attended rotation and numeric token policy are pinned by exact external Git blob and
   SHA-256 identities. They are `MOTIVATION_ONLY`: author-attested, not provider-authenticated, not
