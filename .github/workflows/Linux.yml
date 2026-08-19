@@ -4,9 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  attestations: write
   contents: read
-  id-token: write
 
 concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
@@ -127,14 +125,7 @@ jobs:
            cp MLVApp-*.AppImage ${{ env.ARTIFACT }}
 
     - name: Save build artifact
-      id: upload
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp
         path: ${{ env.ARTIFACT }}
-
-    - name: Attest build provenance
-      uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
-      with:
-        subject-name: MLVApp
-        subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}

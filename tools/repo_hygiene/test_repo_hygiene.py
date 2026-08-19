@@ -705,7 +705,7 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("\n          path: |", artifact_step)
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
 
-    def test_release_workflows_are_bounded_serialized_and_attested(self) -> None:
+    def test_release_workflows_are_bounded_serialized_and_non_attesting_while_blocked(self) -> None:
         workflow_dir = ROOT / ".github" / "workflows"
         release_workflows = (
             workflow_dir / "Linux.yml",
@@ -713,8 +713,6 @@ class RepoHygieneTests(unittest.TestCase):
             workflow_dir / "macOS-Arm64.yml",
             workflow_dir / "macOS-Intel.yml",
         )
-        attestation_revision = "977bb373ede98d70efdf65b84cb5f73e068dcc2a"
-
         for workflow_path in release_workflows:
             workflow = workflow_path.read_text(encoding="utf-8")
             trigger_section = workflow[: workflow.index("\npermissions:")]
@@ -728,24 +726,10 @@ class RepoHygieneTests(unittest.TestCase):
             )
             self.assertIn("    if: github.ref == 'refs/heads/master'", workflow)
             self.assertIn("    timeout-minutes: 120", workflow)
-            self.assertIn("  attestations: write", workflow)
-            self.assertIn("  id-token: write", workflow)
-            self.assertIn(
-                f"uses: actions/attest-build-provenance@{attestation_revision} # v3",
-                workflow,
-            )
-            self.assertLess(
-                workflow.index("- name: Save build artifact"),
-                workflow.index("- name: Attest build provenance"),
-            )
-            self.assertIn("      id: upload", workflow)
-            attestation_step = workflow[workflow.index("- name: Attest build provenance") :]
-            self.assertIn("subject-name:", attestation_step)
-            self.assertIn(
-                "subject-digest: sha256:${{ steps.upload.outputs.artifact-digest }}",
-                attestation_step,
-            )
-            self.assertNotIn("subject-path:", attestation_step)
+            self.assertNotIn("attestations: write", workflow)
+            self.assertNotIn("id-token: write", workflow)
+            self.assertNotIn("actions/attest", workflow)
+            self.assertNotIn("Attest build provenance", workflow)
 
         windows_workflow = (workflow_dir / "Windows.yml").read_text(encoding="utf-8")
         openssl_start = windows_workflow.index("    - name: Install OpenSSL")
@@ -784,7 +768,6 @@ class RepoHygieneTests(unittest.TestCase):
                 ("actions/checkout", "v5"): 8,
                 ("actions/setup-python", "v6"): 8,
                 ("actions/upload-artifact", "v7"): 6,
-                ("actions/attest-build-provenance", "v3"): 4,
                 ("ConorMacBride/install-package", "v1"): 2,
             }
         )
@@ -822,11 +805,7 @@ class RepoHygieneTests(unittest.TestCase):
             observed_permissions = [
                 line.strip() for line in permissions_blocks[0].splitlines() if line.strip()
             ]
-            expected_permissions = (
-                ["attestations: write", "contents: read", "id-token: write"]
-                if workflow_path.name in {"Linux.yml", "Windows.yml", "macOS-Arm64.yml", "macOS-Intel.yml"}
-                else ["contents: read"]
-            )
+            expected_permissions = ["contents: read"]
             self.assertEqual(
                 observed_permissions,
                 expected_permissions,
