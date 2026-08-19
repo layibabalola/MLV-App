@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v3",
-  "status": "DISTINGUISH_R5_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T01:34:55Z",
+  "status": "DISTINGUISH_R6_PHASE_0_1_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T01:56:03Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
   "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
@@ -14,9 +14,19 @@
     "providerInvocation": false
   },
   "localEvidence": {
-    "python313": "24/24 PASS",
-    "python314": "24/24 PASS",
+    "python313": "26/26 PASS",
+    "python314": "26/26 PASS",
+    "python313ProfileValidation": "PASS",
+    "python314ProfileValidation": "PASS",
+    "python313RequireHashesDryRun": "PASS_WINDOWS_ONLY",
+    "python314RequireHashesDryRun": "PASS_WINDOWS_ONLY",
     "hostedMatrix": "NOT_RUN",
+    "ciActionsPinnedToCommit": true,
+    "ciCheckoutCredentialsPersisted": false,
+    "ciCancelInProgress": false,
+    "ciJobTimeoutMinutes": 15,
+    "ciLockPrecedentCommit": "5e01d5c35f8f468a07521e13c62b945be7bac7c5",
+    "ciLockGitBlob": "f13a25ab1846514c83c755931bacc324948167fc",
     "unchangedNoWorkTicks": 1000,
     "providerCalls": 0,
     "providerProcesses": 0,
@@ -37,7 +47,7 @@
   ],
   "subjects": [
     {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 27388, "sha256": "5719b0413ddce28bed9a61c57877421fb7cd0e25b4f68c57570d7b60a3b4a7ff"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 21733, "sha256": "e511bc3820c3eecaadd543bde26d46d132f5d2f0b80fd117ca045ad9b5047333"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 25705, "sha256": "2d3dc2fb74ff207f5928cb1687fa8d0e60add8f5f88fe6a3208a927da49eabff"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 966, "sha256": "a9c7fbf4efcf11c625a45484496552feb39749705d69579dce18275594777507"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"},
@@ -47,7 +57,11 @@
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v1.schema.json", "bytes": 5926, "sha256": "34569f58d75d6f62d69be962fd54be5335c1d28a7247e4f592e5157491d5ba82"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 4081, "sha256": "8a265edc8b487277f958319c1f0933e0ee89573e77943cce2763c3f84e38468e"},
-    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 870, "sha256": "d4dc36dd2b85b38d8e369af3501c2b10310571346c2c3491129f24dcf4cfd2f5"}
+    {"path": "tools/provider_control/README.md", "bytes": 1849, "sha256": "eedd1eefba24a3dc6db38f02e18a326c19ad9c57ad874249f8dee57c803cec90"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 4607, "sha256": "725a4f3c992233346d376376acc1ecb6a3046ed10ada7db03dabe7e7609e1f6f"},
+    {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
+    {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},
+    {"path": ".github/requirements/provider-control-platform-evidence.json", "bytes": 1857, "sha256": "81659e3ff6a624c3d63d1384911a5eb2bbcfea6cdcb272be3ea92cb9f0423f42"},
+    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 1362, "sha256": "7db9a2759e519dba8848391b653c738b5bc053cf745e35a4686ba141af4d76fa"}
   ]
 }

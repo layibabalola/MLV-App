@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -328,7 +329,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R5_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R6_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
         self.assertFalse(packet["authority"]["adoption"])
@@ -359,6 +360,89 @@ class SupervisorTests(unittest.TestCase):
         _, _, local, _ = supervisor.load_contracts()
         self.assertIn("CITABLE_FABLE_SEQUENCE", local["pending"])
         self.assertFalse(local["authority"]["adoption"])
+
+    def test_25_ci_actions_and_hashed_install_are_immutable(self):
+        repo = ROOT.parents[1]
+        workflow = (repo / ".github/workflows/provider-control-candidate.yml").read_text(
+            encoding="utf-8")
+        self.assertIn(
+            "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5",
+            workflow,
+        )
+        self.assertIn(
+            "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6",
+            workflow,
+        )
+        self.assertNotRegex(workflow, r"uses:\s+actions/(?:checkout|setup-python)@v\d+")
+        install = (
+            "python -m pip install --disable-pip-version-check --no-input "
+            "--only-binary=:all: --require-hashes "
+            "-r .github/requirements/provider-control.txt"
+        )
+        self.assertIn(install, workflow)
+        self.assertNotRegex(workflow, r"(?i)pip\s+install\s+(?:--upgrade|-U)\s+pip")
+        self.assertIn('".github/requirements/provider-control*"', workflow)
+        self.assertIn(
+            "group: provider-control-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}",
+            workflow,
+        )
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("timeout-minutes: 15", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+
+    def test_26_ci_lock_is_exact_complete_and_covers_hosted_matrix(self):
+        repo = ROOT.parents[1]
+        source = repo / ".github/requirements/provider-control.in"
+        lock = repo / ".github/requirements/provider-control.txt"
+        evidence_path = repo / ".github/requirements/provider-control-platform-evidence.json"
+        lock_text = lock.read_text(encoding="utf-8")
+        self.assertIn("jsonschema==4.26.0", source.read_text(encoding="utf-8"))
+        self.assertEqual(
+            hashlib.sha256(lock.read_bytes()).hexdigest(),
+            "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5",
+        )
+        packages = dict(re.findall(r"(?m)^([a-z0-9-]+)==([^\\\s]+) \\$", lock_text))
+        self.assertEqual(packages, {
+            "attrs": "26.1.0",
+            "jsonschema": "4.26.0",
+            "jsonschema-specifications": "2025.9.1",
+            "referencing": "0.37.0",
+            "rpds-py": "2026.6.3",
+        })
+        blocks = re.split(r"(?m)(?=^[a-z0-9-]+==)", lock_text)[1:]
+        self.assertEqual(len(blocks), len(packages))
+        for block in blocks:
+            name = block.split("==", 1)[0]
+            hashes = re.findall(r"--hash=sha256:([0-9a-f]{64})", block)
+            with self.subTest(package=name):
+                self.assertTrue(hashes)
+                self.assertNotIn("0" * 64, hashes)
+        self.assertNotRegex(lock_text, r"(?m)^\s*(?:https?://|-e\s|--index-url)")
+
+        evidence = strict_json_file(evidence_path)
+        self.assertEqual(
+            evidence["sourcePrecedentCommit"],
+            "5e01d5c35f8f468a07521e13c62b945be7bac7c5",
+        )
+        self.assertEqual(evidence["pythonVersions"], ["3.13", "3.14"])
+        self.assertEqual(
+            set(evidence["runnerPlatforms"]),
+            {"ubuntu-latest-x86_64", "windows-latest-amd64"},
+        )
+        matrix = {(item["python"], item["runner"]) for item in evidence["platformWheels"]}
+        self.assertEqual(matrix, {
+            ("3.13", "ubuntu-latest-x86_64"),
+            ("3.13", "windows-latest-amd64"),
+            ("3.14", "ubuntu-latest-x86_64"),
+            ("3.14", "windows-latest-amd64"),
+        })
+        for item in evidence["universalWheels"] + evidence["platformWheels"]:
+            with self.subTest(filename=item["filename"]):
+                self.assertRegex(item["sha256"], r"^[0-9a-f]{64}$")
+                self.assertNotEqual(item["sha256"], "0" * 64)
+                self.assertGreater(item["bytes"], 0)
+                self.assertIn(item["sha256"], lock_text)
 
 
 if __name__ == "__main__":

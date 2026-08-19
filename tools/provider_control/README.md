@@ -16,5 +16,14 @@ receipts, and the SHADOW/CONTAINMENT fake-provider harness. The imported univers
 CLOSED-only template: its null/all-zero identities are intentional activation blockers, not
 placeholders that may be treated as evidence.
 
+CI uses immutable full-commit pins for `actions/checkout` and `actions/setup-python`. Its
+`jsonschema` dependency and complete transitive set are installed from
+`.github/requirements/provider-control.txt` with `--require-hashes` and binary-only, noninteractive
+resolution; the source intent and explicit Windows/Ubuntu Python 3.13/3.14 wheel evidence live
+beside the lock. Checkout credentials are not persisted, concurrency is event-safe and
+non-cancelling, and each job has a bounded timeout. Local dry resolution proves the Windows legs
+only. The hosted matrix remains required evidence for the Ubuntu legs and is not claimed by this
+candidate.
+
 The installer is audit-only and refuses `-Apply`. Do not enable/start the task, invoke a provider,
 open a gate, run a canary, or claim adoption from this candidate.
