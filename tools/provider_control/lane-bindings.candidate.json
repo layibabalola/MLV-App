@@ -7,7 +7,7 @@
   "adapter": "claude-code/1.0",
   "quotaDomain": "claude-shared-account",
   "canonicalStateRoot": "C:\\ProgramData\\MLV-App\\provider-control-v1",
-  "profileSha256": "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
+  "profileSha256": "sha256:2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d",
   "stateRootIdentity": "hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "lanes": {
     "claude-review": {"model": "claude-opus-5", "effort": "high", "role": "INDEPENDENT_REVIEW", "subject": "subjects/seat-lane4-review.md", "subjectSha256": "sha256:c8b1fa6502e9199df1ea555500554626ef09f4d12b802f57229a1f9b9743f409"},

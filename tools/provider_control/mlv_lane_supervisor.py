@@ -22,13 +22,22 @@ from vendor.universal_provider_control import (
     route_demand_tick, strict_json_file, validate_project_profile,
 )
 
-TECHNICAL_SUBJECT = "874605e43531c9aa230ee16851f8107a8e0d9cec"
-RATIFICATION_MERGE = "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"
+CANONICAL_TECHNICAL_SUBJECT = "e70a044f31dd2f43ab7c716d63a4eb89318c61b6"
+CANONICAL_DOCTRINE_MERGE = "909f769d02e8412e51e28e242cfa8d00dadc9a3d"
+MECHANICS_TECHNICAL_SUBJECT = "874605e43531c9aa230ee16851f8107a8e0d9cec"
+MECHANICS_RATIFICATION_MERGE = "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d"
+# Compatibility aliases: lane bindings and the vendored engine still depend on exact R14 mechanics.
+TECHNICAL_SUBJECT = MECHANICS_TECHNICAL_SUBJECT
+RATIFICATION_MERGE = MECHANICS_RATIFICATION_MERGE
 DOCTRINE_ENGINE_GIT_BLOB = "0e26b15f249f89972e2fc7807ccd0d98a0bd4954"
-EXPECTED_PROFILE_SHA256 = "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"
-EXPECTED_BINDINGS_SHA256 = "sha256:f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"
+ATTENDED_RECEIPT_GIT_BLOB = "41d7b4c6ae56f8efb880a1f36f4c3225f3112251"
+ATTENDED_RECEIPT_SHA256 = "sha256:b3c69cdd972b694bd37e914b6c8f11ec452ac3c8c14ed230c2a23215e1e01307"
+TOKEN_POLICY_GIT_BLOB = "33b75cfb61b8c8934009ff987f2ea90ef5f74eb5"
+TOKEN_POLICY_SHA256 = "sha256:b5eca2ef60a86d87e2ca96d34569035aef510387de7ea204ab7cbf98ce5f5192"
+EXPECTED_PROFILE_SHA256 = "sha256:2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"
+EXPECTED_BINDINGS_SHA256 = "sha256:8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"
 EXPECTED_INVENTORY_SHA256 = "sha256:7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"
-EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:a4e97bd2f481e3b5f461ecbe8a131100ec0ba0ef1ab545ff0da2387cd3b41c90"
+EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:4a295f43863943e399f3b8ee823201b5d12c0707176299310e9584b5f0c52b43"
 PRODUCTION_STATE_ROOT = Path(r"C:\ProgramData\MLV-App\provider-control-v1")
 DEFAULT_STATE_ROOT = PRODUCTION_STATE_ROOT
 ROOT = Path(__file__).resolve().parent
@@ -187,8 +196,53 @@ def load_contracts() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], di
             raise ControlError("LANE_BINDINGS_INVALID")
     digests = supervisor_profile["contractDigests"]
     if (supervisor_profile["doctrine"] != {
-            "generation": "R14", "technicalSubject": TECHNICAL_SUBJECT,
-            "ratificationMerge": RATIFICATION_MERGE,
+            "canonicalUniversal": {
+                "generation": "R26",
+                "technicalSubject": CANONICAL_TECHNICAL_SUBJECT,
+                "doctrineMerge": CANONICAL_DOCTRINE_MERGE,
+                "automaticLaunchGate": "CLOSED",
+                "authority": False,
+            },
+            "mechanicsDependency": {
+                "generation": "R14",
+                "technicalSubject": MECHANICS_TECHNICAL_SUBJECT,
+                "ratificationMerge": MECHANICS_RATIFICATION_MERGE,
+                "scope": "EXACT_VENDOR_ENGINE_AND_LANE_BINDINGS_ONLY",
+                "authority": False,
+            },
+        } or supervisor_profile["tokenSavingEvidence"] != {
+            "treatment": "MOTIVATION_ONLY",
+            "authority": False,
+            "attendedRotation": {
+                "path": "receipts/attended-provider-rotation-20260819.json",
+                "gitBlobOid": ATTENDED_RECEIPT_GIT_BLOB,
+                "sha256": ATTENDED_RECEIPT_SHA256,
+                "provenance": "AUTHOR_ATTESTED_LOCAL_CLI_MEASUREMENT",
+                "credit": "MOTIVATION_AND_MEASUREMENT_ONLY",
+                "providerAuthenticated": False,
+                "independentObserver": False,
+                "rawProviderReceiptCommitted": False,
+                "inputTokens": 7,
+                "cacheCreateTokens": 59319,
+                "cacheReadTokens": 10723,
+                "outputTokens": 7540,
+            },
+            "policy": {
+                "path": "policy/universal-provider-token-control-r22.json",
+                "gitBlobOid": TOKEN_POLICY_GIT_BLOB,
+                "sha256": TOKEN_POLICY_SHA256,
+                "policyId": "universal-provider-token-control-r22",
+                "providerAuthority": False,
+                "noWorkDecisionPoint": "BEFORE_PROCESS_OR_SESSION_CREATION",
+                "requestAccountingScope": "PROVIDER_REQUEST",
+                "cacheReadEnvelopeWeight": 1.0,
+                "maxAssembledPrefixTokens": 32768,
+                "maxAddressedWorkCapsuleTokens": 8192,
+                "cacheAffinityTtlSeconds": 300,
+                "maxProviderRetries": 1,
+                "completionReserveFloor": 0.20,
+                "directLaunchSeparateCertificationRequired": True,
+            },
         } or digests["universalProfileSha256"] != EXPECTED_PROFILE_SHA256 or
             digests["laneBindingsSha256"] != EXPECTED_BINDINGS_SHA256 or
             digests["observedInventorySha256"] != EXPECTED_INVENTORY_SHA256):
@@ -515,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ControlError("AUTOMATIC_GATE_NOT_CLOSED")
             result = {"status": "BLOCKED", "disposition": "DISTINGUISH",
                       "automaticLaunchGate": "CLOSED", "blockers": blockers,
+                      "canonicalTechnicalSubject": CANONICAL_TECHNICAL_SUBJECT,
+                      "canonicalDoctrineMerge": CANONICAL_DOCTRINE_MERGE,
                       "technicalSubject": TECHNICAL_SUBJECT,
                       "ratificationMerge": RATIFICATION_MERGE,
                       "doctrineEngineGitBlob": DOCTRINE_ENGINE_GIT_BLOB,

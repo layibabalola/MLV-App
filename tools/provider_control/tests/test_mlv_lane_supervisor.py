@@ -79,9 +79,18 @@ class SupervisorTests(unittest.TestCase):
     def fake_env(self):
         return {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
 
-    def test_01_exact_r14_subject_and_ratification_are_distinct_and_vendor_is_pinned(self):
+    def test_01_canonical_r26_and_exact_r14_mechanics_are_distinct_and_pinned(self):
+        self.assertEqual(
+            supervisor.CANONICAL_TECHNICAL_SUBJECT,
+            "e70a044f31dd2f43ab7c716d63a4eb89318c61b6",
+        )
+        self.assertEqual(
+            supervisor.CANONICAL_DOCTRINE_MERGE,
+            "909f769d02e8412e51e28e242cfa8d00dadc9a3d",
+        )
         self.assertEqual(supervisor.TECHNICAL_SUBJECT, "874605e43531c9aa230ee16851f8107a8e0d9cec")
         self.assertEqual(supervisor.RATIFICATION_MERGE, "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d")
+        self.assertNotEqual(supervisor.CANONICAL_TECHNICAL_SUBJECT, supervisor.TECHNICAL_SUBJECT)
         self.assertNotEqual(supervisor.TECHNICAL_SUBJECT, supervisor.RATIFICATION_MERGE)
         for relative, expected in VENDOR_BLOBS.items():
             with self.subTest(relative=relative):
@@ -96,6 +105,14 @@ class SupervisorTests(unittest.TestCase):
         validate_project_profile(profile)
         self.assertEqual(bindings["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(bindings["ratificationMerge"], supervisor.RATIFICATION_MERGE)
+        self.assertEqual(
+            local["doctrine"]["canonicalUniversal"]["technicalSubject"],
+            supervisor.CANONICAL_TECHNICAL_SUBJECT,
+        )
+        self.assertEqual(
+            local["doctrine"]["mechanicsDependency"]["technicalSubject"],
+            supervisor.MECHANICS_TECHNICAL_SUBJECT,
+        )
         self.assertEqual(local["disposition"], "DISTINGUISH")
         self.assertEqual(local["automaticLaunchGate"], "CLOSED")
         self.assertEqual(inventory["authority"], "OBSERVED_NON_AUTHORITATIVE")
@@ -330,14 +347,23 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R10_PHASE_0_1_ZERO_AUTHORITY")
-        self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
-        self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
+        self.assertEqual(packet["status"], "DISTINGUISH_R11_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(
+            packet["canonicalDoctrine"]["technicalSubject"],
+            supervisor.CANONICAL_TECHNICAL_SUBJECT,
+        )
+        self.assertEqual(
+            packet["canonicalDoctrine"]["doctrineMerge"],
+            supervisor.CANONICAL_DOCTRINE_MERGE,
+        )
+        self.assertEqual(
+            packet["mechanicsDependency"]["technicalSubject"],
+            supervisor.MECHANICS_TECHNICAL_SUBJECT,
+        )
         self.assertFalse(packet["authority"]["adoption"])
         self.assertEqual(
             packet["localEvidence"]["hostedMatrix"],
-            "R7_INVALID_YAML;R8_UBUNTU_PY314_SYMLINK_RED;"
-            "R9_WINDOWS_CRLF_PROVENANCE_RED;R10_NOT_RUN",
+            "R10_4_OF_4_GREEN_RUN_32208720831;R11_NOT_RUN",
         )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
@@ -469,6 +495,50 @@ class SupervisorTests(unittest.TestCase):
                 self.assertNotEqual(item["sha256"], "0" * 64)
                 self.assertGreater(item["bytes"], 0)
                 self.assertIn(item["sha256"], lock_text)
+
+    def test_27_r11_profile_binds_token_saving_doctrine_as_motivation_only(self):
+        profile, _, local, _ = supervisor.load_contracts()
+        self.assertEqual(profile["profileVersion"], 2)
+        self.assertEqual(profile["policy"]["reserveFloorByPriority"]["OWNER_FOREGROUND"], 0.20)
+        canonical = local["doctrine"]["canonicalUniversal"]
+        self.assertEqual(canonical["technicalSubject"], supervisor.CANONICAL_TECHNICAL_SUBJECT)
+        self.assertEqual(canonical["doctrineMerge"], supervisor.CANONICAL_DOCTRINE_MERGE)
+        self.assertFalse(canonical["authority"])
+        evidence = local["tokenSavingEvidence"]
+        self.assertEqual(evidence["treatment"], "MOTIVATION_ONLY")
+        self.assertFalse(evidence["authority"])
+        self.assertFalse(evidence["attendedRotation"]["providerAuthenticated"])
+        self.assertEqual(evidence["attendedRotation"]["gitBlobOid"],
+                         supervisor.ATTENDED_RECEIPT_GIT_BLOB)
+        self.assertEqual(evidence["policy"]["gitBlobOid"], supervisor.TOKEN_POLICY_GIT_BLOB)
+        self.assertFalse(evidence["policy"]["providerAuthority"])
+        self.assertEqual(evidence["policy"]["completionReserveFloor"], 0.20)
+        self.assertTrue(evidence["policy"]["directLaunchSeparateCertificationRequired"])
+        self.assertEqual(local["automaticLaunchGate"], "CLOSED")
+        self.assertFalse(local["authority"]["adoption"])
+
+    def test_28_r11_doctrine_or_token_evidence_weakening_is_schema_invalid(self):
+        original = strict_json_file(supervisor.SUPERVISOR_PROFILE)
+        mutations = [
+            lambda value: value["doctrine"]["canonicalUniversal"].update(
+                technicalSubject="0" * 40),
+            lambda value: value["doctrine"]["canonicalUniversal"].update(
+                doctrineMerge="1" * 40),
+            lambda value: value["tokenSavingEvidence"].update(authority=True),
+            lambda value: value["tokenSavingEvidence"]["attendedRotation"].update(
+                providerAuthenticated=True),
+            lambda value: value["tokenSavingEvidence"]["policy"].update(
+                cacheReadEnvelopeWeight=0.5),
+            lambda value: value["tokenSavingEvidence"]["policy"].update(
+                directLaunchSeparateCertificationRequired=False),
+        ]
+        for index, mutate in enumerate(mutations):
+            changed = json.loads(json.dumps(original))
+            mutate(changed)
+            with self.subTest(index=index), self.assertRaisesRegex(
+                    ControlError, "MLV_CONTRACT_SCHEMA_INVALID"):
+                supervisor.validate_local_contract(
+                    changed, "mlv-provider-supervisor-profile-v1.schema.json")
 
 
 if __name__ == "__main__":

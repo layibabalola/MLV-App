@@ -1,7 +1,7 @@
 {
   "schema": "fleet-universal-project-profile/v1",
   "project": "mlv-app",
-  "profileVersion": 1,
+  "profileVersion": 2,
   "independenceClass": "SHARED_QUOTA_DOMAIN",
   "coordination": {
     "quotaDomainHostCount": 1,
@@ -13,7 +13,7 @@
   "policy": {
     "maxObservationAgeSeconds": 120, "maxInventoryAgeSeconds": 120, "maxBrokerHealthAgeSeconds": 60, "maxRequestAgeSeconds": 60, "maxRequestValiditySeconds": 300,
     "leaseMaxSeconds": 1800, "postResetQuietSeconds": 900, "maxConcurrentPerQuotaDomain": 1, "evidenceCapsuleMaxBytes": 131072,
-    "reserveFloorByPriority": {"OWNER_FOREGROUND": 0.15, "REQUIRED_REVIEW": 0.25, "PRODUCT_WORK": 0.35, "ADJUDICATION": 0.45, "MAINTENANCE": 0.55},
+    "reserveFloorByPriority": {"OWNER_FOREGROUND": 0.20, "REQUIRED_REVIEW": 0.25, "PRODUCT_WORK": 0.35, "ADJUDICATION": 0.45, "MAINTENANCE": 0.55},
     "requiredCapacityDimensions": {"claude-code/1.0": ["session", "weekly"], "openai-responses/1.0": ["primary", "secondary"], "kimi-code/1.0": ["context", "monthly"], "xai-api/1.0": ["requests", "tokens"]}
   },
   "invariants": {"resetCanOpenGate": false, "authCanOpenGate": false, "capacityCanOpenGate": false, "unknownCanAdmit": false, "directProviderInvocation": false, "exactLaunchBinding": true, "fullChildLifetimeLease": true, "strictRuntimeSchemaEnforcement": true, "boundedStreamingEvidence": true, "deterministicNoWorkProof": true}

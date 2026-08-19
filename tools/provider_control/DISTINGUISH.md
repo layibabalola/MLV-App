@@ -1,14 +1,17 @@
 # MLV-App provider-control disposition
 
-Disposition: **DISTINGUISH - pending supervisor/action graph/CLOSED + SHADOW + CONTAINMENT proof**.
+Disposition: **DISTINGUISH - pending installed choke point/complete action graph/CLOSED + SHADOW + CONTAINMENT proof**.
 
-- Canonical R14 technical subject: `874605e43531c9aa230ee16851f8107a8e0d9cec`
-- Ratification merge: `488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d`
+- Canonical universal token-saving subject: `e70a044f31dd2f43ab7c716d63a4eb89318c61b6`
+- Canonical doctrine merge: `909f769d02e8412e51e28e242cfa8d00dadc9a3d`
+- Exact R14 mechanics dependency: `874605e43531c9aa230ee16851f8107a8e0d9cec`
+- R14 mechanics ratification merge: `488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d`
 - MLV-App base: `30889f77e2000190b94d59f80f6a03b12ce3e0d3`
 
-The technical subject and ratification merge are intentionally separate fields. Neither is claimed
-as an MLV-App ancestor. This candidate pins the ratified R14 contract as external doctrine data.
-R16 features are unratified and may be considered only as `SHADOW_INPUT_ONLY` with zero authority.
+The canonical subject and merge are intentionally separate fields. Neither is claimed as an MLV-App
+ancestor. R26 is the canonical zero-authority token-saving doctrine; the older R14 subject remains
+bound only where the vendored engine, schemas, and lane bindings depend on its exact mechanics.
+Neither reference grants MLV-App provider authority. R16 features remain `SHADOW_INPUT_ONLY`.
 
 ## Verified locally
 
@@ -35,8 +38,13 @@ R16 features are unratified and may be considered only as `SHADOW_INPUT_ONLY` wi
   noninteractive resolution and without upgrading pip. Checkout credentials are not persisted;
   concurrency is event-safe and non-cancelling; `queue: max` prevents the default single-pending-run
   replacement behavior; jobs have a bounded timeout. Lock evidence covers the intended
-  Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only, so hosted
-  execution is still unproven.
+  Windows/Ubuntu Python 3.13/3.14 wheel matrix; local resolution verifies Windows only. The R10 tree
+  passed all four hosted legs in run `32208720831`; R11 exact-tree hosted execution is unproven.
+- The project profile is version 2 and raises the owner-foreground reserve floor to 20 percent. The
+  canonical attended rotation and numeric token policy are pinned by exact external Git blob and
+  SHA-256 identities. They are `MOTIVATION_ONLY`: author-attested, not provider-authenticated, not
+  independently observed, and incapable of satisfying installation, SHADOW, CONTAINMENT, canary,
+  adoption, or activation evidence.
 
 ## Cross-checked from prior analysis
 

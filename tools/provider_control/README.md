@@ -1,8 +1,10 @@
 # MLV-App fail-closed provider supervisor candidate
 
-This directory is a zero-authority Phase-0/1 candidate against R14 technical subject
-`874605e43531c9aa230ee16851f8107a8e0d9cec`, ratified by merge
-`488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d`. Start with `DISTINGUISH.md`,
+This directory is a zero-authority Phase-0/1 candidate reconciled with canonical universal
+token-saving subject `e70a044f31dd2f43ab7c716d63a4eb89318c61b6`, published by doctrine merge
+`909f769d02e8412e51e28e242cfa8d00dadc9a3d`. Exact R14 subject
+`874605e43531c9aa230ee16851f8107a8e0d9cec` remains a mechanics-only dependency for the vendored
+engine and lane bindings. Start with `DISTINGUISH.md`,
 `mlv-supervisor-profile.candidate.json`, and `mlv-observed-inventory.candidate.json`.
 
 Local proof:
@@ -12,7 +14,10 @@ Local proof:
 
 The unit suite validates both strict MLV schemas, hostile inventory/profile inputs, 1,000 unchanged
 ticks, production-root alias/reparse refusal, nonzero demand bindings, separate process-image/script
-receipts, and the SHADOW/CONTAINMENT fake-provider harness. The imported universal profile is a
+receipts, the SHADOW/CONTAINMENT fake-provider harness, and exact fail-closed bindings for canonical
+doctrine, the author-attested attended rotation, and the numeric token-saving policy. The imported
+receipt and policy are motivation only and grant no provider, installation, canary, or adoption
+authority. The imported universal profile is a
 CLOSED-only template: its null/all-zero identities are intentional activation blockers, not
 placeholders that may be treated as evidence.
 
@@ -22,8 +27,11 @@ CI uses immutable full-commit pins for `actions/checkout` and `actions/setup-pyt
 resolution; the source intent and explicit Windows/Ubuntu Python 3.13/3.14 wheel evidence live
 beside the lock. Checkout credentials are not persisted, concurrency is event-safe and
 non-cancelling, `queue: max` preserves up to GitHub's documented pending-run limit, and each job has
-a bounded timeout. Local dry resolution proves the Windows legs only. The hosted matrix remains
-required evidence for the Ubuntu legs and is not claimed by this candidate.
+a bounded timeout. Local dry resolution proves the Windows legs only. R10 passed all four hosted
+legs; R11 still needs its own exact-tree hosted matrix and does not inherit authority from that
+predecessor result.
 
-The installer is audit-only and refuses `-Apply`. Do not enable/start the task, invoke a provider,
-open a gate, run a canary, or claim adoption from this candidate.
+The disposition remains
+`DISTINGUISH(PENDING_INSTALLED_CHOKE_POINT_COMPLETE_ACTION_GRAPH_SHADOW_CONTAINMENT)`. The installer
+is audit-only and refuses `-Apply`. Do not enable/start the task, invoke a provider, open a gate, run
+a canary, or claim adoption from this candidate.
