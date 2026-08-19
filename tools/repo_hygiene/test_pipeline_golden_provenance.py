@@ -58,6 +58,9 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         }
         paths.update(record["path"] for record in manifest["generator"]["sources"])
         paths.update(record["path"] for record in manifest["inputs"])
+        approval_witness = manifest.get("review", {}).get("approval_witness")
+        if isinstance(approval_witness, dict):
+            paths.add(approval_witness["path"])
         for relative in paths:
             destination = self.repo / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +200,22 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             ),
         }
         manifest["unknowns"]["whole_artifact_review_range"] = reviewed_range
+        phase3_path = self.repo / phase3["path"]
+        phase3_content = self._read_json(phase3_path)
+        phase3_content["clips"][0]["frames"][0]["sha256"] = "0" * 64
+        self._write_json(phase3_path, phase3_content)
+        phase3["sha256"] = self._sha256(phase3_path, phase3["hash_mode"])
+        manifest["cross_golden"]["pairs"][0]["status"] = "known_mismatch"
+        source_state = manifest["generator"]["source_state_commit"]
+        reviewed_head = reviewed_range.split("..", 1)[1]
+        phase3_bytes = phase3_path.read_bytes()
+        self.git_witness = OverlayGitWitness(
+            self.git_witness,
+            {
+                (source_state, phase3["path"]): phase3_bytes,
+                (reviewed_head, phase3["path"]): phase3_bytes,
+            },
+        )
         phase3_witness = {
             "schema_version": 1,
             "kind": "tracked_phase3_approval",
@@ -247,7 +266,7 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         phase3_record = manifest["cross_golden"]["phase3"]
         phase3_path = self.repo / phase3_record["path"]
         phase3 = self._read_json(phase3_path)
-        phase3["clips"][0]["frames"][0]["sha256"] = pipeline["tiny_dual_iso.full16.frame0"]
+        phase3["clips"][0]["frames"][0]["sha256"] = "0" * 64
         self._write_json(phase3_path, phase3)
         phase3_record["sha256"] = self._sha256(phase3_path, phase3_record["hash_mode"])
         self._write_manifest(manifest)
@@ -300,7 +319,7 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
         manifest = self._manifest()
         manifest["artifact"]["introduced_by"] = "69c8c428fb18bba5a8b7eb67092daaaf0e2f47e2"
         self._write_manifest(manifest)
-        with self.assertRaisesRegex(ProvenanceValidationError, "not the last artifact-changing commit"):
+        with self.assertRaisesRegex(ProvenanceValidationError, "does not contain the declared artifact blob"):
             self._validate()
 
     def test_hosted_evidence_requires_full_sha(self) -> None:
