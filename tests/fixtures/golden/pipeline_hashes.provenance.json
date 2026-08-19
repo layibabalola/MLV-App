@@ -49,7 +49,7 @@
     "reason": "The repository owner approved the exact 15-key before/after synchronization at 08f38ea73887e9ae3b3e84673f03d82267473fab after the deterministic hosted producer and frozen known-good output agreed.",
     "approval_witness": {
       "path": "receipts/pipeline-golden-sync-human-approval-20260819.json",
-      "sha256": "9d6e9dfba29d9b45d3049f23b8d3075124989cdf58339b6bb2aec527c3266825",
+      "sha256": "77232c9e283e1d4b731b52de1de8b855d6874ff2c311144c6248e9d3b15cc538",
       "hash_mode": "lf_normalized_sha256"
     }
   },
@@ -61,7 +61,7 @@
   },
   "generator": {
     "executable": "pipeline_tests.exe",
-    "source_state_commit": "1649723f96ec40cf782e7233051c6853ec7edbd7",
+    "source_state_commit": "6195dc24714ccbe1a3b7481723e031c7c21ee1a1",
     "dependency_snapshot": {
       "complete": false,
       "scope": "listed_generator_sources_and_declared_fixture_receipt_inputs_only",
