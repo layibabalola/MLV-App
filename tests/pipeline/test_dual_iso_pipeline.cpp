@@ -150,6 +150,63 @@ static QByteArray read_all_bytes(const QString & path)
     return file.readAll();
 }
 
+class ScopedAsyncWriterEnvironment
+{
+public:
+    ScopedAsyncWriterEnvironment()
+    {
+        static const char * const keys[] = {
+            "MLVAPP_EXPORT_STAGE_PROFILER",
+            "MLVAPP_EXPORT_STAGE_PROFILE_FILE",
+            "MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID",
+            "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"
+        };
+        for(const char * key : keys)
+        {
+            Entry entry;
+            entry.key = QByteArray(key);
+            entry.was_set = qEnvironmentVariableIsSet(key);
+            entry.value = qgetenv(key);
+            entries_.push_back(entry);
+        }
+    }
+
+    ~ScopedAsyncWriterEnvironment()
+    {
+        for(const Entry & entry : entries_)
+        {
+            if(entry.was_set)
+            {
+                qputenv(entry.key.constData(), entry.value);
+            }
+            else
+            {
+                qunsetenv(entry.key.constData());
+            }
+        }
+    }
+
+private:
+    struct Entry
+    {
+        QByteArray key;
+        QByteArray value;
+        bool was_set = false;
+    };
+    std::vector<Entry> entries_;
+};
+
+class ScopedDngExportProfilerReset
+{
+public:
+    ScopedDngExportProfilerReset() { resetDngExportProfilerForTesting(); }
+    ~ScopedDngExportProfilerReset() { resetDngExportProfilerForTesting(); }
+};
+
 static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
                                                     bool profiler_enabled,
                                                     const QString & dng_path,
@@ -3041,6 +3098,77 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterFreshProfileDoesNotInheritDisabledWriterJobs)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    ScopedAsyncWriterEnvironment environment_guard;
+    ScopedDngExportProfilerReset profiler_guard;
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * disabled_writer = createDngPayloadWriter();
+    ASSERT_TRUE(disabled_writer != nullptr);
+    QByteArray disabled_first_path = temp_dir.filePath(QStringLiteral("disabled-first.dng")).toLocal8Bit();
+    QByteArray disabled_second_path = temp_dir.filePath(QStringLiteral("disabled-second.dng")).toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(disabled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   disabled_first_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(disabled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   disabled_second_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(disabled_writer));
+
+    const QString profile_path = temp_dir.filePath(QStringLiteral("fresh-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("fresh-profile-test"));
+
+    dngPayloadWriter_t * profiled_writer = createDngPayloadWriter();
+    ASSERT_TRUE(profiled_writer != nullptr);
+    QByteArray profiled_path = temp_dir.filePath(QStringLiteral("profiled.dng")).toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(profiled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   profiled_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(profiled_writer));
+    freeDngObject(dng);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(read_all_bytes(profile_path));
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
+
 }
 
 TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
