@@ -400,6 +400,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(local["hostedNonFiniteJsonForbidden"])
         self.assertTrue(local["hostedJunitFullSemanticCrossCheck"])
         self.assertTrue(local["hostedJunitExactRootChildren"])
+        self.assertTrue(local["hostedFatalRequiresLiveGitBinding"])
         self.assertEqual(
             local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
@@ -1419,6 +1420,28 @@ class SupervisorTests(unittest.TestCase):
             replaced_fatal["invalidExistingDiagnostic"]["sha256"],
             hosted_runner._sha256(forged_fatal),
         )
+        hosted_runner._verify_fatal_diagnostic(fatal)
+
+        git_error_fatal = {
+            "schema": "mlv-provider-control-hosted-fatal-diagnostic/v1",
+            "completeEvidenceBundle": False,
+            "authority": False,
+            "errorType": "RuntimeError",
+            "error": "attacker claims Git failed",
+            "traceback": "forged",
+            "environment": hosted_runner._runtime_environment(),
+            "gitError": "ATTACKER CLAIMS GIT FAILED",
+        }
+        fatal.write_text(json.dumps(git_error_fatal), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "keys are invalid"):
+            hosted_runner._verify_fatal_diagnostic(fatal)
+        try:
+            raise RuntimeError("replace unbound Git-error diagnostic")
+        except RuntimeError as error:
+            hosted_runner._write_fatal_diagnostic(args, error)
+        replaced_git_error = hosted_runner._strict_json(fatal)
+        self.assertIn("git", replaced_git_error)
+        self.assertNotIn("gitError", replaced_git_error)
         hosted_runner._verify_fatal_diagnostic(fatal)
         fatal.unlink()
 

@@ -75,7 +75,8 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
   non-authoritative fatal diagnostic that must separately pass strict schema, zero-authority,
   live-environment, and head/tree validation before upload. A forged existing fatal is replaced by a
-  bound invalid-predecessor receipt rather than preserved as evidence. Evidence remains retained for
+  bound invalid-predecessor receipt rather than preserved as evidence; a self-declared `gitError`
+  cannot substitute for a live exact head/tree binding. Evidence remains retained for
   30 days rather than permanently
   archived, and the exact verdict is written to the hosted step summary. R15 is not hosted yet and
   may not inherit R14's result.

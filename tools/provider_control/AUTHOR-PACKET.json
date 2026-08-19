@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v6",
   "status": "DISTINGUISH_PROJECT_R15_HOSTED_EVIDENCE_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T13:25:55Z",
+  "capturedAt": "2026-08-19T13:28:38Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "canonicalDoctrine": {
     "generation": "R26",
@@ -116,6 +116,7 @@
     "hostedNonFiniteJsonForbidden": true,
     "hostedJunitFullSemanticCrossCheck": true,
     "hostedJunitExactRootChildren": true,
+    "hostedFatalRequiresLiveGitBinding": true,
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -147,8 +148,8 @@
   ],
   "subjects": [
     {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 43884, "sha256": "0bd4116a29304c86fe124f692efa81fe4904506731c58f1a1e05761ac9e9da04"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 77102, "sha256": "06d1e0d66571c377b1ae875e963879c1dce18d295882cdf203138bcd88a839c3"},
-    {"path": "tools/provider_control/tests/hosted_runner.py", "bytes": 36085, "sha256": "1b04ea8a8449ac05c7ca72483acad4d5e23f204644ca692aa0280cb695194feb"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 78212, "sha256": "232549d8122235dee4075188e8ba0d431d8758e709817d2d02e4f505d14c2f93"},
+    {"path": "tools/provider_control/tests/hosted_runner.py", "bytes": 35729, "sha256": "b9c5c98f933565199374b0dfba67fb882c42f6acfc3d93da805d509547d9338d"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 1367, "sha256": "2ee4213711eeadc5eb4ece0ab161557ee123751e50aaa72f61150a5b4ed41f59"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"},
@@ -159,8 +160,8 @@
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v2.schema.json", "bytes": 18842, "sha256": "c7edee3dc6973a9aa398c8425c9c85c09d3370ad0706df22e2438fcf01a6b4d3"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/README.md", "bytes": 7374, "sha256": "26fb65407523de11817c8b3f5ae5d24f9f06130d7b175b8684bf8d398947ff4c"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 11325, "sha256": "9378844bf1a8d4138485b98b350fc4e2f5a49e8bd0826c544cd378b2bf93f45f"},
+    {"path": "tools/provider_control/README.md", "bytes": 7485, "sha256": "356e07f4e44b2d7c6ef66bd000e1a5aebbff50b8b35825c10ca632bde59b21cb"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 11408, "sha256": "9c0363191cd25f68ace73e458c0a7f668109ab8c991f006ca8094fd14a6726bc"},
     {"path": ".gitattributes", "bytes": 267, "sha256": "a54a31bbb6bdb0b34a3871f9d3a80fa0d5df04cb204dcbbe107b5009c8885e60"},
     {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
     {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},

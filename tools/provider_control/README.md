@@ -63,7 +63,8 @@ written to the hosted step summary, and runner exceptions after argument parsing
 non-authoritative fatal diagnostic rather than a partial bundle. That diagnostic has its own strict
 schema, live environment and head/tree verifier; a forged preexisting fatal file is replaced by a
 zero-authority invalid-predecessor receipt and can never pass the fatal upload route merely by
-existing. The narrowly scoped dot-directory files are explicitly included by the pinned upload
+existing. A self-declared Git error is not evidence: verified fatal uploads require the live
+checkout's exact head/tree. The narrowly scoped dot-directory files are explicitly included by the pinned upload
 action; missing files are an error. Retention is
 30 days and is not a permanent evidence archive. R15 itself
 remains unhosted until its own four legs produce those artifacts; the R14 console-only run cannot be

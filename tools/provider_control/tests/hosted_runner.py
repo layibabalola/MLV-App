@@ -617,9 +617,9 @@ def _verify_fatal_diagnostic(path: Path) -> None:
     diagnostic = _strict_json(path)
     base_keys = {
         "schema", "completeEvidenceBundle", "authority", "errorType", "error",
-        "traceback", "environment",
+        "traceback", "environment", "git",
     }
-    optional = {"git", "gitError", "invalidExistingDiagnostic"}
+    optional = {"invalidExistingDiagnostic"}
     if not base_keys <= set(diagnostic) or set(diagnostic) - base_keys - optional:
         raise ValueError("fatal diagnostic keys are invalid")
     if diagnostic["schema"] != "mlv-provider-control-hosted-fatal-diagnostic/v1":
@@ -633,17 +633,12 @@ def _verify_fatal_diagnostic(path: Path) -> None:
         raise ValueError("fatal diagnostic error fields are invalid")
     if diagnostic["environment"] != _runtime_environment():
         raise ValueError("fatal diagnostic environment does not match the live verifier process")
-    if ("git" in diagnostic) == ("gitError" in diagnostic):
-        raise ValueError("fatal diagnostic must contain exactly one Git outcome")
-    if "git" in diagnostic:
-        expected_git = {
-            "head": _git("rev-parse", "HEAD"),
-            "tree": _git("rev-parse", "HEAD^{tree}"),
-        }
-        if diagnostic["git"] != expected_git:
-            raise ValueError("fatal diagnostic Git binding mismatch")
-    elif not isinstance(diagnostic["gitError"], str) or not diagnostic["gitError"]:
-        raise ValueError("fatal diagnostic Git error is invalid")
+    expected_git = {
+        "head": _git("rev-parse", "HEAD"),
+        "tree": _git("rev-parse", "HEAD^{tree}"),
+    }
+    if diagnostic["git"] != expected_git:
+        raise ValueError("fatal diagnostic Git binding mismatch")
     if "invalidExistingDiagnostic" in diagnostic:
         invalid = diagnostic["invalidExistingDiagnostic"]
         if not isinstance(invalid, dict) or set(invalid) != {
