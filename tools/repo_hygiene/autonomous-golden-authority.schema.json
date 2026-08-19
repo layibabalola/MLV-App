@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app/schemas/autonomous-golden-authority-v2.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "ownerDelegation", "authorityBoundary", "signerClasses", "independence", "decisionClasses", "requiredEvidence", "failClosedOn", "receiptContracts", "antiLaundering", "promotion", "activationPrerequisites"],
+  "properties": {
+    "schema": {"const": "mlv-app/autonomous-golden-authority-policy/v2"},
+    "status": {"const": "CANDIDATE_ZERO_AUTHORITY"},
+    "ownerDelegation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["routineHumanApprovalRequiredUntilActivation", "postActivationRoutineHumanApprovalRequired", "defaultOnAmbiguity", "notificationModeAfterActivation", "humanOverrideActions", "humanOverrideMayPromote", "objectiveVetoMayBeOverridden"],
+      "properties": {
+        "routineHumanApprovalRequiredUntilActivation": {"const": true},
+        "postActivationRoutineHumanApprovalRequired": {"const": false},
+        "defaultOnAmbiguity": {"const": "REJECT_PRESERVE_BASELINE"},
+        "notificationModeAfterActivation": {"const": "RECEIPT_ONLY_NO_RESPONSE_REQUIRED"},
+        "humanOverrideActions": {"$ref": "#/$defs/humanOverrideActions"},
+        "humanOverrideMayPromote": {"const": false},
+        "objectiveVetoMayBeOverridden": {"const": false}
+      }
+    },
+    "authorityBoundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["promotionActor", "implementationProposerRecused", "providerRuntimeAuthority", "automaticLaunchGate", "goldenPromotionAuthority"],
+      "properties": {
+        "promotionActor": {"const": "BROKER_ONLY"},
+        "implementationProposerRecused": {"const": true},
+        "providerRuntimeAuthority": {"const": false},
+        "automaticLaunchGate": {"const": "CLOSED"},
+        "goldenPromotionAuthority": {"const": "NOT_INSTALLED"}
+      }
+    },
+    "signerClasses": {"$ref": "#/$defs/allSignerClasses"},
+    "independence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctIdentity", "distinctKey", "distinctModelFamily", "distinctOperatorClass", "proposerAndBrokerExcluded", "trustedRegistryAndRevocationRequired", "commitThenReveal", "receiptExpiryAndReplayProtectionRequired", "modelConsensusCannotOverrideOutputFailure"],
+      "properties": {
+        "distinctIdentity": {"const": true}, "distinctKey": {"const": true},
+        "distinctModelFamily": {"const": true}, "distinctOperatorClass": {"const": true},
+        "proposerAndBrokerExcluded": {"const": true},
+        "trustedRegistryAndRevocationRequired": {"const": true},
+        "commitThenReveal": {"const": true},
+        "receiptExpiryAndReplayProtectionRequired": {"const": true},
+        "modelConsensusCannotOverrideOutputFailure": {"const": true}
+      }
+    },
+    "decisionClasses": {
+      "type": "object", "additionalProperties": false,
+      "required": ["A_REPRESENTATION_ONLY", "B_MECHANICALLY_PREDICTED", "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"],
+      "properties": {
+        "A_REPRESENTATION_ONLY": {"$ref": "#/$defs/classA"},
+        "B_MECHANICALLY_PREDICTED": {"$ref": "#/$defs/classB"},
+        "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS": {"$ref": "#/$defs/classC"}
+      }
+    },
+    "requiredEvidence": {"$ref": "#/$defs/requiredEvidence"},
+    "failClosedOn": {"$ref": "#/$defs/failClosedOn"},
+    "receiptContracts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["signerReceiptSchema", "promotionReceiptSchema", "referenceSemanticVerifier", "signerReceiptMaxLifetimeSeconds", "verdictCommitmentFormula", "proposalPolicyAndEvidenceDigestBound", "commitRevealNonceBound", "trustedSignerRegistryEpochBound", "expiryAndOneUseLedgerRequired"],
+      "properties": {
+        "signerReceiptSchema": {"const": "tools/repo_hygiene/autonomous-golden-signer-receipt.schema.json"},
+        "promotionReceiptSchema": {"const": "tools/repo_hygiene/autonomous-golden-promotion-receipt.schema.json"},
+        "referenceSemanticVerifier": {"const": "tools/repo_hygiene/autonomous_golden_authority.py"},
+        "signerReceiptMaxLifetimeSeconds": {"const": 7200},
+        "verdictCommitmentFormula": {"const": "SHA256_UTF8_LF_JOIN_PROPOSAL_POLICY_EVIDENCE_SIGNER_VERDICT_REVEAL_NONCE"},
+        "proposalPolicyAndEvidenceDigestBound": {"const": true},
+        "commitRevealNonceBound": {"const": true},
+        "trustedSignerRegistryEpochBound": {"const": true},
+        "expiryAndOneUseLedgerRequired": {"const": true}
+      }
+    },
+    "antiLaundering": {
+      "type": "object", "additionalProperties": false,
+      "required": ["productGoldenVerifierPolicySameTransactionForbidden", "verifierAndPolicyMustLandFirst", "candidateCannotSupplyKnownGoodArtifact", "carryForwardRequiresAuthoritySensitiveBlobIdentity"],
+      "properties": {
+        "productGoldenVerifierPolicySameTransactionForbidden": {"const": true},
+        "verifierAndPolicyMustLandFirst": {"const": true},
+        "candidateCannotSupplyKnownGoodArtifact": {"const": true},
+        "carryForwardRequiresAuthoritySensitiveBlobIdentity": {"const": true}
+      }
+    },
+    "promotion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["states", "allowedEdges", "durableTransactionIdRequired", "compareAndSwapExpectedHeadRequired", "brokerOwnedAtomicCommit", "promotionCommitMayChangeOnlyGoldenAndReceipt", "exactPromotionHeadCiRequired", "crashRecoveryRequired", "rollbackReceiptRequired", "automaticRollbackOnPostPromotionMismatch", "quarantineAfterFailureRequired"],
+      "properties": {
+        "states": {"$ref": "#/$defs/promotionStates"},
+        "allowedEdges": {"$ref": "#/$defs/promotionEdges"},
+        "durableTransactionIdRequired": {"const": true},
+        "compareAndSwapExpectedHeadRequired": {"const": true},
+        "brokerOwnedAtomicCommit": {"const": true},
+        "promotionCommitMayChangeOnlyGoldenAndReceipt": {"const": true},
+        "exactPromotionHeadCiRequired": {"const": true},
+        "crashRecoveryRequired": {"const": true},
+        "rollbackReceiptRequired": {"const": true},
+        "automaticRollbackOnPostPromotionMismatch": {"const": true},
+        "quarantineAfterFailureRequired": {"const": true}
+      }
+    },
+    "activationPrerequisites": {"$ref": "#/$defs/activationPrerequisites"}
+  },
+  "$defs": {
+    "allSignerClasses": {"type": "array", "prefixItems": [{"const": "HOSTED_PRODUCT_ORACLE"}, {"const": "STRANGER_REVIEW"}, {"const": "HUB_DOCTRINE"}, {"const": "SECOND_STRANGER_REVIEW"}, {"const": "OUTPUT_SPECIALIST"}], "items": false, "minItems": 5, "maxItems": 5, "uniqueItems": true},
+    "coreSignerClasses": {"type": "array", "prefixItems": [{"const": "HOSTED_PRODUCT_ORACLE"}, {"const": "STRANGER_REVIEW"}, {"const": "HUB_DOCTRINE"}], "items": false, "minItems": 3, "maxItems": 3, "uniqueItems": true},
+    "humanOverrideActions": {"type": "array", "prefixItems": [{"const": "REJECT"}, {"const": "SAFETY_CLOSE"}, {"const": "ROLLBACK"}], "items": false, "minItems": 3, "maxItems": 3, "uniqueItems": true},
+    "requiredEvidence": {"type": "array", "prefixItems": [{"const": "CANDIDATE_COMMIT_AND_TREE"}, {"const": "IMMUTABLE_KNOWN_GOOD_BUILD_AND_MANIFEST"}, {"const": "EXACT_INPUT_CORPUS_DIGESTS"}, {"const": "OLD_AND_PROPOSED_GOLDEN_DIGESTS"}, {"const": "BASELINE_AND_CANDIDATE_ACTUAL_OUTPUT_DIGESTS"}, {"const": "PER_KEY_BEFORE_AFTER_VALUES"}, {"const": "VALUES_PIXELS_CADENCE_AB"}, {"const": "TEST_INVENTORY_FAILURES_AND_SKIPS"}, {"const": "TOOLCHAIN_AND_ENVIRONMENT"}, {"const": "RATIFIED_PREDICTION_OR_STANDING_POLICY"}, {"const": "SHADOW_CYCLE_RECEIPT"}, {"const": "SIGNER_RECEIPTS_AND_POLICY_DIGEST"}], "items": false, "minItems": 12, "maxItems": 12, "uniqueItems": true},
+    "failClosedOn": {"type": "array", "prefixItems": [{"const": "MISSING_EVIDENCE"}, {"const": "OUTPUT_GATE_FAILURE"}, {"const": "NEW_SKIP"}, {"const": "DIRTY_TREE"}, {"const": "VERIFIER_OR_POLICY_CHANGED_IN_PROPOSAL"}, {"const": "UNKNOWN_DECISION_CLASS"}, {"const": "UNKNOWN_OUTPUT_DELTA"}, {"const": "BASELINE_MISMATCH"}, {"const": "SIGNATURE_INVALID_OR_REVOKED"}, {"const": "SIGNER_OVERLAP"}, {"const": "SIGNER_ABSTENTION_OR_TIMEOUT"}, {"const": "SIGNER_DISAGREEMENT"}, {"const": "RECEIPT_EXPIRED_OR_REPLAYED"}, {"const": "UNEXPLAINED_CROSS_RUN_VARIANCE"}], "items": false, "minItems": 14, "maxItems": 14, "uniqueItems": true},
+    "promotionStates": {"type": "array", "prefixItems": [{"const": "PREPARED"}, {"const": "SHADOW_PASSED"}, {"const": "COMMITTED"}, {"const": "ROLLED_BACK"}, {"const": "QUARANTINED"}], "items": false, "minItems": 5, "maxItems": 5, "uniqueItems": true},
+    "promotionEdges": {"type": "array", "prefixItems": [{"const": "PREPARED->SHADOW_PASSED"}, {"const": "SHADOW_PASSED->COMMITTED"}, {"const": "PREPARED->QUARANTINED"}, {"const": "SHADOW_PASSED->QUARANTINED"}, {"const": "COMMITTED->ROLLED_BACK"}, {"const": "ROLLED_BACK->QUARANTINED"}], "items": false, "minItems": 6, "maxItems": 6, "uniqueItems": true},
+    "activationPrerequisites": {"type": "array", "prefixItems": [{"const": "SEPARATELY_REVIEWED_ACTIVATION_COMMIT"}, {"const": "EXECUTABLE_FAIL_CLOSED_VERIFIER"}, {"const": "PINNED_SIGNER_REGISTRY_KEYS_AND_REVOCATION"}, {"const": "IMMUTABLE_KNOWN_GOOD_ARTIFACT_TRUST_ROOT"}, {"const": "INSTALLED_BROKER_TWO_PHASE_CAS_AND_RECOVERY"}, {"const": "ONE_USE_RECEIPT_LEDGER"}, {"const": "HOSTED_HOSTILE_AND_SHADOW_PROOF"}, {"const": "ACTIVATION_RECEIPT_BOUND_TO_EXACT_POLICY_AND_IMPLEMENTATION"}], "items": false, "minItems": 8, "maxItems": 8, "uniqueItems": true},
+    "classA": {"type": "object", "additionalProperties": false, "required": ["requiredSignerClasses", "minimumSignerClasses", "unanimous", "semanticOutputDelta", "shadowCycles"], "properties": {"requiredSignerClasses": {"$ref": "#/$defs/coreSignerClasses"}, "minimumSignerClasses": {"const": 3}, "unanimous": {"const": true}, "semanticOutputDelta": {"const": "ZERO"}, "shadowCycles": {"type": "integer", "minimum": 1}}},
+    "classB": {"type": "object", "additionalProperties": false, "required": ["requiredSignerClasses", "minimumSignerClasses", "unanimous", "requiresPreexistingRatifiedSpecification", "independentHostedRuns", "shadowCycles"], "properties": {"requiredSignerClasses": {"$ref": "#/$defs/coreSignerClasses"}, "minimumSignerClasses": {"const": 3}, "unanimous": {"const": true}, "requiresPreexistingRatifiedSpecification": {"const": true}, "independentHostedRuns": {"type": "integer", "minimum": 2}, "shadowCycles": {"type": "integer", "minimum": 1}}},
+    "classC": {"type": "object", "additionalProperties": false, "required": ["requiredSignerClasses", "minimumSignerClasses", "unanimous", "requiresStandingBoundedPolicy", "whenPolicyMissing", "shadowCycles"], "properties": {"requiredSignerClasses": {"$ref": "#/$defs/allSignerClasses"}, "minimumSignerClasses": {"const": 5}, "unanimous": {"const": true}, "requiresStandingBoundedPolicy": {"const": true}, "whenPolicyMissing": {"const": "REJECT_PRESERVE_BASELINE"}, "shadowCycles": {"type": "integer", "minimum": 1}}}
+  }
+}

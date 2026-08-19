@@ -11,6 +11,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
+from .autonomous_golden_authority import (
+    signer_commitment,
+    validate_promotion_receipt_semantics,
+    validate_signer_receipt_semantics,
+)
+
 from .closeout import (
     approve_transaction,
     evaluate_closeout_triggers,
@@ -475,6 +483,314 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertFalse(receipt["scope"]["reblessAuthority"])
         self.assertEqual(receipt["scope"]["automaticLaunchGate"], "CLOSED")
         self.assertTrue(receipt["scope"]["humanBeforeAfterReviewRequired"])
+
+    def test_autonomous_golden_authority_is_fail_closed_and_recuses_proposer(self) -> None:
+        policy_path = (
+            ROOT / "tools" / "repo_hygiene" / "autonomous-golden-authority.json"
+        )
+        schema_path = (
+            ROOT
+            / "tools"
+            / "repo_hygiene"
+            / "autonomous-golden-authority.schema.json"
+        )
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        validator = Draft202012Validator(schema)
+        validator.validate(policy)
+
+        self.assertTrue(
+            policy["ownerDelegation"]["routineHumanApprovalRequiredUntilActivation"]
+        )
+        self.assertFalse(
+            policy["ownerDelegation"]["postActivationRoutineHumanApprovalRequired"]
+        )
+        self.assertEqual(
+            policy["ownerDelegation"]["defaultOnAmbiguity"],
+            "REJECT_PRESERVE_BASELINE",
+        )
+        self.assertTrue(policy["authorityBoundary"]["implementationProposerRecused"])
+        self.assertFalse(policy["authorityBoundary"]["providerRuntimeAuthority"])
+        self.assertEqual(policy["authorityBoundary"]["automaticLaunchGate"], "CLOSED")
+        self.assertEqual(
+            policy["authorityBoundary"]["goldenPromotionAuthority"],
+            "NOT_INSTALLED",
+        )
+        self.assertTrue(
+            policy["independence"]["modelConsensusCannotOverrideOutputFailure"]
+        )
+        self.assertGreaterEqual(
+            policy["decisionClasses"]["B_MECHANICALLY_PREDICTED"][
+                "independentHostedRuns"
+            ],
+            2,
+        )
+        required_core_signers = [
+            "HOSTED_PRODUCT_ORACLE",
+            "STRANGER_REVIEW",
+            "HUB_DOCTRINE",
+        ]
+        for decision_class in (
+            "A_REPRESENTATION_ONLY",
+            "B_MECHANICALLY_PREDICTED",
+        ):
+            self.assertEqual(
+                policy["decisionClasses"][decision_class]["requiredSignerClasses"],
+                required_core_signers,
+            )
+            self.assertGreaterEqual(
+                policy["decisionClasses"][decision_class]["shadowCycles"], 1
+            )
+        class_c = policy["decisionClasses"]["C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"]
+        self.assertEqual(class_c["minimumSignerClasses"], 5)
+        self.assertTrue(class_c["unanimous"])
+        self.assertTrue(class_c["requiresStandingBoundedPolicy"])
+        self.assertEqual(class_c["whenPolicyMissing"], "REJECT_PRESERVE_BASELINE")
+        self.assertEqual(class_c["requiredSignerClasses"], policy["signerClasses"])
+        self.assertEqual(
+            policy["ownerDelegation"]["humanOverrideActions"],
+            ["REJECT", "SAFETY_CLOSE", "ROLLBACK"],
+        )
+        self.assertFalse(policy["ownerDelegation"]["humanOverrideMayPromote"])
+        self.assertFalse(policy["ownerDelegation"]["objectiveVetoMayBeOverridden"])
+        self.assertTrue(
+            policy["promotion"]["promotionCommitMayChangeOnlyGoldenAndReceipt"]
+        )
+
+        hostile_mutations = (
+            (
+                "routine human gate restored",
+                ("ownerDelegation", "routineHumanApprovalRequiredUntilActivation"),
+                False,
+            ),
+            (
+                "ambiguity auto-approved",
+                ("ownerDelegation", "defaultOnAmbiguity"),
+                "AUTO_APPROVE",
+            ),
+            (
+                "proposer self-approval",
+                ("authorityBoundary", "implementationProposerRecused"),
+                False,
+            ),
+            (
+                "provider authority smuggled",
+                ("authorityBoundary", "providerRuntimeAuthority"),
+                True,
+            ),
+            (
+                "model vote overrides output",
+                ("independence", "modelConsensusCannotOverrideOutputFailure"),
+                False,
+            ),
+            (
+                "class C skips standing policy",
+                (
+                    "decisionClasses",
+                    "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS",
+                    "requiresStandingBoundedPolicy",
+                ),
+                False,
+            ),
+            (
+                "promotion mixes product",
+                ("promotion", "promotionCommitMayChangeOnlyGoldenAndReceipt"),
+                False,
+            ),
+            (
+                "human override promotes",
+                ("ownerDelegation", "humanOverrideMayPromote"),
+                True,
+            ),
+            (
+                "objective veto overridden",
+                ("ownerDelegation", "objectiveVetoMayBeOverridden"),
+                True,
+            ),
+        )
+        for label, path, value in hostile_mutations:
+            with self.subTest(label=label):
+                hostile = json.loads(json.dumps(policy))
+                target = hostile
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.assertTrue(list(validator.iter_errors(hostile)))
+
+        for field in ("requiredEvidence", "failClosedOn", "activationPrerequisites"):
+            for index, token in enumerate(policy[field]):
+                with self.subTest(field=field, deleted=token):
+                    hostile = json.loads(json.dumps(policy))
+                    del hostile[field][index]
+                    self.assertTrue(list(validator.iter_errors(hostile)))
+                with self.subTest(field=field, substituted=token):
+                    hostile = json.loads(json.dumps(policy))
+                    hostile[field][index] = "ARBITRARY_WEAK_LABEL"
+                    self.assertTrue(list(validator.iter_errors(hostile)))
+
+        for decision_class in (
+            "A_REPRESENTATION_ONLY",
+            "B_MECHANICALLY_PREDICTED",
+            "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS",
+        ):
+            with self.subTest(decision_class=decision_class, weakened_signers=True):
+                hostile = json.loads(json.dumps(policy))
+                hostile["decisionClasses"][decision_class]["requiredSignerClasses"] = [
+                    "STRANGER_REVIEW"
+                ]
+                self.assertTrue(list(validator.iter_errors(hostile)))
+
+        for receipt_schema_name in (
+            "autonomous-golden-signer-receipt.schema.json",
+            "autonomous-golden-promotion-receipt.schema.json",
+        ):
+            receipt_schema = json.loads(
+                (ROOT / "tools" / "repo_hygiene" / receipt_schema_name).read_text(
+                    encoding="utf-8"
+                )
+            )
+            Draft202012Validator.check_schema(receipt_schema)
+
+        docs = (ROOT / "docs" / "autonomous-golden-authority.md").read_text(
+            encoding="utf-8"
+        )
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("receipts, not approval requests", docs)
+        self.assertRegex(docs, r"cannot\s+vote a failing output gate green")
+        self.assertIn("human golden approval remains mandatory", docs)
+        self.assertIn("Human approval remains mandatory today", agents)
+        self.assertIn("docs/autonomous-golden-authority.md", agents)
+
+    def test_autonomous_golden_receipts_reject_illegal_edges_replay_and_false_independence(
+        self,
+    ) -> None:
+        schema_root = ROOT / "tools" / "repo_hygiene"
+        signer_schema = json.loads(
+            (schema_root / "autonomous-golden-signer-receipt.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        promotion_schema = json.loads(
+            (
+                schema_root / "autonomous-golden-promotion-receipt.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        signer_validator = Draft202012Validator(signer_schema)
+        promotion_validator = Draft202012Validator(promotion_schema)
+        reveal_nonce = "a" * 64
+        signer_receipt = {
+            "schema": "mlv-app/autonomous-golden-signer-receipt/v1",
+            "receiptId": "agr-" + "1" * 32,
+            "proposalDigest": "sha256:" + "2" * 64,
+            "policyDigest": "sha256:" + "3" * 64,
+            "evidenceDigest": "sha256:" + "4" * 64,
+            "decisionClass": "A_REPRESENTATION_ONLY",
+            "signerClass": "HOSTED_PRODUCT_ORACLE",
+            "signerId": "hosted-oracle-1",
+            "keyId": "oracle-key-1",
+            "keySha256": "sha256:" + "5" * 64,
+            "registryEpoch": 7,
+            "modelFamily": "objective-hosted-runner",
+            "operatorClass": "HOSTED_ORACLE",
+            "proposerId": "implementation-lane",
+            "brokerId": "golden-broker-1",
+            "commitNonceSha256": "sha256:"
+            + hashlib.sha256(reveal_nonce.encode("utf-8")).hexdigest(),
+            "revealNonce": reveal_nonce,
+            "committedVerdictSha256": "",
+            "verdict": "APPROVE",
+            "issuedAtUtc": "2026-08-19T20:00:00Z",
+            "expiresAtUtc": "2026-08-19T21:00:00Z",
+            "signatureHmacSha256": "sha256:" + "6" * 64,
+            "authority": False,
+        }
+        signer_receipt["committedVerdictSha256"] = signer_commitment(signer_receipt)
+        signer_validator.validate(signer_receipt)
+        validate_signer_receipt_semantics(signer_receipt)
+
+        semantic_signer_hostiles = (
+            ("signer aliases proposer", {"signerId": "implementation-lane"}),
+            ("signer aliases broker", {"signerId": "golden-broker-1"}),
+            ("expiry precedes issue", {"expiresAtUtc": "2026-08-19T19:59:59Z"}),
+            ("receipt lifetime unbounded", {"expiresAtUtc": "2026-08-20T20:00:00Z"}),
+            ("reveal does not match commitment", {"revealNonce": "b" * 64}),
+        )
+        for label, changes in semantic_signer_hostiles:
+            with self.subTest(label=label):
+                hostile = dict(signer_receipt)
+                hostile.update(changes)
+                with self.assertRaises(ValueError):
+                    validate_signer_receipt_semantics(hostile)
+        with self.assertRaisesRegex(ValueError, "replayed"):
+            validate_signer_receipt_semantics(
+                signer_receipt, consumed_receipt_ids={signer_receipt["receiptId"]}
+            )
+
+        promotion_receipt = {
+            "schema": "mlv-app/autonomous-golden-promotion-receipt/v1",
+            "transactionId": "agt-" + "7" * 32,
+            "decisionClass": "A_REPRESENTATION_ONLY",
+            "state": "PREPARED",
+            "previousState": None,
+            "proposalDigest": "sha256:" + "2" * 64,
+            "policyDigest": "sha256:" + "3" * 64,
+            "evidenceDigest": "sha256:" + "4" * 64,
+            "signerReceiptDigests": [
+                "sha256:" + "7" * 64,
+                "sha256:" + "8" * 64,
+                "sha256:" + "9" * 64,
+            ],
+            "expectedHead": "a" * 40,
+            "resultHead": None,
+            "oldGoldenSha256": "sha256:" + "a" * 64,
+            "proposedGoldenSha256": "sha256:" + "b" * 64,
+            "shadowReceiptSha256": None,
+            "rollbackReceiptSha256": None,
+            "quarantineReason": None,
+            "sequence": 1,
+            "issuedAtUtc": "2026-08-19T20:00:00Z",
+            "brokerId": "golden-broker-1",
+            "brokerSignatureHmacSha256": "sha256:" + "c" * 64,
+            "providerAuthority": False,
+            "automaticLaunchGate": "CLOSED",
+        }
+        promotion_validator.validate(promotion_receipt)
+        validate_promotion_receipt_semantics(promotion_receipt)
+
+        schema_promotion_hostiles = (
+            ("prepared from committed", {"previousState": "COMMITTED"}),
+            (
+                "committed skips shadow",
+                {
+                    "state": "COMMITTED",
+                    "previousState": "PREPARED",
+                    "resultHead": "b" * 40,
+                    "shadowReceiptSha256": "sha256:" + "d" * 64,
+                },
+            ),
+            (
+                "rollback lacks receipt",
+                {
+                    "state": "ROLLED_BACK",
+                    "previousState": "COMMITTED",
+                    "resultHead": "b" * 40,
+                    "shadowReceiptSha256": "sha256:" + "d" * 64,
+                },
+            ),
+            (
+                "quarantine lacks reason",
+                {"state": "QUARANTINED", "previousState": "PREPARED"},
+            ),
+            (
+                "class C has only three signers",
+                {"decisionClass": "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"},
+            ),
+        )
+        for label, changes in schema_promotion_hostiles:
+            with self.subTest(label=label):
+                hostile = dict(promotion_receipt)
+                hostile.update(changes)
+                self.assertTrue(list(promotion_validator.iter_errors(hostile)))
 
     def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
         repo = self.init_repo()
