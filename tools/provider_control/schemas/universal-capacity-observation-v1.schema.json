@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://softwarefactory.invalid/schemas/universal-capacity-observation-v1.schema.json",
+  "title": "Normalized universal capacity observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "provider", "adapterVersion", "observedAt", "quotaDomainId", "sourceArtifactSha256", "dimensions"],
+  "properties": {
+    "schema": {"const": "fleet-universal-capacity-observation/v1"},
+    "provider": {"enum": ["claude", "openai", "kimi", "grok"]},
+    "adapterVersion": {"enum": ["claude-code/1.0", "openai-responses/1.0", "kimi-code/1.0", "xai-api/1.0"]},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "quotaDomainId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}/hmac-sha256:[0-9a-f]{64}$"},
+    "sourceArtifactSha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "dimensions": {
+      "type": "array", "minItems": 2, "maxItems": 16,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "usedFraction", "resetsAt", "lastResetAt"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,31}$"},
+          "usedFraction": {"type": "number", "minimum": 0, "maximum": 1},
+          "resetsAt": {"type": "string", "format": "date-time"},
+          "lastResetAt": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

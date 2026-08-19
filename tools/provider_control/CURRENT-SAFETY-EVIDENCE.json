@@ -1,0 +1,28 @@
+{
+  "schema": "mlv-provider-control-current-safety/v1",
+  "capturedAt": "2026-08-19T00:23:35.2065351Z",
+  "canonicalDoctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
+  "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+  "automaticLaunchGate": "ABSENT",
+  "scheduledTask": {
+    "name": "MLV-LaneIgnitionWatchdog",
+    "state": "Disabled",
+    "enabled": false,
+    "taskXmlUtf16Sha256": "sha256:ba6dc9f7c91951901786d1b594c61546fba6b805252c69f39675950d4f16b03f",
+    "action": "C:\\Program Files\\PowerShell\\7\\pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\!Layi Wkspc\\MLV-App\\.claude-state\\coordination\\dual-lane\\ignition\\ignite-dead-lanes.ps1\"",
+    "actionExecutableSha256": "sha256:8737aa78bdbe2941083c2c3674da3a9c3ab4cabd2cac040d39d1d0c19f9fc20d",
+    "repositoryWrapperSha256": "sha256:f8c83535754fa6e009596ea6c0bb4f99673261f2c40128afb9072fd7fb3177ed",
+    "brokerRouted": false,
+    "directProviderInvocation": true,
+    "unreadableLeaseBehavior": "FAIL_TOWARD_IGNITION"
+  },
+  "surfaceCensus": {
+    "SCHEDULED_TASK": {"count": 1, "status": "BLOCKED_DIRECT_DISABLED"},
+    "APP_SCHEDULER": {"count": 0, "status": "RETIRED_BY_PROJECT_RECEIPTS"},
+    "REPOSITORY_WRAPPER": {"count": 1, "status": "BLOCKED_DIRECT_IGNORED_STATE"},
+    "SERVICE": {"count": 0, "status": "NONE_CONFIGURED"}
+  },
+  "providerOrAuthInvokedByCandidateAuthor": false,
+  "hardwareMutatedByCandidateAuthor": false,
+  "installAttemptedByCandidateAuthor": false
+}

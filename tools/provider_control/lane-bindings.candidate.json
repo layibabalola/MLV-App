@@ -1,0 +1,14 @@
+{
+  "schema": "mlv-provider-lane-bindings/v1",
+  "doctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
+  "doctrineEngineGitBlob": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
+  "provider": "claude",
+  "adapter": "claude-code/1.0",
+  "quotaDomain": "claude-shared-account",
+  "lanes": {
+    "claude-review": {"model": "claude-opus-5", "effort": "high", "role": "INDEPENDENT_REVIEW", "subject": "subjects/seat-lane4-review.md"},
+    "fable": {"model": "claude-opus-5", "effort": "high", "role": "HUB", "subject": "subjects/seat-fable-hub.md"},
+    "opus": {"model": "claude-opus-5", "effort": "high", "role": "CRITERION_OWNER", "subject": "subjects/seat-opus.md"},
+    "sonnet-impl": {"model": "claude-sonnet-5", "effort": "high", "role": "IMPLEMENTER", "subject": "subjects/seat-sonnet-impl.md"}
+  }
+}

@@ -1,2 +1,5 @@
 CLOSEOUT-CANONICAL-CONTRACT.md text eol=lf
 CLOSEOUT-CANONICAL-CONTRACT.sha256 text eol=lf
+.gitattributes text eol=lf
+.github/workflows/provider-control-candidate.yml text eol=lf
+tools/provider_control/** text eol=lf

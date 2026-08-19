@@ -1,0 +1,12 @@
+{
+  "schema": "fleet-universal-launcher-inventory/v1", "capturedAt": "2026-08-18T23:00:00Z", "complete": true,
+  "surfaceClasses": ["SCHEDULED_TASK", "APP_SCHEDULER", "REPOSITORY_WRAPPER", "SERVICE"],
+  "configuredSurfaceCounts": {"SCHEDULED_TASK": 1, "APP_SCHEDULER": 0, "REPOSITORY_WRAPPER": 1, "SERVICE": 0},
+  "observedSurfaceCounts": {"SCHEDULED_TASK": 1, "APP_SCHEDULER": 0, "REPOSITORY_WRAPPER": 1, "SERVICE": 0},
+  "censusMethodSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "configuredLauncherCount": 2, "observedLauncherCount": 2,
+  "brokerExecutableSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "launchers": [
+    {"surfaceClass": "SCHEDULED_TASK", "discoverySha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "executablePath": "C:\\Program Files\\PowerShell\\7\\pwsh.exe", "executableSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "brokerRouted": true, "directProviderInvocation": false},
+    {"surfaceClass": "REPOSITORY_WRAPPER", "discoverySha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "executablePath": "C:\\!Layi Wkspc\\MLV-App\\tools\\provider_control\\invoke-mlv-lane-supervisor.ps1", "executableSha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "brokerRouted": true, "directProviderInvocation": false}
+  ]
+}

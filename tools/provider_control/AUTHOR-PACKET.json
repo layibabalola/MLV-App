@@ -1,0 +1,175 @@
+{
+  "schema": "mlv-provider-control-author-packet/v1",
+  "status": "ADOPT_CANDIDATE_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T00:23:35.2065351Z",
+  "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+  "doctrineCommit": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
+  "doctrineEngineGitBlob": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
+  "profileSha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
+  "bindingsSha256": "d3c3b816b7af89a3d56a0a6cce22b169e52dcd9656df88ebe05994154818853e",
+  "localEvidence": {
+    "universalTests": "13/13 PASS",
+    "noWorkTicks": 1000,
+    "noWorkProviderCalls": 0,
+    "fakeConcurrentLoser": "QUOTA_DOMAIN_BUSY",
+    "profileSchema": "PASS",
+    "intendedInventorySchema": "PASS",
+    "scheduledTaskState": "Disabled",
+    "scheduledTaskEnabled": false,
+    "providerOrAuthInvoked": false,
+    "installAttempted": false
+  },
+  "disposition": "DISTINGUISH(488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d, PENDING_REVIEWED_PRODUCTION_SUSPENDED_RESUME_AND_POST_INSTALL_HASHED_CENSUS)",
+  "subjects": [
+    {
+      "path": ".gitattributes",
+      "sha256": "08c34f864efb61e54615b6ebc319e5602935ae433c843f523b1fc692ee2ce454",
+      "bytes": 216
+    },
+    {
+      "path": ".github/workflows/provider-control-candidate.yml",
+      "sha256": "2362cde1151aba008571703867d3bd567b1b49509e7656455dbcfa404ac1385f",
+      "bytes": 991
+    },
+    {
+      "path": "tools/provider_control/ADOPTION-CANDIDATE.md",
+      "sha256": "359a3cf28d19b4d0579ce9531e18686646c76bdf64837ce46889638dba29bed2",
+      "bytes": 4004
+    },
+    {
+      "path": "tools/provider_control/CURRENT-SAFETY-EVIDENCE.json",
+      "sha256": "0867a6236ba09431a189adfedcbca4c32504ad5e4e1a7a8a7523b25da6a073cd",
+      "bytes": 1506
+    },
+    {
+      "path": "tools/provider_control/install-mlv-lane-supervisor.ps1",
+      "sha256": "f10df584222535deb715fd207877b0c4e4eaeace8faafa96d1cc95c939492536",
+      "bytes": 925
+    },
+    {
+      "path": "tools/provider_control/inventory-post-install.candidate.json",
+      "sha256": "8df89ecfabe4876aaa48ad10ddd09bc1c03fc0496695e8d68a87a2e3f7f54878",
+      "bytes": 1446
+    },
+    {
+      "path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1",
+      "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da",
+      "bytes": 810
+    },
+    {
+      "path": "tools/provider_control/lane-bindings.candidate.json",
+      "sha256": "d3c3b816b7af89a3d56a0a6cce22b169e52dcd9656df88ebe05994154818853e",
+      "bytes": 808
+    },
+    {
+      "path": "tools/provider_control/mlv_lane_supervisor.py",
+      "sha256": "010aa4f3b52628eaeda9111310f7c9ef048584778000dc0c4e30a43263dfdbc6",
+      "bytes": 12888
+    },
+    {
+      "path": "tools/provider_control/mlv-project-profile.candidate.json",
+      "sha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9",
+      "bytes": 1553
+    },
+    {
+      "path": "tools/provider_control/README.md",
+      "sha256": "c472483c7a0a85d8ac2b1237f3f018a8076b86c69e302975d33aed8d7145de47",
+      "bytes": 806
+    },
+    {
+      "path": "tools/provider_control/schemas/provider-native-capacity-evidence-v1.schema.json",
+      "sha256": "bf09454ce88e3c6d6131ffc009a8601c1ef149726f2e8b2f35e55be91276a96f",
+      "bytes": 4562
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-broker-health-v1.schema.json",
+      "sha256": "4e0475f4c24b78a1095b2e00efa516609e4278b214279217a4e6527b72a5002e",
+      "bytes": 928
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-capacity-observation-v1.schema.json",
+      "sha256": "f8c2506c8654c0f7b143ca74fa68ddfdc7244cd5f74ddea4d39fa332ffc04fec",
+      "bytes": 1461
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-control-request-v1.schema.json",
+      "sha256": "5ce4b5bbd0cb7c3c02b404b86312f539603ad4feac364a51c5f72fa43fd30c57",
+      "bytes": 4749
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-evidence-capsule-request-v1.schema.json",
+      "sha256": "9051d46a65cc7d52f35891c4ae50aa208427607dbd045cb3f54498556a5b162a",
+      "bytes": 1337
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-evidence-capsule-v1.schema.json",
+      "sha256": "aa81a146014908f73dfa173d620b20f6baf94d6f18068a49a38f470aa9e61a41",
+      "bytes": 1297
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-gate-transition-v1.schema.json",
+      "sha256": "7112b6792689041165376cbd213e135350701b546d7fcd8adbfd6e4575a9cbdd",
+      "bytes": 1751
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-launch-attestation-v1.schema.json",
+      "sha256": "72a2fa593fe3c1b2eb54d23967cd0faf1bc45a971ed4547dc16ce911cfeb0836",
+      "bytes": 2900
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-launcher-inventory-v1.schema.json",
+      "sha256": "308d59f2c9f4ddb1d9c53d2a11d9a04abcab2b1e2cfffa3014039c9eb67a4dde",
+      "bytes": 2613
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-manual-canary-authorization-v1.schema.json",
+      "sha256": "da469a6c3720503afd8259e4b4cbabb70d77f0604c57d65e85bb0d826bf61d2c",
+      "bytes": 1207
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-process-observation-v1.schema.json",
+      "sha256": "943a8151e3f737235fad0220bc163eaa3aa2ba1234dbed804f640d5c4ecc1de4",
+      "bytes": 2612
+    },
+    {
+      "path": "tools/provider_control/schemas/universal-project-profile-v1.schema.json",
+      "sha256": "60207ac83c96a13a44c96eaff2574bff625dcc7b7a0ecd72d04b2f0ee4d5be79",
+      "bytes": 5522
+    },
+    {
+      "path": "tools/provider_control/subjects/seat-fable-hub.md",
+      "sha256": "1f36622f741f8176166bbb98975ce3baaf253c0cfae9c72a842356dd4bff4f8d",
+      "bytes": 4103
+    },
+    {
+      "path": "tools/provider_control/subjects/seat-lane4-review.md",
+      "sha256": "c8b1fa6502e9199df1ea555500554626ef09f4d12b802f57229a1f9b9743f409",
+      "bytes": 5535
+    },
+    {
+      "path": "tools/provider_control/subjects/seat-opus.md",
+      "sha256": "f98792a1cee5fab0644490f7f38defd20702f9c97330f02470e49d637238cda0",
+      "bytes": 4877
+    },
+    {
+      "path": "tools/provider_control/subjects/seat-sonnet-impl.md",
+      "sha256": "f33d2fd9c91a58c33863a3e23b5f0b310635e912aa76dceebe70dd0e18131e85",
+      "bytes": 4590
+    },
+    {
+      "path": "tools/provider_control/tests/fake_provider.py",
+      "sha256": "354143c523b59739bcd4e0265f69e8154e50584a803dbdf4ba41620209a24dbf",
+      "bytes": 525
+    },
+    {
+      "path": "tools/provider_control/tests/test_mlv_lane_supervisor.py",
+      "sha256": "f7ada353fed11426c13ae974cd6d2a1146ab805610b7007fe29806caae2b6b78",
+      "bytes": 10126
+    },
+    {
+      "path": "tools/provider_control/vendor/universal_provider_control.py",
+      "sha256": "9a15dd34bc35a77e7f7aaba7952bc3712a25504ee52a213cfc64e4fc27f0e5c2",
+      "bytes": 119196
+    }
+  ]
+}
