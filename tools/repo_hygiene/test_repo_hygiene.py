@@ -1360,6 +1360,68 @@ class RepoHygieneTests(unittest.TestCase):
 
     def test_qt_opengl_headers_and_cpu_feature_probe_are_architecture_portable(self) -> None:
         qt_dir = ROOT / "platform" / "qt"
+        project = (qt_dir / "MLVApp.pro").read_text(encoding="utf-8")
+        target_line = "DEFINES += WINVER=0x0601 _WIN32_WINNT=0x0601"
+
+        def assert_windows_target_is_scoped_and_unique(project_text: str) -> None:
+            windows_marker = "# Windows, standard use with standard Qt download."
+            self.assertIn(windows_marker, project_text)
+            marker_offset = project_text.index(windows_marker) + len(windows_marker)
+            block_match = re.search(r"(?m)^win32\{\s*$", project_text[marker_offset:])
+            self.assertIsNotNone(block_match, "the Windows compiler-settings block is missing")
+            assert block_match is not None
+            block_start = marker_offset + block_match.start()
+            depth = 0
+            block_end = None
+            for offset, line in enumerate(project_text[block_start:].splitlines(keepends=True)):
+                code = line.split("#", 1)[0]
+                for char in code:
+                    if char == "{":
+                        depth += 1
+                    elif char == "}":
+                        depth -= 1
+                        if depth == 0:
+                            block_end = block_start + sum(
+                                len(part)
+                                for part in project_text[block_start:].splitlines(keepends=True)[: offset + 1]
+                            )
+                            break
+                if block_end is not None:
+                    break
+            self.assertIsNotNone(block_end, "the Windows compiler-settings block is unbalanced")
+            assert block_end is not None
+            windows_section = project_text[block_start:block_end]
+            self.assertIn(
+                target_line,
+                windows_section,
+                "the Windows 7 target must remain inside the Windows compiler-settings section",
+            )
+            active_target_lines = [
+                line.split("#", 1)[0].strip()
+                for line in project_text.splitlines()
+                if re.search(r"\b(?:WINVER|_WIN32_WINNT)\b", line.split("#", 1)[0])
+            ]
+            self.assertEqual(
+                active_target_lines,
+                [target_line],
+                "no conflicting, split, or cross-platform Windows target definition is allowed",
+            )
+
+        assert_windows_target_is_scoped_and_unique(project)
+        with self.assertRaises(AssertionError):
+            assert_windows_target_is_scoped_and_unique(
+                project + "\nDEFINES += WINVER=0x0A00 _WIN32_WINNT=0x0A00\n"
+            )
+        with self.assertRaises(AssertionError):
+            assert_windows_target_is_scoped_and_unique(
+                project.replace(f"    {target_line}\n", "", 1).replace(
+                    "# Build-time git SHA for CrashForensics run-metadata stamp.",
+                    f"{target_line}\n# Build-time git SHA for CrashForensics run-metadata stamp.",
+                    1,
+                )
+            )
+        user_guide = (ROOT / "docs" / "01-user-guide.md").read_text(encoding="utf-8")
+        self.assertIn("| Windows | Windows 7, 64-bit | 64-bit only |", user_guide)
         for source_path in sorted(qt_dir.rglob("*")):
             if source_path.suffix.lower() not in {".h", ".hpp", ".cpp", ".cc"}:
                 continue

@@ -89,6 +89,10 @@ macx{
 # Windows, standard use with standard Qt download.
 # Else comment these lines!
 win32{
+    # The documented minimum is Windows 7.  Declare it explicitly so older
+    # MinGW headers expose APIs available since Windows 7, including
+    # GetLogicalProcessorInformationEx, without inheriting a runner default.
+    DEFINES += WINVER=0x0601 _WIN32_WINNT=0x0601
     QMAKE_CFLAGS_RELEASE -= -O2
     QMAKE_CFLAGS_RELEASE += -O3
     QMAKE_CXXFLAGS_RELEASE -= -O2
