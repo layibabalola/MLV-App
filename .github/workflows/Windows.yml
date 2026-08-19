@@ -135,10 +135,15 @@ jobs:
              throw "Configured g++ '$configuredCompiler' is not beside make '$env:MAKE_EXE'"
            }
            $env:PATH = "$makeBin;$env:PATH"
-           $resolvedCompiler = Get-Command g++.exe -CommandType Application -ErrorAction Stop
-           $actualCompiler = [IO.Path]::GetFullPath($resolvedCompiler.Source)
+           $resolvedCompilers = @(Get-Command g++.exe -All -CommandType Application -ErrorAction Stop)
+           if ($resolvedCompilers.Count -eq 0) { throw "No PATH-resolved g++.exe applications were found" }
+           $canonicalCompilers = @($resolvedCompilers | ForEach-Object { [IO.Path]::GetFullPath($_.Source) })
+           $actualCompiler = $canonicalCompilers[0]
            if ($actualCompiler -ne $expectedCompiler) {
              throw "Bare g++ resolves to '$actualCompiler', expected '$expectedCompiler'"
+           }
+           if (@($canonicalCompilers | Where-Object { $_ -eq $expectedCompiler }).Count -ne 1) {
+             throw "Expected compiler '$expectedCompiler' must appear exactly once in PATH resolution"
            }
            & g++.exe --version
            if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }
