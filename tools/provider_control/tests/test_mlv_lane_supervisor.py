@@ -329,11 +329,14 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R7_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R8_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
         self.assertFalse(packet["authority"]["adoption"])
-        self.assertEqual(packet["localEvidence"]["hostedMatrix"], "NOT_RUN")
+        self.assertEqual(
+            packet["localEvidence"]["hostedMatrix"],
+            "R7_INVALID_WORKFLOW_YAML_REPAIRED_R8_NOT_RUN",
+        )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
             path = repo / subject["path"]
@@ -379,7 +382,15 @@ class SupervisorTests(unittest.TestCase):
             "--only-binary=:all: --require-hashes "
             "-r .github/requirements/provider-control.txt"
         )
-        self.assertIn(install, workflow)
+        self.assertIn(install, " ".join(workflow.split()))
+        self.assertIn(
+            "      - run: >-\n"
+            "          python -m pip install --disable-pip-version-check --no-input\n"
+            "          --only-binary=:all: --require-hashes\n"
+            "          -r .github/requirements/provider-control.txt",
+            workflow,
+        )
+        self.assertNotRegex(workflow, r"(?m)^\s*- run: [^\n]*:all:")
         self.assertNotRegex(workflow, r"(?i)pip\s+install\s+(?:--upgrade|-U)\s+pip")
         self.assertIn('".github/requirements/provider-control*"', workflow)
         self.assertIn(
