@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v3",
-  "status": "DISTINGUISH_R8_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T02:19:00Z",
+  "status": "DISTINGUISH_R9_PHASE_0_1_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T02:25:00Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
   "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
@@ -14,13 +14,13 @@
     "providerInvocation": false
   },
   "localEvidence": {
-    "python313": "26/26 PASS",
-    "python314": "26/26 PASS",
+    "python313": "27/27 PASS",
+    "python314": "27/27 PASS",
     "python313ProfileValidation": "PASS",
     "python314ProfileValidation": "PASS",
     "python313RequireHashesDryRun": "PASS_WINDOWS_ONLY",
     "python314RequireHashesDryRun": "PASS_WINDOWS_ONLY",
-    "hostedMatrix": "R7_INVALID_WORKFLOW_YAML_REPAIRED_R8_NOT_RUN",
+    "hostedMatrix": "R7_INVALID_YAML;R8_UBUNTU_PY314_INTERPRETER_SYMLINK_RED;R9_NOT_RUN",
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -48,8 +48,8 @@
     "CITABLE_FABLE_SEQUENCE_MISSING"
   ],
   "subjects": [
-    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 27388, "sha256": "5719b0413ddce28bed9a61c57877421fb7cd0e25b4f68c57570d7b60a3b4a7ff"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 26269, "sha256": "e6ee6d4b69196ff030f292cee0a1cd487f6105c07172c1485e15db2cc219abd9"},
+    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 27330, "sha256": "17b588f7a4661fa3007246f4eded0fc0c6cbd91a246af7ca7b648795e1ae4f81"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 26772, "sha256": "865a9a5755aec4910d93c99a5db3c75e17d421d5cf1312ee636a1daa3c896437"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 966, "sha256": "a9c7fbf4efcf11c625a45484496552feb39749705d69579dce18275594777507"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"},

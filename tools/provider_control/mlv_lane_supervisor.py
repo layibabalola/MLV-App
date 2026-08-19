@@ -396,9 +396,9 @@ def run_test_fake(
     subject_digest = sha256_file(subject)
     fake_digest = sha256_file(fake)
     process_image_input = Path(sys.executable)
-    if process_image_input.is_symlink():
-        raise ControlError("TEST_PROCESS_IMAGE_IDENTITY_INVALID")
     process_image = process_image_input.resolve(strict=True)
+    if not process_image.is_file():
+        raise ControlError("TEST_PROCESS_IMAGE_IDENTITY_INVALID")
     process_image_digest = sha256_file(process_image)
     argv = [str(process_image), str(fake), "--model", binding["model"], "--effort", binding["effort"],
             "--role", binding["role"], "--subject", str(subject), "--sleep", str(delay),
@@ -418,7 +418,6 @@ def run_test_fake(
                 sha256_file(fresh_subject) != subject_digest or
                 fake_path.is_symlink() or fake_path.resolve(strict=True) != fake or
                 sha256_file(fake) != fake_digest or
-                Path(sys.executable).is_symlink() or
                 Path(sys.executable).resolve(strict=True) != process_image or
                 sha256_file(process_image) != process_image_digest):
             raise ControlError("LAUNCH_BINDING_CHANGED")

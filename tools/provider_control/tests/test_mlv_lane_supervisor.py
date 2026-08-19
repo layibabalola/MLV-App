@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -329,13 +330,13 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R8_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R9_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
         self.assertFalse(packet["authority"]["adoption"])
         self.assertEqual(
             packet["localEvidence"]["hostedMatrix"],
-            "R7_INVALID_WORKFLOW_YAML_REPAIRED_R8_NOT_RUN",
+            "R7_INVALID_YAML;R8_UBUNTU_PY314_INTERPRETER_SYMLINK_RED;R9_NOT_RUN",
         )
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
@@ -403,6 +404,14 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("queue: single", workflow)
         self.assertIn("timeout-minutes: 15", workflow)
         self.assertIn("persist-credentials: false", workflow)
+
+    def test_25b_canonical_interpreter_symlink_is_resolved_not_rejected(self):
+        source = inspect.getsource(supervisor.run_test_fake)
+        self.assertNotIn("process_image_input.is_symlink()", source)
+        self.assertNotIn("Path(sys.executable).is_symlink()", source)
+        image = Path(sys.executable).resolve(strict=True)
+        self.assertTrue(image.is_file())
+        self.assertEqual(supervisor.sha256_file(image), supervisor.sha256_file(image))
 
     def test_26_ci_lock_is_exact_complete_and_covers_hosted_matrix(self):
         repo = ROOT.parents[1]
