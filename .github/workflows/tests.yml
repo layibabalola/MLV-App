@@ -15,6 +15,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  protected-check-route:
+    name: Protected Check Route
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      product: ${{ steps.route.outputs.product }}
+      gui: ${{ steps.route.outputs.gui }}
+      reason: ${{ steps.route.outputs.reason }}
+      head: ${{ steps.route.outputs.head }}
+      tree: ${{ steps.route.outputs.tree }}
+      diff_sha256: ${{ steps.route.outputs.diff_sha256 }}
+    env:
+      ROUTER_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}
+      ROUTER_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ env.ROUTER_HEAD }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Derive fail-closed protected-check route
+        id: route
+        shell: pwsh
+        run: |
+          $receipt = Join-Path $env:RUNNER_TEMP "protected-check-route.json"
+          python tools/repo_hygiene/protected_check_router.py `
+            --repo-root . `
+            --base "$env:ROUTER_BASE" `
+            --head "$env:ROUTER_HEAD" `
+            --receipt $receipt `
+            --github-output $env:GITHUB_OUTPUT
+
+      - name: Upload protected-check route receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: protected-check-route-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/protected-check-route.json
+          if-no-files-found: error
+          retention-days: 30
+
   repo-hygiene-python:
     name: Repo Hygiene Python (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -112,6 +159,7 @@ jobs:
 
   windows-product-oracles:
     name: Windows Product Oracles
+    needs: protected-check-route
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -133,13 +181,24 @@ jobs:
         with:
           python-version-file: ".python-version"
 
+      - name: Record explicit product-oracle N/A
+        if: needs.protected-check-route.outputs.product != 'true'
+        run: |
+          Write-Output "Windows Product Oracles: explicit N/A for exact non-product diff"
+          Write-Output "head=${{ needs.protected-check-route.outputs.head }}"
+          Write-Output "tree=${{ needs.protected-check-route.outputs.tree }}"
+          Write-Output "diffSha256=${{ needs.protected-check-route.outputs.diff_sha256 }}"
+          Write-Output "reason=${{ needs.protected-check-route.outputs.reason }}"
+
       - name: Install aqtinstall
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
           python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
           python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
@@ -147,6 +206,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\\Tools\\mingw1310_64"
 
       - name: Build console_tests
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-console | Out-Null
@@ -156,11 +216,13 @@ jobs:
           Pop-Location
 
       - name: Run console_tests --check-golden
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           & "tests\build-ci-console\release\console_tests.exe" --check-golden
 
       - name: Build pipeline_tests
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-pipeline | Out-Null
@@ -170,6 +232,7 @@ jobs:
           Pop-Location
 
       - name: Run pipeline_tests --check-golden (bounded shards)
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           $env:MLVAPP_CRASH_FORENSICS_AUTOINSTALL = "1"
@@ -389,8 +452,8 @@ jobs:
           }
 
       - name: Upload pipeline crash forensics
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && needs.protected-check-route.outputs.product == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-product-oracles-pipeline-crash-forensics
           if-no-files-found: ignore
@@ -402,6 +465,7 @@ jobs:
 
   windows-gui-pilot:
     name: Windows GUI Pilot
+    needs: protected-check-route
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -423,13 +487,24 @@ jobs:
         with:
           python-version-file: ".python-version"
 
+      - name: Record explicit GUI-pilot N/A
+        if: needs.protected-check-route.outputs.gui != 'true'
+        run: |
+          Write-Output "Windows GUI Pilot: explicit N/A for exact non-product diff"
+          Write-Output "head=${{ needs.protected-check-route.outputs.head }}"
+          Write-Output "tree=${{ needs.protected-check-route.outputs.tree }}"
+          Write-Output "diffSha256=${{ needs.protected-check-route.outputs.diff_sha256 }}"
+          Write-Output "reason=${{ needs.protected-check-route.outputs.reason }}"
+
       - name: Install aqtinstall
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
           python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
           python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
           python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
@@ -437,6 +512,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\Tools\mingw1310_64"
 
       - name: Build gui_tests
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-gui | Out-Null
@@ -446,6 +522,7 @@ jobs:
           Pop-Location
 
       - name: Run gui_tests (offscreen)
+        if: needs.protected-check-route.outputs.gui == 'true'
         env:
           QT_QPA_PLATFORM: offscreen
           QT_OPENGL: desktop
@@ -459,8 +536,8 @@ jobs:
           if ($ec -ne 0) { exit $ec }
 
       - name: Upload gui_tests log on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && needs.protected-check-route.outputs.gui == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gui_tests_output
           path: gui_tests_output.txt

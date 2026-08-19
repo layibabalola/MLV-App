@@ -38,6 +38,7 @@ from .core import (
     stable_id,
     verify_policy,
 )
+from .protected_check_router import RouteError, build_receipt, classify_paths
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -215,12 +216,17 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
         self.assertIn("Verify compatible MCP runtime", bridge_job)
         self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
-        self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
+        self.assertIn("    needs: protected-check-route", product_job)
         self.assertIn("Run console_tests --check-golden", product_job)
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
+        self.assertIn("Record explicit product-oracle N/A", product_job)
+        self.assertIn("outputs.product == 'true'", product_job)
 
-        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.txt").read_text(encoding="utf-8")
+        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
+        lock = (ROOT / "tools" / "agent-bridge" / "requirements-test.txt").read_text(encoding="utf-8")
+        self.assertRegex(lock, r"(?m)^mcp==1\.[0-9.]+ \\\r?$")
+        self.assertNotIn("mcp==2.", lock)
 
     def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
@@ -242,6 +248,7 @@ class RepoHygieneTests(unittest.TestCase):
         )
 
         expected_timeouts = {
+            "protected-check-route": 10,
             "repo-hygiene-python": 45,
             "factory-bridge-regressions": 45,
             "windows-product-oracles": 120,
@@ -262,9 +269,9 @@ class RepoHygieneTests(unittest.TestCase):
         expected_remote_uses = [
             ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
             ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
-        ] * 4 + [
-            ("actions/upload-artifact", "ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
-        ] * 2
+        ] * 5 + [
+            ("actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7"),
+        ] * 3
         uses_entries = []
         for line in workflow.splitlines():
             match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
@@ -301,7 +308,7 @@ class RepoHygieneTests(unittest.TestCase):
             r"\s+persist-credentials: false\s*$",
             workflow,
         )
-        self.assertEqual(len(checkout_blocks), 4)
+        self.assertEqual(len(checkout_blocks), 5)
 
         bridge_start = workflow.index("\n  factory-bridge-regressions:")
         product_start = workflow.index("\n  windows-product-oracles:")
@@ -309,17 +316,109 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run coordination and self-healing guardrails", bridge_job)
         self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
         self.assertIn("tests\\coordination", bridge_job)
-        self.assertIn('python -m pip install "pytest==8.4.2"', bridge_job)
+        self.assertIn("tools\\agent-bridge\\requirements-test.txt", bridge_job)
+        self.assertNotRegex(bridge_job, r"pip install [\"']pytest")
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
-        self.assertNotRegex(product_job, r"(?m)^    needs\s*:")
+        self.assertIn("    needs: protected-check-route", product_job)
         artifact_step_start = product_job.index("\n      - name: Upload pipeline crash forensics")
         next_step = product_job.find("\n      - ", artifact_step_start + 1)
         artifact_step = product_job[artifact_step_start : next_step if next_step != -1 else len(product_job)]
-        self.assertIn("\n        if: always()", artifact_step)
+        self.assertIn(
+            "\n        if: always() && needs.protected-check-route.outputs.product == 'true'",
+            artifact_step,
+        )
         self.assertIn("\n        uses: actions/upload-artifact@", artifact_step)
         self.assertIn("\n          path: |", artifact_step)
         self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
+
+        route_start = workflow.index("\n  protected-check-route:")
+        repo_start = workflow.index("\n  repo-hygiene-python:")
+        route_job = workflow[route_start:repo_start]
+        self.assertIn("tools/repo_hygiene/protected_check_router.py", route_job)
+        self.assertIn("fetch-depth: 0", route_job)
+        self.assertIn("if-no-files-found: error", route_job)
+        self.assertIn("retention-days: 30", route_job)
+
+        required_display_names = {
+            "Repo Hygiene Python (${{ matrix.os }})",
+            "Factory Bridge Regressions",
+            "Windows Product Oracles",
+            "Windows GUI Pilot",
+        }
+        observed_names = set(re.findall(r"(?m)^    name: (.+)$", jobs_text))
+        self.assertTrue(required_display_names.issubset(observed_names))
+
+    def test_protected_check_router_is_conservative_and_provider_specific(self) -> None:
+        provider = classify_paths(
+            [
+                "tools/provider_control/mlv_lane_supervisor.py",
+                ".github/workflows/provider-control-candidate.yml",
+                ".github/requirements/provider-control.txt",
+            ]
+        )
+        self.assertFalse(provider.product)
+        self.assertFalse(provider.gui)
+        self.assertEqual(provider.reason, "EXPLICIT_NA_PROVIDER_CONTROL_ONLY")
+
+        for changed in (
+            ["src/mlv/video_mlv.c"],
+            ["platform/qt/MainWindow.cpp"],
+            ["docs/unknown-surface.md"],
+            [".github/workflows/tests.yml"],
+        ):
+            with self.subTest(changed=changed):
+                route = classify_paths(changed)
+                self.assertTrue(route.product)
+                self.assertTrue(route.gui)
+
+        with self.assertRaises(RouteError):
+            classify_paths([])
+        with self.assertRaises(RouteError):
+            classify_paths(["tools/provider_control/../src/escape.c"])
+
+    def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
+        repo = self.init_repo()
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+        provider = repo / "tools" / "provider_control" / "candidate.py"
+        provider.parent.mkdir(parents=True)
+        provider.write_text("CLOSED = True\n", encoding="utf-8")
+        git(repo, "add", "tools/provider_control/candidate.py")
+        git(repo, "commit", "-m", "provider-only")
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        receipt = build_receipt(repo, base, head)
+        self.assertEqual(receipt["schema"], "mlv-protected-check-route/v1")
+        self.assertFalse(receipt["authority"])
+        self.assertEqual(receipt["git"]["base"], base)
+        self.assertEqual(receipt["git"]["baseTip"], base)
+        self.assertEqual(receipt["git"]["head"], head)
+        self.assertRegex(receipt["git"]["tree"], r"^[0-9a-f]{40}$")
+        self.assertRegex(receipt["git"]["diffSha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(receipt["changedPaths"], ["tools/provider_control/candidate.py"])
+        self.assertFalse(receipt["route"]["productOraclesRequired"])
+        self.assertEqual(
+            receipt["route"]["productOracleCredit"],
+            "EXPLICIT_NA_NON_PRODUCT_DIFF",
+        )
+
+        side = git(repo, "rev-parse", "HEAD^").stdout.strip()
+        with self.assertRaises(RouteError):
+            build_receipt(repo, head, side)
+
+        divergent = repo / "divergent.txt"
+        git(repo, "checkout", "-b", "divergent", base)
+        divergent.write_text("base moved\n", encoding="utf-8")
+        git(repo, "add", "divergent.txt")
+        git(repo, "commit", "-m", "divergent base tip")
+        base_tip = git(repo, "rev-parse", "HEAD").stdout.strip()
+        diverged_receipt = build_receipt(repo, base_tip, head)
+        self.assertEqual(diverged_receipt["git"]["baseTip"], base_tip)
+        self.assertEqual(diverged_receipt["git"]["base"], base)
+        self.assertEqual(
+            diverged_receipt["changedPaths"],
+            ["tools/provider_control/candidate.py"],
+        )
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
         script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"
