@@ -285,6 +285,8 @@ def _write_evidence_bundle(
 
 
 def _verify_evidence_bundle(manifest_path: Path) -> None:
+    if (manifest_path.parent / "fatal-diagnostic.json").exists():
+        raise ValueError("fatal diagnostic exists beside evidence bundle")
     manifest = _strict_json(manifest_path)
     if set(manifest) != {"schema", "complete", "authority", "git", "files"}:
         raise ValueError("evidence manifest keys are not exact")
@@ -300,6 +302,10 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
     files = manifest["files"]
     if not isinstance(files, list) or len(files) != 2:
         raise ValueError("evidence manifest must bind exactly two evidence files")
+    if {item.get("name") for item in files if isinstance(item, dict)} != {
+        "result.json", "junit.xml"
+    }:
+        raise ValueError("evidence manifest filenames are not exact")
     names = set()
     for item in files:
         if not isinstance(item, dict) or set(item) != {"name", "bytes", "sha256"}:
@@ -315,10 +321,135 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
         if item["sha256"] != _sha256(data):
             raise ValueError(f"evidence digest mismatch: {name}")
 
+    result = _strict_json(manifest_path.parent / "result.json")
+    required_result_keys = {
+        "schema", "closedGatePassed", "authority", "authorityScope", "git",
+        "repository", "inputs", "environment", "startedAtUtc", "durationSeconds",
+        "tests", "profileValidation", "declaredZeroActivityInvariant",
+        "automaticLaunchGate",
+    }
+    if set(result) != required_result_keys:
+        raise ValueError("hosted result keys are not exact")
+    if result["schema"] != "mlv-provider-control-hosted-result/v1":
+        raise ValueError("hosted result schema mismatch")
+    if type(result["closedGatePassed"]) is not bool or result["authority"] is not False:
+        raise ValueError("hosted result gate/authority fields are invalid")
+    if result["authorityScope"] != "ZERO_AUTHORITY_CLOSED_GATE_EVIDENCE_ONLY":
+        raise ValueError("hosted result authority scope mismatch")
+    if result["automaticLaunchGate"] != "CLOSED" or result["git"] != manifest["git"]:
+        raise ValueError("hosted result gate or Git binding mismatch")
+    repository = result["repository"]
+    if not isinstance(repository, dict) or set(repository) != {
+        "cleanBefore", "cleanAfter", "statusAfter"
+    }:
+        raise ValueError("hosted result repository evidence is invalid")
+    if repository["cleanBefore"] is not True or type(repository["cleanAfter"]) is not bool:
+        raise ValueError("hosted result repository cleanliness types are invalid")
+    if not isinstance(repository["statusAfter"], str):
+        raise ValueError("hosted result repository status is invalid")
+    if repository["cleanAfter"] != (repository["statusAfter"] == ""):
+        raise ValueError("hosted result repository cleanliness disagrees with status")
+    expected_inputs = [
+        _file_binding(REPO / "tools/provider_control/AUTHOR-PACKET.json"),
+        _file_binding(REPO / ".github/workflows/provider-control-candidate.yml"),
+        _file_binding(REPO / ".github/requirements/provider-control.txt"),
+    ]
+    if result["inputs"] != expected_inputs:
+        raise ValueError("hosted result input bindings mismatch")
+    zero = result["declaredZeroActivityInvariant"]
+    if zero != {
+        "basis": "CLOSED_TEST_SUITE_CONTRACT_ASSERTIONS_NOT_PROVIDER_TELEMETRY",
+        "providerCalls": 0,
+        "providerProcesses": 0,
+        "tokens": 0,
+        "observedByIndependentProviderTelemetry": False,
+    }:
+        raise ValueError("hosted result zero-activity provenance is invalid")
+    profile = result["profileValidation"]
+    if not isinstance(profile, dict) or set(profile) != {"exitCode", "stdout", "stderr"}:
+        raise ValueError("hosted result profile validation is invalid")
+    if type(profile["exitCode"]) is not int or not all(
+        isinstance(profile[key], str) for key in ("stdout", "stderr")
+    ):
+        raise ValueError("hosted result profile validation types are invalid")
+    tests = result["tests"]
+    status_names = {
+        "passed", "failed", "error", "skipped", "expected-failure", "unexpected-success"
+    }
+    if not isinstance(tests, dict) or set(tests) != {"total", "records", *status_names}:
+        raise ValueError("hosted result test keys are invalid")
+    records = tests["records"]
+    if type(tests["total"]) is not int or not isinstance(records, list) or tests["total"] != len(records):
+        raise ValueError("hosted result test total is invalid")
+    actual_counts = {name: 0 for name in status_names}
+    record_ids = set()
+    for record in records:
+        if not isinstance(record, dict) or not {"id", "status", "durationSeconds"} <= set(record):
+            raise ValueError("hosted result test record is invalid")
+        if set(record) - {"id", "status", "durationSeconds", "detail"}:
+            raise ValueError("hosted result test record has unknown keys")
+        if not isinstance(record["id"], str) or record["id"] in record_ids:
+            raise ValueError("hosted result test record id is invalid")
+        record_ids.add(record["id"])
+        if record["status"] not in status_names:
+            raise ValueError("hosted result test status is invalid")
+        if not isinstance(record["durationSeconds"], (int, float)) or isinstance(
+            record["durationSeconds"], bool
+        ) or record["durationSeconds"] < 0:
+            raise ValueError("hosted result test duration is invalid")
+        if "detail" in record and not isinstance(record["detail"], str):
+            raise ValueError("hosted result test detail is invalid")
+        actual_counts[record["status"]] += 1
+    if any(type(tests[name]) is not int or tests[name] != actual_counts[name] for name in status_names):
+        raise ValueError("hosted result test counters mismatch")
+    expected_pass = (
+        tests["total"] > 0
+        and tests["passed"] == tests["total"]
+        and profile["exitCode"] == 0
+        and repository["cleanAfter"] is True
+    )
+    if result["closedGatePassed"] != expected_pass:
+        raise ValueError("hosted result CLOSED-gate verdict mismatch")
+
+    junit_root = ET.parse(manifest_path.parent / "junit.xml").getroot()
+    if junit_root.tag != "testsuite":
+        raise ValueError("JUnit root is not testsuite")
+    try:
+        junit_counts = {
+            key: int(junit_root.attrib[key]) for key in ("tests", "failures", "errors", "skipped")
+        }
+    except (KeyError, ValueError) as error:
+        raise ValueError("JUnit counters are invalid") from error
+    expected_junit = {
+        "tests": tests["total"] + 2,
+        "failures": tests["failed"] + tests["unexpected-success"],
+        "errors": tests["error"] + (profile["exitCode"] != 0) + (not repository["cleanAfter"]),
+        "skipped": tests["skipped"] + tests["expected-failure"],
+    }
+    if junit_counts != expected_junit:
+        raise ValueError("JUnit counters disagree with hosted result")
+    cases = {
+        (case.attrib.get("classname"), case.attrib.get("name")): case
+        for case in junit_root.findall("testcase")
+    }
+    if len(cases) != expected_junit["tests"]:
+        raise ValueError("JUnit testcase identities are duplicated or incomplete")
+    profile_case = cases.get(("provider_control.profile", "validation"))
+    repository_case = cases.get(("provider_control.repository", "clean_after"))
+    if profile_case is None or repository_case is None:
+        raise ValueError("JUnit synthetic checks are missing")
+    if bool(profile_case.find("error") is not None) != (profile["exitCode"] != 0):
+        raise ValueError("JUnit profile outcome mismatch")
+    if bool(repository_case.find("error") is not None) != (not repository["cleanAfter"]):
+        raise ValueError("JUnit repository outcome mismatch")
+
 
 def _write_fatal_diagnostic(args, error: Exception) -> None:
     anchor = args.manifest or args.result or args.verify_manifest
     if anchor is None:
+        return
+    target = anchor.parent / "fatal-diagnostic.json"
+    if target.exists():
         return
     diagnostic = {
         "schema": "mlv-provider-control-hosted-fatal-diagnostic/v1",
@@ -336,7 +467,7 @@ def _write_fatal_diagnostic(args, error: Exception) -> None:
     except Exception as git_error:  # preserve the original failure
         diagnostic["gitError"] = str(git_error)
     _atomic_write(
-        anchor.parent / "fatal-diagnostic.json",
+        target,
         (json.dumps(diagnostic, indent=2, sort_keys=True) + "\n").encode("utf-8"),
     )
 

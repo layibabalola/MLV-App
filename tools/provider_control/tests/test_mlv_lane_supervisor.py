@@ -1098,19 +1098,83 @@ class SupervisorTests(unittest.TestCase):
         result_path = bundle / "result.json"
         junit_path = bundle / "junit.xml"
         manifest_path = bundle / "evidence-manifest.json"
-        result_bytes = b'{"closedGatePassed":false,"authority":false}\n'
-        junit_bytes = b'<?xml version="1.0"?><testsuite tests="1"/>\n'
         head = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT.parents[1], text=True
         ).strip()
         tree = subprocess.check_output(
             ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT.parents[1], text=True
         ).strip()
+        record = {
+            "id": "example.Case.test_pass", "status": "passed", "durationSeconds": 0.01
+        }
+        valid_result = {
+            "schema": "mlv-provider-control-hosted-result/v1",
+            "closedGatePassed": True,
+            "authority": False,
+            "authorityScope": "ZERO_AUTHORITY_CLOSED_GATE_EVIDENCE_ONLY",
+            "git": {"head": head, "tree": tree},
+            "repository": {"cleanBefore": True, "cleanAfter": True, "statusAfter": ""},
+            "inputs": [
+                hosted_runner._file_binding(ROOT / "AUTHOR-PACKET.json"),
+                hosted_runner._file_binding(
+                    ROOT.parents[1] / ".github/workflows/provider-control-candidate.yml"
+                ),
+                hosted_runner._file_binding(
+                    ROOT.parents[1] / ".github/requirements/provider-control.txt"
+                ),
+            ],
+            "environment": {},
+            "startedAtUtc": "2026-08-19T00:00:00Z",
+            "durationSeconds": 0.1,
+            "tests": {
+                "total": 1, "passed": 1, "failed": 0, "error": 0, "skipped": 0,
+                "expected-failure": 0, "unexpected-success": 0, "records": [record],
+            },
+            "profileValidation": {"exitCode": 0, "stdout": "PASS\n", "stderr": ""},
+            "declaredZeroActivityInvariant": {
+                "basis": "CLOSED_TEST_SUITE_CONTRACT_ASSERTIONS_NOT_PROVIDER_TELEMETRY",
+                "providerCalls": 0, "providerProcesses": 0, "tokens": 0,
+                "observedByIndependentProviderTelemetry": False,
+            },
+            "automaticLaunchGate": "CLOSED",
+        }
+        result_bytes = (json.dumps(valid_result, sort_keys=True) + "\n").encode()
+        junit_bytes = hosted_runner._junit_bytes(
+            [record], "2026-08-19T00:00:00Z", 0.1
+        )
         hosted_runner._write_evidence_bundle(
             result_path, junit_path, manifest_path,
             result_bytes, junit_bytes, head, tree,
         )
         hosted_runner._verify_evidence_bundle(manifest_path)
+
+        hostile_result = json.loads(result_bytes)
+        hostile_result["authority"] = True
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(hostile_result, sort_keys=True) + "\n").encode(),
+            junit_bytes, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "gate/authority"):
+            hosted_runner._verify_evidence_bundle(manifest_path)
+
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes, junit_bytes, head, tree,
+        )
+        fatal = bundle / "fatal-diagnostic.json"
+        original_fatal = b'{"error":"original runner failure","authority":false}\n'
+        fatal.write_bytes(original_fatal)
+        with self.assertRaisesRegex(ValueError, "fatal diagnostic"):
+            hosted_runner._verify_evidence_bundle(manifest_path)
+        args = mock.Mock(manifest=manifest_path, result=result_path, verify_manifest=None)
+        try:
+            raise RuntimeError("derivative verifier failure")
+        except RuntimeError as error:
+            hosted_runner._write_fatal_diagnostic(args, error)
+        self.assertEqual(fatal.read_bytes(), original_fatal)
+        fatal.unlink()
+
         result_path.write_bytes(result_bytes + b" ")
         with self.assertRaisesRegex(ValueError, "byte count mismatch"):
             hosted_runner._verify_evidence_bundle(manifest_path)

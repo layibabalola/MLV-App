@@ -61,7 +61,9 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   zero provider calls/processes/tokens under CLOSED as asserted suite invariants, not independent
   provider telemetry. Subtest failures, fixture errors, profile failure, skips, and other non-passes
   are encoded and fail closed. A last-written manifest binds the JSON/JUnit byte counts, SHA-256s,
-  head, and tree; partial bundles are refused rather than uploaded. Complete failure bundles use a
+  head, and tree; semantic verification recomputes counters/verdicts, requires the synthetic profile
+  and repository checks, refuses authority claims or a sibling fatal diagnostic, and preserves the
+  first fatal cause. Partial bundles are refused rather than uploaded. Complete failure bundles use a
   full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
   non-authoritative fatal diagnostic. Evidence remains retained for 30 days rather than permanently
   archived, and the exact verdict is written to the hosted step summary. R15 is not hosted yet and

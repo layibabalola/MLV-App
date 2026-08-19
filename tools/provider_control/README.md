@@ -46,6 +46,9 @@ calls/processes/tokens as suite-contract assertions rather than independent prov
 the CLOSED gate. Subtest failures, fixture errors, profile failure, skips, and every other non-pass
 result fail the job and appear in JUnit. JSON and JUnit are accepted only with a last-written
 manifest that binds their exact SHA-256, byte count, head, and tree; partial bundles are not uploaded.
+The verifier also parses both files, recomputes counters and the CLOSED verdict, requires the profile
+and repository-cleanliness JUnit cases, refuses authority claims, and rejects any sibling fatal
+diagnostic while preserving the original fatal cause.
 Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
 written to the hosted step summary, and runner exceptions after argument parsing produce a separate
 non-authoritative fatal diagnostic rather than a partial bundle. The narrowly scoped dot-directory
