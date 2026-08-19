@@ -64,7 +64,10 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   head, and tree; semantic verification recomputes counters/verdicts, requires the synthetic profile
   and repository checks, refuses authority claims or a sibling fatal diagnostic, and preserves the
   first fatal cause. Each JSON test ID/status/duration must match exactly one JUnit testcase and
-  outcome child. Partial bundles are refused rather than uploaded. Complete failure bundles use a
+  outcome child. The exact 45-test sorted-ID digest rejects zero, partial, or renamed discovery;
+  environment/run fields and canonical UTC timing are type-checked; and the verifier performs a
+  fresh live index/worktree cleanliness check immediately before routing. Partial bundles are
+  refused rather than uploaded. Complete failure bundles use a
   full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
   non-authoritative fatal diagnostic. Evidence remains retained for 30 days rather than permanently
   archived, and the exact verdict is written to the hosted step summary. R15 is not hosted yet and

@@ -7,9 +7,11 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import re
 import socket
 import subprocess
 import sys
@@ -24,6 +26,8 @@ REPO = Path(__file__).resolve().parents[3]
 TEST_MODULE = "tools.provider_control.tests.test_mlv_lane_supervisor"
 PROFILE = REPO / "tools/provider_control/mlv-project-profile.candidate.json"
 VALIDATOR = REPO / "tools/provider_control/vendor/universal_provider_control.py"
+EXPECTED_TEST_COUNT = 45
+EXPECTED_TEST_IDS_SHA256 = "38c03bf4b8f5dbd82ae366e7a55221a1c85a456d9e1edf3f9858677fa1203de1"
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
@@ -230,6 +234,21 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _test_ids_sha256(test_ids: list[str]) -> str:
+    return _sha256(
+        json.dumps(sorted(test_ids), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def _loaded_test_ids(item) -> list[str]:
+    if isinstance(item, unittest.TestSuite):
+        result = []
+        for child in item:
+            result.extend(_loaded_test_ids(child))
+        return result
+    return [item.id()]
+
+
 def _file_binding(path: Path) -> dict[str, object]:
     data = path.read_bytes()
     return {
@@ -284,7 +303,9 @@ def _write_evidence_bundle(
     )
 
 
-def _verify_evidence_bundle(manifest_path: Path) -> None:
+def _verify_evidence_bundle(
+    manifest_path: Path, *, require_live_clean: bool = True
+) -> None:
     if (manifest_path.parent / "fatal-diagnostic.json").exists():
         raise ValueError("fatal diagnostic exists beside evidence bundle")
     manifest = _strict_json(manifest_path)
@@ -325,6 +346,7 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
     required_result_keys = {
         "schema", "closedGatePassed", "authority", "authorityScope", "git",
         "repository", "inputs", "environment", "startedAtUtc", "durationSeconds",
+        "testInventory",
         "tests", "profileValidation", "declaredZeroActivityInvariant",
         "automaticLaunchGate",
     }
@@ -338,6 +360,12 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
         raise ValueError("hosted result authority scope mismatch")
     if result["automaticLaunchGate"] != "CLOSED" or result["git"] != manifest["git"]:
         raise ValueError("hosted result gate or Git binding mismatch")
+    inventory = result["testInventory"]
+    if inventory != {
+        "count": EXPECTED_TEST_COUNT,
+        "idsSha256": EXPECTED_TEST_IDS_SHA256,
+    }:
+        raise ValueError("hosted result expected test inventory mismatch")
     repository = result["repository"]
     if not isinstance(repository, dict) or set(repository) != {
         "cleanBefore", "cleanAfter", "statusAfter"
@@ -356,6 +384,41 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
     ]
     if result["inputs"] != expected_inputs:
         raise ValueError("hosted result input bindings mismatch")
+    environment = result["environment"]
+    environment_keys = {
+        "os", "python", "implementation", "githubActions", "githubRepository",
+        "githubRunId", "githubRunAttempt", "githubJob", "githubRef",
+    }
+    if not isinstance(environment, dict) or set(environment) != environment_keys:
+        raise ValueError("hosted result environment keys are invalid")
+    if not all(
+        isinstance(environment[key], str) and environment[key]
+        for key in ("os", "python", "implementation")
+    ) or type(environment["githubActions"]) is not bool:
+        raise ValueError("hosted result runtime environment is invalid")
+    github_values = [
+        environment[key]
+        for key in ("githubRepository", "githubRunId", "githubRunAttempt", "githubJob", "githubRef")
+    ]
+    if environment["githubActions"]:
+        if not all(isinstance(value, str) and value for value in github_values):
+            raise ValueError("hosted result GitHub provenance is incomplete")
+    elif any(value is not None for value in github_values):
+        raise ValueError("non-hosted result must not claim GitHub provenance")
+    started = result["startedAtUtc"]
+    if not isinstance(started, str) or not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", started
+    ):
+        raise ValueError("hosted result timestamp is not canonical UTC")
+    try:
+        dt.datetime.fromisoformat(started[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError("hosted result timestamp is invalid") from error
+    duration = result["durationSeconds"]
+    if not isinstance(duration, (int, float)) or isinstance(duration, bool) or not math.isfinite(
+        duration
+    ) or duration < 0:
+        raise ValueError("hosted result duration is invalid")
     zero = result["declaredZeroActivityInvariant"]
     if zero != {
         "basis": "CLOSED_TEST_SUITE_CONTRACT_ASSERTIONS_NOT_PROVIDER_TELEMETRY",
@@ -402,6 +465,10 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
         actual_counts[record["status"]] += 1
     if any(type(tests[name]) is not int or tests[name] != actual_counts[name] for name in status_names):
         raise ValueError("hosted result test counters mismatch")
+    if tests["total"] != EXPECTED_TEST_COUNT or _test_ids_sha256(
+        [record["id"] for record in records]
+    ) != EXPECTED_TEST_IDS_SHA256:
+        raise ValueError("hosted result test discovery is truncated or changed")
     expected_pass = (
         tests["total"] > 0
         and tests["passed"] == tests["total"]
@@ -486,6 +553,10 @@ def _verify_evidence_bundle(manifest_path: Path) -> None:
             raise ValueError(f"JUnit duration is invalid for {record['id']}") from error
         if junit_duration != round(float(record["durationSeconds"]), 6):
             raise ValueError(f"JUnit duration disagrees for {record['id']}")
+    if require_live_clean:
+        live_status = _git("status", "--porcelain=v1", "--untracked-files=all")
+        if live_status:
+            raise ValueError(f"repository became dirty before evidence routing:\n{live_status}")
 
 
 def _write_fatal_diagnostic(args, error: Exception) -> None:
@@ -534,10 +605,15 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
         raise RuntimeError(f"checked-out HEAD {head} != EXPECTED_HEAD_SHA {expected}")
     tree = _git("rev-parse", "HEAD^{tree}")
     started_at = dt.datetime.now(dt.timezone.utc)
-    started_text = started_at.isoformat().replace("+00:00", "Z")
+    started_text = started_at.isoformat(timespec="microseconds").replace("+00:00", "Z")
     started_clock = time.perf_counter()
 
     suite = unittest.defaultTestLoader.loadTestsFromName(TEST_MODULE)
+    discovered_ids = sorted(_loaded_test_ids(suite))
+    if len(discovered_ids) != EXPECTED_TEST_COUNT or _test_ids_sha256(
+        discovered_ids
+    ) != EXPECTED_TEST_IDS_SHA256:
+        raise RuntimeError("hosted test discovery does not match the committed inventory")
     runner = unittest.TextTestRunner(
         stream=sys.stdout, verbosity=2, resultclass=EvidenceResult
     )
@@ -564,6 +640,10 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
         "authority": False,
         "authorityScope": "ZERO_AUTHORITY_CLOSED_GATE_EVIDENCE_ONLY",
         "git": {"head": head, "tree": tree},
+        "testInventory": {
+            "count": EXPECTED_TEST_COUNT,
+            "idsSha256": EXPECTED_TEST_IDS_SHA256,
+        },
         "repository": {
             "cleanBefore": True,
             "cleanAfter": repository_clean,
@@ -578,6 +658,7 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
             "os": platform.platform(),
             "python": platform.python_version(),
             "implementation": platform.python_implementation(),
+            "githubActions": os.environ.get("GITHUB_ACTIONS") == "true",
             "githubRepository": os.environ.get("GITHUB_REPOSITORY"),
             "githubRunId": os.environ.get("GITHUB_RUN_ID"),
             "githubRunAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),

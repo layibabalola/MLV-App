@@ -49,7 +49,11 @@ manifest that binds their exact SHA-256, byte count, head, and tree; partial bun
 The verifier also parses both files, recomputes counters and the CLOSED verdict, requires the profile
 and repository-cleanliness JUnit cases, refuses authority claims, and rejects any sibling fatal
 diagnostic while preserving the original fatal cause. Every JSON test ID, status, and rounded
-duration must map to exactly one JUnit testcase with the matching outcome child.
+duration must map to exactly one JUnit testcase with the matching outcome child. The committed
+45-test inventory is bound by its sorted-ID digest, so zero, partial, or renamed discovery cannot
+become a green run. Environment fields, canonical UTC start time, and finite nonnegative duration
+are type-checked, and the verifier rechecks the live index/worktree immediately before artifact
+routing instead of trusting only the runner's earlier cleanliness statement.
 Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
 written to the hosted step summary, and runner exceptions after argument parsing produce a separate
 non-authoritative fatal diagnostic rather than a partial bundle. The narrowly scoped dot-directory

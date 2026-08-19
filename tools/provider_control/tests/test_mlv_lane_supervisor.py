@@ -388,8 +388,16 @@ class SupervisorTests(unittest.TestCase):
             supervisor.MECHANICS_TECHNICAL_SUBJECT,
         )
         self.assertFalse(packet["authority"]["adoption"])
+        local = packet["localEvidence"]
+        self.assertEqual(local["hostedExpectedTestCount"], hosted_runner.EXPECTED_TEST_COUNT)
         self.assertEqual(
-            packet["localEvidence"]["hostedMatrix"],
+            local["hostedExpectedTestIdsSha256"],
+            hosted_runner.EXPECTED_TEST_IDS_SHA256,
+        )
+        self.assertTrue(local["hostedVerifierLiveCleanRecheck"])
+        self.assertTrue(local["hostedStrictRunProvenance"])
+        self.assertEqual(
+            local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
@@ -1104,15 +1112,24 @@ class SupervisorTests(unittest.TestCase):
         tree = subprocess.check_output(
             ["git", "rev-parse", "HEAD^{tree}"], cwd=ROOT.parents[1], text=True
         ).strip()
-        record = {
-            "id": "example.Case.test_pass", "status": "passed", "durationSeconds": 0.01
-        }
+        loaded = unittest.defaultTestLoader.loadTestsFromName(
+            "tools.provider_control.tests.test_mlv_lane_supervisor"
+        )
+        bundle_ids = sorted(hosted_runner._loaded_test_ids(loaded))
+        bundle_records = [
+            {"id": test_id, "status": "passed", "durationSeconds": 0.01}
+            for test_id in bundle_ids
+        ]
         valid_result = {
             "schema": "mlv-provider-control-hosted-result/v1",
             "closedGatePassed": True,
             "authority": False,
             "authorityScope": "ZERO_AUTHORITY_CLOSED_GATE_EVIDENCE_ONLY",
             "git": {"head": head, "tree": tree},
+            "testInventory": {
+                "count": hosted_runner.EXPECTED_TEST_COUNT,
+                "idsSha256": hosted_runner.EXPECTED_TEST_IDS_SHA256,
+            },
             "repository": {"cleanBefore": True, "cleanAfter": True, "statusAfter": ""},
             "inputs": [
                 hosted_runner._file_binding(ROOT / "AUTHOR-PACKET.json"),
@@ -1123,12 +1140,18 @@ class SupervisorTests(unittest.TestCase):
                     ROOT.parents[1] / ".github/requirements/provider-control.txt"
                 ),
             ],
-            "environment": {},
-            "startedAtUtc": "2026-08-19T00:00:00Z",
+            "environment": {
+                "os": "test-os", "python": "3.13.0", "implementation": "CPython",
+                "githubActions": False, "githubRepository": None, "githubRunId": None,
+                "githubRunAttempt": None, "githubJob": None, "githubRef": None,
+            },
+            "startedAtUtc": "2026-08-19T00:00:00.000000Z",
             "durationSeconds": 0.1,
             "tests": {
-                "total": 1, "passed": 1, "failed": 0, "error": 0, "skipped": 0,
-                "expected-failure": 0, "unexpected-success": 0, "records": [record],
+                "total": len(bundle_records), "passed": len(bundle_records),
+                "failed": 0, "error": 0, "skipped": 0,
+                "expected-failure": 0, "unexpected-success": 0,
+                "records": bundle_records,
             },
             "profileValidation": {"exitCode": 0, "stdout": "PASS\n", "stderr": ""},
             "declaredZeroActivityInvariant": {
@@ -1140,18 +1163,65 @@ class SupervisorTests(unittest.TestCase):
         }
         result_bytes = (json.dumps(valid_result, sort_keys=True) + "\n").encode()
         junit_bytes = hosted_runner._junit_bytes(
-            [record], "2026-08-19T00:00:00Z", 0.1
+            bundle_records, "2026-08-19T00:00:00.000000Z", 0.1
         )
         hosted_runner._write_evidence_bundle(
             result_path, junit_path, manifest_path,
             result_bytes, junit_bytes, head, tree,
         )
-        hosted_runner._verify_evidence_bundle(manifest_path)
+        hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        truncated_result = json.loads(result_bytes)
+        truncated_result["tests"]["records"] = bundle_records[:1]
+        truncated_result["tests"]["total"] = 1
+        truncated_result["tests"]["passed"] = 1
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(truncated_result, sort_keys=True) + "\n").encode(),
+            hosted_runner._junit_bytes(
+                bundle_records[:1], "2026-08-19T00:00:00.000000Z", 0.1
+            ),
+            head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "test discovery"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        for field, forged_value, message in (
+            ("environment", {}, "environment"),
+            ("startedAtUtc", "not-a-time", "timestamp"),
+            ("durationSeconds", -9, "duration"),
+        ):
+            forged_result = json.loads(result_bytes)
+            forged_result[field] = forged_value
+            hosted_runner._write_evidence_bundle(
+                result_path, junit_path, manifest_path,
+                (json.dumps(forged_result, sort_keys=True) + "\n").encode(),
+                junit_bytes, head, tree,
+            )
+            with self.assertRaisesRegex(ValueError, message):
+                hosted_runner._verify_evidence_bundle(
+                    manifest_path, require_live_clean=False
+                )
+
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            result_bytes, junit_bytes, head, tree,
+        )
+        real_git = hosted_runner._git
+
+        def dirty_status(*arguments):
+            if arguments == ("status", "--porcelain=v1", "--untracked-files=all"):
+                return " M tracked.txt"
+            return real_git(*arguments)
+
+        with mock.patch.object(hosted_runner, "_git", side_effect=dirty_status):
+            with self.assertRaisesRegex(ValueError, "repository became dirty"):
+                hosted_runner._verify_evidence_bundle(manifest_path)
 
         renamed_root = hosted_runner.ET.fromstring(junit_bytes)
         ordinary = next(
             case for case in renamed_root.findall("testcase")
-            if case.attrib.get("classname") == "example.Case"
+            if case.attrib.get("classname", "").startswith("tools.provider_control.tests")
         )
         ordinary.set("name", "forged_identity")
         renamed_junit = hosted_runner.ET.tostring(
@@ -1162,12 +1232,12 @@ class SupervisorTests(unittest.TestCase):
             result_bytes, renamed_junit, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "testcase identities"):
-            hosted_runner._verify_evidence_bundle(manifest_path)
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         contradictory_root = hosted_runner.ET.fromstring(junit_bytes)
         ordinary = next(
             case for case in contradictory_root.findall("testcase")
-            if case.attrib.get("classname") == "example.Case"
+            if case.attrib.get("classname", "").startswith("tools.provider_control.tests")
         )
         hosted_runner.ET.SubElement(ordinary, "failure").text = "forged failure"
         contradictory_junit = hosted_runner.ET.tostring(
@@ -1178,7 +1248,7 @@ class SupervisorTests(unittest.TestCase):
             result_bytes, contradictory_junit, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "outcome children"):
-            hosted_runner._verify_evidence_bundle(manifest_path)
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         hostile_result = json.loads(result_bytes)
         hostile_result["authority"] = True
@@ -1188,7 +1258,7 @@ class SupervisorTests(unittest.TestCase):
             junit_bytes, head, tree,
         )
         with self.assertRaisesRegex(ValueError, "gate/authority"):
-            hosted_runner._verify_evidence_bundle(manifest_path)
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         hosted_runner._write_evidence_bundle(
             result_path, junit_path, manifest_path,
@@ -1198,7 +1268,7 @@ class SupervisorTests(unittest.TestCase):
         original_fatal = b'{"error":"original runner failure","authority":false}\n'
         fatal.write_bytes(original_fatal)
         with self.assertRaisesRegex(ValueError, "fatal diagnostic"):
-            hosted_runner._verify_evidence_bundle(manifest_path)
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
         args = mock.Mock(manifest=manifest_path, result=result_path, verify_manifest=None)
         try:
             raise RuntimeError("derivative verifier failure")
@@ -1209,7 +1279,7 @@ class SupervisorTests(unittest.TestCase):
 
         result_path.write_bytes(result_bytes + b" ")
         with self.assertRaisesRegex(ValueError, "byte count mismatch"):
-            hosted_runner._verify_evidence_bundle(manifest_path)
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
 
 if __name__ == "__main__":
