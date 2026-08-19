@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v6",
   "status": "DISTINGUISH_PROJECT_R15_HOSTED_EVIDENCE_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T12:58:37Z",
+  "capturedAt": "2026-08-19T13:11:57Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "canonicalDoctrine": {
     "generation": "R26",
@@ -112,6 +112,8 @@
     "hostedExpectedTestIdsSha256": "38c03bf4b8f5dbd82ae366e7a55221a1c85a456d9e1edf3f9858677fa1203de1",
     "hostedVerifierLiveCleanRecheck": true,
     "hostedStrictRunProvenance": true,
+    "hostedFatalDiagnosticSeparatelyVerified": true,
+    "hostedNonFiniteJsonForbidden": true,
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -143,8 +145,8 @@
   ],
   "subjects": [
     {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 43884, "sha256": "0bd4116a29304c86fe124f692efa81fe4904506731c58f1a1e05761ac9e9da04"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 70566, "sha256": "037f4294414fe35689f13d3faa1cfde03f50379603eacc965c346849bfd2d638"},
-    {"path": "tools/provider_control/tests/hosted_runner.py", "bytes": 30245, "sha256": "d76f4d032c3c9310cf699b888d52db1248d4774f0e77400d3b0dc8c62f44b763"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 73083, "sha256": "65c738d7531142882cac8d5f86ed85f531a07208d9a97edf1179ea99d850193d"},
+    {"path": "tools/provider_control/tests/hosted_runner.py", "bytes": 33189, "sha256": "d21b7d2d6f37cd53168ce86ba5a5b77d351d77ece46e684791bc913a4d127574"},
     {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 1367, "sha256": "2ee4213711eeadc5eb4ece0ab161557ee123751e50aaa72f61150a5b4ed41f59"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"},
@@ -155,12 +157,12 @@
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v2.schema.json", "bytes": 18842, "sha256": "c7edee3dc6973a9aa398c8425c9c85c09d3370ad0706df22e2438fcf01a6b4d3"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/README.md", "bytes": 6720, "sha256": "c54b6592eb62f8a7ee39d8035c6ef6ae0b526138a1e4a3ca436199261c5c5ac8"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 10785, "sha256": "9c764bc1d16aac2dbf6e53a7ea790ecafd948d02ebe78f21bf5b974230d950a4"},
+    {"path": "tools/provider_control/README.md", "bytes": 7079, "sha256": "e1f97e317b790dbe1e412b9fd36ce3b822b780f8cf0893c899a093a93ae8fb0f"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 11095, "sha256": "579811465caf43ffe559fe6689d20d6922f0375ccc14358bab3383743d520a4a"},
     {"path": ".gitattributes", "bytes": 267, "sha256": "a54a31bbb6bdb0b34a3871f9d3a80fa0d5df04cb204dcbbe107b5009c8885e60"},
     {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
     {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},
     {"path": ".github/requirements/provider-control-platform-evidence.json", "bytes": 1857, "sha256": "81659e3ff6a624c3d63d1384911a5eb2bbcfea6cdcb272be3ea92cb9f0423f42"},
-    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 3363, "sha256": "4982e2bd8c9f3378945e2cf307c30eccfe7fc9d5e3bfa467db128978dff55fda"}
+    {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 3715, "sha256": "f07e87650c2c0f9cfaf607a288d4e8002e35433b6f54ec25ae2dbdaae672e320"}
   ]
 }

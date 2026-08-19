@@ -52,12 +52,16 @@ diagnostic while preserving the original fatal cause. Every JSON test ID, status
 duration must map to exactly one JUnit testcase with the matching outcome child. The committed
 45-test inventory is bound by its sorted-ID digest, so zero, partial, or renamed discovery cannot
 become a green run. Environment fields, canonical UTC start time, and finite nonnegative duration
-are type-checked, and the verifier rechecks the live index/worktree immediately before artifact
-routing instead of trusting only the runner's earlier cleanliness statement.
+are type-checked; JSON non-finite constants are forbidden; and the environment/GitHub matrix claims
+must equal the live verifier process. The verifier also rechecks the live index/worktree immediately
+before artifact routing instead of trusting only the runner's earlier cleanliness statement.
 Complete bundles are uploaded after a gate failure with a full-commit action pin, the same verdict is
 written to the hosted step summary, and runner exceptions after argument parsing produce a separate
-non-authoritative fatal diagnostic rather than a partial bundle. The narrowly scoped dot-directory
-files are explicitly included by the pinned upload action; missing files are an error. Retention is
+non-authoritative fatal diagnostic rather than a partial bundle. That diagnostic has its own strict
+schema, live environment and head/tree verifier; a forged preexisting fatal file is replaced by a
+zero-authority invalid-predecessor receipt and can never pass the fatal upload route merely by
+existing. The narrowly scoped dot-directory files are explicitly included by the pinned upload
+action; missing files are an error. Retention is
 30 days and is not a permanent evidence archive. R15 itself
 remains unhosted until its own four legs produce those artifacts; the R14 console-only run cannot be
 relabeled as R15 evidence. The workflow now runs for matching pull requests and matching pushes to

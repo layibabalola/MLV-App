@@ -65,11 +65,15 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   and repository checks, refuses authority claims or a sibling fatal diagnostic, and preserves the
   first fatal cause. Each JSON test ID/status/duration must match exactly one JUnit testcase and
   outcome child. The exact 45-test sorted-ID digest rejects zero, partial, or renamed discovery;
-  environment/run fields and canonical UTC timing are type-checked; and the verifier performs a
-  fresh live index/worktree cleanliness check immediately before routing. Partial bundles are
+  environment/run fields must equal the live matrix process; canonical UTC timing is type-checked;
+  and non-finite JSON/JUnit durations are forbidden. The verifier performs a fresh live
+  index/worktree cleanliness check immediately before routing. Partial bundles are
   refused rather than uploaded. Complete failure bundles use a
   full-commit upload pin with the narrow hidden-file opt-in. Runner exceptions produce a distinct
-  non-authoritative fatal diagnostic. Evidence remains retained for 30 days rather than permanently
+  non-authoritative fatal diagnostic that must separately pass strict schema, zero-authority,
+  live-environment, and head/tree validation before upload. A forged existing fatal is replaced by a
+  bound invalid-predecessor receipt rather than preserved as evidence. Evidence remains retained for
+  30 days rather than permanently
   archived, and the exact verdict is written to the hosted step summary. R15 is not hosted yet and
   may not inherit R14's result.
   Matching pushes to `master` now receive the same evidence run. The repository's distinct missing

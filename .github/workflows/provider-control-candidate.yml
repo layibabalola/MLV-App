@@ -68,8 +68,14 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
-      - name: Upload fatal runner diagnostic
+      - name: Verify fatal runner diagnostic
+        id: fatal-verify
         if: ${{ always() && steps.evidence-verify.outcome != 'success' }}
+        run: >-
+          python tools/provider_control/tests/hosted_runner.py
+          --verify-fatal .claude-state/provider-control-results/fatal-diagnostic.json
+      - name: Upload fatal runner diagnostic
+        if: ${{ always() && steps.evidence-verify.outcome != 'success' && steps.fatal-verify.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: provider-control-fatal-${{ matrix.os }}-py${{ matrix.python }}-${{ github.run_id }}-${{ github.run_attempt }}

@@ -396,6 +396,8 @@ class SupervisorTests(unittest.TestCase):
         )
         self.assertTrue(local["hostedVerifierLiveCleanRecheck"])
         self.assertTrue(local["hostedStrictRunProvenance"])
+        self.assertTrue(local["hostedFatalDiagnosticSeparatelyVerified"])
+        self.assertTrue(local["hostedNonFiniteJsonForbidden"])
         self.assertEqual(
             local["hostedMatrix"],
             "R10_4_OF_4_GREEN_RUN_32208720831;"
@@ -991,6 +993,10 @@ class SupervisorTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
+            "--verify-fatal .claude-state/provider-control-results/fatal-diagnostic.json",
+            workflow,
+        )
+        self.assertIn(
             "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7",
             workflow,
         )
@@ -1001,7 +1007,15 @@ class SupervisorTests(unittest.TestCase):
             2,
         )
         self.assertIn("if: ${{ always() && steps.evidence-verify.outcome == 'success' }}", workflow)
-        self.assertIn("if: ${{ always() && steps.evidence-verify.outcome != 'success' }}", workflow)
+        self.assertIn(
+            "if: ${{ always() && steps.evidence-verify.outcome != 'success' }}",
+            workflow,
+        )
+        self.assertIn(
+            "if: ${{ always() && steps.evidence-verify.outcome != 'success' && "
+            "steps.fatal-verify.outcome == 'success' }}",
+            workflow,
+        )
         self.assertIn(".claude-state/provider-control-results/fatal-diagnostic.json", workflow)
         self.assertIn("if-no-files-found: error", workflow)
         self.assertEqual(workflow.count("include-hidden-files: true"), 2)
@@ -1140,11 +1154,7 @@ class SupervisorTests(unittest.TestCase):
                     ROOT.parents[1] / ".github/requirements/provider-control.txt"
                 ),
             ],
-            "environment": {
-                "os": "test-os", "python": "3.13.0", "implementation": "CPython",
-                "githubActions": False, "githubRepository": None, "githubRunId": None,
-                "githubRunAttempt": None, "githubJob": None, "githubRef": None,
-            },
+            "environment": hosted_runner._runtime_environment(),
             "startedAtUtc": "2026-08-19T00:00:00.000000Z",
             "durationSeconds": 0.1,
             "tests": {
@@ -1202,6 +1212,31 @@ class SupervisorTests(unittest.TestCase):
                 hosted_runner._verify_evidence_bundle(
                     manifest_path, require_live_clean=False
                 )
+
+        forged_result = json.loads(result_bytes)
+        forged_result["environment"] = {
+            "os": "forged-os", "python": "0.0", "implementation": "Forged",
+            "githubActions": True, "githubRepository": "evil/repo",
+            "githubRunId": "999", "githubRunAttempt": "99", "githubJob": "evil",
+            "githubRef": "refs/heads/evil",
+        }
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(forged_result, sort_keys=True) + "\n").encode(),
+            junit_bytes, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "live verifier process"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
+
+        infinite_result = json.loads(result_bytes)
+        infinite_result["tests"]["records"][0]["durationSeconds"] = float("inf")
+        hosted_runner._write_evidence_bundle(
+            result_path, junit_path, manifest_path,
+            (json.dumps(infinite_result, sort_keys=True) + "\n").encode(),
+            junit_bytes, head, tree,
+        )
+        with self.assertRaisesRegex(ValueError, "non-finite JSON constant"):
+            hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
 
         hosted_runner._write_evidence_bundle(
             result_path, junit_path, manifest_path,
@@ -1265,16 +1300,39 @@ class SupervisorTests(unittest.TestCase):
             result_bytes, junit_bytes, head, tree,
         )
         fatal = bundle / "fatal-diagnostic.json"
-        original_fatal = b'{"error":"original runner failure","authority":false}\n'
-        fatal.write_bytes(original_fatal)
+        args = mock.Mock(
+            manifest=manifest_path, result=result_path,
+            verify_manifest=None, verify_fatal=None,
+        )
+        try:
+            raise RuntimeError("original runner failure")
+        except RuntimeError as error:
+            hosted_runner._write_fatal_diagnostic(args, error)
+        original_fatal = fatal.read_bytes()
+        hosted_runner._verify_fatal_diagnostic(fatal)
         with self.assertRaisesRegex(ValueError, "fatal diagnostic"):
             hosted_runner._verify_evidence_bundle(manifest_path, require_live_clean=False)
-        args = mock.Mock(manifest=manifest_path, result=result_path, verify_manifest=None)
         try:
             raise RuntimeError("derivative verifier failure")
         except RuntimeError as error:
             hosted_runner._write_fatal_diagnostic(args, error)
         self.assertEqual(fatal.read_bytes(), original_fatal)
+
+        forged_fatal = b'{"schema":"forged","authority":true,"completeEvidenceBundle":true}\n'
+        fatal.write_bytes(forged_fatal)
+        try:
+            raise RuntimeError("invalid predecessor observed")
+        except RuntimeError as error:
+            hosted_runner._write_fatal_diagnostic(args, error)
+        self.assertNotEqual(fatal.read_bytes(), forged_fatal)
+        replaced_fatal = hosted_runner._strict_json(fatal)
+        self.assertFalse(replaced_fatal["authority"])
+        self.assertFalse(replaced_fatal["completeEvidenceBundle"])
+        self.assertEqual(
+            replaced_fatal["invalidExistingDiagnostic"]["sha256"],
+            hosted_runner._sha256(forged_fatal),
+        )
+        hosted_runner._verify_fatal_diagnostic(fatal)
         fatal.unlink()
 
         result_path.write_bytes(result_bytes + b" ")

@@ -258,6 +258,20 @@ def _file_binding(path: Path) -> dict[str, object]:
     }
 
 
+def _runtime_environment() -> dict[str, object]:
+    return {
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "implementation": platform.python_implementation(),
+        "githubActions": os.environ.get("GITHUB_ACTIONS") == "true",
+        "githubRepository": os.environ.get("GITHUB_REPOSITORY"),
+        "githubRunId": os.environ.get("GITHUB_RUN_ID"),
+        "githubRunAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "githubJob": os.environ.get("GITHUB_JOB"),
+        "githubRef": os.environ.get("GITHUB_REF"),
+    }
+
+
 def _strict_json(path: Path) -> dict[str, object]:
     def no_duplicates(pairs):
         value = {}
@@ -267,7 +281,14 @@ def _strict_json(path: Path) -> dict[str, object]:
             value[key] = item
         return value
 
-    value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=no_duplicates)
+    def no_non_finite(constant):
+        raise ValueError(f"non-finite JSON constant is forbidden: {constant}")
+
+    value = json.loads(
+        path.read_text(encoding="utf-8"),
+        object_pairs_hook=no_duplicates,
+        parse_constant=no_non_finite,
+    )
     if not isinstance(value, dict):
         raise ValueError("evidence manifest must be an object")
     return value
@@ -385,26 +406,8 @@ def _verify_evidence_bundle(
     if result["inputs"] != expected_inputs:
         raise ValueError("hosted result input bindings mismatch")
     environment = result["environment"]
-    environment_keys = {
-        "os", "python", "implementation", "githubActions", "githubRepository",
-        "githubRunId", "githubRunAttempt", "githubJob", "githubRef",
-    }
-    if not isinstance(environment, dict) or set(environment) != environment_keys:
-        raise ValueError("hosted result environment keys are invalid")
-    if not all(
-        isinstance(environment[key], str) and environment[key]
-        for key in ("os", "python", "implementation")
-    ) or type(environment["githubActions"]) is not bool:
-        raise ValueError("hosted result runtime environment is invalid")
-    github_values = [
-        environment[key]
-        for key in ("githubRepository", "githubRunId", "githubRunAttempt", "githubJob", "githubRef")
-    ]
-    if environment["githubActions"]:
-        if not all(isinstance(value, str) and value for value in github_values):
-            raise ValueError("hosted result GitHub provenance is incomplete")
-    elif any(value is not None for value in github_values):
-        raise ValueError("non-hosted result must not claim GitHub provenance")
+    if environment != _runtime_environment():
+        raise ValueError("hosted result environment does not match the live verifier process")
     started = result["startedAtUtc"]
     if not isinstance(started, str) or not re.fullmatch(
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z", started
@@ -458,7 +461,7 @@ def _verify_evidence_bundle(
             raise ValueError("hosted result test status is invalid")
         if not isinstance(record["durationSeconds"], (int, float)) or isinstance(
             record["durationSeconds"], bool
-        ) or record["durationSeconds"] < 0:
+        ) or not math.isfinite(record["durationSeconds"]) or record["durationSeconds"] < 0:
             raise ValueError("hosted result test duration is invalid")
         if "detail" in record and not isinstance(record["detail"], str):
             raise ValueError("hosted result test detail is invalid")
@@ -551,6 +554,8 @@ def _verify_evidence_bundle(
             junit_duration = float(case.attrib["time"])
         except (KeyError, ValueError) as error:
             raise ValueError(f"JUnit duration is invalid for {record['id']}") from error
+        if not math.isfinite(junit_duration):
+            raise ValueError(f"JUnit duration is non-finite for {record['id']}")
         if junit_duration != round(float(record["durationSeconds"]), 6):
             raise ValueError(f"JUnit duration disagrees for {record['id']}")
     if require_live_clean:
@@ -559,13 +564,73 @@ def _verify_evidence_bundle(
             raise ValueError(f"repository became dirty before evidence routing:\n{live_status}")
 
 
+def _verify_fatal_diagnostic(path: Path) -> None:
+    diagnostic = _strict_json(path)
+    base_keys = {
+        "schema", "completeEvidenceBundle", "authority", "errorType", "error",
+        "traceback", "environment",
+    }
+    optional = {"git", "gitError", "invalidExistingDiagnostic"}
+    if not base_keys <= set(diagnostic) or set(diagnostic) - base_keys - optional:
+        raise ValueError("fatal diagnostic keys are invalid")
+    if diagnostic["schema"] != "mlv-provider-control-hosted-fatal-diagnostic/v1":
+        raise ValueError("fatal diagnostic schema mismatch")
+    if diagnostic["completeEvidenceBundle"] is not False or diagnostic["authority"] is not False:
+        raise ValueError("fatal diagnostic completeness or authority is invalid")
+    if not all(
+        isinstance(diagnostic[key], str) and diagnostic[key]
+        for key in ("errorType", "error")
+    ) or not isinstance(diagnostic["traceback"], str):
+        raise ValueError("fatal diagnostic error fields are invalid")
+    if diagnostic["environment"] != _runtime_environment():
+        raise ValueError("fatal diagnostic environment does not match the live verifier process")
+    if ("git" in diagnostic) == ("gitError" in diagnostic):
+        raise ValueError("fatal diagnostic must contain exactly one Git outcome")
+    if "git" in diagnostic:
+        expected_git = {
+            "head": _git("rev-parse", "HEAD"),
+            "tree": _git("rev-parse", "HEAD^{tree}"),
+        }
+        if diagnostic["git"] != expected_git:
+            raise ValueError("fatal diagnostic Git binding mismatch")
+    elif not isinstance(diagnostic["gitError"], str) or not diagnostic["gitError"]:
+        raise ValueError("fatal diagnostic Git error is invalid")
+    if "invalidExistingDiagnostic" in diagnostic:
+        invalid = diagnostic["invalidExistingDiagnostic"]
+        if not isinstance(invalid, dict) or set(invalid) != {
+            "bytes", "sha256", "validationError"
+        }:
+            raise ValueError("fatal diagnostic invalid-predecessor receipt is malformed")
+        if type(invalid["bytes"]) is not int or invalid["bytes"] < 0:
+            raise ValueError("fatal diagnostic invalid-predecessor byte count is invalid")
+        if not isinstance(invalid["sha256"], str) or not re.fullmatch(
+            r"[0-9a-f]{64}", invalid["sha256"]
+        ) or not isinstance(invalid["validationError"], str) or not invalid["validationError"]:
+            raise ValueError("fatal diagnostic invalid-predecessor binding is invalid")
+
+
 def _write_fatal_diagnostic(args, error: Exception) -> None:
-    anchor = args.manifest or args.result or args.verify_manifest
+    anchor = (
+        getattr(args, "manifest", None)
+        or getattr(args, "result", None)
+        or getattr(args, "verify_manifest", None)
+        or getattr(args, "verify_fatal", None)
+    )
     if anchor is None:
         return
     target = anchor.parent / "fatal-diagnostic.json"
+    invalid_existing = None
     if target.exists():
-        return
+        try:
+            _verify_fatal_diagnostic(target)
+            return
+        except Exception as existing_error:
+            existing = target.read_bytes()
+            invalid_existing = {
+                "bytes": len(existing),
+                "sha256": _sha256(existing),
+                "validationError": str(existing_error),
+            }
     diagnostic = {
         "schema": "mlv-provider-control-hosted-fatal-diagnostic/v1",
         "completeEvidenceBundle": False,
@@ -573,7 +638,10 @@ def _write_fatal_diagnostic(args, error: Exception) -> None:
         "errorType": type(error).__name__,
         "error": str(error),
         "traceback": traceback.format_exc(),
+        "environment": _runtime_environment(),
     }
+    if invalid_existing is not None:
+        diagnostic["invalidExistingDiagnostic"] = invalid_existing
     try:
         diagnostic["git"] = {
             "head": _git("rev-parse", "HEAD"),
@@ -589,9 +657,14 @@ def _write_fatal_diagnostic(args, error: Exception) -> None:
 
 def _execute(args, parser: argparse.ArgumentParser) -> int:
     if args.verify_manifest:
-        if any((args.junit, args.result, args.manifest)):
+        if any((args.junit, args.result, args.manifest, args.verify_fatal)):
             parser.error("--verify-manifest cannot be combined with write options")
         _verify_evidence_bundle(args.verify_manifest)
+        return 0
+    if args.verify_fatal:
+        if any((args.junit, args.result, args.manifest, args.verify_manifest)):
+            parser.error("--verify-fatal cannot be combined with other options")
+        _verify_fatal_diagnostic(args.verify_fatal)
         return 0
     if not all((args.junit, args.result, args.manifest)):
         parser.error("--junit, --result, and --manifest are all required")
@@ -654,17 +727,7 @@ def _execute(args, parser: argparse.ArgumentParser) -> int:
             _file_binding(REPO / ".github/workflows/provider-control-candidate.yml"),
             _file_binding(REPO / ".github/requirements/provider-control.txt"),
         ],
-        "environment": {
-            "os": platform.platform(),
-            "python": platform.python_version(),
-            "implementation": platform.python_implementation(),
-            "githubActions": os.environ.get("GITHUB_ACTIONS") == "true",
-            "githubRepository": os.environ.get("GITHUB_REPOSITORY"),
-            "githubRunId": os.environ.get("GITHUB_RUN_ID"),
-            "githubRunAttempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
-            "githubJob": os.environ.get("GITHUB_JOB"),
-            "githubRef": os.environ.get("GITHUB_REF"),
-        },
+        "environment": _runtime_environment(),
         "startedAtUtc": started_text,
         "durationSeconds": round(elapsed, 6),
         "tests": {"total": len(records), **statuses, "records": records},
@@ -705,6 +768,7 @@ def main() -> int:
     parser.add_argument("--result", type=Path)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--verify-manifest", type=Path)
+    parser.add_argument("--verify-fatal", type=Path)
     args = parser.parse_args()
     try:
         return _execute(args, parser)
