@@ -14,6 +14,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from .brokered_closeout import (
+    DEFAULT_CLOSEOUT_CONFIG,
     bounded_closeout_run,
     bounded_runner_exit_code,
     bounded_runner_exit_codes,
@@ -696,6 +697,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(config["contentReviewGate"]["coordinationFile"], ".claude-state/coordination/gpu-lane-impl-review-sync.md")
         self.assertEqual(config["contentReviewGate"]["handoffActor"], "CODEX")
         self.assertEqual(config["contentReviewGate"]["reviewActor"], "CLAUDE")
+        self.assertEqual(
+            config["contentReviewGate"]["authorizedReviewSessions"],
+            ["5fc3fc6e-345f-40b8-bb3d-7abd6302b459"],
+        )
         self.assertFalse(config["stashPolicy"]["allowForeignDirtyStash"])
         self.assertIn("pinnedRefs", config["reviewQuorum"]["tupleFields"])
         self.assertIn("repo_sweep_prune_merged", config["reviewQuorum"]["highImpactActions"])
@@ -710,6 +715,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("contentReviewGate.coordinationFile", contract["requiredConfigKeys"])
         self.assertIn("contentReviewGate.handoffActor", contract["requiredConfigKeys"])
         self.assertIn("contentReviewGate.reviewActor", contract["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.authorizedReviewSessions", contract["requiredConfigKeys"])
         self.assertIn("toolingBaseline", contract["requiredConfigKeys"])
         self.assertIn("powerShell", contract["requiredConfigKeys"])
         self.assertIn("powerShell.preferredExecutable", contract["requiredConfigKeys"])
@@ -862,6 +868,48 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("repoClosedAuditHash", config["rollbackPolicy"]["requiredManifestFields"])
         self.assertIn("reset-hard", config["rollbackPolicy"]["disallowedDefaultActions"])
         self.assertIn("delete-evidence", config["rollbackPolicy"]["disallowedDefaultActions"])
+
+    def test_content_review_authorized_session_rotation_is_strict_singleton(self) -> None:
+        current = "5fc3fc6e-345f-40b8-bb3d-7abd6302b459"
+        retired = "ee961390-55ba-48de-" + "8220-095eda6ad492"
+        override = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+        effective = load_closeout_config(ROOT)
+
+        self.assertEqual(override["contentReviewGate"]["authorizedReviewSessions"], [current])
+        self.assertEqual(DEFAULT_CLOSEOUT_CONFIG["contentReviewGate"]["authorizedReviewSessions"], [current])
+        self.assertEqual(effective["contentReviewGate"]["authorizedReviewSessions"], [current])
+        for path in (
+            ROOT / "closeout.config.json",
+            ROOT / "tools" / "repo_hygiene" / "brokered_closeout.py",
+            Path(__file__),
+        ):
+            self.assertNotIn(retired, path.read_text(encoding="utf-8"), str(path))
+
+        start = "c" * 40
+        feature = "f" * 40
+        range_token = "%s..%s" % (start, feature)
+        effective["contentReviewGate"]["coordinationFile"] = "gate.md"
+        detection = {"featureHead": feature, "targetHead": start, "targetBranch": "master"}
+        manifest = {"startHead": start}
+
+        def validate_seat(root: Path, seat: str):
+            (root / "gate.md").write_text(
+                "### [2026-01-01T00:00:00Z] CODEX - HANDOFF (ready)\n"
+                "Range: `%s`\n" % range_token
+                + "### [2026-01-01T01:00:00Z] CLAUDE - REVIEW (verdict)\n"
+                + "Range: `%s`\n" % range_token
+                + "Verdict: APPROVE\n"
+                + "Seat: %s\n" % seat,
+                encoding="utf-8",
+            )
+            return validate_content_review_approval_for_finalize(root, effective, detection, manifest)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(validate_seat(root, current))
+            denied = validate_seat(root, retired)
+            self.assertIsNotNone(denied)
+            self.assertEqual(denied["reason"], "content_approval_unauthorized_seat")
 
     @unittest.skipUnless(os.name == "nt", "PowerShell path policy is Windows-specific")
     def test_powershell_policy_prefers_pwsh_no_profile_for_closeout_commands(self) -> None:
@@ -2134,6 +2182,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("contentReviewGate.coordinationFile", baseline["requiredConfigKeys"])
         self.assertIn("contentReviewGate.handoffActor", baseline["requiredConfigKeys"])
         self.assertIn("contentReviewGate.reviewActor", baseline["requiredConfigKeys"])
+        self.assertIn("contentReviewGate.authorizedReviewSessions", baseline["requiredConfigKeys"])
         self.assertIn("closeoutAddendumPersistence", baseline["requiredConfigKeys"])
         self.assertIn("finalizeLoop", baseline["requiredConfigKeys"])
         self.assertIn("agentRemediation", baseline["requiredConfigKeys"])
@@ -2146,6 +2195,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertIn("powerShell", baseline["requiredConfigKeys"])
         self.assertIn("powerShell.preferredExecutable", baseline["requiredConfigKeys"])
         self.assertIn("powerShell.requiredArgs", baseline["requiredConfigKeys"])
+        self.assertIn(
+            "test_content_review_authorized_session_rotation_is_strict_singleton",
+            baseline["requiredTests"],
+        )
         self.assertIn("test_bounded_runner_kills_hung_finalize_child_with_descendants", baseline["requiredTests"])
         self.assertIn("test_start_work_block_auto_branches_from_clean_protected_target", baseline["requiredTests"])
         self.assertIn("test_start_work_block_blocks_dirty_protected_target_before_auto_branch", baseline["requiredTests"])
@@ -4097,7 +4150,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "### [2026-01-01T00:00:00Z] CODEX - HANDOFF\n"
             f"Range: `{range_token}`\n\nbody\n\n"
             "### [2026-01-01T01:00:00Z] CLAUDE - REVIEW\n"
-            f"Range: `{range_token}`\nVerdict: APPROVE\n\nbody\n",
+            f"Range: `{range_token}`\nVerdict: APPROVE\n"
+            "Seat: 5fc3fc6e-345f-40b8-bb3d-7abd6302b459\n\nbody\n",
         )
 
         linked = repo.parent / "gate-id-4-nostate"
@@ -4207,7 +4261,8 @@ class BrokeredCloseoutTests(unittest.TestCase):
             "Gate: ready for Claude review.\n\n"
             "### [2026-01-01T00:01:00Z] CLAUDE - REVIEW\n"
             f"Range: `{range_token}`\n"
-            "Verdict: APPROVE\n\n"
+            "Verdict: APPROVE\n"
+            "Seat: 5fc3fc6e-345f-40b8-bb3d-7abd6302b459\n\n"
             "### [2026-01-01T00:02:00Z] CLAUDE - REVIEW\n"
             f"Range: `{range_token}`\n"
             "Verdict: IDLE\n",

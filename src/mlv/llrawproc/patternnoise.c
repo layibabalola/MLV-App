@@ -371,7 +371,7 @@ static void fix_column_noise(int16_t * original, int16_t * denoised, int w, int 
         original[i] = COERCE((int)original[i] - mc, 0, 32760);
     }
     
-end:
+end: ;
 }
 
 /* extract a color channel from a Bayer image */

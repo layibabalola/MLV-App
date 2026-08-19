@@ -12,13 +12,15 @@ Default mode is dry-run/validate only.
 """
 import argparse
 import json
-import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from core.paths import ROOT_MANIFEST_FILENAME, resolve_moved_root_chain
+from core.paths import ROOT_MANIFEST_FILENAME, resolve_bridge_paths, resolve_moved_root_chain
+from core.storage import (
+    StorageCapability,
+)
 
 
 def utc_now() -> str:
@@ -37,11 +39,14 @@ def default_session_registry() -> Dict[str, Any]:
     return {"projects": {}, "updated_at": utc_now()}
 
 
-def read_json_object(path: Path) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+def read_json_object(
+    path: Path, *, storage: StorageCapability
+) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    storage.ensure_private_file(path)
     if not path.exists():
         return True, None, None
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with storage.open_private_read_text(path) as handle:
             parsed = json.load(handle)
     except Exception as exc:
         return False, None, str(exc)
@@ -71,7 +76,9 @@ def _add_historical_issue(report: Dict[str, Any], code: str, message: str, **det
     report["historical"]["issues"].append(issue)
 
 
-def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
+def scan_historical_state(
+    state_dir: Path, *, storage: StorageCapability
+) -> Dict[str, Any]:
     state_dir = Path(state_dir)
     root = state_dir.parent
     manifest_path = root / ROOT_MANIFEST_FILENAME
@@ -86,7 +93,7 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
     report: Dict[str, Any] = {"ok": True, "historical": historical}
 
     try:
-        moved = resolve_moved_root_chain(root)
+        moved = resolve_moved_root_chain(root, storage=storage)
     except Exception as exc:
         _add_historical_issue(report, "redirect_error", "MOVED_TO.json chain could not be resolved", error=str(exc))
         moved = None
@@ -103,7 +110,8 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
             chain=chain,
         )
         target_manifest = target / ROOT_MANIFEST_FILENAME
-        ok, target_data, error = read_json_object(target_manifest)
+        target_storage = StorageCapability.bind_trusted(target)
+        ok, target_data, error = read_json_object(target_manifest, storage=target_storage)
         if not ok or target_data is None:
             _add_historical_issue(
                 report,
@@ -121,7 +129,7 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
                 active_root=target_data.get("active_root"),
             )
 
-    ok, manifest, error = read_json_object(manifest_path)
+    ok, manifest, error = read_json_object(manifest_path, storage=storage)
     if not ok:
         _add_historical_issue(
             report,
@@ -164,7 +172,10 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
         historical["migration_sources"].append(source_entry)
         if not source.exists():
             continue
-        ok, moved_manifest, moved_error = read_json_object(moved_path)
+        source_storage = StorageCapability.bind_trusted(source)
+        ok, moved_manifest, moved_error = read_json_object(
+            moved_path, storage=source_storage
+        )
         if moved_manifest is None and ok:
             _add_historical_issue(
                 report,
@@ -198,12 +209,15 @@ def scan_historical_state(state_dir: Path) -> Dict[str, Any]:
     return report
 
 
-def validate_jsonl(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
+def validate_jsonl(
+    path: Path, *, storage: StorageCapability
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     valid: List[Dict[str, Any]] = []
     invalid: List[str] = []
+    storage.ensure_private_file(path)
     if not path.exists():
         return valid, invalid
-    with path.open("r", encoding="utf-8") as handle:
+    with storage.open_private_read_text(path) as handle:
         for line in handle:
             raw = line.rstrip("\n")
             if not raw.strip():
@@ -220,53 +234,57 @@ def validate_jsonl(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     return valid, invalid
 
 
-def write_json(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp.replace(path)
+def write_json(
+    path: Path, value: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    storage.write_json(path, value)
 
 
-def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
-    tmp.replace(path)
+def write_jsonl(
+    path: Path, rows: Iterable[Dict[str, Any]], *, storage: StorageCapability
+) -> None:
+    storage.write_jsonl(path, rows)
 
 
-def append_quarantine(path: Path, lines: Iterable[str]) -> int:
+def append_quarantine(
+    path: Path, lines: Iterable[str], *, storage: StorageCapability
+) -> int:
     lines = list(lines)
     if not lines:
         return 0
     qpath = path.with_suffix(".quarantine.jsonl")
-    with qpath.open("a", encoding="utf-8", newline="\n") as handle:
+    with storage.open_private_text(qpath, "a") as handle:
         for line in lines:
             handle.write(line)
             handle.write("\n")
     return len(lines)
 
 
-def backup_files(paths: Iterable[Path], backup_root: Path) -> List[str]:
-    backup_root.mkdir(parents=True, exist_ok=True)
+def backup_files(
+    paths: Iterable[Path], backup_root: Path, *, storage: StorageCapability
+) -> List[str]:
+    storage.ensure_private_directory(backup_root)
     copied: List[str] = []
     for path in paths:
+        storage.ensure_private_file(path)
         if not path.exists():
             continue
         target = backup_root / path.name
+        storage.reject_link_components(target)
         if target.exists():
             target = backup_root / ("%s.%s" % (path.name, uuid.uuid4().hex[:8]))
-        shutil.copy2(path, target)
+        storage.copy_private_file(path, target)
         copied.append(str(target))
     return copied
 
 
 def recover_state(state_dir: Path, repair: bool = False, scan_historical: bool = False) -> Dict[str, Any]:
-    state_dir = Path(state_dir)
+    # Recovery is a high-level trust boundary: bind the requested state
+    # directory to its canonical bridge root before any validation or repair
+    # helper reaches a storage sink.  Old moved roots remain inspectable.
+    paths = resolve_bridge_paths(state_dir=Path(state_dir), reject_moved=False)
+    state_dir = paths.state_dir
+    storage = paths.storage
     session_path = state_dir.parent / "session.json"
     json_files = [
         ("state", state_dir / "state.json", default_state),
@@ -292,7 +310,7 @@ def recover_state(state_dir: Path, repair: bool = False, scan_historical: bool =
         "repaired": [],
     }
     if scan_historical:
-        historical = scan_historical_state(state_dir)
+        historical = scan_historical_state(state_dir, storage=storage)
         report["historical"] = historical["historical"]
         if not historical["ok"]:
             report["ok"] = False
@@ -302,7 +320,7 @@ def recover_state(state_dir: Path, repair: bool = False, scan_historical: bool =
     jsonl_repairs: List[Tuple[str, Path, List[Dict[str, Any]], List[str]]] = []
 
     for name, path, default_factory in json_files:
-        ok, value, error = read_json_object(path)
+        ok, value, error = read_json_object(path, storage=storage)
         entry: Dict[str, Any] = {
             "path": str(path),
             "exists": path.exists(),
@@ -321,7 +339,7 @@ def recover_state(state_dir: Path, repair: bool = False, scan_historical: bool =
         report["json"][name] = entry
 
     for name, path in jsonl_files:
-        valid, invalid = validate_jsonl(path)
+        valid, invalid = validate_jsonl(path, storage=storage)
         entry = {
             "path": str(path),
             "exists": path.exists(),
@@ -341,12 +359,12 @@ def recover_state(state_dir: Path, repair: bool = False, scan_historical: bool =
     if repair and touched:
         backup_dir = state_dir / "backups" / ("recovery-%s" % backup_stamp())
         report["backup_dir"] = str(backup_dir)
-        report["backups"] = backup_files(touched, backup_dir)
+        report["backups"] = backup_files(touched, backup_dir, storage=storage)
         for _name, path, value in json_repairs:
-            write_json(path, value)
+            write_json(path, value, storage=storage)
         for name, path, valid, invalid in jsonl_repairs:
-            write_jsonl(path, valid)
-            quarantined = append_quarantine(path, invalid)
+            write_jsonl(path, valid, storage=storage)
+            quarantined = append_quarantine(path, invalid, storage=storage)
             report["jsonl"][name]["quarantined_rows"] = quarantined
 
     return report

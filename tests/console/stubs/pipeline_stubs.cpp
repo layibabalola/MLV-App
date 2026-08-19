@@ -229,6 +229,37 @@ void debayerBasic(uint16_t *, float *, int, int, int) {}
 
 int getMlvLastProcessed8DirectPathActive(void) { return 0; }
 
+/*
+ * console_tests links frame_caching.c without the production video_mlv.c
+ * implementation. Mirror only the synchronous current/slot bookkeeping that
+ * invalidateMlvProcessedPreviewCache exposes to these tests. The async mutex,
+ * generation, request, worker, and broadcast contract remains covered by the
+ * pipeline tests that link video_mlv.c.
+ */
+void mlvInvalidateProcessed8PrefetchCache(mlvObject_t * video)
+{
+    if (!video) {
+        return;
+    }
+    video->current_processed_frame_8bit_active = 0;
+    video->current_processed_frame_8bit_signature = 0;
+    video->current_processed_frame_8bit = 0;
+    video->current_processed_frame_8bit_threads = 0;
+    video->processed_8bit_cache_next_slot = 0;
+    std::memset(video->processed_8bit_cache_active, 0, sizeof(video->processed_8bit_cache_active));
+    std::memset(video->processed_8bit_cache_frame, 0, sizeof(video->processed_8bit_cache_frame));
+    std::memset(video->processed_8bit_cache_threads, 0, sizeof(video->processed_8bit_cache_threads));
+    std::memset(video->processed_8bit_cache_signature, 0, sizeof(video->processed_8bit_cache_signature));
+    std::memset(video->processed_8bit_cache_scale, 0, sizeof(video->processed_8bit_cache_scale));
+    std::memset(video->processed_8bit_cache_phase4b_path, 0, sizeof(video->processed_8bit_cache_phase4b_path));
+    std::memset(video->processed_8bit_cache_phase4b_y_crop_rows, 0, sizeof(video->processed_8bit_cache_phase4b_y_crop_rows));
+    std::memset(video->processed_8bit_cache_state, 0, sizeof(video->processed_8bit_cache_state));
+    std::memset(video->processed_8bit_cache_prefetched, 0, sizeof(video->processed_8bit_cache_prefetched));
+    std::memset(video->processed_8bit_cache_generation, 0, sizeof(video->processed_8bit_cache_generation));
+    video->processed_8bit_cache_unit_size = 0;
+    video->processed8_prefetch_snapshot_dirty = 1;
+}
+
 void demosaic(amazeinfo_t *) {}
 
 void lrtpCaCorrect(float **, int, int, int, int, const uint8_t, size_t, const double, const double, uint8_t) {}

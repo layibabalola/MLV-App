@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "tracked_whole_artifact_approval",
+  "verdict": "APPROVE",
+  "artifact_path": "tests/fixtures/golden/pipeline_hashes.json",
+  "artifact_sha256": "89ce4ad45e378f38db8bab1efe3660056dc14c16bd71d8e3ec6da08fbac01f4a",
+  "reviewed_range": "e87b5133397240d5ebf3307625e8379be81e48f4..08f38ea73887e9ae3b3e84673f03d82267473fab",
+  "reviewer": "layibabalola",
+  "reviewer_role": "repository_owner",
+  "reviewed_head": "08f38ea73887e9ae3b3e84673f03d82267473fab",
+  "source": {
+    "kind": "github_issue_comment",
+    "repository": "layibabalola/MLV-App",
+    "pull_request": 6,
+    "comment_id": 5347847988,
+    "url": "https://github.com/layibabalola/MLV-App/pull/6#issuecomment-5347847988",
+    "created_at": "2026-08-19T20:51:23Z"
+  },
+  "scope": {
+    "key_count": 15,
+    "provider_authority": false,
+    "automatic_launch_gate": "CLOSED"
+  }
+}

@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .storage import STATE_SCHEMA_VERSION
+from .storage import STATE_SCHEMA_VERSION, StorageCapability
 
 @dataclasses.dataclass(frozen=True)
 class BridgeSettings:
@@ -94,11 +94,17 @@ def _validate_enum(name: str, value: Any) -> str:
     return normalized
 
 
-def load_settings(state_dir: Path, settings_path: Optional[Path] = None) -> BridgeSettings:
+def load_settings(
+    state_dir: Path,
+    settings_path: Optional[Path] = None,
+    *,
+    storage: StorageCapability,
+) -> BridgeSettings:
     path = Path(settings_path) if settings_path else settings_path_for_state_dir(Path(state_dir))
     values = DEFAULT_SETTINGS.to_dict()
+    storage.ensure_private_file(path)
     if path.exists():
-        with path.open("r", encoding="utf-8-sig") as handle:
+        with storage.open_private_read_text(path, encoding="utf-8-sig") as handle:
             loaded = json.load(handle)
         if not isinstance(loaded, dict):
             raise ValueError("%s must contain a JSON object" % path)

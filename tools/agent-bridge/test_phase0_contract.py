@@ -20,6 +20,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from contextvars import ContextVar
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -28,12 +29,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_bridge import AgentBridge
 from bootstrap_session import bootstrap
 from configure_watcher import configure_watcher
-from core.runtime import peer_runtime_path_for_state_dir, read_runtime_breadcrumb, write_runtime_breadcrumb
+from core.runtime import (
+    peer_runtime_path_for_state_dir,
+    read_runtime_breadcrumb as storage_read_runtime_breadcrumb,
+    write_runtime_breadcrumb as storage_write_runtime_breadcrumb,
+)
+from core.storage import StorageCapability
 import probe_server
 import watcher
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_TEST_STORAGE: ContextVar[StorageCapability] = ContextVar("phase0_test_storage")
+
+
+def read_runtime_breadcrumb(path: Path):
+    return storage_read_runtime_breadcrumb(path, storage=_TEST_STORAGE.get())
+
+
+def write_runtime_breadcrumb(path: Path, payload):
+    return storage_write_runtime_breadcrumb(
+        path, payload, storage=_TEST_STORAGE.get()
+    )
 
 
 class Phase0ContractTests(unittest.TestCase):
@@ -42,8 +59,11 @@ class Phase0ContractTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="agent-bridge-phase0-"))
         self.state_dir = self.tempdir / "state"
+        self.storage = StorageCapability.bind_trusted(self.tempdir)
+        self._storage_token = _TEST_STORAGE.set(self.storage)
 
     def tearDown(self) -> None:
+        _TEST_STORAGE.reset(self._storage_token)
         shutil.rmtree(self.tempdir, ignore_errors=True)
 
     # ------------------------------------------------------------------
@@ -330,6 +350,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -373,8 +394,20 @@ class Phase0ContractTests(unittest.TestCase):
         }
 
         with patch("watcher.notify_windows_toast") as toast, patch("watcher.subprocess.run", return_value=failed) as run:
-            watcher.process_session_once(session_config, seen_ids=seen_ids, state_path=state_path, toasts_enabled=True)
-            watcher.process_session_once(session_config, seen_ids=seen_ids, state_path=state_path, toasts_enabled=True)
+            watcher.process_session_once(
+                session_config,
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+                storage=self.storage,
+            )
+            watcher.process_session_once(
+                session_config,
+                seen_ids=seen_ids,
+                state_path=state_path,
+                toasts_enabled=True,
+                storage=self.storage,
+            )
 
         self.assertEqual(toast.call_count, 1)
         self.assertEqual(run.call_count, 2)
@@ -433,6 +466,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
                 grace_period_seconds=30,
             )
             self.assertEqual(processed, [])
@@ -445,6 +479,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
                 grace_period_seconds=0,
             )
             self.assertEqual(run.call_count, 2)
@@ -460,6 +495,7 @@ class Phase0ContractTests(unittest.TestCase):
             state_path=state_path,
             toasts_enabled=True,
             grace_period_seconds=0,
+            storage=self.storage,
         )
         self.assertIn("msg-lost-input", seen_ids)
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -502,6 +538,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -575,6 +612,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(run.call_args.args[0], ["fake-wake", "-ThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"])
@@ -616,6 +654,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -675,6 +714,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -761,6 +801,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -820,6 +861,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -870,6 +912,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -924,6 +967,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
             self.assertFalse(run.called)
 
@@ -943,6 +987,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(run.call_count, 1)
@@ -982,6 +1027,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(run.call_args.args[0], ["fake-wake", "-ThreadId", "019dcfe4-bd5d-7841-a7c1-2e8969a777c5"])
@@ -1018,6 +1064,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])
@@ -1053,6 +1100,7 @@ class Phase0ContractTests(unittest.TestCase):
                     session_id="codex-live",
                     code=code,
                     inbox_path=inbox_path,
+                    storage=self.storage,
                 )
 
         breaker_state = json.loads((self.state_dir / "wake-failure-windows.json").read_text(encoding="utf-8"))
@@ -1080,6 +1128,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=seen_ids,
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertFalse(run.called, "open breaker must suppress new wake attempts")
@@ -1105,6 +1154,7 @@ class Phase0ContractTests(unittest.TestCase):
                     session_id="codex-live",
                     code="12",
                     inbox_path=inbox_path,
+                    storage=self.storage,
                 )
 
         breaker_path = self.state_dir / "wake-failure-windows.json"
@@ -1133,6 +1183,7 @@ class Phase0ContractTests(unittest.TestCase):
                 session_id="codex-live",
                 code=code,
                 inbox_path=inbox_path,
+                storage=self.storage,
             )
 
         self.assertEqual(bridge.wake_breaker_status("codex-live").data["session"]["breaker_state"], "open")
@@ -1190,6 +1241,7 @@ class Phase0ContractTests(unittest.TestCase):
                 seen_ids=set(),
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=self.storage,
             )
 
         self.assertEqual(processed, [])

@@ -19,7 +19,6 @@
 
 #include <csignal>
 #include <cstdlib>
-#include <numeric>
 
 /* MainWindow.h gives us the static exportCdngSequence helper
  * and pulls in mlv_include.h (C API) transitively. */

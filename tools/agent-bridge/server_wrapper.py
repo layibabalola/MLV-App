@@ -16,7 +16,7 @@ from compact import process_runtime_identity_status, reap_stale_server_pids
 from core.processes import is_process_alive
 from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
 from core.runtime import build_runtime_breadcrumb
-from core.storage import append_jsonl, atomic_replace, file_lock, read_json, write_json
+from core.storage import StorageCapability
 from powershell_runtime import powershell_cim_command
 
 
@@ -97,10 +97,14 @@ def build_server_command(*, server_path: Path, state_dir: Path, max_hops: int, p
     ]
 
 
-def audit_wrapper_launch(*, state_dir: Path, command: List[str]) -> None:
-    event = build_runtime_breadcrumb(state_dir=state_dir, role="mcp_server_wrapper", command=command)
+def audit_wrapper_launch(
+    *, state_dir: Path, command: List[str], storage: StorageCapability
+) -> None:
+    event = build_runtime_breadcrumb(
+        state_dir=state_dir, role="mcp_server_wrapper", command=command, storage=storage
+    )
     event.update({"action": "mcp_server_wrapper_launch", "accepted": True})
-    append_jsonl(Path(state_dir) / "messages.jsonl", event)
+    storage.append_jsonl(Path(state_dir) / "messages.jsonl", event)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -432,6 +436,7 @@ def _mcp_host_identity_for_pid(
 def _live_mcp_server_markers(
     state_dir: Path,
     *,
+    storage: StorageCapability,
     identity_fn=process_runtime_identity_status,
     process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
@@ -443,13 +448,14 @@ def _live_mcp_server_markers(
     for marker in sorted(server_dir.glob("server-*.pid")):
         runtime_path = marker.with_suffix(".json")
         try:
-            pid = int(marker.read_text(encoding="utf-8").strip())
+            with storage.open_private_read_text(marker) as handle:
+                pid = int(handle.read().strip())
         except (OSError, ValueError):
             continue
         runtime: Dict[str, Any] = {}
         if runtime_path.exists():
             try:
-                runtime = read_json(runtime_path, {})
+                runtime = storage.read_json(runtime_path, {})
             except Exception:
                 runtime = {}
         identity = identity_fn(pid, runtime, expected_role="mcp_server")
@@ -486,28 +492,30 @@ def _host_slot_path(state_dir: Path, host_key: str) -> Path:
     return Path(state_dir) / "server-pids" / "host-slots" / ("host-%s.json" % digest)
 
 
-def _read_json_unlocked(path: Path) -> Dict[str, Any]:
+def _read_json_unlocked(path: Path, *, storage: StorageCapability) -> Dict[str, Any]:
     try:
         if not path.exists():
             return {}
-        with path.open("r", encoding="utf-8") as handle:
+        with storage.open_private_read_text(path) as handle:
             data = json.load(handle)
     except (OSError, ValueError, json.JSONDecodeError):
         return {}
     return data if isinstance(data, dict) else {}
 
 
-def _write_json_unlocked(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _write_json_unlocked(
+    path: Path, payload: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    storage.ensure_private_directory(path.parent)
     tmp = path.with_name("%s.%s.%s.tmp" % (path.name, os.getpid(), uuid.uuid4().hex))
     try:
-        with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+        with storage.open_private_text(tmp, "w") as handle:
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
-        atomic_replace(tmp, path)
+        storage.atomic_replace(tmp, path)
     finally:
         try:
-            tmp.unlink(missing_ok=True)
+            storage.unlink(tmp, missing_ok=True)
         except OSError:
             pass
 
@@ -595,11 +603,23 @@ def _host_slot_lease_is_live(
     return True
 
 
-def _audit_wrapper_guard_event(*, state_dir: Path, command: Sequence[str], action: str, **extra: object) -> None:
+def _audit_wrapper_guard_event(
+    *,
+    state_dir: Path,
+    command: Sequence[str],
+    action: str,
+    storage: StorageCapability,
+    **extra: object,
+) -> None:
     try:
-        event = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server_wrapper", command=list(command))
+        event = build_runtime_breadcrumb(
+            state_dir=Path(state_dir),
+            role="mcp_server_wrapper",
+            command=list(command),
+            storage=storage,
+        )
         event.update({"action": action, **extra})
-        append_jsonl(Path(state_dir) / "messages.jsonl", event)
+        storage.append_jsonl(Path(state_dir) / "messages.jsonl", event)
     except Exception:
         pass
 
@@ -609,6 +629,7 @@ def acquire_mcp_host_slot(
     state_dir: Path,
     host_identity: Dict[str, Any],
     audit_command: Sequence[str],
+    storage: StorageCapability,
     current_pid: Optional[int] = None,
     process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -630,8 +651,8 @@ def acquire_mcp_host_slot(
     stale_slot_replaced = False
     stale_lease: Dict[str, Any] = {}
 
-    with file_lock(slot_path):
-        existing = _read_json_unlocked(slot_path)
+    with storage.file_lock(slot_path):
+        existing = _read_json_unlocked(slot_path, storage=storage)
         if existing and _host_slot_lease_is_live(existing, process_table=process_table):
             result = {
                 "accepted": False,
@@ -653,6 +674,7 @@ def acquire_mcp_host_slot(
                 state_dir=Path(state_dir),
                 command=audit_command,
                 action="mcp_server_wrapper_launch_rejected_duplicate_host_slot",
+                storage=storage,
                 **result,
             )
             return result
@@ -688,13 +710,14 @@ def acquire_mcp_host_slot(
             "wrapper_executable_path": wrapper_identity.get("wrapper_executable_path"),
             "wrapper_command_hash": wrapper_identity.get("wrapper_command_hash"),
         }
-        _write_json_unlocked(slot_path, lease)
+        _write_json_unlocked(slot_path, lease, storage=storage)
 
     if stale_slot_replaced:
         _audit_wrapper_guard_event(
             state_dir=Path(state_dir),
             command=audit_command,
             action="mcp_server_wrapper_stale_host_slot_replaced",
+            storage=storage,
             accepted=True,
             host_key=host_key,
             host_pid=host_pid,
@@ -736,6 +759,7 @@ def release_mcp_host_slot(
     wrapper_pid: Optional[int] = None,
     host_pid: Optional[int] = None,
     host_slot_key: Optional[str] = None,
+    storage: StorageCapability,
 ) -> bool:
     resolved_slot_key = str(host_slot_key or "") or _host_slot_key_for_identity(
         {"host_key": host_key, "host_pid": host_pid}
@@ -744,15 +768,15 @@ def release_mcp_host_slot(
         return False
     slot_path = _host_slot_path(Path(state_dir), resolved_slot_key)
     expected_wrapper_pid = int(wrapper_pid if wrapper_pid is not None else os.getpid())
-    with file_lock(slot_path):
-        lease = _read_json_unlocked(slot_path)
+    with storage.file_lock(slot_path):
+        lease = _read_json_unlocked(slot_path, storage=storage)
         if (
             str(lease.get("generation") or "") != str(generation)
             or int(lease.get("wrapper_pid") or 0) != expected_wrapper_pid
         ):
             return False
         try:
-            slot_path.unlink(missing_ok=True)
+            storage.unlink(slot_path, missing_ok=True)
         except OSError:
             return False
     return True
@@ -807,6 +831,7 @@ def enforce_live_server_process_limit(
     max_live_server_processes: int,
     max_live_server_processes_per_host: int,
     audit_command: Sequence[str],
+    storage: StorageCapability,
     current_pid: Optional[int] = None,
     process_table: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
@@ -829,7 +854,9 @@ def enforce_live_server_process_limit(
         }
 
     try:
-        reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
+        reap_stale_server_pids(
+            Path(state_dir), max_age_hours=0, dry_run=False, storage=storage
+        )
     except Exception:
         # Marker cleanup is best-effort. The guard below still uses identity
         # checks, so stale markers should not produce false rejections.
@@ -838,7 +865,9 @@ def enforce_live_server_process_limit(
     table = process_table if process_table is not None else _process_table_from_system()
     wrapper_pid = int(current_pid if current_pid is not None else os.getpid())
     current_host = _mcp_host_identity_for_pid(wrapper_pid, process_table=table)
-    live = _live_mcp_server_markers(Path(state_dir), process_table=table)
+    live = _live_mcp_server_markers(
+        Path(state_dir), process_table=table, storage=storage
+    )
     matching_host = [entry for entry in live if _same_host_identity(entry, current_host)]
     result: Dict[str, Any] = {
         "accepted": True,
@@ -868,6 +897,7 @@ def enforce_live_server_process_limit(
                 state_dir=Path(state_dir),
                 host_identity=current_host,
                 audit_command=audit_command,
+                storage=storage,
                 current_pid=wrapper_pid,
                 process_table=table,
             )
@@ -880,6 +910,7 @@ def enforce_live_server_process_limit(
         state_dir=Path(state_dir),
         command=audit_command,
         action=str(reject_action),
+        storage=storage,
         accepted=False,
         live_server_count=len(live),
         max_live_server_processes=max_live,
@@ -994,10 +1025,13 @@ class ServerSupervisor:
         stdout_stream: Optional[BinaryIO] = None,
         stderr_target: Optional[int] = None,
         host_identity: Optional[Dict[str, Any]] = None,
+        storage: Optional[StorageCapability] = None,
         now_fn=time.monotonic,
     ) -> None:
         self.command = list(command)
         self.state_dir = Path(state_dir)
+        self.storage = storage or StorageCapability.bind_trusted(self.state_dir.parent)
+        self.storage.validate(self.state_dir)
         self.watch_paths = [Path(path) for path in watch_paths]
         self.config = config or SupervisorConfig()
         self.stdin_stream = stdin_stream or _binary_reader(sys.stdin)
@@ -1053,7 +1087,7 @@ class ServerSupervisor:
             "mtimes": _serialize_snapshot(snapshot),
         }
         try:
-            write_json(self._snapshot_path, payload)
+            self.storage.write_json(self._snapshot_path, payload)
         except Exception as exc:
             self._report_error(
                 "agent-bridge server wrapper: code-watcher snapshot write failed (non-fatal): %s" % exc
@@ -1079,7 +1113,7 @@ class ServerSupervisor:
           re-detected on the next startup.
         """
         current = _snapshot_mtimes(self.watch_paths)
-        raw = read_json(self._snapshot_path, {})
+        raw = self.storage.read_json(self._snapshot_path, {})
         if not raw or raw.get("schema_version") != CODE_WATCHER_SNAPSHOT_SCHEMA_VERSION:
             # First run, corrupt file, or schema upgrade — establish a clean baseline.
             self._save_watcher_snapshot(current)
@@ -1256,12 +1290,13 @@ class ServerSupervisor:
         try:
             if not path.exists():
                 return None
-            return json.loads(path.read_text(encoding="utf-8"))
+            with self.storage.open_private_read_text(path) as handle:
+                return json.load(handle)
         except (OSError, ValueError, json.JSONDecodeError):
             return None
 
     def _write_json_file(self, path: Path, payload: dict) -> None:
-        write_json(path, payload)
+        self.storage.write_json(path, payload)
 
     def _load_mcp_session_replay(self) -> None:
         raw = self._read_json_file(self._session_replay_path)
@@ -1917,6 +1952,7 @@ class ServerSupervisor:
                 self.state_dir,
                 max_age_hours=self.config.stale_marker_max_age_hours,
                 dry_run=False,
+                storage=self.storage,
             )
         except Exception as exc:
             self._report_error("agent-bridge server wrapper stale marker cleanup failed (non-fatal): %s" % exc)
@@ -1951,10 +1987,15 @@ class ServerSupervisor:
 
     def _append_audit_event(self, *, action: str, **extra: object) -> None:
         try:
-            event = build_runtime_breadcrumb(state_dir=self.state_dir, role="mcp_server_wrapper", command=self.command)
+            event = build_runtime_breadcrumb(
+                state_dir=self.state_dir,
+                role="mcp_server_wrapper",
+                command=self.command,
+                storage=self.storage,
+            )
             event["action"] = action
             event.update(extra)
-            append_jsonl(self.state_dir / "messages.jsonl", event)
+            self.storage.append_jsonl(self.state_dir / "messages.jsonl", event)
         except Exception as exc:
             self._report_error("agent-bridge server wrapper audit failed: %s" % exc)
 
@@ -1972,6 +2013,7 @@ def run_supervisor(
     stdout_stream: Optional[BinaryIO] = None,
     stderr_target: Optional[int] = None,
     host_identity: Optional[Dict[str, Any]] = None,
+    storage: Optional[StorageCapability] = None,
 ) -> int:
     return ServerSupervisor(
         command=command,
@@ -1982,6 +2024,7 @@ def run_supervisor(
         stdout_stream=stdout_stream,
         stderr_target=stderr_target,
         host_identity=host_identity,
+        storage=storage,
     ).run()
 
 
@@ -2022,6 +2065,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         max_live_server_processes=args.max_live_server_processes,
         max_live_server_processes_per_host=args.max_live_server_processes_per_host,
         audit_command=sys.argv,
+        storage=paths.storage,
     )
     if not guard.get("accepted"):
         if guard.get("host_slot_holder_wrapper_pid"):
@@ -2051,7 +2095,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
 
     try:
-        audit_wrapper_launch(state_dir=paths.state_dir, command=command)
+        audit_wrapper_launch(
+            state_dir=paths.state_dir, command=command, storage=paths.storage
+        )
     except Exception as exc:
         print("agent-bridge server wrapper audit failed: %s" % exc, file=sys.stderr, flush=True)
 
@@ -2069,6 +2115,7 @@ def main(argv: Optional[List[str]] = None) -> None:
                 "host_executable_path": guard.get("host_executable_path"),
                 "host_command_hash": guard.get("host_command_hash"),
             },
+            storage=paths.storage,
         )
     finally:
         release_mcp_host_slot(
@@ -2078,6 +2125,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             wrapper_pid=os.getpid(),
             host_pid=_int_or_none(guard.get("host_pid")),
             host_slot_key=str(guard.get("host_slot_key") or ""),
+            storage=paths.storage,
         )
     raise SystemExit(exit_code)
 

@@ -32,7 +32,11 @@ from core.runtime import (
 )
 from core.routing import resolve_route
 from core.settings import load_settings
-from core.storage import STATE_SCHEMA_VERSION
+from core.storage import (
+    STATE_SCHEMA_VERSION,
+    StorageCapability,
+    authorize_storage_root,
+)
 from core.transport import LocalFilesystemTransport
 from project_identity import derive_project_identity
 from routing_policy import evaluate_message
@@ -201,43 +205,20 @@ def normalize_classifier_text(text: str) -> str:
     return re.sub(r"\s+", " ", "".join(cleaned)).strip().casefold()
 
 
-def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
-    if not path.exists():
-        return dict(default)
-    with _file_lock(path):
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+def read_json(
+    path: Path, default: Dict[str, Any], *, storage: StorageCapability
+) -> Dict[str, Any]:
+    return storage.read_json(path, default)
 
 
-def _file_lock(path: Path, timeout_seconds: float = 30.0, stale_seconds: float = 120.0):
-    @contextlib.contextmanager
-    def _manager():
-        lock_path = path.with_name(path.name + ".lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        start = time.time()
-        while True:
-            try:
-                lock_path.mkdir()
-                break
-            except FileExistsError:
-                try:
-                    age = time.time() - lock_path.stat().st_mtime
-                    if age > stale_seconds:
-                        lock_path.rmdir()
-                        continue
-                except OSError:
-                    pass
-                if time.time() - start > timeout_seconds:
-                    raise TimeoutError("timed out waiting for storage lock %s" % lock_path)
-                time.sleep(0.05)
-        try:
-            yield
-        finally:
-            try:
-                lock_path.rmdir()
-            except OSError:
-                pass
-    return _manager()
+def _file_lock(
+    path: Path,
+    timeout_seconds: float = 30.0,
+    stale_seconds: float = 120.0,
+    *,
+    storage: StorageCapability,
+):
+    return storage.file_lock(path, timeout_seconds, stale_seconds)
 
 
 def _temp_path_for(path: Path) -> Path:
@@ -246,82 +227,32 @@ def _temp_path_for(path: Path) -> Path:
     )
 
 
-def _atomic_replace(src: Path, dst: Path) -> None:
-    """Replace dst with src atomically.
-
-    Path.replace() / os.replace() can fail on Windows with ERROR_ACCESS_DENIED
-    when another process holds dst open without FILE_SHARE_DELETE (Python's
-    default open() does not request that sharing mode).  shutil.move() falls
-    back to a copy-then-delete strategy that works regardless.
-    """
-    if sys.platform == "win32":
-        shutil.move(str(src), str(dst))
-    else:
-        src.replace(dst)
+def _atomic_replace(
+    src: Path, dst: Path, *, storage: StorageCapability
+) -> None:
+    storage.atomic_replace(src, dst)
 
 
-def write_json(path: Path, value: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(path):
-        tmp = _temp_path_for(path)
-        try:
-            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(value, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-            _atomic_replace(tmp, path)
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+def write_json(
+    path: Path, value: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    storage.write_json(path, value)
 
 
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: List[Dict[str, Any]] = []
-    quarantine: List[str] = []
-    with _file_lock(path):
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    try:
-                        rows.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        quarantine.append(line)
-        if quarantine:
-            qpath = path.with_suffix(".quarantine.jsonl")
-            with qpath.open("a", encoding="utf-8", newline="\n") as handle:
-                for bad in quarantine:
-                    handle.write(bad)
-                    handle.write("\n")
-    return rows
+def read_jsonl(path: Path, *, storage: StorageCapability) -> List[Dict[str, Any]]:
+    return storage.read_jsonl(path)
 
 
-def append_jsonl(path: Path, row: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(path):
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(row, sort_keys=True))
-            handle.write("\n")
+def append_jsonl(
+    path: Path, row: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    storage.append_jsonl(path, row)
 
 
-def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _file_lock(path):
-        tmp = _temp_path_for(path)
-        try:
-            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-                for row in rows:
-                    handle.write(json.dumps(row, sort_keys=True))
-                    handle.write("\n")
-            _atomic_replace(tmp, path)
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+def write_jsonl(
+    path: Path, rows: Iterable[Dict[str, Any]], *, storage: StorageCapability
+) -> None:
+    storage.write_jsonl(path, rows)
 
 
 def strip_markers(message: str) -> Dict[str, Any]:
@@ -466,12 +397,24 @@ def process_runtime_identity_status(
 
 
 class AgentBridge:
-    def __init__(self, state_dir: Path, max_hops: int = DEFAULT_MAX_HOPS) -> None:
-        self.state_dir = Path(state_dir)
+    def __init__(
+        self,
+        state_dir: Path,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        *,
+        storage: Optional[StorageCapability] = None,
+    ) -> None:
+        state_path = Path(state_dir).absolute()
+        capability = storage or authorize_storage_root(state_path.parent)
+        if capability.root != state_path.parent:
+            raise ValueError("storage capability does not match bridge state root")
+        capability.validate(state_path)
+        self.storage = capability
+        self.state_dir = state_path
         self.max_hops = max_hops
         self._lock = threading.Lock()
         self.auth = LocalUserAuth(machine_id=LOCAL_DEFAULT_MACHINE_ID)
-        self.transport = LocalFilesystemTransport()
+        self.transport = LocalFilesystemTransport(self.storage)
         self.live_app_dom_titles = False
         self._codex_app_dom_title_cache: Optional[Dict[str, Any]] = None
 
@@ -535,39 +478,17 @@ class AgentBridge:
         return self.state_dir / ("inbox-%s.jsonl" % agent)
 
     def ensure_state_dir(self) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.storage.ensure_private_directory(self.state_dir)
 
     def _load_settings(self):
-        return load_settings(self.state_dir)
+        return load_settings(self.state_dir, storage=self.storage)
 
     @contextlib.contextmanager
     def _locked(self):
         self.ensure_state_dir()
         with self._lock:
-            acquired = False
-            start = time.monotonic()
-            while not acquired:
-                try:
-                    self.lock_path.mkdir()
-                    acquired = True
-                except FileExistsError:
-                    try:
-                        age = time.time() - self.lock_path.stat().st_mtime
-                        if age > 60:
-                            self.lock_path.rmdir()
-                            continue
-                    except OSError:
-                        pass
-                    if time.monotonic() - start > 10:
-                        raise TimeoutError("timed out waiting for bridge state lock")
-                    time.sleep(0.05)
-            try:
+            with self.storage.file_lock(self.lock_path, timeout_seconds=10, stale_seconds=60):
                 yield
-            finally:
-                try:
-                    self.lock_path.rmdir()
-                except FileNotFoundError:
-                    pass
 
     def _default_state(self) -> Dict[str, Any]:
         return {
@@ -578,7 +499,7 @@ class AgentBridge:
         }
 
     def _load_state(self) -> Dict[str, Any]:
-        state = read_json(self.state_path, self._default_state())
+        state = self.storage.read_json(self.state_path, self._default_state())
         state["schema_version"] = max(int(state.get("schema_version") or 1), STATE_SCHEMA_VERSION)
         state.setdefault("paused", False)
         state.setdefault("sessions", {})
@@ -586,7 +507,7 @@ class AgentBridge:
 
     def _save_state(self, state: Dict[str, Any]) -> None:
         state["updated_at"] = utc_now()
-        write_json(self.state_path, state)
+        self.storage.write_json(self.state_path, state)
 
     def _session_state(self, state: Dict[str, Any], session_id: str) -> Dict[str, Any]:
         sessions = state.setdefault("sessions", {})
@@ -1096,7 +1017,7 @@ class AgentBridge:
         target_id = (peer_result_message_id or "").strip()
         if not target_id:
             return None
-        for row in reversed(read_jsonl(self.review_loop_state_path)):
+        for row in reversed(self.storage.read_jsonl(self.review_loop_state_path)):
             if (
                 row.get("event_type") == "peer_replied"
                 and row.get("peer_result_message_id") == target_id
@@ -1141,7 +1062,7 @@ class AgentBridge:
             "status": status or event_type,
             "created_at": utc_now(),
         }
-        append_jsonl(self.review_loop_state_path, row)
+        self.storage.append_jsonl(self.review_loop_state_path, row)
 
     def _record_review_loop_send(
         self,
@@ -1254,7 +1175,7 @@ class AgentBridge:
             "note": (note or "").strip() or None,
             "created_at": now,
         }
-        append_jsonl(self.reviewer_wait_state_path, row)
+        self.storage.append_jsonl(self.reviewer_wait_state_path, row)
         return row
 
     def _reviewer_wait_eta_stamp(self, eta_minutes: Optional[int]) -> Optional[str]:
@@ -1345,7 +1266,7 @@ class AgentBridge:
             if kind not in status_map:
                 return BridgeResult(False, "rejected", "event_type must be eta_requested, eta_recorded, checkback_requested, verdict_received, parked, blocked, or cancelled")
             prior: Optional[Dict[str, Any]] = None
-            for row in read_jsonl(self.reviewer_wait_state_path):
+            for row in self.storage.read_jsonl(self.reviewer_wait_state_path):
                 if row.get("owner_agent") == owner and row.get("wait_id") == resolved_wait_id:
                     if prior is None:
                         prior = {}
@@ -1398,7 +1319,7 @@ class AgentBridge:
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
             waits: Dict[str, Dict[str, Any]] = {}
-            for row in read_jsonl(self.reviewer_wait_state_path):
+            for row in self.storage.read_jsonl(self.reviewer_wait_state_path):
                 if row.get("owner_agent") != owner:
                     continue
                 wait_id = str(row.get("wait_id") or "")
@@ -1505,13 +1426,13 @@ class AgentBridge:
 
     def _load_pending_actions(self) -> Dict[str, Any]:
         try:
-            pending = read_json(self.pending_actions_path, self._default_pending_actions())
+            pending = self.storage.read_json(self.pending_actions_path, self._default_pending_actions())
         except (JSONDecodeError, OSError):
             corrupt_path = self.pending_actions_path.with_name(
                 "pending-actions.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             if self.pending_actions_path.exists():
-                self.pending_actions_path.replace(corrupt_path)
+                self.storage.atomic_replace(self.pending_actions_path, corrupt_path)
             pending = self._default_pending_actions()
         pending["schema_version"] = max(
             int(pending.get("schema_version") or 1),
@@ -1542,17 +1463,17 @@ class AgentBridge:
 
     def _save_pending_actions(self, pending: Dict[str, Any]) -> None:
         pending["updated_at"] = utc_now()
-        write_json(self.pending_actions_path, pending)
+        self.storage.write_json(self.pending_actions_path, pending)
 
     def _load_execution_state(self) -> Dict[str, Any]:
         try:
-            payload = read_json(self.execution_state_path, self._default_execution_state())
+            payload = self.storage.read_json(self.execution_state_path, self._default_execution_state())
         except (JSONDecodeError, OSError):
             corrupt_path = self.execution_state_path.with_name(
                 "execution-state.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             if self.execution_state_path.exists():
-                self.execution_state_path.replace(corrupt_path)
+                self.storage.atomic_replace(self.execution_state_path, corrupt_path)
             payload = self._default_execution_state()
         payload["schema_version"] = max(
             int(payload.get("schema_version") or 1),
@@ -1579,17 +1500,17 @@ class AgentBridge:
 
     def _save_execution_state(self, payload: Dict[str, Any]) -> None:
         payload["updated_at"] = utc_now()
-        write_json(self.execution_state_path, payload)
+        self.storage.write_json(self.execution_state_path, payload)
 
     def _load_implementation_journal(self) -> Dict[str, Any]:
         try:
-            payload = read_json(self.implementation_journal_path, self._default_implementation_journal())
+            payload = self.storage.read_json(self.implementation_journal_path, self._default_implementation_journal())
         except (JSONDecodeError, OSError):
             corrupt_path = self.implementation_journal_path.with_name(
                 "implementation-journal.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             if self.implementation_journal_path.exists():
-                self.implementation_journal_path.replace(corrupt_path)
+                self.storage.atomic_replace(self.implementation_journal_path, corrupt_path)
             payload = self._default_implementation_journal()
         payload["schema_version"] = max(
             int(payload.get("schema_version") or 1),
@@ -1608,7 +1529,7 @@ class AgentBridge:
     def _save_implementation_journal(self, payload: Dict[str, Any]) -> None:
         payload["updated_at"] = utc_now()
         payload["events"] = list(payload.get("events") or [])[-IMPLEMENTATION_JOURNAL_MAX_EVENTS:]
-        write_json(self.implementation_journal_path, payload)
+        self.storage.write_json(self.implementation_journal_path, payload)
 
     def _journal_pair_key(self, owner_agent: str, peer_agent: str) -> str:
         return "%s->%s" % (owner_agent, peer_agent)
@@ -1934,13 +1855,13 @@ class AgentBridge:
 
     def _load_cross_project_pending(self) -> Dict[str, Any]:
         try:
-            pending = read_json(self.cross_project_pending_path, self._default_cross_project_pending())
+            pending = self.storage.read_json(self.cross_project_pending_path, self._default_cross_project_pending())
         except (JSONDecodeError, OSError):
             corrupt_path = self.cross_project_pending_path.with_name(
                 "_pending.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             if self.cross_project_pending_path.exists():
-                self.cross_project_pending_path.replace(corrupt_path)
+                self.storage.atomic_replace(self.cross_project_pending_path, corrupt_path)
             pending = self._default_cross_project_pending()
         pending["schema_version"] = max(
             int(pending.get("schema_version") or 1),
@@ -1954,8 +1875,8 @@ class AgentBridge:
 
     def _save_cross_project_pending(self, pending: Dict[str, Any]) -> None:
         pending["updated_at"] = utc_now()
-        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
-        write_json(self.cross_project_pending_path, pending)
+        self.storage.ensure_private_directory(self.cross_project_pairs_dir)
+        self.storage.write_json(self.cross_project_pending_path, pending)
 
     def _hash_cross_project_nonce(self, nonce: str) -> str:
         return sha256_text("cross-project-pair\n%s" % nonce)
@@ -2000,7 +1921,7 @@ class AgentBridge:
         if not path.exists():
             return None
         try:
-            payload = read_json(path, {})
+            payload = self.storage.read_json(path, {})
         except (JSONDecodeError, OSError):
             return None
         if not isinstance(payload, dict):
@@ -2010,8 +1931,8 @@ class AgentBridge:
     def _save_cross_project_link(self, link: Dict[str, Any]) -> None:
         link_id = self._normalize_cross_project_link_id(str(link.get("link_id") or ""))
         link["updated_at"] = utc_now()
-        self.cross_project_pairs_dir.mkdir(parents=True, exist_ok=True)
-        write_json(self._cross_project_link_path(link_id), link)
+        self.storage.ensure_private_directory(self.cross_project_pairs_dir)
+        self.storage.write_json(self._cross_project_link_path(link_id), link)
 
     def _cross_project_link_status(self, link: Dict[str, Any], now_dt: Optional[datetime] = None) -> str:
         status = str(link.get("status") or "unknown")
@@ -2039,7 +1960,7 @@ class AgentBridge:
             if path.name.startswith("_"):
                 continue
             try:
-                payload = read_json(path, {})
+                payload = self.storage.read_json(path, {})
             except (JSONDecodeError, OSError):
                 continue
             if isinstance(payload, dict):
@@ -2093,13 +2014,13 @@ class AgentBridge:
 
     def _load_session_registry(self) -> Dict[str, Any]:
         try:
-            registry = read_json(self.session_registry_path, self._default_session_registry())
+            registry = self.storage.read_json(self.session_registry_path, self._default_session_registry())
         except (JSONDecodeError, OSError):
             corrupt_path = self.session_registry_path.with_name(
                 "session.corrupt.%s.json" % datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             )
             if self.session_registry_path.exists():
-                self.session_registry_path.replace(corrupt_path)
+                self.storage.atomic_replace(self.session_registry_path, corrupt_path)
             registry = self._default_session_registry()
         registry["schema_version"] = max(int(registry.get("schema_version") or 1), SESSION_REGISTRY_SCHEMA_VERSION)
         registry.setdefault("projects", {})
@@ -2177,7 +2098,7 @@ class AgentBridge:
     def _save_session_registry(self, registry: Dict[str, Any]) -> None:
         self._prune_session_registry(registry)
         registry["updated_at"] = utc_now()
-        write_json(self.session_registry_path, registry)
+        self.storage.write_json(self.session_registry_path, registry)
 
     def _prune_session_registry(self, registry: Dict[str, Any]) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=SESSION_RETENTION_DAYS)
@@ -3364,7 +3285,7 @@ class AgentBridge:
                     moved["orphaned_at"] = now
                     moved["session_truedup_from"] = old_bucket
                     moved["session_truedup_at"] = now
-                    append_jsonl(orphan_path, moved)
+                    self.storage.append_jsonl(orphan_path, moved)
                     touched.append({"id": row.get("id"), "from_session_id": old_bucket, "orphan_path": str(orphan_path)})
                     self._audit(
                         {
@@ -3457,8 +3378,13 @@ class AgentBridge:
                     bootstrap_parent_thread_id=trusted_record.get("bootstrap_parent_thread_id"),
                     trusted_parent_session_id=trusted_session,
                     subagent_signals={},
+                    storage=self.storage,
                 )
-                write_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, owner), breadcrumb)
+                write_runtime_breadcrumb(
+                    peer_runtime_path_for_state_dir(self.state_dir, owner),
+                    breadcrumb,
+                    storage=self.storage,
+                )
                 self._append_control_message(
                     target_agent=peer_agent,
                     session_id=peer_session or project_name,
@@ -3572,7 +3498,7 @@ class AgentBridge:
             peer_agent = "claude" if owner == "codex" else "codex"
             peer_session = active.get(peer_agent)
             drained_messages = [
-                row for row in read_jsonl(self.inbox_path(owner))
+                row for row in self.storage.read_jsonl(self.inbox_path(owner))
                 if row.get("session_id") == session and not row.get("read_at")
             ]
 
@@ -3740,7 +3666,7 @@ class AgentBridge:
             path = self.state_dir / ("orphaned-%s.jsonl" % agent)
             if not path.exists():
                 continue
-            rows = read_jsonl(path)
+            rows = self.storage.read_jsonl(path)
             total += len(rows)
             for row in rows:
                 stamp = row.get("orphaned_at") or row.get("created_at")
@@ -5650,7 +5576,7 @@ class AgentBridge:
         granted_by: str,
         force: bool = False,
     ) -> Dict[str, Any]:
-        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        payload = self.storage.read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
         sessions = payload.setdefault("sessions", {})
         record = self._normalize_wake_breaker_session(sessions.get(session))
         if record.get("breaker_state") != "open":
@@ -5674,7 +5600,7 @@ class AgentBridge:
         sessions[session] = record
         payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
         payload["updated_at"] = utc_now()
-        write_json(self.wake_breaker_path, payload)
+        self.storage.write_json(self.wake_breaker_path, payload)
         self._audit(
             {
                 "id": str(uuid.uuid4()),
@@ -5695,12 +5621,12 @@ class AgentBridge:
         }
 
     def _wake_breaker_open_for_session(self, session: str) -> bool:
-        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        payload = self.storage.read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
         record = self._normalize_wake_breaker_session((payload.get("sessions") or {}).get(session))
         return record.get("breaker_state") == "open"
 
     def _wake_prefire_limited_for_session(self, session: str) -> bool:
-        state = read_json(
+        state = self.storage.read_json(
             self.watcher_state_path,
             {"seen_ids": [], "pending_wake_verifications": [], "wake_fire_history": []},
         )
@@ -5721,12 +5647,12 @@ class AgentBridge:
         subsequent fires (retries, unrelated messages) revert to the default
         "Watcher says check bridge inbox" template value.
         """
-        watcher_state = read_json(
+        watcher_state = self.storage.read_json(
             self.watcher_state_path,
             {"seen_ids": [], "pending_wake_verifications": []},
         )
         watcher_state["next_override_wake_message"] = message
-        write_json(self.watcher_state_path, watcher_state)
+        self.storage.write_json(self.watcher_state_path, watcher_state)
 
     def _request_backpressure_nudge(self, *, agent: str, session: str, reason: str, nudge_wake_message: Optional[str] = None) -> Dict[str, Any]:
         state = self._load_state()
@@ -5757,7 +5683,7 @@ class AgentBridge:
                 result = {"status": status, "session_id": session, "reason": "no_unread_work"}
             else:
                 message_id = str(unread_work[0].get("id") or "")
-                watcher_state = read_json(
+                watcher_state = self.storage.read_json(
                     self.watcher_state_path,
                     {"seen_ids": [], "toasted_ids": [], "pending_wake_verifications": [], "paused_wake_messages": [], "unknown_origin_warnings": [], "wake_fire_history": []},
                 )
@@ -5767,7 +5693,7 @@ class AgentBridge:
                     watcher_state["seen_ids"] = [item for item in seen_ids if item != message_id]
                     if nudge_wake_message:
                         watcher_state["next_override_wake_message"] = nudge_wake_message
-                    write_json(self.watcher_state_path, watcher_state)
+                    self.storage.write_json(self.watcher_state_path, watcher_state)
                 status = "backpressure_rejected_nudge_attempted"
                 result = {
                     "status": status,
@@ -5795,7 +5721,7 @@ class AgentBridge:
     def wake_breaker_status(self, session_id: Optional[str] = None) -> BridgeResult:
         with self._locked():
             target_session = normalize_session(session_id) if session_id is not None else None
-            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+            payload = self.storage.read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
             sessions = payload.get("sessions", {})
             if target_session is not None:
                 return BridgeResult(
@@ -5827,7 +5753,7 @@ class AgentBridge:
                 bounded_limit = max(1, min(200, int(limit)))
             except (TypeError, ValueError):
                 bounded_limit = 20
-            state = read_json(
+            state = self.storage.read_json(
                 self.watcher_state_path,
                 {
                     "seen_ids": [],
@@ -5891,7 +5817,7 @@ class AgentBridge:
             except (TypeError, ValueError) as exc:
                 return BridgeResult(False, "rejected", str(exc))
 
-            watcher_state = read_json(
+            watcher_state = self.storage.read_json(
                 self.watcher_state_path,
                 {
                     "seen_ids": [],
@@ -5940,7 +5866,7 @@ class AgentBridge:
                 watcher_state["seen_ids"] = [item for item in original_seen if item not in target_ids]
                 rearmed_ids = [item for item in original_seen if item in target_ids]
                 if rearmed_ids:
-                    write_json(self.watcher_state_path, watcher_state)
+                    self.storage.write_json(self.watcher_state_path, watcher_state)
 
             self._audit(
                 {
@@ -6004,7 +5930,7 @@ class AgentBridge:
             except ValueError as exc:
                 return BridgeResult(False, "rejected", str(exc))
 
-            watcher_state = read_json(
+            watcher_state = self.storage.read_json(
                 self.watcher_state_path,
                 {
                     "seen_ids": [],
@@ -6098,7 +6024,7 @@ class AgentBridge:
                 rearmed_ids = [item for item in original_seen if item in stale_unread_ids]
                 if rearmed_ids:
                     totals["stale_rearmed"] = len(rearmed_ids)
-                    write_json(self.watcher_state_path, watcher_state)
+                    self.storage.write_json(self.watcher_state_path, watcher_state)
 
             self._audit(
                 {
@@ -6153,13 +6079,13 @@ class AgentBridge:
         *,
         override_wake_message: str = "User says check bridge inbox",
     ) -> Dict[str, Any]:
-        payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+        payload = self.storage.read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
         sessions = payload.setdefault("sessions", {})
         changed = bool(sessions.pop(session, None) is not None)
         payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
         payload["updated_at"] = utc_now()
         if changed:
-            write_json(self.wake_breaker_path, payload)
+            self.storage.write_json(self.wake_breaker_path, payload)
             if override_wake_message:
                 self._set_next_override_wake_message(override_wake_message)
         self._audit(
@@ -7165,7 +7091,7 @@ class AgentBridge:
                 routing_rules["status"] = "settings_error: %s" % exc
             if rules_path.exists():
                 try:
-                    rules = read_json(rules_path, {})
+                    rules = self.storage.read_json(rules_path, {})
                     if not str(routing_rules.get("status", "")).startswith("settings_error"):
                         routing_rules["status"] = "healthy"
                     routing_rules["learned"] = len(rules.get("learned_triggers", []))
@@ -7211,14 +7137,14 @@ class AgentBridge:
             "pid": None,
             "stale": False,
             "lease": None,
-            "runtime": read_runtime_breadcrumb(watcher_runtime_path),
+            "runtime": read_runtime_breadcrumb(watcher_runtime_path, storage=self.storage),
         }
         if watcher["runtime"] and watcher["runtime"].get("bridge_root") and Path(str(watcher["runtime"]["bridge_root"])) != bridge_root:
             watcher["root_mismatch"] = True
             watcher["stale"] = True
         if watcher_lease_path.exists():
             try:
-                watcher["lease"] = read_json(watcher_lease_path, {})
+                watcher["lease"] = self.storage.read_json(watcher_lease_path, {})
                 lease_pid = int((watcher["lease"] or {}).get("pid") or 0)
                 if lease_pid:
                     watcher["pid"] = lease_pid
@@ -7228,7 +7154,8 @@ class AgentBridge:
                 watcher["stale"] = True
         if watcher_pid_path.exists():
             try:
-                pid = int(watcher_pid_path.read_text(encoding="utf-8").strip())
+                with self.storage.open_private_read_text(watcher_pid_path) as handle:
+                    pid = int(handle.read().strip())
                 watcher["pid_marker"] = pid
                 if watcher["pid"] is None:
                     watcher["pid"] = pid
@@ -7245,7 +7172,7 @@ class AgentBridge:
                 entry: Dict[str, Any] = {
                     "path": str(marker),
                     "runtime_path": str(runtime_path),
-                    "runtime": read_runtime_breadcrumb(runtime_path),
+                    "runtime": read_runtime_breadcrumb(runtime_path, storage=self.storage),
                     "pid": None,
                     "running": False,
                     "stale": False,
@@ -7254,7 +7181,8 @@ class AgentBridge:
                     entry["root_mismatch"] = True
                     entry["stale"] = True
                 try:
-                    pid = int(marker.read_text(encoding="utf-8").strip())
+                    with self.storage.open_private_read_text(marker) as handle:
+                        pid = int(handle.read().strip())
                     entry["pid"] = pid
                     identity = process_runtime_identity_status(pid, entry.get("runtime"), expected_role="mcp_server")
                     entry.update(identity)
@@ -7278,7 +7206,7 @@ class AgentBridge:
                 )
 
         stale_servers = [entry for entry in server_markers if entry.get("stale")]
-        wake_breakers = read_json(
+        wake_breakers = self.storage.read_json(
             self.wake_breaker_path,
             {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}},
         )
@@ -7296,7 +7224,7 @@ class AgentBridge:
         }
         if tool_refresh_status_path.exists():
             try:
-                tool_refresh["data"] = read_json(tool_refresh_status_path, {})
+                tool_refresh["data"] = self.storage.read_json(tool_refresh_status_path, {})
                 tool_refresh["refresh_required"] = bool((tool_refresh["data"] or {}).get("refresh_required"))
                 tool_refresh["status"] = "refresh_required" if tool_refresh["refresh_required"] else "current"
             except Exception:
@@ -7520,7 +7448,11 @@ class AgentBridge:
         if not path.exists():
             return {"status": "missing", "path": str(path), "data": copy.deepcopy(default), "error": None}
         try:
-            return {"status": "ok", "path": str(path), "data": read_json(path, default), "error": None}
+            with self.storage.open_readonly_text(path) as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                raise ValueError("%s must contain a JSON object" % path)
+            return {"status": "ok", "path": str(path), "data": data, "error": None}
         except Exception as exc:
             return {"status": "error", "path": str(path), "data": copy.deepcopy(default), "error": "%s" % exc}
 
@@ -7530,7 +7462,7 @@ class AgentBridge:
         rows: List[Dict[str, Any]] = []
         bad_lines = 0
         try:
-            with path.open("r", encoding="utf-8") as handle:
+            with self.storage.open_readonly_text(path) as handle:
                 for line in handle:
                     text = line.strip()
                     if not text:
@@ -7770,7 +7702,7 @@ class AgentBridge:
 
     def _claude_monitor_runtime_status(self, *, session_id: str, project: str, now_dt: datetime) -> Dict[str, Any]:
         runtime_path = monitor_runtime_path_for_state_dir(self.state_dir, "claude", session_id)
-        data = read_runtime_breadcrumb(runtime_path)
+        data = read_runtime_breadcrumb(runtime_path, storage=self.storage)
         result: Dict[str, Any] = {
             "path": str(runtime_path),
             "status": "missing",
@@ -8631,7 +8563,10 @@ class AgentBridge:
         agent_text = str(agent or "").strip().lower()
         if agent_text not in AGENTS:
             return {}
-        breadcrumb = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, agent_text))
+        breadcrumb = read_runtime_breadcrumb(
+            peer_runtime_path_for_state_dir(self.state_dir, agent_text),
+            storage=self.storage,
+        )
         if not isinstance(breadcrumb, dict) or breadcrumb.get("unreadable"):
             return {}
         if str(breadcrumb.get("agent") or "").strip().lower() not in {"", agent_text}:
@@ -10704,7 +10639,7 @@ class AgentBridge:
             state = self._load_state()
             state["paused"] = False
             self._save_state(state)
-            payload = read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
+            payload = self.storage.read_json(self.wake_breaker_path, {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}})
             open_sessions = [
                 session_id
                 for session_id, record in (payload.get("sessions") or {}).items()
