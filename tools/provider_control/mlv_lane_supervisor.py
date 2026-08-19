@@ -54,6 +54,7 @@ DEMAND_KEYS = {"schema", "project", "hasWork", "lane", "priority", "estimateFrac
 PRIORITIES = {"OWNER_FOREGROUND", "REQUIRED_REVIEW", "PRODUCT_WORK",
               "ADJUDICATION", "MAINTENANCE"}
 TEST_MODES = {"SHADOW", "CONTAINMENT"}
+TEST_SLOT_ORDER = ("fable", "claude-review", "opus", "sonnet-impl")
 ZERO_SHA256 = "sha256:" + "0" * 64
 ZERO_HMAC_SHA256 = "hmac-sha256:" + "0" * 64
 
@@ -427,6 +428,135 @@ def quota_lock(state_root: Path) -> Iterator[None]:
             handle.close()
 
 
+def conservative_test_envelope(
+    demand: dict[str, Any], profile: dict[str, Any], supervisor_profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a test-only, deliberately conservative per-request capacity reservation."""
+    policy = supervisor_profile["tokenSavingEvidence"]["policy"]
+    if (policy["cacheReadEnvelopeWeight"] != 1.0 or
+            policy["completionReserveFloor"] != 0.20 or
+            policy["maxProviderRetries"] != 1):
+        raise ControlError("TEST_ENVELOPE_POLICY_DRIFT")
+    estimate = float(demand["estimateFraction"])
+    fresh_input = estimate
+    cache_read = round(estimate * float(policy["cacheReadEnvelopeWeight"]), 12)
+    cache_create = estimate
+    completion = float(policy["completionReserveFloor"])
+    envelope_total = round(fresh_input + cache_read + cache_create + completion, 12)
+    priority_floor = float(profile["policy"]["reserveFloorByPriority"][demand["priority"]])
+    priority_guard_total = round(estimate + priority_floor, 12)
+    required = max(envelope_total, priority_guard_total)
+    result = {
+        "schema": "mlv-test-request-envelope/v1",
+        "freshInputFraction": fresh_input,
+        "cacheReadFraction": cache_read,
+        "cacheCreateFraction": cache_create,
+        "completionReserveFraction": completion,
+        "priorityReserveFloorFraction": priority_floor,
+        "envelopeTotalFraction": envelope_total,
+        "priorityGuardTotal": priority_guard_total,
+        "requiredAvailableFraction": required,
+        "availableFraction": float(demand["availableFraction"]),
+        "maxRetries": int(policy["maxProviderRetries"]),
+        "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
+    }
+    if result["availableFraction"] < result["requiredAvailableFraction"]:
+        raise ControlError("CAPACITY_RESERVE_REFUSED")
+    return result
+
+
+def _write_owned_json(path: Path, value: dict[str, Any]) -> None:
+    temp = path.with_name(path.name + ".tmp-owned")
+    payload = (canonical_json(value) + "\n").encode("utf-8")
+    try:
+        with temp.open("xb") as handle:
+            handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp, path)
+    except FileExistsError as exc:
+        raise ControlError("TEST_SLOT_STATE_BUSY") from exc
+    except OSError as exc:
+        raise ControlError("TEST_SLOT_STATE_UNEVALUABLE") from exc
+
+
+def _read_test_slot_cursor(state_root: Path) -> dict[str, Any]:
+    path = state_root / "test-claude-slot-cursor.json"
+    if not path.exists():
+        return {"schema": "mlv-test-claude-slot-cursor/v1",
+                "nextLane": TEST_SLOT_ORDER[0], "generation": 0}
+    value = strict_json_file(path)
+    if (not isinstance(value, dict) or
+            set(value) != {"schema", "nextLane", "generation"} or
+            value["schema"] != "mlv-test-claude-slot-cursor/v1" or
+            value["nextLane"] not in TEST_SLOT_ORDER or
+            type(value["generation"]) is not int or value["generation"] < 0):
+        raise ControlError("TEST_SLOT_STATE_INVALID")
+    return value
+
+
+def _begin_test_slot(
+    state_root: Path, lane: str, envelope: dict[str, Any], binding_digest: str,
+) -> dict[str, Any]:
+    cursor = _read_test_slot_cursor(state_root)
+    if lane != cursor["nextLane"]:
+        raise ControlError("ROTATING_SLOT_NOT_CURRENT")
+    active = state_root / "test-claude-slot-active.json"
+    reservation = state_root / "test-request-envelope-active.json"
+    if active.exists() or reservation.exists():
+        raise ControlError("TEST_TERMINAL_CLEANUP_INCOMPLETE")
+    active_value = {
+        "schema": "mlv-test-claude-slot-active/v1", "lane": lane,
+        "generation": cursor["generation"], "bindingSha256": binding_digest,
+        "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
+    }
+    try:
+        _write_owned_json(active, active_value)
+        _write_owned_json(reservation, envelope)
+    except BaseException:
+        active.unlink(missing_ok=True); reservation.unlink(missing_ok=True)
+        raise
+    return cursor
+
+
+def _finish_test_slot(state_root: Path, cursor: dict[str, Any]) -> None:
+    active = state_root / "test-claude-slot-active.json"
+    reservation = state_root / "test-request-envelope-active.json"
+    try:
+        active.unlink(missing_ok=True)
+        reservation.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ControlError("TEST_TERMINAL_CLEANUP_FAILED") from exc
+    current = TEST_SLOT_ORDER.index(cursor["nextLane"])
+    next_value = {
+        "schema": "mlv-test-claude-slot-cursor/v1",
+        "nextLane": TEST_SLOT_ORDER[(current + 1) % len(TEST_SLOT_ORDER)],
+        "generation": cursor["generation"] + 1,
+    }
+    _write_owned_json(state_root / "test-claude-slot-cursor.json", next_value)
+
+
+def _broker_owned_test_plan(
+    binding: dict[str, str], subject: Path, delay: float, mode: str, attempt: int,
+) -> dict[str, Any]:
+    fake = (ROOT / "tests" / "fake_provider.py").resolve(strict=True)
+    process_image = Path(sys.executable).resolve(strict=True)
+    if not process_image.is_file() or fake.is_symlink() or not fake.is_file():
+        raise ControlError("TEST_PROVIDER_IDENTITY_INVALID")
+    argv = [str(process_image), str(fake), "--model", binding["model"],
+            "--effort", binding["effort"], "--role", binding["role"],
+            "--subject", str(subject), "--sleep", str(delay),
+            "--harness-mode", mode, "--attempt", str(attempt)]
+    return {
+        "ownership": "BROKER_OWNED_TEST_REFERENCE",
+        "processImagePath": str(process_image),
+        "processImageSha256": sha256_file(process_image),
+        "scriptPath": str(fake), "scriptSha256": sha256_file(fake),
+        "subjectPath": str(subject), "subjectSha256": sha256_file(subject),
+        "argv": argv,
+        "argvSha256": "sha256:" + hashlib.sha256(canonical_json(argv).encode()).hexdigest(),
+        "attempt": attempt,
+    }
+
+
 def run_test_fake(
     state_root: Path, demand_path: Path, fake_path: Path, delay: float, mode: str = "SHADOW",
 ) -> dict[str, Any]:
@@ -440,27 +570,33 @@ def run_test_fake(
         raise ControlError("TEST_REQUIRES_BLOCKED_ACTIVATION")
     demand = validate_demand(strict_json_file(demand_path), profile, bindings)
     if not demand["hasWork"]:
-        raise ControlError("TEST_WORK_REQUIRED")
+        return {
+            "status": "TEST_NO_WORK_SKIPPED", "harnessMode": mode,
+            "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
+            "automaticLaunchGate": "CLOSED",
+            "providerCalls": 0, "providerProcesses": 0,
+            "fakeProviderCalls": 0, "fakeProviderProcesses": 0,
+            "inputTokens": 0, "cachedInputTokens": 0,
+            "reasoningTokens": 0, "outputTokens": 0,
+            "reservationCreated": False, "slotClaimed": False,
+            "demandFingerprint": digest_json(demand),
+        }
     binding = bindings["lanes"][demand["lane"]]
-    floor = float(profile["policy"]["reserveFloorByPriority"][demand["priority"]])
-    if float(demand["availableFraction"]) < float(demand["estimateFraction"]) + floor:
-        raise ControlError("CAPACITY_RESERVE_REFUSED")
+    envelope = conservative_test_envelope(demand, profile, supervisor_profile)
     if fake_path.is_symlink():
         raise ControlError("TEST_PROVIDER_IDENTITY_INVALID")
-    fake = fake_path.resolve(strict=True)
-    if fake != (ROOT / "tests" / "fake_provider.py").resolve(strict=True):
+    caller_fake = fake_path.resolve(strict=True)
+    broker_fake = (ROOT / "tests" / "fake_provider.py").resolve(strict=True)
+    if caller_fake != broker_fake:
         raise ControlError("TEST_PROVIDER_IDENTITY_INVALID")
     subject = (ROOT / binding["subject"]).resolve(strict=True)
-    subject_digest = sha256_file(subject)
-    fake_digest = sha256_file(fake)
-    process_image_input = Path(sys.executable)
-    process_image = process_image_input.resolve(strict=True)
-    if not process_image.is_file():
-        raise ControlError("TEST_PROCESS_IMAGE_IDENTITY_INVALID")
-    process_image_digest = sha256_file(process_image)
-    argv = [str(process_image), str(fake), "--model", binding["model"], "--effort", binding["effort"],
-            "--role", binding["role"], "--subject", str(subject), "--sleep", str(delay),
-            "--harness-mode", mode]
+    initial_plan = _broker_owned_test_plan(binding, subject, delay, mode, 1)
+    if initial_plan["subjectSha256"] != binding["subjectSha256"]:
+        raise ControlError("LAUNCH_BINDING_CHANGED")
+    fixed_plan_keys = (
+        "ownership", "processImagePath", "processImageSha256", "scriptPath",
+        "scriptSha256", "subjectPath", "subjectSha256",
+    )
     with quota_lock(state_root):
         fresh_profile, fresh_bindings, fresh_supervisor_profile, fresh_inventory = load_contracts()
         enforce_state_root(state_root, fresh_profile, fresh_bindings, test_only=True)
@@ -471,55 +607,99 @@ def run_test_fake(
         if fresh_binding != binding:
             raise ControlError("LAUNCH_BINDING_CHANGED")
         fresh_subject = (ROOT / fresh_binding["subject"]).resolve(strict=True)
-        if (fresh_subject != subject or
-                sha256_file(fresh_subject) != fresh_binding["subjectSha256"] or
-                sha256_file(fresh_subject) != subject_digest or
-                fake_path.is_symlink() or fake_path.resolve(strict=True) != fake or
-                sha256_file(fake) != fake_digest or
-                Path(sys.executable).resolve(strict=True) != process_image or
-                sha256_file(process_image) != process_image_digest):
+        fresh_envelope = conservative_test_envelope(
+            demand, fresh_profile, fresh_supervisor_profile)
+        fresh_plan = _broker_owned_test_plan(fresh_binding, fresh_subject, delay, mode, 1)
+        if (fresh_subject != subject or fresh_envelope != envelope or
+                fake_path.is_symlink() or fake_path.resolve(strict=True) != caller_fake or
+                any(fresh_plan[key] != initial_plan[key] for key in fixed_plan_keys) or
+                fresh_plan["subjectSha256"] != fresh_binding["subjectSha256"]):
             raise ControlError("LAUNCH_BINDING_CHANGED")
-        process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
+
+        binding_digest = "sha256:" + hashlib.sha256(canonical_json({
+            "binding": binding,
+            "fixedPlan": {key: initial_plan[key] for key in fixed_plan_keys},
+            "requestEnvelope": envelope,
+        }).encode()).hexdigest()
+        cursor = _begin_test_slot(state_root, demand["lane"], envelope, binding_digest)
         try:
-            stdout, stderr = process.communicate(timeout=10)
-        except subprocess.TimeoutExpired as exc:
-            process.kill()
-            process.communicate()
-            raise ControlError("FAKE_PROVIDER_TIMEOUT_CONTAINED") from exc
-        if process.returncode != 0 or stderr:
+            attempt_bindings = []
+            max_attempts = envelope["maxRetries"] + 1
+            for attempt in range(1, max_attempts + 1):
+                plan = _broker_owned_test_plan(binding, subject, delay, mode, attempt)
+                if (any(plan[key] != initial_plan[key] for key in fixed_plan_keys) or
+                        fake_path.is_symlink() or fake_path.resolve(strict=True) != caller_fake):
+                    raise ControlError("LAUNCH_BINDING_CHANGED")
+                attempt_bindings.append({
+                    "attempt": attempt, "argvSha256": plan["argvSha256"],
+                    "processImageSha256": plan["processImageSha256"],
+                    "scriptSha256": plan["scriptSha256"],
+                    "subjectSha256": plan["subjectSha256"],
+                })
+                process = subprocess.Popen(
+                    plan["argv"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True)
+                try:
+                    stdout, stderr = process.communicate(timeout=10)
+                except subprocess.TimeoutExpired as exc:
+                    process.kill()
+                    process.communicate()
+                    if attempt < max_attempts:
+                        continue
+                    raise ControlError("FAKE_PROVIDER_TIMEOUT_CONTAINED") from exc
+                if process.returncode != 0 or stderr:
+                    if attempt < max_attempts:
+                        continue
+                    raise ControlError("TEST_PROVIDER_FAILED")
+                try:
+                    receipt = json.loads(stdout)
+                except (TypeError, ValueError) as exc:
+                    raise ControlError("TEST_PROVIDER_RECEIPT_INVALID") from exc
+                expected_receipt = {
+                    "model": binding["model"], "effort": binding["effort"],
+                    "role": binding["role"], "subject": str(subject),
+                    "harnessMode": mode, "attempt": attempt,
+                    "provider": "FAKE_ONLY",
+                    "processImagePath": plan["processImagePath"],
+                    "scriptPath": plan["scriptPath"],
+                    "requestedAuthority": (
+                        "OPEN_GATE_AND_ADOPT" if mode == "CONTAINMENT" else "NONE"),
+                }
+                if receipt != expected_receipt:
+                    raise ControlError("TEST_PROVIDER_RECEIPT_INVALID")
+                if UniversalProviderBroker(state_root).gate_state() != "CLOSED":
+                    raise ControlError("TEST_CHANGED_AUTOMATIC_GATE")
+                return {
+                    "status": "TEST_FAKE_COMPLETED", "harnessMode": mode,
+                    "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
+                    "automaticLaunchGate": "CLOSED",
+                    "providerCalls": 0, "providerProcesses": 0,
+                    "fakeProviderCalls": attempt, "fakeProviderProcesses": attempt,
+                    "inputTokens": 0, "cachedInputTokens": 0,
+                    "reasoningTokens": 0, "outputTokens": 0,
+                    "containedHostileAuthorityClaim": mode == "CONTAINMENT",
+                    "exitCode": process.returncode,
+                    "requestEnvelope": envelope,
+                    "retryCount": attempt - 1, "maxRetries": envelope["maxRetries"],
+                    "slot": {"lane": demand["lane"], "generation": cursor["generation"],
+                             "rotationOrder": list(TEST_SLOT_ORDER)},
+                    "callerProviderPathUsedForLaunch": False,
+                    "binding": {
+                        "ownership": plan["ownership"],
+                        "model": binding["model"], "effort": binding["effort"],
+                        "role": binding["role"], "subjectSha256": plan["subjectSha256"],
+                        "processImagePath": plan["processImagePath"],
+                        "processImageSha256": plan["processImageSha256"],
+                        "scriptPath": plan["scriptPath"],
+                        "scriptSha256": plan["scriptSha256"],
+                        "argvSha256": plan["argvSha256"],
+                        "bindingSha256": binding_digest,
+                    },
+                    "attemptBindings": attempt_bindings, "fakeReceipt": receipt,
+                }
             raise ControlError("TEST_PROVIDER_FAILED")
-        try:
-            receipt = json.loads(stdout)
-        except (TypeError, ValueError) as exc:
-            raise ControlError("TEST_PROVIDER_RECEIPT_INVALID") from exc
-        expected_receipt = {
-            "model": binding["model"], "effort": binding["effort"],
-            "role": binding["role"], "subject": str(subject), "harnessMode": mode,
-            "provider": "FAKE_ONLY",
-            "processImagePath": str(process_image), "scriptPath": str(fake),
-            "requestedAuthority": "OPEN_GATE_AND_ADOPT" if mode == "CONTAINMENT" else "NONE",
-        }
-        if receipt != expected_receipt:
-            raise ControlError("TEST_PROVIDER_RECEIPT_INVALID")
-        if UniversalProviderBroker(state_root).gate_state() != "CLOSED":
-            raise ControlError("TEST_CHANGED_AUTOMATIC_GATE")
-        return {"status": "TEST_FAKE_COMPLETED", "harnessMode": mode,
-                "authority": "TEST_ONLY_ZERO_PRODUCTION_AUTHORITY",
-                "automaticLaunchGate": "CLOSED",
-                "providerCalls": 0, "providerProcesses": 0,
-                "fakeProviderCalls": 1, "fakeProviderProcesses": 1,
-                "inputTokens": 0, "cachedInputTokens": 0,
-                "reasoningTokens": 0, "outputTokens": 0,
-                "containedHostileAuthorityClaim": mode == "CONTAINMENT",
-                "exitCode": process.returncode,
-                "binding": {"model": binding["model"], "effort": binding["effort"],
-                            "role": binding["role"], "subjectSha256": sha256_file(subject),
-                            "processImagePath": str(process_image),
-                            "processImageSha256": process_image_digest,
-                            "scriptPath": str(fake), "scriptSha256": fake_digest,
-                            "argvSha256": "sha256:" + hashlib.sha256(canonical_json(argv).encode()).hexdigest()},
-                "fakeReceipt": receipt}
+        finally:
+            _finish_test_slot(state_root, cursor)
 
 
 def observe_signal(state_root: Path, event: str) -> dict[str, Any]:

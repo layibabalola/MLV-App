@@ -76,8 +76,11 @@ class SupervisorTests(unittest.TestCase):
     def write_demand(self, value):
         self.demand.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
 
-    def fake_env(self):
-        return {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(self.state)}
+    def fake_env(self, state=None):
+        return {
+            supervisor.FAKE_ENV: "1",
+            supervisor.TEST_STATE_ROOT_ENV: str(state or self.state),
+        }
 
     def test_01_canonical_r26_and_exact_r14_mechanics_are_distinct_and_pinned(self):
         self.assertEqual(
@@ -183,15 +186,21 @@ class SupervisorTests(unittest.TestCase):
     def test_10_shadow_and_containment_fake_receipts_have_zero_provider_authority(self):
         self.write_demand(demand(hasWork=True))
         for mode in ("SHADOW", "CONTAINMENT"):
-            with self.subTest(mode=mode), mock.patch.dict(os.environ, self.fake_env(), clear=False):
+            mode_state = self.base / mode.lower()
+            with self.subTest(mode=mode), mock.patch.dict(
+                    os.environ, self.fake_env(mode_state), clear=False):
                 result = supervisor.run_test_fake(
-                    self.state, self.demand, HERE / "fake_provider.py", 0, mode
+                    mode_state, self.demand, HERE / "fake_provider.py", 0, mode
                 )
             self.assertEqual(result["harnessMode"], mode)
             self.assertEqual(result["automaticLaunchGate"], "CLOSED")
             self.assertEqual(result["providerCalls"], 0)
             self.assertEqual(result["providerProcesses"], 0)
             self.assertEqual(result["fakeProviderCalls"], 1)
+            self.assertEqual(result["maxRetries"], 1)
+            self.assertEqual(result["retryCount"], 0)
+            self.assertEqual(result["binding"]["ownership"], "BROKER_OWNED_TEST_REFERENCE")
+            self.assertFalse(result["callerProviderPathUsedForLaunch"])
             self.assertEqual(result["fakeReceipt"]["provider"], "FAKE_ONLY")
             image = Path(result["binding"]["processImagePath"])
             script = Path(result["binding"]["scriptPath"])
@@ -207,6 +216,8 @@ class SupervisorTests(unittest.TestCase):
             if mode == "CONTAINMENT":
                 self.assertEqual(result["fakeReceipt"]["requestedAuthority"],
                                  "OPEN_GATE_AND_ADOPT")
+            self.assertFalse((mode_state / "test-claude-slot-active.json").exists())
+            self.assertFalse((mode_state / "test-request-envelope-active.json").exists())
 
     def test_11_quota_lock_lives_for_entire_fake_child(self):
         self.write_demand(demand(hasWork=True))
@@ -222,12 +233,16 @@ class SupervisorTests(unittest.TestCase):
             while not marker.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue(marker.exists(), "first fake child did not start")
+            self.assertTrue((self.state / "test-claude-slot-active.json").exists())
+            self.assertTrue((self.state / "test-request-envelope-active.json").exists())
             second_command = command.copy(); second_command[second_command.index("0.8")] = "0"
             second = subprocess.run(second_command, capture_output=True, text=True, env=env, timeout=5)
             first_out, first_err = first.communicate(timeout=5)
             self.assertEqual(first.returncode, 0, first_err)
             self.assertEqual(json.loads(first_out)["harnessMode"], "CONTAINMENT")
             self.assertEqual(json.loads(second.stdout)["reason"], "QUOTA_DOMAIN_BUSY")
+            self.assertFalse((self.state / "test-claude-slot-active.json").exists())
+            self.assertFalse((self.state / "test-request-envelope-active.json").exists())
         finally:
             if first.poll() is None:
                 first.kill(); first.communicate()
@@ -350,7 +365,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_R13_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_SLOT_SLICE_1_ZERO_AUTHORITY")
         self.assertEqual(
             packet["canonicalDoctrine"]["technicalSubject"],
             supervisor.CANONICAL_TECHNICAL_SUBJECT,
@@ -369,8 +384,17 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN",
         )
+        slot = packet["referenceSlotSlice"]
+        self.assertEqual(slot["rotationOrder"], list(supervisor.TEST_SLOT_ORDER))
+        self.assertEqual(slot["maxConcurrency"], 1)
+        self.assertEqual(slot["maxRetries"], 1)
+        self.assertEqual(slot["completionReserveFraction"], 0.20)
+        self.assertFalse(slot["installed"])
+        self.assertFalse(slot["productionReachable"])
+        self.assertFalse(slot["shadowPassClaimed"])
+        self.assertFalse(slot["containmentPassClaimed"])
         repo = ROOT.parents[1]
         for subject in packet["subjects"]:
             path = repo / subject["path"]
@@ -669,9 +693,139 @@ class SupervisorTests(unittest.TestCase):
             "R10_4_OF_4_GREEN_RUN_32208720831;"
             "R11_TECHNICAL_HEAD_9e3_NOT_RUN;"
             "R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;"
-            "R12_NOT_RUN;R13_NOT_RUN",
+            "R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN",
         )
         self.assertNotIn("R11_4_OF_4_GREEN", hosted)
+
+    def test_32_test_no_work_skips_before_provider_identity_slot_or_reservation(self):
+        self.write_demand(demand(hasWork=False))
+        missing_witness = self.base / "must-not-resolve-provider.py"
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor, "_broker_owned_test_plan",
+                                  side_effect=AssertionError("provider identity resolved")), \
+                mock.patch.object(supervisor, "quota_lock",
+                                  side_effect=AssertionError("quota lock reached")), \
+                mock.patch.object(supervisor.subprocess, "Popen",
+                                  side_effect=AssertionError("provider invoked")):
+            result = supervisor.run_test_fake(self.state, self.demand, missing_witness, 0)
+        self.assertEqual(result["status"], "TEST_NO_WORK_SKIPPED")
+        self.assertFalse(result["reservationCreated"])
+        self.assertFalse(result["slotClaimed"])
+        for field in ("providerCalls", "providerProcesses", "fakeProviderCalls",
+                      "fakeProviderProcesses", "inputTokens", "cachedInputTokens",
+                      "reasoningTokens", "outputTokens"):
+            self.assertEqual(result[field], 0)
+        self.assertFalse(self.state.exists())
+
+    def test_33_conservative_envelope_counts_fresh_cache_read_create_and_completion(self):
+        profile, _, local, _ = supervisor.load_contracts()
+        value = demand(hasWork=True, estimateFraction=0.1, availableFraction=0.9)
+        envelope = supervisor.conservative_test_envelope(value, profile, local)
+        self.assertEqual(envelope["freshInputFraction"], 0.1)
+        self.assertEqual(envelope["cacheReadFraction"], 0.1)
+        self.assertEqual(envelope["cacheCreateFraction"], 0.1)
+        self.assertEqual(envelope["completionReserveFraction"], 0.2)
+        self.assertEqual(envelope["envelopeTotalFraction"], 0.5)
+        self.assertEqual(envelope["priorityReserveFloorFraction"], 0.35)
+        self.assertEqual(envelope["priorityGuardTotal"], 0.45)
+        self.assertEqual(envelope["requiredAvailableFraction"], 0.5)
+        self.assertEqual(envelope["maxRetries"], 1)
+
+    def test_34_serial_slot_rotates_in_fixed_order_and_refuses_wrong_claimant(self):
+        self.write_demand(demand(hasWork=True, lane="fable"))
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False):
+            first = supervisor.run_test_fake(
+                self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertEqual(first["slot"], {
+            "lane": "fable", "generation": 0,
+            "rotationOrder": list(supervisor.TEST_SLOT_ORDER),
+        })
+        cursor = strict_json_file(self.state / "test-claude-slot-cursor.json")
+        self.assertEqual((cursor["nextLane"], cursor["generation"]), ("claude-review", 1))
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor.subprocess, "Popen",
+                                  side_effect=AssertionError("wrong lane invoked")):
+            with self.assertRaisesRegex(ControlError, "ROTATING_SLOT_NOT_CURRENT"):
+                supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.write_demand(demand(hasWork=True, lane="claude-review"))
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False):
+            second = supervisor.run_test_fake(
+                self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertEqual(second["slot"]["generation"], 1)
+        cursor = strict_json_file(self.state / "test-claude-slot-cursor.json")
+        self.assertEqual((cursor["nextLane"], cursor["generation"]), ("opus", 2))
+
+    def test_35_exact_broker_owned_identity_drift_blocks_before_child(self):
+        self.write_demand(demand(hasWork=True))
+        real_plan = supervisor._broker_owned_test_plan
+        calls = 0
+
+        def drifting_plan(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            value = real_plan(*args, **kwargs)
+            if calls == 2:
+                value["scriptSha256"] = "sha256:" + "d" * 64
+            return value
+
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor, "_broker_owned_test_plan",
+                                  side_effect=drifting_plan), \
+                mock.patch.object(supervisor.subprocess, "Popen",
+                                  side_effect=AssertionError("provider invoked")):
+            with self.assertRaisesRegex(ControlError, "LAUNCH_BINDING_CHANGED"):
+                supervisor.run_test_fake(
+                    self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertFalse((self.state / "test-claude-slot-active.json").exists())
+        self.assertFalse((self.state / "test-request-envelope-active.json").exists())
+
+    def test_36_one_retry_maximum_and_terminal_cleanup_on_success_and_failure(self):
+        self.write_demand(demand(hasWork=True))
+        success_log = self.base / "success-attempts.txt"
+        success_env = self.fake_env()
+        success_env.update({"MLV_FAKE_FAIL_ATTEMPTS": "1",
+                            "MLV_FAKE_ATTEMPT_LOG": str(success_log)})
+        with mock.patch.dict(os.environ, success_env, clear=False):
+            result = supervisor.run_test_fake(
+                self.state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertEqual(result["retryCount"], 1)
+        self.assertEqual(result["fakeProviderCalls"], 2)
+        self.assertEqual(success_log.read_text(encoding="utf-8").splitlines(), ["1", "2"])
+        self.assertFalse((self.state / "test-claude-slot-active.json").exists())
+        self.assertFalse((self.state / "test-request-envelope-active.json").exists())
+
+        failed_state = self.base / "failed-state"
+        self.write_demand(demand(hasWork=True))
+        failed_log = self.base / "failed-attempts.txt"
+        failed_env = self.fake_env(failed_state)
+        failed_env.update({"MLV_FAKE_FAIL_ATTEMPTS": "99",
+                           "MLV_FAKE_ATTEMPT_LOG": str(failed_log)})
+        with mock.patch.dict(os.environ, failed_env, clear=False):
+            with self.assertRaisesRegex(ControlError, "TEST_PROVIDER_FAILED"):
+                supervisor.run_test_fake(
+                    failed_state, self.demand, HERE / "fake_provider.py", 0)
+        self.assertEqual(failed_log.read_text(encoding="utf-8").splitlines(), ["1", "2"])
+        self.assertFalse((failed_state / "test-claude-slot-active.json").exists())
+        self.assertFalse((failed_state / "test-request-envelope-active.json").exists())
+        failed_cursor = strict_json_file(failed_state / "test-claude-slot-cursor.json")
+        self.assertEqual((failed_cursor["nextLane"], failed_cursor["generation"]),
+                         ("claude-review", 1))
+
+    def test_37_reference_slot_slice_is_unreachable_from_production_commands(self):
+        tick_source = inspect.getsource(supervisor.tick)
+        signal_source = inspect.getsource(supervisor.observe_signal)
+        for symbol in ("_begin_test_slot", "_broker_owned_test_plan", "subprocess.Popen"):
+            self.assertNotIn(symbol, tick_source)
+            self.assertNotIn(symbol, signal_source)
+        self.write_demand(demand(hasWork=True))
+        with mock.patch.object(supervisor.subprocess, "Popen",
+                              side_effect=AssertionError("production child invoked")):
+            result = supervisor.tick(self.state, self.demand)
+        self.assertEqual(result["reason"], "ACTIVATION_EVIDENCE_BLOCKED")
+        self.assertEqual(result["automaticLaunchGate"], "CLOSED")
+        self.assertEqual((result["providerCalls"], result["providerProcesses"]), (0, 0))
+        self.assertFalse(self.state.exists())
 
 
 if __name__ == "__main__":

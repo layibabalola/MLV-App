@@ -37,6 +37,17 @@ passed all four legs in run `32228841343`. That result must not be relabeled as 
 technical head. R12 and R13 still need their own exact-tree hosted matrices and inherit no authority
 from either predecessor result.
 
+The smallest next choke-point slice is deliberately reachable only through the explicit test-fake
+seam. It serializes one fake Claude slot in fixed lane order, constructs the child executable and
+argv exclusively from broker-owned identities, returns deterministic no-work before identity,
+reservation, lock, or child creation, and reserves a conservative request envelope containing the
+fresh estimate, full cache-read estimate, full cache-create estimate, and a 20 percent completion
+reserve. It permits at most one retry and removes the active slot and request reservation on every
+terminal path. The caller's fake-script path is an exact identity witness, never launch authority.
+These are local fake-provider reference tests only: the slice is not installed or reachable from a
+production command and does not establish SHADOW PASS, CONTAINMENT PASS, canary, adoption, or
+activation.
+
 The disposition remains
 `DISTINGUISH(PENDING_INSTALLED_CHOKE_POINT_COMPLETE_ACTION_GRAPH_SHADOW_CONTAINMENT)`. The installer
 is audit-only and refuses `-Apply`. Do not enable/start the task, invoke a provider, open a gate, run

@@ -23,6 +23,15 @@ Neither reference grants MLV-App provider authority. R16 features remain `SHADOW
   the quota lock for its full lifetime, bind model/effort/role/subject/executable/argv, and leave the
   automatic gate CLOSED. Their receipts count fake calls separately and always report zero provider
   calls/processes/tokens.
+- The test-only reference slot serializes a fixed `fable`, `claude-review`, `opus`, `sonnet-impl`
+  rotation. A no-work demand returns before fake identity, reservation, quota lock, or process
+  creation. Work reserves fresh input, full cache read, full cache create, and a 20 percent
+  completion reserve; the stricter of that envelope and the lane priority guard controls admission.
+  The broker constructs the exact process image, script, subject, and argv, permits one retry at
+  most, and removes its active-slot and reservation records after success or terminal failure.
+- Those fake-only checks are reference mechanics, not an installed choke point and not a claim that
+  CLOSED + SHADOW + CONTAINMENT proof has passed. Production commands cannot reach the reference
+  slot, and the caller-supplied fake path is used only as an exact witness.
 - Test roots equal or canonically aliased to the production root are refused, as is any test-root
   path with a symlink/junction/reparse component. The refusal occurs before state or quota-lock work.
 - Demand capsule, checkpoint, and cache-affinity bindings must each be a full, nonzero SHA-256.

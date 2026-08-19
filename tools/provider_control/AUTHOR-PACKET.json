@@ -1,7 +1,7 @@
 {
-  "schema": "mlv-provider-control-author-packet/v5",
-  "status": "DISTINGUISH_R13_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T08:32:12Z",
+  "schema": "mlv-provider-control-author-packet/v6",
+  "status": "DISTINGUISH_SLOT_SLICE_1_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T08:56:24Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "canonicalDoctrine": {
     "generation": "R26",
@@ -51,6 +51,29 @@
     "surfaceClosure": "BLOCKED",
     "authority": false
   },
+  "referenceSlotSlice": {
+    "scope": "TEST_FAKE_ONLY_REFERENCE_MECHANICS",
+    "authority": false,
+    "installed": false,
+    "productionReachable": false,
+    "maxConcurrency": 1,
+    "rotationOrder": ["fable", "claude-review", "opus", "sonnet-impl"],
+    "bindingOwnership": "BROKER_OWNED_TEST_REFERENCE",
+    "callerPathIsWitnessOnly": true,
+    "noWorkBeforeProcessIdentityReservationLockOrChild": true,
+    "envelopeComponents": [
+      "FRESH_INPUT_ESTIMATE",
+      "FULL_CACHE_READ_ESTIMATE",
+      "FULL_CACHE_CREATE_ESTIMATE",
+      "COMPLETION_RESERVE"
+    ],
+    "cacheReadEnvelopeWeight": 1.0,
+    "completionReserveFraction": 0.20,
+    "maxRetries": 1,
+    "terminalCleanupRequired": true,
+    "shadowPassClaimed": false,
+    "containmentPassClaimed": false
+  },
   "authority": {
     "adoption": false,
     "canary": false,
@@ -58,13 +81,13 @@
     "providerInvocation": false
   },
   "localEvidence": {
-    "python313": "32/32 PASS",
-    "python314": "32/32 PASS",
+    "python313": "38/38 PASS",
+    "python314": "38/38 PASS",
     "python313ProfileValidation": "PASS",
     "python314ProfileValidation": "PASS",
     "python313RequireHashesDryRun": "PASS_WINDOWS_ONLY",
     "python314RequireHashesDryRun": "PASS_WINDOWS_ONLY",
-    "hostedMatrix": "R10_4_OF_4_GREEN_RUN_32208720831;R11_TECHNICAL_HEAD_9e3_NOT_RUN;R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;R12_NOT_RUN;R13_NOT_RUN",
+    "hostedMatrix": "R10_4_OF_4_GREEN_RUN_32208720831;R11_TECHNICAL_HEAD_9e3_NOT_RUN;R11_CLOSEOUT_HEAD_152_4_OF_4_GREEN_RUN_32228841343;R12_NOT_RUN;R13_NOT_RUN;SLOT_SLICE_1_NOT_RUN",
     "ciActionsPinnedToCommit": true,
     "ciCheckoutCredentialsPersisted": false,
     "ciCancelInProgress": false,
@@ -95,9 +118,9 @@
     "CITABLE_FABLE_SEQUENCE_MISSING"
   ],
   "subjects": [
-    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 30546, "sha256": "2571dee71caba129033d4f2a4aea376cb6377bbc78591cf1a59c87a0a4e9e0fb"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 37713, "sha256": "6aa3d0e2f6dbd452663290b81fb18b94ea13c1d7d6df055a60f70d63e52807b4"},
-    {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 966, "sha256": "a9c7fbf4efcf11c625a45484496552feb39749705d69579dce18275594777507"},
+    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 39120, "sha256": "5eed3024b25f6ad72c11695d9a334f4e4b66e677a8980ac151df26c8d9b9af22"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 47073, "sha256": "c9726593d8406cc3ce589dd0f14e3b45de8e45d6d3f734b2817cdc3c449f6769"},
+    {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 1367, "sha256": "2ee4213711eeadc5eb4ece0ab161557ee123751e50aaa72f61150a5b4ed41f59"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "2767dbc8e48e41bfcca6101913dcb157b7ec05b6ef3ba1a8d4405b45f2010f2d"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "8f328778da046d8348a7161cf95d31b843cd58aaf89ee7989d6f60c5360e18b6"},
     {"path": "tools/provider_control/mlv-supervisor-profile.candidate.json", "bytes": 3067, "sha256": "58f2c4a249067af356a9035bfb21babca5e7c6c087e378ece5ad442acd6dccd3"},
@@ -107,8 +130,8 @@
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v2.schema.json", "bytes": 18842, "sha256": "c7edee3dc6973a9aa398c8425c9c85c09d3370ad0706df22e2438fcf01a6b4d3"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/README.md", "bytes": 3049, "sha256": "e8226b6cf43a871f07800fc9e09ad566bf24dd034bc19136a3ce1584d027c91a"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 7768, "sha256": "61f09dd99f1de16ba27acf3beb5302e71bcb1243e1b34432f6fe5ebddd6632b0"},
+    {"path": "tools/provider_control/README.md", "bytes": 3939, "sha256": "96a160585270e1d9f849f157634f5d20183630399936aed6a3068ad44a8d1d2b"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 8618, "sha256": "c89101a0bae3f3273d38d2799a1daf0ed0b2054f99b16a5c759648e0c6a1689c"},
     {"path": ".gitattributes", "bytes": 267, "sha256": "a54a31bbb6bdb0b34a3871f9d3a80fa0d5df04cb204dcbbe107b5009c8885e60"},
     {"path": ".github/requirements/provider-control.in", "bytes": 155, "sha256": "5c477a000b76a78a603be092a3bc3f31b52e4582756f5f6281af3443d02ce1c4"},
     {"path": ".github/requirements/provider-control.txt", "bytes": 10647, "sha256": "6e0174c6d9b84dce3dde8c913537b368cddf0ccef285c90733dd314d786a14b5"},
