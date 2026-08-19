@@ -3,10 +3,11 @@
   "$id": "https://mlv.app/schemas/autonomous-golden-promotion-receipt-v1.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "transactionId", "state", "previousState", "proposalDigest", "policyDigest", "evidenceDigest", "signerReceiptDigests", "expectedHead", "resultHead", "oldGoldenSha256", "proposedGoldenSha256", "shadowReceiptSha256", "rollbackReceiptSha256", "quarantineReason", "sequence", "issuedAtUtc", "brokerId", "brokerSignatureHmacSha256", "providerAuthority", "automaticLaunchGate"],
+  "required": ["schema", "transactionId", "decisionClass", "state", "previousState", "proposalDigest", "policyDigest", "evidenceDigest", "signerReceiptDigests", "expectedHead", "resultHead", "oldGoldenSha256", "proposedGoldenSha256", "shadowReceiptSha256", "rollbackReceiptSha256", "quarantineReason", "sequence", "issuedAtUtc", "brokerId", "brokerSignatureHmacSha256", "providerAuthority", "automaticLaunchGate"],
   "properties": {
     "schema": {"const": "mlv-app/autonomous-golden-promotion-receipt/v1"},
     "transactionId": {"type": "string", "pattern": "^agt-[a-f0-9]{32}$"},
+    "decisionClass": {"enum": ["A_REPRESENTATION_ONLY", "B_MECHANICALLY_PREDICTED", "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"]},
     "state": {"enum": ["PREPARED", "SHADOW_PASSED", "COMMITTED", "ROLLED_BACK", "QUARANTINED"]},
     "previousState": {"type": ["string", "null"], "enum": [null, "PREPARED", "SHADOW_PASSED", "COMMITTED", "ROLLED_BACK"]},
     "proposalDigest": {"$ref": "#/$defs/sha256"},
@@ -27,6 +28,15 @@
     "providerAuthority": {"const": false},
     "automaticLaunchGate": {"const": "CLOSED"}
   },
+  "allOf": [
+    {"if": {"properties": {"decisionClass": {"enum": ["A_REPRESENTATION_ONLY", "B_MECHANICALLY_PREDICTED"]}}}, "then": {"properties": {"signerReceiptDigests": {"minItems": 3, "maxItems": 3}}}},
+    {"if": {"properties": {"decisionClass": {"const": "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"}}}, "then": {"properties": {"signerReceiptDigests": {"minItems": 5, "maxItems": 5}}}},
+    {"if": {"properties": {"state": {"const": "PREPARED"}}}, "then": {"properties": {"previousState": {"const": null}, "resultHead": {"const": null}, "shadowReceiptSha256": {"const": null}, "rollbackReceiptSha256": {"const": null}, "quarantineReason": {"const": null}}}},
+    {"if": {"properties": {"state": {"const": "SHADOW_PASSED"}}}, "then": {"properties": {"previousState": {"const": "PREPARED"}, "resultHead": {"const": null}, "shadowReceiptSha256": {"$ref": "#/$defs/sha256"}, "rollbackReceiptSha256": {"const": null}, "quarantineReason": {"const": null}}}},
+    {"if": {"properties": {"state": {"const": "COMMITTED"}}}, "then": {"properties": {"previousState": {"const": "SHADOW_PASSED"}, "resultHead": {"$ref": "#/$defs/git"}, "shadowReceiptSha256": {"$ref": "#/$defs/sha256"}, "rollbackReceiptSha256": {"const": null}, "quarantineReason": {"const": null}}}},
+    {"if": {"properties": {"state": {"const": "ROLLED_BACK"}}}, "then": {"properties": {"previousState": {"const": "COMMITTED"}, "resultHead": {"$ref": "#/$defs/git"}, "shadowReceiptSha256": {"$ref": "#/$defs/sha256"}, "rollbackReceiptSha256": {"$ref": "#/$defs/sha256"}, "quarantineReason": {"const": null}}}},
+    {"if": {"properties": {"state": {"const": "QUARANTINED"}}}, "then": {"properties": {"previousState": {"enum": ["PREPARED", "SHADOW_PASSED", "ROLLED_BACK"]}, "quarantineReason": {"type": "string", "minLength": 1}}}}
+  ],
   "$defs": {
     "sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "git": {"type": "string", "pattern": "^[a-f0-9]{40}$"}

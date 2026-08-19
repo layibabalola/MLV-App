@@ -3,7 +3,7 @@
   "$id": "https://mlv.app/schemas/autonomous-golden-signer-receipt-v1.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "receiptId", "proposalDigest", "policyDigest", "evidenceDigest", "decisionClass", "signerClass", "signerId", "keyId", "keySha256", "registryEpoch", "modelFamily", "operatorClass", "proposerId", "brokerId", "commitNonceSha256", "committedVerdictSha256", "verdict", "issuedAtUtc", "expiresAtUtc", "signatureHmacSha256", "authority"],
+  "required": ["schema", "receiptId", "proposalDigest", "policyDigest", "evidenceDigest", "decisionClass", "signerClass", "signerId", "keyId", "keySha256", "registryEpoch", "modelFamily", "operatorClass", "proposerId", "brokerId", "commitNonceSha256", "revealNonce", "committedVerdictSha256", "verdict", "issuedAtUtc", "expiresAtUtc", "signatureHmacSha256", "authority"],
   "properties": {
     "schema": {"const": "mlv-app/autonomous-golden-signer-receipt/v1"},
     "receiptId": {"type": "string", "pattern": "^agr-[a-f0-9]{32}$"},
@@ -21,6 +21,7 @@
     "proposerId": {"type": "string", "minLength": 1},
     "brokerId": {"type": "string", "minLength": 1},
     "commitNonceSha256": {"$ref": "#/$defs/sha256"},
+    "revealNonce": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "committedVerdictSha256": {"$ref": "#/$defs/sha256"},
     "verdict": {"enum": ["APPROVE", "REJECT"]},
     "issuedAtUtc": {"$ref": "#/$defs/utc"},

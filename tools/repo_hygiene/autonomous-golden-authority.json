@@ -87,6 +87,9 @@
   "receiptContracts": {
     "signerReceiptSchema": "tools/repo_hygiene/autonomous-golden-signer-receipt.schema.json",
     "promotionReceiptSchema": "tools/repo_hygiene/autonomous-golden-promotion-receipt.schema.json",
+    "referenceSemanticVerifier": "tools/repo_hygiene/autonomous_golden_authority.py",
+    "signerReceiptMaxLifetimeSeconds": 7200,
+    "verdictCommitmentFormula": "SHA256_UTF8_LF_JOIN_PROPOSAL_POLICY_EVIDENCE_SIGNER_VERDICT_REVEAL_NONCE",
     "proposalPolicyAndEvidenceDigestBound": true,
     "commitRevealNonceBound": true,
     "trustedSignerRegistryEpochBound": true,

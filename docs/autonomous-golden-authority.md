@@ -35,6 +35,9 @@ vote a failing output gate green.
   identity/key/model/operator class, commitment nonce, verdict, and expiry.
   The installed verifier must reject revoked keys, proposer/broker signers,
   duplicate identities or keys, expired receipts, and replayed receipt IDs.
+  A reveal nonce hashes to the prior nonce commitment; the verdict commitment
+  is SHA-256 of the UTF-8 LF-joined proposal, policy, evidence, signer, verdict,
+  and reveal nonce fields. Receipts expire after at most two hours.
 
 ## Decision classes
 

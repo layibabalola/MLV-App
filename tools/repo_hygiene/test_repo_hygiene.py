@@ -13,6 +13,12 @@ from unittest.mock import patch
 
 from jsonschema import Draft202012Validator
 
+from .autonomous_golden_authority import (
+    signer_commitment,
+    validate_promotion_receipt_semantics,
+    validate_signer_receipt_semantics,
+)
+
 from .closeout import (
     approve_transaction,
     evaluate_closeout_triggers,
@@ -654,6 +660,137 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("human golden approval remains mandatory", docs)
         self.assertIn("Human approval remains mandatory today", agents)
         self.assertIn("docs/autonomous-golden-authority.md", agents)
+
+    def test_autonomous_golden_receipts_reject_illegal_edges_replay_and_false_independence(
+        self,
+    ) -> None:
+        schema_root = ROOT / "tools" / "repo_hygiene"
+        signer_schema = json.loads(
+            (schema_root / "autonomous-golden-signer-receipt.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        promotion_schema = json.loads(
+            (
+                schema_root / "autonomous-golden-promotion-receipt.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        signer_validator = Draft202012Validator(signer_schema)
+        promotion_validator = Draft202012Validator(promotion_schema)
+        reveal_nonce = "a" * 64
+        signer_receipt = {
+            "schema": "mlv-app/autonomous-golden-signer-receipt/v1",
+            "receiptId": "agr-" + "1" * 32,
+            "proposalDigest": "sha256:" + "2" * 64,
+            "policyDigest": "sha256:" + "3" * 64,
+            "evidenceDigest": "sha256:" + "4" * 64,
+            "decisionClass": "A_REPRESENTATION_ONLY",
+            "signerClass": "HOSTED_PRODUCT_ORACLE",
+            "signerId": "hosted-oracle-1",
+            "keyId": "oracle-key-1",
+            "keySha256": "sha256:" + "5" * 64,
+            "registryEpoch": 7,
+            "modelFamily": "objective-hosted-runner",
+            "operatorClass": "HOSTED_ORACLE",
+            "proposerId": "implementation-lane",
+            "brokerId": "golden-broker-1",
+            "commitNonceSha256": "sha256:"
+            + hashlib.sha256(reveal_nonce.encode("utf-8")).hexdigest(),
+            "revealNonce": reveal_nonce,
+            "committedVerdictSha256": "",
+            "verdict": "APPROVE",
+            "issuedAtUtc": "2026-08-19T20:00:00Z",
+            "expiresAtUtc": "2026-08-19T21:00:00Z",
+            "signatureHmacSha256": "sha256:" + "6" * 64,
+            "authority": False,
+        }
+        signer_receipt["committedVerdictSha256"] = signer_commitment(signer_receipt)
+        signer_validator.validate(signer_receipt)
+        validate_signer_receipt_semantics(signer_receipt)
+
+        semantic_signer_hostiles = (
+            ("signer aliases proposer", {"signerId": "implementation-lane"}),
+            ("signer aliases broker", {"signerId": "golden-broker-1"}),
+            ("expiry precedes issue", {"expiresAtUtc": "2026-08-19T19:59:59Z"}),
+            ("receipt lifetime unbounded", {"expiresAtUtc": "2026-08-20T20:00:00Z"}),
+            ("reveal does not match commitment", {"revealNonce": "b" * 64}),
+        )
+        for label, changes in semantic_signer_hostiles:
+            with self.subTest(label=label):
+                hostile = dict(signer_receipt)
+                hostile.update(changes)
+                with self.assertRaises(ValueError):
+                    validate_signer_receipt_semantics(hostile)
+        with self.assertRaisesRegex(ValueError, "replayed"):
+            validate_signer_receipt_semantics(
+                signer_receipt, consumed_receipt_ids={signer_receipt["receiptId"]}
+            )
+
+        promotion_receipt = {
+            "schema": "mlv-app/autonomous-golden-promotion-receipt/v1",
+            "transactionId": "agt-" + "7" * 32,
+            "decisionClass": "A_REPRESENTATION_ONLY",
+            "state": "PREPARED",
+            "previousState": None,
+            "proposalDigest": "sha256:" + "2" * 64,
+            "policyDigest": "sha256:" + "3" * 64,
+            "evidenceDigest": "sha256:" + "4" * 64,
+            "signerReceiptDigests": [
+                "sha256:" + "7" * 64,
+                "sha256:" + "8" * 64,
+                "sha256:" + "9" * 64,
+            ],
+            "expectedHead": "a" * 40,
+            "resultHead": None,
+            "oldGoldenSha256": "sha256:" + "a" * 64,
+            "proposedGoldenSha256": "sha256:" + "b" * 64,
+            "shadowReceiptSha256": None,
+            "rollbackReceiptSha256": None,
+            "quarantineReason": None,
+            "sequence": 1,
+            "issuedAtUtc": "2026-08-19T20:00:00Z",
+            "brokerId": "golden-broker-1",
+            "brokerSignatureHmacSha256": "sha256:" + "c" * 64,
+            "providerAuthority": False,
+            "automaticLaunchGate": "CLOSED",
+        }
+        promotion_validator.validate(promotion_receipt)
+        validate_promotion_receipt_semantics(promotion_receipt)
+
+        schema_promotion_hostiles = (
+            ("prepared from committed", {"previousState": "COMMITTED"}),
+            (
+                "committed skips shadow",
+                {
+                    "state": "COMMITTED",
+                    "previousState": "PREPARED",
+                    "resultHead": "b" * 40,
+                    "shadowReceiptSha256": "sha256:" + "d" * 64,
+                },
+            ),
+            (
+                "rollback lacks receipt",
+                {
+                    "state": "ROLLED_BACK",
+                    "previousState": "COMMITTED",
+                    "resultHead": "b" * 40,
+                    "shadowReceiptSha256": "sha256:" + "d" * 64,
+                },
+            ),
+            (
+                "quarantine lacks reason",
+                {"state": "QUARANTINED", "previousState": "PREPARED"},
+            ),
+            (
+                "class C has only three signers",
+                {"decisionClass": "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"},
+            ),
+        )
+        for label, changes in schema_promotion_hostiles:
+            with self.subTest(label=label):
+                hostile = dict(promotion_receipt)
+                hostile.update(changes)
+                self.assertTrue(list(promotion_validator.iter_errors(hostile)))
 
     def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
         repo = self.init_repo()

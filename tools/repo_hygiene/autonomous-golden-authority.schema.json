@@ -58,10 +58,13 @@
     "failClosedOn": {"$ref": "#/$defs/failClosedOn"},
     "receiptContracts": {
       "type": "object", "additionalProperties": false,
-      "required": ["signerReceiptSchema", "promotionReceiptSchema", "proposalPolicyAndEvidenceDigestBound", "commitRevealNonceBound", "trustedSignerRegistryEpochBound", "expiryAndOneUseLedgerRequired"],
+      "required": ["signerReceiptSchema", "promotionReceiptSchema", "referenceSemanticVerifier", "signerReceiptMaxLifetimeSeconds", "verdictCommitmentFormula", "proposalPolicyAndEvidenceDigestBound", "commitRevealNonceBound", "trustedSignerRegistryEpochBound", "expiryAndOneUseLedgerRequired"],
       "properties": {
         "signerReceiptSchema": {"const": "tools/repo_hygiene/autonomous-golden-signer-receipt.schema.json"},
         "promotionReceiptSchema": {"const": "tools/repo_hygiene/autonomous-golden-promotion-receipt.schema.json"},
+        "referenceSemanticVerifier": {"const": "tools/repo_hygiene/autonomous_golden_authority.py"},
+        "signerReceiptMaxLifetimeSeconds": {"const": 7200},
+        "verdictCommitmentFormula": {"const": "SHA256_UTF8_LF_JOIN_PROPOSAL_POLICY_EVIDENCE_SIGNER_VERDICT_REVEAL_NONCE"},
         "proposalPolicyAndEvidenceDigestBound": {"const": true},
         "commitRevealNonceBound": {"const": true},
         "trustedSignerRegistryEpochBound": {"const": true},
