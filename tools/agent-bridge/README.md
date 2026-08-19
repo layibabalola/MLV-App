@@ -24,6 +24,12 @@ Install the Python MCP SDK for Python 3:
 py -3 -m pip install -r tools\agent-bridge\requirements.txt
 ```
 
+`requirements.txt` is the reviewed, hash-locked runtime environment generated
+from `requirements.in`. Update it only through
+`tools\dependencies\update-python-locks.ps1`; bridge tests use the separate
+`requirements-test.txt` lock so test-only packages are not added to runtime
+installs.
+
 ## Codex Desktop
 
 Add the server to `%USERPROFILE%\.codex\config.toml`:

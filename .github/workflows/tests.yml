@@ -3,55 +3,94 @@ name: Tests
 on:
   workflow_dispatch:
   pull_request:
-    paths:
-      - ".github/workflows/tests.yml"
-      - "tests/**"
-      - "src/**"
-      - "platform/qt/**"
-      - "tools/repo_hygiene/**"
-      - "tools/repo-hygiene/**"
-      - "tools/profiling/**"
-      - "tools/agent-bridge/**"
-      - "tools/closeout/**"
-      - "closeout.config.json"
-      - "AGENTS.md"
-      - "CLAUDE.md"
   push:
     branches:
       - master
-    paths:
-      - ".github/workflows/tests.yml"
-      - "tests/**"
-      - "src/**"
-      - "platform/qt/**"
-      - "tools/repo_hygiene/**"
-      - "tools/repo-hygiene/**"
-      - "tools/profiling/**"
-      - "tools/agent-bridge/**"
-      - "tools/closeout/**"
-      - "closeout.config.json"
-      - "AGENTS.md"
-      - "CLAUDE.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  protected-check-route:
+    name: Protected Check Route
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      product: ${{ steps.route.outputs.product }}
+      gui: ${{ steps.route.outputs.gui }}
+      reason: ${{ steps.route.outputs.reason }}
+      head: ${{ steps.route.outputs.head }}
+      tree: ${{ steps.route.outputs.tree }}
+      diff_sha256: ${{ steps.route.outputs.diff_sha256 }}
+    env:
+      ROUTER_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'push' && github.event.before || '') }}
+      ROUTER_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ env.ROUTER_HEAD }}
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Derive fail-closed protected-check route
+        id: route
+        shell: pwsh
+        run: |
+          $receipt = Join-Path $env:RUNNER_TEMP "protected-check-route.json"
+          $forceReal = @()
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $forceReal = @('--force-real')
+          }
+          python tools/repo_hygiene/protected_check_router.py `
+            --repo-root . `
+            --base "$env:ROUTER_BASE" `
+            --head "$env:ROUTER_HEAD" `
+            --receipt $receipt `
+            --github-output $env:GITHUB_OUTPUT `
+            @forceReal
+
+      - name: Upload protected-check route receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: protected-check-route-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/protected-check-route.json
+          if-no-files-found: error
+          retention-days: 30
+
   repo-hygiene-python:
     name: Repo Hygiene Python (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
       - name: Install repo hygiene test dependencies
-        run: python -m pip install jsonschema
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+          python -m pip check
 
       - name: Run repo hygiene Python tests
         run: |
@@ -59,36 +98,43 @@ jobs:
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
-  windows-scaffold:
-    name: Windows Scaffold
+      - name: Verify generated Python dependency locks
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv "$env:RUNNER_TEMP\python-lock-tools"
+          & "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/lock-tools.txt
+          & tools\dependencies\update-python-locks.ps1 -RepoRoot . -Python "$env:RUNNER_TEMP\python-lock-tools\Scripts\python.exe" -Check
+
+  # Factory-control regressions must stay independent from product oracles.
+  # A bridge failure is blocking, but it must never suppress product evidence.
+  factory-bridge-regressions:
+    name: Factory Bridge Regressions
     runs-on: windows-latest
+    timeout-minutes: 45
 
     defaults:
       run:
         shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
 
-    env:
-      QT_VERSION: 6.10.2
-      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
 
-      - name: Install blocking Python test dependencies
+      - name: Install factory bridge dependencies
         run: |
-          python -m pip install jsonschema
-          python -m pip install -r tools\agent-bridge\requirements.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r tools\agent-bridge\requirements-test.txt
+          python -m pip check
 
-      - name: Run repo hygiene Python tests
+      - name: Verify compatible MCP runtime
         run: |
-          python -m unittest tools.repo_hygiene.test_repo_hygiene -v
-          python -m unittest tools.repo_hygiene.test_brokered_closeout -v
-          python tools\repo-hygiene\hygiene.py --repo-root . verify-policy
+          python -c "import importlib.metadata as m; version=m.version('mcp'); major=int(version.split('.')[0]); assert major == 1, f'expected MCP 1.x, got {version}'; from mcp.server.fastmcp import FastMCP; print(f'MCP runtime verified: {version}')"
 
       - name: Run agent bridge PowerShell launcher regressions
         run: |
@@ -109,12 +155,79 @@ jobs:
             tools.agent-bridge.test_server_wrapper_phase2.ServerWrapperPhase2Tests.test_supervisor_throttles_host_identity_revalidation `
             -v
 
-      - name: Install aqtinstall
+      - name: Run coordination and self-healing guardrails
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pytest `
+            tools\coordination\test_coordination_guardrails.py `
+            tests\coordination `
+            -q
+
+  windows-product-oracles:
+    name: Windows Product Oracles
+    needs: protected-check-route
+    if: ${{ always() }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '{0}'"
+
+    env:
+      QT_VERSION: 6.10.2
+      QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+      EXPECTED_ROUTE_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+    steps:
+      - name: Fail closed on unavailable product route
+        if: ${{ needs.protected-check-route.result != 'success' || (needs.protected-check-route.outputs.product != 'true' && needs.protected-check-route.outputs.product != 'false') }}
+        run: |
+          throw "protected-check route unavailable or product output malformed"
+
+      - name: Validate exact product route binding
+        run: |
+          $route = '${{ needs.protected-check-route.outputs.product }}'
+          $reason = '${{ needs.protected-check-route.outputs.reason }}'
+          $head = '${{ needs.protected-check-route.outputs.head }}'
+          $tree = '${{ needs.protected-check-route.outputs.tree }}'
+          $diff = '${{ needs.protected-check-route.outputs.diff_sha256 }}'
+          if ($head -ne $env:EXPECTED_ROUTE_HEAD) { throw "protected-check head mismatch" }
+          if ($tree -notmatch '^[0-9a-f]{40}$') { throw "protected-check tree malformed" }
+          if ($diff -notmatch '^[0-9a-f]{64}$') { throw "protected-check diff digest malformed" }
+          if ($route -eq 'false' -and $reason -ne 'EXPLICIT_NA_PROVIDER_CONTROL_ONLY') {
+            throw "product N/A lacks the exact provider-only reason"
+          }
+          if ($route -eq 'true' -and $reason -notin @('ROUTER_CONTROL_CHANGED_RUN_REAL_ORACLES', 'UNKNOWN_OR_PRODUCT_PATH_RUN_REAL_ORACLES', 'MANUAL_DISPATCH_RUN_REAL_ORACLES')) {
+            throw "product run lacks a recognized fail-closed reason"
+          }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: ".python-version"
+
+      - name: Record explicit product-oracle N/A
+        if: needs.protected-check-route.outputs.product == 'false'
+        run: |
+          Write-Output "Windows Product Oracles: explicit N/A for exact non-product diff"
+          Write-Output "head=${{ needs.protected-check-route.outputs.head }}"
+          Write-Output "tree=${{ needs.protected-check-route.outputs.tree }}"
+          Write-Output "diffSha256=${{ needs.protected-check-route.outputs.diff_sha256 }}"
+          Write-Output "reason=${{ needs.protected-check-route.outputs.reason }}"
+
+      - name: Install aqtinstall
+        if: needs.protected-check-route.outputs.product == 'true'
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+          python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
           python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
@@ -122,6 +235,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\\Tools\\mingw1310_64"
 
       - name: Build console_tests
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-console | Out-Null
@@ -131,11 +245,13 @@ jobs:
           Pop-Location
 
       - name: Run console_tests --check-golden
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           & "tests\build-ci-console\release\console_tests.exe" --check-golden
 
       - name: Build pipeline_tests
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-pipeline | Out-Null
@@ -145,6 +261,7 @@ jobs:
           Pop-Location
 
       - name: Run pipeline_tests --check-golden (bounded shards)
+        if: needs.protected-check-route.outputs.product == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           $env:MLVAPP_CRASH_FORENSICS_AUTOINSTALL = "1"
@@ -364,10 +481,10 @@ jobs:
           }
 
       - name: Upload pipeline crash forensics
-        if: always()
-        uses: actions/upload-artifact@v4
+        if: always() && needs.protected-check-route.outputs.product == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: windows-scaffold-pipeline-crash-forensics
+          name: windows-product-oracles-pipeline-crash-forensics
           if-no-files-found: ignore
           path: |
             ${{ runner.temp }}\pipeline-crash-forensics\**
@@ -377,7 +494,10 @@ jobs:
 
   windows-gui-pilot:
     name: Windows GUI Pilot
+    needs: protected-check-route
+    if: ${{ always() }}
     runs-on: windows-latest
+    timeout-minutes: 60
 
     defaults:
       run:
@@ -386,21 +506,58 @@ jobs:
     env:
       QT_VERSION: 6.10.2
       QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+      EXPECTED_ROUTE_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Fail closed on unavailable GUI route
+        if: ${{ needs.protected-check-route.result != 'success' || (needs.protected-check-route.outputs.gui != 'true' && needs.protected-check-route.outputs.gui != 'false') }}
+        run: |
+          throw "protected-check route unavailable or GUI output malformed"
+
+      - name: Validate exact GUI route binding
+        run: |
+          $route = '${{ needs.protected-check-route.outputs.gui }}'
+          $reason = '${{ needs.protected-check-route.outputs.reason }}'
+          $head = '${{ needs.protected-check-route.outputs.head }}'
+          $tree = '${{ needs.protected-check-route.outputs.tree }}'
+          $diff = '${{ needs.protected-check-route.outputs.diff_sha256 }}'
+          if ($head -ne $env:EXPECTED_ROUTE_HEAD) { throw "protected-check head mismatch" }
+          if ($tree -notmatch '^[0-9a-f]{40}$') { throw "protected-check tree malformed" }
+          if ($diff -notmatch '^[0-9a-f]{64}$') { throw "protected-check diff digest malformed" }
+          if ($route -eq 'false' -and $reason -ne 'EXPLICIT_NA_PROVIDER_CONTROL_ONLY') {
+            throw "GUI N/A lacks the exact provider-only reason"
+          }
+          if ($route -eq 'true' -and $reason -notin @('ROUTER_CONTROL_CHANGED_RUN_REAL_ORACLES', 'UNKNOWN_OR_PRODUCT_PATH_RUN_REAL_ORACLES', 'MANUAL_DISPATCH_RUN_REAL_ORACLES')) {
+            throw "GUI run lacks a recognized fail-closed reason"
+          }
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
+
+      - name: Record explicit GUI-pilot N/A
+        if: needs.protected-check-route.outputs.gui == 'false'
+        run: |
+          Write-Output "Windows GUI Pilot: explicit N/A for exact non-product diff"
+          Write-Output "head=${{ needs.protected-check-route.outputs.head }}"
+          Write-Output "tree=${{ needs.protected-check-route.outputs.tree }}"
+          Write-Output "diffSha256=${{ needs.protected-check-route.outputs.diff_sha256 }}"
+          Write-Output "reason=${{ needs.protected-check-route.outputs.reason }}"
 
       - name: Install aqtinstall
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install "aqtinstall==3.3.*"
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/aqtinstall.txt
+          python -m pip check
 
       - name: Install Qt 6.10.2 + MinGW 13.1
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
           python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
           python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
@@ -408,6 +565,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\Tools\mingw1310_64"
 
       - name: Build gui_tests
+        if: needs.protected-check-route.outputs.gui == 'true'
         run: |
           $env:PATH = "$env:QT_ROOT_DIR\bin;$env:MINGW_ROOT\bin;$env:PATH"
           New-Item -ItemType Directory -Force tests\build-ci-gui | Out-Null
@@ -417,6 +575,7 @@ jobs:
           Pop-Location
 
       - name: Run gui_tests (offscreen)
+        if: needs.protected-check-route.outputs.gui == 'true'
         env:
           QT_QPA_PLATFORM: offscreen
           QT_OPENGL: desktop
@@ -430,8 +589,8 @@ jobs:
           if ($ec -ne 0) { exit $ec }
 
       - name: Upload gui_tests log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
+        if: failure() && needs.protected-check-route.outputs.gui == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: gui_tests_output
           path: gui_tests_output.txt

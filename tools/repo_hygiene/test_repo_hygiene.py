@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +39,7 @@ from .core import (
     stable_id,
     verify_policy,
 )
+from .protected_check_router import RouteError, build_receipt, classify_paths
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -179,6 +182,7 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("protected_target_noop_closeout", IMPLEMENTED_CLOSEOUT_TRIGGER_SIGNAL_IDS)
         for action in IMPLEMENTED_DASHBOARD_ACTION_IDS:
             self.assertIn(action, load_config(ROOT)["portability"]["dashboard_action_ids"])
+
         self.assertTrue(load_config(ROOT)["closeout"]["auto_trigger"]["enabled"])
         self.assertFalse(load_config(ROOT)["closeout"]["allow_review_waiver"])
         self.assertIn("codex_desktop", load_config(ROOT)["closeout"]["trusted_approval_sources"])
@@ -200,6 +204,328 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("osx_installer/BuildInstaller.sh", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn("tools/gpu/build-cuda.ps1", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
+
+    def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        product_start = workflow.index("\n  windows-product-oracles:")
+        gui_start = workflow.index("\n  windows-gui-pilot:")
+        bridge_job = workflow[bridge_start:product_start]
+        product_job = workflow[product_start:gui_start]
+
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("Run agent bridge PowerShell launcher regressions", bridge_job)
+        self.assertIn("Verify compatible MCP runtime", bridge_job)
+        self.assertNotIn("Run agent bridge PowerShell launcher regressions", product_job)
+        self.assertIn("    needs: protected-check-route", product_job)
+        self.assertIn("Run console_tests --check-golden", product_job)
+        self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
+        self.assertIn("Record explicit product-oracle N/A", product_job)
+        self.assertIn("outputs.product == 'true'", product_job)
+        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", product_job)
+        self.assertIn("outputs.product != 'true'", product_job)
+        self.assertIn("outputs.product != 'false'", product_job)
+        self.assertIn("outputs.product == 'false'", product_job)
+        self.assertNotIn("outputs.product != 'true'\n        run:", product_job)
+
+        requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
+        self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
+        lock = (ROOT / "tools" / "agent-bridge" / "requirements-test.txt").read_text(encoding="utf-8")
+        self.assertRegex(lock, r"(?m)^mcp==1\.[0-9.]+ \\\r?$")
+        self.assertNotIn("mcp==2.", lock)
+
+    def test_ci_workflow_hardening_is_fail_closed_and_coordination_aware(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+        trigger_section = workflow[: workflow.index("\npermissions:")]
+
+        self.assertIn(
+            "concurrency:\n"
+            "  group: tests-${{ github.workflow }}-${{ github.event_name }}-"
+            "${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}\n"
+            "  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}",
+            workflow,
+        )
+        self.assertIn("  pull_request:\n", trigger_section)
+        self.assertIn("  push:\n    branches:\n      - master\n", trigger_section)
+        self.assertNotRegex(
+            trigger_section,
+            r"(?m)^\s+paths(?:-ignore)?:",
+            "required PR and master CI must not be suppressible by path filtering",
+        )
+
+        expected_timeouts = {
+            "protected-check-route": 10,
+            "repo-hygiene-python": 45,
+            "factory-bridge-regressions": 45,
+            "windows-product-oracles": 120,
+            "windows-gui-pilot": 60,
+        }
+        jobs_text = workflow[workflow.index("\njobs:") :]
+        job_matches = list(re.finditer(r"(?m)^  ([a-z0-9-]+):\r?$", jobs_text))
+        self.assertEqual({match.group(1) for match in job_matches}, set(expected_timeouts))
+        for index, match in enumerate(job_matches):
+            end = job_matches[index + 1].start() if index + 1 < len(job_matches) else len(jobs_text)
+            job = jobs_text[match.start() : end]
+            self.assertIn(
+                f"    timeout-minutes: {expected_timeouts[match.group(1)]}",
+                job,
+                f"{match.group(1)} must have an explicit bounded deadline",
+            )
+
+        expected_remote_uses = [
+            ("actions/checkout", "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09", "v5"),
+            ("actions/setup-python", "ece7cb06caefa5fff74198d8649806c4678c61a1", "v6"),
+        ] * 5 + [
+            ("actions/upload-artifact", "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7"),
+        ] * 3
+        uses_entries = []
+        for line in workflow.splitlines():
+            match = re.match(r"^\s*(?:-\s+)?uses\s*:\s*(.*?)\s*$", line)
+            if not match:
+                continue
+            raw_target = match.group(1)
+            target, comment_separator, version_comment = raw_target.partition(" #")
+            uses_entries.append(
+                (target.strip().strip("\"'"), version_comment.strip() if comment_separator else "")
+            )
+        remote_uses = []
+        for target, version_comment in uses_entries:
+            self.assertFalse(
+                target.startswith("docker://"),
+                "Docker actions are forbidden absent a separately reviewed digest policy",
+            )
+            if target.startswith("./"):
+                continue
+            action, separator, revision = target.partition("@")
+            self.assertEqual(separator, "@", f"remote action lacks a revision: {target}")
+            self.assertRegex(
+                action,
+                r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$",
+                f"unrecognized non-local uses target: {target}",
+            )
+            self.assertRegex(revision, r"^[0-9a-f]{40}$", f"{action} must use a full immutable SHA")
+            remote_uses.append((action, revision, version_comment.strip()))
+        self.assertEqual(sorted(remote_uses), sorted(expected_remote_uses))
+
+        checkout_revision = "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+        checkout_blocks = re.findall(
+            rf"(?m)^\s*- uses: actions/checkout@{checkout_revision} # v5\r?\n"
+            r"\s+with:\r?\n"
+            r"\s+persist-credentials: false\s*$",
+            workflow,
+        )
+        self.assertEqual(len(checkout_blocks), 5)
+
+        bridge_start = workflow.index("\n  factory-bridge-regressions:")
+        product_start = workflow.index("\n  windows-product-oracles:")
+        bridge_job = workflow[bridge_start:product_start]
+        self.assertIn("Run coordination and self-healing guardrails", bridge_job)
+        self.assertIn("tools\\coordination\\test_coordination_guardrails.py", bridge_job)
+        self.assertIn("tests\\coordination", bridge_job)
+        self.assertIn("tools\\agent-bridge\\requirements-test.txt", bridge_job)
+        self.assertNotRegex(bridge_job, r"pip install [\"']pytest")
+
+        product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
+        self.assertIn("    needs: protected-check-route", product_job)
+        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", product_job)
+        self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
+        self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", product_job)
+        self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", product_job)
+        self.assertIn("outputs.product == 'false'", product_job)
+        artifact_step_start = product_job.index("\n      - name: Upload pipeline crash forensics")
+        next_step = product_job.find("\n      - ", artifact_step_start + 1)
+        artifact_step = product_job[artifact_step_start : next_step if next_step != -1 else len(product_job)]
+        self.assertIn(
+            "\n        if: always() && needs.protected-check-route.outputs.product == 'true'",
+            artifact_step,
+        )
+        self.assertIn("\n        uses: actions/upload-artifact@", artifact_step)
+        self.assertIn("\n          path: |", artifact_step)
+        self.assertIn("${{ runner.temp }}\\pipeline-golden-actual.json", artifact_step)
+
+        route_start = workflow.index("\n  protected-check-route:")
+        repo_start = workflow.index("\n  repo-hygiene-python:")
+        route_job = workflow[route_start:repo_start]
+        self.assertIn("tools/repo_hygiene/protected_check_router.py", route_job)
+        self.assertIn("fetch-depth: 0", route_job)
+        self.assertIn("if-no-files-found: error", route_job)
+        self.assertIn("retention-days: 30", route_job)
+        self.assertIn("if ('${{ github.event_name }}' -eq 'workflow_dispatch')", route_job)
+        self.assertIn("$forceReal = @('--force-real')", route_job)
+
+        gui_start = workflow.index("\n  windows-gui-pilot:")
+        gui_job = workflow[gui_start:]
+        self.assertIn("    needs: protected-check-route", gui_job)
+        self.assertIn("    if: ${{ always() }}", gui_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", gui_job)
+        self.assertIn("outputs.gui != 'true'", gui_job)
+        self.assertIn("outputs.gui != 'false'", gui_job)
+        self.assertIn("outputs.gui == 'false'", gui_job)
+        self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", gui_job)
+        self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", gui_job)
+        self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", gui_job)
+
+        required_display_names = {
+            "Repo Hygiene Python (${{ matrix.os }})",
+            "Factory Bridge Regressions",
+            "Windows Product Oracles",
+            "Windows GUI Pilot",
+        }
+        observed_names = set(re.findall(r"(?m)^    name: (.+)$", jobs_text))
+        self.assertTrue(required_display_names.issubset(observed_names))
+
+    def test_protected_check_router_is_conservative_and_provider_specific(self) -> None:
+        provider = classify_paths(
+            [
+                "tools/provider_control/mlv_lane_supervisor.py",
+                ".github/workflows/provider-control-candidate.yml",
+                ".github/requirements/provider-control.txt",
+            ]
+        )
+        self.assertFalse(provider.product)
+        self.assertFalse(provider.gui)
+        self.assertEqual(provider.reason, "EXPLICIT_NA_PROVIDER_CONTROL_ONLY")
+
+        for changed in (
+            ["src/mlv/video_mlv.c"],
+            ["platform/qt/MainWindow.cpp"],
+            ["docs/unknown-surface.md"],
+            [".github/workflows/tests.yml"],
+        ):
+            with self.subTest(changed=changed):
+                route = classify_paths(changed)
+                self.assertTrue(route.product)
+                self.assertTrue(route.gui)
+
+        with self.assertRaises(RouteError):
+            classify_paths([])
+        with self.assertRaises(RouteError):
+            classify_paths(["tools/provider_control/../src/escape.c"])
+
+    def test_pipeline_golden_sync_is_bound_to_frozen_known_good_output(self) -> None:
+        golden = json.loads(
+            (ROOT / "tests" / "fixtures" / "golden" / "pipeline_hashes.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        phase3 = json.loads(
+            (ROOT / "tests" / "fixtures" / "phase3_baselines" / "golden.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        receipt = json.loads(
+            (
+                ROOT
+                / "receipts"
+                / "pipeline-golden-sync-deterministic-dither-20260819.json"
+            ).read_text(encoding="utf-8")
+        )
+
+        canonical = json.dumps(
+            golden,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        canonical_sha256 = hashlib.sha256(canonical).hexdigest()
+        self.assertEqual(len(golden), 15)
+        self.assertEqual(receipt["schema"], "mlv-app/pipeline-golden-sync-receipt/v1")
+        self.assertEqual(receipt["disposition"], "STALE_ORACLE_SYNC")
+        self.assertEqual(receipt["producerContract"]["keyCount"], len(golden))
+        self.assertEqual(receipt["producerContract"]["testCount"], 7)
+        self.assertEqual(receipt["producerContract"]["assertionCount"], 75)
+        self.assertEqual(
+            receipt["hostedCandidateArtifact"]["head"],
+            "f5f8964c2d54df263fd325e80915c8cf799d18c6",
+        )
+        self.assertEqual(
+            receipt["hostedCandidateArtifact"]["tree"],
+            "5909be4d4c063a7da0c6b1147ac5b825e65db78b",
+        )
+        self.assertEqual(
+            receipt["knownGoodArtifact"]["canonicalActualSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["hostedCandidateArtifact"]["canonicalActualSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["equivalence"]["updatedGoldenCanonicalSha256"],
+            canonical_sha256,
+        )
+        self.assertEqual(
+            receipt["knownGoodArtifact"]["actualJsonSha256"],
+            receipt["hostedCandidateArtifact"]["actualJsonSha256"],
+        )
+        self.assertTrue(receipt["equivalence"]["knownGoodAndHostedActualByteIdentical"])
+        self.assertEqual(receipt["equivalence"]["semanticDeltaCount"], 0)
+
+        phase3_frames = {
+            frame["frame"]: frame["sha256"]
+            for frame in phase3["clips"][0]["frames"]
+        }
+        self.assertEqual(golden["tiny_dual_iso.full16.frame0"], phase3_frames[0])
+        self.assertEqual(golden["tiny_dual_iso.full16.frame1"], phase3_frames[1])
+        self.assertFalse(receipt["scope"]["productSourceChanged"])
+        self.assertFalse(receipt["scope"]["runtimeBehaviorChanged"])
+        self.assertFalse(receipt["scope"]["providerAuthority"])
+        self.assertFalse(receipt["scope"]["reblessAuthority"])
+        self.assertEqual(receipt["scope"]["automaticLaunchGate"], "CLOSED")
+        self.assertTrue(receipt["scope"]["humanBeforeAfterReviewRequired"])
+
+    def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
+        repo = self.init_repo()
+        base = git(repo, "rev-parse", "HEAD").stdout.strip()
+        provider = repo / "tools" / "provider_control" / "candidate.py"
+        provider.parent.mkdir(parents=True)
+        provider.write_text("CLOSED = True\n", encoding="utf-8")
+        git(repo, "add", "tools/provider_control/candidate.py")
+        git(repo, "commit", "-m", "provider-only")
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        receipt = build_receipt(repo, base, head)
+        self.assertEqual(receipt["schema"], "mlv-protected-check-route/v1")
+        self.assertFalse(receipt["authority"])
+        self.assertEqual(receipt["git"]["base"], base)
+        self.assertEqual(receipt["git"]["baseTip"], base)
+        self.assertEqual(receipt["git"]["head"], head)
+        self.assertRegex(receipt["git"]["tree"], r"^[0-9a-f]{40}$")
+        self.assertRegex(receipt["git"]["diffSha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(receipt["changedPaths"], ["tools/provider_control/candidate.py"])
+        self.assertFalse(receipt["route"]["productOraclesRequired"])
+        self.assertFalse(receipt["route"]["forcedReal"])
+        self.assertEqual(
+            receipt["route"]["productOracleCredit"],
+            "EXPLICIT_NA_NON_PRODUCT_DIFF",
+        )
+
+        forced = build_receipt(repo, base, head, force_real=True)
+        self.assertTrue(forced["route"]["forcedReal"])
+        self.assertTrue(forced["route"]["productOraclesRequired"])
+        self.assertTrue(forced["route"]["guiPilotRequired"])
+        self.assertEqual(forced["route"]["reason"], "MANUAL_DISPATCH_RUN_REAL_ORACLES")
+        self.assertEqual(forced["route"]["productOracleCredit"], "RUN_REQUIRED")
+
+        side = git(repo, "rev-parse", "HEAD^").stdout.strip()
+        with self.assertRaises(RouteError):
+            build_receipt(repo, head, side)
+
+        divergent = repo / "divergent.txt"
+        git(repo, "checkout", "-b", "divergent", base)
+        divergent.write_text("base moved\n", encoding="utf-8")
+        git(repo, "add", "divergent.txt")
+        git(repo, "commit", "-m", "divergent base tip")
+        base_tip = git(repo, "rev-parse", "HEAD").stdout.strip()
+        diverged_receipt = build_receipt(repo, base_tip, head)
+        self.assertEqual(diverged_receipt["git"]["baseTip"], base_tip)
+        self.assertEqual(diverged_receipt["git"]["base"], base)
+        self.assertEqual(
+            diverged_receipt["changedPaths"],
+            ["tools/provider_control/candidate.py"],
+        )
 
     def test_release_playback_profile_wrapper_pins_windows_qpa(self) -> None:
         script = ROOT / "tools" / "profiling" / "run-release-playback-profile.ps1"
