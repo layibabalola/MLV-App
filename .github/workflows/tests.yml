@@ -47,12 +47,17 @@ jobs:
         shell: pwsh
         run: |
           $receipt = Join-Path $env:RUNNER_TEMP "protected-check-route.json"
+          $forceReal = @()
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $forceReal = @('--force-real')
+          }
           python tools/repo_hygiene/protected_check_router.py `
             --repo-root . `
             --base "$env:ROUTER_BASE" `
             --head "$env:ROUTER_HEAD" `
             --receipt $receipt `
-            --github-output $env:GITHUB_OUTPUT
+            --github-output $env:GITHUB_OUTPUT `
+            @forceReal
 
       - name: Upload protected-check route receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -160,6 +165,7 @@ jobs:
   windows-product-oracles:
     name: Windows Product Oracles
     needs: protected-check-route
+    if: ${{ always() }}
     runs-on: windows-latest
     timeout-minutes: 120
 
@@ -170,8 +176,31 @@ jobs:
     env:
       QT_VERSION: 6.10.2
       QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+      EXPECTED_ROUTE_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
     steps:
+      - name: Fail closed on unavailable product route
+        if: ${{ needs.protected-check-route.result != 'success' || (needs.protected-check-route.outputs.product != 'true' && needs.protected-check-route.outputs.product != 'false') }}
+        run: |
+          throw "protected-check route unavailable or product output malformed"
+
+      - name: Validate exact product route binding
+        run: |
+          $route = '${{ needs.protected-check-route.outputs.product }}'
+          $reason = '${{ needs.protected-check-route.outputs.reason }}'
+          $head = '${{ needs.protected-check-route.outputs.head }}'
+          $tree = '${{ needs.protected-check-route.outputs.tree }}'
+          $diff = '${{ needs.protected-check-route.outputs.diff_sha256 }}'
+          if ($head -ne $env:EXPECTED_ROUTE_HEAD) { throw "protected-check head mismatch" }
+          if ($tree -notmatch '^[0-9a-f]{40}$') { throw "protected-check tree malformed" }
+          if ($diff -notmatch '^[0-9a-f]{64}$') { throw "protected-check diff digest malformed" }
+          if ($route -eq 'false' -and $reason -ne 'EXPLICIT_NA_PROVIDER_CONTROL_ONLY') {
+            throw "product N/A lacks the exact provider-only reason"
+          }
+          if ($route -eq 'true' -and $reason -notin @('ROUTER_CONTROL_CHANGED_RUN_REAL_ORACLES', 'UNKNOWN_OR_PRODUCT_PATH_RUN_REAL_ORACLES', 'MANUAL_DISPATCH_RUN_REAL_ORACLES')) {
+            throw "product run lacks a recognized fail-closed reason"
+          }
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -182,7 +211,7 @@ jobs:
           python-version-file: ".python-version"
 
       - name: Record explicit product-oracle N/A
-        if: needs.protected-check-route.outputs.product != 'true'
+        if: needs.protected-check-route.outputs.product == 'false'
         run: |
           Write-Output "Windows Product Oracles: explicit N/A for exact non-product diff"
           Write-Output "head=${{ needs.protected-check-route.outputs.head }}"
@@ -466,6 +495,7 @@ jobs:
   windows-gui-pilot:
     name: Windows GUI Pilot
     needs: protected-check-route
+    if: ${{ always() }}
     runs-on: windows-latest
     timeout-minutes: 60
 
@@ -476,8 +506,31 @@ jobs:
     env:
       QT_VERSION: 6.10.2
       QT_OUTPUT_DIR: ${{ github.workspace }}\qt
+      EXPECTED_ROUTE_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
     steps:
+      - name: Fail closed on unavailable GUI route
+        if: ${{ needs.protected-check-route.result != 'success' || (needs.protected-check-route.outputs.gui != 'true' && needs.protected-check-route.outputs.gui != 'false') }}
+        run: |
+          throw "protected-check route unavailable or GUI output malformed"
+
+      - name: Validate exact GUI route binding
+        run: |
+          $route = '${{ needs.protected-check-route.outputs.gui }}'
+          $reason = '${{ needs.protected-check-route.outputs.reason }}'
+          $head = '${{ needs.protected-check-route.outputs.head }}'
+          $tree = '${{ needs.protected-check-route.outputs.tree }}'
+          $diff = '${{ needs.protected-check-route.outputs.diff_sha256 }}'
+          if ($head -ne $env:EXPECTED_ROUTE_HEAD) { throw "protected-check head mismatch" }
+          if ($tree -notmatch '^[0-9a-f]{40}$') { throw "protected-check tree malformed" }
+          if ($diff -notmatch '^[0-9a-f]{64}$') { throw "protected-check diff digest malformed" }
+          if ($route -eq 'false' -and $reason -ne 'EXPLICIT_NA_PROVIDER_CONTROL_ONLY') {
+            throw "GUI N/A lacks the exact provider-only reason"
+          }
+          if ($route -eq 'true' -and $reason -notin @('ROUTER_CONTROL_CHANGED_RUN_REAL_ORACLES', 'UNKNOWN_OR_PRODUCT_PATH_RUN_REAL_ORACLES', 'MANUAL_DISPATCH_RUN_REAL_ORACLES')) {
+            throw "GUI run lacks a recognized fail-closed reason"
+          }
+
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
@@ -488,7 +541,7 @@ jobs:
           python-version-file: ".python-version"
 
       - name: Record explicit GUI-pilot N/A
-        if: needs.protected-check-route.outputs.gui != 'true'
+        if: needs.protected-check-route.outputs.gui == 'false'
         run: |
           Write-Output "Windows GUI Pilot: explicit N/A for exact non-product diff"
           Write-Output "head=${{ needs.protected-check-route.outputs.head }}"

@@ -94,7 +94,7 @@ def _resolve_commit(repo: Path, revision: str) -> str:
     return resolved
 
 
-def build_receipt(repo: Path, base: str, head: str) -> dict:
+def build_receipt(repo: Path, base: str, head: str, *, force_real: bool = False) -> dict:
     repo = repo.resolve()
     base_sha = _resolve_commit(repo, base)
     head_sha = _resolve_commit(repo, head)
@@ -119,6 +119,8 @@ def build_receipt(repo: Path, base: str, head: str) -> dict:
     paths = [_canonical_path(item.decode("utf-8", "strict")) for item in raw_paths.split(b"\0") if item]
     paths = sorted(set(paths))
     route = classify_paths(paths)
+    if force_real:
+        route = Route(True, True, "MANUAL_DISPATCH_RUN_REAL_ORACLES")
 
     raw_diff = _git(
         repo,
@@ -143,6 +145,7 @@ def build_receipt(repo: Path, base: str, head: str) -> dict:
         },
         "changedPaths": paths,
         "route": {
+            "forcedReal": force_real,
             "productOraclesRequired": route.product,
             "guiPilotRequired": route.gui,
             "reason": route.reason,
@@ -191,13 +194,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--force-real", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     base = args.base.strip() or "HEAD^"
-    receipt = build_receipt(args.repo_root, base, args.head)
+    receipt = build_receipt(args.repo_root, base, args.head, force_real=args.force_real)
     _atomic_json(args.receipt, receipt)
     if args.github_output is not None:
         _write_github_output(args.github_output, receipt)

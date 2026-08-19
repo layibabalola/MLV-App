@@ -221,6 +221,12 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("Run pipeline_tests --check-golden (bounded shards)", product_job)
         self.assertIn("Record explicit product-oracle N/A", product_job)
         self.assertIn("outputs.product == 'true'", product_job)
+        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", product_job)
+        self.assertIn("outputs.product != 'true'", product_job)
+        self.assertIn("outputs.product != 'false'", product_job)
+        self.assertIn("outputs.product == 'false'", product_job)
+        self.assertNotIn("outputs.product != 'true'\n        run:", product_job)
 
         requirements = (ROOT / "tools" / "agent-bridge" / "requirements.in").read_text(encoding="utf-8")
         self.assertIn("mcp>=1.27.0,<2.0.0", requirements.splitlines())
@@ -321,6 +327,12 @@ class RepoHygieneTests(unittest.TestCase):
 
         product_job = workflow[product_start : workflow.index("\n  windows-gui-pilot:")]
         self.assertIn("    needs: protected-check-route", product_job)
+        self.assertIn("    if: ${{ always() }}", product_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", product_job)
+        self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
+        self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", product_job)
+        self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", product_job)
+        self.assertIn("outputs.product == 'false'", product_job)
         artifact_step_start = product_job.index("\n      - name: Upload pipeline crash forensics")
         next_step = product_job.find("\n      - ", artifact_step_start + 1)
         artifact_step = product_job[artifact_step_start : next_step if next_step != -1 else len(product_job)]
@@ -339,6 +351,20 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", route_job)
         self.assertIn("if-no-files-found: error", route_job)
         self.assertIn("retention-days: 30", route_job)
+        self.assertIn("if ('${{ github.event_name }}' -eq 'workflow_dispatch')", route_job)
+        self.assertIn("$forceReal = @('--force-real')", route_job)
+
+        gui_start = workflow.index("\n  windows-gui-pilot:")
+        gui_job = workflow[gui_start:]
+        self.assertIn("    needs: protected-check-route", gui_job)
+        self.assertIn("    if: ${{ always() }}", gui_job)
+        self.assertIn("needs.protected-check-route.result != 'success'", gui_job)
+        self.assertIn("outputs.gui != 'true'", gui_job)
+        self.assertIn("outputs.gui != 'false'", gui_job)
+        self.assertIn("outputs.gui == 'false'", gui_job)
+        self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", gui_job)
+        self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", gui_job)
+        self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", gui_job)
 
         required_display_names = {
             "Repo Hygiene Python (${{ matrix.os }})",
@@ -397,10 +423,18 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertRegex(receipt["git"]["diffSha256"], r"^[0-9a-f]{64}$")
         self.assertEqual(receipt["changedPaths"], ["tools/provider_control/candidate.py"])
         self.assertFalse(receipt["route"]["productOraclesRequired"])
+        self.assertFalse(receipt["route"]["forcedReal"])
         self.assertEqual(
             receipt["route"]["productOracleCredit"],
             "EXPLICIT_NA_NON_PRODUCT_DIFF",
         )
+
+        forced = build_receipt(repo, base, head, force_real=True)
+        self.assertTrue(forced["route"]["forcedReal"])
+        self.assertTrue(forced["route"]["productOraclesRequired"])
+        self.assertTrue(forced["route"]["guiPilotRequired"])
+        self.assertEqual(forced["route"]["reason"], "MANUAL_DISPATCH_RUN_REAL_ORACLES")
+        self.assertEqual(forced["route"]["productOracleCredit"], "RUN_REQUIRED")
 
         side = git(repo, "rev-parse", "HEAD^").stdout.strip()
         with self.assertRaises(RouteError):
