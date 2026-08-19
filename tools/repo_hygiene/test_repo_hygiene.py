@@ -724,7 +724,7 @@ class RepoHygieneTests(unittest.TestCase):
                 "  cancel-in-progress: false",
                 workflow,
             )
-            self.assertIn("    if: github.ref == 'refs/heads/master'", workflow)
+            self.assertNotIn("if: github.ref == 'refs/heads/master'", workflow)
             self.assertIn("    timeout-minutes: 120", workflow)
             self.assertNotIn("attestations: write", workflow)
             self.assertNotIn("id-token: write", workflow)
@@ -1020,6 +1020,18 @@ class RepoHygieneTests(unittest.TestCase):
             self.assertEqual(positions, sorted(positions))
             return dict(steps)
 
+        def replace_in_named_step(text: str, name: str, old: str, new: str) -> str:
+            pattern = re.compile(
+                rf"(?ms)^    - name:\s*{re.escape(name)}\s*$.*?(?=^    - name:|\Z)"
+            )
+            matches = list(pattern.finditer(text))
+            self.assertEqual(len(matches), 1, f"expected one step named {name!r}")
+            match = matches[0]
+            block = match.group(0)
+            self.assertEqual(block.count(old), 1, f"expected one {old!r} in {name!r}")
+            replacement = block.replace(old, new, 1)
+            return text[: match.start()] + replacement + text[match.end() :]
+
         def assert_common_fail_closed(text: str) -> None:
             self.assertNotRegex(text, r"(?im)^\s*continue-on-error\s*:")
             self.assertNotRegex(text, permissive_shell)
@@ -1192,7 +1204,12 @@ class RepoHygieneTests(unittest.TestCase):
             (
                 "Windows permits missing artifact",
                 assert_windows_policy,
-                windows.replace("        if-no-files-found: error\n", "", 1),
+                replace_in_named_step(
+                    windows,
+                    "Save build artifact",
+                    "        if-no-files-found: error\n",
+                    "",
+                ),
             ),
             (
                 "Linux disables errexit",
@@ -1226,7 +1243,12 @@ class RepoHygieneTests(unittest.TestCase):
             (
                 "Linux permits missing artifact",
                 assert_linux_policy,
-                linux.replace("        if-no-files-found: error\n", "", 1),
+                replace_in_named_step(
+                    linux,
+                    "Save build artifact",
+                    "        if-no-files-found: error\n",
+                    "",
+                ),
             ),
         )
         for label, assertion, falsified in falsifiers:

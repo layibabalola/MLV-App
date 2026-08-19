@@ -24,7 +24,6 @@ env:
 jobs:
   build:
 
-    if: github.ref == 'refs/heads/master'
     runs-on: windows-latest
     timeout-minutes: 120
 
