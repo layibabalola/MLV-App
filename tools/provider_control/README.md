@@ -11,7 +11,8 @@ Local proof:
     py -3 tools/provider_control/vendor/universal_provider_control.py validate profile tools/provider_control/mlv-project-profile.candidate.json
 
 The unit suite validates both strict MLV schemas, hostile inventory/profile inputs, 1,000 unchanged
-ticks, and the SHADOW/CONTAINMENT fake-provider harness. The imported universal profile is a
+ticks, production-root alias/reparse refusal, nonzero demand bindings, separate process-image/script
+receipts, and the SHADOW/CONTAINMENT fake-provider harness. The imported universal profile is a
 CLOSED-only template: its null/all-zero identities are intentional activation blockers, not
 placeholders that may be treated as evidence.
 

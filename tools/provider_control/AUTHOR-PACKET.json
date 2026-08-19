@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v3",
-  "status": "DISTINGUISH_PHASE_0_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T01:18:00Z",
+  "status": "DISTINGUISH_R5_PHASE_0_1_ZERO_AUTHORITY",
+  "capturedAt": "2026-08-19T01:34:55Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "technicalSubject": "874605e43531c9aa230ee16851f8107a8e0d9cec",
   "ratificationMerge": "488cf0dc0c2c2ddd1ab024c6377e1fd6d61eef1d",
@@ -14,8 +14,8 @@
     "providerInvocation": false
   },
   "localEvidence": {
-    "python313": "22/22 PASS",
-    "python314": "22/22 PASS",
+    "python313": "24/24 PASS",
+    "python314": "24/24 PASS",
     "hostedMatrix": "NOT_RUN",
     "unchangedNoWorkTicks": 1000,
     "providerCalls": 0,
@@ -32,21 +32,22 @@
     "ACTION_GRAPH_INCOMPLETE",
     "DIRECT_LAUNCHER_OBSERVED",
     "TASK_XML_CANONICALIZATION_UNKNOWN",
-    "SUPERVISOR_PROFILE_PENDING"
+    "SUPERVISOR_PROFILE_PENDING",
+    "CITABLE_FABLE_SEQUENCE_MISSING"
   ],
   "subjects": [
-    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 25576, "sha256": "39d1a1737509aa3ab65d80ffe6e20a330b9c9f3a62e0a7bd68969f97d444e6b7"},
-    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 19292, "sha256": "18c61dc1f8b8a49817152d77b285a562db360b920fcb38e7e1d69259736de36b"},
-    {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 825, "sha256": "863454ad7a8786a2b4546dc79755514c89062638f2d2631747167f1791b76071"},
+    {"path": "tools/provider_control/mlv_lane_supervisor.py", "bytes": 27388, "sha256": "5719b0413ddce28bed9a61c57877421fb7cd0e25b4f68c57570d7b60a3b4a7ff"},
+    {"path": "tools/provider_control/tests/test_mlv_lane_supervisor.py", "bytes": 21733, "sha256": "e511bc3820c3eecaadd543bde26d46d132f5d2f0b80fd117ca045ad9b5047333"},
+    {"path": "tools/provider_control/tests/fake_provider.py", "bytes": 966, "sha256": "a9c7fbf4efcf11c625a45484496552feb39749705d69579dce18275594777507"},
     {"path": "tools/provider_control/mlv-project-profile.candidate.json", "bytes": 1553, "sha256": "e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"},
     {"path": "tools/provider_control/lane-bindings.candidate.json", "bytes": 1515, "sha256": "f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"},
-    {"path": "tools/provider_control/mlv-supervisor-profile.candidate.json", "bytes": 1211, "sha256": "2bb2a952e226dbb6d268fb67f8bf0acbf3d6eb7c9928f67e4c8cdd54e4bf29d0"},
+    {"path": "tools/provider_control/mlv-supervisor-profile.candidate.json", "bytes": 1241, "sha256": "a4e97bd2f481e3b5f461ecbe8a131100ec0ba0ef1ab545ff0da2387cd3b41c90"},
     {"path": "tools/provider_control/mlv-observed-inventory.candidate.json", "bytes": 4338, "sha256": "7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"},
-    {"path": "tools/provider_control/schemas/mlv-provider-supervisor-profile-v1.schema.json", "bytes": 3021, "sha256": "e3ce913c6a708cd808c4bebcf971da9de1402eda3c01657c3b97b24aecf2d6fb"},
+    {"path": "tools/provider_control/schemas/mlv-provider-supervisor-profile-v1.schema.json", "bytes": 3057, "sha256": "a83478f68eba9d84aaf8e5946440797f80c00dc964d33f0f118dbbfc8d0c5129"},
     {"path": "tools/provider_control/schemas/mlv-provider-observed-inventory-v1.schema.json", "bytes": 5926, "sha256": "34569f58d75d6f62d69be962fd54be5335c1d28a7247e4f592e5157491d5ba82"},
     {"path": "tools/provider_control/install-mlv-lane-supervisor.ps1", "bytes": 947, "sha256": "8663f67b2779a1851b988e68d6959e731141415d646319a92bfe36bafd9719f9"},
     {"path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1", "bytes": 810, "sha256": "ebda0a707c4b46491110cfc8c3b262fea3352d8d4edf8708c27e12a7797006da"},
-    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 3453, "sha256": "1ea85ba703664fa424bf20c373e43f462af7a1c1e4cae94539222ad217b12983"},
+    {"path": "tools/provider_control/DISTINGUISH.md", "bytes": 4081, "sha256": "8a265edc8b487277f958319c1f0933e0ee89573e77943cce2763c3f84e38468e"},
     {"path": ".github/workflows/provider-control-candidate.yml", "bytes": 870, "sha256": "d4dc36dd2b85b38d8e369af3501c2b10310571346c2c3491129f24dcf4cfd2f5"}
   ]
 }

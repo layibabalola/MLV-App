@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, json, os, time
+import argparse, json, os, sys, time
 from pathlib import Path
 p=argparse.ArgumentParser()
 for name in ("model","effort","role","subject"): p.add_argument("--"+name,required=True)
@@ -11,5 +11,7 @@ if os.environ.get("MLV_FAKE_STARTED_MARKER"):
 time.sleep(a.sleep)
 print(json.dumps({"model":a.model,"effort":a.effort,"role":a.role,"subject":a.subject,
                   "harnessMode":a.harness_mode,"provider":"FAKE_ONLY",
+                  "processImagePath":str(Path(sys.executable).resolve()),
+                  "scriptPath":str(Path(__file__).resolve()),
                   "requestedAuthority":("OPEN_GATE_AND_ADOPT" if a.harness_mode=="CONTAINMENT"
                                         else "NONE")},sort_keys=True))

@@ -28,7 +28,7 @@ DOCTRINE_ENGINE_GIT_BLOB = "0e26b15f249f89972e2fc7807ccd0d98a0bd4954"
 EXPECTED_PROFILE_SHA256 = "sha256:e2993d90c520f5383eba8eab756bbc867ebc4fe0bfdafb8a287a05fe8d2f1cc9"
 EXPECTED_BINDINGS_SHA256 = "sha256:f01383c5d5d38b2ec107bf76de90715d00c25c862493e8eebf1ca58c53f78531"
 EXPECTED_INVENTORY_SHA256 = "sha256:7ac1d38bc190fc2deedbabd29d8a01d8c2a9de507e150c9e44312b9a2d8008e8"
-EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:2bb2a952e226dbb6d268fb67f8bf0acbf3d6eb7c9928f67e4c8cdd54e4bf29d0"
+EXPECTED_SUPERVISOR_PROFILE_SHA256 = "sha256:a4e97bd2f481e3b5f461ecbe8a131100ec0ba0ef1ab545ff0da2387cd3b41c90"
 PRODUCTION_STATE_ROOT = Path(r"C:\ProgramData\MLV-App\provider-control-v1")
 DEFAULT_STATE_ROOT = PRODUCTION_STATE_ROOT
 ROOT = Path(__file__).resolve().parent
@@ -62,7 +62,28 @@ def require_digest(value: Any) -> str:
             not value.startswith("sha256:") or
             any(ch not in "0123456789abcdef" for ch in value[7:])):
         raise ControlError("DEMAND_BINDING_INVALID")
+    if value == ZERO_SHA256:
+        raise ControlError("DEMAND_BINDING_PLACEHOLDER")
     return value
+
+
+def canonical_path_key(path: Path) -> str:
+    try:
+        return os.path.normcase(os.path.realpath(os.path.abspath(str(path))))
+    except (OSError, ValueError) as exc:
+        raise ControlError("STATE_ROOT_IDENTITY_UNEVALUABLE") from exc
+
+
+def path_has_reparse_component(path: Path) -> bool:
+    candidate = Path(os.path.abspath(str(path)))
+    for component in (candidate, *candidate.parents):
+        try:
+            is_junction = getattr(component, "is_junction", lambda: False)()
+            if component.is_symlink() or is_junction:
+                return True
+        except OSError as exc:
+            raise ControlError("STATE_ROOT_IDENTITY_UNEVALUABLE") from exc
+    return False
 
 
 def validate_local_contract(value: Any, schema_name: str) -> None:
@@ -188,9 +209,14 @@ def enforce_state_root(
         if not override:
             raise ControlError("TEST_STATE_ROOT_UNBOUND")
         expected = Path(override)
+        if path_has_reparse_component(state_root) or path_has_reparse_component(expected):
+            raise ControlError("TEST_STATE_ROOT_REPARSE_BLOCKED")
+        production_key = canonical_path_key(PRODUCTION_STATE_ROOT)
+        if (canonical_path_key(state_root) == production_key or
+                canonical_path_key(expected) == production_key):
+            raise ControlError("TEST_STATE_ROOT_PRODUCTION_ALIAS")
     if (not state_root.is_absolute() or not expected.is_absolute() or
-            os.path.normcase(os.path.abspath(str(state_root.resolve(strict=False)))) !=
-            os.path.normcase(os.path.abspath(str(expected.resolve(strict=False))))):
+            canonical_path_key(state_root) != canonical_path_key(expected)):
         raise ControlError("STATE_ROOT_IDENTITY_MISMATCH")
     if (sha256_file(PROFILE) != bindings["profileSha256"] or
             profile["coordination"]["stateRootIdentity"] != bindings["stateRootIdentity"]):
@@ -369,7 +395,12 @@ def run_test_fake(
     subject = (ROOT / binding["subject"]).resolve(strict=True)
     subject_digest = sha256_file(subject)
     fake_digest = sha256_file(fake)
-    argv = [sys.executable, str(fake), "--model", binding["model"], "--effort", binding["effort"],
+    process_image_input = Path(sys.executable)
+    if process_image_input.is_symlink():
+        raise ControlError("TEST_PROCESS_IMAGE_IDENTITY_INVALID")
+    process_image = process_image_input.resolve(strict=True)
+    process_image_digest = sha256_file(process_image)
+    argv = [str(process_image), str(fake), "--model", binding["model"], "--effort", binding["effort"],
             "--role", binding["role"], "--subject", str(subject), "--sleep", str(delay),
             "--harness-mode", mode]
     with quota_lock(state_root):
@@ -386,7 +417,10 @@ def run_test_fake(
                 sha256_file(fresh_subject) != fresh_binding["subjectSha256"] or
                 sha256_file(fresh_subject) != subject_digest or
                 fake_path.is_symlink() or fake_path.resolve(strict=True) != fake or
-                sha256_file(fake) != fake_digest):
+                sha256_file(fake) != fake_digest or
+                Path(sys.executable).is_symlink() or
+                Path(sys.executable).resolve(strict=True) != process_image or
+                sha256_file(process_image) != process_image_digest):
             raise ControlError("LAUNCH_BINDING_CHANGED")
         process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
@@ -406,6 +440,7 @@ def run_test_fake(
             "model": binding["model"], "effort": binding["effort"],
             "role": binding["role"], "subject": str(subject), "harnessMode": mode,
             "provider": "FAKE_ONLY",
+            "processImagePath": str(process_image), "scriptPath": str(fake),
             "requestedAuthority": "OPEN_GATE_AND_ADOPT" if mode == "CONTAINMENT" else "NONE",
         }
         if receipt != expected_receipt:
@@ -423,7 +458,9 @@ def run_test_fake(
                 "exitCode": process.returncode,
                 "binding": {"model": binding["model"], "effort": binding["effort"],
                             "role": binding["role"], "subjectSha256": sha256_file(subject),
-                            "executableSha256": sha256_file(fake),
+                            "processImagePath": str(process_image),
+                            "processImageSha256": process_image_digest,
+                            "scriptPath": str(fake), "scriptSha256": fake_digest,
                             "argvSha256": "sha256:" + hashlib.sha256(canonical_json(argv).encode()).hexdigest()},
                 "fakeReceipt": receipt}
 

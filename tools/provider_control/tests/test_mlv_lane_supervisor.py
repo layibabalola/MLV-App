@@ -21,6 +21,9 @@ from vendor.universal_provider_control import (  # noqa: E402
 )
 
 ZERO = "sha256:" + "0" * 64
+CAPSULE = "sha256:" + "a" * 64
+CHECKPOINT = "sha256:" + "b" * 64
+CACHE_AFFINITY = "sha256:" + "c" * 64
 VENDOR_BLOBS = {
     "vendor/universal_provider_control.py": "0e26b15f249f89972e2fc7807ccd0d98a0bd4954",
     "schemas/provider-native-capacity-evidence-v1.schema.json": "9c80864627b60c4d217eed2a907fe51f37d28a30",
@@ -48,7 +51,8 @@ def demand(**changes):
         "schema": "mlv-provider-demand/v1", "project": "mlv-app", "hasWork": False,
         "lane": "fable", "priority": "PRODUCT_WORK", "estimateFraction": 0.1,
         "availableFraction": 0.9, "turns": 4, "contextTokens": 32000,
-        "capsuleSha256": ZERO, "checkpointSha256": ZERO, "cacheAffinitySha256": ZERO,
+        "capsuleSha256": CAPSULE, "checkpointSha256": CHECKPOINT,
+        "cacheAffinitySha256": CACHE_AFFINITY,
     }
     value.update(changes)
     return value
@@ -169,6 +173,16 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(result["providerProcesses"], 0)
             self.assertEqual(result["fakeProviderCalls"], 1)
             self.assertEqual(result["fakeReceipt"]["provider"], "FAKE_ONLY")
+            image = Path(result["binding"]["processImagePath"])
+            script = Path(result["binding"]["scriptPath"])
+            self.assertEqual(image, Path(sys.executable).resolve())
+            self.assertEqual(script, (HERE / "fake_provider.py").resolve())
+            self.assertEqual(result["binding"]["processImageSha256"],
+                             supervisor.sha256_file(image))
+            self.assertEqual(result["binding"]["scriptSha256"],
+                             supervisor.sha256_file(script))
+            self.assertNotEqual(result["binding"]["processImageSha256"],
+                                result["binding"]["scriptSha256"])
             self.assertEqual(result["containedHostileAuthorityClaim"], mode == "CONTAINMENT")
             if mode == "CONTAINMENT":
                 self.assertEqual(result["fakeReceipt"]["requestedAuthority"],
@@ -205,6 +219,11 @@ class SupervisorTests(unittest.TestCase):
         for values, reason in cases:
             self.write_demand(demand(**values))
             with self.subTest(reason=reason), self.assertRaisesRegex(ControlError, reason):
+                supervisor.tick(self.state, self.demand)
+        for field in ("capsuleSha256", "checkpointSha256", "cacheAffinitySha256"):
+            self.write_demand(demand(**{field: ZERO}))
+            with self.subTest(zero_field=field), self.assertRaisesRegex(
+                    ControlError, "DEMAND_BINDING_PLACEHOLDER"):
                 supervisor.tick(self.state, self.demand)
         for field in ("model", "effort", "provider"):
             value = demand(); value[field] = "injected"; self.write_demand(value)
@@ -309,7 +328,7 @@ class SupervisorTests(unittest.TestCase):
 
     def test_22_author_packet_binds_exact_subjects_without_adoption_claim(self):
         packet = strict_json_file(ROOT / "AUTHOR-PACKET.json")
-        self.assertEqual(packet["status"], "DISTINGUISH_PHASE_0_1_ZERO_AUTHORITY")
+        self.assertEqual(packet["status"], "DISTINGUISH_R5_PHASE_0_1_ZERO_AUTHORITY")
         self.assertEqual(packet["technicalSubject"], supervisor.TECHNICAL_SUBJECT)
         self.assertEqual(packet["ratificationMerge"], supervisor.RATIFICATION_MERGE)
         self.assertFalse(packet["authority"]["adoption"])
@@ -320,6 +339,26 @@ class SupervisorTests(unittest.TestCase):
             with self.subTest(path=subject["path"]):
                 self.assertEqual(path.stat().st_size, subject["bytes"])
                 self.assertEqual(supervisor.sha256_file(path)[7:], subject["sha256"])
+
+    def test_23_test_root_cannot_equal_alias_or_reparse_to_production(self):
+        self.write_demand(demand(hasWork=True))
+        profile, bindings, _, _ = supervisor.load_contracts()
+        same_root = self.state / ".." / "state"
+        env = {supervisor.FAKE_ENV: "1", supervisor.TEST_STATE_ROOT_ENV: str(same_root)}
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(supervisor, "PRODUCTION_STATE_ROOT", self.state):
+            with self.assertRaisesRegex(ControlError, "TEST_STATE_ROOT_PRODUCTION_ALIAS"):
+                supervisor.enforce_state_root(same_root, profile, bindings, test_only=True)
+        with mock.patch.dict(os.environ, self.fake_env(), clear=False), \
+                mock.patch.object(supervisor, "path_has_reparse_component", return_value=True):
+            with self.assertRaisesRegex(ControlError, "TEST_STATE_ROOT_REPARSE_BLOCKED"):
+                supervisor.enforce_state_root(self.state, profile, bindings, test_only=True)
+        self.assertFalse(self.state.exists())
+
+    def test_24_c39_without_citable_fable_sequence_has_no_project_authority(self):
+        _, _, local, _ = supervisor.load_contracts()
+        self.assertIn("CITABLE_FABLE_SEQUENCE", local["pending"])
+        self.assertFalse(local["authority"]["adoption"])
 
 
 if __name__ == "__main__":

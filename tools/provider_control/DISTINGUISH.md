@@ -20,6 +20,11 @@ R16 features are unratified and may be considered only as `SHADOW_INPUT_ONLY` wi
   the quota lock for its full lifetime, bind model/effort/role/subject/executable/argv, and leave the
   automatic gate CLOSED. Their receipts count fake calls separately and always report zero provider
   calls/processes/tokens.
+- Test roots equal or canonically aliased to the production root are refused, as is any test-root
+  path with a symlink/junction/reparse component. The refusal occurs before state or quota-lock work.
+- Demand capsule, checkpoint, and cache-affinity bindings must each be a full, nonzero SHA-256.
+- Fake receipts bind the actual resolved Python process image path/SHA-256 separately from the fake
+  script path/SHA-256; the script is never mislabeled as the executable image.
 - Missing fields, injected model/provider fields, contract drift, changed prompt/task/launcher/CLI
   hashes, alternate state roots, all-zero identities, null shared-broker identity, incomplete graph,
   and the observed direct launcher all block before a production child boundary.
@@ -46,6 +51,8 @@ The physical task-file bytes are the current rollback anchor.
 - The separately reviewed production suspended-child observer/resume boundary.
 - Exact CLOSED + SHADOW + CONTAINMENT evidence on the final committed tree and hosted matrix.
 - Independent review, signed installation, and explicit one-use canary authority.
+- A citable Fable sequence for the canonical c39 MLV specification. None is present in the
+  reviewed project evidence, so c39 is not project authority.
 
 Until all blockers are resolved and the fleet's pinned evidence proves the resulting exact tree,
 this project must not publish ADOPT, enable/start the task, invoke a provider, or claim a canary.
