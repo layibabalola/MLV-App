@@ -112,7 +112,10 @@ dropped refinement loop (8ddddce2) directly.
 - **Re-bless laundering** is the worst failure mode: under cost pressure with a noisy gate, the
   path of least resistance is to re-bless a regressed build green, and the same engineer who writes
   "byte-identical" re-blesses the contradicting golden. Only structural guard: buildstamp-pinned
-  bless refusing dirty/unstamped exes + `-Reason` + a reviewed diff.
+  bless refusing dirty/unstamped exes + `-Reason` + a reviewed diff. Routine owner approval may be
+  replaced only by the separated, fail-closed quorum in
+  [`autonomous-golden-authority.md`](autonomous-golden-authority.md); model consensus cannot
+  override a failed frozen-build output comparison.
 - **Auto-WB non-determinism** forces the perceptual legs to wide tolerances (a few mireds / 5-8%
   luma can hide) — which is why the BLOCKING legs are WB-locked and the auto-WB-on legs advisory.
 - **Cadence flake** stays advisory; a real micro-stutter can pass it and must be caught by the

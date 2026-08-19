@@ -1,0 +1,90 @@
+{
+  "schema": "mlv-app/autonomous-golden-authority-policy/v1",
+  "status": "CANDIDATE_ZERO_AUTHORITY",
+  "ownerDelegation": {
+    "routineHumanApprovalRequired": false,
+    "defaultOnAmbiguity": "REJECT_PRESERVE_BASELINE",
+    "notificationMode": "RECEIPT_ONLY_NO_RESPONSE_REQUIRED",
+    "humanRole": "OPTIONAL_APPEAL_OR_EMERGENCY_OVERRIDE"
+  },
+  "authorityBoundary": {
+    "promotionActor": "BROKER_ONLY",
+    "implementationProposerRecused": true,
+    "providerRuntimeAuthority": false,
+    "automaticLaunchGate": "CLOSED"
+  },
+  "signerClasses": [
+    "HOSTED_PRODUCT_ORACLE",
+    "STRANGER_REVIEW",
+    "HUB_DOCTRINE",
+    "SECOND_STRANGER_REVIEW",
+    "OUTPUT_SPECIALIST"
+  ],
+  "independence": {
+    "distinctIdentity": true,
+    "distinctKey": true,
+    "distinctModelFamily": true,
+    "distinctOperatorClass": true,
+    "commitThenReveal": true,
+    "modelConsensusCannotOverrideOutputFailure": true
+  },
+  "decisionClasses": {
+    "A_REPRESENTATION_ONLY": {
+      "minimumSignerClasses": 3,
+      "unanimous": true,
+      "semanticOutputDelta": "ZERO",
+      "shadowCycles": 0
+    },
+    "B_MECHANICALLY_PREDICTED": {
+      "minimumSignerClasses": 3,
+      "unanimous": true,
+      "requiresPreexistingRatifiedSpecification": true,
+      "independentHostedRuns": 2,
+      "shadowCycles": 1
+    },
+    "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS": {
+      "minimumSignerClasses": 5,
+      "unanimous": true,
+      "requiresStandingBoundedPolicy": true,
+      "whenPolicyMissing": "REJECT_PRESERVE_BASELINE",
+      "shadowCycles": 1
+    }
+  },
+  "requiredEvidence": [
+    "CANDIDATE_COMMIT_AND_TREE",
+    "IMMUTABLE_KNOWN_GOOD_BUILD_AND_MANIFEST",
+    "EXACT_INPUT_CORPUS_DIGESTS",
+    "OLD_AND_PROPOSED_GOLDEN_DIGESTS",
+    "BASELINE_AND_CANDIDATE_ACTUAL_OUTPUT_DIGESTS",
+    "PER_KEY_BEFORE_AFTER_VALUES",
+    "VALUES_PIXELS_CADENCE_AB",
+    "TEST_INVENTORY_FAILURES_AND_SKIPS",
+    "TOOLCHAIN_AND_ENVIRONMENT",
+    "SIGNER_RECEIPTS_AND_POLICY_DIGEST"
+  ],
+  "failClosedOn": [
+    "MISSING_EVIDENCE",
+    "NEW_SKIP",
+    "DIRTY_TREE",
+    "VERIFIER_OR_POLICY_CHANGED_IN_PROPOSAL",
+    "UNKNOWN_OUTPUT_DELTA",
+    "BASELINE_MISMATCH",
+    "SIGNER_OVERLAP",
+    "SIGNER_DISAGREEMENT",
+    "UNEXPLAINED_CROSS_RUN_VARIANCE"
+  ],
+  "antiLaundering": {
+    "productGoldenVerifierPolicySameTransactionForbidden": true,
+    "verifierAndPolicyMustLandFirst": true,
+    "candidateCannotSupplyKnownGoodArtifact": true,
+    "carryForwardRequiresAuthoritySensitiveBlobIdentity": true
+  },
+  "promotion": {
+    "twoPhase": true,
+    "preparedReceiptRequired": true,
+    "brokerOwnedAtomicCommit": true,
+    "promotionCommitMayChangeOnlyGoldenAndReceipt": true,
+    "exactPromotionHeadCiRequired": true,
+    "automaticRollbackOnPostPromotionMismatch": true
+  }
+}

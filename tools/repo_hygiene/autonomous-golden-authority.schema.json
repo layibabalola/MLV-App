@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app/schemas/autonomous-golden-authority-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "status", "ownerDelegation", "authorityBoundary", "signerClasses", "independence", "decisionClasses", "requiredEvidence", "failClosedOn", "antiLaundering", "promotion"],
+  "properties": {
+    "schema": {"const": "mlv-app/autonomous-golden-authority-policy/v1"},
+    "status": {"const": "CANDIDATE_ZERO_AUTHORITY"},
+    "ownerDelegation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["routineHumanApprovalRequired", "defaultOnAmbiguity", "notificationMode", "humanRole"],
+      "properties": {
+        "routineHumanApprovalRequired": {"const": false},
+        "defaultOnAmbiguity": {"const": "REJECT_PRESERVE_BASELINE"},
+        "notificationMode": {"const": "RECEIPT_ONLY_NO_RESPONSE_REQUIRED"},
+        "humanRole": {"const": "OPTIONAL_APPEAL_OR_EMERGENCY_OVERRIDE"}
+      }
+    },
+    "authorityBoundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["promotionActor", "implementationProposerRecused", "providerRuntimeAuthority", "automaticLaunchGate"],
+      "properties": {
+        "promotionActor": {"const": "BROKER_ONLY"},
+        "implementationProposerRecused": {"const": true},
+        "providerRuntimeAuthority": {"const": false},
+        "automaticLaunchGate": {"const": "CLOSED"}
+      }
+    },
+    "signerClasses": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "HOSTED_PRODUCT_ORACLE"}, {"const": "STRANGER_REVIEW"},
+        {"const": "HUB_DOCTRINE"}, {"const": "SECOND_STRANGER_REVIEW"},
+        {"const": "OUTPUT_SPECIALIST"}
+      ],
+      "items": false, "minItems": 5, "maxItems": 5, "uniqueItems": true
+    },
+    "independence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distinctIdentity", "distinctKey", "distinctModelFamily", "distinctOperatorClass", "commitThenReveal", "modelConsensusCannotOverrideOutputFailure"],
+      "properties": {
+        "distinctIdentity": {"const": true}, "distinctKey": {"const": true},
+        "distinctModelFamily": {"const": true}, "distinctOperatorClass": {"const": true},
+        "commitThenReveal": {"const": true},
+        "modelConsensusCannotOverrideOutputFailure": {"const": true}
+      }
+    },
+    "decisionClasses": {
+      "type": "object", "additionalProperties": false,
+      "required": ["A_REPRESENTATION_ONLY", "B_MECHANICALLY_PREDICTED", "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"],
+      "properties": {
+        "A_REPRESENTATION_ONLY": {"$ref": "#/$defs/classA"},
+        "B_MECHANICALLY_PREDICTED": {"$ref": "#/$defs/classB"},
+        "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS": {"$ref": "#/$defs/classC"}
+      }
+    },
+    "requiredEvidence": {"$ref": "#/$defs/nonemptyUniqueStrings"},
+    "failClosedOn": {"$ref": "#/$defs/nonemptyUniqueStrings"},
+    "antiLaundering": {
+      "type": "object", "additionalProperties": false,
+      "required": ["productGoldenVerifierPolicySameTransactionForbidden", "verifierAndPolicyMustLandFirst", "candidateCannotSupplyKnownGoodArtifact", "carryForwardRequiresAuthoritySensitiveBlobIdentity"],
+      "properties": {
+        "productGoldenVerifierPolicySameTransactionForbidden": {"const": true},
+        "verifierAndPolicyMustLandFirst": {"const": true},
+        "candidateCannotSupplyKnownGoodArtifact": {"const": true},
+        "carryForwardRequiresAuthoritySensitiveBlobIdentity": {"const": true}
+      }
+    },
+    "promotion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["twoPhase", "preparedReceiptRequired", "brokerOwnedAtomicCommit", "promotionCommitMayChangeOnlyGoldenAndReceipt", "exactPromotionHeadCiRequired", "automaticRollbackOnPostPromotionMismatch"],
+      "properties": {
+        "twoPhase": {"const": true}, "preparedReceiptRequired": {"const": true},
+        "brokerOwnedAtomicCommit": {"const": true},
+        "promotionCommitMayChangeOnlyGoldenAndReceipt": {"const": true},
+        "exactPromotionHeadCiRequired": {"const": true},
+        "automaticRollbackOnPostPromotionMismatch": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "nonemptyUniqueStrings": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+    "classA": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimumSignerClasses", "unanimous", "semanticOutputDelta", "shadowCycles"],
+      "properties": {"minimumSignerClasses": {"const": 3}, "unanimous": {"const": true}, "semanticOutputDelta": {"const": "ZERO"}, "shadowCycles": {"const": 0}}
+    },
+    "classB": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimumSignerClasses", "unanimous", "requiresPreexistingRatifiedSpecification", "independentHostedRuns", "shadowCycles"],
+      "properties": {"minimumSignerClasses": {"const": 3}, "unanimous": {"const": true}, "requiresPreexistingRatifiedSpecification": {"const": true}, "independentHostedRuns": {"minimum": 2, "type": "integer"}, "shadowCycles": {"minimum": 1, "type": "integer"}}
+    },
+    "classC": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minimumSignerClasses", "unanimous", "requiresStandingBoundedPolicy", "whenPolicyMissing", "shadowCycles"],
+      "properties": {"minimumSignerClasses": {"const": 5}, "unanimous": {"const": true}, "requiresStandingBoundedPolicy": {"const": true}, "whenPolicyMissing": {"const": "REJECT_PRESERVE_BASELINE"}, "shadowCycles": {"minimum": 1, "type": "integer"}}
+    }
+  }
+}

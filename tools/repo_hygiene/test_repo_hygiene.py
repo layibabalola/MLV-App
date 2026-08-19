@@ -11,6 +11,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+
 from .closeout import (
     approve_transaction,
     evaluate_closeout_triggers,
@@ -475,6 +477,105 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertFalse(receipt["scope"]["reblessAuthority"])
         self.assertEqual(receipt["scope"]["automaticLaunchGate"], "CLOSED")
         self.assertTrue(receipt["scope"]["humanBeforeAfterReviewRequired"])
+
+    def test_autonomous_golden_authority_is_fail_closed_and_recuses_proposer(self) -> None:
+        policy_path = (
+            ROOT / "tools" / "repo_hygiene" / "autonomous-golden-authority.json"
+        )
+        schema_path = (
+            ROOT
+            / "tools"
+            / "repo_hygiene"
+            / "autonomous-golden-authority.schema.json"
+        )
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        validator = Draft202012Validator(schema)
+        validator.validate(policy)
+
+        self.assertFalse(policy["ownerDelegation"]["routineHumanApprovalRequired"])
+        self.assertEqual(
+            policy["ownerDelegation"]["defaultOnAmbiguity"],
+            "REJECT_PRESERVE_BASELINE",
+        )
+        self.assertTrue(policy["authorityBoundary"]["implementationProposerRecused"])
+        self.assertFalse(policy["authorityBoundary"]["providerRuntimeAuthority"])
+        self.assertEqual(policy["authorityBoundary"]["automaticLaunchGate"], "CLOSED")
+        self.assertTrue(
+            policy["independence"]["modelConsensusCannotOverrideOutputFailure"]
+        )
+        self.assertGreaterEqual(
+            policy["decisionClasses"]["B_MECHANICALLY_PREDICTED"][
+                "independentHostedRuns"
+            ],
+            2,
+        )
+        class_c = policy["decisionClasses"]["C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"]
+        self.assertEqual(class_c["minimumSignerClasses"], 5)
+        self.assertTrue(class_c["unanimous"])
+        self.assertTrue(class_c["requiresStandingBoundedPolicy"])
+        self.assertEqual(class_c["whenPolicyMissing"], "REJECT_PRESERVE_BASELINE")
+        self.assertTrue(
+            policy["promotion"]["promotionCommitMayChangeOnlyGoldenAndReceipt"]
+        )
+
+        hostile_mutations = (
+            (
+                "routine human gate restored",
+                ("ownerDelegation", "routineHumanApprovalRequired"),
+                True,
+            ),
+            (
+                "ambiguity auto-approved",
+                ("ownerDelegation", "defaultOnAmbiguity"),
+                "AUTO_APPROVE",
+            ),
+            (
+                "proposer self-approval",
+                ("authorityBoundary", "implementationProposerRecused"),
+                False,
+            ),
+            (
+                "provider authority smuggled",
+                ("authorityBoundary", "providerRuntimeAuthority"),
+                True,
+            ),
+            (
+                "model vote overrides output",
+                ("independence", "modelConsensusCannotOverrideOutputFailure"),
+                False,
+            ),
+            (
+                "class C skips standing policy",
+                (
+                    "decisionClasses",
+                    "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS",
+                    "requiresStandingBoundedPolicy",
+                ),
+                False,
+            ),
+            (
+                "promotion mixes product",
+                ("promotion", "promotionCommitMayChangeOnlyGoldenAndReceipt"),
+                False,
+            ),
+        )
+        for label, path, value in hostile_mutations:
+            with self.subTest(label=label):
+                hostile = json.loads(json.dumps(policy))
+                target = hostile
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+                self.assertTrue(list(validator.iter_errors(hostile)))
+
+        docs = (ROOT / "docs" / "autonomous-golden-authority.md").read_text(
+            encoding="utf-8"
+        )
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("receipts, not approval requests", docs)
+        self.assertRegex(docs, r"cannot\s+vote a failing output gate green")
+        self.assertIn("docs/autonomous-golden-authority.md", agents)
 
     def test_protected_check_receipt_binds_exact_git_diff_and_refuses_divergence(self) -> None:
         repo = self.init_repo()
