@@ -1,7 +1,7 @@
 {
   "schema": "mlv-provider-control-author-packet/v6",
   "status": "DISTINGUISH_SLOT_SLICE_1_ZERO_AUTHORITY",
-  "capturedAt": "2026-08-19T08:56:24Z",
+  "capturedAt": "2026-08-19T09:01:12Z",
   "repositoryBaseCommit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
   "canonicalDoctrine": {
     "generation": "R26",
