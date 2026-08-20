@@ -26,7 +26,7 @@ FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SIGNATURE_RE = re.compile(r"^[0-9]+$")
 PSNR_RE = re.compile(r"^[0-9]+\.[0-9]{4}$")
-TRUSTED_APPROVAL_WITNESSES = {
+VERIFIED_APPROVAL_CLAIMS = {
     "tracked_whole_artifact_approval": {
         "schema_version": 1,
         "kind": "tracked_whole_artifact_approval",
@@ -339,10 +339,10 @@ def _validate_approval_witness(
              f"{label} must not grant provider authority")
     _require(scope.get("automatic_launch_gate") == "CLOSED",
              f"{label} automatic launch gate must remain CLOSED")
-    trusted_witness = TRUSTED_APPROVAL_WITNESSES.get(kind)
-    _require(trusted_witness is not None,
+    verified_claim = VERIFIED_APPROVAL_CLAIMS.get(kind)
+    _require(verified_claim is not None,
              f"{label} has no independently verified trusted approval claim registered")
-    _require(witness == trusted_witness,
+    _require(witness == verified_claim,
              f"{label} must equal the complete independently verified approval claim")
 
 

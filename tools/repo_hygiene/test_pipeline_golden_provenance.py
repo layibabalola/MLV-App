@@ -7,11 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tools.repo_hygiene import pipeline_golden_provenance as provenance_module
 from tools.repo_hygiene.pipeline_golden_provenance import (
     DEFAULT_MANIFEST,
     ProvenanceValidationError,
     SubprocessGitWitness,
-    TRUSTED_APPROVAL_WITNESSES,
+    VERIFIED_APPROVAL_CLAIMS,
     validate,
 )
 
@@ -97,6 +98,14 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     def _validate(self) -> None:
         validate(self.repo, git_witness=self.git_witness)
 
+    def test_approval_claim_registry_has_no_secret_like_alias(self) -> None:
+        aliases = sorted(
+            name
+            for name, value in vars(provenance_module).items()
+            if value is VERIFIED_APPROVAL_CLAIMS
+        )
+        self.assertEqual(["VERIFIED_APPROVAL_CLAIMS"], aliases)
+
     def _add_tracked_witness(self, relative_path: str, witness: dict) -> dict:
         content = (json.dumps(witness, indent=2) + "\n").encode("utf-8")
         destination = self.repo / relative_path
@@ -117,7 +126,7 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
     def _approval_witness(kind: str, artifact_path: str, artifact_sha256: str,
                           reviewed_range: str, key_count: int) -> dict:
         if kind == "tracked_whole_artifact_approval":
-            return json.loads(json.dumps(TRUSTED_APPROVAL_WITNESSES[kind]))
+            return json.loads(json.dumps(VERIFIED_APPROVAL_CLAIMS[kind]))
         reviewed_head = reviewed_range.split("..", 1)[1]
         source = {
             "kind": "github_issue_comment",
@@ -303,14 +312,14 @@ class PipelineGoldenProvenanceTests(unittest.TestCase):
             "tests/fixtures/golden/test-only-phase3-approval.json", phase3_witness
         )
         self._write_manifest(manifest)
-        TRUSTED_APPROVAL_WITNESSES["tracked_phase3_approval"] = phase3_witness
+        VERIFIED_APPROVAL_CLAIMS["tracked_phase3_approval"] = phase3_witness
         try:
             with self.assertRaisesRegex(
                 ProvenanceValidationError, "ratified pipeline and Phase3 full16 hashes must agree"
             ):
                 self._validate()
         finally:
-            TRUSTED_APPROVAL_WITNESSES.pop("tracked_phase3_approval", None)
+            VERIFIED_APPROVAL_CLAIMS.pop("tracked_phase3_approval", None)
 
     def test_artifact_hash_drift_fails_closed(self) -> None:
         artifact = self.repo / self._manifest()["artifact"]["path"]
