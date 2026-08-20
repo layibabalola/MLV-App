@@ -93,8 +93,16 @@ gates + residual risks: `docs/regression-prevention-program.md`. Binding rules:
   fixed-point property test -- a near-neutral target renders neutral AND a second measure is already
   neutral (single-pass code cannot satisfy it; it fails the dropped refinement loop directly).
 - Bless tooling refuses dirty/unstamped exes and requires `-Reason`; re-blessing a golden needs a
-  reviewed before/after. Re-bless laundering (greenlighting a regressed build by regenerating the
-  golden) is the worst failure mode -- guard it structurally.
+  reviewed before/after. **Human approval remains mandatory today.** It may be replaced by the exact
+  autonomous quorum defined by `docs/autonomous-golden-authority.md` only after a separate reviewed
+  activation commit pins and proves the installed fail-closed verifier, signer registry and
+  revocation state, immutable baseline trust root, one-use receipt ledger, recoverable broker
+  transaction, and hosted shadow evidence. The proposing lane is always recused, objective hosted
+  output evidence has an unconditional veto, and ambiguous changes without a standing bounded
+  policy are rejected while preserving the old golden. Human intervention may reject, safety-close,
+  or roll back; it cannot promote after an objective veto. Re-bless laundering
+  (greenlighting a regressed build by regenerating the golden) is the worst failure mode -- guard it
+  structurally.
 
 ## GUI Release Build Verification
 - **Playback-quality evidence is fail-closed.** `-AllowZeroPresentedFrames` is valid only with the explicit `-LaunchOnlyProbe` declaration. Launch-only probes may not be used for performance, cadence, lifecycle stress, screenshots, artifact detection, A/B comparison, or product-card completion. The GUI-smoke wrapper rejects those combinations before launch.

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mlv.app/schemas/autonomous-golden-signer-receipt-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "receiptId", "proposalDigest", "policyDigest", "evidenceDigest", "decisionClass", "signerClass", "signerId", "keyId", "keySha256", "registryEpoch", "modelFamily", "operatorClass", "proposerId", "brokerId", "commitNonceSha256", "revealNonce", "committedVerdictSha256", "verdict", "issuedAtUtc", "expiresAtUtc", "signatureHmacSha256", "authority"],
+  "properties": {
+    "schema": {"const": "mlv-app/autonomous-golden-signer-receipt/v1"},
+    "receiptId": {"type": "string", "pattern": "^agr-[a-f0-9]{32}$"},
+    "proposalDigest": {"$ref": "#/$defs/sha256"},
+    "policyDigest": {"$ref": "#/$defs/sha256"},
+    "evidenceDigest": {"$ref": "#/$defs/sha256"},
+    "decisionClass": {"enum": ["A_REPRESENTATION_ONLY", "B_MECHANICALLY_PREDICTED", "C_AESTHETIC_DEFAULT_OR_AMBIGUOUS"]},
+    "signerClass": {"enum": ["HOSTED_PRODUCT_ORACLE", "STRANGER_REVIEW", "HUB_DOCTRINE", "SECOND_STRANGER_REVIEW", "OUTPUT_SPECIALIST"]},
+    "signerId": {"type": "string", "minLength": 8},
+    "keyId": {"type": "string", "minLength": 8},
+    "keySha256": {"$ref": "#/$defs/sha256"},
+    "registryEpoch": {"type": "integer", "minimum": 1},
+    "modelFamily": {"type": "string", "minLength": 1},
+    "operatorClass": {"type": "string", "minLength": 1},
+    "proposerId": {"type": "string", "minLength": 1},
+    "brokerId": {"type": "string", "minLength": 1},
+    "commitNonceSha256": {"$ref": "#/$defs/sha256"},
+    "revealNonce": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "committedVerdictSha256": {"$ref": "#/$defs/sha256"},
+    "verdict": {"enum": ["APPROVE", "REJECT"]},
+    "issuedAtUtc": {"$ref": "#/$defs/utc"},
+    "expiresAtUtc": {"$ref": "#/$defs/utc"},
+    "signatureHmacSha256": {"$ref": "#/$defs/sha256"},
+    "authority": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "utc": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+  }
+}
