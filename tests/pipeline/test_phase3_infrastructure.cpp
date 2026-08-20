@@ -23,6 +23,7 @@
 #include "../../src/dng/dng_reader.h"
 extern "C" {
 #include "../../src/mlv/video_mlv.h"
+#include "../../platform/mlv_blender/MLVBlender.h"
 }
 
 // These kernels must reject hostile extents without dereferencing their image inputs.
@@ -330,6 +331,76 @@ TEST(SecuritySizing, RawInputMetadataCannotSelectAnOversizedRead)
     info.bits_per_sample = 14;
     ASSERT_EQ(1, dng_reader_decode_strip(&info, tinyStrip, sizeof(tinyStrip),
                                          tinyOutput));
+}
+
+TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
+{
+    ASSERT_FALSE(dng_reader_range_fits(UINT32_MAX, 2, 16));
+    ASSERT_TRUE(dng_reader_range_fits(14, 2, 16));
+
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+    const QString hostilePath = temporary.filePath("hostile-ifd-offset.dng");
+    QByteArray header(16, '\0');
+    header[0] = 'I';
+    header[1] = 'I';
+    header[2] = 42;
+    header[4] = static_cast<char>(0xff);
+    header[5] = static_cast<char>(0xff);
+    header[6] = static_cast<char>(0xff);
+    header[7] = static_cast<char>(0xff);
+    QFile hostile(hostilePath);
+    ASSERT_TRUE(hostile.open(QIODevice::WriteOnly));
+    ASSERT_EQ(header.size(), hostile.write(header));
+    hostile.close();
+    dng_frame_info_t parsed{};
+    ASSERT_NE(0, dng_reader_parse_file(hostilePath.toUtf8().constData(), &parsed));
+
+    size_t pixels = 0;
+    ASSERT_TRUE(mlvDngSequenceGeometryIsRepresentable(4096, 2160, 14, &pixels));
+    ASSERT_EQ(static_cast<size_t>(4096 * 2160), pixels);
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(65540, 4, 14, &pixels));
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(4, 65540, 14, &pixels));
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(4, 4, 17, &pixels));
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(2, 4, 14, &pixels));
+}
+
+TEST(SecuritySizing, BlenderRejectsEmptyCropAndBindsExportRangeAndSampleMaximum)
+{
+    MLVBlender_mlv_t lane{};
+    lane.mlv = reinterpret_cast<mlvObject_t *>(static_cast<uintptr_t>(1));
+    lane.width = 8;
+    lane.height = 4;
+    lane.crop_left = 8;
+    lane.visible = 1;
+
+    MLVBlender_t blender{};
+    blender.num_mlvs = 1;
+    blender.mlvs = &lane;
+    blender.blended_output = static_cast<float *>(malloc(sizeof(float)));
+    ASSERT_TRUE(blender.blended_output != nullptr);
+    blender.output_width = 1;
+    blender.output_height = 1;
+    MLVBlenderBlend(&blender, 0);
+    ASSERT_TRUE(blender.blended_output == nullptr);
+    ASSERT_EQ(0, blender.output_width);
+    ASSERT_EQ(0, blender.output_height);
+
+    uint32_t first = UINT32_MAX;
+    uint32_t last = UINT32_MAX;
+    ASSERT_TRUE(MLVBlenderInclusiveFrameRange(1, &first, &last));
+    ASSERT_EQ(0u, first);
+    ASSERT_EQ(0u, last);
+    ASSERT_TRUE(MLVBlenderInclusiveFrameRange(17, &first, &last));
+    ASSERT_EQ(0u, first);
+    ASSERT_EQ(16u, last);
+    ASSERT_FALSE(MLVBlenderInclusiveFrameRange(0, &first, &last));
+
+    ASSERT_EQ(static_cast<uint16_t>(16383), MLVBlenderQuantize14(1.0f, 512));
+    ASSERT_EQ(static_cast<uint16_t>(16383), MLVBlenderQuantize14(2.0f, 512));
+    ASSERT_EQ(static_cast<uint16_t>(512), MLVBlenderQuantize14(0.0f, 512));
+    ASSERT_EQ(static_cast<uint16_t>(512),
+              MLVBlenderQuantize14(std::numeric_limits<float>::quiet_NaN(), 512));
 }
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)

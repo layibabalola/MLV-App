@@ -2889,6 +2889,22 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
     return 1;
 }
 
+int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
+                                          uint32_t bits_per_sample,
+                                          size_t * pixel_count)
+{
+    if(!pixel_count || width < 3u || height < 3u
+       || width > UINT16_MAX || height > UINT16_MAX
+       || bits_per_sample == 0u || bits_per_sample > 16u
+       || (size_t)width > SIZE_MAX / (size_t)height)
+        return 0;
+
+    const size_t pixels = (size_t)width * (size_t)height;
+    if(pixels == 0 || pixels > (size_t)INT_MAX) return 0;
+    *pixel_count = pixels;
+    return 1;
+}
+
 /* Unpack or decompress original raw data */
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame)
 {
@@ -9061,7 +9077,9 @@ short_cut:
  * the isDngFolderLoaded() branch. Mirrors openMcrawClip(). */
 int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message)
 {
+    if (!video || !dirPath || !error_message) return MLV_ERR_INVALID;
     video->path = malloc( strlen(dirPath) + 1 );
+    if (!video->path) return MLV_ERR_OPEN;
     memcpy(video->path, dirPath, strlen(dirPath));
     video->path[strlen(dirPath)] = 0x0;
 
@@ -9082,6 +9100,32 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->dng_sequence = seq;
 
     const dng_frame_info_t * fi = &seq->info;
+    size_t dng_pixels = 0;
+    if (!mlvDngSequenceGeometryIsRepresentable(fi->width, fi->height,
+                                                fi->bits_per_sample,
+                                                &dng_pixels))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        sprintf(error_message, "Unsupported CinemaDNG geometry in folder:  %s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    const uint32_t sample_max = fi->bits_per_sample == 16
+        ? UINT16_MAX : ((UINT32_C(1) << fi->bits_per_sample) - 1u);
+    const uint32_t effective_white = fi->white_level > 0
+        ? (uint32_t)fi->white_level : sample_max;
+    if (fi->black_level < 0 || (uint32_t)fi->black_level > sample_max
+        || fi->white_level < 0
+        || effective_white > sample_max
+        || (uint32_t)fi->black_level >= effective_white)
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        sprintf(error_message, "Invalid CinemaDNG sample range in folder:  %s", video->path);
+        return MLV_ERR_INVALID;
+    }
 
     /* In preview mode only the first frame is needed. */
     uint32_t frame_count = seq->count;
@@ -9092,6 +9136,7 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
      * non-NULL video_index keeps the rest of the object consistent (some code
      * indexes it for frame numbers / time). One entry per frame. */
     video->video_index = (frame_index_t *)calloc(video->frames ? video->frames : 1, sizeof(frame_index_t));
+    if (!video->video_index) return MLV_ERR_OPEN;
     for (uint32_t i = 0; i < video->frames; i++)
     {
         video->video_index[i].frame_type   = 1;
@@ -9105,22 +9150,27 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->filenum = 1;
     video->file = (FILE **)calloc(1, sizeof(FILE *));
     video->main_file_mutex = calloc(sizeof(pthread_mutex_t), 1);
+    if (!video->file || !video->main_file_mutex) return MLV_ERR_OPEN;
     pthread_mutex_init(video->main_file_mutex, NULL);
 
     /* RAWI geometry + calibration straight from the DNG IFD. */
     memcpy(&video->RAWI.blockType, "RAWI", 4);
     video->RAWI.blockSize                 = sizeof(mlv_rawi_hdr_t);
-    video->RAWI.xRes                      = fi->width;
-    video->RAWI.yRes                      = fi->height;
-    video->RAWI.raw_info.bits_per_pixel   = fi->bits_per_sample ? fi->bits_per_sample : 14;
+    video->RAWI.xRes                      = (uint16_t)fi->width;
+    video->RAWI.yRes                      = (uint16_t)fi->height;
+    video->RAWI.raw_info.bits_per_pixel   = fi->bits_per_sample;
     video->RAWI.raw_info.black_level      = fi->black_level;
-    video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : ((1 << video->RAWI.raw_info.bits_per_pixel) - 1);
+    video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : (int32_t)sample_max;
     video->RAWI.raw_info.cfa_pattern      = (int32_t)fi->cfa_pattern;
     video->RAWI.raw_info.exposure_bias[0] = 0;
     video->RAWI.raw_info.exposure_bias[1] = 0;
 
     /* Active area: use the DNG tag if present, else full frame. */
-    if (fi->active_area[2] > fi->active_area[0] && fi->active_area[3] > fi->active_area[1])
+    if (fi->active_area[0] >= 0 && fi->active_area[1] >= 0
+        && fi->active_area[2] > fi->active_area[0]
+        && fi->active_area[3] > fi->active_area[1]
+        && (uint32_t)fi->active_area[2] <= fi->height
+        && (uint32_t)fi->active_area[3] <= fi->width)
     {
         video->RAWI.raw_info.active_area.y1 = fi->active_area[0];
         video->RAWI.raw_info.active_area.x1 = fi->active_area[1];
@@ -9202,7 +9252,9 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->llrawproc->diso_validity = DISO_INVALID;
 
     /* NON compressed frame size. */
-    video->frame_size = (getMlvHeight(video) * getMlvWidth(video) * getMlvBitdepth(video)) / 8;
+    const uint64_t dng_frame_bytes = ((uint64_t)dng_pixels * fi->bits_per_sample + 7u) / 8u;
+    if (dng_frame_bytes > UINT32_MAX) return MLV_ERR_INVALID;
+    video->frame_size = (uint32_t)dng_frame_bytes;
 
     /* Calculate framerate. */
     video->frame_rate = getMlvFramerateOrig(video);
@@ -9211,10 +9263,16 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     setMlvRawCacheLimitMegaBytes(video, getMlvRawCacheLimitMegaBytes(video));
 
     /* For frame cache. */
+    if ((size_t)(video->frames ? video->frames : 1u) > SIZE_MAX / sizeof(uint16_t *)
+        || dng_pixels > SIZE_MAX / 3u
+        || dng_pixels * 3u > SIZE_MAX / sizeof(uint16_t))
+        return MLV_ERR_INVALID;
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * (video->frames ? video->frames : 1) );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), (video->frames ? video->frames : 1) );
+    if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+        return MLV_ERR_OPEN;
 
     isMlvActive(video) = 1;
 

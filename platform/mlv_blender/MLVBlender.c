@@ -7,6 +7,31 @@
 #include "MLVBlender.h"
 #include "../../src/dng/dng.h"
 
+int MLVBlenderInclusiveFrameRange(uint64_t frame_count,
+                                  uint32_t * frame_start,
+                                  uint32_t * frame_end)
+{
+    if (!frame_start || !frame_end || frame_count == 0 || frame_count > UINT32_MAX)
+        return 0;
+    *frame_start = 0;
+    *frame_end = (uint32_t)(frame_count - 1u);
+    return 1;
+}
+
+uint16_t MLVBlenderQuantize14(float normalized, int black_level)
+{
+    const float maximum = 16383.0f;
+    if (!isfinite(normalized)) normalized = 0.0f;
+    if (normalized < 0.0f) normalized = 0.0f;
+    if (normalized > 1.0f) normalized = 1.0f;
+    if (black_level < 0) black_level = 0;
+    if (black_level > 16382) black_level = 16382;
+    float result = normalized * (maximum - (float)black_level) + (float)black_level;
+    if (result < 0.0f) result = 0.0f;
+    if (result > maximum) result = maximum;
+    return (uint16_t)result;
+}
+
 static uint64_t file_set_pos(FILE *stream, uint64_t offset, int whence)
 {
 #if defined(__WIN32)
@@ -140,8 +165,8 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
         if (!mlv->mlv || mlv->width <= 0 || mlv->height <= 0
             || mlv->crop_left < 0 || mlv->crop_right < 0
             || mlv->crop_top < 0 || mlv->crop_bottom < 0
-            || mlv->crop_left > mlv->width - mlv->crop_right
-            || mlv->crop_bottom > mlv->height - mlv->crop_top
+            || mlv->crop_left >= mlv->width - mlv->crop_right
+            || mlv->crop_bottom >= mlv->height - mlv->crop_top
             || mlv->feather_left < 0 || mlv->feather_right < 0
             || mlv->feather_top < 0 || mlv->feather_bottom < 0) {
             free(Blender->blended_output);
@@ -380,7 +405,9 @@ int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         }
     }
 
-    if (longest_vid == 0 || longest_vid > UINT32_MAX) return 1;
+    uint32_t frame_start = 0;
+    uint32_t frame_end = 0;
+    if (!MLVBlenderInclusiveFrameRange(longest_vid, &frame_start, &frame_end)) return 1;
 
     mlvObject_t * mlv_object = initMlvObjectWithClip(Blender->mlvs[longest_vid_index].file_name, MLV_OPEN_FULL, NULL, NULL);
 
@@ -428,7 +455,9 @@ int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
     }
     else {
         getMlvBlackLevel(mlv_object) = (int) ( (float)getMlvBlackLevel(mlv_object) * pow(2.0, bitdepth-getMlvBitdepth(mlv_object)) );
-        getMlvWhiteLevel(mlv_object) = 2 << bitdepth - 1;
+        if (getMlvBlackLevel(mlv_object) < 0) getMlvBlackLevel(mlv_object) = 0;
+        if (getMlvBlackLevel(mlv_object) > 16382) getMlvBlackLevel(mlv_object) = 16382;
+        getMlvWhiteLevel(mlv_object) = (1 << bitdepth) - 1;
     }
     getMlvBitdepth(mlv_object) = bitdepth;
 
@@ -436,10 +465,10 @@ int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
     /* Annoying */
     if (isMlvCompressed(mlv_object))
         export_failed = saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_FAST_PASS,
-                                       0, (uint32_t)longest_vid, "MLVStitcher", error);
+                                       frame_start, frame_end, "MLVStitcher", error);
     else
         export_failed = saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_COMPRESS,
-                                       0, (uint32_t)longest_vid, "MLVStitcher", error);
+                                       frame_start, frame_end, "MLVStitcher", error);
 
     if (export_failed) {
         freeMlvObject(mlv_object);
@@ -470,8 +499,7 @@ int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
             break;
         }
 
-        float black_level = getMlvBlackLevel(mlv_object);
-        float maximum = pow(2.0, mlv_object->RAWI.raw_info.bits_per_pixel);
+        int black_level = getMlvBlackLevel(mlv_object);
 
         /* Flip to correct orientation + crop to valid mlv dimensions (result_height and result_width) */
         for (size_t y = 0; y < result_height; ++y)
@@ -481,11 +509,7 @@ int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 
             for (size_t x = 0; x < result_width; ++x)
             {
-                /* Map 0.0-1.0 --> BlackLevel-MaxValue */
-                float result = src_pix[x] * (maximum-black_level) + black_level;
-                if (result > maximum) result = maximum;
-                if (result < 0) result = 0;
-                dst_pix[x] = (uint16_t)result;
+                dst_pix[x] = MLVBlenderQuantize14(src_pix[x], black_level);
             }
         }
 

@@ -16,6 +16,12 @@ int MLVBlenderGetOutputHeight(MLVBlender_t * Blender);
 /* Exports an mlv fil to OutputPath */
 int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath);
 
+/* Exact helpers shared by export and executable regression tests. */
+int MLVBlenderInclusiveFrameRange(uint64_t frame_count,
+                                  uint32_t * frame_start,
+                                  uint32_t * frame_end);
+uint16_t MLVBlenderQuantize14(float normalized, int black_level);
+
 /* Add an MLV */
 void MLVBlenderAddMLV(MLVBlender_t * Blender, const char * MLVPath);
 

@@ -85,6 +85,11 @@ typedef struct
  * error (not a DNG / unreadable / unsupported). Does NOT decode pixels. */
 int dng_reader_parse_file(const char * path, dng_frame_info_t * out);
 
+/* Return non-zero only when [offset, offset + length) is wholly contained in
+ * an extent of extent_size bytes.  Kept public so hostile TIFF offset tests
+ * exercise the exact predicate used by the parser. */
+int dng_reader_range_fits(uint64_t offset, uint64_t length, size_t extent_size);
+
 /* Enumerate *.dng / *.DNG in dirPath (natural sorted), parse frame 0's IFD,
  * and fill *seq. Returns 0 on success. On success the caller owns seq and must
  * call dng_sequence_free(). Returns non-zero (and leaves seq zeroed) if the

@@ -39,6 +39,12 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
                              size_t * packed_size,
                              size_t * allocation_size);
 
+/* Validate CinemaDNG folder metadata before it is narrowed into RAWI's
+ * uint16 geometry or used by legacy int-indexed processing paths. */
+int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
+                                          uint32_t bits_per_sample,
+                                          size_t * pixel_count);
+
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };
 enum open_mode { MLV_OPEN_FULL, MLV_OPEN_MAPP, MLV_OPEN_PREVIEW };

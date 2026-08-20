@@ -71,13 +71,20 @@ static uint32_t entry_scalar_u32(const dng_ifd_entry_t * e)
 static int read_rationals(const uint8_t * buf, size_t buf_size,
                           uint64_t off, uint32_t nrats, int32_t * out)
 {
-    if(off + (uint64_t)nrats * 8 > buf_size) return 1;
+    const uint64_t bytes = (uint64_t)nrats * 8u;
+    if(!dng_reader_range_fits(off, bytes, buf_size)) return 1;
     for(uint32_t i = 0; i < nrats; i++)
     {
         out[i * 2 + 0] = (int32_t)rd_u32(buf + off + i * 8 + 0);
         out[i * 2 + 1] = (int32_t)rd_u32(buf + off + i * 8 + 4);
     }
     return 0;
+}
+
+int dng_reader_range_fits(uint64_t offset, uint64_t length, size_t extent_size)
+{
+    const uint64_t extent = (uint64_t)extent_size;
+    return offset <= extent && length <= extent - offset;
 }
 
 /* ------------------------------------------------------------------ */
@@ -110,11 +117,14 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
     uint16_t magic      = rd_u16(buf + 2);
     if(byte_order != 0x4949 /* II */ || magic != 42) { free(buf); return 1; }
     uint32_t ifd0_off = rd_u32(buf + 4);
-    if(ifd0_off + 2 > got) { free(buf); return 1; }
+    if(!dng_reader_range_fits(ifd0_off, 2u, got)) { free(buf); return 1; }
 
     uint16_t nentries = rd_u16(buf + ifd0_off);
     /* sanity: each entry is 12 bytes; entry table must fit in what we read */
-    if((uint64_t)ifd0_off + 2 + (uint64_t)nentries * 12 > got) { free(buf); return 1; }
+    if(!dng_reader_range_fits(ifd0_off, 2u + (uint64_t)nentries * 12u, got)) {
+        free(buf);
+        return 1;
+    }
 
     int have_w = 0, have_h = 0;
     out->bits_per_sample = 14;            /* sensible default */
@@ -138,14 +148,26 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
         {
             case tcImageWidth:  out->width  = entry_scalar_u32(&e); have_w = 1; break;
             case tcImageLength: out->height = entry_scalar_u32(&e); have_h = 1; break;
-            case tcBitsPerSample: out->bits_per_sample = (uint16_t)entry_scalar_u32(&e); break;
-            case tcCompression:   out->compression     = (uint16_t)entry_scalar_u32(&e); break;
+            case tcBitsPerSample:
+            {
+                const uint32_t value = entry_scalar_u32(&e);
+                if(value > 16u) { free(buf); return 1; }
+                out->bits_per_sample = (uint16_t)value;
+                break;
+            }
+            case tcCompression:
+            {
+                const uint32_t value = entry_scalar_u32(&e);
+                if(value > UINT16_MAX) { free(buf); return 1; }
+                out->compression = (uint16_t)value;
+                break;
+            }
             case tcStripOffsets:    out->strip_offset     = entry_scalar_u32(&e); break;
             case tcStripByteCounts: out->strip_byte_count = entry_scalar_u32(&e); break;
 
             case tcCFAPattern:
                 /* ttByte count4: 4 bytes give 2x2 mosaic order. Stored inline. */
-                if(e.count == 4 && data_off + 4 <= got)
+                if(e.count == 4 && dng_reader_range_fits(data_off, 4u, got))
                 {
                     const uint8_t * cp = buf + data_off;
                     /* Pack as the writer does: byte0 | byte1<<8 | byte2<<16 | byte3<<24 */
@@ -160,7 +182,7 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
             case tcWhiteLevel: out->white_level = (int32_t)entry_scalar_u32(&e); break;
 
             case tcActiveArea:
-                if(e.count == 4 && data_off + 16 <= got)
+                if(e.count == 4 && dng_reader_range_fits(data_off, 16u, got))
                 {
                     for(int k = 0; k < 4; k++)
                         out->active_area[k] = (int32_t)rd_u32(buf + data_off + k * 4);
@@ -199,7 +221,7 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 {
                     size_t n = e.count;
                     if(n >= sizeof(out->camera_model)) n = sizeof(out->camera_model) - 1;
-                    if(data_off + n <= got)
+                    if(dng_reader_range_fits(data_off, n, got))
                     {
                         memcpy(out->camera_model, buf + data_off, n);
                         out->camera_model[n] = 0;
@@ -217,6 +239,17 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
     if(out->strip_offset == 0 || out->strip_byte_count == 0) return 1;
     if(out->compression != DNG_READER_COMPRESSION_NONE &&
        out->compression != DNG_READER_COMPRESSION_LJ92) return 1;
+    if(out->bits_per_sample == 0)
+    {
+        if(out->compression != DNG_READER_COMPRESSION_NONE) return 1;
+        const uint64_t pixels = (uint64_t)out->width * out->height;
+        if(pixels == 0 || out->strip_byte_count > UINT64_MAX / 8u) return 1;
+        const uint64_t total_bits = out->strip_byte_count * 8u;
+        if(total_bits % pixels != 0) return 1;
+        const uint64_t derived = total_bits / pixels;
+        if(derived == 0 || derived > 16u) return 1;
+        out->bits_per_sample = (uint16_t)derived;
+    }
 
     out->valid = 1;
     return 0;
@@ -346,7 +379,8 @@ int dng_sequence_get_bayer16(const dng_sequence_t * seq, uint32_t index, uint16_
 
     /* Guard against geometry mismatch with the sequence -- the caller's buffer
      * is sized for seq->info dimensions. */
-    if(fi.width != seq->info.width || fi.height != seq->info.height) return 1;
+    if(fi.width != seq->info.width || fi.height != seq->info.height
+       || fi.bits_per_sample != seq->info.bits_per_sample) return 1;
 
     FILE * f = fopen(seq->paths[index], "rb");
     if(!f) return 1;
