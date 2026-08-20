@@ -8,7 +8,7 @@
 #    runnable standalone: windeployqt (Qt DLLs + platforms/ imageformats/ ... plugin subdirs)
 #    + the MinGW runtime DLLs (incl. libgomp-1, which --compiler-runtime misses) + the non-Qt
 #    payload (FFmpeg av*/sw*, CUDA cudart64_12 + igpu_recon_cuda, pixel_maps/releases data)
-#    mirrored from a fully deployed donor release tree. Copying ONLY the exe used to leave the
+#    admitted from a fully deployed donor release tree. Copying ONLY the exe used to leave the
 #    artifact with no DLLs beside it, so launching it died in the loader with 0xC0000135
 #    (STATUS_DLL_NOT_FOUND) BEFORE main(), silently breaking any reviewer/gate pointed at it.
 #  - PROVES runnability: launches the stamped exe with a sanitized PATH (system dirs only) so
@@ -28,6 +28,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+Import-Module (Join-Path $SourceRoot 'tools\release-runtime-admission.psm1') -Force
 $env:Path = "$QtBin;$MingwBin;$env:Path"
 $head  = (& git -C $SourceRoot rev-parse HEAD).Trim()
 $porcelain = (& git -C $SourceRoot status --porcelain)
@@ -149,9 +150,10 @@ foreach ($dll in $mingwRuntime) {
 # 3) Non-Qt runtime payload windeployqt cannot know about: FFmpeg (av*/sw*), CUDA (cudart64_12,
 #    igpu_recon_cuda + its .arch.json), and app data files (pixel_maps, releases). These are
 #    runtime-loaded (not load-time imports) so they don't gate startup, but a reviewer/gate that
-#    exercises GPU recon or FFmpeg needs them. Mirror them from a fully deployed donor release
-#    tree, copying only entries NOT already deployed (never clobber windeployqt's Qt DLLs or the
-#    stamped exe) and never the donor's own MLVApp.exe.
+#    exercises GPU recon or FFmpeg needs them. Admit only the exact reviewed payload names from a
+#    fully deployed donor release tree. A broad donor-directory mirror can smuggle an old
+#    hash-named MLVApp executable, stale manifest, or unrelated file into a new artifact and make
+#    its provenance ambiguous even when the launched executable is correctly stamped.
 $donorCandidates = @(
     $RuntimeDonorDir,
     (Join-Path $SourceRoot 'platform\qt\build-release\release'),
@@ -161,10 +163,13 @@ $donor = $donorCandidates | Select-Object -First 1
 if ($donor) {
     $deploy.runtimeExtrasDonor = (Resolve-Path -LiteralPath $donor).Path
     foreach ($item in Get-ChildItem -LiteralPath $donor -Force) {
-        if ($item.Name -ieq 'MLVApp.exe') { continue }
+        if (-not (Test-ReviewedReleaseRuntimeExtraName -Name $item.Name)) { continue }
+        if ($item.PSIsContainer) {
+            throw "Reviewed runtime extra must be a file, not a directory: $($item.FullName)"
+        }
         $target = Join-Path $dest $item.Name
         if (Test-Path -LiteralPath $target) { continue }   # already deployed by windeployqt / step 2
-        Copy-Item -LiteralPath $item.FullName -Destination $target -Recurse -Force
+        Copy-Item -LiteralPath $item.FullName -Destination $target -Force
         $deploy.runtimeExtras += $item.Name
     }
 } else {

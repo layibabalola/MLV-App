@@ -20,6 +20,7 @@ GUI_SMOKE_PROCESS_BOUNDARY = (
 )
 GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
+RELEASE_RUNTIME_ADMISSION = REPO_ROOT / "tools" / "release-runtime-admission.psm1"
 MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
 NEUTRAL_RECEIPT = REPO_ROOT / "tests" / "fixtures" / "receipts" / "neutral_look_assist_off_v4.marxml"
 SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-d8224107-20260820.json"
@@ -653,6 +654,63 @@ def test_release_builder_resolves_source_root_before_changing_directory() -> Non
     resolve_index = source.index("$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path")
     push_index = source.index("Push-Location $bd")
     assert resolve_index < push_index
+    assert "Test-ReviewedReleaseRuntimeExtraName" in source
+    assert "Copy-Item -LiteralPath $item.FullName -Destination $target -Recurse" not in source
+    assert "stale manifest, or unrelated file" in source
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Release packaging is PowerShell-based")
+def test_release_runtime_donor_admission_is_exact_allowlist() -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+    module_literal = str(RELEASE_RUNTIME_ADMISSION).replace("'", "''")
+    names = [
+        "pixel_maps",
+        "releases",
+        "cudart64_12.dll",
+        "igpu_recon_cuda.dll",
+        "igpu_recon_cuda.arch.json",
+        "avcodec-61.dll",
+        "swscale-8.dll",
+        "MLVApp.exe",
+        "MLVApp-deadbeef.exe",
+        "build-manifest.json",
+        "Qt6Core.dll",
+        "unreviewed.dll",
+        "avcodec-61.dll.exe",
+        "AVFORMAT-61.DLL",
+    ]
+    names_json = json.dumps(names, separators=(",", ":")).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+$names = ConvertFrom-Json -InputObject '{names_json}'
+$result = [ordered]@{{}}
+foreach ($name in $names) {{
+    $result[[string]$name] = [bool](Test-ReviewedReleaseRuntimeExtraName -Name ([string]$name))
+}}
+$result | ConvertTo-Json -Compress
+"""
+    completed = subprocess.run(
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout)
+    accepted = {name for name, value in observed.items() if value}
+    assert accepted == {
+        "pixel_maps",
+        "releases",
+        "cudart64_12.dll",
+        "igpu_recon_cuda.dll",
+        "igpu_recon_cuda.arch.json",
+        "avcodec-61.dll",
+        "swscale-8.dll",
+    }
 
 
 def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
