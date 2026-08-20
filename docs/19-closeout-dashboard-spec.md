@@ -16,6 +16,10 @@ summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
 `candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
 integration tree, range diff, policy, and validation plan into one exact tuple.
 Review and hosted surfaces bind that tuple and never carry forward after drift.
+Hosted surfaces are derived only from a content-addressed GitHub check-run snapshot
+for the configured repository and exact feature head; generic review records cannot
+impersonate them. The latest ledger must be internally coherent and match immutable
+history before the dashboard or finalize treats it as ready.
 
 The acceptance state is deliberately batched:
 
@@ -29,6 +33,9 @@ The dashboard must not offer approval, rebless, publication, redistribution, or
 provider-activation controls for this ledger. Agent and hosted verdicts are
 evidence only. Human-only authority boundaries continue to be enforced by their
 own registered policy actors.
+Finalize repeats the exact integrated rehearsal after any eligibility repair and
+compares the real merge tree and canonical diff hash with the accepted tuple before
+updating or pushing the target.
 
 ## Operator Phases
 

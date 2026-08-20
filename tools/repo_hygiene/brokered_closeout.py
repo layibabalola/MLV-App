@@ -821,6 +821,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "runtimeServices",
             "blockerAutoRemediation",
             "candidateAcceptance",
+            "candidateAcceptance.providerRepository",
             "candidateAcceptance.requiredSurfaces",
             "candidateAcceptance.batchUntilAllSurfacesTerminal",
             "candidateAcceptance.carryApprovalsAcrossCandidateTuples",
@@ -1017,6 +1018,16 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_agent_record_cannot_escalate_human_authority",
             "test_finalize_requires_same_tuple_ready_before_content_review",
             "test_github_capture_is_exact_head_terminal_and_fail_closed",
+            "test_content_reviewers_must_be_distinct_even_with_different_sessions",
+            "test_all_same_surface_blocking_findings_survive_consolidation",
+            "test_configured_quorum_cannot_be_replaced_by_one_surface_ledger",
+            "test_rehashed_ready_state_with_blockers_is_incoherent_and_finalize_blocks",
+            "test_generic_records_cannot_impersonate_hosted_surfaces",
+            "test_provider_repository_and_annotation_shape_are_fail_closed",
+            "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence",
+            "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced",
+            "test_diff_identity_is_independent_of_git_color_configuration",
+            "test_final_integration_tree_or_diff_drift_is_blocking",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -1032,6 +1043,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def evaluate"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def integration_range_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1322,6 +1336,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "schema": "candidate-acceptance.v1",
         "stateRoot": ".claude-state/closeout/acceptance",
+        "providerRepository": "layibabalola/MLV-App",
         "requiredSurfaces": [
             "content-self",
             "content-stranger-1",
@@ -1332,7 +1347,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "batchUntilAllSurfacesTerminal": True,
         "carryApprovalsAcrossCandidateTuples": False,
         "agentApprovalsGrantHumanAuthority": False,
-        "requireReadyForFinalize": False,
+        "requireReadyForFinalize": True,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }
@@ -6515,6 +6530,18 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
         return {"status": "blocked", **base_guard, "detection": detection}
+    if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
+        payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
+        write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "stale_refs"})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "stale_refs"})
+        return {"status": "blocked", "reason": "stale_refs", **payload}
+    repair = repair_eligibility(repo_root, work_block_id=block_id)
+    if repair["status"] != "repaired":
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "repair_blocked"})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repair_blocked"})
+        return {"status": "blocked", "reason": "repair_blocked", "repair": repair, "detection": detection}
+    detection = detect_work_block(repo_root, work_block_id=block_id)
     from .candidate_acceptance import validate_for_finalize as validate_candidate_acceptance_for_finalize
 
     acceptance_guard = validate_candidate_acceptance_for_finalize(repo_root, config, detection)
@@ -6531,18 +6558,6 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
         return {"status": "blocked", **content_guard, "detection": detection}
-    if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
-        payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
-        write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
-        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "stale_refs"})
-        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "stale_refs"})
-        return {"status": "blocked", "reason": "stale_refs", **payload}
-    repair = repair_eligibility(repo_root, work_block_id=block_id)
-    if repair["status"] != "repaired":
-        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "repair_blocked"})
-        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repair_blocked"})
-        return {"status": "blocked", "reason": "repair_blocked", "repair": repair, "detection": detection}
-    detection = detect_work_block(repo_root, work_block_id=block_id)
     evidence = finalize_evidence(config, detection)
     evidence_hash = stable_hash(evidence)
     candidate_id = finalize_candidate_id(block_id)
@@ -6633,13 +6648,42 @@ def _finalize_work_block_once(
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "merge_failed"})
             return {"status": "blocked", "reason": "merge_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        diff_check = run_git(integration_path, ["diff", "--check"])
-        if diff_check.returncode != 0:
-            payload = {"operation": "git_diff_check", "returncode": diff_check.returncode, "stdout": diff_check.stdout[-4000:], "stderr": diff_check.stderr[-4000:]}
+        merged_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        final_range = integration_range_evidence(integration_path, target["head"], merged_head)
+        if final_range["diffCheckReturncode"] != 0:
+            payload = {
+                "operation": "git_diff_check",
+                "range": final_range["range"],
+                "returncode": final_range["diffCheckReturncode"],
+                "stdout": final_range["diffCheckStdout"][-4000:],
+                "stderr": final_range["diffCheckStderr"][-4000:],
+            }
             write_audit(repo_root, config, "validation_failure", payload, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
             return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
+        acceptance_policy = config.get("candidateAcceptance", {})
+        final_mismatches: Dict[str, Any] = {}
+        accepted: Dict[str, Any] = {}
+        if bool(acceptance_policy.get("enabled", True)) and bool(acceptance_policy.get("requireReadyForFinalize", True)):
+            from .candidate_acceptance import (
+                final_integration_mismatches as candidate_acceptance_final_integration_mismatches,
+                latest_summary as candidate_acceptance_latest_summary,
+            )
+
+            accepted = candidate_acceptance_latest_summary(repo_root, config)
+            final_mismatches = candidate_acceptance_final_integration_mismatches(accepted, final_range)
+        if final_mismatches:
+            payload = {"operation": "candidate_acceptance_final_tree", "mismatches": final_mismatches, "range": final_range}
+            write_audit(repo_root, config, "candidate_acceptance_final_tree_mismatch", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_final_tree_mismatch"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_final_tree_mismatch",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
         validations = run_validations(
             repo_root,
             config,
@@ -6655,7 +6699,7 @@ def _finalize_work_block_once(
                 remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "validation_failed"})
             return {"status": "blocked", "reason": "validation_failed", "validations": validations, "runtimeLifecycle": runtime_lifecycle}
-        new_target_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        new_target_head = merged_head
         if target["mode"] == "remote":
             target_worktree_preflight = target_worktree_update_preflight(repo_root, target_branch, new_target_head)
             if target_worktree_preflight["status"] != "success":
@@ -7847,6 +7891,44 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
     }
 
 
+def integration_range_evidence(repo_path: Path, target_head: str, integration_head: str) -> Dict[str, Any]:
+    range_spec = "%s..%s" % (target_head, integration_head)
+    prefix = ["-c", "color.ui=false", "-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renames=false"]
+    diff_check = run_git(repo_path, prefix + ["diff", "--check", "--no-color", "--no-ext-diff", "--no-textconv", range_spec])
+    changed = run_git(
+        repo_path,
+        prefix + ["diff", "--name-only", "-z", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", range_spec],
+        check=True,
+    )
+    changed_paths = sorted({normalize_rel(path) for path in changed.stdout.split("\0") if normalize_rel(path)})
+    diff = run_git(
+        repo_path,
+        prefix
+        + [
+            "diff",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--diff-algorithm=myers",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            range_spec,
+        ],
+        check=True,
+    )
+    return {
+        "range": range_spec,
+        "diffCheckReturncode": diff_check.returncode,
+        "diffCheckStdout": diff_check.stdout,
+        "diffCheckStderr": diff_check.stderr,
+        "integrationTree": tree_hash(repo_path, integration_head),
+        "diffSha256": hashlib.sha256(diff.stdout.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "changedPaths": changed_paths,
+    }
+
+
 def simulate_clean_integration(
     repo_root: Path,
     config: Dict[str, Any],
@@ -7884,26 +7966,24 @@ def simulate_clean_integration(
                 "validationStatus": "not_reached",
             }
         integration_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
-        integration_tree = tree_hash(integration_path, integration_head)
-        range_spec = "%s..%s" % (target_head, integration_head)
-        diff_check = run_git(integration_path, ["diff", "--check", range_spec])
-        if diff_check.returncode != 0:
+        range_evidence = integration_range_evidence(integration_path, target_head, integration_head)
+        if range_evidence["diffCheckReturncode"] != 0:
             return {
                 "clean": False,
                 "reason": "diff_check_failed",
                 "attempt": attempt,
                 "integrationHead": integration_head,
-                "integrationTree": integration_tree,
-                "range": range_spec,
-                "returncode": diff_check.returncode,
-                "stdout": diff_check.stdout[-2000:],
-                "stderr": diff_check.stderr[-2000:],
+                "integrationTree": range_evidence["integrationTree"],
+                "range": range_evidence["range"],
+                "returncode": range_evidence["diffCheckReturncode"],
+                "stdout": range_evidence["diffCheckStdout"][-2000:],
+                "stderr": range_evidence["diffCheckStderr"][-2000:],
                 "validationStatus": "diff_check_failed",
             }
-        changed = run_git(integration_path, ["diff", "--name-only", range_spec], check=True)
-        changed_paths = sorted({normalize_rel(line) for line in changed.stdout.splitlines() if normalize_rel(line)})
-        diff = run_git(integration_path, ["diff", "--no-ext-diff", "--binary", range_spec], check=True)
-        diff_sha256 = hashlib.sha256(diff.stdout.encode("utf-8", errors="surrogateescape")).hexdigest()
+        integration_tree = range_evidence["integrationTree"]
+        range_spec = range_evidence["range"]
+        changed_paths = range_evidence["changedPaths"]
+        diff_sha256 = range_evidence["diffSha256"]
         validations = run_validations(repo_root, config, integration_path, changed_paths=changed_paths)
         failed = next((item for item in validations if item["returncode"] != 0), None)
         if failed:

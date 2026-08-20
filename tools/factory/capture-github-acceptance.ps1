@@ -50,7 +50,14 @@ foreach ($run in $runs) {
 $providerRoot = Join-Path $root ".claude-state\closeout\acceptance\provider\$HeadSha"
 New-Item -ItemType Directory -Path $providerRoot -Force | Out-Null
 $providerPath = Join-Path $providerRoot 'check-runs.json'
-$payload | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $providerPath -Encoding utf8NoBOM
+$providerEnvelope = [ordered]@{
+    schema = 'candidate-acceptance-github-checks.v1'
+    capturedAt = [DateTimeOffset]::UtcNow.ToString('o')
+    repository = $Repository
+    headSha = $HeadSha
+    response = $payload
+}
+$providerEnvelope | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $providerPath -Encoding utf8NoBOM
 
 function Select-LatestCheck([string]$Name) {
     $matches = @($runs | Where-Object { [string]$_.name -ceq $Name })
@@ -58,12 +65,7 @@ function Select-LatestCheck([string]$Name) {
     return $matches | Sort-Object -Property @{Expression = { [string]$_.started_at }}, @{Expression = { [long]$_.id }} -Descending | Select-Object -First 1
 }
 
-function Get-ExpectedCheckAppId([string]$Name) {
-    if ($Name -ceq 'CodeQL') { return [long]57789 }
-    return [long]15368
-}
-
-function Record-Surface([string]$Surface, [string[]]$Names, [bool]$RequireZeroAnnotations) {
+function Record-Surface([string]$Surface, [string[]]$Names) {
     $selected = @()
     foreach ($name in $Names) {
         $run = Select-LatestCheck $name
@@ -78,32 +80,13 @@ function Record-Surface([string]$Surface, [string[]]$Names, [bool]$RequireZeroAn
         Write-Output "collecting: $Surface has nonterminal checks"
         return
     }
-    $failed = @($selected | Where-Object {
-        $expectedAppId = Get-ExpectedCheckAppId ([string]$_.name)
-        [string]$_.conclusion -cne 'success' -or
-        [long]$_.app.id -ne $expectedAppId -or
-        ($RequireZeroAnnotations -and [int]$_.output.annotations_count -ne 0)
-    })
-    $verdict = if ($failed.Count -eq 0) { 'APPROVE' } else { 'CHANGES_REQUESTED' }
-    $sessionId = 'github-checks:' + $HeadSha + ':' + (($selected | ForEach-Object { [string]$_.id }) -join ',')
     $arguments = @($PythonArguments) + @(
-        '-m', 'tools.repo_hygiene.candidate_acceptance', 'record',
+        '-m', 'tools.repo_hygiene.candidate_acceptance', 'record-hosted',
         '--repo-root', $root,
         '--ledger', $ledgerPath,
         '--surface', $Surface,
-        '--verdict', $verdict,
-        '--reviewer', 'github-actions',
-        '--session-id', $sessionId
+        '--evidence', $providerPath
     )
-    foreach ($item in $failed) {
-        $finding = @{
-            id = "github-check-$($item.id)"
-            invariant = "$($item.name) must complete successfully at the exact candidate head"
-            falsifier = "status=$($item.status); conclusion=$($item.conclusion); app=$($item.app.id); annotations=$($item.output.annotations_count)"
-            detail = [string]$item.details_url
-        } | ConvertTo-Json -Compress
-        $arguments += @('--finding', $finding)
-    }
     & $Python @arguments
     $recordExit = $LASTEXITCODE
     if ($recordExit -ne 0) {
@@ -118,11 +101,11 @@ Record-Surface 'hosted-tests' @(
     'Windows GUI Pilot',
     'Windows Product Oracles',
     'Protected Check Route'
-) $false
+)
 
 Record-Surface 'hosted-codeql' @(
     'Analyze (actions)',
     'Analyze (c-cpp)',
     'Analyze (python)',
     'CodeQL'
-) $true
+)

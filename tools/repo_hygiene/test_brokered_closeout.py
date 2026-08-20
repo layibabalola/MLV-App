@@ -215,6 +215,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "branchPrefix": "codex/work-block",
             },
             "validation": {"commands": []},
+            "candidateAcceptance": {
+                "enabled": False,
+                "requireReadyForFinalize": False,
+            },
             "paths": {
                 "generated": [".claude-state/**", ".codex-state/**", "**/__pycache__/**", "**/*.pyc"],
                 "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
