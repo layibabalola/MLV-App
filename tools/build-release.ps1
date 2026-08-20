@@ -27,6 +27,7 @@ param(
     [switch]$AllowDirty
 )
 $ErrorActionPreference = 'Stop'
+$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $env:Path = "$QtBin;$MingwBin;$env:Path"
 $head  = (& git -C $SourceRoot rev-parse HEAD).Trim()
 $porcelain = (& git -C $SourceRoot status --porcelain)
@@ -43,6 +44,30 @@ New-Item -ItemType Directory -Force -Path $bd | Out-Null
 Write-Host "Clean build: HEAD=$head dirty=$dirty -> $bd"
 Push-Location $bd
 try {
+    # qmake/mingw32-make are launched through the exclusive runner. Some
+    # Windows process chains resolve the top-level executable by its absolute
+    # path but lose PATH for nested tools (notably windres -> gcc and qmake ->
+    # git). Put tiny, build-local forwarding shims in the working directory;
+    # Windows searches it before PATH, so every nested invocation remains bound
+    # to the exact toolchain selected above instead of silently falling back or
+    # failing with an unhelpful "gcc is not recognized" message.
+    $gitExe = (Get-Command git.exe -ErrorAction Stop).Source
+    $toolShims = [ordered]@{
+        'gcc.cmd' = (Join-Path $MingwBin 'gcc.exe')
+        'g++.cmd' = (Join-Path $MingwBin 'g++.exe')
+        'windres.cmd' = (Join-Path $MingwBin 'windres.exe')
+        'git.cmd' = $gitExe
+    }
+    foreach ($shim in $toolShims.GetEnumerator()) {
+        if (-not (Test-Path -LiteralPath $shim.Value -PathType Leaf)) {
+            throw "Required build tool not found: $($shim.Value)"
+        }
+        $shimText = "@echo off`r`n`"$($shim.Value)`" %*`r`n"
+        [System.IO.File]::WriteAllText(
+            (Join-Path $bd $shim.Key),
+            $shimText,
+            [System.Text.Encoding]::ASCII)
+    }
     # P0-1: stamp the build-time provenance header INTO the build dir before qmake/compile,
     # so the artifact self-identifies its real commit + dirty state (not a qmake-pinned label).
     & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "$SourceRoot\tools\gen-buildinfo.ps1" `
