@@ -1357,11 +1357,11 @@ class VendoredNativePayloadTests(unittest.TestCase):
             _validate_promotion_verifier_unchanged(self.root)
 
             verifier = self.root / "tools" / "repo_hygiene" / "vendored_native_payloads.py"
-            trusted = verifier.read_bytes()
-            verifier.write_bytes(trusted + b"candidate drift\n")
+            baseline_bytes = verifier.read_bytes()
+            verifier.write_bytes(baseline_bytes + b"candidate drift\n")
             with self.assertRaisesRegex(PayloadIntegrityError, "differs from the pinned target"):
                 _validate_promotion_verifier_unchanged(self.root)
-            verifier.write_bytes(trusted)
+            verifier.write_bytes(baseline_bytes)
 
             claims_path = self.root / PROMOTION_CLAIMS_PATH
             claims_path.write_text('{"schema_version":1,"claims":[{"kind":"data-only"}]}\n', encoding="utf-8")
