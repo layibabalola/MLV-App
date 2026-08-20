@@ -17,6 +17,9 @@ from tools.repo_hygiene.brokered_closeout import (
     verify_closeout_tooling_current,
 )
 from tools.repo_hygiene.candidate_acceptance import (
+    _minimal_system_child_environment,
+    _trusted_unix_curl_path_chain,
+    _WINDOWS_CURL_TRUST_SCRIPT,
     _hash,
     _live_github_provider_payload,
     acceptance_root,
@@ -28,6 +31,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     final_integration_mismatches,
     latest_summary,
     provider_surface_record,
+    system_curl_github_query_command,
     surface_record,
     validation_plan,
     validate_for_finalize,
@@ -461,27 +465,366 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "timedOut": False,
             "outputCapped": False,
             "cpuStalled": False,
-            "stdout": json.dumps(provider["response"]),
+            "stdout": json.dumps(provider["response"]) + "\n200",
             "stderr": "",
         }
-        with mock.patch.dict(os.environ, {"GH_HOST": "attacker.invalid"}), mock.patch(
+        with tempfile.TemporaryDirectory() as client_temp:
+            provider_client = Path(client_temp) / ("curl.exe" if os.name == "nt" else "curl")
+            provider_client.write_bytes(b"system-curl-client")
+            identity = {
+                "kind": "os-protected-system-curl",
+                "path": str(provider_client.resolve()),
+                "size": provider_client.stat().st_size,
+                "sha256": hashlib.sha256(b"system-curl-client").hexdigest(),
+                "trust": {"ownerSid": "trusted", "unsafeWriteGrants": []},
+            }
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GH_HOST": "attacker.invalid",
+                    "HTTPS_PROXY": "https://attacker.invalid",
+                    "CURL_HOME": "candidate-curl-config",
+                    "CURL_CA_BUNDLE": "attacker-ca.pem",
+                    "SSL_CERT_FILE": "attacker-ca.pem",
+                    "PYTHONPATH": "candidate-python-path",
+                    "LD_PRELOAD": "candidate-owned.so",
+                    "LD_LIBRARY_PATH": "candidate-libs",
+                    "LD_AUDIT": "candidate-audit.so",
+                    "DYLD_INSERT_LIBRARIES": "candidate-owned.dylib",
+                    "DYLD_LIBRARY_PATH": "candidate-dylibs",
+                    "DYLD_FRAMEWORK_PATH": "candidate-frameworks",
+                    "DYLD_FALLBACK_LIBRARY_PATH": "candidate-fallback-libs",
+                    "DYLD_FALLBACK_FRAMEWORK_PATH": "candidate-fallback-frameworks",
+                },
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+                return_value=self.repo_root,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+                return_value=identity,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=provider_client.resolve(),
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                return_value=completed,
+            ) as bounded:
+                payload = _live_github_provider_payload(
+                    self.repo_root,
+                    self.config,
+                    "layibabalola/MLV-App",
+                    FEATURE,
+                )
+        command = bounded.call_args.args[2]
+        self.assertEqual(str(provider_client.resolve()), command[0])
+        self.assertTrue(Path(command[0]).is_absolute())
+        self.assertEqual("-q", command[1])
+        self.assertIn("--proxy", command)
+        self.assertEqual("", command[command.index("--proxy") + 1])
+        self.assertIn("--noproxy", command)
+        self.assertEqual("*", command[command.index("--noproxy") + 1])
+        self.assertNotIn("--location", command)
+        self.assertEqual(
+            f"https://api.github.com/repos/layibabalola/MLV-App/commits/{FEATURE}/check-runs?per_page=100",
+            command[-1],
+        )
+        for key in (
+            "GH_HOST", "HTTPS_PROXY", "CURL_HOME", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "PYTHONPATH",
+            "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH",
+        ):
+            self.assertNotIn(key, bounded.call_args.kwargs["env"])
+        self.assertEqual(_minimal_system_child_environment(), bounded.call_args.kwargs["env"])
+        self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
+        self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
+        self.assertEqual("os-protected-system-curl", payload["providerClient"]["kind"])
+        self.assertEqual(str(provider_client.resolve()), payload["providerClient"]["path"])
+        self.assertEqual(hashlib.sha256(b"system-curl-client").hexdigest(), payload["providerClient"]["sha256"])
+
+    def test_live_provider_query_ignores_candidate_and_path_executable_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            self.git(repo, "init")
+            fake_gh = repo / ("gh.exe" if os.name == "nt" else "gh")
+            fake_python = repo / ("python.exe" if os.name == "nt" else "python")
+            fake_gh.write_bytes(b"candidate-gh")
+            fake_python.write_bytes(b"candidate-python")
+            system_curl = root / ("curl.exe" if os.name == "nt" else "curl")
+            system_curl.write_bytes(b"protected-system-curl")
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=system_curl.resolve(),
+            ):
+                client, command = system_curl_github_query_command(
+                    "layibabalola/MLV-App", FEATURE, 4096
+                )
+            self.assertEqual(system_curl.resolve(), client)
+            self.assertEqual(str(client), command[0])
+            self.assertNotIn(str(fake_gh), command)
+            self.assertNotIn(str(fake_python), command)
+            self.assertNotIn("gh", command[:3])
+            self.assertNotIn("python", command[:3])
+
+    def test_live_provider_system_curl_identity_must_stay_stable_during_query(self) -> None:
+        provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        completed = {
+            "returncode": 0,
+            "timedOut": False,
+            "outputCapped": False,
+            "cpuStalled": False,
+            "stdout": json.dumps(provider["response"]) + "\n200",
+            "stderr": "",
+        }
+        with tempfile.TemporaryDirectory() as external_temp:
+            provider_client = Path(external_temp) / ("curl.exe" if os.name == "nt" else "curl")
+            provider_client.write_bytes(b"before")
+            before = {
+                "kind": "os-protected-system-curl",
+                "path": str(provider_client.resolve()),
+                "size": 6,
+                "sha256": hashlib.sha256(b"before").hexdigest(),
+                "trust": {"unsafeWriteGrants": []},
+            }
+            after = json.loads(json.dumps(before))
+            after["sha256"] = hashlib.sha256(b"after!").hexdigest()
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+                return_value=self.repo_root,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+                side_effect=[before, after],
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=provider_client.resolve(),
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                return_value=completed,
+            ):
+                with self.assertRaisesRegex(HygieneError, "system curl identity changed"):
+                    _live_github_provider_payload(
+                        self.repo_root,
+                        self.config,
+                        "layibabalola/MLV-App",
+                        FEATURE,
+                    )
+
+    def test_live_provider_system_curl_rejects_redirect_status(self) -> None:
+        provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        identity = {
+            "kind": "os-protected-system-curl",
+            "path": str(Path(os.sys.executable).resolve()),
+            "size": Path(os.sys.executable).stat().st_size,
+            "sha256": hashlib.sha256(Path(os.sys.executable).read_bytes()).hexdigest(),
+            "trust": {"unsafeWriteGrants": []},
+        }
+        completed = {
+            "returncode": 0,
+            "timedOut": False,
+            "outputCapped": False,
+            "cpuStalled": False,
+            "stdout": json.dumps(provider["response"]) + "\n302",
+            "stderr": "",
+        }
+        with mock.patch(
             "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
             return_value=self.repo_root,
         ), mock.patch(
+            "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+            return_value=identity,
+        ), mock.patch(
+            "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+            return_value=Path(os.sys.executable).resolve(),
+        ), mock.patch(
             "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
             return_value=completed,
-        ) as bounded:
-            payload = _live_github_provider_payload(
-                self.repo_root,
-                self.config,
-                "layibabalola/MLV-App",
-                FEATURE,
+        ):
+            with self.assertRaisesRegex(HygieneError, "unexpected HTTP status: 302"):
+                _live_github_provider_payload(self.repo_root, self.config, "layibabalola/MLV-App", FEATURE)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL/signature trust shape")
+    def test_live_provider_system_curl_rejects_user_writable_or_unsigned_client(self) -> None:
+        from tools.repo_hygiene.candidate_acceptance import _trusted_system_curl_identity
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"candidate-controlled-curl")
+            base = {
+                "returncode": 0,
+                "timedOut": False,
+                "outputCapped": False,
+                "cpuStalled": False,
+                "stderr": "",
+            }
+            unsafe = dict(base, stdout=json.dumps({
+                "modulePath": r"C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules",
+                "loadedModulePaths": [r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"],
+                "signatureStatus": "Valid",
+                "signerSubject": "CN=Microsoft Windows, O=Microsoft Corporation",
+                "signerThumbprint": "A" * 40,
+                "pathTrust": [{
+                    "path": str(client),
+                    "ownerSid": "S-1-5-18",
+                    "ownerTrusted": True,
+                    "daclPresent": True,
+                    "daclNull": False,
+                    "unsafeWriteGrants": [{"sid": "S-1-5-4", "rights": "WriteData"}],
+                }] * 3,
+            }))
+            unsigned = dict(base, stdout=json.dumps({
+                "modulePath": r"C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules",
+                "loadedModulePaths": [r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"],
+                "signatureStatus": "NotSigned",
+                "signerSubject": "",
+                "signerThumbprint": "",
+                "pathTrust": [{
+                    "path": str(client),
+                    "ownerSid": "S-1-5-18",
+                    "ownerTrusted": True,
+                    "daclPresent": True,
+                    "daclNull": False,
+                    "unsafeWriteGrants": [],
+                }] * 3,
+            }))
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path", return_value=client
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                side_effect=[unsafe, unsigned],
+            ):
+                with self.assertRaisesRegex(HygieneError, "grants replacement authority"):
+                    _trusted_system_curl_identity(self.repo_root, self.config)
+                with self.assertRaisesRegex(HygieneError, "valid Microsoft signature"):
+                    _trusted_system_curl_identity(self.repo_root, self.config)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL token-group classification")
+    def test_windows_system_curl_trust_classifies_enabled_group_and_ancestor_replacement(self) -> None:
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"unsigned-test-client")
+            add_rule = (
+                "$acl=Get-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH;"
+                "$sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-4');"
+                "$rule=[System.Security.AccessControl.FileSystemAccessRule]::new("
+                "$sid,[System.Security.AccessControl.FileSystemRights]::WriteData,"
+                "[System.Security.AccessControl.AccessControlType]::Allow);"
+                "$null=$acl.AddAccessRule($rule);"
+                "Set-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH -AclObject $acl"
             )
-        command = bounded.call_args.args[2]
-        self.assertEqual(["--hostname", "github.com"], command[2:4])
-        self.assertNotIn("GH_HOST", bounded.call_args.kwargs["env"])
-        self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
-        self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
+            env = _minimal_system_child_environment()
+            env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+            subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", add_rule],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            completed = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_CURL_TRUST_SCRIPT],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            trust = json.loads(completed.stdout)
+            same_path = lambda value, expected: os.path.normcase(str(Path(value).resolve())) == os.path.normcase(str(expected.resolve()))
+            file_trust = next(item for item in trust["pathTrust"] if same_path(item["path"], client))
+            self.assertTrue(any(item["sid"] == "S-1-5-4" for item in file_trust["unsafeWriteGrants"]))
+            parent_trust = next(item for item in trust["pathTrust"] if same_path(item["path"], client.parent))
+            self.assertFalse(parent_trust["ownerTrusted"])
+            self.assertTrue(any(item["unsafeWriteGrants"] for item in trust["pathTrust"][:-1]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows protected-module bootstrap")
+    def test_windows_system_curl_trust_rejects_user_module_shadowing(self) -> None:
+        from tools.repo_hygiene.candidate_acceptance import _trusted_system_curl_identity
+
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            attacker_root = Path(temp)
+            attacker_module = attacker_root / "Microsoft.PowerShell.Utility"
+            attacker_module.mkdir()
+            (attacker_module / "Microsoft.PowerShell.Utility.psm1").write_text(
+                "function ConvertTo-Json { '{\"forged\":true}' }\n"
+                "Export-ModuleMember -Function ConvertTo-Json\n",
+                encoding="utf-8",
+            )
+            hostile_env = _minimal_system_child_environment()
+            hostile_env["PSModulePath"] = str(attacker_root)
+            baseline = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "@{safe=$true} | ConvertTo-Json -Compress"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=hostile_env,
+            )
+            self.assertEqual('{"forged":true}', baseline.stdout.strip())
+            with mock.patch.dict(os.environ, {"PSModulePath": str(attacker_root)}):
+                identity = _trusted_system_curl_identity(ROOT, self.config)
+            trust = identity["trust"]
+            self.assertNotIn(str(attacker_root).casefold(), trust["modulePath"].casefold())
+            protected_modules = "c:\\windows\\system32\\windowspowershell\\v1.0\\modules\\"
+            self.assertTrue(all(str(path).casefold().startswith(protected_modules) for path in trust["loadedModulePaths"]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows NULL-DACL classification")
+    def test_windows_system_curl_trust_rejects_null_dacl(self) -> None:
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"unsigned-null-dacl-test-client")
+            env = _minimal_system_child_environment()
+            env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+            env["PSModulePath"] = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+            null_dacl = (
+                "$ErrorActionPreference='Stop';"
+                "Import-Module ($PSHOME+'\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1');"
+                "$acl=Get-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH;"
+                "$owner=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value;"
+                "$raw=[Security.AccessControl.RawSecurityDescriptor]::new(('O:{0}G:{0}' -f $owner));"
+                "[byte[]]$bytes=New-Object byte[] $raw.BinaryLength;"
+                "$raw.GetBinaryForm($bytes,0);$acl.SetSecurityDescriptorBinaryForm($bytes);"
+                "Set-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH -AclObject $acl"
+            )
+            subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", null_dacl],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            completed = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_CURL_TRUST_SCRIPT],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            trust = json.loads(completed.stdout)
+            same_path = lambda value: os.path.normcase(str(Path(value).resolve())) == os.path.normcase(str(client.resolve()))
+            file_trust = next(item for item in trust["pathTrust"] if same_path(item["path"]))
+            self.assertFalse(file_trust["daclPresent"])
+            self.assertTrue(file_trust["daclNull"])
+            self.assertIn({"sid": "NULL_DACL", "rights": "FullControl"}, file_trust["unsafeWriteGrants"])
+
+    @unittest.skipUnless(os.name != "nt", "Unix fixed-path ownership and ancestry")
+    def test_unix_system_curl_trust_rejects_writable_ancestor(self) -> None:
+        actual = _trusted_unix_curl_path_chain(Path("/usr/bin/curl"))
+        self.assertEqual(["/", "/usr", "/usr/bin", "/usr/bin/curl"], [item["path"] for item in actual])
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp) / "candidate-writable"
+            parent.mkdir()
+            client = parent / "curl"
+            client.write_bytes(b"fake")
+            client.chmod(0o555)
+            with self.assertRaisesRegex(HygieneError, "root-owned and not group/other writable"):
+                _trusted_unix_curl_path_chain(client)
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
@@ -758,11 +1101,11 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("candidate_acceptance_final_tree_mismatch", finalize)
         self.assertIn("integration_range_evidence(integration_path, target[\"head\"], merged_head)", finalize)
 
-    def test_tracked_policy_stages_dormant_barrier_without_human_authority(self) -> None:
+    def test_tracked_policy_activates_barrier_without_human_authority(self) -> None:
         config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         policy = config["candidateAcceptance"]
-        self.assertFalse(policy["enabled"])
-        self.assertFalse(policy["requireReadyForFinalize"])
+        self.assertTrue(policy["enabled"])
+        self.assertTrue(policy["requireReadyForFinalize"])
         self.assertEqual("layibabalola/MLV-App", policy["providerRepository"])
         self.assertTrue(policy["batchUntilAllSurfacesTerminal"])
         self.assertFalse(policy["carryApprovalsAcrossCandidateTuples"])
@@ -772,28 +1115,28 @@ class CandidateAcceptanceTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         dashboard = (ROOT / "docs/19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
-        self.assertIn("first landing is deliberately dormant while the tooling baseline remains mandatory", agents)
+        self.assertIn("first landing was deliberately dormant while the tooling baseline remained mandatory", agents)
         self.assertIn(
-            "may change only `candidateAcceptance.enabled` and `candidateAcceptance.requireReadyForFinalize` "
-            "from `false` to `true` against the pinned dormant target policy",
+            "separately reviewed activation is now landed: `candidateAcceptance.enabled` and "
+            "`candidateAcceptance.requireReadyForFinalize` are both `true`",
             agents,
         )
         self.assertIn("must exactly equal the copy loaded from the pinned target commit in both phases", agents)
         self.assertIn("must never replace that human approval gate", agents)
-        self.assertIn("deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)", claude)
+        self.assertIn("was deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)", claude)
         self.assertIn("tests, and tooling-baseline inventory are\nalready mandatory", claude)
-        self.assertIn("may change only\nthose two booleans against the pinned dormant target policy", claude)
+        self.assertIn("is now active (`enabled=true`,\n`requireReadyForFinalize=true`)", claude)
         self.assertIn("non-authenticating process evidence and never replace", claude)
         self.assertIn("human content-review gate, which remains mandatory in both phases", claude)
         self.assertIn("deliberately dormant first phase", dashboard)
-        self.assertIn("activate only the two activation booleans\nagainst that landed target policy", dashboard)
+        self.assertIn("separately reviewed activation is now landed with only the two activation\nbooleans enabled", dashboard)
         self.assertIn("must exactly match the\ncopy loaded from the pinned target commit", dashboard)
 
-    def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
+    def test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
-        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])
-        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["requireReadyForFinalize"])
+        self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])
+        self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["requireReadyForFinalize"])
         self.assertTrue(tracked["repoSweep"]["evidencePreservingPrune"]["enabled"])
         self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["repoSweep"]["evidencePreservingPrune"]["enabled"])
 
@@ -938,10 +1281,29 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn('"annotations_count" not in output', python_source)
         self.assertIn("hosted surfaces require record-hosted", python_source)
         self.assertIn("def verify_live_provider", python_source)
-        self.assertIn('"--hostname"', python_source)
-        self.assertIn('"github.com"', python_source)
+        self.assertIn("def _trusted_system_curl_identity", python_source)
+        self.assertIn("def system_curl_github_query_command", python_source)
+        self.assertIn("https://api.github.com", python_source)
+        self.assertIn('"-q"', python_source)
+        self.assertIn('"--proxy"', python_source)
+        self.assertIn('"--noproxy"', python_source)
+        self.assertIn('"\\n%{http_code}"', python_source)
+        self.assertIn("Get-AuthenticodeSignature", python_source)
+        self.assertIn("unsafeWriteGrants", python_source)
+        self.assertIn("$principal.IsInRole($sidObject)", python_source)
+        self.assertIn("DeleteSubdirectoriesAndFiles", python_source)
+        self.assertIn("$PSModuleAutoLoadingPreference = 'None'", python_source)
+        self.assertIn("Microsoft.PowerShell.Management\\Get-Item", python_source)
+        self.assertIn("Microsoft.PowerShell.Security\\Get-Acl", python_source)
+        self.assertIn("Microsoft.PowerShell.Utility\\ConvertTo-Json", python_source)
+        self.assertIn("RawSecurityDescriptor", python_source)
+        self.assertIn("DiscretionaryAclPresent", python_source)
+        self.assertIn("daclNull", python_source)
+        self.assertIn("def _minimal_system_child_environment", python_source)
+        self.assertIn("def _trusted_unix_curl_path_chain", python_source)
+        self.assertIn('"PATH": "/usr/bin:/bin"', python_source)
+        self.assertIn('"NoDefaultCurrentDirectoryInExePath": "1"', python_source)
         self.assertIn("run_bounded_closeout_process", python_source)
-        self.assertIn('process_env.pop("GH_HOST", None)', python_source)
 
         command = (
             "$errors=$null; $tokens=$null; "

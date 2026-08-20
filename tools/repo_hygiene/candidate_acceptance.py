@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -406,36 +407,306 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     ]
 
 
-def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
-    command = [
-        "gh",
-        "api",
-        "--hostname",
-        "github.com",
-        "-H",
+_WINDOWS_CURL_TRUST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$ClientPath = $env:MLVAPP_SYSTEM_CURL_PATH
+if ([string]::IsNullOrWhiteSpace($ClientPath)) { throw 'system curl path is missing' }
+$moduleRoot = "$PSHOME\Modules"
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1" -Force -ErrorAction Stop
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -Force -ErrorAction Stop
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -Force -ErrorAction Stop
+$PSModuleAutoLoadingPreference = 'None'
+$clientItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $ClientPath -Force
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+$currentSid = $identity.User.Value
+$broadSids = @('S-1-1-0', 'S-1-5-4', 'S-1-5-11', 'S-1-5-32-545')
+$trustedOwnerSids = @('S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+$fileWriteMask = [int64]([System.Security.AccessControl.FileSystemRights]::WriteData -bor
+    [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+    [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+    [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [System.Security.AccessControl.FileSystemRights]::Delete -bor
+    [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+$directoryReplaceMask = [int64]([System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [System.Security.AccessControl.FileSystemRights]::Delete -bor
+    [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+$chain = [System.Collections.Generic.List[object]]::new()
+$cursor = $clientItem.Directory
+while ($null -ne $cursor) {
+    $chain.Insert(0, $cursor)
+    $cursor = $cursor.Parent
+}
+$chain.Add($clientItem)
+$pathTrust = @()
+foreach ($pathItem in $chain) {
+    if ($pathItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "system curl trust path must not contain a reparse point: $($pathItem.FullName)"
+    }
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $pathItem.FullName
+    $ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    $unsafeWriteGrants = @()
+    $rawDescriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+    $daclPresent = ($rawDescriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0
+    $daclNull = $null -eq $rawDescriptor.DiscretionaryAcl
+    if (-not $daclPresent -or $daclNull) {
+        $unsafeWriteGrants += [ordered]@{ sid = 'NULL_DACL'; rights = 'FullControl' }
+    } else {
+        $effectiveMask = if ($pathItem -is [System.IO.DirectoryInfo]) { $directoryReplaceMask } else { $fileWriteMask }
+        foreach ($rule in $acl.Access) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (([int64]$rule.FileSystemRights -band $effectiveMask) -eq 0) { continue }
+            try {
+                $sidObject = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                $sid = $sidObject.Value
+            } catch {
+                $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
+                continue
+            }
+            $currentTokenCanWrite = ($sid -eq $currentSid) -or $principal.IsInRole($sidObject)
+            if ($currentTokenCanWrite -or ($broadSids -contains $sid)) {
+                $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+            }
+        }
+    }
+    $pathTrust += [ordered]@{
+        path = $pathItem.FullName
+        ownerSid = $ownerSid
+        ownerTrusted = $trustedOwnerSids -contains $ownerSid
+        daclPresent = $daclPresent
+        daclNull = $daclNull
+        unsafeWriteGrants = @($unsafeWriteGrants)
+    }
+}
+$signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $ClientPath
+[ordered]@{
+    modulePath = [string]$env:PSModulePath
+    loadedModulePaths = @(Microsoft.PowerShell.Core\Get-Module | Microsoft.PowerShell.Core\ForEach-Object { $_.Path })
+    signatureStatus = [string]$signature.Status
+    signerSubject = [string]$signature.SignerCertificate.Subject
+    signerThumbprint = [string]$signature.SignerCertificate.Thumbprint
+    pathTrust = @($pathTrust)
+} | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
+"""
+
+
+def _minimal_system_child_environment() -> Dict[str, str]:
+    """Return a fixed environment with no loader, proxy, config, or runtime injection."""
+
+    if os.name == "nt":
+        return {
+            "SystemRoot": r"C:\Windows",
+            "WINDIR": r"C:\Windows",
+            "PATH": r"C:\Windows\System32",
+            "NoDefaultCurrentDirectoryInExePath": "1",
+        }
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+
+
+def _trusted_unix_curl_path_chain(client: Path) -> List[Dict[str, Any]]:
+    """Validate every fixed-path component that can replace the Unix curl binary."""
+
+    chain = [*reversed(client.parents), client]
+    evidence: List[Dict[str, Any]] = []
+    for index, path in enumerate(chain):
+        metadata = path.lstat()
+        expected_directory = index < len(chain) - 1
+        if stat.S_ISLNK(metadata.st_mode):
+            raise HygieneError(f"system curl trust path must not contain a symbolic link: {path}")
+        if expected_directory and not stat.S_ISDIR(metadata.st_mode):
+            raise HygieneError(f"system curl trust ancestor is not a directory: {path}")
+        if not expected_directory and not stat.S_ISREG(metadata.st_mode):
+            raise HygieneError("system curl must be a regular file")
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise HygieneError(f"system curl trust path must be root-owned and not group/other writable: {path}")
+        evidence.append({
+            "path": str(path),
+            "ownerUid": metadata.st_uid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+        })
+    return evidence
+
+
+def _system_curl_path() -> Path:
+    if os.name == "nt":
+        client = Path(r"C:\Windows\System32\curl.exe")
+    else:
+        client = Path("/usr/bin/curl")
+    resolved = client.resolve()
+    if not resolved.is_absolute() or not resolved.is_file():
+        raise HygieneError("candidate acceptance OS-protected system curl is unavailable")
+    if os.name == "nt":
+        if str(resolved).casefold() != str(client).casefold():
+            raise HygieneError("candidate acceptance system curl path is not canonical")
+    elif resolved != Path("/usr/bin/curl"):
+        raise HygieneError("candidate acceptance system curl must resolve to /usr/bin/curl")
+    return resolved
+
+
+def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return fail-closed ownership/signature evidence for the OS curl binary."""
+
+    client = _system_curl_path()
+    trust: Dict[str, Any]
+    if os.name == "nt":
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        if not powershell.is_file():
+            raise HygieneError("Windows system PowerShell is unavailable for curl trust verification")
+        from .brokered_closeout import run_bounded_closeout_process
+
+        trust_env = _minimal_system_child_environment()
+        trust_env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+        trust_env["PSModulePath"] = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+        completed = run_bounded_closeout_process(
+            repo_root,
+            config,
+            [
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _WINDOWS_CURL_TRUST_SCRIPT,
+            ],
+            timeout_ms=30000,
+            max_output_bytes=65536,
+            recovery_command="restore the Microsoft-signed OS curl binary and its protected ACL",
+            normalize_failure_text=False,
+            env=trust_env,
+            resource_overrides={"profile": "provider-verification", "affinityCores": 2},
+        )
+        if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
+            raise HygieneError(f"system curl trust verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
+        try:
+            trust = json.loads(completed["stdout"])
+        except json.JSONDecodeError as exc:
+            raise HygieneError("system curl trust evidence is malformed") from exc
+        path_trust = trust.get("pathTrust")
+        if not isinstance(path_trust, list) or len(path_trust) < 3:
+            raise HygieneError("system curl path-chain trust evidence is incomplete")
+        expected_module_root = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+        expected_module_paths = {
+            r"C:\Program Files\WindowsPowerShell\Modules".casefold(),
+            expected_module_root.casefold(),
+        }
+        actual_module_paths = {
+            value.strip().casefold()
+            for value in str(trust.get("modulePath") or "").split(";")
+            if value.strip()
+        }
+        if actual_module_paths != expected_module_paths:
+            raise HygieneError("system curl trust verification used an unpinned PowerShell module path")
+        loaded_modules = trust.get("loadedModulePaths")
+        if not isinstance(loaded_modules, list) or not loaded_modules:
+            raise HygieneError("system curl trust verification did not report its loaded modules")
+        if any(not str(path).casefold().startswith(expected_module_root.casefold() + "\\") for path in loaded_modules):
+            raise HygieneError("system curl trust verification loaded a module outside the protected system root")
+        if any(not isinstance(item, dict) or not item.get("ownerTrusted") for item in path_trust):
+            raise HygieneError("system curl path chain is not owned by Windows or TrustedInstaller")
+        if any(item.get("daclPresent") is not True or item.get("daclNull") is not False for item in path_trust):
+            raise HygieneError("system curl path chain has an absent or NULL discretionary ACL")
+        if trust.get("signatureStatus") != "Valid" or "O=Microsoft Corporation" not in str(trust.get("signerSubject") or ""):
+            raise HygieneError("system curl does not have a valid Microsoft signature")
+        if any(item.get("unsafeWriteGrants") for item in path_trust):
+            raise HygieneError("system curl path chain grants replacement authority to the current token or a broad principal")
+    else:
+        trust = {
+            "pathTrust": _trusted_unix_curl_path_chain(client),
+        }
+    return {
+        "kind": "os-protected-system-curl",
+        "path": str(client),
+        "size": client.stat().st_size,
+        "sha256": _file_sha256(client),
+        "trust": trust,
+    }
+
+
+def system_curl_github_query_command(
+    repository: str,
+    head_sha: str,
+    max_output_bytes: int,
+) -> tuple[Path, List[str]]:
+    """Build a config-free query through the exact OS-protected curl binary."""
+
+    provider_client = _system_curl_path()
+    if not provider_client.is_absolute() or not provider_client.is_file():
+        raise HygieneError("candidate acceptance system curl is unavailable")
+    head = _require_sha(head_sha, "featureHead")
+    if repository != CANONICAL_PROVIDER_REPOSITORY:
+        raise HygieneError("live GitHub query repository must equal the canonical repository")
+    url = f"https://api.github.com/repos/{repository}/commits/{head}/check-runs?per_page=100"
+    return provider_client, [
+        str(provider_client),
+        "-q",
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "20",
+        "--max-filesize",
+        str(max_output_bytes),
+        "--proxy",
+        "",
+        "--noproxy",
+        "*",
+        "--header",
         "Accept: application/vnd.github+json",
-        f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
+        "--header",
+        "User-Agent: MLV-App-candidate-acceptance/1",
+        "--header",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "--write-out",
+        "\n%{http_code}",
+        url,
     ]
+
+
+def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root)
+    process_env = _minimal_system_child_environment()
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
-    repo_root = resolve_repo_root(repo_root)
-    process_env = dict(os.environ)
-    process_env.pop("GH_HOST", None)
+    output_cap = min(closeout_max_process_output_bytes(config), 4 * 1024 * 1024)
+    provider_client_identity = _trusted_system_curl_identity(repo_root, config)
+    provider_client, command = system_curl_github_query_command(repository, head_sha, output_cap)
+    if str(provider_client) != provider_client_identity["path"]:
+        raise HygieneError("system curl command path differs from the trusted client identity")
     completed = run_bounded_closeout_process(
         repo_root,
         config,
         command,
         timeout_ms=60000,
-        max_output_bytes=closeout_max_process_output_bytes(config),
-        recovery_command="authenticate gh for github.com and rerun candidate acceptance",
+        max_output_bytes=output_cap,
+        recovery_command="restore public api.github.com HTTPS access and rerun candidate acceptance",
         normalize_failure_text=False,
         env=process_env,
         resource_overrides={"profile": "provider-verification", "affinityCores": 2},
     )
     if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
         raise HygieneError(f"live GitHub provider verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
+    if _trusted_system_curl_identity(repo_root, config) != provider_client_identity:
+        raise HygieneError("candidate acceptance system curl identity changed during live verification")
+    body, separator, raw_status = completed["stdout"].rstrip().rpartition("\n")
+    if not separator or raw_status.strip() != "200":
+        raise HygieneError(f"live GitHub provider returned unexpected HTTP status: {raw_status.strip() or 'missing'}")
     try:
-        response = json.loads(completed["stdout"])
+        response = json.loads(body)
     except json.JSONDecodeError as exc:
         raise HygieneError("live GitHub provider response is malformed") from exc
     payload = {
@@ -443,6 +714,7 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
         "capturedAt": utc_now(),
         "repository": repository,
         "headSha": head_sha,
+        "providerClient": provider_client_identity,
         "response": response,
     }
     if not isinstance(response, dict) or not isinstance(response.get("check_runs"), list):
