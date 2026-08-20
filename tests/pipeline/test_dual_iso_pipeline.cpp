@@ -300,6 +300,216 @@ TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBef
                                     1,
                                     1,
                                     &hostile_scratch));
+
+    struct raw_info lut_edge = {};
+    lut_edge.width = 5;
+    lut_edge.height = 6;
+    lut_edge.pitch = 5;
+    lut_edge.bits_per_pixel = 14;
+    lut_edge.black_level = 0;
+    lut_edge.white_level = 16383;
+    lut_edge.active_area.x1 = 0;
+    lut_edge.active_area.y1 = 0;
+    lut_edge.active_area.x2 = 5;
+    lut_edge.active_area.y2 = 6;
+    lut_edge.cfa_pattern = 0x02010100;
+    std::vector<uint16_t> lut_edge_canary(30, static_cast<uint16_t>(1000));
+    const std::vector<uint16_t> original_lut_edge_canary = lut_edge_canary;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(lut_edge,
+                                               lut_edge_canary.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(lut_edge,
+                                    lut_edge_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(lut_edge_canary == original_lut_edge_canary);
+
+    struct raw_info hostile_pitch = {};
+    hostile_pitch.width = 4;
+    hostile_pitch.height = 5;
+    hostile_pitch.pitch = 5;
+    hostile_pitch.bits_per_pixel = 14;
+    hostile_pitch.black_level = 1024;
+    hostile_pitch.white_level = 15000;
+    hostile_pitch.active_area.x1 = 0;
+    hostile_pitch.active_area.y1 = 0;
+    hostile_pitch.active_area.x2 = 4;
+    hostile_pitch.active_area.y2 = 5;
+    hostile_pitch.cfa_pattern = 0x01000201; /* exact GBRG one-row shift path */
+    std::vector<uint16_t> pitch_canary(20, static_cast<uint16_t>(2345));
+    const std::vector<uint16_t> original_pitch_canary = pitch_canary;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(hostile_pitch,
+                                    pitch_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(pitch_canary == original_pitch_canary);
+
+    struct raw_info valid_gbrg = hostile_pitch;
+    valid_gbrg.width = 8;
+    valid_gbrg.height = 8;
+    valid_gbrg.pitch = 8;
+    valid_gbrg.active_area.x2 = 8;
+    valid_gbrg.active_area.y2 = 8;
+    std::vector<uint16_t> gbrg_guarded(66, static_cast<uint16_t>(2345));
+    gbrg_guarded.front() = static_cast<uint16_t>(0x1111);
+    gbrg_guarded.back() = static_cast<uint16_t>(0x2222);
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    (void)diso_get_full20bit(valid_gbrg,
+                             gbrg_guarded.data() + 1,
+                             0,
+                             100,
+                             200,
+                             &iso_pattern,
+                             &auto_correction,
+                             &ev_correction,
+                             &black_delta,
+                             1,
+                             0,
+                             1,
+                             0,
+                             1,
+                             1,
+                             &hostile_scratch);
+    ASSERT_EQ(static_cast<uint16_t>(0x1111), gbrg_guarded.front());
+    ASSERT_EQ(static_cast<uint16_t>(0x2222), gbrg_guarded.back());
+
+    struct raw_info tiny_geometry = hostile_pitch;
+    tiny_geometry.width = 4;
+    tiny_geometry.height = 6;
+    tiny_geometry.pitch = 4;
+    tiny_geometry.active_area.x2 = 4;
+    tiny_geometry.active_area.y2 = 6;
+    tiny_geometry.cfa_pattern = 0x02010100;
+    std::vector<uint16_t> tiny_canary(24, static_cast<uint16_t>(3456));
+    const std::vector<uint16_t> original_tiny_canary = tiny_canary;
+    ASSERT_EQ(0, diso_get_full20bit(tiny_geometry,
+                                    tiny_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_TRUE(tiny_canary == original_tiny_canary);
+
+    struct raw_info zero_thread_raw = tiny_geometry;
+    zero_thread_raw.width = 8;
+    zero_thread_raw.height = 8;
+    zero_thread_raw.pitch = 8;
+    zero_thread_raw.active_area.x2 = 8;
+    zero_thread_raw.active_area.y2 = 8;
+    std::vector<uint16_t> zero_thread_canary(64, static_cast<uint16_t>(4567));
+    const std::vector<uint16_t> original_zero_thread_canary = zero_thread_canary;
+    ASSERT_EQ(0, diso_get_full20bit(zero_thread_raw,
+                                    zero_thread_canary.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    0,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    &hostile_scratch));
+    ASSERT_TRUE(zero_thread_canary == original_zero_thread_canary);
+
+    const int32_t unsupported_cfa_patterns[] = {
+        0x00010102, /* BGGR */
+        0x01020001, /* GRBG */
+        0x12345678, /* unknown */
+    };
+    for (const int32_t unsupported_cfa : unsupported_cfa_patterns)
+    {
+        struct raw_info unsupported_raw = zero_thread_raw;
+        unsupported_raw.cfa_pattern = unsupported_cfa;
+        std::vector<uint16_t> unsupported_canary(
+            64, static_cast<uint16_t>(5678));
+        const std::vector<uint16_t> original_unsupported_canary =
+            unsupported_canary;
+        iso_pattern = 1;
+        auto_correction = -1;
+        ev_correction = 1.0;
+        black_delta = -1;
+        ASSERT_EQ(0, diso_get_full20bit(unsupported_raw,
+                                        unsupported_canary.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        1,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &hostile_scratch));
+        ASSERT_TRUE(unsupported_canary == original_unsupported_canary);
+    }
     free_dualiso_full20bit_scratch(&hostile_scratch);
 }
 #include <QString>
@@ -5755,6 +5965,71 @@ static int synthetic_dual_iso_prepare_state(struct raw_info raw,
                                         state);
 }
 
+TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.active_area.x1 = 17;
+    raw.active_area.x2 = std::min(raw.width, 32);
+    raw.active_area.y1 = 0;
+    raw.active_area.y2 = 41;
+    std::vector<uint16_t> gpu_frame = synthetic_dual_iso_phase_frame(raw, 0);
+    const std::vector<uint16_t> original_gpu_frame = gpu_frame;
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state = {};
+    int iso_pattern = 1;
+    int auto_correction = -1;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    ASSERT_EQ(1, diso_prepare_gpu_recon_state(raw,
+                                               gpu_frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(1, state.valid);
+    ASSERT_TRUE(std::isfinite(state.dark_noise));
+    ASSERT_TRUE(state.dark_noise > 0.0);
+    ASSERT_TRUE(gpu_frame == original_gpu_frame);
+
+    std::vector<uint16_t> cpu_frame = original_gpu_frame;
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(1, diso_get_full20bit(raw,
+                                    cpu_frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
 TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState)
 {
     ScopedDualIsoPhaseEnv phase_env;
@@ -5821,6 +6096,51 @@ TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState
     ASSERT_EQ(-2, auto_correction);
     ASSERT_EQ(1.0, ev_correction);
     ASSERT_EQ(-1, black_delta);
+
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = INT_MAX;
+    std::memset(&state, 0xA5, sizeof(state));
+    const std::vector<uint16_t> frame_before_hostile_delta = frame;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(raw,
+                                               frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(INT_MAX, black_delta);
+    ASSERT_TRUE(frame == frame_before_hostile_delta);
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(INT_MAX, black_delta);
+    ASSERT_TRUE(frame == frame_before_hostile_delta);
     free_dualiso_full20bit_scratch(&scratch);
 }
 

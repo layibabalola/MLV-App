@@ -2371,6 +2371,13 @@ class RepoHygieneTests(unittest.TestCase):
             source.count("dualiso_checked_full20_frame_geometry(raw_info,"), 3
         )
         self.assertIn("*black_delta > INT_MAX / 64", source)
+        self.assertIn("(double)white - (double)black + (double)_black_delta", source)
+        self.assertIn("raw_info.pitch != raw_info.width", source)
+        self.assertIn("interp_method == 0 && threads <= 0", source)
+        self.assertIn("raw_info.cfa_pattern == 0x01000201", source)
+        self.assertIn("if (num < 2)", source)
+        self.assertIn("if (final_blend_result < 0)", source)
+        self.assertIn("white - black >= 16383u * 64u", source)
         self.assertIn("const int dual_iso_recon_ok =", llrawproc_source)
         self.assertIn("if (!dual_iso_recon_ok)", llrawproc_source)
         self.assertIn(

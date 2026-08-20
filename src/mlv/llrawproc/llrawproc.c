@@ -4077,7 +4077,9 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
     raw_info.width = override_w;
     raw_info.height = override_h;
-    raw_info.pitch = override_w * (raw_info.bits_per_pixel <= 16 ? 2 : 4);
+    /* The Dual ISO core receives uint16_t samples and defines pitch in
+     * samples, matching the full-resolution caller. */
+    raw_info.pitch = override_w;
     raw_info.frame_size = (uint32_t)(override_w * override_h * 14 / 8);
     raw_info.active_area.x1 = 0;
     raw_info.active_area.y1 = 0;
