@@ -983,6 +983,14 @@ def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Di
     try:
         enforced = candidate_acceptance_enforced(repo_root, config, detection)
         if not enforced:
+            human_gate_error = content_review_gate_trust_error(repo_root, config, detection)
+            if human_gate_error:
+                return {
+                    "status": "blocked",
+                    "reason": "candidate_acceptance_human_gate_trust_drift",
+                    "detail": human_gate_error,
+                    "recoveryCommand": "restore the pinned target contentReviewGate or land a separately authorized policy change first",
+                }
             return None
         configured_surfaces = required_surfaces(config)
         provider_repository(config)

@@ -582,6 +582,18 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 changed = json.loads(json.dumps(baseline))
                 changed["contentReviewGate"].update(mutation)
                 self.assertIn("differs from the pinned target", content_review_gate_trust_error(repo, changed, detection))
+                with mock.patch(
+                    "tools.repo_hygiene.candidate_acceptance.candidate_acceptance_enforced",
+                    return_value=False,
+                ):
+                    guard = validate_for_finalize(repo, changed, detection)
+                self.assertEqual("candidate_acceptance_human_gate_trust_drift", guard["reason"])
+
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.candidate_acceptance_enforced",
+                return_value=False,
+            ):
+                self.assertIsNone(validate_for_finalize(repo, baseline, detection))
 
     def test_final_integration_tree_or_diff_drift_is_blocking(self) -> None:
         accepted = {"integrationTree": "a" * 40, "diffSha256": "b" * 64}
@@ -760,15 +772,22 @@ class CandidateAcceptanceTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         dashboard = (ROOT / "docs/19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
-        for text in (agents, claude, dashboard):
-            self.assertIn("deliberately dormant", text)
-            self.assertIn("separately reviewed", text)
-            self.assertIn("human", text.lower())
-        self.assertIn("candidateAcceptance.enabled", agents)
-        self.assertIn("candidateAcceptance.requireReadyForFinalize", agents)
-        self.assertIn("enabled=false", claude)
-        self.assertIn("requireReadyForFinalize=false", claude)
-        self.assertIn("never replace", claude)
+        self.assertIn("first landing is deliberately dormant while the tooling baseline remains mandatory", agents)
+        self.assertIn(
+            "may change only `candidateAcceptance.enabled` and `candidateAcceptance.requireReadyForFinalize` "
+            "from `false` to `true` against the pinned dormant target policy",
+            agents,
+        )
+        self.assertIn("must exactly equal the copy loaded from the pinned target commit in both phases", agents)
+        self.assertIn("must never replace that human approval gate", agents)
+        self.assertIn("deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)", claude)
+        self.assertIn("tests, and tooling-baseline inventory are\nalready mandatory", claude)
+        self.assertIn("may change only\nthose two booleans against the pinned dormant target policy", claude)
+        self.assertIn("non-authenticating process evidence and never replace", claude)
+        self.assertIn("human content-review gate, which remains mandatory in both phases", claude)
+        self.assertIn("deliberately dormant first phase", dashboard)
+        self.assertIn("activate only the two activation booleans\nagainst that landed target policy", dashboard)
+        self.assertIn("must exactly match the\ncopy loaded from the pinned target commit", dashboard)
 
     def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
