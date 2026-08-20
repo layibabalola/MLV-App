@@ -161,6 +161,64 @@ TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBef
     ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, 0,
                                                     nullptr, &sample_capacity,
                                                     &highlight_capacity, &first_sample_y));
+
+    struct raw_info hostile_raw = {};
+    hostile_raw.width = INT_MAX;
+    hostile_raw.height = 5;
+    hostile_raw.pitch = 2;
+    hostile_raw.bits_per_pixel = 14;
+    hostile_raw.black_level = 1024;
+    hostile_raw.white_level = 15000;
+    hostile_raw.active_area.x1 = 0;
+    hostile_raw.active_area.y1 = 0;
+    hostile_raw.active_area.x2 = INT_MAX;
+    hostile_raw.active_area.y2 = 5;
+    hostile_raw.cfa_pattern = 0x02010100;
+    uint16_t sentinel_pixel = 1234;
+    dualiso_full20bit_scratch_t hostile_scratch = {};
+    dualiso_gpu_recon_state_t hostile_state = {};
+    int iso_pattern = 1;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_raw,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(1, iso_pattern);
+    ASSERT_EQ(0, hostile_state.valid);
+    ASSERT_EQ(0, diso_get_full20bit(hostile_raw,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+    ASSERT_EQ(1, iso_pattern);
+    ASSERT_EQ(static_cast<uint16_t>(1234), sentinel_pixel);
+    free_dualiso_full20bit_scratch(&hostile_scratch);
 }
 #include <QString>
 #include <QTemporaryDir>
@@ -5652,9 +5710,11 @@ TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState
 
     ASSERT_EQ(0, rc);
     ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(1, iso_pattern);
     ASSERT_EQ(-2, auto_correction);
     ASSERT_EQ(1.0, ev_correction);
     ASSERT_EQ(-1, black_delta);
+    ASSERT_EQ(1, iso_pattern);
 
     iso_pattern = 1;
     auto_correction = -2;
@@ -5680,6 +5740,165 @@ TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState
     ASSERT_EQ(1.0, ev_correction);
     ASSERT_EQ(-1, black_delta);
     free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, HistogramMatchRejectsLowSeparationWithoutPublishingControls)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    const struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    std::vector<uint16_t> frame(static_cast<size_t>(raw.width)
+                              * static_cast<size_t>(raw.height));
+    for (int y = 0; y < raw.height; ++y)
+    {
+        const bool bright_row = ((y & 3) < 2);
+        for (int x = 0; x < raw.width; ++x)
+        {
+            const int texture = (x * 19 + (y / 4) * 23) & 1023;
+            frame[static_cast<size_t>(y) * static_cast<size_t>(raw.width)
+                + static_cast<size_t>(x)] =
+                static_cast<uint16_t>((bright_row ? 5200 : 5000) + texture);
+        }
+    }
+
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state = {};
+    int iso_pattern = 0;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(raw,
+                                               frame.data(),
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &scratch,
+                                               &state));
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(0, iso_pattern);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    ASSERT_TRUE(scratch.histogram_match_pixel_capacity > 0);
+
+    iso_pattern = 0;
+    auto_correction = -2;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    ASSERT_EQ(0, iso_pattern);
+    free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, ScaledLlrawprocRejectsUniformHistogramMatchFailure)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+    mlvSetPlaybackAggressivePreviewMode(1);
+    struct AggressivePreviewResetGuard {
+        ~AggressivePreviewResetGuard()
+        {
+            mlvSetPlaybackAggressivePreviewMode(0);
+        }
+    } aggressive_preview_reset_guard;
+
+    MlvPipelineFixture fixture;
+    QString error_message;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(
+        QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_hq.marxml"),
+        &error_message));
+    fixture.receipt().setFocusPixels(0);
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    llrawprocObject_t * shared = fixture.video()->llrawproc;
+    ASSERT_TRUE(shared != nullptr);
+    shared->fix_raw = 1;
+    shared->dual_iso = 1;
+    shared->diso_validity = 1;
+    shared->diso1 = 100;
+    shared->diso2 = 200;
+    shared->diso_averaging = 1;
+    shared->diso_alias_map = 0;
+    shared->diso_frblending = 1;
+    shared->diso_pattern = 1;
+    shared->diso_auto_correction = -2;
+    shared->diso_ev_correction = 1.0;
+    shared->diso_black_delta = -1;
+    shared->dark_frame = 0;
+    shared->chroma_smooth = 0;
+    shared->focus_pixels = 0;
+    shared->bad_pixels = 0;
+    shared->vertical_stripes = 0;
+    shared->pattern_noise = 0;
+
+    constexpr int width = 128;
+    constexpr int height = 128;
+    std::vector<uint16_t> frame(static_cast<size_t>(width)
+                              * static_cast<size_t>(height),
+                                static_cast<uint16_t>(
+                                    fixture.video()->RAWI.raw_info.white_level));
+    const std::vector<uint16_t> original_frame = frame;
+    const int original_dng_black = shared->dng_black_level;
+    const int original_dng_white = shared->dng_white_level;
+    const int original_dng_depth = shared->dng_bit_depth;
+    ASSERT_EQ(0, applyLLRawProcObject_with_dims(fixture.video(),
+                                                frame.data(),
+                                                frame.size() * sizeof(frame[0]),
+                                                width,
+                                                height));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(1, shared->diso_pattern);
+    ASSERT_EQ(-2, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
+
+    std::vector<uint16_t> full_frame(
+        static_cast<size_t>(fixture.width()) * static_cast<size_t>(fixture.height()),
+        static_cast<uint16_t>(fixture.video()->RAWI.raw_info.white_level));
+    const std::vector<uint16_t> original_full_frame = full_frame;
+    applyLLRawProcObject(fixture.video(),
+                         full_frame.data(),
+                         full_frame.size() * sizeof(full_frame[0]));
+    ASSERT_TRUE(full_frame == original_full_frame);
+    ASSERT_EQ(1, shared->diso_pattern);
+    ASSERT_EQ(-2, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
 }
 
 static std::string synthetic_phase_pattern_list(const std::vector<int> & patterns)

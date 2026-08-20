@@ -2306,6 +2306,22 @@ static llrawproc_runtime_state_t llrawproc_capture_worker_runtime_state(const ll
     return state;
 }
 
+static void llrawproc_restore_worker_runtime_state(
+    llrawprocWorkerState_t * worker,
+    const llrawproc_runtime_state_t * state)
+{
+    if (!worker || !state) return;
+
+    worker->diso_pattern = state->diso_pattern;
+    worker->diso_auto_correction = state->diso_auto_correction;
+    worker->diso_ev_correction = state->diso_ev_correction;
+    worker->diso_black_delta = state->diso_black_delta;
+    worker->dng_bit_depth = state->dng_bit_depth;
+    worker->dng_black_level = state->dng_black_level;
+    worker->dng_white_level = state->dng_white_level;
+    worker->prev_black_level = -1;
+}
+
 static llrawproc_runtime_state_t llrawproc_capture_shared_runtime_state(const llrawprocObject_t * shared)
 {
     llrawproc_runtime_state_t state = { 0 };
@@ -3117,10 +3133,27 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
         raw_info.active_area.x2 = raw_info.width;
         raw_info.active_area.y2 = raw_info.height;
 
+        uint16_t * dual_iso_failure_backup = NULL;
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
 
         if (restricted_lossless)
         {
+            if (dual_iso_mode == 1 && worker->diso_auto_correction == -2)
+            {
+                dual_iso_failure_backup = (uint16_t *)malloc(raw_image_size);
+                if (!dual_iso_failure_backup)
+                {
+                    if (original_bits_per_pixel < 14)
+                    {
+                        undo_14bit(raw_image_buff,
+                                   raw_image_size,
+                                   original_bits_per_pixel);
+                    }
+                    if (using_stack_worker) llrawproc_free_worker_state(worker);
+                    return;
+                }
+                memcpy(dual_iso_failure_backup, raw_image_buff, raw_image_size);
+            }
             const double dual_iso_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
             printf("\nScaling raw data range...\n");
@@ -3530,18 +3563,36 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 &g_llrawproc_last_dual_iso_full20bit_timing);
             dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
 
-            if (has_explicit_auto_match)
+            if (!dual_iso_recon_ok)
             {
-                worker->diso_ev_correction = explicit_ev_correction;
-                worker->diso_black_delta = explicit_black_delta;
+                if (dual_iso_failure_backup)
+                {
+                    memcpy(raw_image_buff, dual_iso_failure_backup, raw_image_size);
+                }
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                llrawproc_restore_worker_runtime_state(
+                    worker,
+                    &worker->seeded_runtime_state);
             }
+            else
+            {
+                if (has_explicit_auto_match)
+                {
+                    worker->diso_ev_correction = explicit_ev_correction;
+                    worker->diso_black_delta = explicit_black_delta;
+                }
 
-            {
-                int bits_shift = 16 - raw_info.bits_per_pixel;
-                worker->dng_black_level = raw_info.black_level << bits_shift;
-                worker->dng_white_level = raw_info.white_level << bits_shift;
-                worker->dng_bit_depth = 16;
-            }
+                {
+                    int bits_shift = 16 - raw_info.bits_per_pixel;
+                    worker->dng_black_level = raw_info.black_level << bits_shift;
+                    worker->dng_white_level = raw_info.white_level << bits_shift;
+                    worker->dng_bit_depth = 16;
+                }
 
             if (gpu_playback_prepare_only_used)
             {
@@ -3696,6 +3747,9 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
             {
                 llrawproc_worker_ensure_luts(worker, raw_info.black_level);
             }
+            }
+            free(dual_iso_failure_backup);
+            dual_iso_failure_backup = NULL;
         }
         else if (dual_iso_mode == 2)
         {
@@ -4130,8 +4184,25 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     if (diso_validity && dual_iso_mode == 1)
     {
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
+        uint16_t * dual_iso_failure_backup = NULL;
         if (restricted_lossless)
         {
+            if (worker->diso_auto_correction == -2)
+            {
+                dual_iso_failure_backup = (uint16_t *)malloc(raw_image_size);
+                if (!dual_iso_failure_backup)
+                {
+                    if (original_bits_per_pixel < 14)
+                    {
+                        undo_14bit(raw_image_buff,
+                                   raw_image_size,
+                                   original_bits_per_pixel);
+                    }
+                    if (using_stack_worker) llrawproc_free_worker_state(worker);
+                    return 0;
+                }
+                memcpy(dual_iso_failure_backup, raw_image_buff, raw_image_size);
+            }
             const double dual_iso_start = mlv_stage_timing_now();
             int low_iso = MIN(diso1, diso2);
             int high_iso = MAX(diso1, diso2);
@@ -4161,31 +4232,59 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
         publish_auto_correction = !has_explicit_auto_match;
 
-        diso_get_full20bit(raw_info,
-                           raw_image_buff,
-                           dark_frame_mode,
-                           diso1,
-                           diso2,
-                           &worker->diso_pattern,
-                           auto_correction_ptr,
-                           ev_correction_ptr,
-                           black_delta_ptr,
-                           diso_averaging,
-                            diso_alias_map,
-                            diso_frblending,
-                            chroma_smooth_mode,
-                            isolated_analysis
-                                ? 0
-                                : processingPlaybackPreviewModeEnabled()
-                                ? ((video && video->playback_scale_factor_active > 0)
-                                    ? video->playback_scale_factor_active
-                                    : processingPlaybackPreviewScaleFactor())
-                                : 0,
-                            llrawproc_threads,
-                            &worker->diso_full20bit_scratch);
+        const int dual_iso_recon_ok =
+            diso_get_full20bit(raw_info,
+                               raw_image_buff,
+                               dark_frame_mode,
+                               diso1,
+                               diso2,
+                               &worker->diso_pattern,
+                               auto_correction_ptr,
+                               ev_correction_ptr,
+                               black_delta_ptr,
+                               diso_averaging,
+                               diso_alias_map,
+                               diso_frblending,
+                               chroma_smooth_mode,
+                               isolated_analysis
+                                   ? 0
+                                   : processingPlaybackPreviewModeEnabled()
+                                   ? ((video && video->playback_scale_factor_active > 0)
+                                       ? video->playback_scale_factor_active
+                                       : processingPlaybackPreviewScaleFactor())
+                                   : 0,
+                               llrawproc_threads,
+                               &worker->diso_full20bit_scratch);
         dualiso_debug_get_full20bit_timing(
             &g_llrawproc_last_dual_iso_full20bit_timing);
         dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
+
+        if (!dual_iso_recon_ok)
+        {
+            if (dual_iso_failure_backup)
+            {
+                memcpy(raw_image_buff, dual_iso_failure_backup, raw_image_size);
+            }
+            if (original_bits_per_pixel < 14)
+            {
+                undo_14bit(raw_image_buff,
+                           raw_image_size,
+                           original_bits_per_pixel);
+            }
+            free(dual_iso_failure_backup);
+            llrawproc_restore_worker_runtime_state(
+                worker,
+                &worker->seeded_runtime_state);
+            g_llrawproc_last_dual_iso_ms = dual_iso_ms;
+            g_llrawproc_last_total_ms =
+                (mlv_stage_timing_now() - apply_start) * 1000.0;
+            if (using_stack_worker)
+            {
+                llrawproc_free_worker_state(worker);
+            }
+            return 0;
+        }
+        free(dual_iso_failure_backup);
 
         if (has_explicit_auto_match)
         {

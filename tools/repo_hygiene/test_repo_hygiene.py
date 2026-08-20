@@ -2349,6 +2349,9 @@ class RepoHygieneTests(unittest.TestCase):
         source = (ROOT / "src" / "mlv" / "llrawproc" / "dualiso.c").read_text(
             encoding="utf-8"
         )
+        llrawproc_source = (
+            ROOT / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+        ).read_text(encoding="utf-8")
         self.assertNotIn(
             "static int _match_exposures(",
             source,
@@ -2363,6 +2366,9 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("if (hi_n >= highlight_capacity) break;", source)
         self.assertIn("if (n == 0) return 0;", source)
         self.assertIn("if (!match_by_histogram(raw_info,", source)
+        self.assertIn("const int dual_iso_recon_ok =", llrawproc_source)
+        self.assertIn("if (!dual_iso_recon_ok)", llrawproc_source)
+        self.assertIn("return 0;", llrawproc_source)
 
     def test_release_sources_remain_cxx14_and_c_memory_portable(self) -> None:
         for source_root in (ROOT / "src", ROOT / "platform" / "qt"):

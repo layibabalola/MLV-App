@@ -1356,7 +1356,10 @@ void free_dualiso_full20bit_scratch(dualiso_full20bit_scratch_t * scratch)
 
 static int ensure_full20bit_pixel_capacity(dualiso_full20bit_scratch_t * scratch, size_t pixel_count)
 {
-    if (!scratch)
+    if (!scratch
+        || pixel_count == 0
+        || pixel_count > SIZE_MAX / sizeof(uint32_t)
+        || pixel_count > SIZE_MAX / sizeof(uint16_t))
     {
         return 0;
     }
@@ -2554,21 +2557,12 @@ static int compute_match_exposure_scalars(struct raw_info raw_info,
         _black_delta = *black_delta * 64;
     }
 
+    if (!isfinite(_ev_correction))
+    {
+        return 0;
+    }
     _ev_correction = COERCE(_ev_correction, 0, 6.0);
     _black_delta = COERCE(_black_delta, 0, 100 * 64);
-    if (applied_ev_correction)
-    {
-        *applied_ev_correction = _ev_correction;
-    }
-    if (applied_black_delta)
-    {
-        *applied_black_delta = _black_delta;
-    }
-
-    *ev_correction = -_ev_correction;
-    *black_delta = _black_delta / 64;
-
-    //printf("DISO: %d, %.2f, %d\n", *auto_correction, *ev_correction, *black_delta);
 
     if (_ev_correction < 0.5)
     {
@@ -2578,8 +2572,30 @@ static int compute_match_exposure_scalars(struct raw_info raw_info,
         return 0;
     }
 
-    double factor = pow(2, -_ev_correction);
-    *white_darkened = ((white - black + _black_delta) * factor) + black;
+    const double factor = pow(2, -_ev_correction);
+    const double matched_white_darkened =
+        ((white - black + _black_delta) * factor) + black;
+    if (!isfinite(factor)
+        || !isfinite(matched_white_darkened)
+        || matched_white_darkened < (double)INT_MIN
+        || matched_white_darkened > (double)INT_MAX)
+    {
+        return 0;
+    }
+
+    if (applied_ev_correction)
+    {
+        *applied_ev_correction = _ev_correction;
+    }
+    if (applied_black_delta)
+    {
+        *applied_black_delta = _black_delta;
+    }
+    *ev_correction = -_ev_correction;
+    *black_delta = _black_delta / 64;
+    *white_darkened = (int)matched_white_darkened;
+
+    //printf("DISO: %d, %.2f, %d\n", *auto_correction, *ev_correction, *black_delta);
 
     return 1;
 }
@@ -6179,6 +6195,8 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                  dualiso_gpu_recon_state_t * state)
 {
     const double full20_start = mlv_stage_timing_now();
+    int restore_iso_pattern_on_failure = 0;
+    int initial_iso_pattern = 0;
     dualiso_debug_reset_full20bit_timing();
     dualiso_debug_set_full20bit_path(DUALISO_FULL20_PATH_GPU_PREPARE,
                                      raw_info,
@@ -6187,7 +6205,13 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                      use_fullres,
                                      playback_preview_scale_factor,
                                      threads);
-#define DUALISO_GPU_PREP_RETURN(value) do { dualiso_debug_finish_full20bit_timing(full20_start); return (value); } while (0)
+#define DUALISO_GPU_PREP_RETURN(value) do { \
+    const int dualiso_return_value = (value); \
+    if (!dualiso_return_value && restore_iso_pattern_on_failure && iso_pattern) \
+        *iso_pattern = initial_iso_pattern; \
+    dualiso_debug_finish_full20bit_timing(full20_start); \
+    return dualiso_return_value; \
+} while (0)
 
     if (state)
     {
@@ -6198,6 +6222,11 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     {
         DUALISO_GPU_PREP_RETURN(0);
     }
+    initial_iso_pattern = *iso_pattern;
+    restore_iso_pattern_on_failure = 1;
+    int staged_auto_correction = *auto_correction;
+    double staged_ev_correction = *ev_correction;
+    int staged_black_delta = *black_delta;
 
     int w = raw_info.width;
     int h = raw_info.height;
@@ -6214,6 +6243,25 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     if (!rggb)
     {
         DUALISO_GPU_PREP_RETURN(0);
+    }
+
+    const int requires_full20_match = (staged_auto_correction == -2);
+    size_t checked_full20_pixels = 0;
+    if (requires_full20_match)
+    {
+        size_t checked_sample_capacity = 0;
+        size_t checked_highlight_capacity = 0;
+        int checked_first_sample_y = 0;
+        if (!dualiso_checked_histogram_geometry(w,
+                                                h,
+                                                raw_info.active_area.y1,
+                                                &checked_full20_pixels,
+                                                &checked_sample_capacity,
+                                                &checked_highlight_capacity,
+                                                &checked_first_sample_y))
+        {
+            DUALISO_GPU_PREP_RETURN(0);
+        }
     }
 
     int is_bright[4];
@@ -6257,12 +6305,11 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     bright_noise_ev += 6;
 
     int white_darkened = white_bright;
-    const int requires_full20_match = (*auto_correction == -2);
     uint32_t * raw_buffer_32 = NULL;
     if (requires_full20_match)
     {
         stage_start = mlv_stage_timing_now();
-        if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
+        if (!ensure_full20bit_pixel_capacity(scratch, checked_full20_pixels))
         {
             g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
             DUALISO_GPU_PREP_RETURN(0);
@@ -6285,9 +6332,9 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                           dark_frame,
                           iso1,
                           iso2,
-                          auto_correction,
-                          ev_correction,
-                          black_delta,
+                          &staged_auto_correction,
+                          &staged_ev_correction,
+                          &staged_black_delta,
                           &white_darkened,
                           is_bright,
                           scratch)
@@ -6296,9 +6343,9 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                          dark_frame,
                                          iso1,
                                          iso2,
-                                         auto_correction,
-                                         ev_correction,
-                                         black_delta,
+                                         &staged_auto_correction,
+                                         &staged_ev_correction,
+                                         &staged_black_delta,
                                          &white_darkened,
                                          is_bright,
                                          scratch,
@@ -6309,7 +6356,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     {
         DUALISO_GPU_PREP_RETURN(0);
     }
-    const double corr_ev = ABS(*ev_correction);
+    const double corr_ev = ABS(staged_ev_correction);
     g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);
 
     const double lowiso_dr = log2(white - black) - dark_noise_ev;
@@ -6348,13 +6395,17 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                                      use_fullres,
                                                      effective_chroma_smooth_method);
 
+    *auto_correction = staged_auto_correction;
+    *ev_correction = staged_ev_correction;
+    *black_delta = staged_black_delta;
+    restore_iso_pattern_on_failure = 0;
     state->valid = 1;
     state->width = raw_info.width;
     state->height = raw_info.height;
     state->black_level = black;
     state->white_level = white;
     state->white_darkened = white_darkened;
-    state->black_delta = *black_delta * 64;
+    state->black_delta = staged_black_delta * 64;
     state->ev_correction = corr_ev;
     state->dark_noise = dark_noise;
     state->interp_method = interp_method;
@@ -6378,6 +6429,8 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
 int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark_frame, int iso1, int iso2, int * iso_pattern, int * auto_correction, double * ev_correction, int * black_delta, int interp_method, int use_alias_map, int use_fullres, int chroma_smooth_method, int playback_preview_scale_factor, int threads, dualiso_full20bit_scratch_t * scratch)
 {
     const double full20_start = mlv_stage_timing_now();
+    int restore_iso_pattern_on_failure = 0;
+    int initial_iso_pattern = 0;
     dualiso_debug_reset_full20bit_timing();
     dualiso_debug_set_full20bit_path(DUALISO_FULL20_PATH_CPU_FULL20,
                                      raw_info,
@@ -6386,7 +6439,24 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                      use_fullres,
                                      playback_preview_scale_factor,
                                      threads);
-#define DUALISO_FULL20_RETURN(value) do { dualiso_debug_finish_full20bit_timing(full20_start); return (value); } while (0)
+#define DUALISO_FULL20_RETURN(value) do { \
+    const int dualiso_return_value = (value); \
+    if (!dualiso_return_value && restore_iso_pattern_on_failure && iso_pattern) \
+        *iso_pattern = initial_iso_pattern; \
+    dualiso_debug_finish_full20bit_timing(full20_start); \
+    return dualiso_return_value; \
+} while (0)
+
+    if (!image_data || !iso_pattern || !auto_correction || !ev_correction
+     || !black_delta || !scratch)
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
+    initial_iso_pattern = *iso_pattern;
+    restore_iso_pattern_on_failure = 1;
+    int staged_auto_correction = *auto_correction;
+    double staged_ev_correction = *ev_correction;
+    int staged_black_delta = *black_delta;
 
     int w = raw_info.width;
     int h = raw_info.height;
@@ -6406,6 +6476,34 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         raw_info.active_area.y2--;
         raw_info.height--;
         h--;
+    }
+
+    if (w <= 0 || h <= 0 || (size_t)w > SIZE_MAX / (size_t)h)
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
+    size_t checked_full20_pixels = (size_t)w * (size_t)h;
+    if (checked_full20_pixels > (size_t)INT_MAX
+        || checked_full20_pixels > SIZE_MAX / sizeof(uint32_t)
+        || checked_full20_pixels > SIZE_MAX / sizeof(uint16_t))
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
+    if (staged_auto_correction == -2)
+    {
+        size_t checked_sample_capacity = 0;
+        size_t checked_highlight_capacity = 0;
+        int checked_first_sample_y = 0;
+        if (!dualiso_checked_histogram_geometry(w,
+                                                h,
+                                                raw_info.active_area.y1,
+                                                &checked_full20_pixels,
+                                                &checked_sample_capacity,
+                                                &checked_highlight_capacity,
+                                                &checked_first_sample_y))
+        {
+            DUALISO_FULL20_RETURN(0);
+        }
     }
     
     int is_bright[4];
@@ -6440,7 +6538,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     g_dualiso_full20bit_timing.noise_ms += dualiso_debug_elapsed_ms(stage_start);
 
     stage_start = mlv_stage_timing_now();
-    if (!ensure_full20bit_pixel_capacity(scratch, (size_t)w * (size_t)h))
+    if (!ensure_full20bit_pixel_capacity(scratch, checked_full20_pixels))
     {
         g_dualiso_full20bit_timing.scratch_ms += dualiso_debug_elapsed_ms(stage_start);
         DUALISO_FULL20_RETURN(0);
@@ -6517,12 +6615,22 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     /* estimate ISO difference between bright and dark exposures */
     int white_darkened = white_bright;
     stage_start = mlv_stage_timing_now();
-    int expo_matched = match_exposures(raw_info, raw_buffer_32, dark_frame, iso1, iso2, auto_correction, ev_correction, black_delta, &white_darkened, is_bright, scratch);
-    if (*auto_correction == -2 && expo_matched <= 0)
+    int expo_matched = match_exposures(raw_info,
+                                       raw_buffer_32,
+                                       dark_frame,
+                                       iso1,
+                                       iso2,
+                                       &staged_auto_correction,
+                                       &staged_ev_correction,
+                                       &staged_black_delta,
+                                       &white_darkened,
+                                       is_bright,
+                                       scratch);
+    if (staged_auto_correction == -2 && expo_matched <= 0)
     {
         DUALISO_FULL20_RETURN(0);
     }
-    double corr_ev = ABS(*ev_correction);
+    double corr_ev = ABS(staged_ev_correction);
     g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);
 
 #ifndef STDOUT_SILENT
@@ -6747,6 +6855,18 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         printf("Dynamic range   : %.02f EV (cooked)\n", log2(white - black) - log2(noise_std[0]));
 #endif
         ret = 1;
+    }
+
+    if (ret)
+    {
+        *auto_correction = staged_auto_correction;
+        *ev_correction = staged_ev_correction;
+        *black_delta = staged_black_delta;
+        restore_iso_pattern_on_failure = 0;
+    }
+    else if (restore_iso_pattern_on_failure)
+    {
+        *iso_pattern = initial_iso_pattern;
     }
 
     /* P3 diagnostic (gated, one-shot per process): dump the EXACT scalars and
