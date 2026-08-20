@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -740,8 +741,10 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "'tools/factory/capture-github-acceptance.ps1',[ref]$tokens,[ref]$errors) | Out-Null; "
             "if($errors.Count){$errors | ForEach-Object {$_.Message}; exit 1}"
         )
+        powershell = "pwsh.exe" if os.name == "nt" else "pwsh"
+        self.assertIsNotNone(shutil.which(powershell), f"required PowerShell executable is unavailable: {powershell}")
         subprocess.run(
-            ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+            [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
             cwd=ROOT,
             check=True,
         )
