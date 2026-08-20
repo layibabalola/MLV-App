@@ -107,6 +107,12 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
                             const uint8_t * strip, size_t strip_size,
                             uint16_t * out16);
 
+/* Validate a parsed strip against the retained file extent before allocation.
+ * Exposed for hostile sizing tests; returns 0 and writes count+4 on success. */
+int dng_reader_strip_allocation_size(const dng_frame_info_t * info,
+                                     uint64_t file_size,
+                                     size_t * allocation_size);
+
 #ifdef __cplusplus
 }
 #endif

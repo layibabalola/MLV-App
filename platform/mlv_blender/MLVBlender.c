@@ -339,7 +339,7 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         }
     }
 
-    if (longest_vid == 0) return;
+    if (longest_vid == 0 || longest_vid > UINT32_MAX) return;
 
     mlvObject_t * mlv_object = initMlvObjectWithClip(Blender->mlvs[longest_vid_index].file_name, MLV_OPEN_FULL, NULL, NULL);
 
@@ -353,7 +353,7 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 
     MLVBlenderBlend(Blender, 0);
 
-    char error[256];
+    char error[256] = { 0 };
 
     /* Round output width down to a multiple of 8, and height 2 */
     size_t output_width = MLVBlenderGetOutputWidth(Blender);
@@ -395,11 +395,21 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
     }
     getMlvBitdepth(mlv_object) = bitdepth;
 
+    int export_failed = 0;
     /* Annoying */
     if (isMlvCompressed(mlv_object))
-        saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_FAST_PASS, 0, longest_vid, "MLVStitcher", error);
+        export_failed = saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_FAST_PASS,
+                                       0, (uint32_t)longest_vid, "MLVStitcher", error);
     else
-        saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_COMPRESS, 0, longest_vid, "MLVStitcher", error);
+        export_failed = saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_COMPRESS,
+                                       0, (uint32_t)longest_vid, "MLVStitcher", error);
+
+    if (export_failed) {
+        freeMlvObject(mlv_object);
+        fclose(mlv_output_file);
+        remove(OutputPath);
+        return;
+    }
 
     uint16_t * buffer16 = malloc(sizeof(uint16_t) * frame_size);
     uint8_t * buffer_compressed = malloc(compressed_capacity);
@@ -412,7 +422,6 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         return;
     }
 
-    int export_failed = 0;
     for (uint64_t f = 0; f < longest_vid; ++f)
     {
         printf("Exporting frame %" PRIu64 "/%" PRIu64 "\n", f, longest_vid);
@@ -456,12 +465,18 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         int chunk = mlv_object->video_index[f].chunk_num;
         uint64_t block_offset = mlv_object->video_index[f].block_offset;
         /* read VIDF block header */
-        file_set_pos(mlv_object->file[chunk], block_offset, SEEK_SET);
-        fread(&vidf_hdr, sizeof(mlv_vidf_hdr_t), 1, mlv_object->file[chunk]);
+        if (file_set_pos(mlv_object->file[chunk], block_offset, SEEK_SET) != 0
+            || fread(&vidf_hdr, sizeof(mlv_vidf_hdr_t), 1, mlv_object->file[chunk]) != 1) {
+            export_failed = 1;
+            break;
+        }
         vidf_hdr.frameSpace = 0;
         vidf_hdr.blockSize = sizeof(mlv_vidf_hdr_t) + frame_size_compressed;
-        fwrite(&vidf_hdr, sizeof(mlv_vidf_hdr_t), 1, mlv_output_file);
-        fwrite(buffer_compressed, frame_size_compressed, 1, mlv_output_file);
+        if (fwrite(&vidf_hdr, sizeof(mlv_vidf_hdr_t), 1, mlv_output_file) != 1
+            || fwrite(buffer_compressed, frame_size_compressed, 1, mlv_output_file) != 1) {
+            export_failed = 1;
+            break;
+        }
     }
 
     free(buffer16);
@@ -474,7 +489,7 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 
     freeMlvObject(mlv_object);
 
-    fclose(mlv_output_file);
+    if (fclose(mlv_output_file) != 0) export_failed = 1;
 
     if (export_failed) {
         remove(OutputPath);

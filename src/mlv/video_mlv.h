@@ -1,6 +1,8 @@
 #ifndef _video_mlv_
 #define _video_mlv_
 
+#include <stddef.h>
+
 #include "raw.h"
 #include "mlv.h"
 #include "../processing/raw_processing.h"
@@ -29,6 +31,13 @@ void printMlvInfo(mlvObject_t * video);
 int openMlvClip(mlvObject_t * video, char * mlvPath, int open_mode, char * error_message);
 int openMcrawClip(mlvObject_t * video, char * mcrawPath, int open_mode, char * error_message);
 int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char * error_message);
+
+/* Validate hostile frame metadata before allocating/reading compressed or
+ * packed RAW bytes. Exposed for sizing regression tests. */
+int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
+                             uint32_t encoded_size,
+                             size_t * packed_size,
+                             size_t * allocation_size);
 
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };

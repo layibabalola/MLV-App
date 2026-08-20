@@ -12129,8 +12129,29 @@ ProcessResult MainWindow::exportCdngSequence(
     }
 
     /* Render one frame for raw correction init */
-    uint32_t frameSize = getMlvWidth( mlvObject ) * getMlvHeight( mlvObject ) * 3;
-    uint16_t *imgBuffer = (uint16_t *)malloc( frameSize * sizeof( uint16_t ) );
+    const size_t rawWidth = static_cast<size_t>( getMlvWidth( mlvObject ) );
+    const size_t rawHeight = static_cast<size_t>( getMlvHeight( mlvObject ) );
+    if( rawWidth == 0 || rawHeight == 0
+        || rawWidth > SIZE_MAX / rawHeight
+        || rawWidth * rawHeight > SIZE_MAX / 3u
+        || rawWidth * rawHeight * 3u > SIZE_MAX / sizeof( uint16_t ) )
+    {
+        freeDngObject( cinemaDng );
+        result.success = false;
+        result.errorMessage = QStringLiteral("Invalid DNG export dimensions");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
+    const size_t frameSize = rawWidth * rawHeight * 3u;
+    uint16_t *imgBuffer = static_cast<uint16_t *>( malloc( frameSize * sizeof( uint16_t ) ) );
+    if( !imgBuffer )
+    {
+        freeDngObject( cinemaDng );
+        result.success = false;
+        result.errorMessage = QStringLiteral("Could not allocate DNG processing buffer");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
     getMlvProcessedFrame16( mlvObject, 0, imgBuffer, mlvappEffectiveWorkerThreadCount() );
     free( imgBuffer );
 

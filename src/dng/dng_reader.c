@@ -307,6 +307,21 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
     return 0;
 }
 
+int dng_reader_strip_allocation_size(const dng_frame_info_t * info,
+                                     uint64_t file_size,
+                                     size_t * allocation_size)
+{
+    if(!info || !allocation_size || !info->valid
+       || info->strip_byte_count == 0
+       || info->strip_offset > file_size
+       || info->strip_byte_count > file_size - info->strip_offset
+       || info->strip_byte_count > (uint64_t)(SIZE_MAX - 4u))
+        return 0;
+
+    *allocation_size = (size_t)info->strip_byte_count + 4u;
+    return 1;
+}
+
 /* ------------------------------------------------------------------ */
 /* Per-frame fetch.                                                    */
 /* ------------------------------------------------------------------ */
@@ -329,11 +344,20 @@ int dng_sequence_get_bayer16(const dng_sequence_t * seq, uint32_t index, uint16_
     FILE * f = fopen(seq->paths[index], "rb");
     if(!f) return 1;
 
-    if(fseek(f, (long)fi.strip_offset, SEEK_SET) != 0) { fclose(f); return 1; }
+    if(fi.strip_offset > (uint64_t)LONG_MAX
+       || fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+    const long file_end = ftell(f);
+    size_t allocation_size = 0;
+    if(file_end < 0
+       || !dng_reader_strip_allocation_size(&fi, (uint64_t)file_end, &allocation_size)
+       || fseek(f, (long)fi.strip_offset, SEEK_SET) != 0) {
+        fclose(f);
+        return 1;
+    }
 
-    uint8_t * strip = (uint8_t *)malloc(fi.strip_byte_count + 4); /* +4 LJ92 safety */
+    uint8_t * strip = (uint8_t *)malloc(allocation_size); /* +4 LJ92 safety */
     if(!strip) { fclose(f); return 1; }
-    size_t rd = fread(strip, 1, fi.strip_byte_count, f);
+    size_t rd = fread(strip, 1, (size_t)fi.strip_byte_count, f);
     fclose(f);
     if(rd != fi.strip_byte_count) { free(strip); return 1; }
 

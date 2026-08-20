@@ -20,6 +20,10 @@
 #include "../../src/librtprocess/src/include/librtprocess.h"
 #include "../../src/ca_correct/CA_correct_RT.h"
 #include "../../src/dng/dng.h"
+#include "../../src/dng/dng_reader.h"
+extern "C" {
+#include "../../src/mlv/video_mlv.h"
+}
 
 // These kernels must reject hostile extents without dereferencing their image inputs.
 
@@ -250,17 +254,64 @@ TEST(SecuritySizing, DngCompressorRejectsExpansionBeyondCallerCapacity)
         ASSERT_EQ(UINT16_C(0xa55a), value);
     }
 
-    uint16_t packed[16] = {};
+    struct ExactPackedPayload
+    {
+        uint16_t words[14];
+        uint16_t canary;
+    } packedPayload = {{}, UINT16_C(0x6b3d)};
+    uint16_t * packed = packedPayload.words;
     uint16_t unpacked[16] = {};
     for (size_t i = 0; i < 16; ++i) input[i] = static_cast<uint16_t>(i * 701u);
     dng_pack_image_bits(packed, input, 4, 4, 14, 0);
+    ASSERT_EQ(UINT16_C(0x6b3d), packedPayload.canary);
     dng_unpack_image_bits(unpacked, packed, 4, 4, 14);
     for (size_t i = 0; i < 16; ++i)
     {
         ASSERT_EQ(input[i], unpacked[i]);
     }
 
+    uint16_t sixteenBitPacked[16] = {};
+    uint16_t sixteenBitUnpacked[16] = {};
+    dng_pack_image_bits(sixteenBitPacked, input, 4, 4, 16, 0);
+    dng_unpack_image_bits(sixteenBitUnpacked, sixteenBitPacked, 4, 4, 16);
+    for (size_t i = 0; i < 16; ++i)
+    {
+        ASSERT_EQ(input[i], sixteenBitUnpacked[i]);
+    }
+
     ASSERT_TRUE(saveDngFrame(nullptr, nullptr, 0, nullptr, nullptr) != 0);
+}
+
+TEST(SecuritySizing, RawInputMetadataCannotSelectAnOversizedRead)
+{
+    size_t packedSize = 0;
+    size_t allocationSize = 0;
+    ASSERT_TRUE(mlvRawFrameInputCapacity(4, 4, 14, 0,
+                                         &packedSize, &allocationSize));
+    ASSERT_EQ(static_cast<size_t>(28), packedSize);
+    ASSERT_EQ(static_cast<size_t>(32), allocationSize);
+    ASSERT_TRUE(mlvRawFrameInputCapacity(4, 4, 14, 200,
+                                         &packedSize, &allocationSize));
+    ASSERT_EQ(static_cast<size_t>(204), allocationSize);
+    ASSERT_FALSE(mlvRawFrameInputCapacity(4, 4, 14, 249,
+                                          &packedSize, &allocationSize));
+    ASSERT_FALSE(mlvRawFrameInputCapacity(INT_MAX, INT_MAX, 14, 1,
+                                          &packedSize, &allocationSize));
+    ASSERT_FALSE(mlvRawFrameInputCapacity(1, 1, 14, 0,
+                                          &packedSize, &allocationSize));
+
+    dng_frame_info_t info = {};
+    info.valid = 1;
+    info.strip_offset = 12;
+    info.strip_byte_count = 20;
+    ASSERT_TRUE(dng_reader_strip_allocation_size(&info, 64, &allocationSize));
+    ASSERT_EQ(static_cast<size_t>(24), allocationSize);
+
+    info.strip_byte_count = UINT64_MAX;
+    ASSERT_FALSE(dng_reader_strip_allocation_size(&info, UINT64_MAX,
+                                                   &allocationSize));
+    info.strip_byte_count = 60;
+    ASSERT_FALSE(dng_reader_strip_allocation_size(&info, 64, &allocationSize));
 }
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)

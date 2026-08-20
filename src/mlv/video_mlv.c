@@ -2856,13 +2856,51 @@ static void frame_index_sort(frame_index_t *frame_index, uint32_t entries)
     } while (n > 1);
 }
 
+int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
+                             uint32_t encoded_size,
+                             size_t * packed_size,
+                             size_t * allocation_size)
+{
+    if(!packed_size || !allocation_size || width <= 0 || height <= 0
+       || bitdepth <= 0 || bitdepth > 16
+       || (size_t)width > SIZE_MAX / (size_t)height)
+        return 0;
+
+    const size_t pixels = (size_t)width * (size_t)height;
+    if(pixels == 0 || pixels > (size_t)INT_MAX
+       || pixels > (SIZE_MAX - 7u) / (size_t)bitdepth
+       || pixels > (SIZE_MAX - 200u) / 3u)
+        return 0;
+
+    const size_t packed_bits = pixels * (size_t)bitdepth;
+    if((packed_bits & 15u) != 0) return 0;
+    const size_t packed = packed_bits / 8u;
+    const size_t max_encoded = pixels * 3u + 200u;
+    if(max_encoded > (size_t)INT_MAX
+       || (encoded_size != 0 && (size_t)encoded_size > max_encoded))
+        return 0;
+
+    const size_t selected = (size_t)encoded_size > packed
+        ? (size_t)encoded_size : packed;
+    if(selected > SIZE_MAX - 4u) return 0;
+
+    *packed_size = packed;
+    *allocation_size = selected + 4u;
+    return 1;
+}
+
 /* Unpack or decompress original raw data */
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame)
 {
     int bitdepth = video->RAWI.raw_info.bits_per_pixel;
     int width = video->RAWI.xRes;
     int height = video->RAWI.yRes;
-    int pixels_count = width * height;
+    size_t packed_frame_size = 0;
+    size_t raw_frame_capacity = 0;
+    if(!mlvRawFrameInputCapacity(width, height, bitdepth, 0,
+                                 &packed_frame_size, &raw_frame_capacity))
+        return 1;
+    const int pixels_count = width * height;
 
     /* CinemaDNG folder source: there is no MLV/mcraw file[chunk] container.
      * Each frame is its own .dng file. Decode the requested frame's bayer
@@ -2916,10 +2954,16 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
     uint64_t frame_offset = video->video_index[frameIndex].frame_offset;
     uint64_t frame_header_offset = video->video_index[frameIndex].block_offset;
 
-    /* How many bytes is RAW frame */
-    int raw_frame_size = (width * height * bitdepth) / 8;
-    /* Memory buffer for original RAW data */
-    uint8_t * raw_frame = (uint8_t *)malloc(raw_frame_size + 4); // additional 4 bytes for safety
+    const int compressed_input = (isMcrawLoaded(video))
+        || (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92);
+    if(compressed_input && !(isMcrawLoaded(video))
+       && !mlvRawFrameInputCapacity(width, height, bitdepth, frame_size,
+                                    &packed_frame_size, &raw_frame_capacity))
+        return 1;
+    /* Additional four bytes preserve the legacy bit-unpack look-ahead while
+     * every read is bounded by the retained allocation capacity. */
+    uint8_t * raw_frame = (uint8_t *)malloc(raw_frame_capacity);
+    if(!raw_frame) return 1;
 
     g_mlv_last_raw_uint16_disk_read_ms = 0.0;
     g_mlv_last_raw_uint16_decompress_ms = 0.0;
@@ -2974,7 +3018,30 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 
         frame_size = item.size;
 
-        if (fread(raw_frame, frame_size, 1, file) != 1)
+        size_t item_packed_size = 0;
+        size_t item_capacity = 0;
+        if(!mlvRawFrameInputCapacity(width, height, bitdepth, frame_size,
+                                     &item_packed_size, &item_capacity))
+        {
+            free(raw_frame);
+            pthread_mutex_unlock(video->main_file_mutex + chunk);
+            return 1;
+        }
+        if(item_capacity > raw_frame_capacity)
+        {
+            uint8_t * replacement = (uint8_t *)realloc(raw_frame, item_capacity);
+            if(!replacement)
+            {
+                free(raw_frame);
+                pthread_mutex_unlock(video->main_file_mutex + chunk);
+                return 1;
+            }
+            raw_frame = replacement;
+            raw_frame_capacity = item_capacity;
+        }
+
+        if ((size_t)frame_size > raw_frame_capacity - 4u
+            || fread(raw_frame, frame_size, 1, file) != 1)
         {
             DEBUG( printf("Frame data read error\n"); )
             free(raw_frame);
@@ -3021,10 +3088,14 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // !!untested!!
 
             // discard first row, discard first col
-            memmove(unpackedFrame, &unpackedFrame[width + 1], (width * (height - 1) * 2) - 2);
+            memmove(unpackedFrame, &unpackedFrame[width + 1],
+                    (size_t)width * (size_t)(height - 1) * sizeof(*unpackedFrame)
+                        - sizeof(*unpackedFrame));
 
             // copy row n-2 to row n
-            memcpy(&unpackedFrame[width * (height - 1)], &unpackedFrame[width * (height - 3)], width * 2);
+            memcpy(&unpackedFrame[width * (height - 1)],
+                   &unpackedFrame[width * (height - 3)],
+                   (size_t)width * sizeof(*unpackedFrame));
 
             // copy col n-2 to col n
             for (int i = 0; i < height; i++)
@@ -3043,7 +3114,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // !!untested!!
 
             // discard first col
-            memmove(unpackedFrame, &unpackedFrame[1], (width * height * 2) - 2);
+            memmove(unpackedFrame, &unpackedFrame[1],
+                    (size_t)pixels_count * sizeof(*unpackedFrame)
+                        - sizeof(*unpackedFrame));
 
             // copy col n-2 to col n
             for (int i = 0; i < height; i++)
@@ -3069,7 +3142,8 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
 
         if (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92)
         {
-            if(fread(raw_frame, frame_size, 1, file) != 1)
+            if((size_t)frame_size > raw_frame_capacity - 4u
+               || fread(raw_frame, frame_size, 1, file) != 1)
             {
                 DEBUG( printf("Frame data read error\n"); )
                 free(raw_frame);
@@ -3080,6 +3154,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             pthread_mutex_unlock(video->main_file_mutex + chunk);
             g_mlv_last_raw_uint16_disk_read_ms = (mlv_stage_timing_now() - disk_read_start) * 1000.0;
 
+            const int expected_width = width;
+            const int expected_height = height;
+            const int expected_bitdepth = bitdepth;
             int components = 1;
             lj92 decoder_object;
             const double decompress_start = mlv_stage_timing_now();
@@ -3095,8 +3172,20 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             }
             else
             {
+                if(width <= 0 || height <= 0 || components <= 0
+                   || (components != 1 && components != 2)
+                   || bitdepth != expected_bitdepth
+                   || (size_t)width > SIZE_MAX / (size_t)height
+                   || (size_t)width * (size_t)height > SIZE_MAX / (size_t)components
+                   || (size_t)width * (size_t)height * (size_t)components
+                        != (size_t)expected_width * (size_t)expected_height)
+                {
+                    lj92_close(decoder_object);
+                    free(raw_frame);
+                    return 1;
+                }
                 const double decompress_execute_start = mlv_stage_timing_now();
-                ret = lj92_decode(decoder_object, unpackedFrame, width * height * components, 0, NULL, 0);
+                ret = lj92_decode(decoder_object, unpackedFrame, pixels_count, 0, NULL, 0);
                 g_mlv_last_raw_uint16_decompress_execute_ms =
                     (mlv_stage_timing_now() - decompress_execute_start) * 1000.0;
                 g_mlv_last_raw_uint16_lj92_pred6_split_active =
@@ -3159,7 +3248,8 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
         }
         else /* If not compressed just unpack to 16bit */
         {
-            if(fread(raw_frame, raw_frame_size, 1, file) != 1)
+            if(packed_frame_size > raw_frame_capacity - 4u
+               || fread(raw_frame, packed_frame_size, 1, file) != 1)
             {
                 DEBUG( printf("Frame data read error\n"); )
                 free(raw_frame);
@@ -3170,19 +3260,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             pthread_mutex_unlock(video->main_file_mutex + chunk);
             g_mlv_last_raw_uint16_disk_read_ms = (mlv_stage_timing_now() - disk_read_start) * 1000.0;
 
-            uint32_t mask = (1 << bitdepth) - 1;
             const double unpack_start = mlv_stage_timing_now();
-            #pragma omp parallel for
-            for (int i = 0; i < pixels_count; ++i)
-            {
-                uint32_t bits_offset = i * bitdepth;
-                uint32_t bits_address = bits_offset / 16;
-                uint32_t bits_shift = bits_offset % 16;
-                uint32_t rotate_value = 16 + ((32 - bitdepth) - bits_shift);
-                uint32_t uncorrected_data = *((uint32_t *)&((uint16_t *)raw_frame)[bits_address]);
-                uint32_t data = ROR32(uncorrected_data, rotate_value);
-                unpackedFrame[i] = ((uint16_t)(data & mask));
-            }
+            dng_unpack_image_bits(unpackedFrame, (uint16_t *)raw_frame,
+                                  width, height, (uint32_t)bitdepth);
             g_mlv_last_raw_uint16_unpack_ms = (mlv_stage_timing_now() - unpack_start) * 1000.0;
         }
     }

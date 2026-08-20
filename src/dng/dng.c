@@ -60,8 +60,6 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define COERCE(x,lo,hi) MAX(MIN((x),(hi)),(lo))
 #define ABS(a) ((a) > 0 ? (a) : -(a))
-#define ROR32(v,a) ((v) >> (a) | (v) << (32-(a)))
-#define ROL32(v,a) ((v) << (a) | (v) >> (32-(a)))
 #define ROR16(v,a) ((v) >> (a) | (v) << (16-(a)))
 #define ROL16(v,a) ((v) << (a) | (v) >> (16-(a)))
 #define log2(x) log((float)(x))/log(2.)
@@ -1725,19 +1723,38 @@ static char * format_datetime(char * datetime, mlvObject_t * mlv_data)
 /* returns the size of uncompressed image data. does not include header */
 static size_t dng_get_image_size(mlvObject_t * mlv_data, int size_mode, uint64_t frame_index)
 {
+    if(!mlv_data) return 0;
     switch(size_mode)
     {
         case IMG_SIZE_PACKED:
-            return (size_t)mlv_data->RAWI.xRes
-                * (size_t)mlv_data->RAWI.yRes
-                * (size_t)mlv_data->RAWI.raw_info.bits_per_pixel / 8u;
+        {
+            const uint32_t bpp = mlv_data->RAWI.raw_info.bits_per_pixel;
+            if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+               || bpp == 0 || bpp > 16
+               || (size_t)mlv_data->RAWI.xRes > SIZE_MAX / (size_t)mlv_data->RAWI.yRes)
+                return 0;
+            const size_t pixels = (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes;
+            if(pixels > SIZE_MAX / (size_t)bpp) return 0;
+            const size_t bits = pixels * (size_t)bpp;
+            /* The legacy pack/unpack API exposes uint16_t words rather than a
+             * byte capacity. Refuse a partial final word so every caller and
+             * the bit helpers agree on the exact writable extent. */
+            return (bits & 15u) == 0 ? bits / 8u : 0;
+        }
             break;
         case IMG_SIZE_LOSLESS:
             return mlv_data->video_index[frame_index].frame_size;
             break;
         case IMG_SIZE_UNPACKED:
         default:
-            return (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes * 2u;
+            if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+               || (size_t)mlv_data->RAWI.xRes > SIZE_MAX / (size_t)mlv_data->RAWI.yRes)
+                return 0;
+            {
+                const size_t pixels = (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes;
+                return pixels <= SIZE_MAX / sizeof(uint16_t)
+                    ? pixels * sizeof(uint16_t) : 0;
+            }
             break;
     }
 }
@@ -2103,7 +2120,7 @@ void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, in
         return;
     }
     const size_t packed_words = (pixel_count * (size_t)bpp + 15u) / 16u;
-    uint32_t mask = (UINT32_C(1) << bpp) - 1u;
+    uint32_t mask = bpp == 16u ? UINT16_MAX : ((UINT32_C(1) << bpp) - 1u);
     uint16_t *packed_bits = input_buffer;
     uint16_t *unpacked_bits = output_buffer;
 
@@ -2114,16 +2131,19 @@ void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, in
         const size_t bits_address = bits_offset / 16u;
         const uint32_t bits_shift = (uint32_t)(bits_offset % 16u);
 
-        /* fetch two 16 bit words into a 32 bit register and correct it plus shift it as needed.
-        after the 32 bit fetch, the two 16 bit words will be swapped, so use a ROR to align them correctly.
-        ROR by 16 to swap 16 bit words plus the bits needed to put the needed pixel bits to right position */
-        uint32_t rotate_value = 16 + ((32 - bpp) - bits_shift);
-        const uint32_t low_word = packed_bits[bits_address];
-        const uint32_t high_word = bits_address + 1u < packed_words
-            ? packed_bits[bits_address + 1u] : 0u;
-        const uint32_t uncorrected_data = low_word | (high_word << 16u);
-        uint32_t data = ROR32(uncorrected_data, rotate_value);
-
+        const uint32_t first_bits = 16u - bits_shift;
+        uint32_t data;
+        if (first_bits >= bpp) {
+            data = (uint32_t)packed_bits[bits_address] >> (first_bits - bpp);
+        } else {
+            const uint32_t remaining_bits = bpp - first_bits;
+            const uint32_t low_part = (uint32_t)packed_bits[bits_address]
+                & ((UINT32_C(1) << first_bits) - 1u);
+            const uint32_t high_part = bits_address + 1u < packed_words
+                ? (uint32_t)packed_bits[bits_address + 1u] >> (16u - remaining_bits)
+                : 0u;
+            data = (low_part << remaining_bits) | high_part;
+        }
         unpacked_bits[pixel_index] = (uint16_t)(data & mask);
     }
 }
@@ -2145,29 +2165,44 @@ void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int 
     if (pixel_count > SIZE_MAX / (size_t)bpp) {
         return;
     }
-    uint32_t bits_free = 16 - bpp;
+    const size_t total_bits = pixel_count * (size_t)bpp;
+    /* All production callers retain 16-bit-word packed payloads. Refuse an
+     * odd trailing byte because this legacy pointer-only API has no capacity
+     * parameter with which to prove that a final full word is writable. */
+    if ((total_bits & 15u) != 0) {
+        return;
+    }
+    const size_t packed_words = (total_bits + 15u) / 16u;
+    const uint32_t mask = bpp == 16u ? UINT16_MAX : ((UINT32_C(1) << bpp) - 1u);
     uint16_t *unpacked_bits = input_buffer;
     uint16_t *packed_bits = output_buffer;
 
-    packed_bits[0] = unpacked_bits[0] << bits_free;
-    for (size_t pixel_index = 1; pixel_index < pixel_count; pixel_index++)
+    memset(packed_bits, 0, packed_words * sizeof(*packed_bits));
+    for (size_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
     {
-        uint32_t bits_offset = (uint32_t)((pixel_index * (size_t)bits_free) % 16u);
-        uint32_t bits_to_rol = bits_free + bits_offset + (bits_offset > 0) * 16;
+        const size_t bits_offset = pixel_index * (size_t)bpp;
+        const size_t bits_address = bits_offset / 16u;
+        const uint32_t bits_shift = (uint32_t)(bits_offset % 16u);
+        const uint32_t first_bits = 16u - bits_shift;
+        const uint32_t data = (uint32_t)unpacked_bits[pixel_index] & mask;
 
-        /* increment pointer by two bytes but fetch 32 bit words from input and outbut buffers.
-        after the 32 bit fetch, the two 16 bit words will be swapped, so use a ROL by 16 to swap
-        16 bit words plus shift to the left to put the needed pixel bits to right position.
-        mask/zero high 16 bits of 32 bit word of packed buffer and do logical OR to ROLed unpacked one.
-        make current packed 16 bit word big endian to satisfy DNG spec */
-        uint32_t data = ROL32((uint32_t)unpacked_bits[pixel_index], bits_to_rol);
-        packed_bits[0] = (uint16_t)(packed_bits[0] | (uint16_t)data);
-        packed_bits[1] = (uint16_t)(data >> 16u);
+        if (first_bits >= bpp) {
+            packed_bits[bits_address] = (uint16_t)(packed_bits[bits_address]
+                | (uint16_t)(data << (first_bits - bpp)));
+        } else {
+            const uint32_t remaining_bits = bpp - first_bits;
+            packed_bits[bits_address] = (uint16_t)(packed_bits[bits_address]
+                | (uint16_t)(data >> remaining_bits));
+            if (bits_address + 1u < packed_words) {
+                packed_bits[bits_address + 1u] = (uint16_t)(packed_bits[bits_address + 1u]
+                    | (uint16_t)(data << (16u - remaining_bits)));
+            }
+        }
+    }
 
-        if(bits_offset > 0 && bits_offset <= bpp)
-        {
-            if(big_endian) *(uint16_t *)packed_bits = ROL16(*(uint16_t *)packed_bits, 8);
-            packed_bits++;
+    if (big_endian) {
+        for (size_t word_index = 0; word_index < packed_words; ++word_index) {
+            packed_bits[word_index] = ROL16(packed_bits[word_index], 8);
         }
     }
 }
@@ -2209,10 +2244,9 @@ int dng_decompress_image(uint16_t * output_buffer, size_t output_buffer_capacity
     } else {
         decoded_pixels = (size_t)width * (size_t)height * (size_t)components;
     }
-    /* MLV-App's lossless encoder represents the row-paired Bayer stream as
-     * two LJ92 components. Accept only the native one- or two-component
-     * layouts, and require their decoded sample total and bit depth to match
-     * the caller's retained RAW geometry exactly. */
+    /* Native output is one component. Retain compatibility with valid
+     * two-component lossless JPEGs only when their decoded sample total and
+     * bit depth match the caller's retained RAW geometry exactly. */
     if (ret == LJ92_ERROR_NONE
         && ((components != 1 && components != 2) || decoded_bpp != (int)expected_bpp
             || decoded_pixels != expected_pixels || expected_pixels > (size_t)INT_MAX)) {
@@ -2605,6 +2639,11 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         else /* If uncompressed, unpack to 16bit or pass trough */
         {
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0 || dng_data->image_size > dng_data->image_capacity)
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return LJ92_ERROR_CORRUPT;
+            }
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
@@ -2692,6 +2731,13 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
         return NULL;
     }
 
+    if(mlv_data->RAWI.xRes == 0 || mlv_data->RAWI.yRes == 0
+       || mlv_data->RAWI.raw_info.bits_per_pixel == 0
+       || mlv_data->RAWI.raw_info.bits_per_pixel > 16) {
+        free(dng_data);
+        return NULL;
+    }
+
     dng_data->fps_float = fps;
     memcpy(dng_data->par, par, sizeof(int32_t) * 4);
 
@@ -2703,7 +2749,8 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
 
     dng_data->image_size_unpacked = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, 0);
     size_t compressed_capacity = 0;
-    if(!dng_lj92_output_capacity(mlv_data->RAWI.xRes,
+    if(dng_data->image_size_unpacked == 0
+       || !dng_lj92_output_capacity(mlv_data->RAWI.xRes,
                                  mlv_data->RAWI.yRes,
                                  &compressed_capacity)) {
         free(dng_data->header_buf);
