@@ -192,10 +192,10 @@ static QString build_helper(bool enable_avx)
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
     prepend_to_path(&environment,
                     {QFileInfo(qmake).absolutePath(), QFileInfo(make_tool).absolutePath()});
+    environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX"));
+    environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX2"));
     if (enable_avx) {
         environment.insert(QStringLiteral("MLVAPP_ENABLE_AVX"), QStringLiteral("1"));
-    } else {
-        environment.remove(QStringLiteral("MLVAPP_ENABLE_AVX"));
     }
 
     QString output;
@@ -264,6 +264,11 @@ TEST(AvxParity, DefaultAndAvxBuildsProduceMatchingFrameHashes)
 
     QJsonObject default_output = run_helper_and_collect(default_helper);
     QJsonObject avx_output = run_helper_and_collect(avx_helper);
+
+    ASSERT_TRUE(default_output.value(QStringLiteral("build_avx")).isBool());
+    ASSERT_FALSE(default_output.value(QStringLiteral("build_avx")).toBool());
+    ASSERT_TRUE(avx_output.value(QStringLiteral("build_avx")).isBool());
+    ASSERT_TRUE(avx_output.value(QStringLiteral("build_avx")).toBool());
 
     default_output.remove(QStringLiteral("build_avx"));
     avx_output.remove(QStringLiteral("build_avx"));
