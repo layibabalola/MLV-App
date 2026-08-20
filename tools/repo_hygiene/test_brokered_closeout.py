@@ -2582,7 +2582,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
             repo,
             {
                 "validation": {
-                    "timeoutMs": 2500,
+                    # Allow a loaded Windows host to start Python and its child;
+                    # the test is about bounded termination, not startup speed.
+                    "timeoutMs": 7500,
                     "maxOutputBytes": 8192,
                     "commands": [
                         {
@@ -2608,6 +2610,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(results[0]["returncode"], 124, results)
         self.assertTrue(results[0]["timedOut"], results)
         self.assertTrue(results[0]["killedProcessTree"], results)
+        self.assertTrue(pid_path.is_file(), results)
         descendant_pid = int(pid_path.read_text(encoding="utf-8"))
         for _ in range(30):
             if not process_is_running(descendant_pid):
