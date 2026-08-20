@@ -612,8 +612,10 @@ requested playback, settling, and capture windows. A hung app is terminated as
 a full process tree, stdout/stderr are drained with bounded waits, and the
 result records timeout exit `124` plus kill/drain evidence. Exact
 `-TargetPresentedFrames` runs cannot use `-LegacyGuiSmokeOptions`, and the
-target frame is included in timing accumulators before synchronous stop/final
-telemetry. Missing screenshots and nonzero child exits are written into the
+target frame is included in timing accumulators and the timeline is pinned to
+that actually presented frame before synchronous stop/final telemetry. This
+prevents an already-advanced timeline from redrawing a later paused frame into
+the screenshot. Missing screenshots and nonzero child exits are written into the
 durable result before the wrapper returns failure.
 For playback backend-selection evidence, pass `-GpuPlaybackReconBackend <name>`
 to `run-release-playback-profile.ps1`, `run-release-gui-smoke.ps1`, or the

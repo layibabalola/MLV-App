@@ -762,6 +762,21 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
     assert stop_index > note_body.rindex("m_playbackSmokeRenderTotalSumMs +=")
     assert stop_index > note_body.rindex("m_playbackSmokeDrawTotalSumMs +=")
     assert "Accumulate the target frame before stopping" in note_body[stop_index:]
+    stop_body = note_body[stop_index:]
+    pin_index = stop_body.index("m_playbackInternalSliderAdvance = true")
+    set_value_index = stop_body.index(
+        "ui->horizontalSliderPosition->setValue(", pin_index
+    )
+    clear_guard_index = stop_body.index(
+        "m_playbackInternalSliderAdvance = false", set_value_index
+    )
+    stop_playback_index = stop_body.index(
+        "ui->actionPlay->setChecked( false )", clear_guard_index
+    )
+    assert "static_cast<int>( displayFrame )" in stop_body[
+        set_value_index:clear_guard_index
+    ]
+    assert pin_index < set_value_index < clear_guard_index < stop_playback_index
     assert NEUTRAL_RECEIPT.read_text(encoding="utf-8") == (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<receipt version="4">\n'

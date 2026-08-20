@@ -25054,9 +25054,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     {
         // Accumulate the target frame before stopping. setChecked(false)
         // synchronously finalizes smoke telemetry, so stopping earlier would
-        // count frame N while reporting only N-1 timing samples. This remains
-        // inside the presentation callback and therefore still runs before
-        // drawFrameReady can schedule the next playback request.
+        // count frame N while reporting only N-1 timing samples. Playback may
+        // already have advanced the timeline while frame N was presenting;
+        // pin it back to the frame whose pixels were actually presented before
+        // the stop invalidates the generation and schedules the paused redraw.
+        // The internal-advance guard avoids a second generation invalidation;
+        // the play-stop transition performs the single authoritative fence.
+        m_playbackInternalSliderAdvance = true;
+        ui->horizontalSliderPosition->setValue(
+            static_cast<int>( displayFrame ) );
+        m_playbackInternalSliderAdvance = false;
         ui->actionPlay->setChecked( false );
     }
 }
