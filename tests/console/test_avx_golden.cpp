@@ -58,13 +58,56 @@ static QString find_tool(const QString & env_name, const QStringList & candidate
 
 static void prepend_to_path(QProcessEnvironment * environment, const QStringList & directories)
 {
-    QStringList parts = environment->value(QStringLiteral("PATH")).split(QDir::listSeparator(), Qt::SkipEmptyParts);
-    for (auto it = directories.crbegin(); it != directories.crend(); ++it) {
-        if (!it->isEmpty() && !parts.contains(*it, Qt::CaseInsensitive)) {
-            parts.prepend(*it);
+#ifdef Q_OS_WIN
+    QStringList parts;
+    for (const QString & directory : directories) {
+        if (!directory.isEmpty() && !parts.contains(directory, Qt::CaseInsensitive)) {
+            parts.append(directory);
         }
     }
+
+    const QString windows_root = qEnvironmentVariable("SystemRoot", QStringLiteral("C:/Windows"));
+    const QStringList system_directories = {
+        QDir(windows_root).filePath(QStringLiteral("System32")),
+        QDir(windows_root).absolutePath()
+    };
+    for (const QString & directory : system_directories) {
+        if (!parts.contains(directory, Qt::CaseInsensitive)) {
+            parts.append(directory);
+        }
+    }
+#else
+    QString inherited_path;
+    const QStringList inherited_keys = environment->keys();
+    for (const QString & key : inherited_keys) {
+        if (key.compare(QStringLiteral("PATH"), Qt::CaseInsensitive) == 0) {
+            if (!inherited_path.isEmpty() && !environment->value(key).isEmpty()) {
+                inherited_path.append(QDir::listSeparator());
+            }
+            inherited_path.append(environment->value(key));
+            environment->remove(key);
+        }
+    }
+
+    QStringList parts = inherited_path.split(QDir::listSeparator(), Qt::SkipEmptyParts);
+    for (const QString & directory : directories) {
+        if (!directory.isEmpty() && !parts.contains(directory, Qt::CaseInsensitive)) {
+            parts.prepend(directory);
+        }
+    }
+#endif
+
+    const QStringList keys = environment->keys();
+    for (const QString & key : keys) {
+        if (key.compare(QStringLiteral("PATH"), Qt::CaseInsensitive) == 0) {
+            environment->remove(key);
+        }
+    }
+#ifdef Q_OS_WIN
+    environment->insert(QStringLiteral("Path"), parts.join(QDir::listSeparator()));
+#else
     environment->insert(QStringLiteral("PATH"), parts.join(QDir::listSeparator()));
+#endif
 }
 
 static bool run_process(const QString & program,
@@ -163,6 +206,7 @@ static QString build_helper(bool enable_avx)
                                       &output);
     if (!qmake_ok) {
         qCritical().noquote() << "AVX parity qmake failed:" << output;
+        std::cerr << "AVX parity qmake failed: " << output.toStdString() << "\n";
     }
     ASSERT_TRUE(qmake_ok);
     const bool make_ok = run_process(make_tool,
@@ -172,6 +216,7 @@ static QString build_helper(bool enable_avx)
                                      &output);
     if (!make_ok) {
         qCritical().noquote() << "AVX parity helper build failed:" << output;
+        std::cerr << "AVX parity helper build failed: " << output.toStdString() << "\n";
     }
     ASSERT_TRUE(make_ok);
 
