@@ -1,0 +1,286 @@
+{
+  "schema": "mlv-app-universal-token-control-machine-observation-candidate/v1",
+  "status": "POINT_IN_TIME_OBSERVATION_ZERO_AUTHORITY",
+  "baseCandidate": {
+    "commit": "38ed4bbf9068cac80140297c74facdf522577704",
+    "tree": "e3a20b1227fe40a1550664ea92343f76c760baae",
+    "parent": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+    "artifactPath": "docs/universal-token-control-launcher-action-graph-census-candidate-2026-08-20.json",
+    "artifactGitBlobOid": "ba0e476429dbf0aad33ea2b96b76986f394673de",
+    "artifactBytes": 21007,
+    "artifactSha256": "sha256:52aef218ac9657f381f9166675722a2083fe525d1b09f4ffb03fdf96f5d4a506",
+    "acceptedCandidateOnly": true,
+    "adoptionTransferred": false,
+    "authorityTransferred": false
+  },
+  "observationBoundary": {
+    "kind": "READ_ONLY_POINT_IN_TIME_CURRENT_MACHINE_OBSERVATION",
+    "machineScope": "CURRENT_MACHINE_ONLY",
+    "eventLogCutoffRecordId": 1774790,
+    "eventLogCutoffUtc": "2026-08-20T16:39:02.5555858Z",
+    "currentMachineStateObserved": true,
+    "currentTaskDefinitionsClosed": false,
+    "scheduledTaskInventoryComplete": false,
+    "launcherInventoryComplete": false,
+    "actionGraphComplete": false,
+    "eventLogWindowCompleteHistory": false,
+    "semanticCompletenessClaimed": false,
+    "providerOrAuthInvoked": false,
+    "processOrTaskActionPerformed": false,
+    "machineFilesMutated": false
+  },
+  "machineInputs": [
+    {
+      "inputId": "MACHINE_SCHEDULED_TASK_REGISTRY",
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\SCHEDULED-TASK-REGISTRY.md",
+      "bytes": 26289,
+      "sha256": "sha256:340534b7632cdc0245cd9ed63878b6fb5c91a942bd57183dbbe3321385c112a2",
+      "lastWriteTimeUtc": "2026-08-19T16:31:33.1058137Z",
+      "readSucceeded": true,
+      "mutated": false
+    },
+    {
+      "inputId": "MACHINE_SCHEDULED_TASK_AUDITOR",
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\audit-scheduled-tasks.ps1",
+      "bytes": 22496,
+      "sha256": "sha256:0bb0ca5a7cb23b71bc309f8005e11c8acd692a7fea203dd75c57b2cf9b8979c6",
+      "lastWriteTimeUtc": "2026-08-01T01:26:32.4186232Z",
+      "readSucceeded": true,
+      "mutated": false
+    }
+  ],
+  "auditorObservation": {
+    "command": "pwsh -NoProfile -File C:\\Users\\obabalola\\.claude\\machine\\audit-scheduled-tasks.ps1",
+    "enumerationCall": "Get-ScheduledTask",
+    "enumerationScriptLine": 214,
+    "enumerationResult": "ACCESS_DENIED",
+    "reportEmittedAfterNonTerminatingError": true,
+    "reportedPopulation": 0,
+    "reportedRegistryEntries": 41,
+    "reportedLogCoverageHoursRounded": 56.9,
+    "populationUsableAsCurrentTaskCountProof": false,
+    "zeroPopulationMeansZeroTasks": false,
+    "currentTaskDefinitionsClosed": false,
+    "conclusion": "ACCESS_DENIED_ZERO_POPULATION_IS_NOT_ZERO_TASKS_AND_CANNOT_CLOSE_CURRENT_DEFINITIONS"
+  },
+  "taskSchedulerOperationalSlice": {
+    "channel": "Microsoft-Windows-TaskScheduler/Operational",
+    "selection": "RecordId >= 1755824 AND RecordId <= 1774790",
+    "firstRecordId": 1755824,
+    "lastRecordId": 1774790,
+    "firstEventId": 129,
+    "lastEventId": 102,
+    "firstUtc": "2026-08-18T07:52:03.0714055Z",
+    "lastUtc": "2026-08-20T16:39:02.5555858Z",
+    "coverageSeconds": 204419.4841803,
+    "coverageHours": 56.783190050083334,
+    "totalEvents": 18967,
+    "rollingBuffer": true,
+    "beforeWindowAbsenceProven": false,
+    "afterCutoffAbsenceProven": false,
+    "taskDefinitionEvidence": false,
+    "taskExistenceAtCutoffProvenOnlyForObservedTaskNames": true
+  },
+  "mlvNamedTaskObservation": {
+    "matchField": "TaskName",
+    "matchMode": "CASE_INSENSITIVE_SUBSTRING",
+    "matchLiteral": "mlv",
+    "distinctTaskNames": [
+      "\\MlvGpuProfileAgentWatchdogV2"
+    ],
+    "eventCount": 4092,
+    "tasks": [
+      {
+        "taskName": "\\MlvGpuProfileAgentWatchdogV2",
+        "eventCount": 4092,
+        "eventIdCounts": [
+          {
+            "eventId": 100,
+            "count": 682
+          },
+          {
+            "eventId": 102,
+            "count": 682
+          },
+          {
+            "eventId": 107,
+            "count": 682
+          },
+          {
+            "eventId": 129,
+            "count": 682
+          },
+          {
+            "eventId": 200,
+            "count": 682
+          },
+          {
+            "eventId": 201,
+            "count": 682
+          }
+        ],
+        "actionExecutables": [
+          "wscript.exe"
+        ],
+        "event201ResultCodeZeroCount": 682,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": 1755841,
+        "lastRecordId": 1774790,
+        "firstUtc": "2026-08-18T07:53:59.7067262Z",
+        "lastUtc": "2026-08-20T16:39:02.5555858Z",
+        "taskDefinitionRead": false,
+        "definitionOwnerInferredFromLog": false,
+        "mlvAppTarget": false,
+        "separateProjectClassificationFromRegistry": true
+      }
+    ]
+  },
+  "explicitMlvAppTargetPatternObservations": [
+    {
+      "pattern": "MLV-LaneIgnitionWatchdog",
+      "matchField": "TaskName",
+      "matchMode": "CASE_INSENSITIVE_SUBSTRING",
+      "eventCount": 0,
+      "absenceProof": false,
+      "interpretation": "NO_MATCH_IN_BOUNDED_ROLLING_WINDOW_ONLY"
+    },
+    {
+      "pattern": "mlv-app-dual-lane-codex-liveness",
+      "matchField": "TaskName",
+      "matchMode": "CASE_INSENSITIVE_SUBSTRING",
+      "eventCount": 0,
+      "absenceProof": false,
+      "interpretation": "NO_MATCH_IN_BOUNDED_ROLLING_WINDOW_ONLY"
+    },
+    {
+      "pattern": "APP_STORE_WAKE_FAMILY",
+      "matchField": "TaskName",
+      "matchMode": "CASE_INSENSITIVE_SUBSTRING",
+      "eventCount": 0,
+      "absenceProof": false,
+      "interpretation": "NO_MATCH_IN_BOUNDED_ROLLING_WINDOW_ONLY"
+    },
+    {
+      "pattern": "APP_STORE_MIRROR_FAMILY",
+      "matchField": "TaskName",
+      "matchMode": "CASE_INSENSITIVE_SUBSTRING",
+      "eventCount": 0,
+      "absenceProof": false,
+      "interpretation": "NO_MATCH_IN_BOUNDED_ROLLING_WINDOW_ONLY"
+    }
+  ],
+  "separateProjectClassification": {
+    "sourceInputId": "MACHINE_SCHEDULED_TASK_REGISTRY",
+    "registrySectionHeading": "MLV GPU profile bench — owner: MLV bench work (separate project, `G:\\Temp\\mlv-gpu-profile`)",
+    "registryTaskHeading": "\\MlvGpuProfileAgentWatchdogV2",
+    "ownerProject": "MLV_GPU_PROFILE_BENCH_SEPARATE_PROJECT",
+    "ownerPath": "G:\\Temp\\mlv-gpu-profile",
+    "classificationAppliedToObservedTask": true,
+    "classificationIsCurrentDefinitionProof": false,
+    "classificationTransfersToMlvApp": false
+  },
+  "creditDenials": [
+    {
+      "claim": "CURRENT_TASK_DEFINITIONS_CLOSED",
+      "credited": false,
+      "reason": "GET_SCHEDULED_TASK_ACCESS_DENIED"
+    },
+    {
+      "claim": "AUDITOR_POPULATION_USABLE",
+      "credited": false,
+      "reason": "ZERO_REPORTED_AFTER_ACCESS_DENIED_WHILE_REGISTRY_HAS_41_ENTRIES"
+    },
+    {
+      "claim": "SCHEDULED_TASK_INVENTORY_COMPLETE",
+      "credited": false,
+      "reason": "DEFINITIONS_UNREADABLE_AND_EVENT_LOG_IS_NOT_AN_INVENTORY"
+    },
+    {
+      "claim": "MLV_APP_TARGET_ACTIVITY_ABSENT",
+      "credited": false,
+      "reason": "ZERO_PATTERN_EVENTS_IN_ROLLING_WINDOW_IS_NOT_ABSENCE_PROOF"
+    },
+    {
+      "claim": "MLV_GPU_WATCHDOG_BELONGS_TO_MLV_APP_PROJECT",
+      "credited": false,
+      "reason": "MACHINE_REGISTRY_CLASSIFIES_IT_UNDER_SEPARATE_MLV_GPU_BENCH_PROJECT"
+    },
+    {
+      "claim": "COMPLETE_LAUNCHER_OR_ACTION_GRAPH",
+      "credited": false,
+      "reason": "OBSERVATION_IS_ONE_CHANNEL_ONE_RECORD_RANGE"
+    },
+    {
+      "claim": "QUALITY_OR_FUNCTIONALITY_PRESERVED",
+      "credited": false,
+      "reason": "NO_PRODUCT_EXECUTION_OR_BASELINE_AB_PERFORMED"
+    },
+    {
+      "claim": "ADOPT_DISTINGUISH_OR_REJECT_DISPOSITION",
+      "credited": false,
+      "reason": "NO_PROJECT_OWNER_DISPOSITION_PUBLISHED"
+    },
+    {
+      "claim": "INSTALLATION_OR_RUNTIME_ACTIVATION",
+      "credited": false,
+      "reason": "READ_ONLY_OBSERVATION_PERFORMED_NO_INSTALL_TRANSACTION"
+    }
+  ],
+  "uncreditedProofs": [
+    "COMPLETE_CURRENT_TASK_DEFINITIONS",
+    "COMPLETE_SCHEDULED_TASK_INVENTORY",
+    "COMPLETE_LAUNCHER_INVENTORY",
+    "COMPLETE_ACTION_GRAPH",
+    "EVENT_LOG_ABSENCE_OUTSIDE_PINNED_RANGE",
+    "MODEL_EFFORT_ROLE_PRESERVATION",
+    "QUALITY_EQUIVALENCE",
+    "FUNCTIONALITY_EQUIVALENCE",
+    "CURRENT_CLOSED_GATE_PROOF",
+    "PROJECT_OWNER_DISPOSITION",
+    "INSTALLATION",
+    "ADOPTION",
+    "RUNTIME_ACTIVATION",
+    "PROVIDER_RECEIPT"
+  ],
+  "reviewBoundary": {
+    "authorConflicted": true,
+    "authorMaySelfReview": false,
+    "freshIndependentReviewReceived": false,
+    "distinctAdjudicationReceived": false,
+    "priorReviewTransferAllowed": false,
+    "baseCandidateReviewTransferAllowed": false
+  },
+  "authority": {
+    "projectAdoption": false,
+    "fleetAdoption": false,
+    "dispositionCredit": false,
+    "installation": false,
+    "runtimeActivation": false,
+    "providerInvocation": false,
+    "authenticationAction": false,
+    "processSpawnResumeKill": false,
+    "schedulerOrTaskMutation": false,
+    "automationMutation": false,
+    "launcherMutation": false,
+    "automaticGateMutation": false,
+    "canaryCredit": false,
+    "mergeLandingPushRelease": false,
+    "qualityCredit": false,
+    "functionalityCredit": false,
+    "completenessCredit": false,
+    "absenceCredit": false
+  },
+  "nextLawfulStep": {
+    "kind": "AUTHORIZED_READ_ONLY_TASK_DEFINITION_ENUMERATION_THEN_OWNER_DISPOSITION",
+    "scope": "A separately authorized observer with Task Scheduler definition-read access must bind exact current MLV-App task definitions and reconcile them against the R35 launcher/action graph; any project-owner disposition, installation, or runtime activation remains a later separately reviewed transaction.",
+    "requiredOutput": "A new forward-only exact subject naming every readable and unreadable task-definition surface, typed definition and history outcomes, complete-or-incomplete inventory declaration, and zero inherited adoption authority.",
+    "forbiddenActions": [
+      "PROVIDER_OR_AUTH_INVOCATION",
+      "PROCESS_SPAWN_RESUME_OR_KILL",
+      "TASK_AUTOMATION_LAUNCHER_OR_GATE_MUTATION",
+      "LEASE_PACKET_QUEUE_OR_RUNTIME_MUTATION",
+      "MACHINE_FILE_MUTATION",
+      "ADOPTION_INSTALLATION_CANARY_OR_DISPOSITION_CREDIT"
+    ]
+  }
+}
