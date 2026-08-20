@@ -195,6 +195,18 @@ class BrokeredCloseoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="brokered-closeout-test-"))
         self.repo_counter = 0
+        self.acceptance_patcher = mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.validate_for_finalize",
+            return_value=None,
+        )
+        self.acceptance_patcher.start()
+        self.addCleanup(self.acceptance_patcher.stop)
+        self.acceptance_enforcement_patcher = mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.candidate_acceptance_enforced",
+            return_value=False,
+        )
+        self.acceptance_enforcement_patcher.start()
+        self.addCleanup(self.acceptance_enforcement_patcher.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tempdir, ignore_errors=True)
@@ -215,6 +227,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 "branchPrefix": "codex/work-block",
             },
             "validation": {"commands": []},
+            "candidateAcceptance": {
+                "enabled": False,
+                "requireReadyForFinalize": False,
+            },
             "paths": {
                 "generated": [".claude-state/**", ".codex-state/**", "**/__pycache__/**", "**/*.pyc"],
                 "sensitive": [".claude/**", ".claude", ".git/**", ".git"],
@@ -2566,7 +2582,9 @@ class BrokeredCloseoutTests(unittest.TestCase):
             repo,
             {
                 "validation": {
-                    "timeoutMs": 2500,
+                    # Allow a loaded Windows host to start Python and its child;
+                    # the test is about bounded termination, not startup speed.
+                    "timeoutMs": 7500,
                     "maxOutputBytes": 8192,
                     "commands": [
                         {
@@ -2592,6 +2610,7 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(results[0]["returncode"], 124, results)
         self.assertTrue(results[0]["timedOut"], results)
         self.assertTrue(results[0]["killedProcessTree"], results)
+        self.assertTrue(pid_path.is_file(), results)
         descendant_pid = int(pid_path.read_text(encoding="utf-8"))
         for _ in range(30):
             if not process_is_running(descendant_pid):

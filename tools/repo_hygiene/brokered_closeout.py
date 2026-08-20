@@ -772,6 +772,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "CLAUDE.md",
             "closeout.config.json",
             "tools/repo_hygiene/brokered_closeout.py",
+            "tools/repo_hygiene/candidate_acceptance.py",
+            "tools/repo_hygiene/test_candidate_acceptance.py",
+            "tools/factory/capture-github-acceptance.ps1",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
             "tools/closeout/Invoke-CloseoutCli.ps1",
@@ -817,6 +820,17 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "hardClean",
             "runtimeServices",
             "blockerAutoRemediation",
+            "candidateAcceptance",
+            "candidateAcceptance.schema",
+            "candidateAcceptance.enabled",
+            "candidateAcceptance.providerRepository",
+            "candidateAcceptance.requiredSurfaces",
+            "candidateAcceptance.batchUntilAllSurfacesTerminal",
+            "candidateAcceptance.carryApprovalsAcrossCandidateTuples",
+            "candidateAcceptance.agentApprovalsGrantHumanAuthority",
+            "candidateAcceptance.requireReadyForFinalize",
+            "toolingBaseline.enabled",
+            "toolingBaseline.requiredTestFiles",
             "closeoutAddendumPersistence",
             "finalizeLoop",
             "remediationFreeze",
@@ -1003,6 +1017,29 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
             "test_closeout_tooling_stale_reports_missing_power_shell_policy",
         ],
+        "requiredTestFiles": [
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_acceptance_uses_two_phase_target_pinned_activation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tuple_drift_never_carries_approval"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_agent_record_cannot_escalate_human_authority"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_finalize_requires_same_tuple_ready_before_content_review"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_github_capture_is_exact_head_terminal_and_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_content_reviewers_must_be_distinct_even_with_different_sessions"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_all_same_surface_blocking_findings_survive_consolidation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_configured_quorum_cannot_be_replaced_by_one_surface_ledger"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_rehashed_ready_state_with_blockers_is_incoherent_and_finalize_blocks"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_generic_records_cannot_impersonate_hosted_surfaces"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_provider_repository_and_annotation_shape_are_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_nonterminal_or_fabricated_provider_state_cannot_finalize"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_monotonic_chain_detects_deleted_same_tuple_blocker_history"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_diff_identity_is_independent_of_git_color_configuration"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_final_integration_tree_or_diff_drift_is_blocking"},
+        ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
@@ -1013,6 +1050,20 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_content_review_approval_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def target_candidate_acceptance_policy"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _activation_state"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_acceptance_enforced"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repository_has_canonical_acceptance_remote"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_identity"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def evaluate"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def content_review_gate_trust_error"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def integration_range_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1298,6 +1349,23 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "prunePatchEquivalentBranches": True,
         "maxConflictFilesForAgent": 8,
         "explicitProtectedWorktreeActions": [],
+    },
+    "candidateAcceptance": {
+        "enabled": False,
+        "schema": "candidate-acceptance.v1",
+        "stateRoot": ".claude-state/closeout/acceptance",
+        "providerRepository": "layibabalola/MLV-App",
+        "requiredSurfaces": [
+            "content-self",
+            "content-stranger-1",
+            "content-stranger-2",
+            "hosted-tests",
+            "hosted-codeql",
+        ],
+        "batchUntilAllSurfacesTerminal": True,
+        "carryApprovalsAcrossCandidateTuples": False,
+        "agentApprovalsGrantHumanAuthority": False,
+        "requireReadyForFinalize": False,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }
@@ -3505,6 +3573,25 @@ def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, 
     return True, None
 
 
+def repository_has_canonical_acceptance_remote(repo_root: Path) -> bool:
+    result = run_git(repo_root, ["config", "--get-regexp", r"^remote\..*\.url$"])
+    if result.returncode != 0:
+        return False
+    canonical_urls = {
+        "https://github.com/layibabalola/mlv-app",
+        "git@github.com:layibabalola/mlv-app",
+        "ssh://git@github.com/layibabalola/mlv-app",
+    }
+    for line in result.stdout.splitlines():
+        _, _, raw_url = line.partition(" ")
+        normalized = raw_url.strip().lower().rstrip("/")
+        if normalized.endswith(".git"):
+            normalized = normalized[:-4]
+        if normalized in canonical_urls:
+            return True
+    return False
+
+
 def verify_closeout_tooling_current(
     repo_root_arg: Path,
     config: Optional[Dict[str, Any]] = None,
@@ -3516,10 +3603,66 @@ def verify_closeout_tooling_current(
     config = config or load_closeout_config(repo_root)
     raw_config = read_json(repo_root / CONFIG_PATH, {}) if (repo_root / CONFIG_PATH).exists() else {}
     baseline = config.get("toolingBaseline", {})
-    if not bool(baseline.get("enabled", False)):
+    raw_acceptance = raw_config.get("candidateAcceptance") if isinstance(raw_config, dict) else None
+    acceptance_bearing = (
+        isinstance(raw_acceptance, dict) and raw_acceptance.get("schema") == "candidate-acceptance.v1"
+    ) or repository_has_canonical_acceptance_remote(repo_root)
+    if not bool(baseline.get("enabled", False)) and not acceptance_bearing:
         return {"ok": True, "status": "disabled", "missing": [], "updated": [], "plannedUpdates": []}
 
     missing: List[Dict[str, Any]] = []
+    if acceptance_bearing and baseline.get("enabled") is not True:
+        missing.append({"kind": "baseline_enabled", "key": "toolingBaseline.enabled", "expected": True})
+    default_baseline = DEFAULT_CLOSEOUT_CONFIG["toolingBaseline"]
+    mandatory_paths = {
+        "tools/repo_hygiene/candidate_acceptance.py",
+        "tools/repo_hygiene/test_candidate_acceptance.py",
+        "tools/factory/capture-github-acceptance.ps1",
+    }
+    configured_paths = {normalize_rel(str(path)) for path in baseline.get("paths", [])}
+    for path in sorted(mandatory_paths - configured_paths):
+        missing.append({"kind": "baseline_path", "path": path})
+
+    mandatory_config_keys = {
+        str(key)
+        for key in default_baseline.get("requiredConfigKeys", [])
+        if str(key).startswith("candidateAcceptance") or str(key) == "toolingBaseline.requiredTestFiles"
+    }
+    configured_keys = {str(key) for key in baseline.get("requiredConfigKeys", [])}
+    for key in sorted(mandatory_config_keys - configured_keys):
+        missing.append({"kind": "baseline_config_requirement", "key": key})
+
+    mandatory_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in default_baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    configured_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    for path, test_name in sorted(mandatory_test_files - configured_test_files):
+        missing.append({"kind": "baseline_test_requirement", "path": path, "test": test_name})
+
+    mandatory_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in default_baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+        and (
+            normalize_rel(str(item.get("path") or "")) == "tools/repo_hygiene/candidate_acceptance.py"
+            or str(item.get("contains") or "")
+            in {"def integration_range_evidence", "def repository_has_canonical_acceptance_remote"}
+        )
+    }
+    configured_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+    }
+    for path, contains in sorted(mandatory_symbols - configured_symbols):
+        missing.append({"kind": "baseline_symbol_requirement", "path": path, "contains": contains})
+
     for key in baseline.get("requiredConfigKeys", []):
         if config_path_value(raw_config, str(key)) is None:
             missing.append({"kind": "config_key", "key": str(key)})
@@ -3536,6 +3679,21 @@ def verify_closeout_tooling_current(
     for test_name in baseline.get("requiredTests", []):
         if str(test_name) not in test_text:
             missing.append({"kind": "test", "test": str(test_name), "path": normalize_rel(str(test_path.relative_to(repo_root))) if test_path.exists() else "tools/repo_hygiene/test_brokered_closeout.py"})
+    for required_test in baseline.get("requiredTestFiles", []):
+        if not isinstance(required_test, dict):
+            missing.append({"kind": "test", "test": str(required_test), "path": ""})
+            continue
+        path = normalize_rel(str(required_test.get("path") or ""))
+        test_name = str(required_test.get("test") or "")
+        candidate_path = repo_root / path
+        try:
+            candidate_path.resolve().relative_to(repo_root.resolve())
+        except (OSError, ValueError):
+            missing.append({"kind": "test", "test": test_name, "path": path})
+            continue
+        candidate_text = candidate_path.read_text(encoding="utf-8") if path and candidate_path.is_file() else ""
+        if not path or not test_name or test_name not in candidate_text:
+            missing.append({"kind": "test", "test": test_name, "path": path})
     for required in baseline.get("requiredSymbols", []):
         path = normalize_rel(str(required.get("path") or ""))
         contains = str(required.get("contains") or "")
@@ -6480,13 +6638,6 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
         return {"status": "blocked", **base_guard, "detection": detection}
-    content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
-    if content_guard:
-        reason = str(content_guard["reason"])
-        write_audit(repo_root, config, reason, content_guard, work_block_id=block_id, outcome="blocked")
-        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
-        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
-        return {"status": "blocked", **content_guard, "detection": detection}
     if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
         payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
         write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
@@ -6499,6 +6650,22 @@ def _finalize_work_block_once(
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repair_blocked"})
         return {"status": "blocked", "reason": "repair_blocked", "repair": repair, "detection": detection}
     detection = detect_work_block(repo_root, work_block_id=block_id)
+    from .candidate_acceptance import validate_for_finalize as validate_candidate_acceptance_for_finalize
+
+    acceptance_guard = validate_candidate_acceptance_for_finalize(repo_root, config, detection)
+    if acceptance_guard:
+        reason = str(acceptance_guard["reason"])
+        write_audit(repo_root, config, reason, acceptance_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **acceptance_guard, "detection": detection}
+    content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
+    if content_guard:
+        reason = str(content_guard["reason"])
+        write_audit(repo_root, config, reason, content_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **content_guard, "detection": detection}
     evidence = finalize_evidence(config, detection)
     evidence_hash = stable_hash(evidence)
     candidate_id = finalize_candidate_id(block_id)
@@ -6589,13 +6756,56 @@ def _finalize_work_block_once(
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "merge_failed"})
             return {"status": "blocked", "reason": "merge_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        diff_check = run_git(integration_path, ["diff", "--check"])
-        if diff_check.returncode != 0:
-            payload = {"operation": "git_diff_check", "returncode": diff_check.returncode, "stdout": diff_check.stdout[-4000:], "stderr": diff_check.stderr[-4000:]}
+        merged_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        final_range = integration_range_evidence(integration_path, target["head"], merged_head)
+        if final_range["diffCheckReturncode"] != 0:
+            payload = {
+                "operation": "git_diff_check",
+                "range": final_range["range"],
+                "returncode": final_range["diffCheckReturncode"],
+                "stdout": final_range["diffCheckStdout"][-4000:],
+                "stderr": final_range["diffCheckStderr"][-4000:],
+            }
             write_audit(repo_root, config, "validation_failure", payload, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
             return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
+        final_mismatches: Dict[str, Any] = {}
+        accepted: Dict[str, Any] = {}
+        from .candidate_acceptance import candidate_acceptance_enforced
+
+        try:
+            acceptance_enforced = candidate_acceptance_enforced(repo_root, config, detection)
+        except HygieneError as exc:
+            payload = {"operation": "candidate_acceptance_policy", "detail": str(exc)}
+            write_audit(repo_root, config, "candidate_acceptance_policy_invalid", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_policy_invalid"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_policy_invalid",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
+        if acceptance_enforced:
+            from .candidate_acceptance import (
+                final_integration_mismatches as candidate_acceptance_final_integration_mismatches,
+                latest_summary as candidate_acceptance_latest_summary,
+            )
+
+            accepted = candidate_acceptance_latest_summary(repo_root, config)
+            final_mismatches = candidate_acceptance_final_integration_mismatches(accepted, final_range)
+        if final_mismatches:
+            payload = {"operation": "candidate_acceptance_final_tree", "mismatches": final_mismatches, "range": final_range}
+            write_audit(repo_root, config, "candidate_acceptance_final_tree_mismatch", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_final_tree_mismatch"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_final_tree_mismatch",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
         validations = run_validations(
             repo_root,
             config,
@@ -6611,7 +6821,7 @@ def _finalize_work_block_once(
                 remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "validation_failed"})
             return {"status": "blocked", "reason": "validation_failed", "validations": validations, "runtimeLifecycle": runtime_lifecycle}
-        new_target_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        new_target_head = merged_head
         if target["mode"] == "remote":
             target_worktree_preflight = target_worktree_update_preflight(repo_root, target_branch, new_target_head)
             if target_worktree_preflight["status"] != "success":
@@ -7803,6 +8013,52 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
     }
 
 
+def integration_range_evidence(repo_path: Path, target_head: str, integration_head: str) -> Dict[str, Any]:
+    range_spec = "%s..%s" % (target_head, integration_head)
+    prefix = [
+        "-c", "color.ui=false",
+        "-c", "core.quotepath=false",
+        "-c", "diff.external=",
+        "-c", "diff.renames=false",
+        "-c", "diff.context=3",
+        "-c", "diff.interHunkContext=0",
+        "-c", "diff.indentHeuristic=false",
+    ]
+    diff_check = run_git(repo_path, prefix + ["diff", "--check", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", range_spec])
+    changed = run_git(
+        repo_path,
+        prefix
+        + ["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", target_head, integration_head],
+        check=True,
+    )
+    changed_paths = sorted({normalize_rel(path) for path in changed.stdout.split("\0") if normalize_rel(path)})
+    raw_identity = run_git(
+        repo_path,
+        prefix
+        + [
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--raw",
+            "-z",
+            "--full-index",
+            "--no-renames",
+            target_head,
+            integration_head,
+        ],
+        check=True,
+    )
+    return {
+        "range": range_spec,
+        "diffCheckReturncode": diff_check.returncode,
+        "diffCheckStdout": diff_check.stdout,
+        "diffCheckStderr": diff_check.stderr,
+        "integrationTree": tree_hash(repo_path, integration_head),
+        "diffSha256": hashlib.sha256(raw_identity.stdout.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "changedPaths": changed_paths,
+    }
+
+
 def simulate_clean_integration(
     repo_root: Path,
     config: Dict[str, Any],
@@ -7839,26 +8095,49 @@ def simulate_clean_integration(
                 "conflicts": conflicts,
                 "validationStatus": "not_reached",
             }
-        diff_check = run_git(integration_path, ["diff", "--check"])
-        if diff_check.returncode != 0:
+        integration_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        range_evidence = integration_range_evidence(integration_path, target_head, integration_head)
+        if range_evidence["diffCheckReturncode"] != 0:
             return {
                 "clean": False,
                 "reason": "diff_check_failed",
                 "attempt": attempt,
-                "returncode": diff_check.returncode,
-                "stdout": diff_check.stdout[-2000:],
-                "stderr": diff_check.stderr[-2000:],
+                "integrationHead": integration_head,
+                "integrationTree": range_evidence["integrationTree"],
+                "range": range_evidence["range"],
+                "returncode": range_evidence["diffCheckReturncode"],
+                "stdout": range_evidence["diffCheckStdout"][-2000:],
+                "stderr": range_evidence["diffCheckStderr"][-2000:],
                 "validationStatus": "diff_check_failed",
             }
-        validations = run_validations(repo_root, config, integration_path)
+        integration_tree = range_evidence["integrationTree"]
+        range_spec = range_evidence["range"]
+        changed_paths = range_evidence["changedPaths"]
+        diff_sha256 = range_evidence["diffSha256"]
+        validations = run_validations(repo_root, config, integration_path, changed_paths=changed_paths)
         failed = next((item for item in validations if item["returncode"] != 0), None)
         if failed:
-            return {"clean": False, "reason": "validation_failed", "attempt": attempt, "validations": validations, "validationStatus": "failed"}
+            return {
+                "clean": False,
+                "reason": "validation_failed",
+                "attempt": attempt,
+                "integrationHead": integration_head,
+                "integrationTree": integration_tree,
+                "range": range_spec,
+                "diffSha256": diff_sha256,
+                "changedPaths": changed_paths,
+                "validations": validations,
+                "validationStatus": "failed",
+            }
         return {
             "clean": True,
             "reason": "clean_merge_and_validation_passed",
             "attempt": attempt,
-            "integrationHead": git_stdout(integration_path, ["rev-parse", "HEAD"]),
+            "integrationHead": integration_head,
+            "integrationTree": integration_tree,
+            "range": range_spec,
+            "diffSha256": diff_sha256,
+            "changedPaths": changed_paths,
             "validations": validations,
             "validationStatus": "passed",
         }
@@ -8317,6 +8596,9 @@ def repo_state_snapshot(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    from .candidate_acceptance import latest_summary as candidate_acceptance_latest_summary
+
+    candidate_acceptance = candidate_acceptance_latest_summary(repo_root, config)
     ledger = repo_state_ledger_config(config)
     dashboard = repo_state_dashboard_spec(config)
     rollback = rollback_policy(config)
@@ -8433,6 +8715,7 @@ def repo_state_snapshot(
             "latestCloseoutCleanTruth": state_audits["latestCloseoutCleanTruth"],
             "history": closeout_history,
         },
+        "candidateAcceptance": candidate_acceptance,
         "dashboard": {
             "enabled": bool(dashboard.get("enabled", True)),
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),

@@ -9,6 +9,51 @@ are allowed when they are derived from repo-owned truth and do not become a
 second mutation authority. Its sticky local URL is
 `http://127.0.0.1:8765/closeout`.
 
+## Candidate Acceptance
+
+The dashboard's repo-state feed includes `candidateAcceptance`, a read-only
+summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
+`candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
+integration tree, range diff, policy, and validation plan into one exact tuple.
+The infrastructure lands in a deliberately dormant first phase. A later,
+separately reviewed candidate may activate only the two activation booleans
+against that landed target policy. Activation before the dormant policy exists,
+policy drift during activation, or any later disablement is fail-closed. This
+two-phase rule lands the code, provider adapter, path-aware test inventory, and
+symbol/config guards before the gate can authorize a finalize; the activation
+change is limited to the two booleans.
+Review and hosted surfaces bind that tuple and never carry forward after drift.
+Hosted surfaces are derived only from a content-addressed SHA-named GitHub check-run snapshot
+for the configured repository and exact feature head; generic review records cannot
+impersonate them. The latest ledger must be internally coherent and match its chained
+local history before the dashboard or finalize treats it as ready. Finalize independently
+re-queries the canonical GitHub repository and requires those live terminal check
+identities to equal the accepted records. Same-tuple revisions are anchored by a
+monotonic local chain: a missing row is invalid, and a recorded blocking verdict can
+only be cleared by a new candidate tuple.
+
+The acceptance state is deliberately batched:
+
+- `collecting`: at least one required surface has not reported a terminal verdict.
+- `changes_required`: all surfaces are terminal and one consolidated fix batch
+  contains every rehearsal/review/hosted blocker.
+- `ready`: the integrated rehearsal and every same-tuple surface passed.
+- `missing` or `invalid`: the generated feed is absent or fails its ledger hash.
+
+The dashboard must not offer approval, rebless, publication, redistribution, or
+provider-activation controls for this ledger. Agent and hosted verdicts are
+evidence only. Human-only authority boundaries continue to be enforced by their
+own registered policy actors. The human content-gate object must exactly match the
+copy loaded from the pinned target commit; disabling or repointing it in the same
+candidate blocks until a separately authorized policy change has landed.
+The local chain and fixed reviewer labels are non-cryptographic process evidence. They
+detect accidental drift and ordinary replay, but do not authenticate a human or resist
+a privileged actor rewriting the entire generated-state directory. They must never be
+described or consumed as a substitute for the separate registered human authority gate.
+Finalize repeats the exact integrated rehearsal after any eligibility repair and
+compares the real merge tree and canonical diff hash with the accepted tuple before
+updating or pushing the target.
+
 ## Operator Phases
 
 The dashboard should present the closeout flow as four explicit phases:

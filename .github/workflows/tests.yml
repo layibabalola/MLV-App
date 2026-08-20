@@ -96,6 +96,7 @@ jobs:
       - name: Run repo hygiene Python tests
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
+          python -m unittest tools.repo_hygiene.test_candidate_acceptance -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
           python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
           python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v

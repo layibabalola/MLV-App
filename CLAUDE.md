@@ -157,6 +157,15 @@ whenever feasible: update `AGENTS.md`/`CLAUDE.md` for agent policy,
 `tools/repo_hygiene/test_brokered_closeout.py` or tooling-baseline required
 symbols/tests for executable coverage. If implementation is not feasible,
 record an explicit closeout blocker or roadmap item before final response.
+Candidate acceptance uses a fail-closed two-phase rollout. Its first landing is
+deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`) while
+the acceptance code, hosted adapter, tests, and tooling-baseline inventory are
+already mandatory. A later, separately reviewed activation may change only
+those two booleans against the pinned dormant target policy. Once active, the
+five required surfaces, canonical repository, and finalize requirement cannot
+be weakened by candidate configuration. Candidate-acceptance records are
+non-authenticating process evidence and never replace the separately pinned
+human content-review gate, which remains mandatory in both phases.
 The shared hybrid closeout contract lives in
 [`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md) and its
 drift sentinel is [`CLOSEOUT-CANONICAL-CONTRACT.sha256`](CLOSEOUT-CANONICAL-CONTRACT.sha256);
