@@ -369,49 +369,235 @@ def _parse_tools(
     return dict(sorted(records.items()))
 
 
-def _inspect_executable_architecture(path: Path) -> dict[str, Any]:
-    _, digest, data = _read_file_snapshot(path, capture=True)
-    assert data is not None
+def _macho_header_identity(data: bytes, offset: int, limit: int) -> dict[str, str | int]:
+    magic = data[offset : offset + 4]
+    formats = {
+        b"\xfe\xed\xfa\xce": (">", 28),
+        b"\xce\xfa\xed\xfe": ("<", 28),
+        b"\xfe\xed\xfa\xcf": (">", 32),
+        b"\xcf\xfa\xed\xfe": ("<", 32),
+    }
+    if magic not in formats:
+        raise EvidenceError("Mach-O slice header has an invalid magic")
+    byte_order, header_size = formats[magic]
+    if offset < 0 or offset + header_size > limit or limit > len(data):
+        raise EvidenceError("Mach-O slice header is truncated")
+    cpu_type = struct.unpack_from(f"{byte_order}I", data, offset + 4)[0]
+    file_type = struct.unpack_from(f"{byte_order}I", data, offset + 12)[0]
+    architectures = {0x01000007: "x86_64", 0x0100000C: "arm64", 7: "x86"}
+    if cpu_type not in architectures:
+        raise EvidenceError(f"Mach-O slice has unsupported CPU type 0x{cpu_type:08x}")
+    architecture = architectures[cpu_type]
+    kinds = {2: "executable", 6: "shared-library", 8: "shared-library"}
+    if file_type not in kinds:
+        raise EvidenceError(f"Mach-O slice has unsupported file type {file_type}")
+    return {
+        "architecture": architecture,
+        "cpu_type": cpu_type,
+        "header_size": header_size,
+        "kind": kinds[file_type],
+    }
+
+
+def _inspect_executable_architecture(
+    path: Path,
+    *,
+    snapshot: tuple[str, bytes] | None = None,
+) -> dict[str, Any]:
+    if snapshot is None:
+        _, digest, data = _read_file_snapshot(path, capture=True)
+        assert data is not None
+    else:
+        digest, data = snapshot
     architectures: list[str]
     binary_format: str
     if data.startswith(b"MZ") and len(data) >= 64:
         pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
-        if pe_offset + 6 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
+        if pe_offset + 24 > len(data) or data[pe_offset : pe_offset + 4] != b"PE\0\0":
             raise EvidenceError("expected main executable has a malformed PE header")
         machine = struct.unpack_from("<H", data, pe_offset + 4)[0]
+        section_count = struct.unpack_from("<H", data, pe_offset + 6)[0]
+        optional_header_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+        characteristics = struct.unpack_from("<H", data, pe_offset + 22)[0]
+        optional_header_offset = pe_offset + 24
+        if (
+            section_count == 0
+            or optional_header_size < 2
+            or optional_header_offset + optional_header_size > len(data)
+            or optional_header_offset + optional_header_size + section_count * 40 > len(data)
+        ):
+            raise EvidenceError("expected main executable has an incomplete PE image header")
+        optional_magic = struct.unpack_from("<H", data, optional_header_offset)[0]
+        if optional_magic not in {0x10B, 0x20B}:
+            raise EvidenceError("expected main executable has an invalid PE optional-header magic")
+        if not characteristics & 0x0002:
+            raise EvidenceError("expected main executable PE header is not marked executable")
         architectures = [{0x8664: "x86_64", 0xAA64: "arm64", 0x14C: "x86"}.get(machine, f"unknown-0x{machine:04x}")]
         binary_format = "pe"
-    elif data.startswith(b"\x7fELF") and len(data) >= 20:
+    elif data.startswith(b"\x7fELF"):
+        elf_class = data[4] if len(data) > 4 else 0
+        header_size = {1: 52, 2: 64}.get(elf_class)
+        if header_size is None or len(data) < header_size:
+            raise EvidenceError("expected main executable has a truncated or invalid ELF header")
         byte_order = {1: "<", 2: ">"}.get(data[5])
         if byte_order is None:
             raise EvidenceError("expected main executable has an invalid ELF byte order")
+        if data[6] != 1 or struct.unpack_from(f"{byte_order}I", data, 20)[0] != 1:
+            raise EvidenceError("expected main executable has an invalid ELF version")
+        elf_type = struct.unpack_from(f"{byte_order}H", data, 16)[0]
+        if elf_type not in {2, 3}:
+            raise EvidenceError(f"expected main executable has unsupported ELF e_type {elf_type}")
+        elf_header_size = struct.unpack_from(f"{byte_order}H", data, 40 if elf_class == 1 else 52)[0]
+        expected_header_size = 52 if elf_class == 1 else 64
+        if elf_header_size != expected_header_size:
+            raise EvidenceError("expected main executable has an invalid ELF header size")
+        if elf_class == 1:
+            program_offset = struct.unpack_from(f"{byte_order}I", data, 28)[0]
+            program_entry_size = struct.unpack_from(f"{byte_order}H", data, 42)[0]
+            program_count = struct.unpack_from(f"{byte_order}H", data, 44)[0]
+            expected_program_entry_size = 32
+        else:
+            program_offset = struct.unpack_from(f"{byte_order}Q", data, 32)[0]
+            program_entry_size = struct.unpack_from(f"{byte_order}H", data, 54)[0]
+            program_count = struct.unpack_from(f"{byte_order}H", data, 56)[0]
+            expected_program_entry_size = 56
+        if (
+            program_count == 0
+            or program_entry_size != expected_program_entry_size
+            or program_offset < expected_header_size
+            or program_offset + program_entry_size * program_count > len(data)
+        ):
+            raise EvidenceError("expected main executable has an incomplete ELF program-header table")
+        program_types = {
+            struct.unpack_from(
+                f"{byte_order}I", data, program_offset + index * program_entry_size
+            )[0]
+            for index in range(program_count)
+        }
+        if 1 not in program_types:
+            raise EvidenceError("expected main executable ELF image has no loadable segment")
         machine = struct.unpack_from(f"{byte_order}H", data, 18)[0]
         architectures = [{62: "x86_64", 183: "arm64", 3: "x86"}.get(machine, f"unknown-{machine}")]
         binary_format = "elf"
     elif len(data) >= 8 and data[:4] in {
         b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe"
     }:
-        byte_order = ">" if data[:4] in {b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf"} else "<"
-        cpu_type = struct.unpack_from(f"{byte_order}I", data, 4)[0]
-        architectures = [{0x01000007: "x86_64", 0x0100000C: "arm64", 7: "x86"}.get(cpu_type, f"unknown-0x{cpu_type:08x}")]
+        identity = _macho_header_identity(data, 0, len(data))
+        architectures = [str(identity["architecture"])]
         binary_format = "macho"
     elif len(data) >= 8 and data[:4] in {
         b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca", b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"
     }:
         byte_order = ">" if data[:4] in {b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"} else "<"
-        entry_size = 32 if data[:4] in {b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"} else 20
+        is_64 = data[:4] in {b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca"}
+        entry_size = 32 if is_64 else 20
         count = struct.unpack_from(f"{byte_order}I", data, 4)[0]
-        if count == 0 or count > 32 or 8 + count * entry_size > len(data):
+        table_end = 8 + count * entry_size
+        if count == 0 or count > 32 or table_end > len(data):
             raise EvidenceError("expected main executable has a malformed Mach-O fat header")
         architectures = []
+        slice_ranges: list[tuple[int, int]] = []
+        slice_kinds: set[str] = set()
         for index in range(count):
-            cpu_type = struct.unpack_from(f"{byte_order}I", data, 8 + index * entry_size)[0]
-            architectures.append({0x01000007: "x86_64", 0x0100000C: "arm64", 7: "x86"}.get(cpu_type, f"unknown-0x{cpu_type:08x}"))
+            entry = 8 + index * entry_size
+            cpu_type = struct.unpack_from(f"{byte_order}I", data, entry)[0]
+            if is_64:
+                slice_offset = struct.unpack_from(f"{byte_order}Q", data, entry + 8)[0]
+                slice_size = struct.unpack_from(f"{byte_order}Q", data, entry + 16)[0]
+            else:
+                slice_offset = struct.unpack_from(f"{byte_order}I", data, entry + 8)[0]
+                slice_size = struct.unpack_from(f"{byte_order}I", data, entry + 12)[0]
+            slice_end = slice_offset + slice_size
+            if (
+                slice_offset < table_end
+                or slice_size == 0
+                or slice_end > len(data)
+                or any(slice_offset < prior_end and prior_start < slice_end for prior_start, prior_end in slice_ranges)
+            ):
+                raise EvidenceError(f"expected main executable has an invalid Mach-O fat slice {index}")
+            try:
+                identity = _macho_header_identity(data, slice_offset, slice_end)
+            except EvidenceError as exc:
+                raise EvidenceError(f"expected main executable has an invalid Mach-O slice header {index}: {exc}") from exc
+            slice_cpu_type = int(identity["cpu_type"])
+            if slice_cpu_type != cpu_type:
+                raise EvidenceError(f"expected main executable Mach-O fat table/slice CPU mismatch at {index}")
+            architecture = str(identity["architecture"])
+            if architecture in architectures:
+                raise EvidenceError(f"expected main executable repeats Mach-O architecture {architecture}")
+            architectures.append(architecture)
+            slice_kinds.add(str(identity["kind"]))
+            slice_ranges.append((slice_offset, slice_end))
+        if len(slice_kinds) != 1:
+            raise EvidenceError("expected main executable Mach-O fat slices disagree on binary kind")
         architectures = sorted(set(architectures))
         binary_format = "macho-fat"
     else:
         raise EvidenceError("expected main executable format is not PE, ELF, or Mach-O")
     return {"architectures": architectures, "format": binary_format, "sha256": digest}
+
+
+def _is_native_binary_prefix(prefix: bytes) -> bool:
+    return prefix.startswith((b"MZ", b"\x7fELF")) or prefix[:4] in {
+        b"\xfe\xed\xfa\xce",
+        b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    }
+
+
+def _assert_native_bundle_architecture(
+    inventory_root: Path,
+    inventory: dict[str, Any],
+    target_os: str,
+    target_arch: str,
+) -> list[dict[str, Any]]:
+    """Inspect every native inventory member, not only the declared main executable."""
+    expected_format = {"windows": "pe", "linux": "elf", "macos": "macho"}[target_os]
+    native_records: list[dict[str, Any]] = []
+    for inventory_record in inventory["files"]:
+        relative = inventory_record["path"]
+        candidate = inventory_root.joinpath(*PurePosixPath(relative).parts)
+        if _is_link_or_junction(candidate) or not candidate.is_file():
+            raise EvidenceError(f"inventory member is not a stable regular file: {relative}")
+        observed_size, observed_sha256, data = _read_file_snapshot(candidate, capture=True)
+        assert data is not None
+        if (
+            observed_size != inventory_record["size"]
+            or observed_sha256 != inventory_record["sha256"]
+        ):
+            raise EvidenceError(f"inventory member changed before native architecture admission: {relative}")
+        prefix = data[:8]
+        if not _is_native_binary_prefix(prefix):
+            continue
+        architecture = _inspect_executable_architecture(
+            candidate,
+            snapshot=(observed_sha256, data),
+        )
+        if not architecture["format"].startswith(expected_format):
+            raise EvidenceError(
+                f"native inventory member format mismatch for {relative}: target {target_os} "
+                f"requires {expected_format}, observed {architecture['format']}"
+            )
+        if target_arch not in architecture["architectures"]:
+            raise EvidenceError(
+                f"native inventory member architecture mismatch for {relative}: declared {target_arch}, "
+                f"observed {architecture['architectures']}"
+            )
+        native_records.append({"path": relative, **architecture})
+    if not native_records:
+        raise EvidenceError("staged release inventory contains no native binaries")
+    return native_records
+
+
+def _assert_inventory_unchanged(inventory_root: Path, expected: dict[str, Any]) -> None:
+    observed = inventory_path(inventory_root, logical_name=inventory_root.name)
+    if _canonical_bytes(observed) != _canonical_bytes(expected):
+        raise EvidenceError("staged release inventory changed before evidence publication")
 
 
 def _load_vendored_readiness(repo_root: Path, relative_path: str) -> dict[str, Any]:
@@ -582,6 +768,12 @@ def generate_evidence(
         target_os,
         target_arch,
     )
+    native_binaries = _assert_native_bundle_architecture(
+        inventory_root,
+        contents_inventory,
+        target_os,
+        target_arch,
+    )
     contents = inventory_document(contents_inventory)
 
     if product.is_dir():
@@ -632,6 +824,7 @@ def generate_evidence(
             "count": contents_inventory["file_count"] + contents_inventory["link_count"],
             "expected_main_executable": expected_main,
             "main_executable": main_executable,
+            "native_binaries": native_binaries,
             "inventory_sha256": contents["inventory_sha256"],
             "manifest": f"{label}.contents.json",
             "manifest_sha256": _sha256_bytes(_canonical_bytes(contents) + b"\n"),
@@ -642,6 +835,7 @@ def generate_evidence(
         "vendored_payloads": vendored,
     }
 
+    _assert_inventory_unchanged(inventory_root, contents_inventory)
     output_dir.mkdir(parents=True, exist_ok=True)
     contents_path = output_dir / f"{label}.contents.json"
     build_info_path = output_dir / f"{label}.build-info.json"

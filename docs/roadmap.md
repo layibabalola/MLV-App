@@ -71,7 +71,7 @@ queues in detail documents.
 | 5 | P0-D | DONE | Dual-ISO dither is deterministic for a frame regardless of scheduling | P0-C | repeat/thread/path determinism tests plus real-output baseline A/B |
 | 6 | P0-E | DONE | Histogram accumulation cannot wrap above 65,535 samples per bin | P0-D | synthetic overflow test, parity corpus, bounded performance result |
 | 7 | CI-1 | ACTIVE | Required CI gives trustworthy red/green signals, including GUI smoke | P0-E | restore/correct missing promotion record, independent GUI job, two hosted greens, then blocking status |
-| 8 | E4-1 | QUEUED | Headless batch takes one MLV clip and emits one playable H.264 MP4 | CI-1, P0-C | end-to-end CLI test, receipt/aspect parity, cancellation/error proof, real playable output |
+| 8 | E4-1 | DONE | Headless batch takes one MLV clip and emits one playable H.264 MP4 | CI-1, P0-C | integrated at `02e030bb`; end-to-end CLI test, receipt/aspect parity, cancellation/error proof, real playable output |
 | 9 | P1-A | QUEUED | GPU ABI v2 wording and extension negotiation are unambiguous before new kernels | E4-1 | header/loader/tests agree; unknown extensions fail safely; Claude + Opus design review |
 | 10 | P1-B | QUEUED | F1b/processing statistics expose stable, parser-friendly timing and fallback reasons | P1-A | schema/version tests, disabled-path silence, no hot-path regression |
 | 11 | Q7 | QUEUED | Highest-value remaining GPU stage is implemented behind a capability gate | P1-B | CPU oracle parity, fallback proof, 4090 proof, cross-path transfer report |
@@ -252,6 +252,8 @@ branch, remove its worktree, or treat a restore as new dirt. The broad
 protection prevents branch-oriented cleanup from bypassing that policy.
 
 ### E4-1 — ship the rendered-export walking skeleton
+
+Status: **DONE** at `02e030bb4e3c75eff39b3570fe9d57bd785814da`.
 
 Delete no contract types merely for aesthetic cleanup, but add no new framework
 until one clip reaches one MP4. Reuse the working GUI decode/process/render
