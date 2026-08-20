@@ -6,16 +6,16 @@
     "reason": "evidence_repair_precedes_repo_closed_postcondition",
     "status": "pending"
   },
-  "committedDeltaPathCount": 11,
-  "createdAt": "2026-08-20T19:16:55+00:00",
-  "detectorHash": "1940d37847db50b59783d7727aa81b59",
+  "committedDeltaPathCount": 15,
+  "createdAt": "2026-08-20T19:25:16+00:00",
+  "detectorHash": "abacc0c52c0b4f63e25292a7a2268e38",
   "dirtyCounts": {
     "foreignDirty": 0,
     "mixedDirty": 0,
     "ownedDirty": 0,
     "unownedDirty": 0
   },
-  "featureHead": "41b989ba5f499ac3464b374e0b3e44b084293fe3",
+  "featureHead": "ec006ce79d7fdc8199b56cb059c90d7b2579165e",
   "schemaVersion": "1.0",
   "targetHead": "74ebed4130f7136e8f50ed061a36ed4a1bb12529",
   "workBlockId": "wb-c2f9e373804f4932"
