@@ -7,9 +7,9 @@
     "reason": "evidence_repair_precedes_repo_closed_postcondition",
     "status": "pending"
   },
-  "createdAt": "2026-08-20T07:07:01+00:00",
-  "detectorHash": "90db9478b4f0e523253bf14b128a53cd",
-  "featureHead": "982b93bb4d432f289ea80edc61638e6d3f84d630",
+  "createdAt": "2026-08-20T08:07:10+00:00",
+  "detectorHash": "f9eb86ee7634be2a40b61362a95c7049",
+  "featureHead": "5cb9085b8a1e01cc1a9f6ff48f6ab9edea345f97",
   "schemaVersion": "1.0",
   "targetHead": "727f9febf38d7aa1d953f0f042ab84b50247d4dd",
   "workBlockId": "wb-421ee79fc5bf4f11",
