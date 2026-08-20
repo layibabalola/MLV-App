@@ -1,0 +1,566 @@
+{
+  "schema": "mlv-app-launcher-action-graph-census-candidate/v1",
+  "status": "CANDIDATE_ZERO_AUTHORITY",
+  "projectBase": {
+    "qualifiedRef": "refs/remotes/origin/master",
+    "commit": "30889f77e2000190b94d59f80f6a03b12ce3e0d3",
+    "tree": "d82ca4fdb9c2f45eb4bf169b4f5edfcc9a14100a",
+    "parent": "45b63b1eb1841ab216a0f5c2ff78b3938fb82f85",
+    "canonicalOrigin": "https://github.com/layibabalola/MLV-App.git",
+    "localAcquisitionOrigin": "C:\\code\\softwarefactory-fleet-doctrine-worktrees\\mlv-app-r26-disposition-candidate-20260819-01",
+    "masterQualified": true
+  },
+  "candidateBoundary": {
+    "kind": "PROJECT_OWNED_TRACKED_STATIC_CENSUS",
+    "semanticCompletenessClaimed": false,
+    "inventoryComplete": false,
+    "actionGraphComplete": false,
+    "installed": false,
+    "dispositionPublishedByCandidate": false,
+    "adoptionCredit": false,
+    "automaticGateState": "CLOSED",
+    "currentClosedGateProofCredited": false,
+    "gateObservedByCandidate": false,
+    "currentMachineStateObserved": false,
+    "providerOrAuthInvoked": false,
+    "processOrTaskActionPerformed": false
+  },
+  "baseTrackedEvidence": [
+    {
+      "path": "AGENTS.md",
+      "gitBlobOid": "4fda88533706544f6d3d2ddb8b9e4da4533b4324",
+      "sha256": "sha256:05f7d1293ff01b8b5ea86fbc71847c7b4229a2362cbacfea6ce8a7fb7316328d",
+      "bytes": 61002,
+      "requiredText": [
+        "output-equivalence **proven, not asserted**",
+        "A failed baseline is not a comparator.",
+        "Product-card completion requires a dedicated independent reviewer",
+        "handoffActor=CODEX",
+        "reviewActor=CLAUDE"
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/bootstrap_session.py",
+      "gitBlobOid": "9bc712a535d5e67b59a1f89d4ef9ec2bf24f5541",
+      "sha256": "sha256:577e2aa779f3ccf4b953a4a4475f03a715127fb3a4b69604bb574ed32fa3e705",
+      "bytes": 43843,
+      "requiredText": [
+        "watcher_script = Path(__file__).with_name(\"watcher.py\")",
+        "command = [sys.executable, str(watcher_script), \"--config\", str(watcher_config)]",
+        "start_new_session=True"
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/configure_watcher.py",
+      "gitBlobOid": "57ecb3666c2401f57536e306f0f1e2838e81fc2d",
+      "sha256": "sha256:436e6a111749e0265f7de38db21b478c160e735364aa921184d94b842a4dd9f3",
+      "bytes": 16204,
+      "requiredText": [
+        "settings.wake_provider in {\"sendkeys\", \"targeted_sendkeys\"}",
+        "settings.wake_provider in {\"app_server\", \"app_server_then_redraw\"}",
+        "codex_app_server_wake.py"
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/watcher.py",
+      "gitBlobOid": "3a6478d31fc4e0e9d8bea6e0572b6b90a7132381",
+      "sha256": "sha256:4535e9cd70a7f73f38bda61457a0266135e38bc6c5774e3451d515b23ab5897d",
+      "bytes": 115700,
+      "requiredText": [
+        "on_message_command_template",
+        "proc = subprocess.run(",
+        "list(cmd)"
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/codex_app_server_wake.py",
+      "gitBlobOid": "8cfc204ca63f0e54801a41947279f46fd50c29b8",
+      "sha256": "sha256:6961d853835865c23f18c94069658447fce20ab7c68ab0edf4ef34516a47be28",
+      "bytes": 16712,
+      "requiredText": [
+        "command = [codex_exe, \"app-server\", \"--listen\", listen_url]",
+        "await client.request(\"thread/resume\"",
+        "\"turn/start\""
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/wake_codex.ps1",
+      "gitBlobOid": "aed289dd0c740d7e4e324e52543f170b5141757c",
+      "sha256": "sha256:2cd1a07390939701d78fffd9920f2e65a005ed8fa5c7169df3439b1e67b60274",
+      "bytes": 90884,
+      "requiredText": [
+        "$uri = \"codex://threads/$Value\"",
+        "Start-Process $uri",
+        "Ctrl+Enter is the \"Steer\""
+      ]
+    },
+    {
+      "path": "tools/agent-bridge/wake_claude.ps1",
+      "gitBlobOid": "bfa60ee949e29ab346c5070b70334e9d779e9ecd",
+      "sha256": "sha256:cb204d8acde97ab07dd86f78376c9ee6794bd0f5b02e97c1429865e9073ee77b",
+      "bytes": 2648,
+      "requiredText": [
+        "refuses UI injection by default",
+        "unsupported_thread_addressable_wake",
+        "$UnsupportedExitCode = 20"
+      ]
+    }
+  ],
+  "knownSurfaceFamilies": [
+    {
+      "familyId": "WINDOWS_TASK_MLV_LANE_IGNITION_WATCHDOG",
+      "kind": "WINDOWS_SCHEDULED_TASK",
+      "reportedName": "MLV-LaneIgnitionWatchdog",
+      "reportedCadenceMinutes": 20,
+      "reportedState": "Disabled",
+      "currentObservationCredited": false,
+      "inventoryClosureCredited": false
+    },
+    {
+      "familyId": "CODEX_DESKTOP_AUTOMATION_LIVENESS",
+      "kind": "CODEX_AUTOMATION",
+      "reportedName": "mlv-app-dual-lane-codex-liveness",
+      "reportedCadenceMinutes": 5,
+      "reportedState": "KNOWN_DEFINITION_UNVERIFIED_CURRENT_STATE",
+      "currentObservationCredited": false,
+      "inventoryClosureCredited": false
+    },
+    {
+      "familyId": "RETIRED_APP_STORE_WAKE",
+      "kind": "RETIRED_APP_STORE_TASK_FAMILY",
+      "reportedName": "APP_STORE_WAKE_FAMILY",
+      "reportedCadenceMinutes": 0,
+      "reportedState": "RETIRED_BY_RECEIPT_CONTEXT_RECEIPTS_NOT_IMPORTED",
+      "currentObservationCredited": false,
+      "inventoryClosureCredited": false
+    },
+    {
+      "familyId": "RETIRED_APP_STORE_MIRROR",
+      "kind": "RETIRED_APP_STORE_TASK_FAMILY",
+      "reportedName": "APP_STORE_MIRROR_FAMILY",
+      "reportedCadenceMinutes": 0,
+      "reportedState": "RETIRED_BY_RECEIPT_CONTEXT_RECEIPTS_NOT_IMPORTED",
+      "currentObservationCredited": false,
+      "inventoryClosureCredited": false
+    }
+  ],
+  "knownActionEdges": [
+    {
+      "edgeId": "EDGE-01",
+      "family": "WINDOWS_TASK",
+      "from": "MLV-LaneIgnitionWatchdog",
+      "to": "pwsh.exe",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "CURRENT_MACHINE_SURFACE_UNREAD",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-02",
+      "family": "WINDOWS_TASK",
+      "from": "pwsh.exe",
+      "to": "ignite-dead-lanes.ps1",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "CURRENT_MACHINE_SURFACE_UNREAD",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-03",
+      "family": "DIRECT_PROVIDER_LAUNCH",
+      "from": "ignite-dead-lanes.ps1",
+      "to": "claude.cmd -p",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "PROVIDER_LAUNCH_FORBIDDEN_STATIC_CENSUS",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-04",
+      "family": "DIRECT_PROVIDER_LAUNCH",
+      "from": "claude.cmd",
+      "to": "claude-code-executable",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "PROVIDER_LAUNCH_FORBIDDEN_STATIC_CENSUS",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-05",
+      "family": "CODEX_AUTOMATION",
+      "from": "mlv-app-dual-lane-codex-liveness",
+      "to": "Codex Desktop automation executor",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "AUTOMATION_EXECUTOR_INTERNAL_CHAIN_UNREAD",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-06",
+      "family": "CODEX_AUTOMATION",
+      "from": "Codex Desktop automation executor",
+      "to": "codex exec revival",
+      "evidenceKind": "KNOWN_EXTERNAL_UNVERIFIED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "AUTOMATION_EXECUTOR_INTERNAL_CHAIN_UNREAD",
+      "outcome": "KNOWN_EDGE_ENUMERATED_NOT_CURRENT_PROOF"
+    },
+    {
+      "edgeId": "EDGE-07",
+      "family": "RETIRED_APP_STORE",
+      "from": "app scheduler registry",
+      "to": "app-store wake family",
+      "evidenceKind": "DOCTRINE_CONTEXT_UNCREDITED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "RETIRED_FAMILY_RECEIPTS_NOT_IMPORTED",
+      "outcome": "KNOWN_RETIRED_FAMILY_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-08",
+      "family": "RETIRED_APP_STORE",
+      "from": "app scheduler registry",
+      "to": "app-store mirror family",
+      "evidenceKind": "DOCTRINE_CONTEXT_UNCREDITED",
+      "basePath": null,
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "RETIRED_FAMILY_RECEIPTS_NOT_IMPORTED",
+      "outcome": "KNOWN_RETIRED_FAMILY_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-09",
+      "family": "TRACKED_WATCHER",
+      "from": "tools/agent-bridge/bootstrap_session.py",
+      "to": "tools/agent-bridge/watcher.py",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/bootstrap_session.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "NOT_EXECUTED_STATIC_ONLY",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-10",
+      "family": "TRACKED_WATCHER",
+      "from": "tools/agent-bridge/configure_watcher.py",
+      "to": "watcher on_message_command_template",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/configure_watcher.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "NOT_EXECUTED_STATIC_ONLY",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-11",
+      "family": "TRACKED_WATCHER",
+      "from": "tools/agent-bridge/watcher.py",
+      "to": "configured argv",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/watcher.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "NOT_EXECUTED_STATIC_ONLY",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-12",
+      "family": "DIRECT_TURN_START",
+      "from": "configured argv",
+      "to": "tools/agent-bridge/codex_app_server_wake.py",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/configure_watcher.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "MODEL_EFFORT_BINDING_MISSING",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-13",
+      "family": "DIRECT_TURN_START",
+      "from": "tools/agent-bridge/codex_app_server_wake.py",
+      "to": "codex app-server",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/codex_app_server_wake.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "MODEL_EFFORT_BINDING_MISSING",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-14",
+      "family": "DIRECT_TURN_START",
+      "from": "codex app-server",
+      "to": "thread/resume",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/codex_app_server_wake.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "MODEL_EFFORT_BINDING_MISSING",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-15",
+      "family": "DIRECT_TURN_START",
+      "from": "thread/resume",
+      "to": "turn/start",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/codex_app_server_wake.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "MODEL_EFFORT_BINDING_MISSING",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-16",
+      "family": "DIRECT_UI_STEER",
+      "from": "tools/agent-bridge/configure_watcher.py",
+      "to": "tools/agent-bridge/wake_codex.ps1",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/configure_watcher.py",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "NOT_EXECUTED_STATIC_ONLY",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-17",
+      "family": "DIRECT_UI_STEER",
+      "from": "tools/agent-bridge/wake_codex.ps1",
+      "to": "codex://threads/<id> plus Ctrl+Enter Steer",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/wake_codex.ps1",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "NOT_EXECUTED_STATIC_ONLY",
+      "outcome": "TRACKED_EDGE_ENUMERATED_UNCREDITED"
+    },
+    {
+      "edgeId": "EDGE-18",
+      "family": "FAIL_CLOSED_DIAGNOSTIC",
+      "from": "tools/agent-bridge/wake_claude.ps1",
+      "to": "unsupported_thread_addressable_wake exit 20",
+      "evidenceKind": "TRACKED_BASE_EXACT",
+      "basePath": "tools/agent-bridge/wake_claude.ps1",
+      "executionObserved": false,
+      "authorityCredited": false,
+      "errorClass": "UNSUPPORTED_THREAD_ADDRESSABLE_WAKE",
+      "outcome": "FAIL_CLOSED_DIAGNOSTIC_EDGE_ENUMERATED"
+    }
+  ],
+  "preservationRequirementsOnly": [
+    {
+      "dimension": "model",
+      "requirement": "EXACT_MODEL_MUST_BE_PRESERVED_WITHOUT_SUBSTITUTION",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "BASE_DIRECT_TURN_START_HAS_NO_EXACT_MODEL_BINDING"
+    },
+    {
+      "dimension": "effort",
+      "requirement": "EXACT_EFFORT_MUST_BE_PRESERVED_WITHOUT_SUBSTITUTION",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "BASE_DIRECT_TURN_START_HAS_NO_EXACT_EFFORT_BINDING"
+    },
+    {
+      "dimension": "role",
+      "requirement": "EXACT_ROLE_MUST_BE_BOUND_TO_EACH_REQUEST_AND_LANE",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "REQUEST_ROLE_BINDING_NOT_PRODUCED"
+    },
+    {
+      "dimension": "review",
+      "requirement": "FRESH_NON_AUTHOR_REVIEW_AND_DISTINCT_ADJUDICATION_MUST_FOLLOW_BYTE_OFFSET_ORDERED_TWO_KEY_POLICY_WITH_BLOCKING_VERDICTS_FAIL_CLOSED",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "FRESH_CANDIDATE_REVIEW_AND_ADJUDICATION_NOT_PRODUCED"
+    },
+    {
+      "dimension": "quality",
+      "requirement": "KNOWN_GOOD_BUILD_OUTPUT_EQUIVALENCE_MUST_BE_PROVEN_NOT_ASSERTED",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "QUALITY_EQUIVALENCE_NOT_PRODUCED"
+    },
+    {
+      "dimension": "functionality",
+      "requirement": "FUNCTIONALITY_EQUIVALENCE_MUST_BE_PROVEN_BY_BASELINE_AB",
+      "required": true,
+      "proven": false,
+      "credited": false,
+      "gap": "FUNCTIONALITY_EQUIVALENCE_NOT_PRODUCED"
+    }
+  ],
+  "explicitNoTransfer": [
+    {
+      "claimId": "R2_NO_WORK_UNCHANGED_TICKS_1000",
+      "sourceCommit": "d9aa0d0062e1aa6ec3911bf6e0ce6e203f55aab9",
+      "sourceTree": "8a03372c0fcacd8385e36a1a5f7ac29c964b3304",
+      "value": 1000,
+      "sourceCommitTupleVerifiedHere": false,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "R2_CONTROLS_PYTHON_3_13",
+      "sourceCommit": "d9aa0d0062e1aa6ec3911bf6e0ce6e203f55aab9",
+      "sourceTree": "8a03372c0fcacd8385e36a1a5f7ac29c964b3304",
+      "value": "18/18 PASS",
+      "sourceCommitTupleVerifiedHere": false,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "R2_CONTROLS_PYTHON_3_14",
+      "sourceCommit": "d9aa0d0062e1aa6ec3911bf6e0ce6e203f55aab9",
+      "sourceTree": "8a03372c0fcacd8385e36a1a5f7ac29c964b3304",
+      "value": "18/18 PASS",
+      "sourceCommitTupleVerifiedHere": false,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "R2_INDEPENDENT_REVIEW_MARKER",
+      "sourceCommit": "d9aa0d0062e1aa6ec3911bf6e0ce6e203f55aab9",
+      "sourceTree": "8a03372c0fcacd8385e36a1a5f7ac29c964b3304",
+      "value": "[MSG 20260819-005623-CODEX-MLV-R2-CLOSED-REVIEW]",
+      "sourceCommitTupleVerifiedHere": false,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "R2_DISTINCT_ADJUDICATION_MARKER",
+      "sourceCommit": "bc62eb0b14e1d23b95a46dc1c56ab8da2a500a63",
+      "sourceTree": "7e7cd706c572e6da260a03062dcbad4cbc4c1a4b",
+      "value": "[MSG 20260819-MLV-UPC-R2-DISTINGUISH-ADJUDICATION-ACCEPT]",
+      "sourceCommitTupleVerifiedHere": false,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "SIBLING_R15_NO_WORK_UNCHANGED_TICKS_1000",
+      "sourceCommit": "50db64d71bf62da041b9a6872c893382cd7cc79b",
+      "sourceTree": "ab58ec53414ff889eaa41a6689dde1141cc687ed",
+      "value": 1000,
+      "sourceCommitTupleVerifiedHere": true,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "SIBLING_R15_LOCAL_CONTROLS_PYTHON_3_13",
+      "sourceCommit": "50db64d71bf62da041b9a6872c893382cd7cc79b",
+      "sourceTree": "ab58ec53414ff889eaa41a6689dde1141cc687ed",
+      "value": "45/45 PASS",
+      "sourceCommitTupleVerifiedHere": true,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "SIBLING_R15_LOCAL_CONTROLS_PYTHON_3_14",
+      "sourceCommit": "50db64d71bf62da041b9a6872c893382cd7cc79b",
+      "sourceTree": "ab58ec53414ff889eaa41a6689dde1141cc687ed",
+      "value": "45/45 PASS",
+      "sourceCommitTupleVerifiedHere": true,
+      "transferAllowed": false,
+      "credited": false
+    },
+    {
+      "claimId": "SIBLING_R15_ANY_REVIEW_ADJUDICATION_OR_HOSTED_MARKER",
+      "sourceCommit": "50db64d71bf62da041b9a6872c893382cd7cc79b",
+      "sourceTree": "ab58ec53414ff889eaa41a6689dde1141cc687ed",
+      "value": "NO_MARKER_TRANSFERS_TO_THIS_CANDIDATE",
+      "sourceCommitTupleVerifiedHere": true,
+      "transferAllowed": false,
+      "credited": false
+    }
+  ],
+  "missingSurfaces": [
+    "CURRENT_WINDOWS_TASK_DEFINITION_STATE_AND_HISTORY",
+    "CURRENT_CODEX_AUTOMATION_DEFINITIONS_AND_EXECUTOR_INTERNAL_CHAIN",
+    "RETIRED_APP_STORE_WAKE_AND_MIRROR_RECEIPTS",
+    "CURRENT_SERVICES_STARTUP_FOLDERS_RUN_KEYS_AND_ALTERNATE_USER_PROFILES",
+    "CURRENT_MUTABLE_WATCHER_CONFIG_AND_SHARED_AGENT_BRIDGE_STATE",
+    "UNTRACKED_IGNORED_AND_DIRECT_CLI_LAUNCHERS",
+    "PROVIDER_BACKEND_ACCOUNT_AND_TOKEN_TELEMETRY",
+    "SUPERVISOR_SUSPENDED_CHILD_RESUME_AND_FULL_CHILD_FENCING",
+    "INDEPENDENT_OBSERVER_TO_PROVIDER_RECEIPT_EDGE"
+  ],
+  "uncreditedAdoptionProofs": [
+    "PINNED_LOCAL_SUPERVISOR_ADAPTER",
+    "COMPLETE_LAUNCHER_INVENTORY",
+    "COMPLETE_ACTION_GRAPH",
+    "FAKE_PROVIDER_CONTROLS",
+    "CONCURRENCY_CONTROLS",
+    "REQUEST_LEVEL_TOKEN_ACCOUNTING",
+    "UNCHANGED_ZERO_INFERENCE_TICKS_1000",
+    "FULL_CHILD_FENCING",
+    "ROLLBACK_PROOF",
+    "SIGNED_INSTALLATION",
+    "POSITIVE_DIRECT_LAUNCH_ENFORCEMENT",
+    "EXACT_MODEL_EFFORT_ROLE_BINDING",
+    "FRESH_INDEPENDENT_REVIEW_AND_DISTINCT_ADJUDICATION",
+    "QUALITY_EQUIVALENCE",
+    "FUNCTIONALITY_EQUIVALENCE",
+    "CURRENT_CLOSED_GATE_PROOF",
+    "ONE_USE_CANARY_AUTHORIZATION_AND_RECEIPT",
+    "HOSTED_EXACT_TREE_GREEN"
+  ],
+  "reviewBoundary": {
+    "authorConflicted": true,
+    "authorMaySelfReview": false,
+    "freshIndependentReviewReceived": false,
+    "distinctAdjudicationReceived": false,
+    "priorReviewTransferAllowed": false
+  },
+  "authority": {
+    "projectAdoption": false,
+    "fleetAdoption": false,
+    "runtimeActivation": false,
+    "providerInvocation": false,
+    "authenticationAction": false,
+    "processSpawnResumeKill": false,
+    "schedulerOrTaskMutation": false,
+    "automationMutation": false,
+    "launcherMutation": false,
+    "automaticGateMutation": false,
+    "installation": false,
+    "canaryCredit": false,
+    "mergeLandingPushRelease": false,
+    "currentRuntimeGateCredit": false,
+    "siblingProofTransfer": false,
+    "dispositionCredit": false
+  },
+  "nextLawfulStep": {
+    "kind": "READ_ONLY_CURRENT_MACHINE_LAUNCHER_AND_ACTION_GRAPH_CLOSURE",
+    "scope": "From a separately authorized read-only observer, bind current scheduled-task definitions and history, Codex automation definitions and executor chain, retired-family receipts, services, startup, run keys, mutable watcher configuration, untracked launchers, and every direct provider or turn-start edge without executing any edge.",
+    "requiredOutput": "A new exact subject with explicit unreadable surfaces, typed edge outcomes, a complete-or-incomplete declaration, and zero authority; any later installation remains a separate reviewed transaction.",
+    "forbiddenActions": [
+      "PROVIDER_OR_AUTH_INVOCATION",
+      "PROCESS_SPAWN_RESUME_OR_KILL",
+      "TASK_AUTOMATION_LAUNCHER_OR_GATE_MUTATION",
+      "LEASE_PACKET_QUEUE_OR_RUNTIME_MUTATION",
+      "ADOPTION_INSTALLATION_CANARY_OR_DISPOSITION_CREDIT"
+    ]
+  }
+}
