@@ -736,6 +736,7 @@
       {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
       {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
       {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
+      {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def content_review_gate_trust_error"},
       {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
       {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
       {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def integration_range_evidence"},

@@ -36,7 +36,9 @@ The acceptance state is deliberately batched:
 The dashboard must not offer approval, rebless, publication, redistribution, or
 provider-activation controls for this ledger. Agent and hosted verdicts are
 evidence only. Human-only authority boundaries continue to be enforced by their
-own registered policy actors.
+own registered policy actors. The human content-gate object must exactly match the
+copy loaded from the pinned target commit; disabling or repointing it in the same
+candidate blocks until a separately authorized policy change has landed.
 The local chain and fixed reviewer labels are non-cryptographic process evidence. They
 detect accidental drift and ordinary replay, but do not authenticate a human or resist
 a privileged actor rewriting the entire generated-state directory. They must never be

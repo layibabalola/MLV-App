@@ -29,6 +29,48 @@ CONTENT_REVIEWERS = {
     "content-stranger-1": "release_combined_review",
     "content-stranger-2": "release_failopen_review",
 }
+
+
+def content_review_gate_trust_error(
+    repo_root: Path,
+    config: Dict[str, Any],
+    detection: Dict[str, Any],
+) -> Optional[str]:
+    """Bind the human authority gate to the already-landed target policy.
+
+    Candidate acceptance is process evidence, so it cannot authorize weakening the
+    separate human gate in the same candidate.  A gate-policy change must land first
+    through the prior target policy, then a later candidate may inherit that new root.
+    """
+
+    try:
+        target_head = _require_sha(detection.get("targetHead"), "targetHead")
+    except HygieneError as exc:
+        return str(exc)
+    from .brokered_closeout import git_stdout
+
+    raw = git_stdout(repo_root, ["show", f"{target_head}:closeout.config.json"], required=False)
+    if not raw:
+        return "pinned target closeout.config.json is unavailable"
+    try:
+        target_config = json.loads(raw)
+    except json.JSONDecodeError:
+        return "pinned target closeout.config.json is malformed"
+    target_gate = target_config.get("contentReviewGate") if isinstance(target_config, dict) else None
+    candidate_gate = config.get("contentReviewGate") if isinstance(config, dict) else None
+    if not isinstance(target_gate, dict) or not isinstance(candidate_gate, dict):
+        return "contentReviewGate trust root is missing"
+    if not bool(target_gate.get("requireClaudeApprovalForFinalize")) or not bool(target_gate.get("requireHandoff")):
+        return "pinned target contentReviewGate is not fail-closed"
+    for key in ("coordinationFile", "handoffActor", "handoffKind", "reviewActor", "reviewKind"):
+        if not str(target_gate.get(key) or "").strip():
+            return f"pinned target contentReviewGate.{key} is empty"
+    sessions = target_gate.get("authorizedReviewSessions")
+    if not isinstance(sessions, list) or not sessions or any(not str(item).strip() for item in sessions):
+        return "pinned target contentReviewGate authorized review sessions are empty"
+    if canonical_json(candidate_gate) != canonical_json(target_gate):
+        return "candidate contentReviewGate differs from the pinned target trust root"
+    return None
 TERMINAL_VERDICTS = {"APPROVE", "CHANGES_REQUESTED", "UNAVAILABLE"}
 BLOCKING_VERDICTS = {"CHANGES_REQUESTED", "UNAVAILABLE"}
 HOSTED_SURFACES = {"hosted-tests", "hosted-codeql"}
@@ -692,7 +734,7 @@ def _same_tuple_blocker_error(ledgers: Sequence[Dict[str, Any]], proposed_hash: 
     blocking_hashes = {
         str(item.get("ledgerHash"))
         for item in ledgers
-        if item.get("state") == "changes_required"
+        if item.get("state") == "changes_required" or bool(item.get("blockers"))
     }
     if blocking_hashes and proposed_hash not in blocking_hashes:
         return "candidate acceptance same-tuple blocker is monotonic; a repair requires a new candidate tuple"
@@ -892,6 +934,15 @@ def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Di
         if summary.get(key) != value
     }
     if summary.get("state") == "ready" and not mismatches:
+        human_gate_error = content_review_gate_trust_error(repo_root, config, detection)
+        if human_gate_error:
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_human_gate_trust_drift",
+                "candidateAcceptance": summary,
+                "detail": human_gate_error,
+                "recoveryCommand": "restore the pinned target contentReviewGate or land a separately authorized policy change first",
+            }
         latest_path = acceptance_root(repo_root, config) / "latest.json"
         try:
             ledger = json.loads(latest_path.read_text(encoding="utf-8"))

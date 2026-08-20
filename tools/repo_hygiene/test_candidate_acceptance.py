@@ -16,6 +16,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     acceptance_root,
     CONTENT_REVIEWERS,
     candidate_identity,
+    content_review_gate_trust_error,
     evaluate,
     final_integration_mismatches,
     latest_summary,
@@ -486,6 +487,43 @@ class CandidateAcceptanceTests(unittest.TestCase):
         guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
         self.assertEqual("candidate_acceptance_policy_weakened", guard["reason"])
 
+    def test_human_gate_trust_root_is_pinned_to_target_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self.git(repo, "init")
+            self.git(repo, "config", "user.email", "candidate-acceptance@example.invalid")
+            self.git(repo, "config", "user.name", "Candidate Acceptance Test")
+            gate = {
+                "requireClaudeApprovalForFinalize": True,
+                "coordinationFile": ".claude-state/coordination/gpu-lane-impl-review-sync.md",
+                "handoffActor": "CODEX",
+                "handoffKind": "HANDOFF",
+                "reviewActor": "CLAUDE",
+                "reviewKind": "REVIEW",
+                "approveTokens": ["APPROVE"],
+                "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
+                "requireHandoff": True,
+                "additionalHandoffActors": ["CLAUDE_IMPL"],
+                "authorizedReviewSessions": ["5fc3fc6e-345f-40b8-bb3d-7abd6302b459"],
+            }
+            baseline = {"contentReviewGate": gate}
+            (repo / "closeout.config.json").write_text(json.dumps(baseline), encoding="utf-8")
+            self.git(repo, "add", "closeout.config.json")
+            self.git(repo, "commit", "-m", "baseline")
+            target = self.git(repo, "rev-parse", "HEAD").strip()
+            detection = {"targetHead": target}
+            self.assertIsNone(content_review_gate_trust_error(repo, baseline, detection))
+
+            for mutation in (
+                {"requireClaudeApprovalForFinalize": False},
+                {"coordinationFile": ".claude-state/coordination/attacker.md"},
+                {"reviewActor": "CANDIDATE"},
+                {"authorizedReviewSessions": ["00000000-0000-0000-0000-000000000000"]},
+            ):
+                changed = json.loads(json.dumps(baseline))
+                changed["contentReviewGate"].update(mutation)
+                self.assertIn("differs from the pinned target", content_review_gate_trust_error(repo, changed, detection))
+
     def test_final_integration_tree_or_diff_drift_is_blocking(self) -> None:
         accepted = {"integrationTree": "a" * 40, "diffSha256": "b" * 64}
         self.assertEqual({}, final_integration_mismatches(accepted, dict(accepted)))
@@ -571,6 +609,27 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertEqual("invalid", summary["state"])
         self.assertIn("same-tuple blocker is monotonic", summary["error"])
 
+    def test_collecting_ledger_blocker_is_already_monotonic(self) -> None:
+        candidate, rehearsal = self.candidate()
+        collecting_records = self.records(candidate, {"content-stranger-1": "CHANGES_REQUESTED"})
+        collecting_records = [
+            record for record in collecting_records if record["surface"] != "content-stranger-2"
+        ]
+        collecting = self.run_evaluate(
+            candidate=candidate,
+            rehearsal=rehearsal,
+            records=collecting_records,
+        )
+        self.assertEqual("collecting", collecting["state"])
+        self.assertTrue(collecting["blockers"])
+        ready = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=self.records(candidate))
+        write_ledger(self.repo_root, self.config, collecting)
+        with self.assertRaisesRegex(HygieneError, "same-tuple blocker is monotonic"):
+            write_ledger(self.repo_root, self.config, ready)
+        summary = latest_summary(self.repo_root, self.config)
+        self.assertEqual("collecting", summary["state"])
+        self.assertFalse(summary["ready"])
+
     def test_state_root_escape_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(HygieneError, "must stay under"):
@@ -601,7 +660,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
             validate_for_finalize(self.repo_root, self.config, detection)["reason"],
         )
         write_ledger(self.repo_root, self.config, ledger)
-        with mock.patch("tools.repo_hygiene.candidate_acceptance._live_github_provider_payload", return_value=json.loads(self.provider_path.read_text(encoding="utf-8"))), mock.patch(
+        with mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.content_review_gate_trust_error",
+            return_value="candidate contentReviewGate differs from the pinned target trust root",
+        ):
+            trust_guard = validate_for_finalize(self.repo_root, self.config, detection)
+        self.assertEqual("candidate_acceptance_human_gate_trust_drift", trust_guard["reason"])
+        with mock.patch("tools.repo_hygiene.candidate_acceptance.content_review_gate_trust_error", return_value=None), mock.patch("tools.repo_hygiene.candidate_acceptance._live_github_provider_payload", return_value=json.loads(self.provider_path.read_text(encoding="utf-8"))), mock.patch(
             "tools.repo_hygiene.brokered_closeout.simulate_clean_integration", return_value=rehearsal
         ):
             self.assertIsNone(validate_for_finalize(self.repo_root, self.config, detection))
