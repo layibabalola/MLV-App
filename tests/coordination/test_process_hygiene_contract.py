@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "tools" / "coordination" / "invoke-mlv-exclusive.ps1"
 GEN_BUILDINFO = REPO_ROOT / "tools" / "gen-buildinfo.ps1"
 ARTIFACT_DETECTOR = REPO_ROOT / "tools" / "profiling" / "detect-playback-artifacts.ps1"
+GUI_SMOKE_RUNNER = REPO_ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
+GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -244,3 +246,115 @@ def test_playback_detector_cadence_advisory_exits_cleanly(tmp_path: Path) -> Non
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "ARTIFACT-CHECK verdict=PASS" in completed.stdout
     assert "ARTIFACT-CADENCE cadence_advisory=1" in completed.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke runner is PowerShell-based")
+def test_gui_smoke_legacy_option_set_omits_new_cli_flags(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    receipt = tmp_path / "locked.marxml"
+    receipt.write_text(
+        '<?xml version="1.0"?><receipt version="4"><lookAssistEnabled>0</lookAssistEnabled></receipt>',
+        encoding="ascii",
+    )
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(GUI_SMOKE_RUNNER),
+            "-RepoRoot",
+            str(REPO_ROOT),
+            "-ExePath",
+            str(GUI_SMOKE_RUNNER),
+            "-ClipPath",
+            str(GUI_SMOKE_RUNNER),
+            "-Output",
+            str(tmp_path / "result.json"),
+            "-Receipt",
+            str(receipt),
+            "-NoLoop",
+            "-DisableLookAssist",
+            "-LegacyGuiSmokeOptions",
+            "-DryRun",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    dry_run = json.loads(completed.stdout)
+    arguments = dry_run["arguments"]
+    assert "--drop-frame-mode" not in arguments
+    assert "--loop" not in arguments
+    assert "--no-look-assist" not in arguments
+    assert arguments[arguments.index("--receipt") + 1] == str(receipt)
+    assert dry_run["validationPolicy"]["legacyGuiSmokeOptions"] is True
+    assert dry_run["validationPolicy"]["requireLookAssist"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
+def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    def write_smoke(path: Path, last_frame: int) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "validation": {
+                        "ok": True,
+                        "launchOnlyProbe": False,
+                        "presentedFrames": 2,
+                        "firstPresentedFrame": last_frame - 1,
+                        "lastPresentedFrame": last_frame,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    write_smoke(before, 104)
+    write_smoke(after, 105)
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(GUI_SMOKE_COMPARER),
+            "-Before",
+            str(before),
+            "-After",
+            str(after),
+            "-Output",
+            str(tmp_path / "comparison.json"),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    result = json.loads((tmp_path / "comparison.json").read_text(encoding="utf-8-sig"))
+    assert result["verdict"] == "FAIL"
+    assert result["presentedFrameEvidence"]["before"]["lastPresentedFrame"] == 104
+    assert result["presentedFrameEvidence"]["after"]["lastPresentedFrame"] == 105
+    assert any("not frame-locked" in failure for failure in result["failures"])

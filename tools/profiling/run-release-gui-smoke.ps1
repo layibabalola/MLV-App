@@ -4,7 +4,7 @@ param(
     [Alias("Input")]
     [string]$ClipPath = "",
     [string]$Output = "",
-    [int]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
+    [double]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
                           # generous time to actually play before closing -- ~3x the old 8s, toward the
                           # recommended 30s settled-validation window. Both lanes use a generous window.
     [int]$StartFrame = 0,
@@ -72,6 +72,7 @@ param(
     [string[]]$AdditionalArgs = @(),
     [switch]$DetectPlaybackArtifacts,
     [switch]$ArtifactCadenceAdvisory,
+    [switch]$LegacyGuiSmokeOptions,
     [switch]$AllowZeroPresentedFrames,
     [switch]$LaunchOnlyProbe,
     [ValidateRange(0.0, 1.0)]
@@ -82,6 +83,13 @@ param(
 $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
+
+if ($DisableLookAssist) {
+    if ($PSBoundParameters.ContainsKey("RequireLookAssist") -and $RequireLookAssist) {
+        throw "-DisableLookAssist cannot be combined with -RequireLookAssist:`$true."
+    }
+    $RequireLookAssist = $false
+}
 
 # A zero-present result proves only that the process launched. It is never a
 # playback, cadence, lifecycle-stress, screenshot, or A/B-quality result.
@@ -100,6 +108,17 @@ if ($ExerciseClipLifecycleStress -and $DetectPlaybackArtifacts) {
 }
 if ($ArtifactCadenceAdvisory -and -not $DetectPlaybackArtifacts) {
     throw "-ArtifactCadenceAdvisory requires -DetectPlaybackArtifacts."
+}
+if ($LegacyGuiSmokeOptions) {
+    if (-not $NoLoop) {
+        throw "-LegacyGuiSmokeOptions requires -NoLoop because the pinned legacy CLI has no --loop option."
+    }
+    if ($DropFrameMode -ne "persisted") {
+        throw "-LegacyGuiSmokeOptions supports only the legacy persisted drop-frame default."
+    }
+    if ($DisableLookAssist -and [string]::IsNullOrWhiteSpace($Receipt)) {
+        throw "-LegacyGuiSmokeOptions requires a receipt that explicitly disables Look Assist when -DisableLookAssist is requested."
+    }
 }
 
 if ($UsePersistedPlaybackSettings) {
@@ -860,9 +879,16 @@ if ($CaptureScreenshot) {
 $arguments = @(
     "--gui-smoke-playback",
     "--input", $inputPath,
-    "--seconds", [string]$Seconds,
-    "--start-frame", [string]$StartFrame,
-    "--drop-frame-mode", $DropFrameMode,
+    "--seconds", ([string]::Format(
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        "{0}",
+        $Seconds)),
+    "--start-frame", [string]$StartFrame
+)
+if (-not $LegacyGuiSmokeOptions) {
+    $arguments += @("--drop-frame-mode", $DropFrameMode)
+}
+$arguments += @(
     "--settle-ms", [string]$SettleMs,
     "--settle-cpu-percent", ([string]::Format(
         [System.Globalization.CultureInfo]::InvariantCulture,
@@ -897,7 +923,7 @@ if (-not [string]::IsNullOrWhiteSpace($GpuAmazeDebayer)) {
 if ($GpuAmazeTexturePresent) {
     $arguments += "--gpu-amaze-texture-present"
 }
-if ($DisableLookAssist) {
+if ($DisableLookAssist -and -not $LegacyGuiSmokeOptions) {
     $arguments += "--no-look-assist"
 }
 if ($ExerciseClipLifecycleStress) {
@@ -1051,6 +1077,7 @@ if ($DryRun) {
             qualityModeOverride = $QualityMode
             scaleFactorOverride = $ScaleFactor
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
+            legacyGuiSmokeOptions = [bool]$LegacyGuiSmokeOptions
         }
         output = $outputPath
     } | ConvertTo-Json -Depth 5
@@ -1502,6 +1529,11 @@ if ($RequireLookAssist -and
      [int](Get-ObjectPropertyValue $visualState "look_assist_diagnostics_valid") -ne 1)) {
     $validationFailures += "GUI visual state did not have settled Look Assist enabled."
 }
+if ($DisableLookAssist -and
+    $null -ne $visualState -and
+    [int](Get-ObjectPropertyValue $visualState "look_assist_enabled") -ne 0) {
+    $validationFailures += "GUI visual state did not have Look Assist disabled."
+}
 if ($RequireCpuSettled -and -not $cpuSettled) {
     $validationFailures += "CPU did not settle before playback."
 }
@@ -1580,8 +1612,11 @@ if ($ExpectedQualityMode -ge 0 -and
     [int](Get-ObjectPropertyValue $visualState "quality_mode") -ne $ExpectedQualityMode) {
     $validationFailures += "GUI visual state quality mode was $(Get-ObjectPropertyValue $visualState "quality_mode"); expected $ExpectedQualityMode."
 }
-if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent) {
+if ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent -and -not $LegacyGuiSmokeOptions) {
     $validationFailures += "Auto playback quality telemetry was missing from playback_smoke.summary."
+}
+elseif ($ExpectedQualityMode -eq 2 -and -not $autoDecisionFieldsPresent -and $LegacyGuiSmokeOptions) {
+    $validationWarnings += "Pinned legacy build predates auto-decision telemetry; quality_mode=2 remains verified from visual-state and summary telemetry."
 }
 if ($ExpectedQualityMode -eq 2 -and $autoDecisionFieldsPresent) {
     $validationFailures += $autoDecisionCapabilityFailures
@@ -1718,6 +1753,7 @@ $result = [pscustomobject]@{
             expectedAspectMode = $ExpectedAspectMode
             expectedStretchTolerance = $ExpectedStretchTolerance
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
+            legacyGuiSmokeOptions = [bool]$LegacyGuiSmokeOptions
         }
         matchedUserShellDefaults = [pscustomobject]@{
             frameTelemetry = [bool]$FrameTelemetry

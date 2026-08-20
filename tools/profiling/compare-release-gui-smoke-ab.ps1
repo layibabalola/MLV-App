@@ -321,6 +321,7 @@ $screenshotCompare = Compare-SmokeScreenshots `
     -RequestedSampleStep $SampleStep
 
 $failures = @()
+$presentedFrameEvidence = [ordered]@{}
 foreach ($leg in @(
     [pscustomobject]@{ Name = "before"; Smoke = $beforeSmoke },
     [pscustomobject]@{ Name = "after"; Smoke = $afterSmoke }
@@ -333,6 +334,11 @@ foreach ($leg in @(
         "validation.firstPresentedFrame", "log.summary.first_presented_frame")
     $lastPresented = Get-FirstNestedValue $leg.Smoke @(
         "validation.lastPresentedFrame", "log.summary.last_presented_frame")
+    $presentedFrameEvidence[$leg.Name] = [pscustomobject]@{
+        presentedFrames = $presented
+        firstPresentedFrame = $firstPresented
+        lastPresentedFrame = $lastPresented
+    }
     if ($validationOk -ne $true) {
         $failures += "$($leg.Name) smoke did not independently pass validation."
     }
@@ -346,6 +352,15 @@ foreach ($leg in @(
         [int64]$firstPresented -eq [int64]$lastPresented) {
         $failures += "$($leg.Name) smoke did not prove displayed-frame advancement."
     }
+}
+$beforeLastPresented = $presentedFrameEvidence.before.lastPresentedFrame
+$afterLastPresented = $presentedFrameEvidence.after.lastPresentedFrame
+if ($null -eq $beforeLastPresented -or $null -eq $afterLastPresented -or
+    [int64]$beforeLastPresented -ne [int64]$afterLastPresented) {
+    $failures += (
+        "Screenshot A/B is not frame-locked: before lastPresentedFrame=" +
+        "$beforeLastPresented, after lastPresentedFrame=$afterLastPresented."
+    )
 }
 if ($FailOnScreenshotDelta) {
     if ($screenshotCompare.status -ne "compared") {
@@ -379,6 +394,7 @@ $result = [pscustomobject]@{
         maxChangedSampleRatio = $MaxChangedSampleRatio
     }
     screenshot = $screenshotCompare
+    presentedFrameEvidence = [pscustomobject]$presentedFrameEvidence
     autoDecision = New-AutoDecisionComparison `
         -BeforeSmoke $beforeSmoke `
         -AfterSmoke $afterSmoke
