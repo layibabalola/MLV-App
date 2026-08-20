@@ -602,17 +602,37 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
     )
 
     source_bindings = (
-        (GUI_SMOKE_COMPARER, receipt["verifier"]["comparerSha256"]),
-        (GUI_SMOKE_RUNNER, receipt["verifier"]["runnerSha256"]),
-        (NEUTRAL_RECEIPT, receipt["renderContract"]["receiptSha256"]),
+        (
+            GUI_SMOKE_COMPARER,
+            receipt["verifier"]["comparerSha256"],
+            receipt["verifier"]["comparerGitBlob"],
+        ),
+        (
+            GUI_SMOKE_RUNNER,
+            receipt["verifier"]["runnerSha256"],
+            receipt["verifier"]["runnerGitBlob"],
+        ),
+        (
+            NEUTRAL_RECEIPT,
+            receipt["renderContract"]["receiptSha256"],
+            receipt["renderContract"]["receiptGitBlob"],
+        ),
     )
-    for path, expected in source_bindings:
+    for path, expected_sha256, expected_git_blob in source_bindings:
         # Git stores these text subjects with LF bytes, while a Windows
         # checkout can materialize all or only some lines as CRLF.  Bind the
         # portable committed-object bytes rather than an autocrlf-dependent
         # worktree representation.
         canonical_bytes = path.read_bytes().replace(b"\r\n", b"\n")
-        assert hashlib.sha256(canonical_bytes).hexdigest().upper() == expected
+        assert (
+            hashlib.sha256(canonical_bytes).hexdigest().upper()
+            == expected_sha256
+        )
+        git_blob_header = f"blob {len(canonical_bytes)}\0".encode("ascii")
+        git_blob_hasher = hashlib.sha1(usedforsecurity=False)
+        git_blob_hasher.update(git_blob_header)
+        git_blob_hasher.update(canonical_bytes)
+        assert git_blob_hasher.hexdigest() == expected_git_blob
 
     clips = receipt["clips"]
     assert [clip["name"] for clip in clips] == [
