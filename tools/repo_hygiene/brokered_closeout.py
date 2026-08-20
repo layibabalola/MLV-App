@@ -1019,7 +1019,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         ],
         "requiredTestFiles": [
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_acceptance_uses_two_phase_target_pinned_activation"},
-            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_cli_rejects_candidate_and_git_contained_shadowing"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_cli_bytes_must_stay_stable_during_query"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch"},
@@ -1060,6 +1062,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def resolve_external_github_cli"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def content_review_gate_trust_error"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},

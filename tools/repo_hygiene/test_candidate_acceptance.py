@@ -28,6 +28,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     final_integration_mismatches,
     latest_summary,
     provider_surface_record,
+    resolve_external_github_cli,
     surface_record,
     validation_plan,
     validate_for_finalize,
@@ -464,24 +465,105 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "stdout": json.dumps(provider["response"]),
             "stderr": "",
         }
-        with mock.patch.dict(os.environ, {"GH_HOST": "attacker.invalid"}), mock.patch(
-            "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
-            return_value=self.repo_root,
-        ), mock.patch(
-            "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
-            return_value=completed,
-        ) as bounded:
-            payload = _live_github_provider_payload(
-                self.repo_root,
-                self.config,
-                "layibabalola/MLV-App",
-                FEATURE,
-            )
+        with tempfile.TemporaryDirectory() as external_temp:
+            github_cli = Path(external_temp) / ("gh.exe" if os.name == "nt" else "gh")
+            github_cli.write_bytes(b"external-gh-client")
+            with mock.patch.dict(os.environ, {"GH_HOST": "attacker.invalid"}), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+                return_value=self.repo_root,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_external_github_cli",
+                return_value=github_cli,
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                return_value=completed,
+            ) as bounded:
+                payload = _live_github_provider_payload(
+                    self.repo_root,
+                    self.config,
+                    "layibabalola/MLV-App",
+                    FEATURE,
+                )
         command = bounded.call_args.args[2]
+        self.assertEqual(str(github_cli), command[0])
+        self.assertTrue(Path(command[0]).is_absolute())
         self.assertEqual(["--hostname", "github.com"], command[2:4])
         self.assertNotIn("GH_HOST", bounded.call_args.kwargs["env"])
+        if os.name == "nt":
+            self.assertEqual("1", bounded.call_args.kwargs["env"]["NoDefaultCurrentDirectoryInExePath"])
         self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
         self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
+        self.assertEqual(str(github_cli), payload["githubCli"]["path"])
+        self.assertEqual(hashlib.sha256(b"external-gh-client").hexdigest(), payload["githubCli"]["sha256"])
+
+    def test_live_provider_cli_rejects_candidate_and_git_contained_shadowing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            candidate_bin = repo / "bin"
+            external_bin = root / "external-bin"
+            git_contained_bin = root / "tool-source" / "bin"
+            repo.mkdir()
+            self.git(repo, "init")
+            (git_contained_bin.parent / ".git").mkdir(parents=True)
+            candidate_bin.mkdir()
+            external_bin.mkdir()
+            git_contained_bin.mkdir()
+            executable = "gh.exe" if os.name == "nt" else "gh"
+            candidate_cli = candidate_bin / executable
+            git_contained_cli = git_contained_bin / executable
+            external_cli = external_bin / executable
+            for path in (candidate_cli, git_contained_cli, external_cli):
+                path.write_bytes(b"fixture")
+                if os.name != "nt":
+                    path.chmod(0o755)
+
+            resolved = resolve_external_github_cli(
+                repo,
+                {"PATH": os.pathsep.join((str(candidate_bin), str(git_contained_bin), str(external_bin)))},
+            )
+            self.assertEqual(external_cli.resolve(), resolved)
+            with self.assertRaisesRegex(HygieneError, "outside every Git repository/worktree"):
+                resolve_external_github_cli(
+                    repo,
+                    {"PATH": os.pathsep.join((str(candidate_bin), str(git_contained_bin)))},
+                )
+
+    def test_live_provider_cli_bytes_must_stay_stable_during_query(self) -> None:
+        provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        completed = {
+            "returncode": 0,
+            "timedOut": False,
+            "outputCapped": False,
+            "cpuStalled": False,
+            "stdout": json.dumps(provider["response"]),
+            "stderr": "",
+        }
+        with tempfile.TemporaryDirectory() as external_temp:
+            github_cli = Path(external_temp) / ("gh.exe" if os.name == "nt" else "gh")
+            github_cli.write_bytes(b"before")
+
+            def mutate_client(*_args, **_kwargs):
+                github_cli.write_bytes(b"after-with-different-bytes")
+                return completed
+
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+                return_value=self.repo_root,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance.resolve_external_github_cli",
+                return_value=github_cli,
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                side_effect=mutate_client,
+            ):
+                with self.assertRaisesRegex(HygieneError, "bytes changed"):
+                    _live_github_provider_payload(
+                        self.repo_root,
+                        self.config,
+                        "layibabalola/MLV-App",
+                        FEATURE,
+                    )
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
@@ -789,7 +871,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("separately reviewed activation is now landed with only the two activation\nbooleans enabled", dashboard)
         self.assertIn("must exactly match the\ncopy loaded from the pinned target commit", dashboard)
 
-    def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
+    def test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
         self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])

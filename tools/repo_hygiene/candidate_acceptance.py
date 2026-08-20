@@ -406,9 +406,70 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     ]
 
 
+def _path_is_inside_git_repository(path: Path) -> bool:
+    """Return True when path is nested in a Git worktree or bare repository."""
+
+    current = path.resolve().parent
+    while True:
+        if (current / ".git").exists():
+            return True
+        if (current / "HEAD").is_file() and (current / "objects").is_dir() and (current / "refs").is_dir():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
+def resolve_external_github_cli(
+    repo_root: Path,
+    process_env: Optional[Dict[str, str]] = None,
+) -> Path:
+    """Resolve gh from explicit PATH entries, never from a candidate checkout.
+
+    Windows searches the current directory before PATH for bare executable names.
+    Enumerating only absolute PATH directories and rejecting every Git-contained
+    candidate prevents a feature branch from substituting its own ``gh.exe`` for
+    the provider client used by the finalize-time trust query.
+    """
+
+    repo = resolve_repo_root(repo_root)
+    env = process_env if process_env is not None else os.environ
+    executable = "gh.exe" if os.name == "nt" else "gh"
+    for raw_entry in str(env.get("PATH") or "").split(os.pathsep):
+        entry = raw_entry.strip().strip('"')
+        if not entry:
+            continue
+        directory = Path(os.path.expandvars(os.path.expanduser(entry)))
+        if not directory.is_absolute():
+            continue
+        try:
+            candidate = (directory / executable).resolve()
+        except OSError:
+            continue
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if candidate == repo or repo in candidate.parents:
+            continue
+        if _path_is_inside_git_repository(candidate):
+            continue
+        return candidate
+    raise HygieneError("GitHub CLI must resolve to an absolute executable outside every Git repository/worktree")
+
+
 def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
+    repo_root = resolve_repo_root(repo_root)
+    process_env = dict(os.environ)
+    process_env.pop("GH_HOST", None)
+    if os.name == "nt":
+        process_env["NoDefaultCurrentDirectoryInExePath"] = "1"
+    github_cli = resolve_external_github_cli(repo_root, process_env)
+    github_cli_identity = {
+        "path": str(github_cli),
+        "size": github_cli.stat().st_size,
+        "sha256": _file_sha256(github_cli),
+    }
     command = [
-        "gh",
+        str(github_cli),
         "api",
         "--hostname",
         "github.com",
@@ -418,9 +479,6 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
     ]
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
-    repo_root = resolve_repo_root(repo_root)
-    process_env = dict(os.environ)
-    process_env.pop("GH_HOST", None)
     completed = run_bounded_closeout_process(
         repo_root,
         config,
@@ -434,6 +492,8 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
     )
     if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
         raise HygieneError(f"live GitHub provider verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
+    if github_cli.stat().st_size != github_cli_identity["size"] or _file_sha256(github_cli) != github_cli_identity["sha256"]:
+        raise HygieneError("GitHub CLI bytes changed during live provider verification")
     try:
         response = json.loads(completed["stdout"])
     except json.JSONDecodeError as exc:
@@ -443,6 +503,7 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
         "capturedAt": utc_now(),
         "repository": repository,
         "headSha": head_sha,
+        "githubCli": github_cli_identity,
         "response": response,
     }
     if not isinstance(response, dict) or not isinstance(response.get("check_runs"), list):

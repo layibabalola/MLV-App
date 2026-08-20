@@ -166,6 +166,9 @@ five required surfaces, canonical repository, and finalize requirement cannot
 be weakened by candidate configuration. Candidate-acceptance records are
 non-authenticating process evidence and never replace the separately pinned
 human content-review gate, which remains mandatory in both phases.
+Finalize resolves the GitHub CLI to an absolute external executable from explicit
+PATH directories, rejects candidate- or Git-contained clients, and disables
+Windows current-directory executable lookup before its bounded live provider query.
 The shared hybrid closeout contract lives in
 [`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md) and its
 drift sentinel is [`CLOSEOUT-CANONICAL-CONTRACT.sha256`](CLOSEOUT-CANONICAL-CONTRACT.sha256);
