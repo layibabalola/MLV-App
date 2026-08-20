@@ -416,12 +416,16 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     clip.write_bytes(b"same clip bytes")
     receipt.write_bytes(b"<receipt version=\"4\"/>")
     fixture_repo = tmp_path / "git-fixture"
+    fixture_git_env = os.environ.copy()
+    fixture_git_env["GIT_CONFIG_NOSYSTEM"] = "1"
+    fixture_git_env["GIT_CONFIG_GLOBAL"] = os.devnull
     subprocess.run(
         ["git", "init", str(fixture_repo)],
         capture_output=True,
         text=True,
         timeout=10,
         check=True,
+        env=fixture_git_env,
     )
     marker = fixture_repo / "marker.txt"
     commits: list[str] = []
@@ -434,6 +438,7 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
             text=True,
             timeout=10,
             check=True,
+            env=fixture_git_env,
         )
         subprocess.run(
             [
@@ -453,6 +458,7 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
             text=True,
             timeout=10,
             check=True,
+            env=fixture_git_env,
         )
         commits.append(
             subprocess.run(
@@ -462,6 +468,7 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
                 text=True,
                 timeout=10,
                 check=True,
+                env=fixture_git_env,
             ).stdout.strip()
         )
 
