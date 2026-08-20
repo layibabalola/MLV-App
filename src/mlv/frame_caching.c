@@ -624,7 +624,19 @@ void an_mlv_cache_thread(mlvObject_t * video)
         getMlvRawFrameFloat(video, cache_frame, imagefloat1d);
 
         /* Single thread AMaZE */
-        demosaic(&amaze_params);
+        const int demosaic_succeeded = demosaic(&amaze_params);
+
+        if (!demosaic_succeeded)
+        {
+            pthread_mutex_lock(&video->g_mutexFind);
+            if (cache_generation == video->cache_generation
+                && video->cached_frames[cache_frame] == MLV_FRAME_BEING_CACHED)
+            {
+                video->cached_frames[cache_frame] = MLV_FRAME_NOT_CACHED;
+            }
+            pthread_mutex_unlock(&video->g_mutexFind);
+            continue;
+        }
 
         pthread_mutex_lock( &video->g_mutexFind );
         int cache_still_valid = (cache_generation == video->cache_generation);
@@ -807,7 +819,16 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
     }
     else if (debayer_type == 1 )
     {
-        debayerAmaze(output_frame, temp_memory, width, height, debayer_threads, getMlvBlackLevel(video));
+        if (!debayerAmaze(output_frame,
+                          temp_memory,
+                          width,
+                          height,
+                          debayer_threads,
+                          getMlvBlackLevel(video)))
+        {
+            memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
+            return;
+        }
     }
     else if(debayer_type == 2 || debayer_type == 3)
     {

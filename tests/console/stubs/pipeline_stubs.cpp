@@ -219,7 +219,7 @@ void wb_convert(wb_convert_info_t * wb_info, float *, int, int, int)
 void wb_undo(const wb_convert_info_t *, uint16_t *, int, int, int) {}
 
 void debayerLibRtProcess(uint16_t *, float *, int, int, int, double[9]) {}
-void debayerAmaze(uint16_t *, float *, int, int, int, int) {}
+int debayerAmaze(uint16_t *, float *, int, int, int, int) { return 1; }
 void debayerEasy(uint16_t *, float *, int, int, int, int) {}
 void debayerNoneU16(uint16_t *, const uint16_t *, int, int, int, int) {}
 void debayerBasicU16(uint16_t *, uint16_t *, int, int, int, int) {}
@@ -260,7 +260,7 @@ void mlvInvalidateProcessed8PrefetchCache(mlvObject_t * video)
     video->processed8_prefetch_snapshot_dirty = 1;
 }
 
-void demosaic(amazeinfo_t *) {}
+int demosaic(amazeinfo_t *) { return 1; }
 
 void lrtpCaCorrect(float **, int, int, int, int, const uint8_t, size_t, const double, const double, uint8_t) {}
 

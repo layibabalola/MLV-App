@@ -92,13 +92,14 @@
 #ifndef ORACLE_REAL_DEMOSAIC
 /* mean23-only build: the AMaZE branch is never entered, so a one-line stub
  * satisfies the link-time demosaic() symbol reference. */
-void
+int
 #ifdef __MINGW32__
 __attribute__ ((force_align_arg_pointer))
 #endif
 demosaic(amazeinfo_t * inputdata)
 {
     (void)inputdata;
+    return 1;
 }
 #endif /* !ORACLE_REAL_DEMOSAIC */
 

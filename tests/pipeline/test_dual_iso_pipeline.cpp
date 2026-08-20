@@ -103,6 +103,24 @@ TEST(DualIsoPipeline, RestrictedRangeScalingRejectsInvalidStateBeforeMutation)
     ASSERT_TRUE(frame == original_frame);
     ASSERT_EQ(valid_levels_raw.black_level, raw.black_level);
     ASSERT_EQ(valid_levels_raw.white_level, raw.white_level);
+
+    /* A safe-domain historical vector prevents an implementation that merely
+     * rejects every restricted frame from satisfying the hostile tests. */
+    raw.width = 4;
+    raw.height = 1;
+    raw.pitch = 4;
+    raw.black_level = 1024;
+    raw.white_level = 14000;
+    frame = {1024, 2048, 8192, 14000};
+    ASSERT_EQ(1, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size(),
+                                                          100,
+                                                          200));
+    const std::vector<uint16_t> expected = {1024, 1771, 6253, 10490};
+    ASSERT_TRUE(frame == expected);
+    ASSERT_EQ(1024, raw.black_level);
+    ASSERT_EQ(12976, raw.white_level);
 }
 
 TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
@@ -6170,6 +6188,52 @@ TEST(DualIsoPipeline, AmazeWorkerFailuresAreTransactional)
 
     expect_failure_without_publication(false);
     expect_failure_without_publication(true);
+}
+
+TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
+{
+    struct ScopedAmazeFailureReset
+    {
+        ~ScopedAmazeFailureReset()
+        {
+            debayerAmazeSetThreadCreateFailureForTesting(-1);
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    constexpr int width = 33;
+    constexpr int height = 33;
+    const size_t pixels = static_cast<size_t>(width) * height;
+    std::vector<float> input(pixels, 2048.0f);
+    std::vector<uint16_t> output(pixels * 3u, static_cast<uint16_t>(0x4444));
+    const std::vector<uint16_t> original_output = output;
+
+    amazeDemosaicSetAllocationFailureForTesting(1);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              1,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    amazeDemosaicSetAllocationFailureForTesting(0);
+    debayerAmazeSetThreadCreateFailureForTesting(0);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              2,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    debayerAmazeSetThreadCreateFailureForTesting(-1);
+    ASSERT_EQ(1, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              1,
+                              1024));
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
