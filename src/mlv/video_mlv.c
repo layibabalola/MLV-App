@@ -9242,6 +9242,17 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
                  "CinemaDNG UniqueCameraModel is missing:  %.181s", video->path);
         return MLV_ERR_INVALID;
     }
+    if(fi->camera_model[0] == '\0'
+       && strlen(fi->unique_camera_model) >= sizeof(video->IDNT.cameraName))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256,
+                 "CinemaDNG UniqueCameraModel is too long for Model fallback:  %.166s",
+                 video->path);
+        return MLV_ERR_INVALID;
+    }
     size_t dng_pixels = 0;
     if (!mlvDngSequenceGeometryIsRepresentable(fi->width, fi->height,
                                                 fi->bits_per_sample,

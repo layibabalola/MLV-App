@@ -723,6 +723,70 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
     QByteArray emptyUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 1, 0);
     ASSERT_NE(0, parseBytes("empty-unique.dng", emptyUnique, &parsed));
 
+    QByteArray shortUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 6, 256);
+    shortUnique.replace(256, 6, QByteArray("Short\0", 6));
+    QTemporaryDir shortFallbackDirectory;
+    ASSERT_TRUE(shortFallbackDirectory.isValid());
+    QFile shortFallbackFile(shortFallbackDirectory.filePath("000000.dng"));
+    ASSERT_TRUE(shortFallbackFile.open(QIODevice::WriteOnly));
+    ASSERT_EQ(shortUnique.size(), shortFallbackFile.write(shortUnique));
+    shortFallbackFile.close();
+    QByteArray shortFallbackPath = shortFallbackDirectory.path().toLocal8Bit();
+    int shortFallbackError = MLV_ERR_NONE;
+    char shortFallbackMessage[256] = {};
+    mlvObject_t * shortFallbackObject = initMlvObjectWithDngFolder(
+        shortFallbackPath.data(), MLV_OPEN_FULL,
+        &shortFallbackError, shortFallbackMessage);
+    ASSERT_TRUE(shortFallbackObject != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, shortFallbackError);
+    ASSERT_EQ(std::string("Short"),
+              std::string(reinterpret_cast<const char *>(
+                  shortFallbackObject->IDNT.cameraName)));
+    ASSERT_TRUE(shortFallbackObject->camid.cameraName[UNIQ] != nullptr);
+    ASSERT_EQ(std::string("Short"),
+              std::string(shortFallbackObject->camid.cameraName[UNIQ]));
+
+    QTemporaryDir shortFallbackReexportDirectory;
+    ASSERT_TRUE(shortFallbackReexportDirectory.isValid());
+    int32_t shortFallbackPar[4] = { 1, 1, 1, 1 };
+    dngObject_t * shortFallbackDng = initDngObject(
+        shortFallbackObject, UNCOMPRESSED_RAW, 24.0, shortFallbackPar);
+    ASSERT_TRUE(shortFallbackDng != nullptr);
+    const QString shortFallbackReexportPath =
+        shortFallbackReexportDirectory.filePath("reexport.dng");
+    QByteArray shortFallbackReexportBytes =
+        shortFallbackReexportPath.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(shortFallbackObject, shortFallbackDng, 0,
+                              shortFallbackReexportBytes.data(), nullptr));
+    freeDngObject(shortFallbackDng);
+    dng_frame_info_t shortFallbackReexportInfo{};
+    ASSERT_EQ(0, dng_reader_parse_file(
+        shortFallbackReexportBytes.constData(), &shortFallbackReexportInfo));
+    ASSERT_EQ(std::string("Short"),
+              std::string(shortFallbackReexportInfo.camera_model));
+    ASSERT_EQ(std::string("Short"),
+              std::string(shortFallbackReexportInfo.unique_camera_model));
+    freeMlvObject(shortFallbackObject);
+
+    QByteArray longUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 40, 256);
+    longUnique.replace(256, 40, QByteArray(39, 'L') + QByteArray(1, '\0'));
+    QTemporaryDir longFallbackDirectory;
+    ASSERT_TRUE(longFallbackDirectory.isValid());
+    QFile longFallbackFile(longFallbackDirectory.filePath("000000.dng"));
+    ASSERT_TRUE(longFallbackFile.open(QIODevice::WriteOnly));
+    ASSERT_EQ(longUnique.size(), longFallbackFile.write(longUnique));
+    longFallbackFile.close();
+    QByteArray longFallbackPath = longFallbackDirectory.path().toLocal8Bit();
+    int longFallbackError = MLV_ERR_NONE;
+    char longFallbackMessage[256] = {};
+    mlvObject_t * longFallbackObject = initMlvObjectWithDngFolder(
+        longFallbackPath.data(), MLV_OPEN_FULL,
+        &longFallbackError, longFallbackMessage);
+    ASSERT_TRUE(longFallbackObject != nullptr);
+    ASSERT_EQ(MLV_ERR_INVALID, longFallbackError);
+    ASSERT_TRUE(std::strstr(longFallbackMessage, "too long") != nullptr);
+    freeMlvObject(longFallbackObject);
+
     QByteArray invalidActive = withExtraEntry(tcActiveArea, ttLong, 4, 256);
     put32(invalidActive, 256, 3); put32(invalidActive, 260, 0);
     put32(invalidActive, 264, 2); put32(invalidActive, 268, 4);

@@ -1206,6 +1206,8 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     int32_t fast_par[4] = { 1, 1, 5, 3 };
     ASSERT_TRUE(initDngObject(reopened, UNCOMPRESSED_ORIG, 1.0, fast_par)
                 == nullptr);
+    ASSERT_TRUE(initDngObject(reopened, COMPRESSED_ORIG, 1.0, fast_par)
+                == nullptr);
 
     /* Close the metadata loop: reopen the folder through the production MLV
      * object, write a new DNG from that object, then parse and compare it to

@@ -2858,7 +2858,8 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
      * current source abstraction exposes decoded bayer samples rather than a
      * retained per-frame strip. Refuse this mode instead of silently applying
      * llrawproc and rewriting the payload under a pass-through label. */
-    if(isDngFolderLoaded(mlv_data) && raw_state == UNCOMPRESSED_ORIG) {
+    if(isDngFolderLoaded(mlv_data)
+       && (raw_state == UNCOMPRESSED_ORIG || raw_state == COMPRESSED_ORIG)) {
         free(dng_data);
         return NULL;
     }
