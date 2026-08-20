@@ -8840,6 +8840,8 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
 
     QElapsedTimer playbackClock;
     playbackClock.start();
+    m_playbackSmokeTargetPresentedFrames =
+        qMax( 0, options.targetPresentedFrames );
     // RULE 2026-06-26 (Layi): with --loop, check actionLoop BEFORE Play so a short clip (e.g. 16 frames)
     // replays continuously and actionPlay stays checked for the whole durationMs window -- otherwise the
     // clip plays once, the engine unchecks Play at clip-end, and the wait loop below exits early ("MLV
@@ -9158,6 +9160,15 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             qApp->processEvents( QEventLoop::AllEvents );
         }
         QThread::msleep( 10 );
+    }
+
+    if( m_playbackSmokeTargetPresentedFrames > 0
+     && m_playbackSmokePresentedFrames != m_playbackSmokeTargetPresentedFrames )
+    {
+        err << "[GUI-SMOKE] ERROR: exact presented-frame target was not met; target="
+            << m_playbackSmokeTargetPresentedFrames
+            << " observed=" << m_playbackSmokePresentedFrames << ".\n";
+        return 11;
     }
 
     if( options.exerciseClipLifecycleStress && !stressAttempted )
@@ -22898,6 +22909,16 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLastPresentedTime = now;
     m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );
     ++m_playbackSmokePresentedFrames;
+    if( m_playbackSmokeTargetPresentedFrames > 0
+     && m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames
+     && ui->actionPlay->isChecked() )
+    {
+        // Stop inside the presentation callback, before drawFrameReady can
+        // schedule another playback request. This makes screenshot A/B frame
+        // locking independent of CPU/GPU speed while leaving ordinary GUI
+        // playback and time-based smokes unchanged.
+        ui->actionPlay->setChecked( false );
+    }
 
     const auto avgSmokeMs = [this]( double sum ) -> double
     {

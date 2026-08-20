@@ -1190,6 +1190,13 @@ static int runGuiPlaybackSmoke(QApplication &app)
         QStringLiteral("0"));
     parser.addOption(startFrameOpt);
 
+    const QCommandLineOption presentedFramesOpt(
+        QStringLiteral("presented-frames"),
+        QStringLiteral("Stop after exactly this many fresh presented frames; --seconds remains a fail-closed timeout. Zero keeps time-based behavior."),
+        QStringLiteral("count"),
+        QStringLiteral("0"));
+    parser.addOption(presentedFramesOpt);
+
     const QCommandLineOption dropFrameModeOpt(
         QStringLiteral("drop-frame-mode"),
         QStringLiteral("Force timeline pacing during GUI smoke playback: persisted, on, or off."),
@@ -1384,6 +1391,14 @@ static int runGuiPlaybackSmoke(QApplication &app)
         return 2;
     }
 
+    const int targetPresentedFrames =
+        parser.value(presentedFramesOpt).toInt(&ok);
+    if (!ok || targetPresentedFrames < 0)
+    {
+        err << "[GUI-SMOKE] ERROR: --presented-frames must be 0 or greater.\n";
+        return 2;
+    }
+
     const QString dropFrameMode =
         parser.value(dropFrameModeOpt).trimmed().toLower();
     if (dropFrameMode != QStringLiteral("persisted")
@@ -1543,6 +1558,7 @@ static int runGuiPlaybackSmoke(QApplication &app)
         : QFileInfo(parser.value(receiptOpt)).absoluteFilePath();
     options.startFrame = startFrame;
     options.durationMs = qRound(seconds * 1000.0);
+    options.targetPresentedFrames = targetPresentedFrames;
     options.settleMs = settleMs;
     options.settleCpuPercent = settleCpuPercent;
     options.settleCpuStableMs = settleCpuStableMs;

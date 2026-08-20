@@ -7,6 +7,8 @@ param(
     [double]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
                           # generous time to actually play before closing -- ~3x the old 8s, toward the
                           # recommended 30s settled-validation window. Both lanes use a generous window.
+    [ValidateRange(0, 1000000)]
+    [int]$TargetPresentedFrames = 0,
     [int]$StartFrame = 0,
     [ValidateSet("persisted", "on", "off")]
     [string]$DropFrameMode = "persisted",
@@ -920,6 +922,9 @@ $arguments = @(
         $Seconds)),
     "--start-frame", [string]$StartFrame
 )
+if ($TargetPresentedFrames -gt 0 -and -not $LegacyGuiSmokeOptions) {
+    $arguments += @("--presented-frames", [string]$TargetPresentedFrames)
+}
 if (-not $LegacyGuiSmokeOptions) {
     $arguments += @("--drop-frame-mode", $DropFrameMode)
 }

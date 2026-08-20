@@ -562,6 +562,12 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
     comparer = GUI_SMOKE_COMPARER.read_text(encoding="utf-8")
     runner = GUI_SMOKE_RUNNER.read_text(encoding="utf-8")
     main_window = MAIN_WINDOW.read_text(encoding="utf-8")
+    main_window_header = (REPO_ROOT / "platform" / "qt" / "MainWindow.h").read_text(
+        encoding="utf-8"
+    )
+    main_cpp = (REPO_ROOT / "platform" / "qt" / "main.cpp").read_text(
+        encoding="utf-8"
+    )
 
     assert 'schema = "gui-smoke-ab-compare.v3"' in comparer
     assert 'schema = "mlvapp-gui-smoke-result.v2"' in runner
@@ -578,6 +584,13 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
     assert "eventSha256" in runner
     assert "frame=%7 serial=%8 generation=%9" in main_window
     assert "QCryptographicHash::Sha256" in main_window
+    assert "TargetPresentedFrames" in runner
+    assert '"--presented-frames"' in runner
+    assert "targetPresentedFrames = 0" in main_window_header
+    assert "m_playbackSmokeTargetPresentedFrames" in main_window_header
+    assert 'QStringLiteral("presented-frames")' in main_cpp
+    assert "exact presented-frame target was not met" in main_window
+    assert "m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames" in main_window
     assert NEUTRAL_RECEIPT.read_text(encoding="utf-8") == (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<receipt version="4">\n'
