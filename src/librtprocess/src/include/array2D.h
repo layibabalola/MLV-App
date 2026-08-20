@@ -59,6 +59,7 @@
 #include <cstddef>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
 
 // flags for use
@@ -108,33 +109,40 @@ private:
         const std::size_t previousCount =
             (x > 0 && y > 0) ? checked_element_count(x, y) : 0;
 
-        if ((ptr) && ((h > y) || (h < y / 4))) {
-            delete[] ptr;
-            ptr = nullptr;
+        const bool replacePtr = ptr == nullptr || h > y || h < y / 4;
+        const bool replaceData = data == nullptr || offset != 0
+            || logicalCount > previousCount || logicalCount < previousCount / 4u;
+
+        /* Allocate every throwing resource before releasing the old buffers.
+         * A failed resize therefore leaves the prior array and row pointers
+         * intact instead of publishing a half-resized object. */
+        std::unique_ptr<T*[]> pendingPtr;
+        std::unique_ptr<T[]> pendingData;
+        if (replacePtr) {
+            pendingPtr.reset(new T*[h]);
+        }
+        if (replaceData) {
+            pendingData.reset(new T[allocationCount]);
         }
 
-        if ((data) && (offset != 0
-                       || logicalCount > previousCount
-                       || logicalCount < previousCount / 4u)) {
+        T *const nextData = pendingData ? pendingData.get() : data;
+        T **const nextPtr = pendingPtr ? pendingPtr.get() : ptr;
+        for (int i = 0; i < h; i++) {
+            nextPtr[i] = nextData + static_cast<std::size_t>(offset)
+                + static_cast<std::size_t>(w) * static_cast<std::size_t>(i);
+        }
+
+        if (pendingData) {
             delete[] data;
-            data = nullptr;
+            data = pendingData.release();
         }
-
-        if (ptr == nullptr) {
-            ptr = new T*[h];
-        }
-
-        if (data == nullptr) {
-            data = new T[allocationCount];
+        if (pendingPtr) {
+            delete[] ptr;
+            ptr = pendingPtr.release();
         }
 
         x = w;
         y = h;
-
-        for (int i = 0; i < h; i++) {
-            ptr[i] = data + static_cast<std::size_t>(offset)
-                + static_cast<std::size_t>(w) * static_cast<std::size_t>(i);
-        }
 
         owner = 1;
     }
@@ -154,11 +162,13 @@ public:
         const std::size_t elementCount = checked_element_count(w, h);
         flags = flgs;
         lock = flags & ARRAY2D_LOCK_DATA;
-        data = new T[elementCount];
+        std::unique_ptr<T[]> pendingData(new T[elementCount]);
+        std::unique_ptr<T*[]> pendingPtr(new T*[h]);
+        data = pendingData.get();
         owner = 1;
         x = w;
         y = h;
-        ptr = new T*[h];
+        ptr = pendingPtr.get();
 
         for (int i = 0; i < h; i++) {
             ptr[i] = data + static_cast<std::size_t>(i) * static_cast<std::size_t>(w);
@@ -167,6 +177,8 @@ public:
         if (flags & ARRAY2D_CLEAR_DATA) {
             memset(data, 0, elementCount * sizeof(T));
         }
+        pendingData.release();
+        pendingPtr.release();
     }
 
     // creator type 2
@@ -180,15 +192,18 @@ public:
         // TODO: improve this code with ar_realloc()
         owner = (flags & ARRAY2D_BYREFERENCE) ? 0 : 1;
 
+        std::unique_ptr<T[]> pendingData;
+        std::unique_ptr<T*[]> pendingPtr(new T*[h]);
         if (owner) {
-            data = new T[elementCount];
+            pendingData.reset(new T[elementCount]);
+            data = pendingData.get();
         } else {
             data = nullptr;
         }
 
         x = w;
         y = h;
-        ptr = new T*[h];
+        ptr = pendingPtr.get();
 
         for (int i = 0; i < h; i++) {
             if (owner) {
@@ -201,6 +216,8 @@ public:
                 ptr[i] = source[i];
             }
         }
+        pendingData.release();
+        pendingPtr.release();
     }
 
     // destructor

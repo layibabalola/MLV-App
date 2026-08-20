@@ -68,7 +68,8 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
         return RP_MEMORY_ERROR;
     }
     const size_t pixelCount = widthElements * heightElements;
-    if (pixelCount > std::numeric_limits<size_t>::max() / sizeof(float)) {
+    if (pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())
+        || pixelCount > std::numeric_limits<size_t>::max() / sizeof(float)) {
         return RP_MEMORY_ERROR;
     }
     float *rgbarray = (float (*)) malloc(pixelCount * sizeof(float));
@@ -95,12 +96,12 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
 
     float* rgb[2];
     rgb[0] = rgbarray;
-    rgb[1] = rgbarray + (width * height) / 2;
+    rgb[1] = rgbarray + pixelCount / 2u;
 
     float* chr[4];
 
     chr[0] = chrarray;
-    chr[1] = chrarray + (width * height) / 2;
+    chr[1] = chrarray + pixelCount / 2u;
 
     // mapped chr[2] and chr[3] to hdif and hdif, because these are out of use, when chr[2] and chr[3] are used
     chr[2] = hdif;
@@ -476,7 +477,8 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
         return RP_MEMORY_ERROR;
     }
     const size_t pixelCount = widthElements * heightElements;
-    if (pixelCount > std::numeric_limits<size_t>::max() / (3u * sizeof(float))) {
+    if (pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())
+        || pixelCount > std::numeric_limits<size_t>::max() / (3u * sizeof(float))) {
         return RP_MEMORY_ERROR;
     }
     const size_t halfPixelCount = pixelCount / 2u + pixelCount % 2u;

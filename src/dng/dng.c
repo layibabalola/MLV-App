@@ -2161,8 +2161,6 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
         || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
         return LJ92_ERROR_CORRUPT;
     }
-    const int expected_width = width;
-    const int expected_height = height;
     const size_t expected_pixels = (size_t)width * (size_t)height;
     int components = 1;
     lj92 decoder_object;
@@ -2177,10 +2175,19 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
         return ret;
     }
 
-    if (width != expected_width || height != expected_height || components != 1
-        || expected_pixels > (size_t)INT_MAX) {
+    size_t decoded_pixels = 0;
+    if (width <= 0 || height <= 0 || components <= 0
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / (size_t)components) {
         ret = LJ92_ERROR_CORRUPT;
     } else {
+        decoded_pixels = (size_t)width * (size_t)height * (size_t)components;
+    }
+    if (ret == LJ92_ERROR_NONE
+        && (decoded_pixels != expected_pixels || expected_pixels > (size_t)INT_MAX)) {
+        ret = LJ92_ERROR_CORRUPT;
+    }
+    if (ret == LJ92_ERROR_NONE) {
         ret = lj92_decode(decoder_object, output_buffer, (int)expected_pixels, 0, NULL, 0);
     }
     if(ret != LJ92_ERROR_NONE)
@@ -2195,7 +2202,27 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
     return ret;
 }
 
+static int dng_lj92_output_capacity(int width, int height, size_t * output_capacity)
+{
+    if (!output_capacity || width <= 0 || height <= 1 || width > INT_MAX / 2
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return 0;
+    }
+    const size_t input_pixels = (size_t)width * (size_t)height;
+    if (input_pixels > (SIZE_MAX - 200u) / 3u) {
+        return 0;
+    }
+    const int encoded_width = width * 2;
+    const int encoded_height = height / 2;
+    if (encoded_height <= 0 || encoded_width > INT_MAX / encoded_height) {
+        return 0;
+    }
+    *output_capacity = input_pixels * 3u + 200u;
+    return 1;
+}
+
 static int dng_compress_image_profiled(uint16_t * output_buffer,
+                                       size_t output_buffer_capacity,
                                        uint16_t * input_buffer,
                                        size_t * output_buffer_size,
                                        int width,
@@ -2207,9 +2234,15 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
         || width <= 0 || height <= 0 || width > INT_MAX / 2
         || (size_t)width > SIZE_MAX / (size_t)height
         || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
+        if (output_buffer_size) *output_buffer_size = 0;
         return LJ92_ERROR_CORRUPT;
     }
-    const size_t input_pixels = (size_t)width * (size_t)height;
+    size_t maximum_encoded_size = 0;
+    if (!dng_lj92_output_capacity(width, height, &maximum_encoded_size)
+        || output_buffer_capacity == 0) {
+        *output_buffer_size = 0;
+        return LJ92_ERROR_CORRUPT;
+    }
     uint8_t * compressed = NULL;
     int new_width = width * 2;
     int new_height = height / 2;
@@ -2218,25 +2251,32 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
     if (new_height <= 0 || new_width > INT_MAX / new_height) {
         return LJ92_ERROR_CORRUPT;
     }
+    int encoded_length = 0;
     int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp,
                           new_width * new_height, 0, NULL, 0,
-                          &compressed, (int*)output_buffer_size);
+                          &compressed, &encoded_length);
+    if (ret == LJ92_ERROR_NONE
+        && (encoded_length < 0
+            || (size_t)encoded_length > maximum_encoded_size
+            || (size_t)encoded_length > output_buffer_capacity)) {
+        ret = LJ92_ERROR_CORRUPT;
+    }
     export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_ENCODE, profile_stage_start);
 
     if(ret == LJ92_ERROR_NONE)
     {
+        *output_buffer_size = (size_t)encoded_length;
         profile_stage_start = export_profile_stage_begin(profile_frame);
         memcpy(output_buffer, compressed, *output_buffer_size);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_COPY, profile_stage_start);
 #ifndef STDOUT_SILENT
-        size_t input_buffer_size = input_pixels * sizeof(uint16_t);
+        size_t input_buffer_size = (size_t)width * (size_t)height * sizeof(uint16_t);
         printf("LJ92 encoder: "FMT_SIZE" -> "FMT_SIZE" (%2.2f%% ratio)\n", *output_buffer_size, input_buffer_size, ((float)*output_buffer_size * 100.0f) / (float)input_buffer_size);
 #endif
     }
     else
     {
-        *output_buffer_size = input_pixels * sizeof(uint16_t);
-        memset(output_buffer, 0, *output_buffer_size);
+        *output_buffer_size = 0;
 #ifndef STDOUT_SILENT
         printf("LJ92 encoder: failed with error code (%d)\n", ret);
 #endif
@@ -2253,9 +2293,10 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
 }
 
 /* compress input_buffer to LJ92 image */
-int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
+int dng_compress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp)
 {
     return dng_compress_image_profiled(output_buffer,
+                                      output_buffer_capacity,
                                       input_buffer,
                                       output_buffer_size,
                                       width,
@@ -2330,6 +2371,7 @@ static int dng_prepare_compressed_frame(mlvObject_t * mlv_data,
 
     double profile_stage_start = export_profile_stage_begin(profile_frame);
     const int ret = dng_compress_image_profiled(dng_data->image_buf,
+                                                dng_data->image_capacity,
                                                 dng_data->image_buf_unpacked,
                                                 &dng_data->image_size,
                                                 mlv_data->RAWI.xRes,
@@ -2381,8 +2423,13 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 
         size_t stored_size = item.size;
 
-        if (stored_size > dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, frame_index)) {
-            dng_data->image_buf2 = realloc(dng_data->image_buf2, stored_size);
+        if (stored_size > dng_data->image_capacity) {
+            void * replacement = realloc(dng_data->image_buf2, stored_size);
+            if(!replacement) {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return -1;
+            }
+            dng_data->image_buf2 = replacement;
         }
 
         if (fread(dng_data->image_buf2, stored_size, 1, fd) != 1)
@@ -2602,6 +2649,11 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
 {
     dngObject_t * dng_data = calloc(1, sizeof(dngObject_t));
 
+    if(!dng_data || !mlv_data) {
+        free(dng_data);
+        return NULL;
+    }
+
     dng_data->fps_float = fps;
     memcpy(dng_data->par, par, sizeof(int32_t) * 4);
 
@@ -2611,12 +2663,31 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
     dng_data->header_size = HEADER_SIZE;
     dng_data->header_buf = malloc(dng_data->header_size);
 
-    dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, 0);
-    dng_data->image_buf  = malloc(dng_data->image_size);
-    dng_data->image_buf2 = malloc(dng_data->image_size);
-
     dng_data->image_size_unpacked = dng_get_image_size(mlv_data, IMG_SIZE_UNPACKED, 0);
-    dng_data->image_buf_unpacked = malloc(dng_data->image_size_unpacked);
+    size_t compressed_capacity = 0;
+    if(!dng_lj92_output_capacity(mlv_data->RAWI.xRes,
+                                 mlv_data->RAWI.yRes,
+                                 &compressed_capacity)) {
+        free(dng_data->header_buf);
+        free(dng_data);
+        return NULL;
+    }
+    dng_data->image_size = dng_data->image_size_unpacked;
+    dng_data->image_capacity = compressed_capacity > dng_data->image_size_unpacked
+        ? compressed_capacity : dng_data->image_size_unpacked;
+    dng_data->image_buf = malloc(dng_data->image_capacity);
+    dng_data->image_buf2 = malloc(dng_data->image_capacity);
+    dng_data->image_buf_unpacked = malloc(dng_data->image_capacity);
+
+    if(!dng_data->header_buf || !dng_data->image_buf || !dng_data->image_buf2
+       || !dng_data->image_buf_unpacked) {
+        free(dng_data->header_buf);
+        free(dng_data->image_buf);
+        free(dng_data->image_buf2);
+        free(dng_data->image_buf_unpacked);
+        free(dng_data);
+        return NULL;
+    }
 
     return dng_data;
 }
@@ -2659,7 +2730,7 @@ static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
     if(!dng_data) return NULL;
     if(!dng_data->header_buf || !dng_data->image_buf) return NULL;
 
-    uint16_t * replacement_image = (uint16_t*)malloc(dng_data->image_size_unpacked);
+    uint16_t * replacement_image = (uint16_t*)malloc(dng_data->image_capacity);
     uint8_t * payload_header = (uint8_t*)malloc(dng_data->header_size);
     if(!replacement_image || !payload_header)
     {
@@ -2686,7 +2757,7 @@ static dngFramePayload_t * dng_take_ready_frame_payload(dngObject_t * dng_data,
     payload->compression_input_bytes = dng_data->payload_compress_input_bytes;
     payload->header_size = dng_data->header_size;
     payload->image_size = dng_data->image_size;
-    payload->image_capacity = dng_data->image_size_unpacked;
+    payload->image_capacity = dng_data->image_capacity;
     payload->header_buf = payload_header;
     payload->image_buf = (uint8_t*)dng_data->image_buf;
 
@@ -2767,6 +2838,7 @@ static int dng_prepare_payload_for_write(dngFramePayload_t * payload,
     size_t output_size = payload->image_capacity;
     double profile_stage_start = export_profile_stage_begin(profile_frame);
     const int ret = dng_compress_image_profiled((uint16_t*)payload->image_buf,
+                                                payload->image_capacity,
                                                 (uint16_t*)payload->image_buf,
                                                 &output_size,
                                                 payload->compression_width,

@@ -17,6 +17,11 @@
 #include "../../src/debug/StageTiming.h"
 #include "../../src/debug/StageTimingCsvSink.h"
 #include "../../src/librtprocess/src/include/array2D.h"
+#include "../../src/librtprocess/src/include/librtprocess.h"
+#include "../../src/ca_correct/CA_correct_RT.h"
+#include "../../src/dng/dng.h"
+
+// These kernels must reject hostile extents without dereferencing their image inputs.
 
 #include <QByteArray>
 #include <QDir>
@@ -60,6 +65,21 @@ private:
     QByteArray m_value;
 };
 
+struct ThrowingElement {
+    static bool failConstruction;
+    int value = 0;
+
+    ThrowingElement()
+    {
+        if (failConstruction)
+        {
+            throw std::bad_alloc();
+        }
+    }
+};
+
+bool ThrowingElement::failConstruction = false;
+
 std::string readTextFile(const QString & path)
 {
     QFile file(path);
@@ -99,6 +119,105 @@ TEST(SecuritySizing, Array2DRejectsOverflowBeforeAllocation)
                          "array2D rejects overflow before attempting allocation");
     }
     ASSERT_TRUE(rejected);
+}
+
+TEST(SecuritySizing, ResizeAndImageKernelsRejectHostileDimensionsBeforeIndexing)
+{
+    array2D<uint64_t> stable(2, 2, ARRAY2D_CLEAR_DATA);
+    stable[0][0] = UINT64_C(0x123456789abcdef0);
+    bool resizeRejected = false;
+    try
+    {
+        stable(std::numeric_limits<int>::max(),
+               std::numeric_limits<int>::max(),
+               ARRAY2D_CLEAR_DATA);
+    }
+    catch (const std::bad_array_new_length &)
+    {
+        resizeRejected = true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         "array2D resize rejects overflow before allocation");
+    }
+    ASSERT_TRUE(resizeRejected);
+    ASSERT_EQ(2, stable.width());
+    ASSERT_EQ(2, stable.height());
+    ASSERT_EQ(UINT64_C(0x123456789abcdef0), stable[0][0]);
+
+    array2D<ThrowingElement> throwing(2, 2);
+    throwing[0][0].value = 73;
+    ThrowingElement::failConstruction = true;
+    bool allocationRejected = false;
+    try
+    {
+        throwing(3, 3);
+    }
+    catch (const std::bad_alloc &)
+    {
+        allocationRejected = true;
+    }
+    ThrowingElement::failConstruction = false;
+    ASSERT_TRUE(allocationRejected);
+    ASSERT_EQ(2, throwing.width());
+    ASSERT_EQ(2, throwing.height());
+    ASSERT_EQ(73, throwing[0][0].value);
+
+    const unsigned bayerCfa[2][2] = {{0u, 1u}, {1u, 2u}};
+    const unsigned fourColorCfa[2][2] = {{0u, 1u}, {3u, 2u}};
+    const auto progress = [](double) { return false; };
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              igv_demosaic(std::numeric_limits<int>::max(),
+                           std::numeric_limits<int>::max(),
+                           nullptr, nullptr, nullptr, nullptr, bayerCfa, progress));
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              lmmse_demosaic(std::numeric_limits<int>::max(),
+                             std::numeric_limits<int>::max(),
+                             nullptr, nullptr, nullptr, nullptr, bayerCfa, progress, 1));
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              vng4_demosaic(std::numeric_limits<int>::max(),
+                            std::numeric_limits<int>::max(),
+                            nullptr, nullptr, nullptr, nullptr, fourColorCfa, progress));
+
+    double fitParams[2][2][16] = {};
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              CA_correct(std::numeric_limits<int>::min(), 0,
+                         std::numeric_limits<int>::max(), 1,
+                         false, 1, 0.0, 0.0, false,
+                         nullptr, nullptr, bayerCfa, progress,
+                         fitParams, false));
+
+    CA_correct_RT(nullptr, 0, 0,
+                  std::numeric_limits<int>::max(),
+                  std::numeric_limits<int>::max(),
+                  0, 0,
+                  std::numeric_limits<int>::max(),
+                  std::numeric_limits<int>::max(),
+                  0, 0.0f, 0.0f);
+}
+
+TEST(SecuritySizing, DngCompressorRejectsExpansionBeyondCallerCapacity)
+{
+    uint16_t input[16] = {};
+    uint16_t output[8];
+    for (uint16_t & value : output)
+    {
+        value = UINT16_C(0xa55a);
+    }
+    size_t outputSize = sizeof(output);
+    ASSERT_TRUE(dng_compress_image(output,
+                                   1,
+                                   input,
+                                   &outputSize,
+                                   4,
+                                   4,
+                                   14) != 0);
+    ASSERT_EQ(static_cast<size_t>(0), outputSize);
+    for (const uint16_t value : output)
+    {
+        ASSERT_EQ(UINT16_C(0xa55a), value);
+    }
 }
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)

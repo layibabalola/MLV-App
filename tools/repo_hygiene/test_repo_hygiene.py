@@ -237,6 +237,19 @@ class RepoHygieneTests(unittest.TestCase):
         ca_rt = (ROOT / "src" / "ca_correct" / "CA_correct_RT.c").read_text(
             encoding="utf-8"
         )
+        ca = (
+            ROOT / "src" / "librtprocess" / "src" / "preprocess" / "CA_correct.cc"
+        ).read_text(encoding="utf-8")
+        igv = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "igv.cc"
+        ).read_text(encoding="utf-8")
+        lmmse = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "lmmse.cc"
+        ).read_text(encoding="utf-8")
+        vng4 = (
+            ROOT / "src" / "librtprocess" / "src" / "demosaic" / "vng4.cc"
+        ).read_text(encoding="utf-8")
+        dng = (ROOT / "src" / "dng" / "dng.c").read_text(encoding="utf-8")
 
         self.assertIn('#include <inttypes.h>', blender)
         self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
@@ -284,6 +297,8 @@ class RepoHygieneTests(unittest.TestCase):
         )
 
         self.assertIn("checked_element_count(w, h, offset)", array2d)
+        self.assertIn("std::unique_ptr<T[]> pendingData", array2d)
+        self.assertIn("std::unique_ptr<T*[]> pendingPtr", array2d)
         self.assertNotIn("new T[h * w]", array2d)
         self.assertNotIn("memset(data, 0, (size_t)w * (size_t)h", array2d)
         self.assertIn("size_t tile_pixels = 0;", ca_rt)
@@ -292,6 +307,18 @@ class RepoHygieneTests(unittest.TestCase):
             ca_rt,
         )
         self.assertNotIn("calloc(TS*TS/2", ca_rt)
+        self.assertIn("image_pixels > (size_t)INT_MAX", ca_rt)
+        self.assertIn("const int64_t wideW", ca)
+        self.assertIn("imageElements > static_cast<size_t>(std::numeric_limits<int>::max())", ca)
+        self.assertIn("pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())", igv)
+        self.assertIn("planeElements > static_cast<size_t>(std::numeric_limits<int>::max())", lmmse)
+        self.assertIn("width > std::numeric_limits<int>::max() / 16", vng4)
+        self.assertIn("int encoded_length = 0;", dng)
+        self.assertNotIn("(int*)output_buffer_size", dng)
+        self.assertIn("size_t output_buffer_capacity", dng)
+        self.assertIn("(size_t)encoded_length > output_buffer_capacity", dng)
+        self.assertIn("dng_data->image_capacity", dng)
+        self.assertIn("decoded_pixels != expected_pixels", dng)
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")

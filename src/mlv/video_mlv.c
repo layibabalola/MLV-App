@@ -8554,7 +8554,13 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         if(!ret)
         {
             dng_unpack_image_bits(frame_buf_unpacked, (uint16_t*)frame_buf, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
-            ret = dng_compress_image(frame_buf_compressed, frame_buf_unpacked, &frame_size_compressed, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            ret = dng_compress_image(frame_buf_compressed,
+                                     frame_size_unpacked,
+                                     frame_buf_unpacked,
+                                     &frame_size_compressed,
+                                     video->RAWI.xRes,
+                                     video->RAWI.yRes,
+                                     video->RAWI.raw_info.bits_per_pixel);
             if(ret == LJ92_ERROR_NONE)
             {
                 vidf_hdr.blockSize = sizeof(mlv_vidf_hdr_t) + frame_size_compressed;

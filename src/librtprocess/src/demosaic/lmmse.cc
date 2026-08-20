@@ -242,7 +242,8 @@ rpError lmmse_demosaic(int width, int height, const float * const *rawData, floa
         return RP_MEMORY_ERROR;
     }
     const size_t planeElements = rrElements * ccElements;
-    if (planeElements > std::numeric_limits<size_t>::max() / (5u * sizeof(float))) {
+    if (planeElements > static_cast<size_t>(std::numeric_limits<int>::max())
+        || planeElements > std::numeric_limits<size_t>::max() / (5u * sizeof(float))) {
         return RP_MEMORY_ERROR;
     }
     float *buffer = (float *)calloc(planeElements, 5u * sizeof(float));

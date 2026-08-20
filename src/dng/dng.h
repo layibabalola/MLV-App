@@ -24,6 +24,10 @@
 #include <sys/types.h>
 #include "../mlv/mlv_object.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* raw state definitions */
 #define UNCOMPRESSED_RAW 0
 #define COMPRESSED_RAW 1
@@ -54,6 +58,7 @@ typedef struct
 
     size_t header_size;             // dng header size
     size_t image_size;              // raw image buffer size
+    size_t image_capacity;          // allocated image buffer capacity in bytes
     size_t image_size_unpacked;     // bit unpacked working buffer size
 
     uint8_t * header_buf;           // pointer to header buffer
@@ -91,7 +96,7 @@ typedef struct dngPayloadWriter dngPayloadWriter_t;
 /* routines to unpack, pack, decompress or compress raw data */
 void dng_unpack_image_bits(uint16_t * input_buffer, uint16_t * output_buffer, int width, int height, uint32_t bpp);
 void dng_pack_image_bits(uint16_t * input_buffer, uint16_t * output_buffer, int width, int height, uint32_t bpp, int big_endian);
-int dng_compress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp);
+int dng_compress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp);
 int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp);
 
 /* routines to initialize, save and free DNG exporting struct */
@@ -106,5 +111,9 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer, mlvObject_t *
 int saveDngFrameViaPayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 void freeDngObject(dngObject_t * dng_data);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

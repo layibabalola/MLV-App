@@ -72,7 +72,8 @@ rpError vng4_demosaic (int width, int height, const float * const *rawData, floa
 
     constexpr unsigned int colors = 4;
 
-    if (width <= 0 || height <= 0) {
+    if (width <= 0 || height <= 0
+        || width > std::numeric_limits<int>::max() / 16) {
         return RP_MEMORY_ERROR;
     }
     const size_t widthElements = static_cast<size_t>(width);
@@ -81,7 +82,8 @@ rpError vng4_demosaic (int width, int height, const float * const *rawData, floa
         return RP_MEMORY_ERROR;
     }
     const size_t pixelCount = heightElements * widthElements;
-    if (pixelCount > std::numeric_limits<size_t>::max() / sizeof(float[4])) {
+    if (pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())
+        || pixelCount > std::numeric_limits<size_t>::max() / sizeof(float[4])) {
         return RP_MEMORY_ERROR;
     }
     float (*image)[4] = (float (*)[4]) calloc(pixelCount, sizeof * image);

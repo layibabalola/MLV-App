@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <stdint.h>
+#include <limits.h>
 #define SQR(X) (X*X)
 #define min(X, Y) (((X) < (Y)) ? (X) : (Y))
 #define max(X, Y) (((X) > (Y)) ? (X) : (Y))
@@ -85,13 +86,17 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   //float cared = 0, cablue = 0;
   // local variables
   int width = winw, height = winh;
-  if (width <= 0 || height <= 0 || tilew <= 0 || tileh <= 0) {
+  if (width <= 0 || height <= 0 || tilex < 0 || tiley < 0
+      || tilew <= 0 || tileh <= 0
+      || width > INT_MAX - (TS + 16) || height > INT_MAX - (TS + 16)
+      || tilew > width - tilex || tileh > height - tiley) {
     return;
   }
   size_t image_pixels = 0;
   size_t tile_pixels = 0;
   if (!ca_checked_mul_size((size_t)height, (size_t)width, &image_pixels)
-      || !ca_checked_mul_size((size_t)tileh, (size_t)tilew, &tile_pixels)) {
+      || !ca_checked_mul_size((size_t)tileh, (size_t)tilew, &tile_pixels)
+      || image_pixels > (size_t)INT_MAX || tile_pixels > (size_t)INT_MAX) {
     return;
   }
   //temporary array to store simple interpolation of G

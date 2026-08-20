@@ -24,6 +24,7 @@
 
 #include <memory>
 #include <limits>
+#include <cstdint>
 
 #include "bayerhelper.h"
 #include "gauss.h"
@@ -157,11 +158,15 @@ rpError CA_correct(
     }
 
     // local variables
-    const int W = winw - winx;
-    const int H = winh - winy;
-    if (W <= 0 || H <= 0 || W == std::numeric_limits<int>::max()) {
+    const int64_t wideW = static_cast<int64_t>(winw) - static_cast<int64_t>(winx);
+    const int64_t wideH = static_cast<int64_t>(winh) - static_cast<int64_t>(winy);
+    if (wideW <= 2 * cb || wideH <= 2 * cb
+        || wideW > std::numeric_limits<int>::max() - 1
+        || wideH > std::numeric_limits<int>::max()) {
         return RP_MEMORY_ERROR;
     }
+    const int W = static_cast<int>(wideW);
+    const int H = static_cast<int>(wideH);
 
     std::unique_ptr<JaggedArray<float>> redFactor;
     std::unique_ptr<JaggedArray<float>> blueFactor;
@@ -203,6 +208,11 @@ rpError CA_correct(
     constexpr int border = 8;
     constexpr int border2 = 16;
 
+    if (width > std::numeric_limits<int>::max() - border2
+        || height > std::numeric_limits<int>::max() - border2) {
+        return RP_MEMORY_ERROR;
+    }
+
     const int vz1 = (height + border2) % (ts - border2) == 0 ? 1 : 0;
     const int hz1 = (width + border2) % (ts - border2) == 0 ? 1 : 0;
     const int vblsz = ceil((float)(height + border2) / (ts - border2) + 2 + vz1);
@@ -217,6 +227,9 @@ rpError CA_correct(
         return RP_MEMORY_ERROR;
     }
     const size_t imageElements = heightElements * widthElements;
+    if (imageElements > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        return RP_MEMORY_ERROR;
+    }
     const size_t blockCount = vblockElements * hblockElements;
     constexpr size_t blockStride = 2u * 2u + 1u;
     if (blockCount > std::numeric_limits<size_t>::max() / blockStride) {

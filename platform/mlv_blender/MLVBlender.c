@@ -365,7 +365,13 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         }
 
         size_t frame_size_compressed = 0;
-        int ret = dng_compress_image(buffer_compressed, buffer16, &frame_size_compressed, result_width, result_height, bitdepth);
+        int ret = dng_compress_image(buffer_compressed,
+                                     2 * frame_size * sizeof(uint16_t),
+                                     buffer16,
+                                     &frame_size_compressed,
+                                     result_width,
+                                     result_height,
+                                     bitdepth);
 
         /* Write frame */
         mlv_vidf_hdr_t vidf_hdr = { 0 };
