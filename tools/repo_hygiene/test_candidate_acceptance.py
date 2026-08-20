@@ -756,6 +756,20 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertFalse(policy["carryApprovalsAcrossCandidateTuples"])
         self.assertFalse(policy["agentApprovalsGrantHumanAuthority"])
 
+    def test_agent_doctrine_matches_two_phase_acceptance_authority_boundary(self) -> None:
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        dashboard = (ROOT / "docs/19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
+        for text in (agents, claude, dashboard):
+            self.assertIn("deliberately dormant", text)
+            self.assertIn("separately reviewed", text)
+            self.assertIn("human", text.lower())
+        self.assertIn("candidateAcceptance.enabled", agents)
+        self.assertIn("candidateAcceptance.requireReadyForFinalize", agents)
+        self.assertIn("enabled=false", claude)
+        self.assertIn("requireReadyForFinalize=false", claude)
+        self.assertIn("never replace", claude)
+
     def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
