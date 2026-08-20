@@ -211,7 +211,10 @@ public:
         pthread_mutex_lock(&m_video->llrawproc_mutex);
         llrawprocObject_t * const llrawproc = m_video->llrawproc;
         free(llrawproc->dark_frame_data);
-        llrawproc->dark_frame_size = static_cast<uint32_t>(m_video->RAWI.xRes * m_video->RAWI.yRes * sizeof(uint16_t));
+        llrawproc->dark_frame_size = static_cast<uint32_t>(
+            static_cast<uint64_t>(m_video->RAWI.xRes)
+            * static_cast<uint64_t>(m_video->RAWI.yRes)
+            * sizeof(uint16_t));
         llrawproc->dark_frame_data = static_cast<uint16_t *>(calloc(llrawproc->dark_frame_size + 4u, 1));
         if( !llrawproc->dark_frame_data )
         {

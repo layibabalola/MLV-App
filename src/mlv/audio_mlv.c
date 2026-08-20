@@ -170,7 +170,8 @@ void writeMlvAudioToWaveCut(mlvObject_t * video, char * path, uint32_t cut_in, u
     if( frames <= 0 ) return;
 
     /* Calculate the sum of audio sample sizes for all audio channels */
-    uint64_t audio_sample_size = getMlvAudioChannels(video) * (getMlvAudioBitsPerSample(video) / 8);
+    uint64_t audio_sample_size = (uint64_t)getMlvAudioChannels(video)
+        * (uint64_t)(getMlvAudioBitsPerSample(video) / 8);
     /* Calculate the audio alignement block size in bytes */
     uint16_t block_align = audio_sample_size * 1024;
     /* Calculate cut_in offset */
@@ -250,7 +251,8 @@ void readMlvAudioData(mlvObject_t * video)
 
             if (mlv_audio_size + hdr_item.size > allocated_size)
             {
-                allocated_size = mlv_audio_size + hdr_item.size + (video->audios - i) * hdr_item.size;
+                allocated_size = mlv_audio_size + hdr_item.size
+                    + (size_t)(video->audios - i) * (size_t)hdr_item.size;
                 mlv_audio_buffer = realloc(mlv_audio_buffer, allocated_size);
             }
 
@@ -303,7 +305,8 @@ void readMlvAudioData(mlvObject_t * video)
     }
 
     /* Calculate the sum of audio sample sizes for all audio channels */
-    uint64_t audio_sample_size = getMlvAudioChannels(video) * (getMlvAudioBitsPerSample(video) / 8);
+    uint64_t audio_sample_size = (uint64_t)getMlvAudioChannels(video)
+        * (uint64_t)(getMlvAudioBitsPerSample(video) / 8);
     /* Calculate the audio alignement block size in bytes */
     uint16_t block_align = audio_sample_size * 1024;
 

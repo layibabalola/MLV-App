@@ -229,14 +229,15 @@ rpError lmmse_demosaic(int width, int height, const float * const *rawData, floa
 
     float *rix[5];
     float *qix[5] {nullptr};
-    float *buffer = (float *)calloc(rr1 * cc1 * 5 * sizeof(float), 1);
+    const size_t planeElements = static_cast<size_t>(rr1) * static_cast<size_t>(cc1);
+    float *buffer = (float *)calloc(planeElements * 5u, sizeof(float));
 
     if (!buffer) { // allocation of big block of memory failed, try to get 5 smaller ones
         printf("lmmse_interpolate_omp: allocation of big memory block failed, try to get 5 smaller ones now...\n");
         bool allocationFailed = false;
 
         for (int i = 0; i < 5; i++) {
-            qix[i] = (float *)calloc(rr1 * cc1 * sizeof(float), 1);
+            qix[i] = (float *)calloc(planeElements, sizeof(float));
 
             if (!qix[i]) { // allocation of at least one small block failed
                 allocationFailed = true;

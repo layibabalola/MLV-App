@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <inttypes.h>
 #include <math.h>
 
 #include "mcraw.h"
@@ -469,7 +470,7 @@ void mr_dump(mr_ctx_t *ctx)
 
     file_hdr.ident[6] = 0;
 
-    printf("File size: %ld\n", file_size);
+    printf("File size: %" PRId64 "\n", file_size);
     printf("    Ident: %s\n", file_hdr.ident);
     printf("  Version: %d\n\n", file_hdr.version);
 
@@ -485,14 +486,17 @@ void mr_dump(mr_ctx_t *ctx)
             return;
         }
 
-        printf("type: %s size: %8d, offset: %ld\n", type_str[item.type & 7], item.size, pos);
+        printf("type: %s size: %8" PRIu32 ", offset: %" PRId64 "\n",
+               type_str[item.type & 7], item.size, pos);
 
         pos += (sizeof(mr_item_t) + item.size);
 
         mr_fseek(ctx->fd, item.size, SEEK_CUR);
     }
 
-    printf("Index offset: %ld\n", file_size - (sizeof(mr_buffer_index_t) + sizeof(mr_item_t)));
+    const int64_t index_offset = file_size
+        - (int64_t)(sizeof(mr_buffer_index_t) + sizeof(mr_item_t));
+    printf("Index offset: %" PRId64 "\n", index_offset);
 }
 
 //-----------------------------------------------------------------------------
@@ -629,7 +633,7 @@ static int mr_read_index(mr_ctx_t *ctx)
             int64_t timestamp = ctx->offsets[i].timestamp;
             int64_t delta = timestamp - prev;
 
-            printf("block: %ld, timestamp: %ld, delta: %ld\n",
+            printf("block: %" PRId64 ", timestamp: %" PRId64 ", delta: %" PRId64 "\n",
                    ctx->offsets[i].offset, ctx->offsets[i].timestamp, delta / 1000000);
 
             prev = ctx->offsets[i].timestamp;
@@ -697,7 +701,7 @@ int mr_decoder_parse(mr_ctx_t *ctx)
 
         if (memcmp(file_hdr.ident, MCRAW_CONTAINER_ID, 7) != 0)
         {
-            mr_set_error(ctx, -1, "File header is missing, invalid file:  %s", ctx->fd);
+            mr_set_error(ctx, -1, "File header is missing, invalid file");
             break;
         }
 

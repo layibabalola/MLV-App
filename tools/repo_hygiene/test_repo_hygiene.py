@@ -213,6 +213,70 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("tools/gpu/build-cuda.ps1", load_config(ROOT)["tracked_ignored_allowlist"])
         self.assertIn(".claude-state/probe.tmp", load_config(ROOT)["required_ignore_samples"]["must_be_ignored"])
 
+    def test_c_variadic_and_typed_pixel_store_contracts_remain_safe(self) -> None:
+        """Guard resolved UB contracts that ordinary output tests may not exercise."""
+        blender = (ROOT / "platform" / "mlv_blender" / "MLVBlender.c").read_text(
+            encoding="utf-8"
+        )
+        basic = (ROOT / "src" / "debayer" / "basic.c").read_text(encoding="utf-8")
+        llrawproc = (
+            ROOT / "src" / "mlv" / "llrawproc" / "llrawproc.c"
+        ).read_text(encoding="utf-8")
+        mcraw = (ROOT / "src" / "mlv" / "mcraw" / "mcraw.c").read_text(
+            encoding="utf-8"
+        )
+        cube_lut = (ROOT / "src" / "processing" / "cube_lut.c").read_text(
+            encoding="utf-8"
+        )
+        raw_processing = (
+            ROOT / "src" / "processing" / "raw_processing.c"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('#include <inttypes.h>', blender)
+        self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
+        self.assertNotIn('"Exporting frame %i/%i', blender)
+
+        self.assertEqual(basic.count('allocation of %zu bytes failed.'), 2)
+        self.assertNotIn('allocation of %u bytes failed.', basic)
+
+        self.assertIn('raw_image_size / sizeof(*raw_image_buff) > 1000', llrawproc)
+        self.assertIn('(unsigned int)raw_image_buff[1000]', llrawproc)
+        self.assertIn('Proc_Black = %f', llrawproc)
+        self.assertNotIn('Proc_Black = %d', llrawproc)
+
+        self.assertIn('#include <inttypes.h>', mcraw)
+        self.assertNotIn('%ld', mcraw)
+        self.assertIn('size: %8" PRIu32', mcraw)
+        self.assertIn('"File header is missing, invalid file"', mcraw)
+        self.assertNotIn('invalid file:  %s", ctx->fd', mcraw)
+
+        self.assertIn('Data line #%u values:', cube_lut)
+        self.assertNotIn('Data line #%d values:', cube_lut)
+        self.assertIn(
+            'printf("LUT_1D_INPUT_RANGE %f %f\\n", inMin, inMax);',
+            cube_lut,
+        )
+        self.assertIn(
+            'printf("LUT_3D_INPUT_RANGE %f %f\\n", inMin, inMax);',
+            cube_lut,
+        )
+        self.assertNotRegex(
+            cube_lut,
+            r'printf\("LUT_[13]D_INPUT_RANGE[^;]+&inMin',
+        )
+
+        self.assertIn('static inline void agx_store_float_triplet_fast', raw_processing)
+        self.assertIn(
+            'agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b, '
+            '&pixg[0], &pixg[1], &pixg[2]);',
+            raw_processing,
+        )
+        self.assertNotIn(
+            'agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, '
+            '&pixg[0], &pixg[1], &pixg[2]);',
+            raw_processing,
+        )
+
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
         bridge_start = workflow.index("\n  factory-bridge-regressions:")

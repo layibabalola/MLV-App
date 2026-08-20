@@ -71,7 +71,8 @@ rpError vng4_demosaic (int width, int height, const float * const *rawData, floa
 
     constexpr unsigned int colors = 4;
 
-    float (*image)[4] = (float (*)[4]) calloc (height * width, sizeof * image);
+    const size_t pixelCount = static_cast<size_t>(height) * static_cast<size_t>(width);
+    float (*image)[4] = (float (*)[4]) calloc(pixelCount, sizeof * image);
 
     if (!image) {
         return RP_MEMORY_ERROR;

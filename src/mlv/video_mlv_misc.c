@@ -303,7 +303,7 @@ int create_thumbnail(mlvObject_t * video, uint8_t * thumbnail_img, int downscale
     int raw_h = video->RAWI.yRes;
     int i, j;
 
-    uint16_t *raw_frame = (uint16_t *)(malloc(raw_w * raw_h * sizeof(uint16_t)));
+    uint16_t *raw_frame = (uint16_t *)malloc((size_t)raw_w * (size_t)raw_h * sizeof(uint16_t));
     if (getMlvRawFrameUint16(video, 0, raw_frame))
     {
         free(raw_frame);

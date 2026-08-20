@@ -3004,7 +3004,9 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
             // rg      gb
 
             // discard first row
-            memmove(unpackedFrame, &unpackedFrame[width], width * (height - 1) * 2);
+            memmove(unpackedFrame,
+                    &unpackedFrame[width],
+                    (size_t)width * (size_t)(height - 1) * sizeof(*unpackedFrame));
 
             // copy row n-2 to row n
             memcpy(&unpackedFrame[width * (height - 1)], &unpackedFrame[width * (height - 3)], width * 2);
@@ -3546,10 +3548,14 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
     video->processing->wbFindActive = 0;
 
     /* Vignette alloc */
-    video->processing->vignette_mask = realloc( video->processing->vignette_mask, getMlvWidth(video) * getMlvHeight(video) * sizeof( float ) );
+    video->processing->vignette_mask = realloc(
+        video->processing->vignette_mask,
+        (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video) * sizeof(float));
 
     /* Gradient alloc */
-    video->processing->gradient_mask = realloc( video->processing->gradient_mask, getMlvWidth(video) * getMlvHeight(video) * sizeof( uint16_t ) );
+    video->processing->gradient_mask = realloc(
+        video->processing->gradient_mask,
+        (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video) * sizeof(uint16_t));
 
     /* MATRIX stuff (not working, so commented out - 
      * processing object defaults to 1,0,0,0,1,0,0,0,1) */
@@ -5566,7 +5572,7 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
-    int frame_size = width * height * sizeof(uint16_t) * 3;
+    size_t frame_size = (size_t)width * (size_t)height * sizeof(uint16_t) * 3u;
     uint64_t pixels_count = (uint64_t)width * height;
     mlv_reset_last_raw_stage_telemetry();
     resetMlvLastDebayerStageMilliseconds();
@@ -8593,7 +8599,8 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         mlv_audf_hdr_t audf_hdr = { { 'A','U','D','F' }, 0, 0, 0, 0 };
 
         /* Calculate the sum of audio sample sizes for all audio channels */
-        uint64_t audio_sample_size = getMlvAudioChannels(video) * (getMlvAudioBitsPerSample(video) / 8);
+        uint64_t audio_sample_size = (uint64_t)getMlvAudioChannels(video)
+            * (uint64_t)(getMlvAudioBitsPerSample(video) / 8);
         /* Calculate the audio alignement block size in bytes */
         uint16_t block_align = audio_sample_size * 1024;
         /* Calculate audio starting offset */

@@ -1133,7 +1133,7 @@ int lj92_open(lj92* lj,
     int ret = findSoI(self);
 
     if (ret == LJ92_ERROR_NONE) {
-        u16* rowcache = (u16*)calloc(self->x * self->components * 2, sizeof(u16));
+        u16* rowcache = (u16*)calloc((size_t)self->x * (size_t)self->components * 2u, sizeof(u16));
         if (rowcache == NULL) ret = LJ92_ERROR_NO_MEMORY;
         else {
             self->rowcache = rowcache;

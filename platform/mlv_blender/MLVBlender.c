@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <inttypes.h>
 #include <math.h>
 
 #include "MLVBlender.h"
@@ -145,7 +146,7 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
 
         if (!mlv->visible) continue;
 
-        size_t frame_size = mlv->width * mlv->height;
+        size_t frame_size = (size_t)mlv->width * (size_t)mlv->height;
         uint16_t * frame_data = malloc(frame_size * sizeof(uint16_t));
 
         /* If we are past the end of the MLV just keep using it's last frame */
@@ -341,7 +342,7 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 
     for (uint64_t f = 0; f < longest_vid; ++f)
     {
-        printf("Exporting frame %i/%i\n", f, longest_vid);
+        printf("Exporting frame %" PRIu64 "/%" PRIu64 "\n", f, longest_vid);
         if (f != 0) MLVBlenderBlend(Blender, f);
 
         float black_level = getMlvBlackLevel(mlv_object);

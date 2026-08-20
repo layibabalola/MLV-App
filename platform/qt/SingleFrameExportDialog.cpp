@@ -105,7 +105,11 @@ void SingleFrameExportDialog::exportViaQt()
     m_lastPath = QFileInfo( fileName ).absolutePath();
 
     //Get frame from library
-    uint8_t *pRawImage = (uint8_t*)malloc( 3 * getMlvWidth(m_pMlvObject) * getMlvHeight(m_pMlvObject) * sizeof( uint8_t ) );
+    const size_t rawImageBytes = (size_t)3
+        * (size_t)getMlvWidth(m_pMlvObject)
+        * (size_t)getMlvHeight(m_pMlvObject)
+        * sizeof(uint8_t);
+    uint8_t *pRawImage = (uint8_t*)malloc(rawImageBytes);
     getMlvProcessedFrame8( m_pMlvObject, m_frameNr, pRawImage, 1 );
 
     uint8_t * imgBufferScaled8;

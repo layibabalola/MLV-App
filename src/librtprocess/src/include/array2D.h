@@ -132,7 +132,7 @@ public:
         }
 
         if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data, 0, w * h * sizeof(T));
+            memset(data, 0, static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(T));
         }
     }
 
@@ -241,7 +241,7 @@ public:
         ar_realloc(w, h, offset);
 
         if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data + offset, 0, w * h * sizeof(T));
+            memset(data + offset, 0, static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(T));
         }
     }
 

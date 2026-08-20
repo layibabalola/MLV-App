@@ -58,10 +58,11 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
     const int width = winw, height = winh;
     const int v1 = 1 * width, v2 = 2 * width, v3 = 3 * width, v5 = 5 * width;
 
-    float *rgbarray = (float (*)) malloc((width * height) * sizeof(float));
-    float *vdif = (float (*)) calloc(width * height / 2, sizeof * vdif);
-    float *hdif = (float (*)) calloc(width * height / 2, sizeof * hdif);
-    float *chrarray = (float (*)) calloc(width * height, sizeof(float));
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    float *rgbarray = (float (*)) malloc(pixelCount * sizeof(float));
+    float *vdif = (float (*)) calloc(pixelCount / 2u, sizeof * vdif);
+    float *hdif = (float (*)) calloc(pixelCount / 2u, sizeof * hdif);
+    float *chrarray = (float (*)) calloc(pixelCount, sizeof(float));
 
     if(!rgbarray || !vdif || !hdif || !chrarray) {
         if (rgbarray) {

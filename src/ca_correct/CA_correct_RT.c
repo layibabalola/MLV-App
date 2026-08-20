@@ -76,19 +76,26 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   //float cared = 0, cablue = 0;
   // local variables
   int width = winw, height = winh;
+  if (width <= 0 || height <= 0 || tilew <= 0 || tileh <= 0) {
+    return;
+  }
+  const size_t image_pixels = (size_t)height * (size_t)width;
+  const size_t tile_pixels = (size_t)tileh * (size_t)tilew;
   //temporary array to store simple interpolation of G
   float (*Gtmp);
-  Gtmp = (float (*)) calloc ((height) * (width), sizeof * Gtmp);
+  Gtmp = (float (*)) calloc(image_pixels, sizeof * Gtmp);
 
   // temporary array to avoid race conflicts, only every second pixel needs to be saved here
   float (*RawDataTmp);
 //  RawDataTmp = (float*) malloc( height * width * sizeof(float) / 2);
 //  size_t RawDataTmp_sz = height * width / 2;
-  RawDataTmp = (float*) malloc( tileh * tilew * sizeof(float) / 2);
-  size_t RawDataTmp_sz = tileh * tilew / 2;
+  RawDataTmp = (float*) malloc((tile_pixels / 2u) * sizeof(float));
+  size_t RawDataTmp_sz = tile_pixels / 2u;
 
-  if( !RawDataTmp ) {
+  if( !Gtmp || !RawDataTmp ) {
     //std::cout<<"CA_correct_RT: cannot allocate RawDataTmp buffer of size "<<RawDataTmp_sz*sizeof(float)<<std::endl;
+    free(Gtmp);
+    free(RawDataTmp);
     return;
   }
 
@@ -124,19 +131,22 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   vblsz = ceil((float)(height + border2) / (TS - border2) + 2 + vz1);
   hblsz = ceil((float)(width + border2) / (TS - border2) + 2 + hz1);
 
-  buffer1 = (char *) malloc(vblsz * hblsz * (3 * 2 + 1) * sizeof(float));
+  const size_t block_count = (size_t)vblsz * (size_t)hblsz;
+  const size_t buffer1_size = block_count * (3u * 2u + 1u) * sizeof(float);
+  buffer1 = (char *) malloc(buffer1_size);
 
   if( !buffer1 ) {
+    free( Gtmp );
     free( RawDataTmp );
     //std::cout<<"CA_correct_RT: cannot allocate buffer of size "<<vblsz * hblsz * (3 * 2 + 1) * sizeof(float)<<std::endl;
     return;
   }
 
   //merror(buffer1,"CA_correct()");
-  memset(buffer1, 0, vblsz * hblsz * (3 * 2 + 1)*sizeof(float));
+  memset(buffer1, 0, buffer1_size);
   // block CA shifts
   blockwt     = (float (*))           (buffer1);
-  blockshifts = (float (*)[3][2])     (buffer1 + (vblsz * hblsz * sizeof(float)));
+  blockshifts = (float (*)[3][2])     (buffer1 + (block_count * sizeof(float)));
 
   double fitparams[3][2][16];
 

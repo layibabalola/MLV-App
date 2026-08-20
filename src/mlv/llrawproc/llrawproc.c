@@ -3772,7 +3772,17 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
     */
 
 #ifndef STDOUT_SILENT
-    printf("raw_image_buff[1000] = %u, Proc_Black = %d, Proc_White = %d, Raw_Black = %d, Raw_White = %d <= THE END OF LLRAWPROC\n", raw_image_buff[1000], video->processing->black_level, video->processing->white_level, video->RAWI.raw_info.black_level, video->RAWI.raw_info.white_level);
+    if (video->processing
+     && raw_image_buff
+     && raw_image_size / sizeof(*raw_image_buff) > 1000)
+    {
+        printf("raw_image_buff[1000] = %u, Proc_Black = %f, Proc_White = %d, Raw_Black = %d, Raw_White = %d <= THE END OF LLRAWPROC\n",
+               (unsigned int)raw_image_buff[1000],
+               (double)video->processing->black_level,
+               video->processing->white_level,
+               video->RAWI.raw_info.black_level,
+               video->RAWI.raw_info.white_level);
+    }
 #endif
 
     g_llrawproc_last_dark_frame_ms = dark_frame_ms;

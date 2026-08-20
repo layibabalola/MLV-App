@@ -1727,14 +1727,16 @@ static size_t dng_get_image_size(mlvObject_t * mlv_data, int size_mode, uint64_t
     switch(size_mode)
     {
         case IMG_SIZE_PACKED:
-            return (size_t)(mlv_data->RAWI.xRes * mlv_data->RAWI.yRes * mlv_data->RAWI.raw_info.bits_per_pixel / 8);
+            return (size_t)mlv_data->RAWI.xRes
+                * (size_t)mlv_data->RAWI.yRes
+                * (size_t)mlv_data->RAWI.raw_info.bits_per_pixel / 8u;
             break;
         case IMG_SIZE_LOSLESS:
             return mlv_data->video_index[frame_index].frame_size;
             break;
         case IMG_SIZE_UNPACKED:
         default:
-            return mlv_data->RAWI.xRes * mlv_data->RAWI.yRes * 2;
+            return (size_t)mlv_data->RAWI.xRes * (size_t)mlv_data->RAWI.yRes * 2u;
             break;
     }
 }
@@ -2162,7 +2164,7 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, width * height * sizeof(uint16_t));
+        memset(output_buffer, 0, (size_t)width * (size_t)height * sizeof(uint16_t));
         return ret;
     }
 
@@ -2172,7 +2174,7 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, width * height * sizeof(uint16_t));
+        memset(output_buffer, 0, (size_t)width * (size_t)height * sizeof(uint16_t));
     }
 
     lj92_close(decoder_object);
@@ -2201,13 +2203,13 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
         memcpy(output_buffer, compressed, *output_buffer_size);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_COPY, profile_stage_start);
 #ifndef STDOUT_SILENT
-        size_t input_buffer_size = width * height * 2;
+        size_t input_buffer_size = (size_t)width * (size_t)height * 2u;
         printf("LJ92 encoder: "FMT_SIZE" -> "FMT_SIZE" (%2.2f%% ratio)\n", *output_buffer_size, input_buffer_size, ((float)*output_buffer_size * 100.0f) / (float)input_buffer_size);
 #endif
     }
     else
     {
-        *output_buffer_size = width * height * sizeof(uint16_t);
+        *output_buffer_size = (size_t)width * (size_t)height * sizeof(uint16_t);
         memset(output_buffer, 0, *output_buffer_size);
 #ifndef STDOUT_SILENT
         printf("LJ92 encoder: failed with error code (%d)\n", ret);

@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 #include "ColorAberrationCorrection.h"
 
 #define MIN(X, Y) (((X) < (Y)) ? (X) : (Y))
@@ -77,11 +78,27 @@ void CACorrection(int imageX, int imageY,
                   uint16_t * __restrict outputImage,
                   uint16_t threshold, uint8_t radius)
 {
+    if (imageX <= 0 || imageY <= 0 || !inputImage || !outputImage)
+    {
+        return;
+    }
+
+    const size_t pixelCount = (size_t)imageX * (size_t)imageY;
+    const size_t channelBytes = pixelCount * sizeof(uint16_t);
     //getting working memory
-    uint16_t *bVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *gVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *rVec = malloc( imageX * imageY * sizeof( uint16_t ) );
-    uint16_t *temp = malloc( imageX * imageY * sizeof( uint16_t ) );
+    uint16_t *bVec = malloc(channelBytes);
+    uint16_t *gVec = malloc(channelBytes);
+    uint16_t *rVec = malloc(channelBytes);
+    uint16_t *temp = malloc(channelBytes);
+
+    if (!bVec || !gVec || !rVec || !temp)
+    {
+        free(bVec);
+        free(gVec);
+        free(rVec);
+        free(temp);
+        return;
+    }
 
 	//split the color image into individual color channel for convenient in calculation
 #pragma omp parallel for
@@ -101,17 +118,17 @@ void CACorrection(int imageX, int imageY,
     rmCA(rVec, gVec, bVec, imageX, imageY, threshold, radius);
 
 	//transpose the R,G B channel image to correct chromatic aberration in vertical direction 
-    memcpy( temp, rVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, rVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
             rVec[x*imageY+y] = temp[y*imageX+x];
-    memcpy( temp, gVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, gVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
             gVec[x*imageY+y] = temp[y*imageX+x];
-    memcpy( temp, bVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, bVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
@@ -121,17 +138,17 @@ void CACorrection(int imageX, int imageY,
     rmCA(rVec, gVec, bVec, imageY, imageX, threshold, radius);
 
     //rotate the image back to original position
-    memcpy( temp, rVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, rVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
             rVec[y*imageX+x] = temp[x*imageY+y];
-    memcpy( temp, gVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, gVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )
             gVec[y*imageX+x] = temp[x*imageY+y];
-    memcpy( temp, bVec, imageX*imageY * sizeof(uint16_t) );
+    memcpy(temp, bVec, channelBytes);
 #pragma omp parallel for
     for( int y = 0; y < imageY; y++ )
         for( int x = 0; x < imageX; x++ )

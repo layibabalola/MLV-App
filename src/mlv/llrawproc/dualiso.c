@@ -2207,10 +2207,11 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
     int y0 = raw_info.active_area.y1 + 2;
     
     /* quick interpolation for matching */
-    int* dark   = malloc(w * h * sizeof(dark[0]));
-    int* bright = malloc(w * h * sizeof(bright[0]));
-    memset(dark, 0, w * h * sizeof(dark[0]));
-    memset(bright, 0, w * h * sizeof(bright[0]));
+    const size_t image_pixels = (size_t)w * (size_t)h;
+    int* dark   = malloc(image_pixels * sizeof(dark[0]));
+    int* bright = malloc(image_pixels * sizeof(bright[0]));
+    memset(dark, 0, image_pixels * sizeof(dark[0]));
+    memset(bright, 0, image_pixels * sizeof(bright[0]));
     
     //#pragma omp parallel for
     for (int y = y0; y < h-2; y += 3)
@@ -4371,7 +4372,7 @@ static inline void build_alias_map(struct raw_info raw_info,
         dualiso_debug_elapsed_ms(alias_stage_start);
 
     alias_stage_start = mlv_stage_timing_now();
-    memcpy(alias_aux, alias_map, w * h * sizeof(uint16_t));
+    memcpy(alias_aux, alias_map, (size_t)w * (size_t)h * sizeof(uint16_t));
     g_dualiso_full20bit_timing.mix_alias_map_copy_ms +=
         dualiso_debug_elapsed_ms(alias_stage_start);
 #ifndef STDOUT_SILENT

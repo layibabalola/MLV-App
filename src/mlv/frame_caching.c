@@ -409,7 +409,7 @@ void enableMlvCaching(mlvObject_t * video)
 /* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
 void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
 {
-    uint64_t frame_pix   = getMlvWidth(video) * getMlvHeight(video) * 3;
+    uint64_t frame_pix   = (uint64_t)getMlvWidth(video) * (uint64_t)getMlvHeight(video) * 3u;
     uint64_t frame_size  = frame_pix * sizeof(uint16_t);
     uint64_t bytes_limit = megaByteLimit * (1 << 20);
 
@@ -460,7 +460,7 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
 /* Not recommended */
 void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
 {
-    uint64_t frame_pix   = getMlvWidth(video) * getMlvHeight(video) * 3;
+    uint64_t frame_pix   = (uint64_t)getMlvWidth(video) * (uint64_t)getMlvHeight(video) * 3u;
     uint64_t frame_size  = frame_pix * sizeof(uint16_t);
 
     /* Do only if clip is loaded */
