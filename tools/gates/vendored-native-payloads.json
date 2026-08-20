@@ -186,7 +186,7 @@
           "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Arm64.yml",
-            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible macos-arm64",
             "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
         },
@@ -418,7 +418,7 @@
           "operation_marker": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-arm64 --archive-reference raw2mlvMacOsArm.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed",
           "integrity_gate": {
             "path": ".github/workflows/macOS-Arm64.yml",
-            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root .",
+            "marker": "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible macos-arm64",
             "must_precede": "PYTHONPATH=\"${{ github.workspace }}\" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root \"${{ github.workspace }}\" --payload-id raw2mlv-macos-arm64 --archive-reference raw2mlvMacOsArm.zip --output-dir \"MLV App.app/Contents/MacOS\" --verify-installed"
           }
         },

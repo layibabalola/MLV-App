@@ -29,8 +29,10 @@ from .vendored_native_payloads import (
     _validate_policy,
     _validate_provenance,
     _validate_readiness,
+    _validate_release_target_compatibility,
     main,
     validate,
+    validate_manifest,
 )
 
 
@@ -221,6 +223,107 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.assertEqual(arm_consumer["status"], "active-release-workflow-architecture-mismatch")
         self.assertEqual(mac_ffmpeg["selected_members"][0]["binary"]["machine"], "x86_64")
 
+    def test_arm64_release_target_rejects_committed_x86_64_ffmpeg_before_packaging(self) -> None:
+        with self.assertRaisesRegex(
+            PayloadIntegrityError,
+            "release target macos-arm64 rejects payload ffmpeg-macos-x86_64",
+        ):
+            validate(ROOT, required_target="macos-arm64")
+
+        intel = validate(ROOT, required_target="macos-x86_64")
+        admitted = intel["target_compatibility"]
+        self.assertEqual(admitted["status"], "pass")
+        self.assertEqual(admitted["target"], "macos-x86_64")
+        self.assertEqual(
+            {row["payload_id"] for row in admitted["members"]},
+            {"ffmpeg-macos-x86_64", "raw2mlv-macos-x86_64"},
+        )
+
+        relabeled = copy.deepcopy(
+            next(record for record in self.manifest["payloads"] if record["id"] == "ffmpeg-macos-x86_64")
+        )
+        arm_consumer = next(
+            consumer for consumer in relabeled["consumers"] if consumer["target"] == "macos-arm64"
+        )
+        arm_consumer["target"] = "macos-arm64-bypass"
+        with self.assertRaisesRegex(PayloadIntegrityError, "does not match canonical release workflow"):
+            _validate_consumer_claim(
+                ROOT,
+                relabeled["path"],
+                arm_consumer,
+                "relabeled Arm64 ffmpeg consumer",
+            )
+
+        omitted = copy.deepcopy(self.manifest)
+        omitted_ffmpeg = next(
+            record for record in omitted["payloads"] if record["id"] == "ffmpeg-macos-x86_64"
+        )
+        omitted_ffmpeg["consumers"] = [
+            consumer for consumer in omitted_ffmpeg["consumers"] if consumer["target"] != "macos-arm64"
+        ]
+        self.assertEqual(validate_manifest(ROOT, omitted)["integrity"], "pass")
+        with self.assertRaisesRegex(PayloadIntegrityError, "extraction/consumer payload mismatch"):
+            _validate_release_target_compatibility(ROOT, omitted, "macos-arm64")
+
+    def test_target_admission_accepts_universal_macho_only_with_requested_slice(self) -> None:
+        workflow = self.root / ".github" / "workflows" / "macOS-Arm64.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            "      run: |\n"
+            "        python -m tools.repo_hygiene.extract_vendored_native_payload "
+            "--payload-id universal-helper\n",
+            encoding="utf-8",
+        )
+        manifest = {
+            "payloads": [
+                {
+                    "id": "universal-helper",
+                    "selected_members": [
+                        {
+                            "output_name": "helper",
+                            "kind": "executable",
+                            "binary": {"format": "macho", "machine": "arm64+x86_64"},
+                        }
+                    ],
+                    "consumers": [
+                        {"target": "macos-arm64", "status": "active-release-workflow"}
+                    ],
+                }
+            ]
+        }
+        result = _validate_release_target_compatibility(self.root, manifest, "macos-arm64")
+        self.assertEqual(result["members"][0]["machine"], "arm64+x86_64")
+
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8")
+            + "    - name: Hidden extraction\n"
+            + "      run: |\n"
+            + "        python -m tools.repo_hygiene.extract_vendored_native_payload \\\n"
+            + "          --payload-id hidden-helper\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "not a complete single-line command"):
+            _validate_release_target_compatibility(self.root, manifest, "macos-arm64")
+        workflow.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            "      run: |\n"
+            "        python -m tools.repo_hygiene.extract_vendored_native_payload "
+            "--payload-id universal-helper\n",
+            encoding="utf-8",
+        )
+
+        incompatible = copy.deepcopy(manifest)
+        incompatible["payloads"][0]["selected_members"][0]["binary"]["machine"] = "x86_64"
+        with self.assertRaisesRegex(PayloadIntegrityError, "required architecture arm64"):
+            _validate_release_target_compatibility(self.root, incompatible, "macos-arm64")
+
     def test_provenance_truth_keeps_archive_equality_separate_from_upstream_checksum(self) -> None:
         linux_ffmpeg = next(
             record for record in self.manifest["payloads"] if record["id"] == "ffmpeg-linux-x86_64"
@@ -358,18 +461,29 @@ class VendoredNativePayloadTests(unittest.TestCase):
         self.assertEqual(result["redistribution_enforcement"], "required")
 
     def test_consumer_claims_bind_reference_operation_and_gate_order(self) -> None:
-        consumer_path = self.root / "consumer.yml"
+        consumer_path = self.root / ".github" / "workflows" / "Linux.yml"
+        consumer_path.parent.mkdir(parents=True)
         gate_marker = "verify payload integrity"
         operation_marker = "extract bundle.zip"
-        consumer_path.write_text(f"{gate_marker}\n{operation_marker}\n", encoding="utf-8")
+        workflow = lambda first, second: (
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: First operation\n"
+            f"      run: {first}\n"
+            "    - name: Second operation\n"
+            "      run: |\n"
+            f"        {second}\n"
+        )
+        consumer_path.write_text(workflow(gate_marker, operation_marker), encoding="utf-8")
         consumer = {
-            "target": "fixture",
-            "path": "consumer.yml",
+            "target": "linux-x86_64",
+            "path": ".github/workflows/Linux.yml",
             "status": "active-release-workflow",
             "reference_marker": "bundle.zip",
             "operation_marker": operation_marker,
             "integrity_gate": {
-                "path": "consumer.yml",
+                "path": ".github/workflows/Linux.yml",
                 "marker": gate_marker,
                 "must_precede": operation_marker,
             },
@@ -396,8 +510,136 @@ class VendoredNativePayloadTests(unittest.TestCase):
                 self.root, "payloads/bundle.zip", missing_gate, "fixture consumer"
             )
 
-        consumer_path.write_text(f"{operation_marker}\n{gate_marker}\n", encoding="utf-8")
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n"
+            "    - name: Verify\n"
+            f"      run: {gate_marker}\n",
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(PayloadIntegrityError, "does not precede"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "env:\n"
+            f"  INERT_GATE: {gate_marker}\n"
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            "      run: |\n"
+            f"        {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "exact executable command line"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            f"      run: echo {gate_marker}\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "exact executable command line"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            "      if: false\n"
+            f"      run: {gate_marker}\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "conditional or fail-open"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        for quoted_key in ('"if"', "'continue-on-error'"):
+            consumer_path.write_text(
+                "jobs:\n"
+                "  release:\n"
+                "    steps:\n"
+                "    - name: Verify\n"
+                f"      {quoted_key}: false\n"
+                f"      run: {gate_marker}\n"
+                "    - name: Extract\n"
+                f"      run: {operation_marker}\n",
+                encoding="utf-8",
+            )
+            with self.subTest(quoted_key=quoted_key), self.assertRaisesRegex(
+                PayloadIntegrityError, "conditional or fail-open"
+            ):
+                _validate_consumer_claim(
+                    self.root, "payloads/bundle.zip", consumer, "fixture consumer"
+                )
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            "      shell: bash -c '{0} || true'\n"
+            f"      run: {gate_marker}\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "conditional or fail-open"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            "      continue-on-error: true\n"
+            f"      run: {gate_marker}\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "conditional or fail-open"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  verify:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            f"      run: {gate_marker}\n"
+            "  package:\n"
+            "    steps:\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "different workflow jobs"):
+            _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
+
+        consumer_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            "      run: |\n"
+            "        set +e\n"
+            f"        {gate_marker}\n"
+            "        true\n"
+            "    - name: Extract\n"
+            f"      run: {operation_marker}\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(PayloadIntegrityError, "complete scalar run command"):
             _validate_consumer_claim(self.root, "payloads/bundle.zip", consumer, "fixture consumer")
 
     def test_consumer_claim_rejects_cross_payload_substitution(self) -> None:
@@ -426,21 +668,42 @@ class VendoredNativePayloadTests(unittest.TestCase):
 
     def test_two_hop_consumer_gate_is_bound_to_the_build_boundary(self) -> None:
         (self.root / "project.pro").write_text("unzip payload.zip\n", encoding="utf-8")
-        (self.root / "release.yml").write_text("verify payload integrity\nmake -j8\n", encoding="utf-8")
+        release_path = self.root / ".github" / "workflows" / "Linux.yml"
+        release_path.parent.mkdir(parents=True)
+        release_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Verify\n"
+            "      run: verify payload integrity\n"
+            "    - name: Build\n"
+            "      run: |\n"
+            "        make -j8\n",
+            encoding="utf-8",
+        )
         consumer = {
-            "target": "fixture",
+            "target": "linux-x86_64",
             "path": "project.pro",
             "status": "active-release-rule",
             "reference_marker": "payload.zip",
             "operation_marker": "unzip payload.zip",
             "integrity_gate": {
-                "path": "release.yml",
+                "path": ".github/workflows/Linux.yml",
                 "marker": "verify payload integrity",
                 "must_precede": "make -j8",
             },
         }
         _validate_consumer_claim(self.root, "payload.zip", consumer, "two-hop consumer")
-        (self.root / "release.yml").write_text("make -j8\nverify payload integrity\n", encoding="utf-8")
+        release_path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            "    steps:\n"
+            "    - name: Build\n"
+            "      run: make -j8\n"
+            "    - name: Verify\n"
+            "      run: verify payload integrity\n",
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(PayloadIntegrityError, "does not precede"):
             _validate_consumer_claim(self.root, "payload.zip", consumer, "two-hop consumer")
 
@@ -825,6 +1088,16 @@ class VendoredNativePayloadTests(unittest.TestCase):
                 self.assertEqual(text.count(helper), expected_helper_calls)
                 self.assertLess(text.index(command), text.index(helper))
                 self.assertEqual(text.count("--verify-installed"), expected_helper_calls)
+
+        arm_text = (ROOT / ".github" / "workflows" / "macOS-Arm64.yml").read_text(encoding="utf-8")
+        strict_arm_gate = (
+            "python -m tools.repo_hygiene.vendored_native_payloads --repo-root . "
+            "--require-target-compatible macos-arm64"
+        )
+        self.assertEqual(arm_text.count(strict_arm_gate), 1)
+        self.assertLess(arm_text.index(strict_arm_gate), arm_text.index("- name: Create build directory"))
+        self.assertLess(arm_text.index(strict_arm_gate), arm_text.index("extract_vendored_native_payload"))
+        self.assertLess(arm_text.index(strict_arm_gate), arm_text.index("- name: Save build artifact"))
 
         windows = (ROOT / ".github/workflows/Windows.yml").read_text(encoding="utf-8")
         linux = (ROOT / ".github/workflows/Linux.yml").read_text(encoding="utf-8")

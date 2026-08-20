@@ -14,6 +14,7 @@ from .release_evidence import (
     BUILD_INFO_SCHEMA,
     CONTENTS_SCHEMA,
     EvidenceError,
+    _assert_native_bundle_architecture,
     _canonical_bytes,
     _inspect_executable_architecture,
     _revalidate_symlink_records,
@@ -36,18 +37,52 @@ def _pe(machine: int = 0x8664) -> bytes:
     value[0x3C:0x40] = (128).to_bytes(4, "little")
     value[128:132] = b"PE\0\0"
     value[132:134] = machine.to_bytes(2, "little")
+    value[134:136] = (1).to_bytes(2, "little")
+    value[148:150] = (2).to_bytes(2, "little")
+    value[150:152] = (0x0002).to_bytes(2, "little")
+    value[152:154] = (0x20B).to_bytes(2, "little")
     return bytes(value)
 
 
 def _elf(machine: int = 62) -> bytes:
-    value = bytearray(64)
-    value[:6] = b"\x7fELF\x02\x01"
+    value = bytearray(120)
+    value[:7] = b"\x7fELF\x02\x01\x01"
+    value[16:18] = (2).to_bytes(2, "little")
     value[18:20] = machine.to_bytes(2, "little")
+    value[20:24] = (1).to_bytes(4, "little")
+    value[32:40] = (64).to_bytes(8, "little")
+    value[52:54] = (64).to_bytes(2, "little")
+    value[54:56] = (56).to_bytes(2, "little")
+    value[56:58] = (1).to_bytes(2, "little")
+    value[64:68] = (1).to_bytes(4, "little")
     return bytes(value)
 
 
 def _macho(cpu_type: int = 0x0100000C) -> bytes:
-    return b"\xcf\xfa\xed\xfe" + cpu_type.to_bytes(4, "little") + bytes(24)
+    value = bytearray(32)
+    value[:4] = b"\xcf\xfa\xed\xfe"
+    value[4:8] = cpu_type.to_bytes(4, "little")
+    value[12:16] = (2).to_bytes(4, "little")
+    return bytes(value)
+
+
+def _fat_macho(*cpu_types: int) -> bytes:
+    if not cpu_types:
+        raise ValueError("fat Mach-O fixture needs at least one slice")
+    entry_size = 20
+    first_slice = 128
+    slice_size = 32
+    value = bytearray(first_slice + len(cpu_types) * slice_size)
+    value[:4] = b"\xca\xfe\xba\xbe"
+    value[4:8] = len(cpu_types).to_bytes(4, "big")
+    for index, cpu_type in enumerate(cpu_types):
+        entry = 8 + index * entry_size
+        offset = first_slice + index * slice_size
+        value[entry : entry + 4] = cpu_type.to_bytes(4, "big")
+        value[entry + 8 : entry + 12] = offset.to_bytes(4, "big")
+        value[entry + 12 : entry + 16] = slice_size.to_bytes(4, "big")
+        value[offset : offset + slice_size] = _macho(cpu_type)
+    return bytes(value)
 
 
 class ReleaseEvidenceTests(unittest.TestCase):
@@ -179,6 +214,10 @@ class ReleaseEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(build_info["contents"]["main_executable"]["architectures"], ["x86_64"])
         self.assertEqual(build_info["contents"]["main_executable"]["format"], "pe")
+        self.assertEqual(
+            [row["path"] for row in build_info["contents"]["native_binaries"]],
+            ["MLVApp.exe"],
+        )
 
     def test_file_product_and_separate_staging_inventory_are_bound(self) -> None:
         staging = self.repo / "build" / "image"
@@ -242,6 +281,134 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 observed = _inspect_executable_architecture(binary)
                 self.assertEqual(observed["format"], "macho")
                 self.assertEqual(observed["architectures"], [expected])
+
+        universal = bytearray(_fat_macho(0x01000007, 0x0100000C))
+        binary.write_bytes(universal)
+        observed = _inspect_executable_architecture(binary)
+        self.assertEqual(observed["format"], "macho-fat")
+        self.assertEqual(observed["architectures"], ["arm64", "x86_64"])
+
+        universal[8:12] = (0x0100000C).to_bytes(4, "big")
+        binary.write_bytes(universal)
+        with self.assertRaisesRegex(EvidenceError, "table/slice CPU mismatch"):
+            _inspect_executable_architecture(binary)
+
+        mixed_kinds = bytearray(_fat_macho(0x01000007, 0x0100000C))
+        mixed_kinds[128 + 32 + 12 : 128 + 32 + 16] = (6).to_bytes(4, "little")
+        binary.write_bytes(mixed_kinds)
+        with self.assertRaisesRegex(EvidenceError, "slices disagree on binary kind"):
+            _inspect_executable_architecture(binary)
+
+        truncated = bytearray(36)
+        truncated[:4] = b"\xca\xfe\xba\xbe"
+        truncated[4:8] = (1).to_bytes(4, "big")
+        truncated[8:12] = (0x0100000C).to_bytes(4, "big")
+        truncated[16:20] = (28).to_bytes(4, "big")
+        truncated[20:24] = (8).to_bytes(4, "big")
+        truncated[28:32] = b"\xcf\xfa\xed\xfe"
+        truncated[32:36] = (0x0100000C).to_bytes(4, "little")
+        binary.write_bytes(truncated)
+        with self.assertRaisesRegex(EvidenceError, "slice header.*truncated"):
+            _inspect_executable_architecture(binary)
+
+    def test_pe_and_elf_architecture_inspection_rejects_truncated_headers(self) -> None:
+        binary = self.repo / "build" / "native"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        truncated_pe = bytearray(70)
+        truncated_pe[:2] = b"MZ"
+        truncated_pe[0x3C:0x40] = (64).to_bytes(4, "little")
+        truncated_pe[64:68] = b"PE\0\0"
+        truncated_pe[68:70] = (0xAA64).to_bytes(2, "little")
+        binary.write_bytes(truncated_pe)
+        with self.assertRaisesRegex(EvidenceError, "malformed PE header"):
+            _inspect_executable_architecture(binary)
+
+        truncated_elf = bytearray(20)
+        truncated_elf[:6] = b"\x7fELF\x02\x01"
+        truncated_elf[16:18] = (2).to_bytes(2, "little")
+        truncated_elf[18:20] = (183).to_bytes(2, "little")
+        binary.write_bytes(truncated_elf)
+        with self.assertRaisesRegex(EvidenceError, "truncated or invalid ELF header"):
+            _inspect_executable_architecture(binary)
+
+        incomplete_pe = bytearray(152)
+        incomplete_pe[:2] = b"MZ"
+        incomplete_pe[0x3C:0x40] = (128).to_bytes(4, "little")
+        incomplete_pe[128:132] = b"PE\0\0"
+        incomplete_pe[132:134] = (0xAA64).to_bytes(2, "little")
+        incomplete_pe[150:152] = (0x0002).to_bytes(2, "little")
+        binary.write_bytes(incomplete_pe)
+        with self.assertRaisesRegex(EvidenceError, "incomplete PE image header"):
+            _inspect_executable_architecture(binary)
+
+        incomplete_elf = bytearray(64)
+        incomplete_elf[:7] = b"\x7fELF\x02\x01\x01"
+        incomplete_elf[16:18] = (2).to_bytes(2, "little")
+        incomplete_elf[18:20] = (183).to_bytes(2, "little")
+        binary.write_bytes(incomplete_elf)
+        with self.assertRaisesRegex(EvidenceError, "invalid ELF version"):
+            _inspect_executable_architecture(binary)
+
+    def test_macos_arm64_evidence_rejects_x86_64_native_helper(self) -> None:
+        staging = self.repo / "build" / "MLV App.app"
+        native_dir = staging / "Contents" / "MacOS"
+        native_dir.mkdir(parents=True)
+        main = native_dir / "MLV App"
+        helper = native_dir / "ffmpeg"
+        main.write_bytes(_macho(0x0100000C))
+        helper.write_bytes(_macho(0x01000007))
+        os.chmod(main, 0o755)
+        os.chmod(helper, 0o755)
+        product = self.repo / "build" / "MLV App.dmg"
+        product.write_bytes(b"dmg")
+        mac_tools = [
+            f"qmake={self.tool_dir / 'qmake'}",
+            f"compiler={self.tool_dir / 'compiler'}",
+            f"macdeployqt={self.tool_dir / 'macdeployqt'}",
+        ]
+        mac_versions = ["qmake=5", "compiler=20", "macdeployqt=5"]
+        with self.assertRaisesRegex(
+            EvidenceError,
+            r"native inventory member architecture mismatch for Contents/MacOS/ffmpeg.*declared arm64",
+        ):
+            self._generate(
+                product=product,
+                inventory_root=staging,
+                expected_main="Contents/MacOS/MLV App",
+                target_os="macos",
+                target_arch="arm64",
+                tools=mac_tools,
+                tool_versions=mac_versions,
+            )
+
+        inventoried = inventory_path(staging, logical_name=staging.name)
+        helper.write_bytes(b"no longer native")
+        with self.assertRaisesRegex(
+            EvidenceError,
+            r"inventory member changed before native architecture admission: Contents/MacOS/ffmpeg",
+        ):
+            _assert_native_bundle_architecture(staging, inventoried, "macos", "arm64")
+
+        helper.write_bytes(_fat_macho(0x01000007, 0x0100000C))
+        os.chmod(helper, 0o755)
+        _, build_info_path = self._generate(
+            product=product,
+            inventory_root=staging,
+            expected_main="Contents/MacOS/MLV App",
+            target_os="macos",
+            target_arch="arm64",
+            output_dir=self.root / "macos-universal-evidence",
+            tools=mac_tools,
+            tool_versions=mac_versions,
+        )
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        native = {row["path"]: row for row in build_info["contents"]["native_binaries"]}
+        self.assertEqual(set(native), {"Contents/MacOS/MLV App", "Contents/MacOS/ffmpeg"})
+        self.assertEqual(native["Contents/MacOS/MLV App"]["architectures"], ["arm64"])
+        self.assertEqual(
+            native["Contents/MacOS/ffmpeg"]["architectures"],
+            ["arm64", "x86_64"],
+        )
 
     def test_same_tool_version_with_different_bytes_changes_identity_hash(self) -> None:
         product = self._directory_product()
@@ -521,6 +688,24 @@ class ReleaseEvidenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(EvidenceError, message):
                     self._generate(product=product)
 
+    def test_staged_inventory_is_revalidated_immediately_before_publication(self) -> None:
+        product = self._directory_product()
+        from . import release_evidence
+
+        original = release_evidence._load_vendored_readiness
+
+        def mutate_after_native_scan(*args: object, **kwargs: object) -> dict[str, object]:
+            result = original(*args, **kwargs)
+            (product / "MLVApp.exe").write_bytes(_pe(0xAA64))
+            return result
+
+        with mock.patch(
+            "tools.release.release_evidence._load_vendored_readiness",
+            side_effect=mutate_after_native_scan,
+        ), self.assertRaisesRegex(EvidenceError, "inventory changed before evidence publication"):
+            self._generate(product=product)
+        self.assertFalse((self.root / "evidence").exists())
+
     def test_contract_remains_explicitly_non_authorizing(self) -> None:
         contract = json.loads(
             (ROOT / "tools" / "release" / "release-evidence-contract.json").read_text(encoding="utf-8")
@@ -535,6 +720,11 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertIn("empty standalone product file", inventory["reject"])
         self.assertIn(
             "absolute, escaping, broken, non-file-or-directory, unrecorded, cyclic, or concurrently changed symlink",
+            inventory["reject"],
+        )
+        self.assertIn("Every PE, ELF, or Mach-O", inventory["native_member_architecture"])
+        self.assertIn(
+            "native executable or shared-library format/architecture incompatible with the declared release target",
             inventory["reject"],
         )
 
