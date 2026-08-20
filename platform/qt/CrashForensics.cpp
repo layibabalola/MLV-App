@@ -35,6 +35,16 @@
 #include <cstdio>
 #include <cstdlib>
 
+/* The authoritative clean-build path generates this header in OUT_PWD. Use
+ * it for run_metadata as well as the title/build stamp; otherwise a perfectly
+ * stamped artifact can still report build_sha="unknown" when qmake-time git
+ * discovery was unavailable. */
+#if defined(__has_include)
+#  if __has_include("build_buildinfo.h")
+#    include "build_buildinfo.h"
+#  endif
+#endif
+
 #ifdef Q_OS_WIN
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN

@@ -11,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "tools" / "coordination" / "invoke-mlv-exclusive.ps1"
+GEN_BUILDINFO = REPO_ROOT / "tools" / "gen-buildinfo.ps1"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -157,3 +158,46 @@ def test_exclusive_runner_preserves_child_environment_and_path(tmp_path: Path) -
     observed = json.loads(completed.stdout.strip())
     assert observed["sentinel"] == sentinel
     assert str(path_marker).casefold() in observed["path"].casefold()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App release provenance is Windows-specific")
+def test_buildinfo_header_overrides_qmake_time_sha(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    output = tmp_path / "build_buildinfo.h"
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(GEN_BUILDINFO),
+            "-SrcRoot",
+            str(REPO_ROOT),
+            "-OutHeader",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    header = output.read_text(encoding="ascii")
+    assert "#ifdef MLVAPP_GIT_SHA\n#undef MLVAPP_GIT_SHA\n#endif" in header
+    assert f'#define MLVAPP_GIT_SHA "{head}"' in header
+    assert f'#define MLVAPP_BUILD_SHA "{head}"' in header
