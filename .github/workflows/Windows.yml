@@ -2,32 +2,156 @@ name: Windows Release
 
 on:
   workflow_dispatch:
-    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SOURCE_DIR:   ${{ github.workspace }}\platform
   ARTIFACT:     ${{ github.workspace }}\platform\build\MLVApp\MLVApp.Win64.zip
+  OPENSSL_BIN:  C:\Program Files\OpenSSL\bin
+  QMAKE_EXE:    C:\Qt\5.15.2\mingw81_64\bin\qmake.exe
+  WINDEPLOYQT_EXE: C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe
 
 jobs:
   build:
 
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        persist-credentials: false
+
+    - name: Set up Python for payload verification
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version-file: ".python-version"
+
+    - name: Install hash-locked payload verification dependencies
+      run: |
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+        python -m pip check
+
+    - name: Verify vendored native payload integrity
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
 
     - name: Install OpenSSL
-      continue-on-error: true
+      timeout-minutes: 15
       run: |
-           choco install openssl
-           dir "C:\Program Files\OpenSSL\"
-           dir "C:\Program Files\OpenSSL\bin"
+           choco install openssl --yes --no-progress --limit-output --execution-timeout=600
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey OpenSSL install failed with exit code $LASTEXITCODE" }
               
-    - name: Install Qt
+    - name: Install MinGW 8.1
+      timeout-minutes: 15
       run: |
-           choco install qt5-default
-           dir C:\Qt\5.15.2\mingw81_64\bin
-           dir C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+           choco install mingw --version=8.1.0 --exact --allow-downgrade --yes --no-progress --limit-output --execution-timeout=600
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey MinGW 8.1 install failed with exit code $LASTEXITCODE" }
+
+    - name: Install Qt
+      timeout-minutes: 20
+      run: |
+           choco install qt5-default --version=5.15.2.20240623 --exact --yes --no-progress --limit-output --execution-timeout=900
+           if ($LASTEXITCODE -ne 0) { throw "Chocolatey Qt install failed with exit code $LASTEXITCODE" }
+
+    - name: Verify Windows build toolchain
+      run: |
+           $mingwRoot = Join-Path $env:ChocolateyInstall "lib\mingw\tools\install"
+           $makeCandidates = @(
+             Get-ChildItem -LiteralPath $mingwRoot -Filter "mingw32-make.exe" -File -Recurse |
+               Where-Object {
+                 $bin = $_.DirectoryName
+                 (Test-Path -LiteralPath (Join-Path $bin "g++.exe") -PathType Leaf) -and
+                 (Test-Path -LiteralPath (Join-Path $bin "libgomp-1.dll") -PathType Leaf)
+               }
+           )
+           if ($makeCandidates.Count -ne 1) {
+             throw "Expected exactly one complete MinGW 8.1 toolchain under '$mingwRoot'; found $($makeCandidates.Count)"
+           }
+           $env:MINGW_BIN = [IO.Path]::GetFullPath($makeCandidates[0].DirectoryName)
+           $env:MAKE_EXE = [IO.Path]::GetFullPath($makeCandidates[0].FullName)
+           $env:GXX_EXE = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "g++.exe"))
+           $env:LIBGOMP_DLL = [IO.Path]::GetFullPath((Join-Path $env:MINGW_BIN "libgomp-1.dll"))
+           $requiredExecutables = @(
+             (Join-Path $env:OPENSSL_BIN "openssl.exe"),
+             $env:QMAKE_EXE,
+             $env:WINDEPLOYQT_EXE,
+             $env:MAKE_EXE,
+             $env:GXX_EXE
+           )
+           foreach ($executable in $requiredExecutables) {
+             if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
+               throw "Required release executable is missing: $executable"
+             }
+           }
+           if (-not (Test-Path -LiteralPath $env:LIBGOMP_DLL -PathType Leaf)) {
+             throw "Required release DLL is missing: $env:LIBGOMP_DLL"
+           }
+           $cryptoDlls = @(Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libcrypto*.dll" -File)
+           $sslDlls = @(Get-ChildItem -LiteralPath $env:OPENSSL_BIN -Filter "libssl*.dll" -File)
+           if ($cryptoDlls.Count -eq 0) { throw "No libcrypto DLL found in $env:OPENSSL_BIN" }
+           if ($sslDlls.Count -eq 0) { throw "No libssl DLL found in $env:OPENSSL_BIN" }
+           "OPENSSL_CRYPTO_DLLS=$($cryptoDlls.FullName -join ';')" >> $env:GITHUB_ENV
+           "OPENSSL_SSL_DLLS=$($sslDlls.FullName -join ';')" >> $env:GITHUB_ENV
+           & (Join-Path $env:OPENSSL_BIN "openssl.exe") version
+           if ($LASTEXITCODE -ne 0) { throw "OpenSSL executable probe failed" }
+           & $env:QMAKE_EXE -v
+           if ($LASTEXITCODE -ne 0) { throw "qmake executable probe failed" }
+           $qmakeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:QMAKE_EXE))
+           $deployBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:WINDEPLOYQT_EXE))
+           if ($deployBin -ne $qmakeBin) {
+             throw "windeployqt '$env:WINDEPLOYQT_EXE' is not beside verified qmake '$env:QMAKE_EXE'"
+           }
+           & $env:MAKE_EXE --version
+           if ($LASTEXITCODE -ne 0) { throw "make executable probe failed" }
+           & $env:GXX_EXE --version
+           if ($LASTEXITCODE -ne 0) { throw "exact MinGW g++ executable probe failed" }
+           $compilerVersion = (& $env:GXX_EXE -dumpfullversion -dumpversion).Trim()
+           if ($LASTEXITCODE -ne 0 -or $compilerVersion -ne "8.1.0") {
+             throw "MinGW compiler version mismatch: expected 8.1.0, observed '$compilerVersion'"
+           }
+           $compilerTarget = (& $env:GXX_EXE -dumpmachine).Trim()
+           if ($LASTEXITCODE -ne 0 -or $compilerTarget -ne "x86_64-w64-mingw32") {
+             throw "MinGW compiler target mismatch: expected x86_64-w64-mingw32, observed '$compilerTarget'"
+           }
+           $qtVersion = (& $env:QMAKE_EXE -query QT_VERSION).Trim()
+           if ($LASTEXITCODE -ne 0 -or $qtVersion -ne "5.15.2") {
+             throw "Qt version mismatch: expected 5.15.2, observed '$qtVersion'"
+           }
+           $makeBin = [IO.Path]::GetFullPath((Split-Path -Parent $env:MAKE_EXE))
+           $configuredMingwBin = [IO.Path]::GetFullPath($env:MINGW_BIN)
+           if ($makeBin -ne $configuredMingwBin) {
+             throw "Configured MinGW bin '$configuredMingwBin' does not contain make '$makeBin'"
+           }
+           $expectedCompiler = [IO.Path]::GetFullPath((Join-Path $makeBin "g++.exe"))
+           $configuredCompiler = [IO.Path]::GetFullPath($env:GXX_EXE)
+           if ($configuredCompiler -ne $expectedCompiler) {
+             throw "Configured g++ '$configuredCompiler' is not beside make '$env:MAKE_EXE'"
+           }
+           $env:PATH = "$makeBin;$env:PATH"
+           $resolvedCompilers = @(Get-Command g++.exe -All -CommandType Application -ErrorAction Stop)
+           if ($resolvedCompilers.Count -eq 0) { throw "No PATH-resolved g++.exe applications were found" }
+           $canonicalCompilers = @($resolvedCompilers | ForEach-Object { [IO.Path]::GetFullPath($_.Source) })
+           $actualCompiler = $canonicalCompilers[0]
+           if ($actualCompiler -ne $expectedCompiler) {
+             throw "Bare g++ resolves to '$actualCompiler', expected '$expectedCompiler'"
+           }
+           if (@($canonicalCompilers | Where-Object { $_ -eq $expectedCompiler }).Count -ne 1) {
+             throw "Expected compiler '$expectedCompiler' must appear exactly once in PATH resolution"
+           }
+           & g++.exe --version
+           if ($LASTEXITCODE -ne 0) { throw "PATH-resolved MinGW g++ executable probe failed" }
+           "MINGW_BIN=$env:MINGW_BIN" >> $env:GITHUB_ENV
+           "MAKE_EXE=$env:MAKE_EXE" >> $env:GITHUB_ENV
+           "GXX_EXE=$env:GXX_EXE" >> $env:GITHUB_ENV
+           "LIBGOMP_DLL=$env:LIBGOMP_DLL" >> $env:GITHUB_ENV
+           $makeBin >> $env:GITHUB_PATH
 
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}\build
@@ -35,25 +159,29 @@ jobs:
     - name: Build
       working-directory: ${{ env.SOURCE_DIR }}\build
       run:  |
-            C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -r ${{ env.SOURCE_DIR }}\qt\MLVApp.pro
-            make.exe
-            dir
-            cd release
-            C:\Qt\5.15.2\mingw81_64\bin\windeployqt MLVApp.exe
-            copy C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin\libgomp-1.dll .
-            copy "C:\Program Files\OpenSSL\bin\libcrypto*" .
-            copy "C:\Program Files\OpenSSL\bin\libssl*" .
-            dir
+            & $env:QMAKE_EXE -r "${{ env.SOURCE_DIR }}\qt\MLVApp.pro"
+            if ($LASTEXITCODE -ne 0) { throw "qmake failed with exit code $LASTEXITCODE" }
+            & $env:MAKE_EXE
+            if ($LASTEXITCODE -ne 0) { throw "make failed with exit code $LASTEXITCODE" }
+            Set-Location release
+            & $env:WINDEPLOYQT_EXE MLVApp.exe
+            if ($LASTEXITCODE -ne 0) { throw "windeployqt failed with exit code $LASTEXITCODE" }
+            Copy-Item -LiteralPath $env:LIBGOMP_DLL -Destination .
+            foreach ($dll in ($env:OPENSSL_CRYPTO_DLLS -split ';')) {
+              Copy-Item -LiteralPath $dll -Destination .
+            }
+            foreach ($dll in ($env:OPENSSL_SSL_DLLS -split ';')) {
+              Copy-Item -LiteralPath $dll -Destination .
+            }
+            Get-ChildItem
 
-    - name: Decompress FFMPEG
-      working-directory: ${{ env.SOURCE_DIR }}\qt\FFmpeg
+    - name: Install verified FFMPEG
       run:  |
-            7z x ffmpegWin64.zip -o${{ env.SOURCE_DIR }}\build\release
+            python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id ffmpeg-windows-x86_64 --archive-reference ffmpegWin64.zip --output-dir "${{ env.SOURCE_DIR }}\build\release" --verify-installed
 
-    - name: Decompress RAW2MLV
-      working-directory: ${{ env.SOURCE_DIR }}\qt\raw2mlv
+    - name: Install verified RAW2MLV
       run:  |
-            7z x raw2mlvWin64.zip -o${{ env.SOURCE_DIR }}\build\release
+            python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-windows-x86-compat --archive-reference raw2mlvWin64.zip --output-dir "${{ env.SOURCE_DIR }}\build\release" --verify-installed
             dir ${{ env.SOURCE_DIR }}\build\release
 
     - name: Rename release folder
@@ -62,8 +190,50 @@ jobs:
            ren release MLVApp
            dir
 
+    - name: Generate single-build release evidence
+      run: |
+           $QmakePath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\qmake.exe -CommandType Application -ErrorAction Stop).Source
+           $CompilerPath = (Get-Command $env:GXX_EXE -CommandType Application -ErrorAction Stop).Source
+           $DeployPath = (Get-Command C:\Qt\5.15.2\mingw81_64\bin\windeployqt.exe -CommandType Application -ErrorAction Stop).Source
+           $QtVersion = & $QmakePath -query QT_VERSION
+           $CompilerVersion = & $CompilerPath -dumpfullversion -dumpversion
+           $CompilerTarget = & $CompilerPath -dumpmachine
+           python -m tools.release.release_evidence `
+             --repo-root "${{ github.workspace }}" `
+             --product "${{ env.SOURCE_DIR }}\build\MLVApp" `
+             --inventory-root "${{ env.SOURCE_DIR }}\build\MLVApp" `
+             --expected-main "MLVApp.exe" `
+             --output-dir "${{ runner.temp }}\release-evidence" `
+             --label "windows-x86_64" `
+             --target-os "windows" `
+             --target-arch "x86_64" `
+             --repository "${{ github.repository }}" `
+             --source-ref "${{ github.ref }}" `
+             --commit "${{ github.sha }}" `
+             --run-id "${{ github.run_id }}" `
+             --run-attempt "${{ github.run_attempt }}" `
+             --runner-os "${{ runner.os }}" `
+             --runner-arch "${{ runner.arch }}" `
+             --runner-name "${{ runner.name }}" `
+             --runner-image-os "$env:ImageOS" `
+             --runner-image-version "$env:ImageVersion" `
+             --tool "qmake=$QmakePath" `
+             --tool "compiler=$CompilerPath" `
+             --tool "windeployqt=$DeployPath" `
+             --tool-version "qmake=$QtVersion" `
+             --tool-version "compiler=$CompilerVersion|$CompilerTarget" `
+             --tool-version "windeployqt=$QtVersion"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp Windows 64bit release evidence
+        path: ${{ runner.temp }}\release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp Windows 64bit
         path: ${{ env.SOURCE_DIR }}\build\MLVApp
+        if-no-files-found: error

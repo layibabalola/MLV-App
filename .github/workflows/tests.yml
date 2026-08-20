@@ -80,6 +80,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -96,6 +97,11 @@ jobs:
         run: |
           python -m unittest tools.repo_hygiene.test_repo_hygiene -v
           python -m unittest tools.repo_hygiene.test_brokered_closeout -v
+          python -m unittest tools.repo_hygiene.test_pipeline_golden_provenance -v
+          python -m unittest tools.repo_hygiene.test_vendored_native_payloads -v
+          python -m unittest tools.release.test_release_evidence -v
+          python -m tools.repo_hygiene.pipeline_golden_provenance --repo-root .
+          python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
           python tools/repo-hygiene/hygiene.py --repo-root . verify-policy
 
       - name: Verify generated Python dependency locks
@@ -205,6 +211,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Test screenshot fresh-render provenance gate
+        if: needs.protected-check-route.outputs.product == 'true'
+        run: |
+          & tools\profiling\test-gui-smoke-screenshot-provenance.ps1
+
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -229,10 +240,36 @@ jobs:
       - name: Install Qt 6.10.2 + MinGW 13.1
         if: needs.protected-check-route.outputs.product == 'true'
         run: |
-          python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
-          python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
-          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$env:QT_OUTPUT_DIR\\$env:QT_VERSION\\mingw_64"
-          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\\Tools\\mingw1310_64"
+          $ErrorActionPreference = "Stop"
+          $qtInstallRoot = Join-Path $env:QT_OUTPUT_DIR $env:QT_VERSION
+          $qtRoot = Join-Path $qtInstallRoot "mingw_64"
+          $qtQmake = Join-Path $qtRoot "bin\qmake.exe"
+          $qtReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $qtInstallRoot) { Remove-Item -LiteralPath $qtInstallRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $qtInstallRoot) { throw "Qt retry cleanup did not remove $qtInstallRoot" }
+            python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
+            $qtExit = $LASTEXITCODE
+            if ($qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)) { $qtReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $qtReady) { throw "aqt Qt install failed or qmake.exe is missing after 3 attempts (exit=$qtExit)" }
+
+          $mingwRoot = Join-Path $env:QT_OUTPUT_DIR "Tools\mingw1310_64"
+          $mingwMake = Join-Path $mingwRoot "bin\mingw32-make.exe"
+          $mingwGxx = Join-Path $mingwRoot "bin\g++.exe"
+          $mingwReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $mingwRoot) { Remove-Item -LiteralPath $mingwRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $mingwRoot) { throw "MinGW retry cleanup did not remove $mingwRoot" }
+            python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+            $mingwExit = $LASTEXITCODE
+            if ($mingwExit -eq 0 -and (Test-Path -LiteralPath $mingwMake -PathType Leaf) -and (Test-Path -LiteralPath $mingwGxx -PathType Leaf)) { $mingwReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $mingwReady) { throw "aqt MinGW install failed or required tools are missing after 3 attempts (exit=$mingwExit)" }
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$qtRoot"
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$mingwRoot"
 
       - name: Build console_tests
         if: needs.protected-check-route.outputs.product == 'true'
@@ -282,7 +319,7 @@ jobs:
             }
           ) | Sort-Object -Unique
           if ($testNames.Count -eq 0) { throw "pipeline test registry discovery returned no tests" }
-          $testsPerShard = 24
+          $testsPerShard = 12
           $shards = @()
           for ($offset = 0; $offset -lt $testNames.Count; $offset += $testsPerShard) {
             $end = [Math]::Min($offset + $testsPerShard, $testNames.Count)
@@ -559,10 +596,36 @@ jobs:
       - name: Install Qt 6.10.2 + MinGW 13.1
         if: needs.protected-check-route.outputs.gui == 'true'
         run: |
-          python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
-          python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
-          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$env:QT_OUTPUT_DIR\$env:QT_VERSION\mingw_64"
-          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$env:QT_OUTPUT_DIR\Tools\mingw1310_64"
+          $ErrorActionPreference = "Stop"
+          $qtInstallRoot = Join-Path $env:QT_OUTPUT_DIR $env:QT_VERSION
+          $qtRoot = Join-Path $qtInstallRoot "mingw_64"
+          $qtQmake = Join-Path $qtRoot "bin\qmake.exe"
+          $qtReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $qtInstallRoot) { Remove-Item -LiteralPath $qtInstallRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $qtInstallRoot) { throw "Qt retry cleanup did not remove $qtInstallRoot" }
+            python -m aqt install-qt --outputdir "$env:QT_OUTPUT_DIR" windows desktop "$env:QT_VERSION" win64_mingw
+            $qtExit = $LASTEXITCODE
+            if ($qtExit -eq 0 -and (Test-Path -LiteralPath $qtQmake -PathType Leaf)) { $qtReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $qtReady) { throw "aqt Qt install failed or qmake.exe is missing after 3 attempts (exit=$qtExit)" }
+
+          $mingwRoot = Join-Path $env:QT_OUTPUT_DIR "Tools\mingw1310_64"
+          $mingwMake = Join-Path $mingwRoot "bin\mingw32-make.exe"
+          $mingwGxx = Join-Path $mingwRoot "bin\g++.exe"
+          $mingwReady = $false
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            if (Test-Path -LiteralPath $mingwRoot) { Remove-Item -LiteralPath $mingwRoot -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $mingwRoot) { throw "MinGW retry cleanup did not remove $mingwRoot" }
+            python -m aqt install-tool --outputdir "$env:QT_OUTPUT_DIR" windows desktop tools_mingw1310 qt.tools.win64_mingw1310
+            $mingwExit = $LASTEXITCODE
+            if ($mingwExit -eq 0 -and (Test-Path -LiteralPath $mingwMake -PathType Leaf) -and (Test-Path -LiteralPath $mingwGxx -PathType Leaf)) { $mingwReady = $true; break }
+            if ($attempt -lt 3) { Start-Sleep -Seconds (5 * $attempt) }
+          }
+          if (-not $mingwReady) { throw "aqt MinGW install failed or required tools are missing after 3 attempts (exit=$mingwExit)" }
+          Add-Content -Path $env:GITHUB_ENV -Value "QT_ROOT_DIR=$qtRoot"
+          Add-Content -Path $env:GITHUB_ENV -Value "MINGW_ROOT=$mingwRoot"
 
       - name: Build gui_tests
         if: needs.protected-check-route.outputs.gui == 'true'

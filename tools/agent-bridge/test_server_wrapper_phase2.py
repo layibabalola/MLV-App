@@ -19,7 +19,7 @@ import powershell_runtime as _psrt
 import server as _server
 import server_wrapper as _sw
 import server_wrapper_trampoline as _trampoline
-from core.storage import read_jsonl
+from core.storage import StorageCapability, UnsafeStoragePathError
 from server_wrapper import SERVER_WRAPPER_SELF_RESTART_EXIT_CODE, SupervisorConfig, _is_restart_trigger_file, run_supervisor
 
 
@@ -164,8 +164,11 @@ class SupervisorHarness:
         watch_paths: Optional[List[Path]] = None,
         config: Optional[SupervisorConfig] = None,
         host_identity: Optional[Dict[str, object]] = None,
+        storage: StorageCapability,
     ) -> None:
         self.root = tempdir
+        self.storage = storage
+        self.storage.validate(self.root)
         self.state_dir = self.root / "bridge-root" / "state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.server_script = self.root / "fake_server.py"
@@ -229,6 +232,7 @@ class SupervisorHarness:
                 stdout_stream=self.stdout_stream,
                 stderr_target=subprocess.DEVNULL,
                 host_identity=self.host_identity,
+                storage=self.storage,
             )
         except BaseException as exc:
             self.result["error"] = exc
@@ -269,7 +273,7 @@ class SupervisorHarness:
             self.watch_files[index].write_text("# touched %s\\n" % time.time_ns(), encoding="utf-8")
 
     def audit_events(self) -> List[dict]:
-        return read_jsonl(self.state_dir / "messages.jsonl")
+        return self.storage.read_jsonl(self.state_dir / "messages.jsonl")
 
     def wait_for_audit_events(self, action: str, expected: int = 1, timeout: float = 3.0) -> List[dict]:
         deadline = time.time() + timeout
@@ -337,6 +341,7 @@ class SupervisorHarness:
 class ServerWrapperPhase2Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="server-wrapper-phase2-"))
+        self.storage = StorageCapability.bind_trusted(self.tempdir)
         self._harnesses: List[SupervisorHarness] = []
 
     def tearDown(self) -> None:
@@ -347,6 +352,21 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
     def assertPowerShellCimCommand(self, argv: List[str], executable: str) -> None:
         self.assertEqual(argv[:6], [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"])
         self.assertEqual(argv[6], "-Command")
+
+    def test_supervisor_rejects_capability_for_another_bridge_root(self) -> None:
+        allowed_root = self.tempdir / "allowed-root"
+        rejected_state = self.tempdir / "other-root" / "state"
+        allowed_root.mkdir()
+        rejected_state.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(allowed_root)
+
+        with self.assertRaises(UnsafeStoragePathError):
+            _sw.ServerSupervisor(
+                command=[sys.executable, "-c", "pass"],
+                state_dir=rejected_state,
+                watch_paths=[],
+                storage=storage,
+            )
 
     def _start_harness(
         self,
@@ -360,6 +380,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             mode=mode,
             watch_count=watch_count,
             tool_signature=tool_signature,
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -547,6 +568,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness = SupervisorHarness(
             self.tempdir / ("case-%s" % len(self._harnesses)),
             watch_paths=[wrapper_file],
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -572,6 +594,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness = SupervisorHarness(
             self.tempdir / ("case-%s" % len(self._harnesses)),
             watch_paths=[wrapper_file, server_file],
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -608,6 +631,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
             self.tempdir / ("case-%s" % len(self._harnesses)),
             watch_paths=[wrapper_file],
             config=config,
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -637,6 +661,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness = SupervisorHarness(
             self.tempdir / ("case-%s" % len(self._harnesses)),
             watch_paths=[real_file, no_restart_file],
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -666,6 +691,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         harness = SupervisorHarness(
             self.tempdir / ("case-%s" % len(self._harnesses)),
             watch_paths=[real_file, no_restart_file],
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -833,7 +859,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir, process_table=None: [{"pid": 101, "host_key": "pid:70"}]
+        _sw._live_mcp_server_markers = lambda state_dir, process_table=None, storage=None: [{"pid": 101, "host_key": "pid:70"}]
         process_table = {
             100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
             90: {"pid": 90, "parent_pid": 80, "name": "python.exe", "command_line": "python " + TRAMPOLINE_SCRIPT},
@@ -847,6 +873,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -863,7 +890,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: [
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None, storage=None: [
             {"pid": 101, "host_key": "pid:70"},
             {"pid": 202, "host_key": "pid:60"},
         ]
@@ -880,6 +907,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py", "--bridge-root", "x"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -890,7 +918,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertEqual(result["live_server_count"], 2)
         self.assertEqual(result["host_key"], "pid:70")
         self.assertEqual(result["matching_host_live_server_pids"], [101])
-        events = read_jsonl(state_dir / "messages.jsonl")
+        events = self.storage.read_jsonl(state_dir / "messages.jsonl")
         self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_duplicate_host")
         self.assertEqual(events[-1]["matching_host_live_server_pids"], [101])
         self.assertEqual(events[-1]["max_live_server_processes_per_host"], 1)
@@ -901,7 +929,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_reap = _sw.reap_stale_server_pids
         original_live = _sw._live_mcp_server_markers
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: [
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None, storage=None: [
             {"pid": 101, "host_key": "pid:70"},
         ]
         process_table = {
@@ -923,6 +951,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -977,6 +1006,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         try:
             live = _sw._live_mcp_server_markers(
                 state_dir,
+                storage=self.storage,
                 process_table={},
                 identity_fn=lambda *args, **kwargs: {"running": True, "identity_mismatch": False},
             )
@@ -995,7 +1025,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_live = _sw._live_mcp_server_markers
         original_alive = _sw.is_process_alive
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None, storage=None: []
         _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
         process_table = {
             100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
@@ -1012,6 +1042,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
             second = _sw.enforce_live_server_process_limit(
@@ -1020,6 +1051,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -1029,6 +1061,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation=str(first.get("host_slot_generation") or ""),
                     wrapper_pid=100,
+                    storage=self.storage,
                 )
             _sw.reap_stale_server_pids = original_reap
             _sw._live_mcp_server_markers = original_live
@@ -1038,7 +1071,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         self.assertFalse(second["accepted"])
         self.assertEqual(second["live_server_count"], 0)
         self.assertEqual(second["host_slot_holder_wrapper_pid"], 100)
-        events = read_jsonl(state_dir / "messages.jsonl")
+        events = self.storage.read_jsonl(state_dir / "messages.jsonl")
         self.assertEqual(events[-1]["action"], "mcp_server_wrapper_launch_rejected_duplicate_host_slot")
         self.assertEqual(events[-1]["host_slot_holder_wrapper_pid"], 100)
 
@@ -1059,6 +1092,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1080,6 +1114,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 host_identity={"host_key": "pid:70", "host_pid": 70},
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1109,6 +1144,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation=str(first.get("host_slot_generation") or ""),
                     wrapper_pid=100,
+                    storage=self.storage,
                     host_slot_key=str(first.get("host_slot_key") or ""),
                 )
             _sw.is_process_alive = original_alive
@@ -1136,6 +1172,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1158,6 +1195,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 host_identity={"host_key": "pid:70", "host_pid": 70},
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1189,6 +1227,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation=str(first.get("host_slot_generation") or ""),
                     wrapper_pid=100,
+                    storage=self.storage,
                     host_slot_key=str(first.get("host_slot_key") or ""),
                 )
             _sw.is_process_alive = original_alive
@@ -1204,7 +1243,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_live = _sw._live_mcp_server_markers
         original_alive = _sw.is_process_alive
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None, storage=None: []
         process_table = {
             100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
             101: {"pid": 101, "parent_pid": 91, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
@@ -1221,6 +1260,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
             self.assertTrue(first["accepted"])
@@ -1232,6 +1272,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -1241,6 +1282,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(second.get("host_key") or ""),
                     generation=str(second.get("host_slot_generation") or ""),
                     wrapper_pid=101,
+                    storage=self.storage,
                 )
             _sw.reap_stale_server_pids = original_reap
             _sw._live_mcp_server_markers = original_live
@@ -1248,7 +1290,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
 
         self.assertTrue(second["accepted"])
         self.assertTrue(second["stale_host_slot_replaced"])
-        events = read_jsonl(state_dir / "messages.jsonl")
+        events = self.storage.read_jsonl(state_dir / "messages.jsonl")
         self.assertEqual(events[-1]["action"], "mcp_server_wrapper_stale_host_slot_replaced")
         self.assertEqual(events[-1]["stale_lease"]["wrapper_pid"], 100)
 
@@ -1263,6 +1305,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 host_identity={"host_key": "pid:70", "host_pid": 70},
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1279,6 +1322,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 host_identity={"host_key": "pid:70", "host_pid": 70},
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1302,6 +1346,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(second.get("host_key") or ""),
                     generation=str(second.get("host_slot_generation") or ""),
                     wrapper_pid=101,
+                    storage=self.storage,
                 )
             _sw.is_process_alive = original_alive
 
@@ -1324,6 +1369,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1344,6 +1390,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table={
                     100: {
                         "pid": 100,
@@ -1367,6 +1414,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(second.get("host_key") or ""),
                     generation=str(second.get("host_slot_generation") or ""),
                     wrapper_pid=101,
+                    storage=self.storage,
                     host_slot_key=str(second.get("host_slot_key") or ""),
                 )
             _sw.is_process_alive = original_alive
@@ -1390,6 +1438,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table={},
             )
             blocked = _sw.acquire_mcp_host_slot(
@@ -1401,6 +1450,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 },
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table={},
             )
         finally:
@@ -1410,6 +1460,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation=str(first.get("host_slot_generation") or ""),
                     wrapper_pid=100,
+                    storage=self.storage,
                 )
             _sw.is_process_alive = original_alive
 
@@ -1424,7 +1475,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
         original_live = _sw._live_mcp_server_markers
         original_alive = _sw.is_process_alive
         _sw.reap_stale_server_pids = lambda *args, **kwargs: {}
-        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None: []
+        _sw._live_mcp_server_markers = lambda state_dir_arg, process_table=None, storage=None: []
         _sw.is_process_alive = lambda pid: int(pid) in {70, 100, 101}
         process_table = {
             100: {"pid": 100, "parent_pid": 90, "name": "python.exe", "command_line": "python " + WRAPPER_SCRIPT},
@@ -1440,6 +1491,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=100,
+                storage=self.storage,
                 process_table=process_table,
             )
             self.assertTrue(first["accepted"])
@@ -1449,6 +1501,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation="wrong-generation",
                     wrapper_pid=100,
+                    storage=self.storage,
                 )
             )
             blocked = _sw.enforce_live_server_process_limit(
@@ -1457,6 +1510,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table=process_table,
             )
             self.assertFalse(blocked["accepted"])
@@ -1467,6 +1521,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(first.get("host_key") or ""),
                     generation=str(first.get("host_slot_generation") or ""),
                     wrapper_pid=100,
+                    storage=self.storage,
                 )
             )
             allowed = _sw.enforce_live_server_process_limit(
@@ -1475,6 +1530,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                 max_live_server_processes_per_host=1,
                 audit_command=["server_wrapper.py"],
                 current_pid=101,
+                storage=self.storage,
                 process_table=process_table,
             )
         finally:
@@ -1484,6 +1540,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     host_key=str(allowed.get("host_key") or ""),
                     generation=str(allowed.get("host_slot_generation") or ""),
                     wrapper_pid=101,
+                    storage=self.storage,
                 )
             _sw.reap_stale_server_pids = original_reap
             _sw._live_mcp_server_markers = original_live
@@ -1502,6 +1559,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     "host_pid": 70,
                     "host_process_name": "codex.exe",
                 },
+                storage=self.storage,
             )
             self._harnesses.append(harness)
             self.assertEqual(harness.wait_for_exit(timeout=3.0), 0)
@@ -1545,6 +1603,7 @@ class ServerWrapperPhase2Tests(unittest.TestCase):
                     "host_process_name": "codex.exe",
                     "host_creation_date": "created",
                 },
+                storage=self.storage,
                 now_fn=lambda: now[0],
             )
 
@@ -1702,6 +1761,7 @@ class ServerWrapperTrampolineTests(unittest.TestCase):
 class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="server-wrapper-trampoline-mcp-"))
+        self.storage = StorageCapability.bind_trusted(self.tempdir)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tempdir, ignore_errors=True)
@@ -1739,12 +1799,12 @@ class ServerWrapperTrampolineMcpSmokeTests(unittest.TestCase):
     def _wait_for_audit_count(self, audit_path: Path, action: str, expected: int, timeout: float = 12.0) -> List[dict]:
         deadline = time.time() + timeout
         while time.time() < deadline:
-            rows = read_jsonl(audit_path) if audit_path.exists() else []
+            rows = self.storage.read_jsonl(audit_path) if audit_path.exists() else []
             matches = [row for row in rows if row.get("action") == action]
             if len(matches) >= expected:
                 return matches
             time.sleep(0.05)
-        rows = read_jsonl(audit_path) if audit_path.exists() else []
+        rows = self.storage.read_jsonl(audit_path) if audit_path.exists() else []
         raise AssertionError("timed out waiting for %s x%s; rows=%r" % (action, expected, rows))
 
     def test_trampoline_preserves_mcp_tool_calls_across_wrapper_exit_77(self) -> None:
@@ -1858,6 +1918,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="server-wrapper-snapshot-"))
+        self.storage = StorageCapability.bind_trusted(self.tempdir)
         self._harnesses: List[SupervisorHarness] = []
         self._case_counter = 0
 
@@ -1904,6 +1965,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         harness = SupervisorHarness(
             self._make_case_dir(),
             watch_paths=[watch_file],
+            storage=self.storage,
         )
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
@@ -1935,7 +1997,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         harness1_root.mkdir()
         (harness1_root / "bridge-root" / "state").mkdir(parents=True)
 
-        harness1 = SupervisorHarness(harness1_root, watch_paths=[trigger_file])
+        harness1 = SupervisorHarness(harness1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness1)
         harness1.wait_for_launch_count(1)
         harness1.stdout_stream.wait_for(b"READY ")
@@ -1958,7 +2020,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # Copy the snapshot from session 1 into session 2's state dir
         shutil.copy2(str(snapshot_path_h1), str(state2 / "code-watcher-snapshot.json"))
 
-        harness2 = SupervisorHarness(harness2_root, watch_paths=[trigger_file])
+        harness2 = SupervisorHarness(harness2_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness2)
 
         events = harness2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
@@ -1984,7 +2046,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         harness1_root = self.tempdir / "s1"
         harness1_root.mkdir()
         (harness1_root / "bridge-root" / "state").mkdir(parents=True)
-        harness1 = SupervisorHarness(harness1_root, watch_paths=[trigger_file])
+        harness1 = SupervisorHarness(harness1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness1)
         harness1.wait_for_launch_count(1)
         harness1.stdout_stream.wait_for(b"READY ")
@@ -2004,7 +2066,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # shutil.copy2 preserves the source mtime; record it so we can detect the rewrite.
         old_file_mtime_ns = snap2_path.stat().st_mtime_ns
 
-        harness2 = SupervisorHarness(harness2_root, watch_paths=[trigger_file])
+        harness2 = SupervisorHarness(harness2_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness2)
         harness2.wait_for_launch_count(1)
         harness2.stdout_stream.wait_for(b"READY ")
@@ -2042,7 +2104,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h1_root = self.tempdir / "refresh-s1"
         h1_root.mkdir()
         (h1_root / "bridge-root" / "state").mkdir(parents=True)
-        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2063,7 +2125,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # shutil.copy2 preserves the source mtime; record it so we can detect the rewrite.
         old_file_mtime_ns = snap2_path.stat().st_mtime_ns
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h2)
         h2.wait_for_launch_count(1)
         h2.stdout_stream.wait_for(b"READY ")
@@ -2104,7 +2166,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         corrupt_snap.write_text("not valid json!!!", encoding="utf-8")
         corrupt_mtime_ns = corrupt_snap.stat().st_mtime_ns
 
-        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file])
+        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
         harness.stdout_stream.wait_for(b"READY ")
@@ -2138,7 +2200,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         )
         wrong_mtime_ns = wrong_snap.stat().st_mtime_ns
 
-        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file])
+        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
         harness.stdout_stream.wait_for(b"READY ")
@@ -2162,7 +2224,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h1_root = self.tempdir / "nt1"
         h1_root.mkdir()
         (h1_root / "bridge-root" / "state").mkdir(parents=True)
-        h1 = SupervisorHarness(h1_root, watch_paths=[non_trigger_file, trigger_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[non_trigger_file, trigger_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2183,7 +2245,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # shutil.copy2 preserves the source mtime; record it so we can detect the rewrite.
         old_file_mtime_ns = snap2_path.stat().st_mtime_ns
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[non_trigger_file, trigger_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[non_trigger_file, trigger_file], storage=self.storage)
         self._harnesses.append(h2)
         h2.wait_for_launch_count(1)
         h2.stdout_stream.wait_for(b"READY ")
@@ -2210,7 +2272,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h1_root = self.tempdir / "pr1"
         h1_root.mkdir()
         (h1_root / "bridge-root" / "state").mkdir(parents=True)
-        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2233,7 +2295,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2.mkdir(parents=True)
         shutil.copy2(str(snap_path), str(state2 / "code-watcher-snapshot.json"))
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h2)
         h2.wait_for_launch_count(1)
         h2.stdout_stream.wait_for(b"READY ")
@@ -2256,7 +2318,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         wrapper_file.write_text("# wrapper v1\n", encoding="utf-8")
 
         h1_root = self._make_case_dir()
-        h1 = SupervisorHarness(h1_root, watch_paths=[wrapper_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[wrapper_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2271,7 +2333,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2 = h2_root / "bridge-root" / "state"
         state2.mkdir(parents=True)
         shutil.copy2(str(snap1), str(state2 / "code-watcher-snapshot.json"))
-        h2 = SupervisorHarness(h2_root, watch_paths=[wrapper_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[wrapper_file], storage=self.storage)
         self._harnesses.append(h2)
         self.assertEqual(h2.wait_for_exit(timeout=5.0), SERVER_WRAPPER_SELF_RESTART_EXIT_CODE)
         h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
@@ -2285,7 +2347,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state3.mkdir(parents=True)
         shutil.copy2(str(state2 / "code-watcher-snapshot.json"), str(state3 / "code-watcher-snapshot.json"))
         old_file_mtime_ns = (state3 / "code-watcher-snapshot.json").stat().st_mtime_ns
-        h3 = SupervisorHarness(h3_root, watch_paths=[wrapper_file])
+        h3 = SupervisorHarness(h3_root, watch_paths=[wrapper_file], storage=self.storage)
         self._harnesses.append(h3)
         h3.wait_for_launch_count(1)
         h3.stdout_stream.wait_for(b"READY ")
@@ -2308,7 +2370,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         h1_root = self.tempdir / "nf1"
         h1_root.mkdir()
         (h1_root / "bridge-root" / "state").mkdir(parents=True)
-        h1 = SupervisorHarness(h1_root, watch_paths=[original_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[original_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2327,7 +2389,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2.mkdir(parents=True)
         shutil.copy2(str(snap), str(state2 / "code-watcher-snapshot.json"))
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[original_file, new_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[original_file, new_file], storage=self.storage)
         self._harnesses.append(h2)
 
         events = h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
@@ -2360,7 +2422,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
 
         # --- Session 1: establish baseline ---
         h1_root = self._make_case_dir()
-        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2388,7 +2450,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2.mkdir(parents=True)
         shutil.copy2(str(snap1), str(state2 / "code-watcher-snapshot.json"))
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], config=tight_config)
+        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], config=tight_config, storage=self.storage)
         self._harnesses.append(h2)
 
         # First startup-detected restart: snapshot starts at v1, file is v2 -> restart fires.
@@ -2433,7 +2495,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state3.mkdir(parents=True)
         shutil.copy2(str(state2 / "code-watcher-snapshot.json"), str(state3 / "code-watcher-snapshot.json"))
 
-        h3 = SupervisorHarness(h3_root, watch_paths=[trigger_file])
+        h3 = SupervisorHarness(h3_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h3)
 
         # Session 3 must detect the v3 change (unhandled in session 2) and restart.
@@ -2455,7 +2517,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         2. A stderr warning and an audit event are emitted so the failure is observable.
         3. In-session change detection still triggers a restart despite the blocked path.
 
-        Failure injection: monkeypatch _sw.write_json to raise for the snapshot path.
+        Failure injection: monkeypatch StorageCapability.write_json to raise for the snapshot path.
         This is cross-platform (unlike a directory-at-path approach, which on Windows
         causes shutil.move to silently move the temp file into the directory — no exception).
         """
@@ -2465,22 +2527,22 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         harness_root = self._make_case_dir()
 
         # --- Inject write failure and capture stderr before starting the harness ---
-        original_write_json = _sw.write_json
+        original_write_json = StorageCapability.write_json
         write_failure_count = [0]
 
-        def _write_json_snapshot_fail(path, value):
+        def _write_json_snapshot_fail(storage, path, value):
             if path.name == _sw.CODE_WATCHER_SNAPSHOT_FILENAME:
                 write_failure_count[0] += 1
                 raise OSError("simulated disk full for snapshot test")
-            original_write_json(path, value)
+            original_write_json(storage, path, value)
 
         captured_stderr = io.StringIO()
         old_stderr = sys.stderr
 
-        _sw.write_json = _write_json_snapshot_fail
+        StorageCapability.write_json = _write_json_snapshot_fail
         sys.stderr = captured_stderr
         try:
-            harness = SupervisorHarness(harness_root, watch_paths=[trigger_file])
+            harness = SupervisorHarness(harness_root, watch_paths=[trigger_file], storage=self.storage)
             self._harnesses.append(harness)
             harness.wait_for_launch_count(1)
             harness.stdout_stream.wait_for(b"READY ")
@@ -2506,7 +2568,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
             harness.stdin_stream.close()
             self.assertEqual(harness.wait_for_exit(), 0)
         finally:
-            _sw.write_json = original_write_json
+            StorageCapability.write_json = original_write_json
             sys.stderr = old_stderr
 
         # Property 2a: stderr warning emitted (check after thread is done to avoid races).
@@ -2537,7 +2599,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         # Session 1: establish baseline with the file present.
         h1_root = self._make_case_dir()
         (h1_root / "bridge-root" / "state").mkdir(parents=True)
-        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file])
+        h1 = SupervisorHarness(h1_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h1)
         h1.wait_for_launch_count(1)
         h1.stdout_stream.wait_for(b"READY ")
@@ -2558,7 +2620,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         state2.mkdir(parents=True)
         shutil.copy2(str(snap1), str(state2 / "code-watcher-snapshot.json"))
 
-        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file])
+        h2 = SupervisorHarness(h2_root, watch_paths=[trigger_file], storage=self.storage)
         self._harnesses.append(h2)
 
         events = h2.wait_for_audit_events("mcp_server_restart_queued_from_persisted_snapshot")
@@ -2602,7 +2664,7 @@ class ServerWrapperSnapshotTests(unittest.TestCase):
         )
 
         harness_root = self._make_case_dir()
-        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file], config=config)
+        harness = SupervisorHarness(harness_root, watch_paths=[trigger_file], config=config, storage=self.storage)
         self._harnesses.append(harness)
         harness.wait_for_launch_count(1)
         harness.stdout_stream.wait_for(b"READY ")

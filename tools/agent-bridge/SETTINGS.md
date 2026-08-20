@@ -35,8 +35,8 @@ agent name (e.g. `codex_`).
 | `wake_max_wait_seconds` | `60` | `1..3600` | claude | `wake_codex.ps1 -MaxWaitSeconds`. |
 | `poll_interval_seconds` | `2` | `0.1..60` | claude | Watcher file-stat loop interval. Accepts float (e.g. `0.5`). |
 | `compact_interval_hours` | `6` | `1..168` | claude | Watcher periodic compaction cadence. |
-| `audit_log_retention_days` | `90` | `1..3650` | both | Rotated audit-log retention. |
-| `inbox_read_retention_days` | `7` | `1..3650` | both | Read inbox row retention during compaction. |
+| `audit_log_retention_days` | `90` | `1..3650` | both | Rotated audit-log retention. The active log rolls daily or at 5 MB, whichever comes first. |
+| `inbox_read_retention_days` | `7` | `1..3650` | both | Read inbox row retention during compaction; unread rows are never silently deleted and the newest 200 read rows remain as recovery context. |
 | `toasts_enabled` | `true` | boolean | claude | Watcher toast/log mode. |
 | `toast_retention_mode` | `latest_sticky` | `latest_sticky`, `all_sticky`, `all_expiring` | claude | `latest_sticky`: newest toast stays until dismissed, older ones expire after `toast_expiry_minutes`. `all_sticky`: nothing auto-expires. `all_expiring`: every toast expires. |
 | `codex_bridge_reminder_toasts_enabled` | `false` | boolean | codex | Windows balloon toast for Codex workflow hygiene reminders; stdout reminder still prints either way. |
@@ -74,3 +74,47 @@ agent name (e.g. `codex_`).
 Older watcher configs may still contain `toasts_enabled`. That legacy key is
 used only when `settings.json` is absent. Once `settings.json` exists, it is the
 canonical source for `toasts_enabled`.
+
+## Storage confidentiality and retention
+
+Bridge state is clear-text local operational state and may contain sensitive
+message bodies. On POSIX systems, bridge storage helpers enforce mode `0700` on
+created state directories and `0600` on state, inbox, audit, temporary, rotated,
+and quarantine files. On Windows, agent-bridge deliberately does not replace an
+inherited DACL: doing so without knowing the required Desktop/AppContainer
+principals can lock out the bridge or require unavailable privileges. Operators
+that require a verified confidentiality boundary must run this fail-closed audit:
+
+The root resolver is the storage trust boundary. It converts an explicitly
+configured relative bridge root to an absolute root and creates one immutable
+`StorageCapability` for that root. There is no process-global list of authorized
+roots: every lower-level read, write, lock, replace, and delete receives the
+owning capability explicitly. Paths must already be absolute, must not contain
+`..`, must remain beneath that capability's root, and must not traverse a
+symlink or Windows reparse point. Redirect targets use provisional local
+capabilities while the complete `MOVED_TO.json` chain is checked; a failed,
+cyclic, or overlong chain grants no authority and causes no storage mutation.
+POSIX mutations are anchored to no-follow directory descriptors. Windows opens
+verify reparse attributes and final-handle containment before writing; fully
+hostile same-user parent swaps still require an `NtCreateFile`-style root handle
+and remain a documented defense-in-depth limit rather than a claimed guarantee.
+
+```powershell
+py -3 tools\agent-bridge\compact.py --state-dir "$env:USERPROFILE\.agent-bridge\state" --audit-permissions-only
+```
+
+The audit exits `0` only when the platform's private-storage policy is verified.
+The current Windows implementation reports `windows_acl_unverified` and exits
+`2`; treat that as a deployment warning, not as permission to store secrets.
+
+Retention semantics are deliberately loss-averse:
+
+- `messages.jsonl` rolls into daily `messages.YYYY-MM-DD.jsonl` files when its
+  oldest event reaches one day or its size reaches 5 MB. Rotated files are
+  removed after `audit_log_retention_days` (subject to the compaction cadence).
+- Read inbox and control rows age out according to
+  `inbox_read_retention_days`, except that the newest 200 read rows remain as
+  recovery context. Unread rows are operational work and are never deleted by
+  automatic compaction, regardless of age.
+- `*.quarantine.jsonl` files preserve corrupt-row recovery evidence and are not
+  deleted by audit pruning. Their deletion is an explicit operator action.

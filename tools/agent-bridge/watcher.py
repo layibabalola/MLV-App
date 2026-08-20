@@ -29,23 +29,24 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 from agent_bridge import AgentBridge
-from core.paths import session_registry_path_for_state_dir
+from core.paths import resolve_bridge_paths, session_registry_path_for_state_dir
 from core.processes import acquire_singleton_lease, command_line_hash, heartbeat_lease, is_process_alive, release_lease
 from core.runtime import (
     MONITOR_RUNTIME_MIN_TTL_S,
-    build_runtime_breadcrumb,
+    build_runtime_breadcrumb as _core_build_runtime_breadcrumb,
     monitor_runtime_path_for_state_dir,
     normalize_peer_runtime_breadcrumb,
     peer_runtime_path_for_state_dir,
-    read_runtime_breadcrumb,
-    write_runtime_breadcrumb,
+    read_runtime_breadcrumb as _core_read_runtime_breadcrumb,
+    write_runtime_breadcrumb as _core_write_runtime_breadcrumb,
 )
-from core.settings import BridgeSettings, load_settings, settings_path_for_state_dir
-from core.storage import append_jsonl as storage_append_jsonl
-from core.storage import read_json as storage_read_json
-from core.storage import read_jsonl as storage_read_jsonl
-from core.storage import update_json as storage_update_json
-from core.storage import write_json as storage_write_json
+from core.settings import BridgeSettings, load_settings as _load_settings, settings_path_for_state_dir
+from core.storage import append_jsonl as _storage_append_jsonl
+from core.storage import read_json as _storage_read_json
+from core.storage import read_jsonl as _storage_read_jsonl
+from core.storage import update_json as _storage_update_json
+from core.storage import write_json as _storage_write_json
+from core.storage import StorageCapability, UnsafeStoragePathError
 
 # Compaction support (same directory -- import directly)
 try:
@@ -88,23 +89,80 @@ ACTIVE_SESSION_ID_SOURCE = "active_session"
 _SESSION_REGISTRY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+def storage_read_json(
+    path: Path, default: Dict[str, Any], *, storage: StorageCapability
+) -> Dict[str, Any]:
+    return _storage_read_json(path, default, storage=storage)
+
+
+def storage_write_json(
+    path: Path, value: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    _storage_write_json(path, value, storage=storage)
+
+
+def storage_read_jsonl(path: Path, *, storage: StorageCapability) -> List[Dict[str, Any]]:
+    return _storage_read_jsonl(path, storage=storage)
+
+
+def storage_append_jsonl(
+    path: Path, row: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    _storage_append_jsonl(path, row, storage=storage)
+
+
+def storage_update_json(path: Path, default, updater, *, storage: StorageCapability):
+    return _storage_update_json(path, default, updater, storage=storage)
+
+
+def read_runtime_breadcrumb(path: Path, *, storage: StorageCapability):
+    return _core_read_runtime_breadcrumb(path, storage=storage)
+
+
+def write_runtime_breadcrumb(
+    path: Path, breadcrumb: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    _core_write_runtime_breadcrumb(path, breadcrumb, storage=storage)
+
+
+def build_runtime_breadcrumb(*, storage: StorageCapability, **kwargs):
+    return _core_build_runtime_breadcrumb(**kwargs, storage=storage)
+
+
+def load_settings(
+    state_dir: Path,
+    settings_path: Optional[Path] = None,
+    *,
+    storage: StorageCapability,
+) -> BridgeSettings:
+    return _load_settings(
+        state_dir,
+        settings_path=settings_path,
+        storage=storage,
+    )
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def read_jsonl(path: Path) -> List[Dict[str, Any]]:
-    return storage_read_jsonl(path)
+def read_jsonl(path: Path, *, storage: StorageCapability) -> List[Dict[str, Any]]:
+    return storage_read_jsonl(path, storage=storage)
 
 
-def unread_for_session(inbox_path: Path, session_id: str) -> List[Dict[str, Any]]:
-    rows = read_jsonl(inbox_path)
+def unread_for_session(
+    inbox_path: Path, session_id: str, *, storage: StorageCapability
+) -> List[Dict[str, Any]]:
+    rows = read_jsonl(inbox_path, storage=storage)
     return [
         r for r in rows
         if r.get("session_id") == session_id and not r.get("read_at")
     ]
 
 
-def _load_session_registry_cached(registry_path: Path) -> Dict[str, Any]:
+def _load_session_registry_cached(
+    registry_path: Path, *, storage: StorageCapability
+) -> Dict[str, Any]:
     """Read session.json with a cheap mtime/size cache for watcher poll loops."""
     key = str(registry_path)
     try:
@@ -120,9 +178,8 @@ def _load_session_registry_cached(registry_path: Path) -> Dict[str, Any]:
         return payload if isinstance(payload, dict) else {}
 
     try:
-        with registry_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+        payload = storage.read_json(registry_path, {})
+    except (OSError, json.JSONDecodeError, UnsafeStoragePathError):
         payload = {}
     if not isinstance(payload, dict):
         payload = {}
@@ -151,7 +208,9 @@ def _active_session_from_registry(registry: Dict[str, Any], *, project: str, age
     return session_id
 
 
-def _resolve_session_config(session_config: Dict[str, Any]) -> Dict[str, Any]:
+def _resolve_session_config(
+    session_config: Dict[str, Any], *, storage: StorageCapability
+) -> Dict[str, Any]:
     """Return a copy with private entries rebound to the active session registry row.
 
     watcher-config.json may contain a stale private session_id snapshot.  For
@@ -175,7 +234,7 @@ def _resolve_session_config(session_config: Dict[str, Any]) -> Dict[str, Any]:
     registry_value = str(resolved.get("session_registry") or resolved.get("session_registry_path") or "").strip()
     registry_path = Path(registry_value) if registry_value else session_registry_path_for_state_dir(Path(inbox_value).parent)
     active_session_id = _active_session_from_registry(
-        _load_session_registry_cached(registry_path),
+        _load_session_registry_cached(registry_path, storage=storage),
         project=project,
         agent=agent,
     )
@@ -186,7 +245,7 @@ def _resolve_session_config(session_config: Dict[str, Any]) -> Dict[str, Any]:
     return resolved
 
 
-def load_seen(state_path: Path) -> Dict[str, Any]:
+def load_seen(state_path: Path, *, storage: StorageCapability) -> Dict[str, Any]:
     data = storage_read_json(
         state_path,
         {
@@ -198,6 +257,7 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
             "wake_fire_history": [],
             "claude_monitor_escalations": [],
         },
+        storage=storage,
     )
     data.setdefault("seen_ids", [])
     data.setdefault("toasted_ids", [])
@@ -209,8 +269,10 @@ def load_seen(state_path: Path) -> Dict[str, Any]:
     return data
 
 
-def save_seen(state_path: Path, seen: Dict[str, Any]) -> None:
-    storage_write_json(state_path, seen)
+def save_seen(
+    state_path: Path, seen: Dict[str, Any], *, storage: StorageCapability
+) -> None:
+    storage_write_json(state_path, seen, storage=storage)
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:
@@ -225,23 +287,33 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
     return parsed
 
 
-def _message_by_id(inbox_path: Path, message_id: str) -> Optional[Dict[str, Any]]:
-    for row in read_jsonl(inbox_path):
+def _message_by_id(
+    inbox_path: Path, message_id: str, *, storage: StorageCapability
+) -> Optional[Dict[str, Any]]:
+    for row in read_jsonl(inbox_path, storage=storage):
         if row.get("id") == message_id:
             return row
     return None
 
 
-def _message_has_wake_receipt(inbox_path: Path, message_id: str) -> bool:
-    row = _message_by_id(inbox_path, message_id)
+def _message_has_wake_receipt(
+    inbox_path: Path, message_id: str, *, storage: StorageCapability
+) -> bool:
+    row = _message_by_id(inbox_path, message_id, storage=storage)
     if not row:
         return True
     return bool(row.get("seen_at") or row.get("read_at"))
 
 
-def _claude_monitor_runtime_status(state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+def _claude_monitor_runtime_status(
+    state_dir: Path,
+    session_id: str,
+    project: str,
+    *,
+    storage: StorageCapability,
+) -> Dict[str, Any]:
     runtime_path = monitor_runtime_path_for_state_dir(state_dir, "claude", session_id)
-    data = read_runtime_breadcrumb(runtime_path)
+    data = read_runtime_breadcrumb(runtime_path, storage=storage)
     result: Dict[str, Any] = {"status": "missing", "path": str(runtime_path), "fresh": False}
     if not data:
         return result
@@ -292,12 +364,15 @@ def _escalate_claude_unread_without_monitor(
     toast_expiry_minutes: int,
     toast_max_in_tray: int,
     emit_user_visible: bool = True,
+    storage: StorageCapability,
 ) -> List[str]:
-    runtime = _claude_monitor_runtime_status(inbox_path.parent, session_id, project)
+    runtime = _claude_monitor_runtime_status(
+        inbox_path.parent, session_id, project, storage=storage
+    )
     if runtime.get("fresh"):
         return []
     now_dt = datetime.now(timezone.utc)
-    unread = unread_for_session(inbox_path, session_id)
+    unread = unread_for_session(inbox_path, session_id, storage=storage)
     candidates: List[Dict[str, Any]] = []
     for row in unread:
         created = _parse_dt(str(row.get("created_at") or ""))
@@ -350,11 +425,12 @@ def _escalate_claude_unread_without_monitor(
             "claude_monitor_escalations": [],
         },
         _merge,
+        storage=storage,
     )
     events = list(updated.get("_new_claude_monitor_escalations") or [])
     if "_new_claude_monitor_escalations" in updated:
         updated.pop("_new_claude_monitor_escalations", None)
-        storage_write_json(state_path, updated)
+        storage_write_json(state_path, updated, storage=storage)
     for event in events:
         _append_wake_audit(
             inbox_path,
@@ -368,6 +444,7 @@ def _escalate_claude_unread_without_monitor(
                 "runtime_status": event.get("runtime_status"),
                 "age_seconds": event.get("age_seconds"),
             },
+            storage=storage,
         )
         if emit_user_visible:
             print(
@@ -395,12 +472,14 @@ def _escalate_claude_unread_without_monitor(
     return [str(event.get("message_id") or "") for event in events if event.get("message_id")]
 
 
-def _append_wake_audit(inbox_path: Path, event: Dict[str, Any]) -> None:
+def _append_wake_audit(
+    inbox_path: Path, event: Dict[str, Any], *, storage: StorageCapability
+) -> None:
     audit_path = inbox_path.parent / "messages.jsonl"
     event.setdefault("id", str(uuid.uuid4()))
     event.setdefault("timestamp", utc_now())
     try:
-        storage_append_jsonl(audit_path, event)
+        storage_append_jsonl(audit_path, event, storage=storage)
     except OSError as exc:
         print(f"[agent-bridge] failed to write wake audit event: {exc}", flush=True)
 
@@ -415,13 +494,16 @@ def _rearm_stale_unread_without_monitor(
     toasted_ids: set,
     pending_ids: set,
     paused_ids: set,
+    storage: StorageCapability,
 ) -> List[str]:
-    runtime = _claude_monitor_runtime_status(inbox_path.parent, session_id, project)
+    runtime = _claude_monitor_runtime_status(
+        inbox_path.parent, session_id, project, storage=storage
+    )
     if runtime.get("fresh"):
         return []
     now_dt = datetime.now(timezone.utc)
     candidates: List[Dict[str, Any]] = []
-    for row in unread_for_session(inbox_path, session_id):
+    for row in unread_for_session(inbox_path, session_id, storage=storage):
         message_id = str(row.get("id") or "")
         if not message_id or message_id in pending_ids or message_id in paused_ids:
             continue
@@ -491,11 +573,12 @@ def _rearm_stale_unread_without_monitor(
             "stale_unread_watchdog_rearms": [],
         },
         _merge,
+        storage=storage,
     )
     events = list(updated.get("_new_stale_unread_watchdog_rearms") or [])
     if "_new_stale_unread_watchdog_rearms" in updated:
         updated.pop("_new_stale_unread_watchdog_rearms", None)
-        storage_write_json(state_path, updated)
+        storage_write_json(state_path, updated, storage=storage)
     seen_ids.clear()
     seen_ids.update(str(item) for item in updated.get("seen_ids", []) if str(item))
     toasted_ids.clear()
@@ -514,6 +597,7 @@ def _rearm_stale_unread_without_monitor(
                 "runtime_status": runtime.get("status"),
                 "oldest_age_seconds": max(int(event.get("age_seconds") or 0) for event in events),
             },
+            storage=storage,
         )
     return [str(event.get("message_id") or "") for event in events if event.get("message_id")]
 
@@ -565,13 +649,14 @@ def _queue_monitor_restart_required_control(
     reason: str,
     runtime: Optional[Dict[str, Any]] = None,
     commit: Optional[str] = None,
+    storage: StorageCapability,
 ) -> Optional[str]:
     key = "%s:%s:%s" % (session_id, trigger, dedupe_value)
-    state = load_seen(state_path)
+    state = load_seen(state_path, storage=storage)
     controls = [item for item in state.get("monitor_restart_required_controls", []) if isinstance(item, dict)]
     if any(str(item.get("key") or "") == key for item in controls):
         return None
-    bridge = AgentBridge(state_dir)
+    bridge = AgentBridge(state_dir, storage=storage)
     body = _monitor_restart_control_body(
         trigger=trigger,
         reason=reason,
@@ -630,7 +715,7 @@ def _queue_monitor_restart_required_control(
         }
     )
     state["monitor_restart_required_controls"] = controls[-200:]
-    storage_write_json(state_path, state)
+    storage_write_json(state_path, state, storage=storage)
     return message_id
 
 
@@ -640,9 +725,10 @@ def _monitor_runtime_unhealthy_long_enough(
     session_id: str,
     runtime: Dict[str, Any],
     threshold_seconds: int = MONITOR_RUNTIME_MIN_TTL_S,
+    storage: StorageCapability,
 ) -> bool:
     if runtime.get("fresh"):
-        state = load_seen(state_path)
+        state = load_seen(state_path, storage=storage)
         observations = dict(state.get("monitor_runtime_observations") or {})
         controls = [
             item
@@ -657,7 +743,7 @@ def _monitor_runtime_unhealthy_long_enough(
         observations = {key: value for key, value in observations.items() if not str(key).startswith(key_prefix)}
         state["monitor_runtime_observations"] = observations
         state["monitor_restart_required_controls"] = controls
-        storage_write_json(state_path, state)
+        storage_write_json(state_path, state, storage=storage)
         return False
     status = str(runtime.get("status") or "missing")
     age_seconds = runtime.get("age_seconds")
@@ -666,7 +752,7 @@ def _monitor_runtime_unhealthy_long_enough(
             return int(age_seconds) >= int(runtime.get("freshness_ttl_seconds") or threshold_seconds)
         except (TypeError, ValueError):
             return True
-    state = load_seen(state_path)
+    state = load_seen(state_path, storage=storage)
     observations = dict(state.get("monitor_runtime_observations") or {})
     key = "%s:%s" % (session_id, status)
     now = datetime.now(timezone.utc)
@@ -674,7 +760,7 @@ def _monitor_runtime_unhealthy_long_enough(
     if not first_seen:
         observations[key] = now.isoformat(timespec="seconds")
         state["monitor_runtime_observations"] = observations
-        storage_write_json(state_path, state)
+        storage_write_json(state_path, state, storage=storage)
         return False
     return (now - first_seen).total_seconds() >= threshold_seconds
 
@@ -684,16 +770,24 @@ def _maybe_queue_monitor_stale_control(
     session_config: Dict[str, Any],
     state_path: Path,
     state_dir: Path,
+    storage: StorageCapability,
 ) -> Optional[str]:
-    resolved = _resolve_session_config(session_config)
+    resolved = _resolve_session_config(session_config, storage=storage)
     if resolved.get("agent") != "claude":
         return None
     session_id = str(resolved.get("session_id") or "")
     project = str(resolved.get("project") or "")
     if not session_id or not project or session_id == project:
         return None
-    runtime = _claude_monitor_runtime_status(state_dir, session_id, project)
-    if not _monitor_runtime_unhealthy_long_enough(state_path=state_path, session_id=session_id, runtime=runtime):
+    runtime = _claude_monitor_runtime_status(
+        state_dir, session_id, project, storage=storage
+    )
+    if not _monitor_runtime_unhealthy_long_enough(
+        state_path=state_path,
+        session_id=session_id,
+        runtime=runtime,
+        storage=storage,
+    ):
         return None
     status = str(runtime.get("status") or "missing")
     reason = "claude_monitor_%s" % status
@@ -706,6 +800,7 @@ def _maybe_queue_monitor_stale_control(
         dedupe_value=status,
         reason=reason,
         runtime=runtime,
+        storage=storage,
     )
 
 
@@ -731,6 +826,7 @@ def _maybe_queue_commit_monitor_restart_controls(
     sessions: List[Dict[str, Any]],
     state_path: Path,
     state_dir: Path,
+    storage: StorageCapability,
 ) -> List[str]:
     repo_value = config.get("repo_root") or config.get("canonical_root")
     if not repo_value:
@@ -744,19 +840,19 @@ def _maybe_queue_commit_monitor_restart_controls(
     commit = _latest_bridge_watch_commit(repo_root)
     if not commit:
         return []
-    state = load_seen(state_path)
+    state = load_seen(state_path, storage=storage)
     watch = dict(state.get("monitor_restart_commit_watch") or {})
     previous = watch.get("last_commit")
     if previous == commit:
         return []
     watch.update({"repo_root": str(repo_root), "last_commit": commit, "updated_at": utc_now()})
     state["monitor_restart_commit_watch"] = watch
-    storage_write_json(state_path, state)
+    storage_write_json(state_path, state, storage=storage)
     if not previous:
         return []
     queued: List[str] = []
     for session in sessions:
-        resolved = _resolve_session_config(session)
+        resolved = _resolve_session_config(session, storage=storage)
         if resolved.get("agent") != "claude":
             continue
         session_id = str(resolved.get("session_id") or "")
@@ -772,6 +868,7 @@ def _maybe_queue_commit_monitor_restart_controls(
             dedupe_value=commit,
             reason="bridge_monitor_related_code_changed",
             commit=commit,
+            storage=storage,
         )
         if message_id:
             queued.append(message_id)
@@ -786,11 +883,14 @@ def _wake_breaker_path(state_path: Path) -> Path:
     return _watcher_state_dir(state_path) / "wake-failure-windows.json"
 
 
-def _load_wake_breakers(state_path: Path) -> Dict[str, Any]:
+def _load_wake_breakers(
+    state_path: Path, *, storage: StorageCapability
+) -> Dict[str, Any]:
     path = _wake_breaker_path(state_path)
     data = storage_read_json(
         path,
         {"schema_version": WAKE_BREAKER_SCHEMA_VERSION, "sessions": {}, "updated_at": utc_now()},
+        storage=storage,
     )
     data.setdefault("schema_version", WAKE_BREAKER_SCHEMA_VERSION)
     data.setdefault("sessions", {})
@@ -798,11 +898,13 @@ def _load_wake_breakers(state_path: Path) -> Dict[str, Any]:
     return data
 
 
-def _save_wake_breakers(state_path: Path, payload: Dict[str, Any]) -> None:
+def _save_wake_breakers(
+    state_path: Path, payload: Dict[str, Any], *, storage: StorageCapability
+) -> None:
     path = _wake_breaker_path(state_path)
     payload["schema_version"] = WAKE_BREAKER_SCHEMA_VERSION
     payload["updated_at"] = utc_now()
-    storage_write_json(path, payload)
+    storage_write_json(path, payload, storage=storage)
 
 
 def _normalize_breaker_session(record: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -847,8 +949,9 @@ def _close_breaker(
     session_id: str,
     reason: str,
     inbox_path: Optional[Path] = None,
+    storage: StorageCapability,
 ) -> None:
-    payload = _load_wake_breakers(state_path)
+    payload = _load_wake_breakers(state_path, storage=storage)
     sessions = payload.setdefault("sessions", {})
     record = sessions.get(session_id)
     if not record:
@@ -863,17 +966,19 @@ def _close_breaker(
                     "session_id": session_id,
                     "reason": reason,
                 },
+                storage=storage,
             )
     sessions.pop(session_id, None)
-    _save_wake_breakers(state_path, payload)
+    _save_wake_breakers(state_path, payload, storage=storage)
 
 
 def _breaker_recovery_mode(
     *,
     state_path: Path,
     session_id: str,
+    storage: StorageCapability,
 ) -> str:
-    payload = _load_wake_breakers(state_path)
+    payload = _load_wake_breakers(state_path, storage=storage)
     record = payload.get("sessions", {}).get(session_id)
     if not record:
         return "closed"
@@ -901,9 +1006,16 @@ def _consume_breaker_recovery(
     inbox_path: Optional[Path] = None,
     agent: Optional[str] = None,
     message_id: Optional[str] = None,
+    storage: StorageCapability,
 ) -> None:
     if mode == "idle":
-        _close_breaker(state_path=state_path, session_id=session_id, reason="idle", inbox_path=inbox_path)
+        _close_breaker(
+            state_path=state_path,
+            session_id=session_id,
+            reason="idle",
+            inbox_path=inbox_path,
+            storage=storage,
+        )
         if inbox_path is not None:
             _append_wake_audit(
                 inbox_path,
@@ -913,11 +1025,12 @@ def _consume_breaker_recovery(
                     "session_id": session_id,
                     "message_id": message_id,
                 },
+                storage=storage,
             )
         return
     if mode != "bypass":
         return
-    payload = _load_wake_breakers(state_path)
+    payload = _load_wake_breakers(state_path, storage=storage)
     sessions = payload.setdefault("sessions", {})
     record = _normalize_breaker_session(sessions.get(session_id))
     grants = int(record.get("bypass_grants") or 0)
@@ -926,7 +1039,7 @@ def _consume_breaker_recovery(
     record["bypass_grants"] = grants - 1
     record["last_bypass_consumed_at"] = utc_now()
     sessions[session_id] = record
-    _save_wake_breakers(state_path, payload)
+    _save_wake_breakers(state_path, payload, storage=storage)
     if inbox_path is not None:
         _append_wake_audit(
             inbox_path,
@@ -937,6 +1050,7 @@ def _consume_breaker_recovery(
                 "message_id": message_id,
                 "remaining_bypass_grants": record["bypass_grants"],
             },
+            storage=storage,
         )
 
 
@@ -945,10 +1059,19 @@ def _breaker_is_open(
     state_path: Path,
     session_id: str,
     inbox_path: Optional[Path] = None,
+    storage: StorageCapability,
 ) -> bool:
-    mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+    mode = _breaker_recovery_mode(
+        state_path=state_path, session_id=session_id, storage=storage
+    )
     if mode == "idle":
-        _consume_breaker_recovery(state_path=state_path, session_id=session_id, mode=mode, inbox_path=inbox_path)
+        _consume_breaker_recovery(
+            state_path=state_path,
+            session_id=session_id,
+            mode=mode,
+            inbox_path=inbox_path,
+            storage=storage,
+        )
         return False
     return mode == "open"
 
@@ -960,6 +1083,7 @@ def _record_wake_failure(
     session_id: str,
     code: str,
     inbox_path: Path,
+    storage: StorageCapability,
 ) -> bool:
     code_text = str(code or "unknown")
     if code_text in WAKE_BREAKER_EXEMPT_EXIT_CODE_STRINGS:
@@ -972,9 +1096,10 @@ def _record_wake_failure(
                 "code": code_text,
                 "reason": "focus_steal_blocked",
             },
+            storage=storage,
         )
         return False
-    payload = _load_wake_breakers(state_path)
+    payload = _load_wake_breakers(state_path, storage=storage)
     sessions = payload.setdefault("sessions", {})
     record = _normalize_breaker_session(sessions.get(session_id))
     now = datetime.now(timezone.utc)
@@ -999,6 +1124,7 @@ def _record_wake_failure(
                     "exit_code_distribution": dict(record.get("exit_code_distribution", {})),
                     "opened_at": record["opened_at"],
                 },
+                storage=storage,
             )
             notify_terminal(
                 agent,
@@ -1007,12 +1133,18 @@ def _record_wake_failure(
             )
             opened = True
     sessions[session_id] = record
-    _save_wake_breakers(state_path, payload)
+    _save_wake_breakers(state_path, payload, storage=storage)
     return opened or was_open
 
 
-def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optional[Path] = None) -> None:
-    payload = _load_wake_breakers(state_path)
+def _record_wake_success(
+    *,
+    state_path: Path,
+    session_id: str,
+    inbox_path: Optional[Path] = None,
+    storage: StorageCapability,
+) -> None:
+    payload = _load_wake_breakers(state_path, storage=storage)
     sessions = payload.setdefault("sessions", {})
     record = _normalize_breaker_session(sessions.get(session_id))
     was_open = record.get("breaker_state") == "open"
@@ -1025,6 +1157,7 @@ def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optio
                 "session_id": session_id,
                 "reason": "success",
             },
+            storage=storage,
         )
     record["breaker_state"] = "closed"
     record["opened_at"] = None
@@ -1032,7 +1165,7 @@ def _record_wake_success(*, state_path: Path, session_id: str, inbox_path: Optio
     record["failures"] = []
     record["exit_code_distribution"] = {}
     sessions[session_id] = record
-    _save_wake_breakers(state_path, payload)
+    _save_wake_breakers(state_path, payload, storage=storage)
 
 
 def _truncate_ui_label(value: Any, limit: int = 240) -> str:
@@ -1047,9 +1180,13 @@ def _runtime_session_display_label(
     agent: str,
     session_id: str,
     project: Optional[str] = None,
+    *,
+    storage: StorageCapability,
 ) -> str:
     tail = ("..." + session_id[-8:]) if session_id else ""
-    peer = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent))
+    peer = read_runtime_breadcrumb(
+        peer_runtime_path_for_state_dir(state_dir, agent), storage=storage
+    )
     if not isinstance(peer, dict) or peer.get("unreadable"):
         return tail
     if str(peer.get("agent") or "").strip().lower() not in {"", str(agent or "").strip().lower()}:
@@ -1097,13 +1234,14 @@ def _cache_wake_telemetry(
     session_id: str,
     message_id: str,
     command_result: Dict[str, Any],
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     events = _extract_wake_telemetry(command_result.get("stdout"))
     if not events:
         return []
 
     peer_path = peer_runtime_path_for_state_dir(inbox_path.parent, agent)
-    peer = read_runtime_breadcrumb(peer_path)
+    peer = read_runtime_breadcrumb(peer_path, storage=storage)
     if not isinstance(peer, dict) or peer.get("unreadable"):
         return events
 
@@ -1186,7 +1324,7 @@ def _cache_wake_telemetry(
             changed = True
 
     if changed:
-        write_runtime_breadcrumb(peer_path, peer)
+        write_runtime_breadcrumb(peer_path, peer, storage=storage)
         _append_wake_audit(
             inbox_path,
             {
@@ -1200,6 +1338,7 @@ def _cache_wake_telemetry(
                 "postflight_action": peer.get("last_wake_postflight_action"),
                 "delivery_priority_action": peer.get("last_wake_delivery_priority_action"),
             },
+            storage=storage,
         )
     return events
 
@@ -1212,6 +1351,7 @@ def _rate_limit_fire_history(
     unknown_origin_warnings: List[str],
     wake_fire_history: List[Dict[str, Any]],
     state_path: Path,
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     now = datetime.now(timezone.utc)
     kept = []
@@ -1229,6 +1369,7 @@ def _rate_limit_fire_history(
             paused_messages,
             unknown_origin_warnings,
             kept,
+            storage=storage,
         )
     return kept
 
@@ -1242,6 +1383,7 @@ def _wake_rate_limited(
     paused_messages: List[Dict[str, Any]],
     unknown_origin_warnings: List[str],
     state_path: Path,
+    storage: StorageCapability,
 ) -> bool:
     kept = _rate_limit_fire_history(
         seen_ids=seen_ids,
@@ -1250,6 +1392,7 @@ def _wake_rate_limited(
         unknown_origin_warnings=unknown_origin_warnings,
         wake_fire_history=wake_fire_history,
         state_path=state_path,
+        storage=storage,
     )
     return sum(1 for item in kept if item.get("session_id") == session_id) >= WAKE_PREFIRE_LIMIT
 
@@ -1263,6 +1406,7 @@ def _record_wake_fire(
     unknown_origin_warnings: List[str],
     wake_fire_history: List[Dict[str, Any]],
     state_path: Path,
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     kept = _rate_limit_fire_history(
         seen_ids=seen_ids,
@@ -1271,6 +1415,7 @@ def _record_wake_fire(
         unknown_origin_warnings=unknown_origin_warnings,
         wake_fire_history=wake_fire_history,
         state_path=state_path,
+        storage=storage,
     )
     kept.append({"session_id": session_id, "at": utc_now()})
     _save_watcher_state(
@@ -1280,6 +1425,7 @@ def _record_wake_fire(
         paused_messages,
         unknown_origin_warnings,
         kept,
+        storage=storage,
     )
     return kept
 
@@ -1292,9 +1438,14 @@ def _save_watcher_state(
     unknown_origin_warnings: Optional[List[str]] = None,
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
     toasted_ids: Optional[set] = None,
+    *,
+    storage: StorageCapability,
 ) -> None:
     if toasted_ids is None:
-        toasted_ids = set(str(item) for item in load_seen(state_path).get("toasted_ids", []))
+        toasted_ids = set(
+            str(item)
+            for item in load_seen(state_path, storage=storage).get("toasted_ids", [])
+        )
 
     def _merge(existing: Dict[str, Any]) -> Dict[str, Any]:
         existing_seen = {str(item) for item in existing.get("seen_ids", []) if str(item)}
@@ -1325,33 +1476,37 @@ def _save_watcher_state(
             "claude_monitor_escalations": [],
         },
         _merge,
+        storage=storage,
     )
     seen_ids.clear()
     seen_ids.update(str(item) for item in saved.get("seen_ids", []) if str(item))
 
 
-def _clear_override_wake_message(state_path: Path) -> None:
+def _clear_override_wake_message(
+    state_path: Path, *, storage: StorageCapability
+) -> None:
     """Remove next_override_wake_message from watcher state after it has been consumed."""
     def _clear(existing: Dict[str, Any]) -> Dict[str, Any]:
         result = dict(existing)
         result.pop("next_override_wake_message", None)
         return result
-    storage_update_json(state_path, {}, _clear)
+    storage_update_json(state_path, {}, _clear, storage=storage)
 
 
-def _bridge_is_paused(state_dir: Path) -> bool:
+def _bridge_is_paused(state_dir: Path, *, storage: StorageCapability) -> bool:
     state_path = state_dir / "state.json"
     if not state_path.exists():
         return False
     try:
-        with state_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        data = storage_read_json(state_path, {}, storage=storage)
     except (OSError, json.JSONDecodeError):
         return False
     return bool(data.get("paused"))
 
 
-def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
+def run_compaction(
+    state_dir: Path, settings: BridgeSettings, *, storage: StorageCapability
+) -> None:
     if not _COMPACT_AVAILABLE:
         return
     try:
@@ -1361,6 +1516,7 @@ def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
                 state_dir,
                 agent,
                 max_age_days=settings.inbox_read_retention_days,
+                storage=storage,
             )
             if result["read_dropped"] > 0:
                 print(
@@ -1369,8 +1525,12 @@ def run_compaction(state_dir: Path, settings: BridgeSettings) -> None:
                     f"{result['unread_preserved']} unread preserved",
                     flush=True,
                 )
-        rotate_audit_log(state_dir)
-        prune_audit_logs(state_dir, retention_days=settings.audit_log_retention_days)
+        rotate_audit_log(state_dir, storage=storage)
+        prune_audit_logs(
+            state_dir,
+            retention_days=settings.audit_log_retention_days,
+            storage=storage,
+        )
     except Exception as exc:
         print(f"[agent-bridge] compaction error: {exc}", flush=True)
 
@@ -1619,6 +1779,7 @@ def _mark_permanent_wake_failure(
     seen_ids: set,
     result: Dict[str, Any],
     state_path: Optional[Path] = None,
+    storage: StorageCapability,
 ) -> None:
     returncode = int(result.get("returncode") or 0)
     seen_ids.add(message_id)
@@ -1629,6 +1790,7 @@ def _mark_permanent_wake_failure(
             session_id=session_id,
             code=str(returncode or result.get("reason") or "unknown"),
             inbox_path=inbox_path,
+            storage=storage,
         )
     _append_wake_audit(
         inbox_path,
@@ -1639,6 +1801,7 @@ def _mark_permanent_wake_failure(
             returncode=returncode,
             result=result,
         ),
+        storage=storage,
     )
     print(
         f"[agent-bridge] permanent wake failure for {agent} id={message_id} session=...{session_id[-8:]} rc={returncode}; suppressing retries",
@@ -1740,6 +1903,8 @@ def _resolve_command_template(
     session_config: Dict[str, Any],
     inbox_path: Path,
     override_wake_message: Optional[str] = None,
+    *,
+    storage: StorageCapability,
 ) -> Dict[str, Any]:
     template = session_config.get("on_message_command_template")
     if not template:
@@ -1751,7 +1916,9 @@ def _resolve_command_template(
     agent = str(session_config.get("agent") or "")
     state_dir = inbox_path.parent
     peer_path = peer_runtime_path_for_state_dir(state_dir, agent)
-    peer = normalize_peer_runtime_breadcrumb(read_runtime_breadcrumb(peer_path))
+    peer = normalize_peer_runtime_breadcrumb(
+        read_runtime_breadcrumb(peer_path, storage=storage)
+    )
     if not peer or peer.get("unreadable"):
         return {
             "ok": False,
@@ -1855,8 +2022,9 @@ def _warn_unknown_origin_once(
     inbox_path: Path,
     agent: str,
     session_id: str,
+    storage: StorageCapability,
 ) -> None:
-    state = load_seen(state_path)
+    state = load_seen(state_path, storage=storage)
     warned = set(str(item) for item in state.get("unknown_origin_warnings", []))
     if session_key in warned:
         return
@@ -1869,6 +2037,7 @@ def _warn_unknown_origin_once(
             "session_id": session_id,
             "reason": "peer_runtime_bootstrap_origin_unknown",
         },
+        storage=storage,
     )
     _save_watcher_state(
         state_path,
@@ -1877,17 +2046,24 @@ def _warn_unknown_origin_once(
         paused_messages,
         sorted(warned),
         wake_fire_history,
+        storage=storage,
     )
 
 
-def _attempt_bad_provenance_repair(*, inbox_path: Path, agent: str, peer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _attempt_bad_provenance_repair(
+    *,
+    inbox_path: Path,
+    agent: str,
+    peer: Dict[str, Any],
+    storage: StorageCapability,
+) -> Optional[Dict[str, Any]]:
     if str(peer.get("bootstrap_origin") or "").strip().lower() != "subagent":
         return None
     project = str(peer.get("project") or "").strip()
     bad_session = str(peer.get("session_id") or "").strip()
     if not project or not bad_session:
         return None
-    bridge = AgentBridge(inbox_path.parent)
+    bridge = AgentBridge(inbox_path.parent, storage=storage)
     result = bridge.repair_bootstrap_provenance(
         agent=agent,
         project=project,
@@ -1998,9 +2174,10 @@ def _process_pending_wake_verifications(
     paused_messages: Optional[List[Dict[str, Any]]] = None,
     unknown_origin_warnings: Optional[List[str]] = None,
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     """Promote pending wake attempts to seen only after a receipt appears."""
-    session_config = _resolve_session_config(session_config)
+    session_config = _resolve_session_config(session_config, storage=storage)
     agent = session_config["agent"]
     session_id = str(session_config.get("session_id") or "")
     project = str(session_config.get("project") or "")
@@ -2017,7 +2194,7 @@ def _process_pending_wake_verifications(
     # Read any pending initiator override so the wake message shows who triggered
     # this nudge ("Claude says…", "User says…", etc.) rather than always "Watcher says…".
     # The override is one-shot: cleared from state after the first successful fire.
-    _ow_state = load_seen(state_path)
+    _ow_state = load_seen(state_path, storage=storage)
     _next_override_wake_message: Optional[str] = _ow_state.get("next_override_wake_message") or None
     _override_consumed = False
 
@@ -2031,7 +2208,7 @@ def _process_pending_wake_verifications(
             changed = True
             continue
 
-        if _message_has_wake_receipt(inbox_path, message_id):
+        if _message_has_wake_receipt(inbox_path, message_id, storage=storage):
             seen_ids.add(message_id)
             changed = True
             print(
@@ -2065,12 +2242,18 @@ def _process_pending_wake_verifications(
                 "retry_count": retry_count,
                 "reason": "seen_at_not_observed_after_wake_retries",
             }
-            _append_wake_audit(inbox_path, event)
+            _append_wake_audit(inbox_path, event, storage=storage)
             notify_terminal(
                 agent,
                 session_id,
-                [_message_by_id(inbox_path, message_id) or {"id": message_id, "body": "wake delivery failed"}],
-                display_label=_runtime_session_display_label(inbox_path.parent, agent, session_id, project),
+                [_message_by_id(inbox_path, message_id, storage=storage) or {"id": message_id, "body": "wake delivery failed"}],
+                display_label=_runtime_session_display_label(
+                    inbox_path.parent,
+                    agent,
+                    session_id,
+                    project,
+                    storage=storage,
+                ),
             )
             print(
                 f"[agent-bridge] wake delivery failed for {agent} id={message_id} after {retry_count} retries",
@@ -2078,13 +2261,15 @@ def _process_pending_wake_verifications(
             )
             continue
 
-        row = _message_by_id(inbox_path, message_id)
+        row = _message_by_id(inbox_path, message_id, storage=storage)
         if not row or row.get("read_at"):
             seen_ids.add(message_id)
             changed = True
             continue
 
-        breaker_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+        breaker_mode = _breaker_recovery_mode(
+            state_path=state_path, session_id=session_id, storage=storage
+        )
         if breaker_mode == "open":
             seen_ids.add(message_id)
             changed = True
@@ -2097,6 +2282,7 @@ def _process_pending_wake_verifications(
                     "message_id": message_id,
                     "reason": "wake_breaker_open",
                 },
+                storage=storage,
             )
             continue
 
@@ -2108,6 +2294,7 @@ def _process_pending_wake_verifications(
             paused_messages=paused_messages or [],
             unknown_origin_warnings=unknown_origin_warnings,
             state_path=state_path,
+            storage=storage,
         ):
             entry["deferred_until"] = (now + timedelta(seconds=WAKE_PREFIRE_DEFER_S)).isoformat(timespec="seconds")
             kept.append(entry)
@@ -2121,11 +2308,17 @@ def _process_pending_wake_verifications(
                     "message_id": message_id,
                     "deferred_seconds": WAKE_PREFIRE_DEFER_S,
                 },
+                storage=storage,
             )
             continue
 
         _this_override = _next_override_wake_message if not _override_consumed else None
-        resolved = _resolve_command_template(session_config, inbox_path, override_wake_message=_this_override)
+        resolved = _resolve_command_template(
+            session_config,
+            inbox_path,
+            override_wake_message=_this_override,
+            storage=storage,
+        )
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
@@ -2136,6 +2329,7 @@ def _process_pending_wake_verifications(
                 inbox_path=inbox_path,
                 agent=agent,
                 message_id=message_id,
+                storage=storage,
             )
             wake_fire_history = _record_wake_fire(
                 session_id=session_id,
@@ -2145,6 +2339,7 @@ def _process_pending_wake_verifications(
                 unknown_origin_warnings=unknown_origin_warnings,
                 wake_fire_history=wake_fire_history,
                 state_path=state_path,
+                storage=storage,
             )
             command_result = run_command_for_session(resolved["command"], agent, session_id, [row], inbox_path)
         else:
@@ -2155,12 +2350,14 @@ def _process_pending_wake_verifications(
             session_id=session_id,
             message_id=message_id,
             command_result=command_result,
+            storage=storage,
         )
         if not command_result.get("ok") and not command_result.get("retryable", True):
             repair = _attempt_bad_provenance_repair(
                 inbox_path=inbox_path,
                 agent=agent,
                 peer=resolved.get("peer") or command_result.get("peer") or {},
+                storage=storage,
             )
             if repair:
                 command_result["repair"] = repair
@@ -2172,11 +2369,17 @@ def _process_pending_wake_verifications(
                 seen_ids=seen_ids,
                 result=command_result,
                 state_path=state_path,
+                storage=storage,
             )
             changed = True
             continue
         if command_result.get("ok"):
-            _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+            _record_wake_success(
+                state_path=state_path,
+                session_id=session_id,
+                inbox_path=inbox_path,
+                storage=storage,
+            )
             if _this_override:
                 _override_consumed = True
             # Wake spawn is not delivery; keep the row pending until
@@ -2199,6 +2402,7 @@ def _process_pending_wake_verifications(
                 session_id=session_id,
                 code=str(command_result.get("returncode") if command_result.get("returncode") is not None else "timeout"),
                 inbox_path=inbox_path,
+                storage=storage,
             )
             retry_count += 1
             entry["retry_count"] = retry_count
@@ -2213,9 +2417,17 @@ def _process_pending_wake_verifications(
             )
 
     if changed:
-        _save_watcher_state(state_path, seen_ids, kept, paused_messages, unknown_origin_warnings, wake_fire_history)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            kept,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+            storage=storage,
+        )
     if _override_consumed:
-        _clear_override_wake_message(state_path)
+        _clear_override_wake_message(state_path, storage=storage)
     return kept
 
 
@@ -2232,6 +2444,7 @@ def _queue_pending_wake_verifications(
     unknown_origin_warnings: Optional[List[str]] = None,
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
     deferred_seconds: int = 0,
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     existing_ids = {entry.get("message_id") for entry in pending}
     now = utc_now()
@@ -2240,7 +2453,7 @@ def _queue_pending_wake_verifications(
         message_id = str(message.get("id", ""))
         if not message_id or message_id in existing_ids or message_id in seen_ids:
             continue
-        if _message_has_wake_receipt(inbox_path, message_id):
+        if _message_has_wake_receipt(inbox_path, message_id, storage=storage):
             seen_ids.add(message_id)
             changed = True
             continue
@@ -2268,6 +2481,7 @@ def _queue_pending_wake_verifications(
             paused_messages,
             unknown_origin_warnings,
             wake_fire_history,
+            storage=storage,
         )
     return pending
 
@@ -2284,6 +2498,7 @@ def _queue_paused_wake_messages(
     state_path: Path,
     unknown_origin_warnings: Optional[List[str]] = None,
     wake_fire_history: Optional[List[Dict[str, Any]]] = None,
+    storage: StorageCapability,
 ) -> List[Dict[str, Any]]:
     existing_ids = {entry.get("message_id") for entry in paused_messages}
     changed = False
@@ -2310,6 +2525,7 @@ def _queue_paused_wake_messages(
                 "message_id": message_id,
                 "reason": "bridge_paused",
             },
+            storage=storage,
         )
         changed = True
     if changed:
@@ -2320,6 +2536,7 @@ def _queue_paused_wake_messages(
             paused_messages,
             unknown_origin_warnings,
             wake_fire_history,
+            storage=storage,
         )
     return paused_messages
 
@@ -2334,6 +2551,7 @@ def process_session_once(
     toast_max_in_tray: int = 10,
     grace_period_seconds: int = WAKE_ACK_GRACE_PERIOD_S,
     max_retries: int = WAKE_MAX_RETRIES,
+    storage: StorageCapability,
 ) -> List[str]:
     """Process one configured watcher session once.
 
@@ -2341,7 +2559,7 @@ def process_session_once(
     notification succeeds and any wake command exits cleanly. Failed wake
     commands leave messages retryable for the next poll.
     """
-    session_config = _resolve_session_config(session_config)
+    session_config = _resolve_session_config(session_config, storage=storage)
     agent = session_config["agent"]
     session_id = str(session_config.get("session_id") or "")
     project = str(session_config.get("project") or "")
@@ -2356,7 +2574,7 @@ def process_session_once(
     if not toasts_enabled and on_message == "toast":
         effective_on_message = "log"
 
-    state = load_seen(state_path)
+    state = load_seen(state_path, storage=storage)
     seen_ids.clear()
     seen_ids.update(str(item) for item in state.get("seen_ids", []) if str(item))
     pending: List[Dict[str, Any]] = list(state.get("pending_wake_verifications", []))
@@ -2364,7 +2582,7 @@ def process_session_once(
     unknown_origin_warnings: List[str] = list(state.get("unknown_origin_warnings", []))
     wake_fire_history: List[Dict[str, Any]] = list(state.get("wake_fire_history", []))
     toasted_ids: set = set(str(item) for item in state.get("toasted_ids", []))
-    bridge_paused = _bridge_is_paused(inbox_path.parent)
+    bridge_paused = _bridge_is_paused(inbox_path.parent, storage=storage)
     if not bridge_paused:
         filtered_paused_messages = [
             entry
@@ -2373,7 +2591,16 @@ def process_session_once(
         ]
         if len(filtered_paused_messages) != len(paused_messages):
             paused_messages = filtered_paused_messages
-            _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history, toasted_ids)
+            _save_watcher_state(
+                state_path,
+                seen_ids,
+                pending,
+                paused_messages,
+                unknown_origin_warnings,
+                wake_fire_history,
+                toasted_ids,
+                storage=storage,
+            )
     pending = _process_pending_wake_verifications(
         session_config,
         pending=pending,
@@ -2386,8 +2613,11 @@ def process_session_once(
         paused_messages=paused_messages,
         unknown_origin_warnings=unknown_origin_warnings,
         wake_fire_history=wake_fire_history,
+        storage=storage,
     )
-    wake_fire_history = list(load_seen(state_path).get("wake_fire_history", []))
+    wake_fire_history = list(
+        load_seen(state_path, storage=storage).get("wake_fire_history", [])
+    )
     pending_ids = {
         entry.get("message_id")
         for entry in pending
@@ -2400,7 +2630,7 @@ def process_session_once(
     }
 
     command_configured = bool(on_message_command or on_message_command_template)
-    unread = unread_for_session(inbox_path, session_id)
+    unread = unread_for_session(inbox_path, session_id, storage=storage)
     escalated_ids: set = set()
     if agent == "claude":
         escalated_ids = set(
@@ -2413,6 +2643,7 @@ def process_session_once(
                 toast_expiry_minutes=toast_expiry_minutes,
                 toast_max_in_tray=toast_max_in_tray,
                 emit_user_visible=effective_on_message == "toast",
+                storage=storage,
             )
         )
         if escalated_ids:
@@ -2425,6 +2656,7 @@ def process_session_once(
                 unknown_origin_warnings,
                 wake_fire_history,
                 toasted_ids,
+                storage=storage,
             )
         _rearm_stale_unread_without_monitor(
             state_path=state_path,
@@ -2435,13 +2667,16 @@ def process_session_once(
             toasted_ids=toasted_ids,
             pending_ids=pending_ids,
             paused_ids=paused_ids,
+            storage=storage,
         )
     new_msgs = [
         m for m in unread
         if m.get("id") not in seen_ids and m.get("id") not in pending_ids and m.get("id") not in paused_ids
     ]
     if command_configured and not new_msgs:
-        recovery_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+        recovery_mode = _breaker_recovery_mode(
+            state_path=state_path, session_id=session_id, storage=storage
+        )
         if recovery_mode in {"idle", "bypass"}:
             recovery_candidates = [
                 m for m in unread
@@ -2460,6 +2695,7 @@ def process_session_once(
                         unknown_origin_warnings,
                         wake_fire_history,
                         toasted_ids,
+                        storage=storage,
                     )
                 _append_wake_audit(
                     inbox_path,
@@ -2470,11 +2706,14 @@ def process_session_once(
                         "message_id": recovery_id,
                         "mode": recovery_mode,
                     },
+                    storage=storage,
                 )
                 new_msgs = [recovery_message]
     if not new_msgs:
         return []
-    display_label = _runtime_session_display_label(inbox_path.parent, agent, session_id, project)
+    display_label = _runtime_session_display_label(
+        inbox_path.parent, agent, session_id, project, storage=storage
+    )
 
     if effective_on_message == "log":
         if bridge_paused and command_configured:
@@ -2489,6 +2728,7 @@ def process_session_once(
                 state_path=state_path,
                 unknown_origin_warnings=unknown_origin_warnings,
                 wake_fire_history=wake_fire_history,
+                storage=storage,
             )
             for m in new_msgs:
                 print(
@@ -2503,7 +2743,15 @@ def process_session_once(
             )
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+            storage=storage,
+        )
         return [m["id"] for m in new_msgs]
 
     if effective_on_message == "toast":
@@ -2529,6 +2777,7 @@ def process_session_once(
                 unknown_origin_warnings,
                 wake_fire_history,
                 toasted_ids,
+                storage=storage,
             )
     else:
         notify_terminal(agent, session_id, new_msgs, display_label=display_label)
@@ -2545,12 +2794,15 @@ def process_session_once(
             state_path=state_path,
             unknown_origin_warnings=unknown_origin_warnings,
             wake_fire_history=wake_fire_history,
+            storage=storage,
         )
         return []
 
     command_result = {"ok": False, "returncode": None, "retryable": True, "stdout": "", "stderr": ""}
     if command_configured:
-        resolved = _resolve_command_template(session_config, inbox_path)
+        resolved = _resolve_command_template(
+            session_config, inbox_path, storage=storage
+        )
         peer = resolved.get("peer") or {}
         if agent != "codex" and str(peer.get("bootstrap_origin") or "").lower() == "unknown":
             session_key = "%s:%s" % (agent, session_id)
@@ -2565,11 +2817,14 @@ def process_session_once(
                 inbox_path=inbox_path,
                 agent=agent,
                 session_id=session_id,
+                storage=storage,
             )
         if resolved.get("result") is not None:
             command_result = resolved["result"]
         elif resolved.get("command"):
-            breaker_mode = _breaker_recovery_mode(state_path=state_path, session_id=session_id)
+            breaker_mode = _breaker_recovery_mode(
+                state_path=state_path, session_id=session_id, storage=storage
+            )
             if breaker_mode == "open":
                 for message in new_msgs:
                     message_id = str(message.get("id", ""))
@@ -2585,8 +2840,17 @@ def process_session_once(
                             "message_id": message_id,
                             "reason": "wake_breaker_open",
                         },
+                        storage=storage,
                     )
-                _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+                _save_watcher_state(
+                    state_path,
+                    seen_ids,
+                    pending,
+                    paused_messages,
+                    unknown_origin_warnings,
+                    wake_fire_history,
+                    storage=storage,
+                )
                 return []
             if _wake_rate_limited(
                 session_id=session_id,
@@ -2596,6 +2860,7 @@ def process_session_once(
                 paused_messages=paused_messages,
                 unknown_origin_warnings=unknown_origin_warnings,
                 state_path=state_path,
+                storage=storage,
             ):
                 _queue_pending_wake_verifications(
                     pending=pending,
@@ -2609,6 +2874,7 @@ def process_session_once(
                     unknown_origin_warnings=unknown_origin_warnings,
                     wake_fire_history=wake_fire_history,
                     deferred_seconds=WAKE_PREFIRE_DEFER_S,
+                    storage=storage,
                 )
                 for message in new_msgs:
                     _append_wake_audit(
@@ -2620,6 +2886,7 @@ def process_session_once(
                             "message_id": str(message.get("id", "")),
                             "deferred_seconds": WAKE_PREFIRE_DEFER_S,
                         },
+                        storage=storage,
                     )
                 return []
             _consume_breaker_recovery(
@@ -2629,6 +2896,7 @@ def process_session_once(
                 inbox_path=inbox_path,
                 agent=agent,
                 message_id=str(new_msgs[0].get("id", "")) if new_msgs else None,
+                storage=storage,
             )
             wake_fire_history = _record_wake_fire(
                 session_id=session_id,
@@ -2638,6 +2906,7 @@ def process_session_once(
                 unknown_origin_warnings=unknown_origin_warnings,
                 wake_fire_history=wake_fire_history,
                 state_path=state_path,
+                storage=storage,
             )
             command_result = run_command_for_session(resolved["command"], agent, session_id, new_msgs, inbox_path)
 
@@ -2648,6 +2917,7 @@ def process_session_once(
             session_id=session_id,
             message_id=str(new_msgs[0].get("id", "")) if new_msgs else "",
             command_result=command_result,
+            storage=storage,
         )
 
     if command_configured and not command_result.get("ok") and not command_result.get("retryable", True):
@@ -2655,6 +2925,7 @@ def process_session_once(
             inbox_path=inbox_path,
             agent=agent,
             peer=resolved.get("peer") or command_result.get("peer") or {},
+            storage=storage,
         )
         if repair:
             command_result["repair"] = repair
@@ -2670,12 +2941,26 @@ def process_session_once(
                 seen_ids=seen_ids,
                 result=command_result,
                 state_path=state_path,
+                storage=storage,
             )
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+            storage=storage,
+        )
         return []
 
     if command_configured and command_result.get("ok"):
-        _record_wake_success(state_path=state_path, session_id=session_id, inbox_path=inbox_path)
+        _record_wake_success(
+            state_path=state_path,
+            session_id=session_id,
+            inbox_path=inbox_path,
+            storage=storage,
+        )
         _queue_pending_wake_verifications(
             pending=pending,
             agent=agent,
@@ -2687,6 +2972,7 @@ def process_session_once(
             paused_messages=paused_messages,
             unknown_origin_warnings=unknown_origin_warnings,
             wake_fire_history=wake_fire_history,
+            storage=storage,
         )
         return []
 
@@ -2697,20 +2983,77 @@ def process_session_once(
             session_id=session_id,
             code=str(command_result.get("returncode") if command_result.get("returncode") is not None else "timeout"),
             inbox_path=inbox_path,
+            storage=storage,
         )
 
     if not command_configured:
         for m in new_msgs:
             seen_ids.add(m["id"])
-        _save_watcher_state(state_path, seen_ids, pending, paused_messages, unknown_origin_warnings, wake_fire_history)
+        _save_watcher_state(
+            state_path,
+            seen_ids,
+            pending,
+            paused_messages,
+            unknown_origin_warnings,
+            wake_fire_history,
+            storage=storage,
+        )
         return [m["id"] for m in new_msgs]
 
     return []
 
 
-def _load_config(config_path: Path) -> Dict[str, Any]:
-    with config_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def _load_config(
+    config_path: Path, *, storage: StorageCapability
+) -> Dict[str, Any]:
+    return storage.read_json(config_path, {})
+
+
+def _validate_watcher_config(
+    config: Dict[str, Any],
+    *,
+    state_dir: Path,
+    storage: StorageCapability,
+) -> List[Dict[str, Any]]:
+    """Validate all configurable storage paths before accepting a config.
+
+    Hot reload is transactional: callers keep the previous session set unless
+    every inbox and optional registry path belongs to this watcher's immutable
+    capability and fixed state directory.
+    """
+    raw_sessions = config.get("sessions", [])
+    if not isinstance(raw_sessions, list):
+        raise UnsafeStoragePathError("watcher sessions must be a list")
+    sessions: List[Dict[str, Any]] = []
+    canonical_state_dir = storage.validate(state_dir)
+    canonical_registry_path = storage.validate(
+        session_registry_path_for_state_dir(canonical_state_dir)
+    )
+    for raw_session in raw_sessions:
+        if not isinstance(raw_session, dict):
+            raise UnsafeStoragePathError("watcher session must be an object")
+        session = dict(raw_session)
+        inbox_value = str(session.get("inbox") or "").strip()
+        if not inbox_value:
+            raise UnsafeStoragePathError("watcher session inbox is required")
+        inbox = storage.validate(Path(inbox_value))
+        if inbox.parent != canonical_state_dir:
+            raise UnsafeStoragePathError(
+                "watcher inbox must remain directly under bridge state"
+            )
+        session["inbox"] = str(inbox)
+        for key in ("session_registry", "session_registry_path"):
+            registry_value = str(session.get(key) or "").strip()
+            if not registry_value:
+                continue
+            registry_path = storage.validate(Path(registry_value))
+            if registry_path != canonical_registry_path:
+                raise UnsafeStoragePathError(
+                    "watcher session registry must equal the canonical bridge registry path"
+                )
+            session[key] = str(registry_path)
+        sessions.append(session)
+    return sessions
 
 
 def _effective_toasts_enabled(config: Dict[str, Any], settings: BridgeSettings, settings_path: Path) -> bool:
@@ -2723,6 +3066,7 @@ def _maybe_notify_mcp_server_restart(
     *,
     state_dir: Path,
     sessions: List[Dict[str, Any]],
+    storage: StorageCapability,
 ) -> None:
     """Send a bridge-inbox notification when the MCP server wrapper flags a restart.
 
@@ -2735,7 +3079,7 @@ def _maybe_notify_mcp_server_restart(
     try:
         if not status_path.exists():
             return
-        data = storage_read_json(status_path)
+        data = storage_read_json(status_path, {}, storage=storage)
         if not data or not data.get("needs_notification"):
             return
 
@@ -2745,7 +3089,7 @@ def _maybe_notify_mcp_server_restart(
         elapsed_str = ("%dms" % elapsed_ms) if elapsed_ms is not None else "unknown"
 
         for s in sessions:
-            resolved = _resolve_session_config(s)
+            resolved = _resolve_session_config(s, storage=storage)
             if str(resolved.get("agent") or "") != "claude":
                 continue
             session_id = str(resolved.get("session_id") or "")
@@ -2759,7 +3103,7 @@ def _maybe_notify_mcp_server_restart(
                 "The 'Server disconnected' banner can be dismissed safely."
             ) % (child_pid, last_restart_at, elapsed_str)
 
-            bridge = AgentBridge(state_dir)
+            bridge = AgentBridge(state_dir, storage=storage)
             with bridge._locked():
                 message_id = bridge._append_control_message(
                     target_agent="claude",
@@ -2788,7 +3132,7 @@ def _maybe_notify_mcp_server_restart(
         # Clear the flag regardless of whether we found a session — avoids
         # a retry storm if no Claude session is currently registered.
         data["needs_notification"] = False
-        storage_write_json(status_path, data)
+        storage_write_json(status_path, data, storage=storage)
     except Exception as exc:
         print("[agent-bridge] failed to process MCP server restart notification: %s" % exc, flush=True)
 
@@ -2797,25 +3141,30 @@ def watch(
     config_path: Path,
     stop_event: Optional[threading.Event] = None,
     heartbeat: Optional[Callable[[], None]] = None,
+    *,
+    storage: StorageCapability,
 ) -> None:
-    config = _load_config(config_path)
+    capability = storage
+    config = _load_config(config_path, storage=capability)
     config_mtime = config_path.stat().st_mtime
 
-    sessions = config.get("sessions", [])
+    state_dir = capability.validate(capability.root / "state")
+    sessions = _validate_watcher_config(
+        config, state_dir=state_dir, storage=capability
+    )
     if not sessions:
         print("[agent-bridge] No sessions configured. Exiting.", flush=True)
         return
 
     # Per-session seen-ID tracking stored alongside watcher config
     state_path = config_path.parent / "watcher-state.json"
-    seen_data = load_seen(state_path)
+    seen_data = load_seen(state_path, storage=capability)
     seen_ids: set = set(seen_data.get("seen_ids", []))
 
-    # Derive state_dir from first inbox path (parent directory)
-    state_dir = Path(sessions[0]["inbox"]).parent if sessions else None
-
-    settings_path = settings_path_for_state_dir(state_dir) if state_dir else config_path.parent / "settings.json"
-    settings = load_settings(state_dir or config_path.parent / "state", settings_path=settings_path)
+    settings_path = settings_path_for_state_dir(state_dir)
+    settings = load_settings(
+        state_dir, settings_path=settings_path, storage=capability
+    )
     settings_mtime = settings_path.stat().st_mtime if settings_path.exists() else None
 
     toasts_enabled = _effective_toasts_enabled(config, settings, settings_path)
@@ -2825,7 +3174,7 @@ def watch(
         flush=True,
     )
     for s in sessions:
-        resolved = _resolve_session_config(s)
+        resolved = _resolve_session_config(s, storage=capability)
         session_id = str(resolved.get("session_id") or "")
         project = str(resolved.get("project") or "")
         source = str(s.get("session_id_source") or "static")
@@ -2834,6 +3183,7 @@ def watch(
             str(s["agent"]),
             session_id,
             project,
+            storage=capability,
         )
         print(
             f"  agent={s['agent']}  session={display_label}  source={source}  inbox={s['inbox']}",
@@ -2841,8 +3191,7 @@ def watch(
         )
 
     # Compact on startup
-    if state_dir:
-        run_compaction(state_dir, settings)
+    run_compaction(state_dir, settings, storage=capability)
 
     last_compact = time.monotonic()
 
@@ -2854,8 +3203,11 @@ def watch(
             try:
                 mtime = config_path.stat().st_mtime
                 if mtime != config_mtime:
-                    new_config = _load_config(config_path)
-                    sessions = new_config.get("sessions", sessions)
+                    new_config = _load_config(config_path, storage=capability)
+                    new_sessions = _validate_watcher_config(
+                        new_config, state_dir=state_dir, storage=capability
+                    )
+                    sessions = new_sessions
                     config = new_config
                     config_mtime = mtime
             except Exception:
@@ -2863,7 +3215,11 @@ def watch(
             try:
                 new_settings_mtime = settings_path.stat().st_mtime if settings_path.exists() else None
                 if new_settings_mtime != settings_mtime:
-                    settings = load_settings(state_dir or config_path.parent / "state", settings_path=settings_path)
+                    settings = load_settings(
+                        state_dir,
+                        settings_path=settings_path,
+                        storage=capability,
+                    )
                     settings_mtime = new_settings_mtime
                     print("[agent-bridge] settings.json reloaded", flush=True)
                 new_toasts = _effective_toasts_enabled(config, settings, settings_path)
@@ -2878,11 +3234,16 @@ def watch(
                 now = time.monotonic()
                 time_due = (now - last_compact) >= (settings.compact_interval_hours * 3600)
                 size_due = _COMPACT_AVAILABLE and any(
-                    should_compact(state_dir, s["agent"], COMPACT_SIZE_MB)
+                    should_compact(
+                        state_dir,
+                        s["agent"],
+                        COMPACT_SIZE_MB,
+                        storage=capability,
+                    )
                     for s in sessions
                 )
                 if time_due or size_due:
-                    run_compaction(state_dir, settings)
+                    run_compaction(state_dir, settings, storage=capability)
                     last_compact = now
 
                 _maybe_queue_commit_monitor_restart_controls(
@@ -2890,10 +3251,12 @@ def watch(
                     sessions=sessions,
                     state_path=state_path,
                     state_dir=state_dir,
+                    storage=capability,
                 )
                 _maybe_notify_mcp_server_restart(
                     state_dir=state_dir,
                     sessions=sessions,
+                    storage=capability,
                 )
 
             for s in sessions:
@@ -2902,6 +3265,7 @@ def watch(
                         session_config=s,
                         state_path=state_path,
                         state_dir=state_dir,
+                        storage=capability,
                     )
                 process_session_once(
                     s,
@@ -2910,6 +3274,7 @@ def watch(
                     toasts_enabled=toasts_enabled,
                     toast_expiry_minutes=settings.toast_expiry_minutes,
                     toast_max_in_tray=settings.toast_max_in_tray,
+                    storage=capability,
                 )
 
                     # (the consumer would mark messages read silently — destructive).
@@ -2921,11 +3286,18 @@ def watch(
     print("[agent-bridge] Watcher exiting.", flush=True)
 
 
-def _write_pid(pid_path: Path) -> None:
-    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+def _write_pid(pid_path: Path, *, storage: StorageCapability) -> None:
+    with storage.open_private_text(pid_path, "w") as handle:
+        handle.write(str(os.getpid()))
 
 
-def _write_runtime_breadcrumb(config_path: Path, state_dir: Path, command: List[str]) -> Path:
+def _write_runtime_breadcrumb(
+    config_path: Path,
+    state_dir: Path,
+    command: List[str],
+    *,
+    storage: StorageCapability,
+) -> Path:
     runtime_path = config_path.parent / "watcher.runtime.json"
     write_runtime_breadcrumb(
         runtime_path,
@@ -2935,19 +3307,22 @@ def _write_runtime_breadcrumb(config_path: Path, state_dir: Path, command: List[
             command=command,
             pid=os.getpid(),
             config_path=config_path,
+            storage=storage,
         ),
+        storage=storage,
     )
     return runtime_path
 
 
-def _kill_stale(pid_path: Path) -> None:
+def _kill_stale(pid_path: Path, *, storage: StorageCapability) -> None:
     """Kill any existing watcher process recorded in pid_path."""
     if not pid_path.exists():
         return
     try:
-        old_pid = int(pid_path.read_text(encoding="utf-8").strip())
+        with storage.open_private_read_text(pid_path) as handle:
+            old_pid = int(handle.read().strip())
     except (ValueError, OSError):
-        pid_path.unlink(missing_ok=True)
+        storage.unlink(pid_path, missing_ok=True)
         return
     if old_pid == os.getpid():
         return
@@ -2966,7 +3341,7 @@ def _kill_stale(pid_path: Path) -> None:
             print(f"[agent-bridge] Sent SIGTERM to stale watcher PID {old_pid}.", flush=True)
     except (ProcessLookupError, OSError):
         pass  # already gone
-    pid_path.unlink(missing_ok=True)
+    storage.unlink(pid_path, missing_ok=True)
 
 
 def main() -> None:
@@ -2985,9 +3360,12 @@ def main() -> None:
         print(f"[agent-bridge] Config not found: {config_path}", file=sys.stderr)
         sys.exit(1)
 
-    config = _load_config(config_path)
-    sessions = config.get("sessions", [])
-    state_dir = Path(sessions[0]["inbox"]).parent if sessions else config_path.parent / "state"
+    paths = resolve_bridge_paths(bridge_root=config_path.absolute().parent)
+    storage = paths.storage
+    storage.validate(config_path.absolute())
+    config = _load_config(config_path.absolute(), storage=storage)
+    state_dir = paths.state_dir
+    _validate_watcher_config(config, state_dir=state_dir, storage=storage)
     command = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path)]
     lease_path = state_dir / "locks" / "watcher.lock"
     acquired = acquire_singleton_lease(
@@ -2996,6 +3374,7 @@ def main() -> None:
         command=command,
         state_dir=state_dir,
         pid=os.getpid(),
+        storage=storage,
     )
     if not acquired.get("acquired") and acquired.get("pid") != os.getpid():
         print(
@@ -3008,21 +3387,26 @@ def main() -> None:
 
     # Compatibility PID marker next to the config.
     pid_path = config_path.parent / "watcher.pid"
-    _write_pid(pid_path)
-    runtime_path = _write_runtime_breadcrumb(config_path, state_dir, command)
+    _write_pid(pid_path, storage=storage)
+    runtime_path = _write_runtime_breadcrumb(
+        config_path, state_dir, command, storage=storage
+    )
 
     def _cleanup() -> None:
         try:
-            if pid_path.exists() and pid_path.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                pid_path.unlink(missing_ok=True)
+            if pid_path.exists():
+                with storage.open_private_read_text(pid_path) as handle:
+                    owns_pid = handle.read().strip() == str(os.getpid())
+                if owns_pid:
+                    storage.unlink(pid_path, missing_ok=True)
             if runtime_path.exists():
-                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+                runtime = storage.read_json(runtime_path, {})
                 if int(runtime.get("pid") or 0) == os.getpid():
-                    runtime_path.unlink(missing_ok=True)
+                    storage.unlink(runtime_path, missing_ok=True)
         except Exception:
             pass
         if generation:
-            release_lease(lease_path, os.getpid(), generation)
+            release_lease(lease_path, os.getpid(), generation, storage=storage)
 
     atexit.register(_cleanup)
 
@@ -3037,9 +3421,9 @@ def main() -> None:
 
     def _heartbeat() -> None:
         if generation:
-            heartbeat_lease(lease_path, os.getpid(), generation)
+            heartbeat_lease(lease_path, os.getpid(), generation, storage=storage)
 
-    watch(config_path, stop_event=_stop, heartbeat=_heartbeat)
+    watch(config_path, stop_event=_stop, heartbeat=_heartbeat, storage=storage)
     _cleanup()
 
 

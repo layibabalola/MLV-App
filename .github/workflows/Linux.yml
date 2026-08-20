@@ -2,7 +2,13 @@ name: Linux Release
 
 on:
   workflow_dispatch:
-    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
@@ -12,9 +18,26 @@ jobs:
   build:
 
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        persist-credentials: false
+
+    - name: Set up Python for payload verification
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version-file: ".python-version"
+
+    - name: Install hash-locked payload verification dependencies
+      run: |
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+        python -m pip check
+
+    - name: Verify vendored native payload integrity
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
 
     - name: Install compiler & Qt
       run: |
@@ -25,12 +48,29 @@ jobs:
             libqt5opengl5-dev libqt5designer5 libqt5svg5-dev \
             libfuse2 libxkbcommon-x11-0 appstream
 
-    - name: Inspect Qt plugin directories
+    - name: Verify required Qt multimedia plugins
       run: |
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/audio
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/mediaservice
-           ls -l /usr/lib/x86_64-linux-gnu/qt5/plugins/playlistformats
+           set -euo pipefail
+           command -v qmake
+           qmake -v
+           command -v make
+           make --version
+           command -v g++
+           g++ --version
+           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
+           required_directories=(audio mediaservice playlistformats)
+           required_plugins=(
+             audio/libqtaudio_alsa.so
+             audio/libqtmedia_pulse.so
+             mediaservice/libgstmediaplayer.so
+             playlistformats/libqtmultimedia_m3u.so
+           )
+           for directory in "${required_directories[@]}"; do
+             test -d "${plugin_root}/${directory}"
+           done
+           for plugin in "${required_plugins[@]}"; do
+             test -f "${plugin_root}/${plugin}"
+           done
            
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build
@@ -50,28 +90,61 @@ jobs:
             cd usr
             mkdir bin
             cd bin
-            tar -C ${{ env.SOURCE_DIR }}/qt/FFmpeg/ -xvJf ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpegLinux.tar.xz --strip=1 --wildcards */ffmpeg
-            chmod a+x ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpeg
-            mv ${{ env.SOURCE_DIR }}/qt/FFmpeg/ffmpeg .
-            tar -C ${{ env.SOURCE_DIR }}/qt/raw2mlv/ -xvJf ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlvLinux.tar.xz --strip=1 --wildcards */raw2mlv
-            chmod a+x ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlv
-            mv ${{ env.SOURCE_DIR }}/qt/raw2mlv/raw2mlv .
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id ffmpeg-linux-x86_64 --archive-reference ffmpegLinux.tar.xz --output-dir . --verify-installed
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-linux-x86_64 --archive-reference raw2mlvLinux.tar.xz --output-dir . --verify-installed
             ls -al
 
     - name: Copy Qt multimedia plugins
       working-directory: ${{ env.SOURCE_DIR }}/build
       run: |
-           mkdir -p image/usr/plugins/audio
-           mkdir -p image/usr/plugins/mediaservice
-           mkdir -p image/usr/plugins/playlistformats
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/audio/* image/usr/plugins/audio/ || true
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/mediaservice/* image/usr/plugins/mediaservice/ || true
-           cp -r /usr/lib/x86_64-linux-gnu/qt5/plugins/playlistformats/* image/usr/plugins/playlistformats/ || true
+           set -euo pipefail
+           plugin_root=/usr/lib/x86_64-linux-gnu/qt5/plugins
+           required_directories=(audio mediaservice playlistformats)
+           required_plugins=(
+             audio/libqtaudio_alsa.so
+             audio/libqtmedia_pulse.so
+             mediaservice/libgstmediaplayer.so
+             playlistformats/libqtmultimedia_m3u.so
+           )
+           for directory in "${required_directories[@]}"; do
+             source_directory="${plugin_root}/${directory}"
+             destination_directory="image/usr/plugins/${directory}"
+             test -d "${source_directory}"
+             mkdir -p "${destination_directory}"
+             cp -a "${source_directory}/." "${destination_directory}/"
+           done
+           for plugin in "${required_plugins[@]}"; do
+             test -f "image/usr/plugins/${plugin}"
+           done
 
-    - name: Install LinuxDeploy
-      uses: miurahr/install-linuxdeploy-action@v1.7.0
-      with:
-        plugins: qt appimage
+    - name: Install pinned LinuxDeploy tools
+      shell: bash
+      run: |
+           set -euo pipefail
+           tools_dir="${RUNNER_TEMP}/linuxdeploy-tools"
+           mkdir -p "${tools_dir}"
+           curl --fail --location --retry 5 --retry-all-errors \
+             --output "${tools_dir}/linuxdeploy-x86_64.AppImage" \
+             "https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"
+           curl --fail --location --retry 5 --retry-all-errors \
+             --output "${tools_dir}/linuxdeploy-plugin-qt-x86_64.AppImage" \
+             "https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage"
+           curl --fail --location --retry 5 --retry-all-errors \
+             --output "${tools_dir}/linuxdeploy-plugin-appimage-x86_64.AppImage" \
+             "https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-appimage-x86_64.AppImage"
+           cat > "${tools_dir}/SHA256SUMS" <<'EOF'
+           c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d  linuxdeploy-x86_64.AppImage
+           15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724  linuxdeploy-plugin-qt-x86_64.AppImage
+           992d502a248e14ab185448ddf6f6e7d25558cb84d4623c354c3af350c25fccb3  linuxdeploy-plugin-appimage-x86_64.AppImage
+           EOF
+           (
+             cd "${tools_dir}"
+             sha256sum -c SHA256SUMS
+             chmod +x linuxdeploy-x86_64.AppImage \
+               linuxdeploy-plugin-qt-x86_64.AppImage \
+               linuxdeploy-plugin-appimage-x86_64.AppImage
+           )
+           printf '%s\n' "${tools_dir}" >> "${GITHUB_PATH}"
 
     - name: Create Appimage
       working-directory: ${{ env.SOURCE_DIR }}/build
@@ -80,8 +153,55 @@ jobs:
            linuxdeploy-x86_64.AppImage --desktop-file=image/mlvapp.desktop --executable=mlvapp --appdir=image --plugin=qt --output=appimage --verbosity=3 --icon-file=image/MLVAPP.png
            cp MLVApp-*.AppImage ${{ env.ARTIFACT }}
 
+    - name: Generate single-build release evidence
+      run: |
+           QMAKE_PATH="$(command -v qmake)"
+           COMPILER_PATH="$(command -v g++)"
+           LINUXDEPLOY_PATH="$(command -v linuxdeploy-x86_64.AppImage)"
+           LINUXDEPLOY_QT_PATH="$(command -v linuxdeploy-plugin-qt-x86_64.AppImage)"
+           LINUXDEPLOY_APPIMAGE_PATH="$(command -v linuxdeploy-plugin-appimage-x86_64.AppImage)"
+           QT_VERSION="$(${QMAKE_PATH} -query QT_VERSION)"
+           COMPILER_VERSION="$(${COMPILER_PATH} -dumpfullversion -dumpversion)"
+           python -m tools.release.release_evidence \
+             --repo-root "${{ github.workspace }}" \
+             --product "${{ env.ARTIFACT }}" \
+             --inventory-root "${{ env.SOURCE_DIR }}/build/image" \
+             --expected-main "usr/bin/mlvapp" \
+             --output-dir "${{ runner.temp }}/release-evidence" \
+             --label "linux-x86_64" \
+             --target-os "linux" \
+             --target-arch "x86_64" \
+             --repository "${{ github.repository }}" \
+             --source-ref "${{ github.ref }}" \
+             --commit "${{ github.sha }}" \
+             --run-id "${{ github.run_id }}" \
+             --run-attempt "${{ github.run_attempt }}" \
+             --runner-os "${{ runner.os }}" \
+             --runner-arch "${{ runner.arch }}" \
+             --runner-name "${{ runner.name }}" \
+             --runner-image-os "${ImageOS}" \
+             --runner-image-version "${ImageVersion}" \
+             --tool "qmake=${QMAKE_PATH}" \
+             --tool "compiler=${COMPILER_PATH}" \
+             --tool "linuxdeploy=${LINUXDEPLOY_PATH}" \
+             --tool "linuxdeploy-plugin-qt=${LINUXDEPLOY_QT_PATH}" \
+             --tool "linuxdeploy-plugin-appimage=${LINUXDEPLOY_APPIMAGE_PATH}" \
+             --tool-version "qmake=${QT_VERSION}" \
+             --tool-version "compiler=${COMPILER_VERSION}" \
+             --tool-version "linuxdeploy=1-alpha-20251107-1" \
+             --tool-version "linuxdeploy-plugin-qt=1-alpha-20250213-1" \
+             --tool-version "linuxdeploy-plugin-appimage=1-alpha-20250213-1"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp Linux release evidence
+        path: ${{ runner.temp }}/release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp
         path: ${{ env.ARTIFACT }}
+        if-no-files-found: error
