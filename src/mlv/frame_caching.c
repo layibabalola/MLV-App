@@ -560,6 +560,13 @@ void add_mlv_cache_thread(mlvObject_t * video)
 }
 
 /* Add as many of these as you want :) */
+static int g_mlv_cache_allocation_failure_for_testing = 0;
+
+void mlvCacheSetAllocationFailureForTesting(int enabled)
+{
+    g_mlv_cache_allocation_failure_for_testing = enabled != 0;
+}
+
 void an_mlv_cache_thread(mlvObject_t * video)
 {
     if (!isMlvActive(video)) return;
@@ -570,21 +577,64 @@ void an_mlv_cache_thread(mlvObject_t * video)
 
     uint32_t height = getMlvHeight(video);
     uint32_t width = getMlvWidth(video);
-    uint32_t pixelsize = width * height;
+    const size_t checked_width = (size_t)width;
+    const size_t checked_height = (size_t)height;
+    if (width < 33 || height < 33
+        || checked_width > SIZE_MAX / checked_height)
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->cache_thread_count--;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return;
+    }
+    const size_t pixelsize = checked_width * checked_height;
+    if (pixelsize < 10u
+        || pixelsize > SIZE_MAX / 3u
+        || pixelsize > SIZE_MAX / sizeof(float)
+        || checked_height > SIZE_MAX / sizeof(float *))
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->cache_thread_count--;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return;
+    }
 
     /* 2d array uglyness */
-    float  * __restrict imagefloat1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict imagefloat2d = (float **)malloc(height * sizeof(float *));
-    for (volatile uint32_t y = 0; y < height; ++y) imagefloat2d[y] = (float *)(imagefloat1d+(y*width));
-    float  * __restrict red1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict red2d = (float **)malloc(height * sizeof(float *));
-    for (volatile uint32_t y = 0; y < height; ++y) red2d[y] = (float *)(red1d+(y*width));
-    float  * __restrict green1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict green2d = (float **)malloc(height * sizeof(float *));
-    for (volatile uint32_t y = 0; y < height; ++y) green2d[y] = (float *)(green1d+(y*width));
-    float  * __restrict blue1d = (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict blue2d = (float **)malloc(height * sizeof(float *));
-    for (volatile uint32_t y = 0; y < height; ++y) blue2d[y] = (float *)(blue1d+(y*width));
+    const int force_allocation_failure = g_mlv_cache_allocation_failure_for_testing;
+    float  * __restrict imagefloat1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
+    float ** __restrict imagefloat2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float  * __restrict red1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
+    float ** __restrict red2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float  * __restrict green1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
+    float ** __restrict green2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float  * __restrict blue1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
+    float ** __restrict blue2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    if (!imagefloat1d || !imagefloat2d
+        || !red1d || !red2d
+        || !green1d || !green2d
+        || !blue1d || !blue2d)
+    {
+        free(red1d);
+        free(red2d);
+        free(green1d);
+        free(green2d);
+        free(blue1d);
+        free(blue2d);
+        free(imagefloat2d);
+        free(imagefloat1d);
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->cache_thread_count--;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return;
+    }
+    for (size_t y = 0; y < checked_height; ++y)
+    {
+        const size_t row_offset = y * checked_width;
+        imagefloat2d[y] = imagefloat1d + row_offset;
+        red2d[y] = red1d + row_offset;
+        green2d[y] = green1d + row_offset;
+        blue2d[y] = blue1d + row_offset;
+    }
 
     pthread_mutex_lock( &video->g_mutexCount );
     amazeinfo_t amaze_params = {
@@ -635,7 +685,11 @@ void an_mlv_cache_thread(mlvObject_t * video)
                 video->cached_frames[cache_frame] = MLV_FRAME_NOT_CACHED;
             }
             pthread_mutex_unlock(&video->g_mutexFind);
-            continue;
+            /* A persistent worker/allocation failure would otherwise select
+             * the same NOT_CACHED frame immediately and hot-spin forever.
+             * Leave the cache thread; a later explicitly started worker may
+             * retry after resources recover. */
+            break;
         }
 
         pthread_mutex_lock( &video->g_mutexFind );
@@ -646,9 +700,9 @@ void an_mlv_cache_thread(mlvObject_t * video)
 
         /* To 16-bit */
         uint16_t * out = video->rgb_raw_frames[cache_slot];
-        for (uint32_t i = 0; i < pixelsize-10; i++)
+        for (size_t i = 0; i < pixelsize - 10u; i++)
         {
-            uint16_t * pix = out + (i*3);
+            uint16_t * pix = out + (i * 3u);
             pix[0] = (uint16_t)MIN(red1d[i], 65535);
             pix[1] = (uint16_t)MIN(green1d[i], 65535);
             pix[2] = (uint16_t)MIN(blue1d[i], 65535);

@@ -6197,12 +6197,13 @@ TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
         ~ScopedAmazeFailureReset()
         {
             debayerAmazeSetThreadCreateFailureForTesting(-1);
+            debayerAmazeSetAllocationFailureForTesting(0);
             amazeDemosaicSetAllocationFailureForTesting(0);
         }
     } reset;
 
     constexpr int width = 33;
-    constexpr int height = 33;
+    constexpr int height = 68;
     const size_t pixels = static_cast<size_t>(width) * height;
     std::vector<float> input(pixels, 2048.0f);
     std::vector<uint16_t> output(pixels * 3u, static_cast<uint16_t>(0x4444));
@@ -6218,12 +6219,24 @@ TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
     ASSERT_TRUE(output == original_output);
 
     amazeDemosaicSetAllocationFailureForTesting(0);
-    debayerAmazeSetThreadCreateFailureForTesting(0);
+    debayerAmazeSetAllocationFailureForTesting(1);
     ASSERT_EQ(0, debayerAmaze(output.data(),
                               input.data(),
                               width,
                               height,
-                              2,
+                              1,
+                              1024));
+    ASSERT_TRUE(output == original_output);
+
+    debayerAmazeSetAllocationFailureForTesting(0);
+    /* The hostile caller count must be clamped before any storage extent or
+     * chunk loop; failing worker 1 also proves partial-create cleanup. */
+    debayerAmazeSetThreadCreateFailureForTesting(1);
+    ASSERT_EQ(0, debayerAmaze(output.data(),
+                              input.data(),
+                              width,
+                              height,
+                              INT_MAX,
                               1024));
     ASSERT_TRUE(output == original_output);
 
@@ -6234,6 +6247,54 @@ TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
                               height,
                               1,
                               1024));
+}
+
+TEST(DualIsoPipeline, CacheAmazeAllocationFailureBalancesWorkerCount)
+{
+    struct ScopedCacheAllocationFailureReset
+    {
+        ~ScopedCacheAllocationFailureReset()
+        {
+            mlvCacheSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    const int initial_worker_count = fixture.video()->cache_thread_count;
+
+    mlvCacheSetAllocationFailureForTesting(1);
+    an_mlv_cache_thread(fixture.video());
+
+    ASSERT_EQ(initial_worker_count, fixture.video()->cache_thread_count);
+}
+
+TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
+{
+    struct ScopedCacheDemosaicFailureReset
+    {
+        ~ScopedCacheDemosaicFailureReset()
+        {
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    fixture.video()->stop_caching = 0;
+    amazeDemosaicSetAllocationFailureForTesting(1);
+
+    an_mlv_cache_thread(fixture.video());
+
+    ASSERT_EQ(0, fixture.video()->cache_thread_count);
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+    fixture.video()->stop_caching = 1;
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)

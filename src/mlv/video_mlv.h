@@ -313,6 +313,9 @@ void setMlvLosslessBpp(mlvObject_t * video);
 /* Add as many of these as you want :) */
 void an_mlv_cache_thread(mlvObject_t * video);
 
+/* Test-only fault injection for cache-worker plane allocation. */
+void mlvCacheSetAllocationFailureForTesting(int enabled);
+
 /* Marks all frames as not cached */
 void mark_mlv_uncached(mlvObject_t * video);
 

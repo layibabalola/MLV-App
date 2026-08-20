@@ -67,4 +67,7 @@ demosaic(amazeinfo_t * inputdata);
  * Production leaves this disabled. */
 void amazeDemosaicSetAllocationFailureForTesting(int enabled);
 
+/* Test-only fault injection for debayerAmaze's wrapper allocations. */
+void debayerAmazeSetAllocationFailureForTesting(int enabled);
+
 #endif
