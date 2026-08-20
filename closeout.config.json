@@ -713,6 +713,8 @@
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_system_curl_rejects_redirect_status"},
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_system_curl_rejects_user_writable_or_unsigned_client"},
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_classifies_enabled_group_and_ancestor_replacement"},
+      {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_rejects_user_module_shadowing"},
+      {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_rejects_null_dacl"},
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_unix_system_curl_trust_rejects_writable_ancestor"},
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
       {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},

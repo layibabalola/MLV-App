@@ -658,6 +658,8 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 "stderr": "",
             }
             unsafe = dict(base, stdout=json.dumps({
+                "modulePath": r"C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules",
+                "loadedModulePaths": [r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"],
                 "signatureStatus": "Valid",
                 "signerSubject": "CN=Microsoft Windows, O=Microsoft Corporation",
                 "signerThumbprint": "A" * 40,
@@ -665,10 +667,14 @@ class CandidateAcceptanceTests(unittest.TestCase):
                     "path": str(client),
                     "ownerSid": "S-1-5-18",
                     "ownerTrusted": True,
+                    "daclPresent": True,
+                    "daclNull": False,
                     "unsafeWriteGrants": [{"sid": "S-1-5-4", "rights": "WriteData"}],
                 }] * 3,
             }))
             unsigned = dict(base, stdout=json.dumps({
+                "modulePath": r"C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules",
+                "loadedModulePaths": [r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"],
                 "signatureStatus": "NotSigned",
                 "signerSubject": "",
                 "signerThumbprint": "",
@@ -676,6 +682,8 @@ class CandidateAcceptanceTests(unittest.TestCase):
                     "path": str(client),
                     "ownerSid": "S-1-5-18",
                     "ownerTrusted": True,
+                    "daclPresent": True,
+                    "daclNull": False,
                     "unsafeWriteGrants": [],
                 }] * 3,
             }))
@@ -730,6 +738,80 @@ class CandidateAcceptanceTests(unittest.TestCase):
             parent_trust = next(item for item in trust["pathTrust"] if same_path(item["path"], client.parent))
             self.assertFalse(parent_trust["ownerTrusted"])
             self.assertTrue(any(item["unsafeWriteGrants"] for item in trust["pathTrust"][:-1]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows protected-module bootstrap")
+    def test_windows_system_curl_trust_rejects_user_module_shadowing(self) -> None:
+        from tools.repo_hygiene.candidate_acceptance import _trusted_system_curl_identity
+
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            attacker_root = Path(temp)
+            attacker_module = attacker_root / "Microsoft.PowerShell.Utility"
+            attacker_module.mkdir()
+            (attacker_module / "Microsoft.PowerShell.Utility.psm1").write_text(
+                "function ConvertTo-Json { '{\"forged\":true}' }\n"
+                "Export-ModuleMember -Function ConvertTo-Json\n",
+                encoding="utf-8",
+            )
+            hostile_env = _minimal_system_child_environment()
+            hostile_env["PSModulePath"] = str(attacker_root)
+            baseline = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "@{safe=$true} | ConvertTo-Json -Compress"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=hostile_env,
+            )
+            self.assertEqual('{"forged":true}', baseline.stdout.strip())
+            with mock.patch.dict(os.environ, {"PSModulePath": str(attacker_root)}):
+                identity = _trusted_system_curl_identity(ROOT, self.config)
+            trust = identity["trust"]
+            self.assertNotIn(str(attacker_root).casefold(), trust["modulePath"].casefold())
+            protected_modules = "c:\\windows\\system32\\windowspowershell\\v1.0\\modules\\"
+            self.assertTrue(all(str(path).casefold().startswith(protected_modules) for path in trust["loadedModulePaths"]))
+
+    @unittest.skipUnless(os.name == "nt", "Windows NULL-DACL classification")
+    def test_windows_system_curl_trust_rejects_null_dacl(self) -> None:
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"unsigned-null-dacl-test-client")
+            env = _minimal_system_child_environment()
+            env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+            env["PSModulePath"] = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+            null_dacl = (
+                "$ErrorActionPreference='Stop';"
+                "Import-Module ($PSHOME+'\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1');"
+                "$acl=Get-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH;"
+                "$owner=([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value;"
+                "$raw=[Security.AccessControl.RawSecurityDescriptor]::new(('O:{0}G:{0}' -f $owner));"
+                "[byte[]]$bytes=New-Object byte[] $raw.BinaryLength;"
+                "$raw.GetBinaryForm($bytes,0);$acl.SetSecurityDescriptorBinaryForm($bytes);"
+                "Set-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH -AclObject $acl"
+            )
+            subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", null_dacl],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            completed = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_CURL_TRUST_SCRIPT],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            trust = json.loads(completed.stdout)
+            same_path = lambda value: os.path.normcase(str(Path(value).resolve())) == os.path.normcase(str(client.resolve()))
+            file_trust = next(item for item in trust["pathTrust"] if same_path(item["path"]))
+            self.assertFalse(file_trust["daclPresent"])
+            self.assertTrue(file_trust["daclNull"])
+            self.assertIn({"sid": "NULL_DACL", "rights": "FullControl"}, file_trust["unsafeWriteGrants"])
 
     @unittest.skipUnless(os.name != "nt", "Unix fixed-path ownership and ancestry")
     def test_unix_system_curl_trust_rejects_writable_ancestor(self) -> None:
@@ -1210,6 +1292,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("unsafeWriteGrants", python_source)
         self.assertIn("$principal.IsInRole($sidObject)", python_source)
         self.assertIn("DeleteSubdirectoriesAndFiles", python_source)
+        self.assertIn("$PSModuleAutoLoadingPreference = 'None'", python_source)
+        self.assertIn("Microsoft.PowerShell.Management\\Get-Item", python_source)
+        self.assertIn("Microsoft.PowerShell.Security\\Get-Acl", python_source)
+        self.assertIn("Microsoft.PowerShell.Utility\\ConvertTo-Json", python_source)
+        self.assertIn("RawSecurityDescriptor", python_source)
+        self.assertIn("DiscretionaryAclPresent", python_source)
+        self.assertIn("daclNull", python_source)
         self.assertIn("def _minimal_system_child_environment", python_source)
         self.assertIn("def _trusted_unix_curl_path_chain", python_source)
         self.assertIn('"PATH": "/usr/bin:/bin"', python_source)

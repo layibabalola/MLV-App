@@ -411,8 +411,12 @@ _WINDOWS_CURL_TRUST_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $ClientPath = $env:MLVAPP_SYSTEM_CURL_PATH
 if ([string]::IsNullOrWhiteSpace($ClientPath)) { throw 'system curl path is missing' }
-Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -Force -ErrorAction Stop
-$clientItem = Get-Item -LiteralPath $ClientPath -Force
+$moduleRoot = "$PSHOME\Modules"
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Management\Microsoft.PowerShell.Management.psd1" -Force -ErrorAction Stop
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1" -Force -ErrorAction Stop
+Microsoft.PowerShell.Core\Import-Module -Name "$moduleRoot\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1" -Force -ErrorAction Stop
+$PSModuleAutoLoadingPreference = 'None'
+$clientItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $ClientPath -Force
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
 $currentSid = $identity.User.Value
@@ -442,40 +446,51 @@ foreach ($pathItem in $chain) {
     if ($pathItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
         throw "system curl trust path must not contain a reparse point: $($pathItem.FullName)"
     }
-    $acl = Get-Acl -LiteralPath $pathItem.FullName
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $pathItem.FullName
     $ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
     $unsafeWriteGrants = @()
-    $effectiveMask = if ($pathItem -is [System.IO.DirectoryInfo]) { $directoryReplaceMask } else { $fileWriteMask }
-    foreach ($rule in $acl.Access) {
-        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
-        if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
-        if (([int64]$rule.FileSystemRights -band $effectiveMask) -eq 0) { continue }
-        try {
-            $sidObject = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
-            $sid = $sidObject.Value
-        } catch {
-            $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
-            continue
-        }
-        $currentTokenCanWrite = ($sid -eq $currentSid) -or $principal.IsInRole($sidObject)
-        if ($currentTokenCanWrite -or ($broadSids -contains $sid)) {
-            $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+    $rawDescriptor = [System.Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+    $daclPresent = ($rawDescriptor.ControlFlags -band [System.Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -ne 0
+    $daclNull = $null -eq $rawDescriptor.DiscretionaryAcl
+    if (-not $daclPresent -or $daclNull) {
+        $unsafeWriteGrants += [ordered]@{ sid = 'NULL_DACL'; rights = 'FullControl' }
+    } else {
+        $effectiveMask = if ($pathItem -is [System.IO.DirectoryInfo]) { $directoryReplaceMask } else { $fileWriteMask }
+        foreach ($rule in $acl.Access) {
+            if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+            if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (([int64]$rule.FileSystemRights -band $effectiveMask) -eq 0) { continue }
+            try {
+                $sidObject = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+                $sid = $sidObject.Value
+            } catch {
+                $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
+                continue
+            }
+            $currentTokenCanWrite = ($sid -eq $currentSid) -or $principal.IsInRole($sidObject)
+            if ($currentTokenCanWrite -or ($broadSids -contains $sid)) {
+                $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+            }
         }
     }
     $pathTrust += [ordered]@{
         path = $pathItem.FullName
         ownerSid = $ownerSid
         ownerTrusted = $trustedOwnerSids -contains $ownerSid
+        daclPresent = $daclPresent
+        daclNull = $daclNull
         unsafeWriteGrants = @($unsafeWriteGrants)
     }
 }
-$signature = Get-AuthenticodeSignature -LiteralPath $ClientPath
+$signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $ClientPath
 [ordered]@{
+    modulePath = [string]$env:PSModulePath
+    loadedModulePaths = @(Microsoft.PowerShell.Core\Get-Module | Microsoft.PowerShell.Core\ForEach-Object { $_.Path })
     signatureStatus = [string]$signature.Status
     signerSubject = [string]$signature.SignerCertificate.Subject
     signerThumbprint = [string]$signature.SignerCertificate.Thumbprint
     pathTrust = @($pathTrust)
-} | ConvertTo-Json -Depth 8 -Compress
+} | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 8 -Compress
 """
 
 
@@ -549,6 +564,7 @@ def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Di
 
         trust_env = _minimal_system_child_environment()
         trust_env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+        trust_env["PSModulePath"] = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
         completed = run_bounded_closeout_process(
             repo_root,
             config,
@@ -578,8 +594,27 @@ def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Di
         path_trust = trust.get("pathTrust")
         if not isinstance(path_trust, list) or len(path_trust) < 3:
             raise HygieneError("system curl path-chain trust evidence is incomplete")
+        expected_module_root = r"C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+        expected_module_paths = {
+            r"C:\Program Files\WindowsPowerShell\Modules".casefold(),
+            expected_module_root.casefold(),
+        }
+        actual_module_paths = {
+            value.strip().casefold()
+            for value in str(trust.get("modulePath") or "").split(";")
+            if value.strip()
+        }
+        if actual_module_paths != expected_module_paths:
+            raise HygieneError("system curl trust verification used an unpinned PowerShell module path")
+        loaded_modules = trust.get("loadedModulePaths")
+        if not isinstance(loaded_modules, list) or not loaded_modules:
+            raise HygieneError("system curl trust verification did not report its loaded modules")
+        if any(not str(path).casefold().startswith(expected_module_root.casefold() + "\\") for path in loaded_modules):
+            raise HygieneError("system curl trust verification loaded a module outside the protected system root")
         if any(not isinstance(item, dict) or not item.get("ownerTrusted") for item in path_trust):
             raise HygieneError("system curl path chain is not owned by Windows or TrustedInstaller")
+        if any(item.get("daclPresent") is not True or item.get("daclNull") is not False for item in path_trust):
+            raise HygieneError("system curl path chain has an absent or NULL discretionary ACL")
         if trust.get("signatureStatus") != "Valid" or "O=Microsoft Corporation" not in str(trust.get("signerSubject") or ""):
             raise HygieneError("system curl does not have a valid Microsoft signature")
         if any(item.get("unsafeWriteGrants") for item in path_trust):

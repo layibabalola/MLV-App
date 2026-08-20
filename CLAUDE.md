@@ -170,7 +170,9 @@ Finalize uses the fixed OS-protected system curl against the public
 `api.github.com` checks endpoint. It executes no PATH-selected provider client,
 and the network request imports none of Python's user-writable HTTPS runtime or
 the caller's loader/runtime injection environment. The executable and every
-replace-capable ancestor are OS-owned and non-writable by the current token.
+replace-capable ancestor are OS-owned, have a non-NULL DACL, and are
+non-writable by the current token; the Windows trust probe imports only
+module-qualified commands from fixed system module paths.
 Curl configuration/proxies and redirect following are disabled, HTTP 200 is
 required, and the protected client's path, ownership/ACL, platform signature
 where available, size, and hash are revalidated after the bounded query.
