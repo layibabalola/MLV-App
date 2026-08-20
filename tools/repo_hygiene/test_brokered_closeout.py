@@ -62,10 +62,12 @@ from .brokered_closeout import (
     record_review_approval,
     repair_missing_evidence,
     repair_target_push_failure,
+    run_git,
     repair_eligibility,
     remediate_retained_candidates,
     retire_stale_plan_absent_agent_queue_packets,
     repo_sweep,
+    repo_sweep_plan,
     repo_sweep_tuple,
     repo_state_snapshot,
     powershell_policy,
@@ -84,6 +86,8 @@ from .brokered_closeout import (
     stop_runtime_services_before_promotion,
     target_worktree_update_preflight,
     update_local_target,
+    delete_remote_feature_ref,
+    worktree_dirty_state,
     validate_rollback_manifest,
     verify_repo_closed_postcondition,
     verify_prune_recovery_artifact,
@@ -4760,6 +4764,154 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(packet_path.exists())
         self.assertTrue((packet_path.parent / "accepted-review-manifest.json").exists())
 
+    def test_repo_sweep_reuses_one_plan_and_one_dirty_probe_per_worktree(self) -> None:
+        repo = self.init_repo()
+        detached = self.tempdir / "single-probe-detached"
+        git(repo, "worktree", "add", "--detach", str(detached), "HEAD")
+        config = load_closeout_config(repo)
+
+        with mock.patch(
+            "tools.repo_hygiene.brokered_closeout.worktree_dirty_state",
+            wraps=worktree_dirty_state,
+        ) as dirty_probe:
+            plan = repo_sweep_plan(repo, config)
+        self.assertEqual(dirty_probe.call_count, len(plan["worktreePlans"]))
+
+        with mock.patch(
+            "tools.repo_hygiene.brokered_closeout.repo_sweep_plan",
+            wraps=repo_sweep_plan,
+        ) as plan_probe, mock.patch(
+            "tools.repo_hygiene.brokered_closeout.load_closeout_config",
+            wraps=load_closeout_config,
+        ) as config_probe:
+            result = repo_sweep(repo)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(plan_probe.call_count, 1)
+        self.assertEqual(config_probe.call_count, 1)
+
+        stale_plan = json.loads(json.dumps(plan))
+        stale_plan["pinnedRefs"]["target"]["head"] = "0" * 40
+        with self.assertRaisesRegex(HygieneError, "plan evidence hash is stale or invalid"):
+            repo_sweep_tuple(repo, plan=stale_plan, config=config)
+
+        mismatched_config = json.loads(json.dumps(config))
+        mismatched_config["policyHash"] = "0" * 32
+        with self.assertRaisesRegex(HygieneError, "plan policy hash does not match"):
+            repo_sweep_tuple(repo, plan=plan, config=mismatched_config)
+
+    def test_repo_sweep_investigations_resume_in_bounded_content_addressed_pages(self) -> None:
+        repo = self.init_repo(config_updates={"repoSweep": {"maxNewInvestigationsPerRun": 1}})
+        branches = ["codex/paged-one", "codex/paged-two", "codex/paged-three"]
+        for index, branch in enumerate(branches):
+            git(repo, "checkout", "-b", branch, "master")
+            path = repo / f"paged-{index}.txt"
+            path.write_text(f"page {index}\n", encoding="utf-8")
+            git(repo, "add", path.name)
+            git(repo, "commit", "-m", f"paged candidate {index}")
+        git(repo, "checkout", "master")
+
+        first = repo_sweep(repo)
+        self.assertEqual(first["status"], "planned_partial")
+        self.assertEqual(first["investigationProgress"]["total"], 3)
+        self.assertEqual(first["investigationProgress"]["generated"], 1)
+        self.assertEqual(first["investigationProgress"]["reused"], 0)
+        self.assertEqual(len(first["investigationProgress"]["pendingCandidateIds"]), 2)
+
+        second = repo_sweep(repo, apply=True)
+        self.assertEqual(second["status"], "blocked")
+        self.assertEqual(second["reason"], "repo_sweep_investigations_pending")
+        self.assertEqual(second["investigationProgress"]["generated"], 1)
+        self.assertEqual(second["investigationProgress"]["reused"], 1)
+        self.assertEqual(len(second["investigationProgress"]["pendingCandidateIds"]), 1)
+        for branch in branches:
+            self.assertEqual(git(repo, "rev-parse", "--verify", branch).returncode, 0)
+
+        third = repo_sweep(repo)
+        self.assertEqual(third["status"], "planned")
+        self.assertTrue(third["investigationProgress"]["complete"])
+        self.assertEqual(third["investigationProgress"]["generated"], 1)
+        self.assertEqual(third["investigationProgress"]["reused"], 2)
+
+        fourth = repo_sweep(repo)
+        self.assertEqual(fourth["status"], "planned")
+        self.assertEqual(fourth["investigationProgress"]["generated"], 0)
+        self.assertEqual(fourth["investigationProgress"]["reused"], 3)
+
+    def test_repo_sweep_investigation_cache_rejects_dirty_source_item_drift(self) -> None:
+        repo = self.init_repo(config_updates={"repoSweep": {"maxNewInvestigationsPerRun": 1}})
+        branch = "codex/dirty-cache-drift"
+        git(repo, "checkout", "-b", branch)
+        (repo / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+        git(repo, "add", "tracked.txt")
+        git(repo, "commit", "-m", "dirty cache branch")
+        first_dirty = repo / "first-untracked.txt"
+        first_dirty.write_text("first\n", encoding="utf-8")
+        detached = self.tempdir / "dirty-cache-detached"
+        git(repo, "worktree", "add", "--detach", str(detached), "master")
+        (detached / "detached-untracked.txt").write_text("detached\n", encoding="utf-8")
+
+        first = repo_sweep(repo)
+        self.assertEqual(first["status"], "planned_partial")
+        self.assertEqual(first["investigationProgress"]["generated"], 1)
+        cached = first["investigationProgress"]["reports"][0]
+        self.assertEqual(cached["branch"], branch)
+        self.assertIn("first-untracked.txt", cached["dirtyClassification"]["dirtyPaths"])
+
+        first_dirty.unlink()
+        (repo / "second-untracked.txt").write_text("second\n", encoding="utf-8")
+        second = repo_sweep(repo, apply=True)
+
+        self.assertEqual(second["status"], "blocked")
+        self.assertEqual(second["reason"], "repo_sweep_investigations_pending")
+        self.assertEqual(second["investigationProgress"]["generated"], 1)
+        self.assertEqual(second["investigationProgress"]["reused"], 0)
+        refreshed = second["investigationProgress"]["reports"][0]
+        self.assertNotEqual(refreshed["candidateId"], cached["candidateId"])
+        self.assertIn("second-untracked.txt", refreshed["dirtyClassification"]["dirtyPaths"])
+        self.assertNotIn("first-untracked.txt", refreshed["dirtyClassification"]["dirtyPaths"])
+
+    def test_repo_sweep_cached_recommendation_cannot_be_rehashed_into_prune_authority(self) -> None:
+        repo = self.init_repo(config_updates={"repoSweep": {"maxNewInvestigationsPerRun": 1}})
+        branch = "codex/cached-recommendation-forgery"
+        git(repo, "checkout", "-b", branch, "master")
+        (repo / "candidate.txt").write_text("candidate\n", encoding="utf-8")
+        git(repo, "add", "candidate.txt")
+        git(repo, "commit", "-m", "candidate branch")
+        git(repo, "checkout", "master")
+
+        first = repo_sweep(repo)
+        self.assertEqual(first["status"], "planned")
+        original = next(report for report in first["retainedCandidateReports"] if report.get("branch") == branch)
+        self.assertEqual(original["recommendedAction"], "clean_integrate_now")
+        report_path = Path(original["reportPath"])
+        forged = json.loads(report_path.read_text(encoding="utf-8"))
+        forged["recommendedAction"] = "prune_now"
+        forged["actionClass"] = "redundant_branch_prune"
+        forged["blockers"] = []
+        forged["remediationProof"]["recommendedAction"] = "prune_now"
+        forged["remediationProof"]["actionClass"] = "redundant_branch_prune"
+        forged["remediationProof"]["blockers"] = []
+        forged["evidenceHash"] = stable_hash(
+            {key: value for key, value in forged.items() if key not in {"evidenceHash", "reportPath"}}
+        )
+        report_path.write_text(json.dumps(forged, indent=2) + "\n", encoding="utf-8")
+
+        forged_plan = repo_sweep(repo)
+        forged_candidate = next(
+            candidate
+            for candidate in forged_plan["promotedCandidates"]
+            if ((candidate.get("pinnedRefs") or {}).get("branch") or {}).get("branch") == branch
+        )
+        self.assertEqual(forged_candidate["actionId"], "delete_local_branch")
+
+        applied = repo_sweep(repo, apply=True, candidate_id=forged_candidate["candidateId"])
+        self.assertEqual(applied["status"], "blocked")
+        self.assertEqual(applied["reason"], "candidate_not_found_or_not_promoted")
+        self.assertEqual(git(repo, "rev-parse", "--verify", branch).returncode, 0)
+        refreshed = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(refreshed["recommendedAction"], "clean_integrate_now")
+        self.assertEqual(refreshed["actionClass"], "repo_sweep_clean_integrate")
+
     def test_repo_sweep_prune_worktrees_clean_detached_only_removes_clean_detached(self) -> None:
         repo = self.init_repo()
         detached = self.tempdir / "clean-detached-worktree"
@@ -5124,6 +5276,193 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertTrue(any(item.get("action") == "delete_remote_branch" and item.get("branch") == "codex/remote-integrated" for item in result["actions"]))
         self.assertEqual(git(repo, "ls-remote", "--heads", "origin", "codex/remote-integrated").stdout.strip(), "")
         self.assertIn("remote_branch_deletion", self.audit_types(repo))
+
+    def test_remote_feature_delete_is_idempotent_when_provider_already_removed_ref(self) -> None:
+        repo = self.init_repo(remote=True)
+        git(repo, "checkout", "-b", "codex/provider-already-deleted")
+        (repo / "provider-deleted.txt").write_text("provider deleted\n", encoding="utf-8")
+        git(repo, "add", "provider-deleted.txt")
+        git(repo, "commit", "-m", "provider deleted branch")
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", "codex/provider-already-deleted")
+        remote_path = Path(git(repo, "remote", "get-url", "origin").stdout.strip())
+        git(remote_path, "update-ref", "-d", "refs/heads/codex/provider-already-deleted")
+
+        result = delete_remote_feature_ref(
+            repo,
+            load_closeout_config(repo),
+            remote="origin",
+            branch="codex/provider-already-deleted",
+            expected_head=head,
+        )
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertTrue(result["alreadyMissing"])
+        self.assertEqual(result["providerQueryBefore"]["status"], "absent")
+        self.assertEqual(result["trackingCleanupReturncode"], 0)
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", "codex/provider-already-deleted").stdout.strip(), "")
+
+    def test_remote_feature_delete_fetches_when_tracking_ref_is_missing(self) -> None:
+        repo = self.init_repo(remote=True)
+        branch = "codex/missing-tracking-only"
+        git(repo, "checkout", "-b", branch)
+        (repo / "missing-tracking.txt").write_text("still remote\n", encoding="utf-8")
+        git(repo, "add", "missing-tracking.txt")
+        git(repo, "commit", "-m", "remote branch with missing tracking ref")
+        head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", branch)
+        git(repo, "update-ref", "-d", f"refs/remotes/origin/{branch}")
+
+        result = delete_remote_feature_ref(
+            repo,
+            load_closeout_config(repo),
+            remote="origin",
+            branch=branch,
+            expected_head=head,
+        )
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["returncode"], 0)
+        self.assertIsNone(result["remoteTrackingHeadAfter"])
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", branch).stdout.strip(), "")
+
+    def test_remote_feature_delete_ignores_narrow_fetch_refspec_for_provider_truth(self) -> None:
+        repo = self.init_repo(remote=True)
+        branch = "codex/narrow-refspec"
+        git(repo, "checkout", "-b", branch)
+        (repo / "narrow.txt").write_text("provider truth\n", encoding="utf-8")
+        git(repo, "add", "narrow.txt")
+        git(repo, "commit", "-m", "narrow refspec branch")
+        expected_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", branch)
+        git(repo, "config", "--replace-all", "remote.origin.fetch", "+refs/heads/master:refs/remotes/origin/master")
+        git(repo, "update-ref", "-d", f"refs/remotes/origin/{branch}")
+
+        result = delete_remote_feature_ref(
+            repo,
+            load_closeout_config(repo),
+            remote="origin",
+            branch=branch,
+            expected_head=expected_head,
+        )
+
+        self.assertEqual(result["status"], "success", result)
+        self.assertEqual(result["providerQueryBefore"]["head"], expected_head)
+        self.assertEqual(result["providerQueryAfter"]["status"], "absent")
+        self.assertEqual(git(repo, "ls-remote", "--heads", "origin", branch).stdout.strip(), "")
+
+    def test_remote_feature_delete_lease_rejects_concurrent_advance(self) -> None:
+        repo = self.init_repo(remote=True)
+        branch = "codex/concurrent-advance"
+        git(repo, "checkout", "-b", branch)
+        (repo / "advance.txt").write_text("old\n", encoding="utf-8")
+        git(repo, "add", "advance.txt")
+        git(repo, "commit", "-m", "old remote head")
+        expected_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", branch)
+        (repo / "advance.txt").write_text("new\n", encoding="utf-8")
+        git(repo, "commit", "-am", "new remote head")
+        advanced_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", f"HEAD:refs/heads/race-source")
+        remote_path = Path(git(repo, "remote", "get-url", "origin").stdout.strip())
+        real_run_git = run_git
+        advanced = False
+
+        def race_before_delete(root: Path, args: list[str], **kwargs: object):
+            nonlocal advanced
+            if not advanced and args and args[0] == "push" and any(str(arg).startswith("--force-with-lease=") for arg in args):
+                git(remote_path, "update-ref", f"refs/heads/{branch}", advanced_head)
+                advanced = True
+            return real_run_git(root, args, **kwargs)
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.run_git", side_effect=race_before_delete):
+            result = delete_remote_feature_ref(
+                repo,
+                load_closeout_config(repo),
+                remote="origin",
+                branch=branch,
+                expected_head=expected_head,
+            )
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "remote_feature_still_present_after_delete")
+        self.assertNotEqual(result["returncode"], 0)
+        self.assertEqual(result["providerQueryAfter"]["head"], advanced_head)
+        self.assertIn(advanced_head, git(repo, "ls-remote", "--heads", "origin", branch).stdout)
+
+    def test_remote_feature_delete_blocks_ref_recreated_after_delete(self) -> None:
+        repo = self.init_repo(remote=True)
+        branch = "codex/recreated-after-delete"
+        git(repo, "checkout", "-b", branch)
+        (repo / "recreate.txt").write_text("old\n", encoding="utf-8")
+        git(repo, "add", "recreate.txt")
+        git(repo, "commit", "-m", "old recreated head")
+        expected_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", branch)
+        (repo / "recreate.txt").write_text("new\n", encoding="utf-8")
+        git(repo, "commit", "-am", "new recreated head")
+        recreated_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", f"HEAD:refs/heads/race-source")
+        remote_path = Path(git(repo, "remote", "get-url", "origin").stdout.strip())
+        real_run_git = run_git
+        query_count = 0
+
+        def recreate_before_postfetch(root: Path, args: list[str], **kwargs: object):
+            nonlocal query_count
+            if args and args[0] == "ls-remote":
+                query_count += 1
+                if query_count == 2:
+                    git(remote_path, "update-ref", f"refs/heads/{branch}", recreated_head)
+            return real_run_git(root, args, **kwargs)
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.run_git", side_effect=recreate_before_postfetch):
+            result = delete_remote_feature_ref(
+                repo,
+                load_closeout_config(repo),
+                remote="origin",
+                branch=branch,
+                expected_head=expected_head,
+            )
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["reason"], "remote_feature_still_present_after_delete")
+        self.assertEqual(result["providerQueryAfter"]["head"], recreated_head)
+        self.assertIn(recreated_head, git(repo, "ls-remote", "--heads", "origin", branch).stdout)
+
+    def test_remote_feature_delete_blocks_when_postdelete_exact_query_fails(self) -> None:
+        repo = self.init_repo(remote=True)
+        branch = "codex/postdelete-fetch-failure"
+        git(repo, "checkout", "-b", branch)
+        (repo / "postfetch.txt").write_text("postfetch\n", encoding="utf-8")
+        git(repo, "add", "postfetch.txt")
+        git(repo, "commit", "-m", "postdelete fetch failure")
+        expected_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        git(repo, "push", "origin", branch)
+        real_run_git = run_git
+        query_count = 0
+
+        def fail_postdelete_fetch(root: Path, args: list[str], **kwargs: object):
+            nonlocal query_count
+            if args and args[0] == "ls-remote":
+                query_count += 1
+                if query_count == 2:
+                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="simulated postdelete exact-query failure")
+            return real_run_git(root, args, **kwargs)
+
+        with mock.patch("tools.repo_hygiene.brokered_closeout.run_git", side_effect=fail_postdelete_fetch):
+            result = delete_remote_feature_ref(
+                repo,
+                load_closeout_config(repo),
+                remote="origin",
+                branch=branch,
+                expected_head=expected_head,
+            )
+
+        self.assertEqual(result["status"], "blocked", result)
+        self.assertEqual(result["reason"], "remote_feature_exact_query_failed")
+        self.assertEqual(result["returncode"], 0)
+        self.assertEqual(result["providerQueryAfter"]["returncode"], 1)
 
     def test_repo_sweep_remote_patch_equivalent_feature_branch_is_pruned(self) -> None:
         repo = self.init_repo(remote=True)

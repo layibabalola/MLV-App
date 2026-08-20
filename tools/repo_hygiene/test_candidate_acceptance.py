@@ -1145,10 +1145,20 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertEqual(tracked_baseline["requiredTestFiles"], default_baseline["requiredTestFiles"])
         self.assertIn("toolingBaseline.requiredTestFiles", tracked_baseline["requiredConfigKeys"])
         required_paths = {entry["path"] for entry in tracked_baseline["requiredTestFiles"]}
-        self.assertEqual({"tools/repo_hygiene/test_candidate_acceptance.py"}, required_paths)
+        self.assertEqual(
+            {
+                "tools/repo_hygiene/test_candidate_acceptance.py",
+                "tools/repo_hygiene/test_brokered_closeout.py",
+            },
+            required_paths,
+        )
         required_symbols = {(entry["path"], entry["contains"]) for entry in tracked_baseline["requiredSymbols"]}
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def integration_range_evidence"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def reusable_candidate_report"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def investigation_jobs"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def fresh_investigation_report"), required_symbols)
         self.assertIn(("tools/repo_hygiene/candidate_acceptance.py", "def validate_for_finalize"), required_symbols)
+        self.assertIn("repoSweep.maxNewInvestigationsPerRun", tracked_baseline["requiredConfigKeys"])
 
         current = verify_closeout_tooling_current(ROOT, load_closeout_config(ROOT), attempt_update=False, plan_only=True)
         self.assertTrue(current["ok"], current)
@@ -1205,6 +1215,25 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 lambda baseline: baseline.__setitem__(
                     "requiredConfigKeys",
                     [key for key in baseline["requiredConfigKeys"] if key != "candidateAcceptance.enabled"],
+                ),
+            ),
+            (
+                "removed bounded investigation config requirement",
+                lambda baseline: baseline.__setitem__(
+                    "requiredConfigKeys",
+                    [key for key in baseline["requiredConfigKeys"] if key != "repoSweep.maxNewInvestigationsPerRun"],
+                ),
+            ),
+            (
+                "removed cached-report recomputation symbols",
+                lambda baseline: baseline.__setitem__(
+                    "requiredSymbols",
+                    [
+                        item
+                        for item in baseline["requiredSymbols"]
+                        if item.get("contains")
+                        not in {"def reusable_candidate_report", "def investigation_jobs", "def fresh_investigation_report"}
+                    ],
                 ),
             ),
         ):
