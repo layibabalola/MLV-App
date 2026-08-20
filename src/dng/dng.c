@@ -1603,7 +1603,6 @@ struct directory_entry {
 enum
 {
     tcTimeCodes             = 51043,
-    tcFrameRate             = 51044,
     tcTStop                 = 51058,
     tcReelName              = 51081,
     tcCameraLabel           = 51105,

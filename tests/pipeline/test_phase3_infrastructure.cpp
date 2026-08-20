@@ -37,6 +37,8 @@ extern "C" {
 #include <QtGlobal>
 #include <QStringList>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -366,7 +368,14 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(4, 4, 17, &pixels));
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(2, 4, 14, &pixels));
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(40000, 40000, 14, &pixels));
-    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(3, 3, 14, &pixels));
+    /* Compressed DNG geometry need not be aligned like packed uncompressed
+     * strips; the open/decode path applies the packed-only constraint. */
+    ASSERT_TRUE(mlvDngSequenceGeometryIsRepresentable(3, 3, 14, &pixels));
+    ASSERT_TRUE(mlvDngCfaPatternIsSupported(0x02010100u));
+    ASSERT_FALSE(mlvDngCfaPatternIsSupported(0x01000201u));
+    ASSERT_FALSE(mlvDngCfaPatternIsSupported(0x00010102u));
+    ASSERT_FALSE(mlvDngCfaPatternIsSupported(0x01020001u));
+    ASSERT_FALSE(mlvDngCfaPatternIsSupported(0xffffffffu));
 
     dng_frame_info_t expected{};
     expected.valid = 1;
@@ -386,9 +395,59 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     candidate.white_level--;
     ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
 
+    expected.has_as_shot_neutral = 1;
+    expected.as_shot_neutral[0] = 2;
+    expected.as_shot_neutral[1] = 1;
+    expected.as_shot_neutral[2] = 1;
+    expected.as_shot_neutral[3] = 1;
+    expected.as_shot_neutral[4] = 1;
+    expected.as_shot_neutral[5] = 2;
+    candidate = expected;
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate.as_shot_neutral[4] = 2;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+
+    expected.has_color_matrix1 = 1;
+    expected.color_matrix1[0] = 1;
+    expected.color_matrix1[1] = 1;
+    candidate = expected;
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate.color_matrix1[0] = 2;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+
+    expected.has_default_scale = 1;
+    expected.default_scale[0] = 1;
+    expected.default_scale[1] = 1;
+    expected.default_scale[2] = 5;
+    expected.default_scale[3] = 3;
+    expected.has_frame_rate = 1;
+    expected.frame_rate[0] = 24000;
+    expected.frame_rate[1] = 1001;
+    expected.has_iso = 1;
+    expected.iso = 800;
+    std::strcpy(expected.camera_model, "metadata-anchor");
+    candidate = expected;
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate.default_scale[2] = 4;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    candidate.frame_rate[0] = 25;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    candidate.iso = 1600;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    std::strcpy(candidate.camera_model, "other-camera");
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+
     const int32_t neutral[] = { 1, 2, 1, 1, 2, 1 };
     uint32_t gains[3] = {};
     ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(neutral, gains));
+    ASSERT_EQ(512u, gains[0]);
+    ASSERT_EQ(1024u, gains[1]);
+    ASSERT_EQ(2048u, gains[2]);
+    const int32_t writerRoundTrip[] = { 2048, 1024, 1024, 1024, 512, 1024 };
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(writerRoundTrip, gains));
     ASSERT_EQ(2048u, gains[0]);
     ASSERT_EQ(1024u, gains[1]);
     ASSERT_EQ(512u, gains[2]);
@@ -396,6 +455,56 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_FALSE(mlvDngAsShotNeutralToWbGains(zeroDenominator, gains));
     const int32_t negativeNumerator[] = { -1, 2, 1, 1, 2, 1 };
     ASSERT_FALSE(mlvDngAsShotNeutralToWbGains(negativeNumerator, gains));
+
+    const int32_t squeezedScale[] = { 1, 1, 5, 3 };
+    uint32_t samplingX = 0;
+    uint32_t samplingY = 0;
+    ASSERT_TRUE(mlvDngDefaultScaleToSampling(squeezedScale,
+                                             &samplingX, &samplingY));
+    ASSERT_EQ(3u, samplingX);
+    ASSERT_EQ(5u, samplingY);
+    const int32_t equivalentScale[] = { 2, 3, 10, 9 };
+    ASSERT_TRUE(mlvDngDefaultScaleToSampling(equivalentScale,
+                                             &samplingX, &samplingY));
+    ASSERT_EQ(3u, samplingX);
+    ASSERT_EQ(5u, samplingY);
+    const int32_t unrepresentableScale[] = { 1, 1, 256, 1 };
+    ASSERT_FALSE(mlvDngDefaultScaleToSampling(unrepresentableScale,
+                                              &samplingX, &samplingY));
+
+    double kelvinMultipliers[3] = {};
+    get_kelvin_multipliers_rgb(5200.0, kelvinMultipliers);
+    const double kelvinNeutral[] = {
+        1.0 / kelvinMultipliers[0],
+        1.0 / kelvinMultipliers[1],
+        1.0 / kelvinMultipliers[2]
+    };
+    int fittedTemperature = 0;
+    int fittedTint = 999;
+    ASSERT_TRUE(processingWhiteBalanceControlsForAsShotNeutral(
+        kelvinNeutral, &fittedTemperature, &fittedTint));
+    ASSERT_EQ(5200, fittedTemperature);
+    ASSERT_EQ(0, fittedTint);
+    double tintedMultipliers[3] = {};
+    get_kelvin_multipliers_rgb(6500.0, tintedMultipliers);
+    const double effectiveTint = std::pow(0.4, 1.75) * 10.0;
+    tintedMultipliers[2] += effectiveTint / 11.0;
+    tintedMultipliers[0] += effectiveTint / 19.0;
+    const double tintedLowest = std::min(tintedMultipliers[0],
+        std::min(tintedMultipliers[1], tintedMultipliers[2]));
+    for (double & multiplier : tintedMultipliers) multiplier /= tintedLowest;
+    const double tintedNeutral[] = {
+        1.0 / tintedMultipliers[0],
+        1.0 / tintedMultipliers[1],
+        1.0 / tintedMultipliers[2]
+    };
+    ASSERT_TRUE(processingWhiteBalanceControlsForAsShotNeutral(
+        tintedNeutral, &fittedTemperature, &fittedTint));
+    ASSERT_EQ(6500, fittedTemperature);
+    ASSERT_EQ(40, fittedTint);
+    const double invalidNeutral[] = { 1.0, 0.0, 1.0 };
+    ASSERT_FALSE(processingWhiteBalanceControlsForAsShotNeutral(
+        invalidNeutral, &fittedTemperature, &fittedTint));
 }
 
 TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
@@ -412,8 +521,8 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
             bytes[offset + shift / 8] = static_cast<char>((value >> shift) & 0xffu);
     };
     auto makeDng = [&](bool withNeutral) {
-        const uint16_t entryCount = withNeutral ? 7u : 6u;
-        QByteArray bytes(224, '\0');
+        const uint16_t entryCount = withNeutral ? 13u : 12u;
+        QByteArray bytes(420, '\0');
         bytes[0] = 'I';
         bytes[1] = 'I';
         put16(bytes, 2, 42);
@@ -430,15 +539,21 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
         entry(0, tcImageWidth, ttLong, 1, 4);
         entry(1, tcImageLength, ttLong, 1, 4);
         entry(2, tcBitsPerSample, ttShort, 1, 14);
-        entry(3, tcStripOffsets, ttLong, 1, 192);
-        entry(4, tcStripByteCounts, ttLong, 1, 28);
-        entry(5, tcCFAPattern, ttByte, 4, 0x02010100u);
+        entry(3, tcCompression, ttShort, 1, DNG_READER_COMPRESSION_NONE);
+        entry(4, tcPhotometricInterpretation, ttShort, 1, 32803);
+        entry(5, tcStripOffsets, ttLong, 1, 384);
+        entry(6, tcSamplesPerPixel, ttShort, 1, 1);
+        entry(7, tcRowsPerStrip, ttShort, 1, 4);
+        entry(8, tcStripByteCounts, ttLong, 1, 28);
+        entry(9, tcPlanarConfiguration, ttShort, 1, 1);
+        entry(10, tcCFARepeatPatternDim, ttShort, 2, 0x00020002u);
+        entry(11, tcCFAPattern, ttByte, 4, 0x02010100u);
         if (withNeutral)
         {
-            entry(6, tcAsShotNeutral, ttRational, 3, 112);
-            put32(bytes, 112, 1); put32(bytes, 116, 1);
-            put32(bytes, 120, 1); put32(bytes, 124, 0);
-            put32(bytes, 128, 1); put32(bytes, 132, 1);
+            entry(12, tcAsShotNeutral, ttRational, 3, 256);
+            put32(bytes, 256, 1); put32(bytes, 260, 1);
+            put32(bytes, 264, 1); put32(bytes, 268, 0);
+            put32(bytes, 272, 1); put32(bytes, 276, 1);
         }
         return bytes;
     };
@@ -460,13 +575,37 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
     put16(missingBits, 10 + 2 * 12, 65000);
     ASSERT_NE(0, parseBytes("missing-bits.dng", missingBits, &parsed));
 
+    QByteArray missingCompression = valid;
+    put16(missingCompression, 10 + 3 * 12, 65000);
+    ASSERT_NE(0, parseBytes("missing-compression.dng", missingCompression, &parsed));
+
+    QByteArray duplicateCompression = valid;
+    put16(duplicateCompression, 10 + 4 * 12, tcCompression);
+    ASSERT_NE(0, parseBytes("duplicate-compression.dng", duplicateCompression, &parsed));
+
     QByteArray wrongBitsCount = valid;
     put32(wrongBitsCount, 10 + 2 * 12 + 4, 2);
     ASSERT_NE(0, parseBytes("wrong-bits-count.dng", wrongBitsCount, &parsed));
 
     QByteArray multipleStrips = valid;
-    put32(multipleStrips, 10 + 3 * 12 + 4, 2);
+    put32(multipleStrips, 10 + 5 * 12 + 4, 2);
     ASSERT_NE(0, parseBytes("multiple-strips.dng", multipleStrips, &parsed));
+
+    QByteArray wrongPhotometric = valid;
+    put32(wrongPhotometric, 10 + 4 * 12 + 8, 2);
+    ASSERT_NE(0, parseBytes("wrong-photometric.dng", wrongPhotometric, &parsed));
+
+    QByteArray wrongSamples = valid;
+    put32(wrongSamples, 10 + 6 * 12 + 8, 3);
+    ASSERT_NE(0, parseBytes("wrong-samples.dng", wrongSamples, &parsed));
+
+    QByteArray partialRows = valid;
+    put32(partialRows, 10 + 7 * 12 + 8, 2);
+    ASSERT_NE(0, parseBytes("partial-rows.dng", partialRows, &parsed));
+
+    QByteArray wrongRepeat = valid;
+    put32(wrongRepeat, 10 + 10 * 12 + 8, 0x00030002u);
+    ASSERT_NE(0, parseBytes("wrong-cfa-repeat.dng", wrongRepeat, &parsed));
 
     QByteArray invalidNeutral = makeDng(true);
     ASSERT_NE(0, parseBytes("zero-neutral-denominator.dng", invalidNeutral, &parsed));

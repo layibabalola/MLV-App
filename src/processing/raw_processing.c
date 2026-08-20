@@ -4785,6 +4785,70 @@ void processingSetSharpening(processingObject_t * processing, double sharpen)
     }
 }
 
+static void processing_wb_controls_to_multipliers(int kelvin, int receipt_tint,
+                                                  double multipliers[3])
+{
+    get_kelvin_multipliers_rgb((double)kelvin, multipliers);
+    double tint = (double)receipt_tint / 10.0;
+    const int negative = tint < 0.0;
+    if(negative) tint = -tint;
+    tint = pow(tint / 10.0, 1.75) * 10.0;
+    if(negative) tint = -tint;
+    multipliers[2] += tint / 11.0;
+    multipliers[0] += tint / 19.0;
+    const double lowest = MIN(MIN(multipliers[0], multipliers[1]), multipliers[2]);
+    if(lowest > 0.0)
+        for(int channel = 0; channel < 3; ++channel) multipliers[channel] /= lowest;
+}
+
+int processingWhiteBalanceControlsForAsShotNeutral(const double neutral[3],
+                                                    int * wbTemp,
+                                                    int * wbTint)
+{
+    if(!neutral || !wbTemp || !wbTint) return 0;
+    double target[3];
+    for(int channel = 0; channel < 3; ++channel)
+    {
+        if(!isfinite(neutral[channel]) || neutral[channel] <= 0.0) return 0;
+        target[channel] = 1.0 / neutral[channel];
+    }
+    const double target_lowest = MIN(MIN(target[0], target[1]), target[2]);
+    if(!isfinite(target_lowest) || target_lowest <= 0.0) return 0;
+    for(int channel = 0; channel < 3; ++channel) target[channel] /= target_lowest;
+
+    double best_error = DBL_MAX;
+    int best_temperature = 6000;
+    int best_tint = 0;
+    /* Ten-kelvin resolution matches the precision useful to the integer GUI
+     * receipt while keeping clip-open work bounded and deterministic. */
+    for(int temperature = 2000; temperature <= 10000; temperature += 10)
+    {
+        for(int tint = -100; tint <= 100; ++tint)
+        {
+            double candidate[3];
+            processing_wb_controls_to_multipliers(temperature, tint, candidate);
+            if(candidate[0] <= 0.0 || candidate[1] <= 0.0 || candidate[2] <= 0.0)
+                continue;
+            double error = 0.0;
+            for(int channel = 0; channel < 3; ++channel)
+            {
+                const double delta = log(candidate[channel] / target[channel]);
+                error += delta * delta;
+            }
+            if(error < best_error)
+            {
+                best_error = error;
+                best_temperature = temperature;
+                best_tint = tint;
+            }
+        }
+    }
+    if(!isfinite(best_error)) return 0;
+    *wbTemp = best_temperature;
+    *wbTint = best_tint;
+    return 1;
+}
+
 /* Set white balance by kelvin + tint value */
 void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin, double WBTint)
 {

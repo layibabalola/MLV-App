@@ -2901,11 +2901,15 @@ int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
 
     const size_t pixels = (size_t)width * (size_t)height;
     if(pixels == 0 || pixels > (size_t)INT_MAX / 3u
-       || pixels > SIZE_MAX / (size_t)bits_per_sample
-       || ((pixels * (size_t)bits_per_sample) & 15u) != 0)
+       || pixels > SIZE_MAX / (size_t)bits_per_sample)
         return 0;
     *pixel_count = pixels;
     return 1;
+}
+
+int mlvDngCfaPatternIsSupported(uint32_t cfa_pattern)
+{
+    return cfa_pattern == UINT32_C(0x02010100); /* RGGB */
 }
 
 int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3])
@@ -2916,10 +2920,48 @@ int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3])
         const int32_t numerator = neutral[channel * 2];
         const int32_t denominator = neutral[channel * 2 + 1];
         if(numerator <= 0 || denominator <= 0) return 0;
-        const double gain = ((double)denominator / (double)numerator) * 1024.0;
+        /* MLV's custom WBAL stores the DNG AsShotNeutral ratios directly:
+         * the repo's DNG writer emits wbgain_{r,g,b}/wbgain_g and the mcraw
+         * importer uses the same convention.  Inverting here would swap the
+         * red/blue correction on a write -> folder-open round trip. */
+        const double gain = ((double)numerator / (double)denominator) * 1024.0;
         if(!isfinite(gain) || gain < 1.0 || gain > (double)UINT32_MAX) return 0;
         gains[channel] = (uint32_t)gain;
     }
+    return 1;
+}
+
+static uint64_t mlvGcdU64(uint64_t a, uint64_t b)
+{
+    while(b != 0u)
+    {
+        const uint64_t next = a % b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+int mlvDngDefaultScaleToSampling(const int32_t scale[4],
+                                 uint32_t * sampling_x,
+                                 uint32_t * sampling_y)
+{
+    if(!scale || !sampling_x || !sampling_y
+       || scale[0] <= 0 || scale[1] <= 0
+       || scale[2] <= 0 || scale[3] <= 0)
+        return 0;
+
+    /* Pixel aspect is Y-scale / X-scale. The writer emits X=1 and
+     * Y=(sampling_y/sampling_x), but handle any positive canonical pair. */
+    uint64_t y = (uint64_t)(uint32_t)scale[2] * (uint64_t)(uint32_t)scale[1];
+    uint64_t x = (uint64_t)(uint32_t)scale[3] * (uint64_t)(uint32_t)scale[0];
+    const uint64_t divisor = mlvGcdU64(x, y);
+    if(divisor == 0u) return 0;
+    x /= divisor;
+    y /= divisor;
+    if(x == 0u || y == 0u || x > UINT8_MAX || y > UINT8_MAX) return 0;
+    *sampling_x = (uint32_t)x;
+    *sampling_y = (uint32_t)y;
     return 1;
 }
 
@@ -2931,10 +2973,6 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
     int height = video->RAWI.yRes;
     size_t packed_frame_size = 0;
     size_t raw_frame_capacity = 0;
-    if(!mlvRawFrameInputCapacity(width, height, bitdepth, 0,
-                                 &packed_frame_size, &raw_frame_capacity))
-        return 1;
-    const int pixels_count = width * height;
 
     /* CinemaDNG folder source: there is no MLV/mcraw file[chunk] container.
      * Each frame is its own .dng file. Decode the requested frame's bayer
@@ -2982,6 +3020,11 @@ static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, 
         }
         return 0;
     }
+
+    if(!mlvRawFrameInputCapacity(width, height, bitdepth, 0,
+                                 &packed_frame_size, &raw_frame_capacity))
+        return 1;
+    const int pixels_count = width * height;
 
     int chunk = video->video_index[frameIndex].chunk_num;
     uint32_t frame_size = video->video_index[frameIndex].frame_size;
@@ -9129,6 +9172,23 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         snprintf(error_message, 256, "Unsupported CinemaDNG geometry in folder:  %.190s", video->path);
         return MLV_ERR_INVALID;
     }
+    if (!mlvDngCfaPatternIsSupported(fi->cfa_pattern))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported CinemaDNG CFA pattern in folder:  %.187s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    if (fi->compression == DNG_READER_COMPRESSION_NONE
+        && ((dng_pixels * (size_t)fi->bits_per_sample) & 15u) != 0)
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported packed CinemaDNG geometry in folder:  %.183s", video->path);
+        return MLV_ERR_INVALID;
+    }
     const uint32_t sample_max = fi->bits_per_sample == 16
         ? UINT16_MAX : ((UINT32_C(1) << fi->bits_per_sample) - 1u);
     const uint32_t effective_white = fi->white_level > 0
@@ -9142,6 +9202,29 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         free(seq);
         video->dng_sequence = NULL;
         snprintf(error_message, 256, "Invalid CinemaDNG sample range in folder:  %.188s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    uint32_t dng_wb_gains[3] = { 1024, 1024, 1024 };
+    if (fi->has_as_shot_neutral
+        && !mlvDngAsShotNeutralToWbGains(fi->as_shot_neutral, dng_wb_gains))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Invalid CinemaDNG white balance in folder:  %.188s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    uint32_t dng_sampling_x = 1u;
+    uint32_t dng_sampling_y = 1u;
+    if (fi->has_default_scale
+        && !mlvDngDefaultScaleToSampling(fi->default_scale,
+                                         &dng_sampling_x,
+                                         &dng_sampling_y))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Unsupported CinemaDNG pixel aspect in folder:  %.185s", video->path);
         return MLV_ERR_INVALID;
     }
 
@@ -9195,6 +9278,15 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->RAWI.raw_info.exposure_bias[0] = 0;
     video->RAWI.raw_info.exposure_bias[1] = 0;
 
+    /* Preserve DefaultScale through the source-of-truth RAWC aspect path used
+     * by every playback/export/present route. */
+    memcpy(&video->RAWC.blockType, "RAWC", 4);
+    video->RAWC.blockSize = sizeof(mlv_rawc_hdr_t);
+    video->RAWC.binning_x = (uint8_t)dng_sampling_x;
+    video->RAWC.binning_y = (uint8_t)dng_sampling_y;
+    video->RAWC.skipping_x = 0;
+    video->RAWC.skipping_y = 0;
+
     /* Active area: use the DNG tag if present, else full frame. */
     if (fi->active_area[0] >= 0 && fi->active_area[1] >= 0
         && fi->active_area[2] > fi->active_area[0]
@@ -9238,32 +9330,23 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->MLVI.blockSize        = sizeof(mlv_file_hdr_t);
     video->MLVI.videoClass       = MLV_VIDEO_CLASS_RAW | MLV_VIDEO_CLASS_FLAG_DNGSEQ;
     video->MLVI.videoFrameCount  = frame_count;
-    /* Default to 24 fps; CinemaDNG does not reliably carry a clip frame rate
-     * in a single frame's IFD (FrameRate tag is optional). */
-    video->MLVI.sourceFpsNom     = 24;
-    video->MLVI.sourceFpsDenom   = 1;
+    video->MLVI.sourceFpsNom     = fi->has_frame_rate
+        ? (uint32_t)fi->frame_rate[0] : 24u;
+    video->MLVI.sourceFpsDenom   = fi->has_frame_rate
+        ? (uint32_t)fi->frame_rate[1] : 1u;
     video->MLVI.audioClass       = 0;
     video->MLVI.audioFrameCount  = 0;
 
-    /* White balance: from AsShotNeutral when present (gains are 1/neutral,
-     * scaled by 1024 like the mcraw path). */
+    /* White balance: preserve the repository's AsShotNeutral/WBAL round-trip
+     * convention, scaled by 1024 just like the mcraw import path. */
     memcpy(&video->WBAL.blockType, "WBAL", 4);
     video->WBAL.blockSize        = sizeof(mlv_wbal_hdr_t);
     video->WBAL.wb_mode          = 6;     // CUSTOM
     video->WBAL.timestamp        = 0;
     video->WBAL.kelvin           = 0;
-    if (fi->has_as_shot_neutral)
-    {
-        uint32_t gains[3] = { 0, 0, 0 };
-        if (!mlvDngAsShotNeutralToWbGains(fi->as_shot_neutral, gains))
-        {
-            snprintf(error_message, 256, "Invalid CinemaDNG white balance in folder:  %.188s", video->path);
-            return MLV_ERR_INVALID;
-        }
-        video->WBAL.wbgain_r = gains[0];
-        video->WBAL.wbgain_g = gains[1];
-        video->WBAL.wbgain_b = gains[2];
-    }
+    video->WBAL.wbgain_r         = dng_wb_gains[0];
+    video->WBAL.wbgain_g         = dng_wb_gains[1];
+    video->WBAL.wbgain_b         = dng_wb_gains[2];
 
     memcpy(&video->IDNT.blockType, "IDNT", 4);
     video->IDNT.blockSize        = sizeof(mlv_idnt_hdr_t);
@@ -9271,7 +9354,7 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
 
     memcpy(&video->EXPO.blockType, "EXPO", 4);
     video->EXPO.blockSize        = sizeof(mlv_expo_hdr_t);
-    video->EXPO.isoValue         = fi->iso ? fi->iso : 100;
+    video->EXPO.isoValue         = fi->has_iso ? fi->iso : 100;
     video->EXPO.shutterValue     = 1;     /* unknown; non-zero to avoid div-by-zero in UI */
 
     /* Save original levels for reset. */

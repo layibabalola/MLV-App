@@ -16,6 +16,7 @@
 
 #include "dng_tag_codes.h"
 #include "dng_tag_types.h"
+#include "dng_tag_values.h"
 #include "dng.h"   /* dng_decompress_image() */
 
 /* ------------------------------------------------------------------ */
@@ -107,6 +108,33 @@ static int positive_rationals(const int32_t * values, uint32_t nrats)
     return 1;
 }
 
+static int parse_exif_iso(const uint8_t * buf, size_t buf_size,
+                          uint32_t ifd_offset, dng_frame_info_t * out)
+{
+    if(!buf || !out || !dng_reader_range_fits(ifd_offset, 2u, buf_size)) return 1;
+    const uint16_t nentries = rd_u16(buf + ifd_offset);
+    const uint64_t table_bytes = 2u + (uint64_t)nentries * 12u + 4u;
+    if(!dng_reader_range_fits(ifd_offset, table_bytes, buf_size)) return 1;
+
+    for(uint16_t i = 0; i < nentries; ++i)
+    {
+        const uint8_t * ep = buf + ifd_offset + 2u + (size_t)i * 12u;
+        dng_ifd_entry_t e;
+        e.tag = rd_u16(ep);
+        e.type = rd_u16(ep + 2);
+        e.count = rd_u32(ep + 4);
+        e.value = rd_u32(ep + 8);
+        if(e.tag != tcISOSpeedRatings) continue;
+        if(out->has_iso) return 1;
+        if(!exact_contract(&e, ttShort, 1u)) return 1;
+        const uint32_t iso = entry_scalar_u32(&e);
+        if(iso == 0u || iso > UINT16_MAX) return 1;
+        out->iso = (int32_t)iso;
+        out->has_iso = 1;
+    }
+    return 0;
+}
+
 int dng_reader_range_fits(uint64_t offset, uint64_t length, size_t extent_size)
 {
     const uint64_t extent = (uint64_t)extent_size;
@@ -147,13 +175,18 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
 
     uint16_t nentries = rd_u16(buf + ifd0_off);
     /* sanity: each entry is 12 bytes; entry table must fit in what we read */
-    if(!dng_reader_range_fits(ifd0_off, 2u + (uint64_t)nentries * 12u, got)) {
+    if(!dng_reader_range_fits(ifd0_off, 2u + (uint64_t)nentries * 12u + 4u, got)) {
         free(buf);
         return 1;
     }
 
-    int have_w = 0, have_h = 0, have_bps = 0;
+    int have_w = 0, have_h = 0, have_bps = 0, have_compression = 0;
     int have_strip_offset = 0, have_strip_count = 0, have_cfa = 0;
+    int have_photometric = 0, have_samples = 0, have_rows = 0;
+    int have_planar = 0, have_cfa_repeat = 0;
+    int have_black = 0, have_white = 0, have_active = 0;
+    int have_exif_ifd = 0;
+    uint32_t exif_ifd_offset = 0;
     out->compression = DNG_READER_COMPRESSION_NONE;
 
     for(uint16_t i = 0; i < nentries; i++)
@@ -175,13 +208,16 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
         switch(e.tag)
         {
             case tcImageWidth:
+                if(have_w) { free(buf); return 1; }
                 if(!scalar_u32_contract(&e)) { free(buf); return 1; }
                 out->width = entry_scalar_u32(&e); have_w = 1; break;
             case tcImageLength:
+                if(have_h) { free(buf); return 1; }
                 if(!scalar_u32_contract(&e)) { free(buf); return 1; }
                 out->height = entry_scalar_u32(&e); have_h = 1; break;
             case tcBitsPerSample:
             {
+                if(have_bps) { free(buf); return 1; }
                 if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
                 const uint32_t value = entry_scalar_u32(&e);
                 if(value == 0u || value > 16u) { free(buf); return 1; }
@@ -191,22 +227,50 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
             }
             case tcCompression:
             {
+                if(have_compression) { free(buf); return 1; }
                 if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
                 const uint32_t value = entry_scalar_u32(&e);
                 if(value > UINT16_MAX) { free(buf); return 1; }
                 out->compression = (uint16_t)value;
+                have_compression = 1;
                 break;
             }
+            case tcPhotometricInterpretation:
+                if(have_photometric) { free(buf); return 1; }
+                if(!exact_contract(&e, ttShort, 1u)
+                   || entry_scalar_u32(&e) != piCFA) { free(buf); return 1; }
+                have_photometric = 1;
+                break;
+            case tcSamplesPerPixel:
+                if(have_samples) { free(buf); return 1; }
+                if(!exact_contract(&e, ttShort, 1u)
+                   || entry_scalar_u32(&e) != 1u) { free(buf); return 1; }
+                have_samples = 1;
+                break;
+            case tcRowsPerStrip:
+                if(have_rows) { free(buf); return 1; }
+                if(!scalar_u32_contract(&e)) { free(buf); return 1; }
+                out->rows_per_strip = entry_scalar_u32(&e);
+                have_rows = 1;
+                break;
+            case tcPlanarConfiguration:
+                if(have_planar) { free(buf); return 1; }
+                if(!exact_contract(&e, ttShort, 1u)
+                   || entry_scalar_u32(&e) != pcInterleaved) { free(buf); return 1; }
+                have_planar = 1;
+                break;
             case tcStripOffsets:
+                if(have_strip_offset) { free(buf); return 1; }
                 if(!exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
                 out->strip_offset = entry_scalar_u32(&e); have_strip_offset = 1; break;
             case tcStripByteCounts:
+                if(have_strip_count) { free(buf); return 1; }
                 if(!exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
                 out->strip_byte_count = entry_scalar_u32(&e); have_strip_count = 1; break;
 
             case tcCFAPattern:
                 /* ttByte count4: 4 bytes give 2x2 mosaic order. Stored inline. */
-                if(!exact_contract(&e, ttByte, 4u)
+                if(have_cfa || !exact_contract(&e, ttByte, 4u)
                    || !dng_reader_range_fits(data_off, 4u, got))
                 { free(buf); return 1; }
                 {
@@ -220,46 +284,55 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 }
                 break;
 
+            case tcCFARepeatPatternDim:
+                if(have_cfa_repeat || !exact_contract(&e, ttShort, 2u)
+                   || e.value != UINT32_C(0x00020002)) { free(buf); return 1; }
+                have_cfa_repeat = 1;
+                break;
+
             case tcBlackLevel:
+                if(have_black) { free(buf); return 1; }
                 if(!scalar_u32_contract(&e)) { free(buf); return 1; }
-                out->black_level = (int32_t)entry_scalar_u32(&e); break;
+                out->black_level = (int32_t)entry_scalar_u32(&e); have_black = 1; break;
             case tcWhiteLevel:
+                if(have_white) { free(buf); return 1; }
                 if(!scalar_u32_contract(&e)) { free(buf); return 1; }
-                out->white_level = (int32_t)entry_scalar_u32(&e); break;
+                out->white_level = (int32_t)entry_scalar_u32(&e); have_white = 1; break;
 
             case tcActiveArea:
-                if(!exact_contract(&e, ttLong, 4u)
+                if(have_active || !exact_contract(&e, ttLong, 4u)
                    || !dng_reader_range_fits(data_off, 16u, got))
                 { free(buf); return 1; }
                 {
                     for(int k = 0; k < 4; k++)
                         out->active_area[k] = (int32_t)rd_u32(buf + data_off + k * 4);
                 }
+                have_active = 1;
                 break;
 
             case tcColorMatrix1:
-                if(!exact_contract(&e, ttSRational, 9u)
+                if(out->has_color_matrix1 || !exact_contract(&e, ttSRational, 9u)
                    || read_rationals(buf, got, data_off, 9, out->color_matrix1)
                    || !rational_denominators_nonzero(out->color_matrix1, 9u))
                 { free(buf); return 1; }
                 out->has_color_matrix1 = 1;
                 break;
             case tcColorMatrix2:
-                if(!exact_contract(&e, ttSRational, 9u)
+                if(out->has_color_matrix2 || !exact_contract(&e, ttSRational, 9u)
                    || read_rationals(buf, got, data_off, 9, out->color_matrix2)
                    || !rational_denominators_nonzero(out->color_matrix2, 9u))
                 { free(buf); return 1; }
                 out->has_color_matrix2 = 1;
                 break;
             case tcForwardMatrix1:
-                if(!exact_contract(&e, ttSRational, 9u)
+                if(out->has_forward_matrix1 || !exact_contract(&e, ttSRational, 9u)
                    || read_rationals(buf, got, data_off, 9, out->forward_matrix1)
                    || !rational_denominators_nonzero(out->forward_matrix1, 9u))
                 { free(buf); return 1; }
                 out->has_forward_matrix1 = 1;
                 break;
             case tcForwardMatrix2:
-                if(!exact_contract(&e, ttSRational, 9u)
+                if(out->has_forward_matrix2 || !exact_contract(&e, ttSRational, 9u)
                    || read_rationals(buf, got, data_off, 9, out->forward_matrix2)
                    || !rational_denominators_nonzero(out->forward_matrix2, 9u))
                 { free(buf); return 1; }
@@ -267,17 +340,40 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 break;
 
             case tcAsShotNeutral:
-                if(!exact_contract(&e, ttRational, 3u)
+                if(out->has_as_shot_neutral || !exact_contract(&e, ttRational, 3u)
                    || read_rationals(buf, got, data_off, 3, out->as_shot_neutral)
                    || !positive_rationals(out->as_shot_neutral, 3u))
                 { free(buf); return 1; }
                 out->has_as_shot_neutral = 1;
                 break;
 
-            case tcISOSpeedRatings:
-                if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
-                out->iso = (int32_t)entry_scalar_u32(&e);
+            case tcDefaultScale:
+                if(out->has_default_scale || !exact_contract(&e, ttRational, 2u)
+                   || read_rationals(buf, got, data_off, 2, out->default_scale)
+                   || !positive_rationals(out->default_scale, 2u))
+                { free(buf); return 1; }
+                out->has_default_scale = 1;
                 break;
+
+            case tcFrameRate:
+                if(out->has_frame_rate || !exact_contract(&e, ttSRational, 1u)
+                   || read_rationals(buf, got, data_off, 1, out->frame_rate)
+                   || !positive_rationals(out->frame_rate, 1u))
+                { free(buf); return 1; }
+                out->has_frame_rate = 1;
+                break;
+
+            case tcExifIFD:
+                if(have_exif_ifd || !exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
+                exif_ifd_offset = entry_scalar_u32(&e);
+                if(exif_ifd_offset == 0u) { free(buf); return 1; }
+                have_exif_ifd = 1;
+                break;
+
+            case tcISOSpeedRatings:
+                /* ISO belongs in the nested EXIF IFD. Reject an ambiguous
+                 * duplicate in IFD0 rather than silently preferring one. */
+                free(buf); return 1;
 
             case tcUniqueCameraModel:
             case tcModel:
@@ -300,10 +396,15 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
         }
     }
 
+    if(have_exif_ifd && parse_exif_iso(buf, got, exif_ifd_offset, out) != 0)
+    { free(buf); return 1; }
     free(buf);
 
-    if(!have_w || !have_h || !have_bps || !have_strip_offset || !have_strip_count
-       || !have_cfa || out->width == 0 || out->height == 0) return 1;
+    if(!have_w || !have_h || !have_bps || !have_compression
+       || !have_strip_offset || !have_strip_count || !have_cfa
+       || !have_photometric || !have_samples || !have_rows || !have_planar
+       || !have_cfa_repeat || out->width == 0 || out->height == 0) return 1;
+    if(out->rows_per_strip != out->height) return 1;
     if(out->strip_offset == 0 || out->strip_byte_count == 0) return 1;
     if(out->compression != DNG_READER_COMPRESSION_NONE &&
        out->compression != DNG_READER_COMPRESSION_LJ92) return 1;
@@ -350,20 +451,9 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
      *       writer instead of re-deriving the rotate math by hand. */
     const size_t bytes_16bit = pixels * sizeof(uint16_t);
 
-    /* Recover bits-per-sample when the BitsPerSample(258) tag is absent or zero
-     * (some writer paths fill the IFD before the per-frame bit depth is known
-     * and emit 0). The packed strip size unambiguously encodes the real bit
-     * depth: bpp = strip_byte_count * 8 / pixels. Without this, bpp==0 makes the
-     * unpack mask 0 and every output pixel becomes zero (the all-zeros bug). */
-    if((bpp == 0 || bpp > 16) && strip_size < bytes_16bit)
+    if(bpp == 16u)
     {
-        if(strip_size > (size_t)(UINT64_MAX / 8u)) return 1;
-        uint32_t derived = (uint32_t)((uint64_t)strip_size * 8u / pixels);
-        if(derived >= 8 && derived <= 16) bpp = derived;
-    }
-
-    if(strip_size >= bytes_16bit && (bpp == 0 || bpp >= 16))
-    {
+        if(strip_size != bytes_16bit) return 1;
         /* (a) 16-bit pass-through: byte-swap each sample. */
         const uint8_t * src = strip;
         for(size_t i = 0; i < pixels; i++)
@@ -371,17 +461,15 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
         return 0;
     }
 
-    if(bpp == 0 || bpp > 16) return 1; /* cannot determine packing */
-
     /* (b) bit-packed. Byte-swap each 16-bit word from the DNG's big-endian
      * layout back to little-endian, then delegate to the proven inverse of the
      * writer (dng_unpack_image_bits). The +2 word tail guards the 32-bit fetch
      * dng_unpack_image_bits performs on the final word. */
-    if(pixels > (SIZE_MAX - 7u) / (size_t)bpp) return 1;
+    if(bpp == 0 || bpp > 15 || pixels > (SIZE_MAX - 7u) / (size_t)bpp) return 1;
     const size_t packed_bits = pixels * (size_t)bpp;
     if((packed_bits & 15u) != 0) return 1;
     const size_t packed_bytes = packed_bits / 8u;
-    if(strip_size < packed_bytes) return 1;
+    if(strip_size != packed_bytes) return 1;
 
     if(packed_bytes > SIZE_MAX - 1u) return 1;
     const size_t payload_words = (packed_bytes + 1u) / 2u;
@@ -422,14 +510,47 @@ int dng_reader_processing_metadata_matches(const dng_frame_info_t * expected,
                                            const dng_frame_info_t * candidate)
 {
     if(!expected || !candidate || !expected->valid || !candidate->valid) return 0;
-    return candidate->width == expected->width
-        && candidate->height == expected->height
-        && candidate->bits_per_sample == expected->bits_per_sample
-        && candidate->cfa_pattern == expected->cfa_pattern
-        && candidate->black_level == expected->black_level
-        && candidate->white_level == expected->white_level
-        && memcmp(candidate->active_area, expected->active_area,
-                  sizeof(expected->active_area)) == 0;
+    if(candidate->width != expected->width
+        || candidate->height != expected->height
+        || candidate->bits_per_sample != expected->bits_per_sample
+        || candidate->cfa_pattern != expected->cfa_pattern
+        || candidate->black_level != expected->black_level
+        || candidate->white_level != expected->white_level
+        || candidate->has_color_matrix1 != expected->has_color_matrix1
+        || candidate->has_color_matrix2 != expected->has_color_matrix2
+        || candidate->has_forward_matrix1 != expected->has_forward_matrix1
+        || candidate->has_forward_matrix2 != expected->has_forward_matrix2
+        || candidate->has_as_shot_neutral != expected->has_as_shot_neutral
+        || candidate->has_default_scale != expected->has_default_scale
+        || candidate->has_frame_rate != expected->has_frame_rate
+        || candidate->has_iso != expected->has_iso
+        || candidate->iso != expected->iso
+        || strcmp(candidate->camera_model, expected->camera_model) != 0
+        || memcmp(candidate->active_area, expected->active_area,
+                  sizeof(expected->active_area)) != 0)
+        return 0;
+
+    return (!expected->has_color_matrix1
+            || memcmp(candidate->color_matrix1, expected->color_matrix1,
+                      sizeof(expected->color_matrix1)) == 0)
+        && (!expected->has_color_matrix2
+            || memcmp(candidate->color_matrix2, expected->color_matrix2,
+                      sizeof(expected->color_matrix2)) == 0)
+        && (!expected->has_forward_matrix1
+            || memcmp(candidate->forward_matrix1, expected->forward_matrix1,
+                      sizeof(expected->forward_matrix1)) == 0)
+        && (!expected->has_forward_matrix2
+            || memcmp(candidate->forward_matrix2, expected->forward_matrix2,
+                      sizeof(expected->forward_matrix2)) == 0)
+        && (!expected->has_as_shot_neutral
+            || memcmp(candidate->as_shot_neutral, expected->as_shot_neutral,
+                      sizeof(expected->as_shot_neutral)) == 0)
+        && (!expected->has_default_scale
+            || memcmp(candidate->default_scale, expected->default_scale,
+                      sizeof(expected->default_scale)) == 0)
+        && (!expected->has_frame_rate
+            || memcmp(candidate->frame_rate, expected->frame_rate,
+                      sizeof(expected->frame_rate)) == 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -559,6 +680,7 @@ int dng_sequence_open(const char * dirPath, dng_sequence_t * seq)
 
     char ** paths = NULL;
     uint32_t count = 0, cap = 0;
+    int enumeration_failed = 0;
 
 #if defined(_WIN32)
     {
@@ -574,13 +696,18 @@ int dng_sequence_open(const char * dirPath, dng_sequence_t * seq)
             if(!has_dng_ext(fd.name)) continue;
             if(count >= cap)
             {
-                uint32_t ncap = cap ? cap * 2 : 64;
-                char ** np = (char **)realloc(paths, ncap * sizeof(char *));
-                if(!np) break;
+                if(cap > UINT32_MAX / 2u) { enumeration_failed = 1; break; }
+                uint32_t ncap = cap ? cap * 2u : 64u;
+#if UINTPTR_MAX <= UINT32_MAX
+                if(ncap > SIZE_MAX / sizeof(char *)) { enumeration_failed = 1; break; }
+#endif
+                char ** np = (char **)realloc(paths, (size_t)ncap * sizeof(char *));
+                if(!np) { enumeration_failed = 1; break; }
                 paths = np; cap = ncap;
             }
             char * p = join_path(dirPath, fd.name);
-            if(p) paths[count++] = p;
+            if(!p) { enumeration_failed = 1; break; }
+            paths[count++] = p;
         } while(_findnext(h, &fd) == 0);
         _findclose(h);
     }
@@ -594,20 +721,26 @@ int dng_sequence_open(const char * dirPath, dng_sequence_t * seq)
             if(!has_dng_ext(de->d_name)) continue;
             if(count >= cap)
             {
-                uint32_t ncap = cap ? cap * 2 : 64;
-                char ** np = (char **)realloc(paths, ncap * sizeof(char *));
-                if(!np) break;
+                if(cap > UINT32_MAX / 2u) { enumeration_failed = 1; break; }
+                uint32_t ncap = cap ? cap * 2u : 64u;
+#if UINTPTR_MAX <= UINT32_MAX
+                if(ncap > SIZE_MAX / sizeof(char *)) { enumeration_failed = 1; break; }
+#endif
+                char ** np = (char **)realloc(paths, (size_t)ncap * sizeof(char *));
+                if(!np) { enumeration_failed = 1; break; }
                 paths = np; cap = ncap;
             }
             char * p = join_path(dirPath, de->d_name);
-            if(p) paths[count++] = p;
+            if(!p) { enumeration_failed = 1; break; }
+            paths[count++] = p;
         }
         closedir(d);
     }
 #endif
 
-    if(count == 0)
+    if(enumeration_failed || count == 0)
     {
+        for(uint32_t i = 0; i < count; ++i) free(paths[i]);
         free(paths);
         return 1;
     }

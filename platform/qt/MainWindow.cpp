@@ -28924,9 +28924,32 @@ void MainWindow::setWhiteBalanceFromMlv(ReceiptSettings *sliders)
     switch( getMlvWbMode( m_pMlvObject ) )
     {
     case 0: //Auto - use default
-    case 6: //Custom - use default
         sliders->setTemperature( 6000 );
+        sliders->setTint( 0 );
         break;
+    case 6: //Custom - fit the retained neutral to receipt controls
+    {
+        const double neutral[3] = {
+            static_cast<double>( getMlvWbRgain( m_pMlvObject ) ) / 1024.0,
+            static_cast<double>( getMlvWbGgain( m_pMlvObject ) ) / 1024.0,
+            static_cast<double>( getMlvWbBgain( m_pMlvObject ) ) / 1024.0
+        };
+        int temperature = 6000;
+        int tint = 0;
+        if( processingWhiteBalanceControlsForAsShotNeutral( neutral,
+                                                            &temperature,
+                                                            &tint ) )
+        {
+            sliders->setTemperature( temperature );
+            sliders->setTint( tint );
+        }
+        else
+        {
+            sliders->setTemperature( 6000 );
+            sliders->setTint( 0 );
+        }
+        break;
+    }
     case 1: //Sunny
         sliders->setTemperature( 5200 );
         break;

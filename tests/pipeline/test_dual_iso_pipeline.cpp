@@ -1102,7 +1102,7 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
         fixture.video()->llrawproc->dng_white_level = 0;
         pthread_mutex_unlock(&fixture.video()->llrawproc_mutex);
 
-        int32_t par[4] = { 1, 1, 1, 1 };
+        int32_t par[4] = { 1, 1, 5, 3 };
         dngObject_t * dng = initDngObject(fixture.video(), raw_state, 1.0, par);
         ASSERT_TRUE(dng != nullptr);
         QByteArray dng_path_bytes = dng_path.toLocal8Bit();
@@ -1121,6 +1121,17 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
         ASSERT_EQ(expected_bpp, info.bits_per_sample);
         ASSERT_EQ(static_cast<uint32_t>(fixture.width()), info.width);
         ASSERT_EQ(static_cast<uint32_t>(fixture.height()), info.height);
+        ASSERT_TRUE(info.has_default_scale);
+        ASSERT_EQ(1, info.default_scale[0]);
+        ASSERT_EQ(1, info.default_scale[1]);
+        ASSERT_EQ(5, info.default_scale[2]);
+        ASSERT_EQ(3, info.default_scale[3]);
+        ASSERT_TRUE(info.has_frame_rate);
+        ASSERT_EQ(1000, info.frame_rate[0]);
+        ASSERT_EQ(1000, info.frame_rate[1]);
+        ASSERT_TRUE(info.has_iso);
+        ASSERT_EQ(static_cast<int32_t>(getMlvIso(fixture.video())), info.iso);
+        ASSERT_TRUE(info.has_as_shot_neutral);
         decoded_frames.push_back(std::move(decoded));
     }
 
@@ -1129,6 +1140,64 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     for (std::size_t i = 0; i < decoded_frames[0].size(); ++i) {
         ASSERT_EQ(decoded_frames[0][i], decoded_frames[1][i]);
     }
+
+    /* Exercise the real writer -> folder reader -> mlvObject contract, not a
+     * same-codepath TIFF proxy. Both frames carry identical metadata while
+     * using different compression encodings. */
+    QByteArray folder_path = temp_dir.path().toLocal8Bit();
+    int open_error = MLV_ERR_NONE;
+    char open_message[256] = {};
+    mlvObject_t * reopened = initMlvObjectWithDngFolder(
+        folder_path.data(), MLV_OPEN_FULL, &open_error, open_message);
+    ASSERT_TRUE(reopened != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_error);
+    ASSERT_EQ(2u, reopened->frames);
+    ASSERT_EQ(1000u, reopened->MLVI.sourceFpsNom);
+    ASSERT_EQ(1000u, reopened->MLVI.sourceFpsDenom);
+    ASSERT_EQ(getMlvIso(fixture.video()), getMlvIso(reopened));
+    ASSERT_TRUE(std::fabs(getMlvAspectRatio(reopened) - (5.0f / 3.0f)) < 0.0001f);
+    ASSERT_EQ(6u, getMlvWbMode(reopened));
+    freeMlvObject(reopened);
+
+    /* A later frame may not silently replace calibration inherited from frame
+     * zero. Corrupt only the second frame's retained AsShotNeutral numerator
+     * and prove lazy frame decode rejects it before touching output pixels. */
+    const QString drift_path = temp_dir.filePath(QStringLiteral("uncompressed.dng"));
+    QByteArray drift_bytes = read_all_bytes(drift_path);
+    uint16_t neutral_type = 0;
+    uint32_t neutral_count = 0;
+    uint32_t neutral_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(drift_bytes, 50728,
+                                    &neutral_type, &neutral_count,
+                                    &neutral_offset));
+    ASSERT_EQ(5, neutral_type);
+    ASSERT_EQ(3u, neutral_count);
+    ASSERT_TRUE(neutral_offset + 24u <= static_cast<uint32_t>(drift_bytes.size()));
+    const uint32_t original_red = dng_u32(drift_bytes, static_cast<int>(neutral_offset));
+    const uint32_t changed_red = original_red == UINT32_MAX
+        ? original_red - 1u : original_red + 1u;
+    for (int shift = 0; shift < 32; shift += 8)
+        drift_bytes[static_cast<int>(neutral_offset) + shift / 8] =
+            static_cast<char>((changed_red >> shift) & 0xffu);
+    QFile drift_file(drift_path);
+    ASSERT_TRUE(drift_file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    ASSERT_EQ(drift_bytes.size(), drift_file.write(drift_bytes));
+    drift_file.close();
+
+    dng_sequence_t drift_sequence{};
+    ASSERT_EQ(0, dng_sequence_open(folder_path.constData(), &drift_sequence));
+    uint32_t drift_index = UINT32_MAX;
+    for (uint32_t i = 0; i < drift_sequence.count; ++i)
+        if (QString::fromLocal8Bit(drift_sequence.paths[i]).endsWith(
+                QStringLiteral("uncompressed.dng"))) drift_index = i;
+    ASSERT_NE(UINT32_MAX, drift_index);
+    std::vector<uint16_t> rejected_frame(
+        static_cast<std::size_t>(drift_sequence.info.width)
+        * static_cast<std::size_t>(drift_sequence.info.height));
+    ASSERT_NE(0, dng_sequence_get_bayer16(&drift_sequence,
+                                          drift_index,
+                                          rejected_frame.data()));
+    dng_sequence_free(&drift_sequence);
 }
 
 TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)

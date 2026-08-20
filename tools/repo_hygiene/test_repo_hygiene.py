@@ -259,6 +259,9 @@ class RepoHygieneTests(unittest.TestCase):
         video_mlv = (ROOT / "src" / "mlv" / "video_mlv.c").read_text(
             encoding="utf-8"
         )
+        main_window = (ROOT / "platform" / "qt" / "MainWindow.cpp").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('#include <inttypes.h>', blender)
         self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
@@ -355,12 +358,35 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("mlvDngSequenceGeometryIsRepresentable", video_mlv)
         self.assertIn("pixels > (size_t)INT_MAX / 3u", video_mlv)
         self.assertIn("mlvDngAsShotNeutralToWbGains", video_mlv)
+        self.assertIn("mlvDngCfaPatternIsSupported", video_mlv)
+        self.assertIn("fi->compression == DNG_READER_COMPRESSION_NONE", video_mlv)
+        self.assertIn("uint32_t dng_wb_gains[3] = { 1024, 1024, 1024 }", video_mlv)
+        self.assertIn("mlvDngDefaultScaleToSampling", video_mlv)
+        self.assertIn("video->MLVI.sourceFpsNom     = fi->has_frame_rate", video_mlv)
+        self.assertIn("video->EXPO.isoValue         = fi->has_iso", video_mlv)
         self.assertIn("FILE ** dng_files", video_mlv)
         self.assertIn("video->file = dng_files", video_mlv)
         self.assertIn("snprintf(error_message, 256", video_mlv)
         self.assertIn("dng_reader_processing_metadata_matches", dng_reader)
         self.assertIn("!have_bps", dng_reader)
         self.assertIn("positive_rationals", dng_reader)
+        for strict_tag in (
+            "tcPhotometricInterpretation",
+            "tcSamplesPerPixel",
+            "tcRowsPerStrip",
+            "tcPlanarConfiguration",
+            "tcCFARepeatPatternDim",
+            "tcDefaultScale",
+            "tcFrameRate",
+            "tcExifIFD",
+        ):
+            self.assertIn(strict_tag, dng_reader)
+        self.assertIn("enumeration_failed", dng_reader)
+        self.assertIn("candidate->has_default_scale != expected->has_default_scale", dng_reader)
+        self.assertIn("candidate->has_frame_rate != expected->has_frame_rate", dng_reader)
+        self.assertIn("candidate->has_iso != expected->has_iso", dng_reader)
+        self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", raw_processing)
+        self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", main_window)
         self.assertIn("width > UINT16_MAX || height > UINT16_MAX", video_mlv)
         self.assertIn("width < 3 || height < 3", video_mlv)
         self.assertIn("(size_t)frame_size > raw_frame_capacity - 4u", video_mlv)

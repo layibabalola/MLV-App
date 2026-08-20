@@ -42,6 +42,7 @@ typedef struct
     uint32_t height;           /* tcImageLength (257)                       */
     uint16_t bits_per_sample;  /* tcBitsPerSample (258)                     */
     uint16_t compression;      /* tcCompression (259): 1 = none, 7 = LJ92   */
+    uint32_t rows_per_strip;   /* tcRowsPerStrip (278), one full-frame strip */
 
     uint64_t strip_offset;     /* tcStripOffsets (273) -- byte pos of strip */
     uint64_t strip_byte_count; /* tcStripByteCounts (279) -- strip length   */
@@ -67,7 +68,13 @@ typedef struct
     int      has_as_shot_neutral; /* tcAsShotNeutral (50728): 3 rationals  */
     int32_t  as_shot_neutral[6];  /* [num,den]*3 for R,G,B                 */
 
-    /* EXIF-ish odds and ends (best effort; 0 when absent). */
+    int      has_default_scale;   /* tcDefaultScale (50718): X and Y scale */
+    int32_t  default_scale[4];    /* [x_num,x_den,y_num,y_den]             */
+    int      has_frame_rate;      /* tcFrameRate (51044): signed rational  */
+    int32_t  frame_rate[2];       /* [frames_per_second numerator,denom]    */
+
+    /* EXIF metadata from the nested ExifIFD. */
+    int      has_iso;
     int32_t  iso;              /* tcISOSpeedRatings (34855)                 */
 
     char     camera_model[64]; /* tcUniqueCameraModel (50708) or Model     */
