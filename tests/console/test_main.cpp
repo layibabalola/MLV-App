@@ -42,6 +42,11 @@ static int run_pipeline_match_helper()
         std::cerr << "PIPELINE-DATA-MISMATCH:" << line << "\n";
         return 6;
     }
+    std::string trailing;
+    if (std::getline(std::cin, trailing)) {
+        std::cerr << "PIPELINE-DATA-UNEXPECTED-TRAILING:" << trailing << "\n";
+        return 7;
+    }
     std::cerr << "PIPELINE-DATA-VERIFIED\n";
     return 0;
 }

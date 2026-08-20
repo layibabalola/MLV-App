@@ -80,7 +80,7 @@ static void prepend_to_path(QProcessEnvironment * environment, const QStringList
     QString inherited_path;
     const QStringList inherited_keys = environment->keys();
     for (const QString & key : inherited_keys) {
-        if (key.compare(QStringLiteral("PATH"), Qt::CaseInsensitive) == 0) {
+        if (key == QStringLiteral("PATH")) {
             if (!inherited_path.isEmpty() && !environment->value(key).isEmpty()) {
                 inherited_path.append(QDir::listSeparator());
             }
@@ -186,7 +186,11 @@ static QString build_helper(bool enable_avx)
 
     const QString flavor = enable_avx ? QStringLiteral("on") : QStringLiteral("off");
     const QString build_directory = QDir(root).filePath(QStringLiteral("tests/build-avx-parity/%1").arg(flavor));
-    QDir().mkpath(build_directory);
+    QDir build_directory_handle(build_directory);
+    if (build_directory_handle.exists()) {
+        ASSERT_TRUE(build_directory_handle.removeRecursively());
+    }
+    ASSERT_TRUE(QDir().mkpath(build_directory));
 
     const QString pro_path = QDir(root).filePath(QStringLiteral("tests/console/avx_parity_helper.pro"));
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();

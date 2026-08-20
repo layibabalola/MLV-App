@@ -2,6 +2,7 @@
 #include "../../platform/qt/ExportProcess.h"
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 
 TEST( ExportProcess, RawVideoInvocationPreservesProgramAndArgumentBoundaries )
 {
@@ -123,7 +124,24 @@ TEST( ExportProcess, PipelineDrainsHighVolumeStderrWithoutStalling )
                   << pipeline.diagnostics().toStdString() << "\n";
     }
     ASSERT_TRUE( finished );
-    ASSERT_TRUE( pipeline.diagnostics().contains( QStringLiteral("NOISY-STDERR-") ) );
+    const QString diagnostic_text = pipeline.diagnostics();
+    const QByteArray diagnostic_bytes = diagnostic_text.toUtf8();
+    ASSERT_TRUE( diagnostic_bytes.size() <= 8192 );
+
+    bool saw_first_noise = false;
+    bool saw_last_noise = false;
+    bool saw_verified_data = false;
+    const QStringList diagnostic_lines = diagnostic_text.split(
+        QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts );
+    for ( const QString &line : diagnostic_lines ) {
+        const QString trimmed = line.trimmed();
+        saw_first_noise = saw_first_noise || trimmed == QStringLiteral("NOISY-STDERR-1");
+        saw_last_noise = saw_last_noise || trimmed == QStringLiteral("NOISY-STDERR-4000");
+        saw_verified_data = saw_verified_data || trimmed == QStringLiteral("PIPELINE-DATA-VERIFIED");
+    }
+    ASSERT_FALSE( saw_first_noise );
+    ASSERT_TRUE( saw_last_noise );
+    ASSERT_TRUE( saw_verified_data );
 }
 
 TEST( ExportProcess, PipelineMidStreamChildDeathIsFailureWithDiagnostics )
