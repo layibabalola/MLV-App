@@ -22909,17 +22909,6 @@ void MainWindow::notePlaybackSmokePresentedFrame(
     m_playbackSmokeLastPresentedTime = now;
     m_playbackSmokeLastPresentedFrame = static_cast<int>( displayFrame );
     ++m_playbackSmokePresentedFrames;
-    if( m_playbackSmokeTargetPresentedFrames > 0
-     && m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames
-     && ui->actionPlay->isChecked() )
-    {
-        // Stop inside the presentation callback, before drawFrameReady can
-        // schedule another playback request. This makes screenshot A/B frame
-        // locking independent of CPU/GPU speed while leaving ordinary GUI
-        // playback and time-based smokes unchanged.
-        ui->actionPlay->setChecked( false );
-    }
-
     const auto avgSmokeMs = [this]( double sum ) -> double
     {
         return m_playbackSmokePresentedFrames > 0
@@ -25057,6 +25046,18 @@ void MainWindow::notePlaybackSmokePresentedFrame(
                        .arg( bool01( dualIsoFull20Fullres ) )
                        .arg( dualIsoFull20Threads );
         }
+    }
+
+    if( m_playbackSmokeTargetPresentedFrames > 0
+     && m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames
+     && ui->actionPlay->isChecked() )
+    {
+        // Accumulate the target frame before stopping. setChecked(false)
+        // synchronously finalizes smoke telemetry, so stopping earlier would
+        // count frame N while reporting only N-1 timing samples. This remains
+        // inside the presentation callback and therefore still runs before
+        // drawFrameReady can schedule the next playback request.
+        ui->actionPlay->setChecked( false );
     }
 }
 

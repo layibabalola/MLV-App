@@ -5,8 +5,10 @@ param(
     [string]$ClipPath = "",
     [string]$Output = "",
     [double]$Seconds = 24,   # settled-playback window (s) AFTER settle. RULE 2026-06-26 (Layi): give MLV a
-                          # generous time to actually play before closing -- ~3x the old 8s, toward the
-                          # recommended 30s settled-validation window. Both lanes use a generous window.
+                           # generous time to actually play before closing -- ~3x the old 8s, toward the
+                           # recommended 30s settled-validation window. Both lanes use a generous window.
+    [ValidateRange(0, 3600000)]
+    [int]$ProcessTimeoutMs = 0,
     [ValidateRange(0, 1000000)]
     [int]$TargetPresentedFrames = 0,
     [int]$StartFrame = 0,
@@ -87,6 +89,7 @@ $ErrorActionPreference = "Stop"
 $settledValidationRecommendedSeconds = 30
 $validationWarnings = @()
 . (Join-Path $PSScriptRoot 'gui-smoke-screenshot-provenance.ps1')
+Import-Module (Join-Path $PSScriptRoot 'gui-smoke-process-boundary.psm1') -Force
 
 if ($RequireFreshScreenshotRender -and -not $CaptureScreenshot) {
     throw "-RequireFreshScreenshotRender requires -CaptureScreenshot."
@@ -864,6 +867,12 @@ function Wait-ForLogLineMatch {
 }
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
+if ($TargetPresentedFrames -gt 0 -and $LegacyGuiSmokeOptions) {
+    throw "-TargetPresentedFrames requires the current GUI-smoke option contract; it cannot be combined with -LegacyGuiSmokeOptions."
+}
+if ([double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds) -or $Seconds -lt 0) {
+    throw "-Seconds must be a finite non-negative value."
+}
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
     $ExePath = Join-Path $root "platform\qt\build-release\release\MLVApp.exe"
 }
@@ -1088,6 +1097,24 @@ $effectiveExpectedVisualScaleRequest = if ($ExpectedVisualScaleRequest -eq -2) {
     $ExpectedVisualScaleRequest
 }
 
+$derivedProcessTimeoutMs = [Math]::Ceiling(
+    ([Math]::Max(0.0, $Seconds) * 1000.0) +
+    [Math]::Max(0, $SettleMs) +
+    [Math]::Max(0, $SettleCpuMaxMs) +
+    [Math]::Max(0, $ScreenshotDelayMs) +
+    [Math]::Max(0, $ScreenshotWindowWaitMs) +
+    [Math]::Max(0, $ScreenshotCaptureTimeoutMs) +
+    $(if ($ExerciseClipLifecycleStress) { [Math]::Max(0, $StressSwitchAtMs) + 60000 } else { 30000 })
+)
+if ($derivedProcessTimeoutMs -gt 3600000) {
+    throw "Derived GUI-smoke process timeout exceeds the 3600000 ms safety ceiling; pass a smaller bounded workload."
+}
+$effectiveProcessTimeoutMs = if ($ProcessTimeoutMs -gt 0) {
+    $ProcessTimeoutMs
+} else {
+    [Math]::Max(1000, [int]$derivedProcessTimeoutMs)
+}
+
 if ($DryRun) {
     $dryRunResult = [pscustomobject]@{
         exePath = $exe
@@ -1118,6 +1145,7 @@ if ($DryRun) {
             scaleFactorOverride = $ScaleFactor
             usePersistedPlaybackSettings = [bool]$UsePersistedPlaybackSettings
             legacyGuiSmokeOptions = [bool]$LegacyGuiSmokeOptions
+            processTimeoutMs = $effectiveProcessTimeoutMs
         }
         output = $outputPath
     }
@@ -1135,6 +1163,8 @@ $smokeMutexAcquired = $smokeMutex.WaitOne([TimeSpan]::FromMinutes(10))
 if (-not $smokeMutexAcquired) {
     throw "Timed out waiting for another GUI smoke run to release the shared MLVApp log parser."
 }
+
+try {
 
 $buildManifestPath = Join-Path (Split-Path -Parent $exe) "build-manifest.json"
 $receiptPath = $null
@@ -1235,46 +1265,66 @@ $fpsStatusCropCapture = $null
 $colorArtifactScan = $null
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderrTask = $process.StandardError.ReadToEndAsync()
-$process.WaitForExit()
-$stdout = $stdoutTask.GetAwaiter().GetResult()
-$stderr = $stderrTask.GetAwaiter().GetResult()
+$processBoundary = Wait-GuiSmokeProcessBounded `
+    -Process $process `
+    -StandardOutputTask $stdoutTask `
+    -StandardErrorTask $stderrTask `
+    -TimeoutMs $effectiveProcessTimeoutMs
+$stdout = $processBoundary.stdout
+$stderr = $processBoundary.stderr
+$processExitCode = [int]$processBoundary.exitCode
+$captureBindingFailures += @($processBoundary.failures)
 $endUtc = [datetime]::UtcNow
 
 if ($CaptureScreenshot) {
     if (-not (Test-Path -LiteralPath $screenshotPath)) {
-        throw "GUI smoke completed but did not write screenshot: $screenshotPath"
+        $captureBindingFailures += "GUI smoke completed but did not write screenshot: $screenshotPath"
     }
-    $screenshotItem = Get-Item -LiteralPath $screenshotPath
-    $screenshotImage = Get-ScreenshotImageMetadata -Path $screenshotPath
-    $screenshotCapture = [pscustomobject]@{
-        outputPath = $screenshotItem.FullName
-        takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
-        method = "app-internal-presented-frame-preferred"
-        length = $screenshotItem.Length
-        image = $screenshotImage
-        requestedDelayMs = $ScreenshotDelayMs
-        windowWaitMs = $ScreenshotWindowWaitMs
-        captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+    else {
+        try {
+            $screenshotItem = Get-Item -LiteralPath $screenshotPath
+            $screenshotImage = Get-ScreenshotImageMetadata -Path $screenshotPath
+            $screenshotCapture = [pscustomobject]@{
+                outputPath = $screenshotItem.FullName
+                takenAtUtc = $screenshotItem.LastWriteTimeUtc.ToString("o")
+                method = "app-internal-presented-frame-preferred"
+                length = $screenshotItem.Length
+                image = $screenshotImage
+                requestedDelayMs = $ScreenshotDelayMs
+                windowWaitMs = $ScreenshotWindowWaitMs
+                captureTimeoutMs = $ScreenshotCaptureTimeoutMs
+            }
+            $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
+        }
+        catch {
+            $captureBindingFailures += "GUI smoke screenshot validation failed: $($_.Exception.Message)"
+        }
     }
-    $colorArtifactScan = Get-ScreenshotColorArtifactScan -Path $screenshotPath
 }
 if (-not [string]::IsNullOrWhiteSpace($windowScreenshotPath)) {
     if (-not (Test-Path -LiteralPath $windowScreenshotPath)) {
-        throw "GUI smoke completed but did not write window screenshot: $windowScreenshotPath"
+        $captureBindingFailures += "GUI smoke completed but did not write window screenshot: $windowScreenshotPath"
     }
-    $windowScreenshotItem = Get-Item -LiteralPath $windowScreenshotPath
-    $windowScreenshotImage = Get-ScreenshotImageMetadata -Path $windowScreenshotPath
-    $windowScreenshotCapture = [pscustomobject]@{
-        outputPath = $windowScreenshotItem.FullName
-        takenAtUtc = $windowScreenshotItem.LastWriteTimeUtc.ToString("o")
-        method = "app-internal-window-grab"
-        length = $windowScreenshotItem.Length
-        image = $windowScreenshotImage
-    }
-    if (-not [string]::IsNullOrWhiteSpace($fpsStatusCropPath)) {
-        $fpsStatusCropCapture = New-FpsStatusProofCrop `
-            -SourcePath $windowScreenshotPath `
-            -OutputPath $fpsStatusCropPath
+    else {
+        try {
+            $windowScreenshotItem = Get-Item -LiteralPath $windowScreenshotPath
+            $windowScreenshotImage = Get-ScreenshotImageMetadata -Path $windowScreenshotPath
+            $windowScreenshotCapture = [pscustomobject]@{
+                outputPath = $windowScreenshotItem.FullName
+                takenAtUtc = $windowScreenshotItem.LastWriteTimeUtc.ToString("o")
+                method = "app-internal-window-grab"
+                length = $windowScreenshotItem.Length
+                image = $windowScreenshotImage
+            }
+            if (-not [string]::IsNullOrWhiteSpace($fpsStatusCropPath)) {
+                $fpsStatusCropCapture = New-FpsStatusProofCrop `
+                    -SourcePath $windowScreenshotPath `
+                    -OutputPath $fpsStatusCropPath
+            }
+        }
+        catch {
+            $captureBindingFailures += "GUI smoke window-screenshot validation failed: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -1634,8 +1684,11 @@ $colorArtifactScanPassed =
 
 $validationFailures = @()
 $validationFailures += $captureBindingFailures
-if ($null -ne $process -and $process.ExitCode -ne 0) {
-    $validationFailures += "MLVApp exited with code $($process.ExitCode)."
+if ($processBoundary.timedOut) {
+    $validationFailures += "MLVApp exceeded its fail-closed process timeout and was terminated."
+}
+if ($processExitCode -ne 0) {
+    $validationFailures += "MLVApp exited with effective code $processExitCode."
 }
 if ($RequireLookAssist -and -not $lookAssistApplied) {
     $validationFailures += "Look Assist did not settle/apply before playback."
@@ -1982,7 +2035,15 @@ $result = [pscustomobject]@{
     playbackArtifacts = $playbackArtifacts
     process = [pscustomobject]@{
         id = $process.Id
-        exitCode = $process.ExitCode
+        exitCode = $processExitCode
+        nativeExitCode = $processBoundary.nativeExitCode
+        timedOut = [bool]$processBoundary.timedOut
+        timeoutMs = [int]$processBoundary.timeoutMs
+        treeKillAttempted = [bool]$processBoundary.treeKillAttempted
+        treeKillSucceeded = [bool]$processBoundary.treeKillSucceeded
+        terminationConfirmed = [bool]$processBoundary.terminationConfirmed
+        stdoutDrained = [bool]$processBoundary.stdoutDrained
+        stderrDrained = [bool]$processBoundary.stderrDrained
         startedAtUtc = $startUtc.ToString("o")
         endedAtUtc = $endUtc.ToString("o")
         stdout = $stdout.Trim()
@@ -2119,17 +2180,21 @@ if ($RequireFreshScreenshotRender) {
 
 $result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $outputPath -Encoding UTF8
 $result | ConvertTo-Json -Depth 8
-if ($smokeMutexAcquired) {
-    $smokeMutex.ReleaseMutex()
-    $smokeMutex.Dispose()
+$scriptExitCode = 0
+if ($processExitCode -ne 0) {
+    $scriptExitCode = $processExitCode
 }
-if ($process.ExitCode -ne 0) {
-    exit $process.ExitCode
-}
-if ($validationFailures.Count -gt 0) {
+elseif ($validationFailures.Count -gt 0) {
     foreach ($failure in $validationFailures) {
         Write-Error $failure
     }
-    exit 2
+    $scriptExitCode = 2
 }
-exit 0
+}
+finally {
+    if ($smokeMutexAcquired) {
+        $smokeMutex.ReleaseMutex()
+        $smokeMutex.Dispose()
+    }
+}
+exit $scriptExitCode

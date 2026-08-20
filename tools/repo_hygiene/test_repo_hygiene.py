@@ -49,6 +49,7 @@ from .core import (
     verify_policy,
 )
 from .protected_check_router import RouteError, build_receipt, classify_paths
+from .sealed_real_clip_receipt import SealedReceiptError, validate_sealed_receipt
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -193,6 +194,52 @@ class RepoHygieneTests(unittest.TestCase):
         shutil.copy(ROOT / "tools" / "repo-hygiene" / "POLICY.md", policy_dir / "POLICY.md")
         shutil.copy(ROOT / "tools" / "repo-hygiene" / "closeout.contract.json", policy_dir / "closeout.contract.json")
         return repo
+
+    def test_sealed_real_clip_receipt_schema_and_semantics_fail_closed(self) -> None:
+        schema_path = (
+            ROOT
+            / "tools"
+            / "repo_hygiene"
+            / "sealed-real-clip-ab-receipt.schema.json"
+        )
+        receipt_path = (
+            ROOT / "receipts" / "sealed-real-clip-ab-d8224107-20260820.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(schema)
+        validate_sealed_receipt(receipt, repo_root=ROOT, require_git_objects=True)
+
+        hostile_mutations = []
+        hostile = json.loads(json.dumps(receipt))
+        hostile["scope"]["mergeAuthority"] = True
+        hostile_mutations.append(("merge authority", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["retention"]["hostedPromotionRequired"] = False
+        hostile_mutations.append(("hosted requirement", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["candidate"]["productTree"] = hostile["baseline"]["protectedProductTree"]
+        hostile_mutations.append(("same tree", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"][0]["afterScreenshotSha256"] = "F" * 64
+        hostile_mutations.append(("screenshot substitution", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"].append(json.loads(json.dumps(hostile["clips"][0])))
+        hostile_mutations.append(("duplicate clip", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["coverage"]["availableAndPassed"] -= 1
+        hostile_mutations.append(("count mismatch", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["unknownAuthoritySurface"] = True
+        hostile_mutations.append(("unknown field", hostile))
+
+        for label, hostile in hostile_mutations:
+            with self.subTest(label=label), self.assertRaises(SealedReceiptError):
+                validate_sealed_receipt(
+                    hostile,
+                    repo_root=ROOT,
+                    require_git_objects=False,
+                )
 
     def signed(self, tx: dict, artifact_type: str, payload: dict, actor_id: str = "codex-test") -> dict:
         payload = json.loads(json.dumps(payload))
@@ -1013,6 +1060,12 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("    if: ${{ always() }}", product_job)
         self.assertIn("needs.protected-check-route.result != 'success'", product_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", product_job)
+        self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", product_job)
+        self.assertIn("Verify exact product checkout binding", product_job)
+        self.assertIn("git rev-parse HEAD", product_job)
+        self.assertIn("git rev-parse 'HEAD^{tree}'", product_job)
+        self.assertIn("product checkout head mismatch", product_job)
+        self.assertIn("product checkout tree mismatch", product_job)
         self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", product_job)
         self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", product_job)
         self.assertIn("outputs.product == 'false'", product_job)
@@ -1046,6 +1099,12 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("outputs.gui != 'false'", gui_job)
         self.assertIn("outputs.gui == 'false'", gui_job)
         self.assertIn("if ($head -ne $env:EXPECTED_ROUTE_HEAD)", gui_job)
+        self.assertIn("ref: ${{ env.EXPECTED_ROUTE_HEAD }}", gui_job)
+        self.assertIn("Verify exact GUI checkout binding", gui_job)
+        self.assertIn("git rev-parse HEAD", gui_job)
+        self.assertIn("git rev-parse 'HEAD^{tree}'", gui_job)
+        self.assertIn("GUI checkout head mismatch", gui_job)
+        self.assertIn("GUI checkout tree mismatch", gui_job)
         self.assertIn("EXPLICIT_NA_PROVIDER_CONTROL_ONLY", gui_job)
         self.assertIn("MANUAL_DISPATCH_RUN_REAL_ORACLES", gui_job)
 

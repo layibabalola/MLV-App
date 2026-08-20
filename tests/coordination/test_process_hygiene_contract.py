@@ -15,6 +15,9 @@ RUNNER = REPO_ROOT / "tools" / "coordination" / "invoke-mlv-exclusive.ps1"
 GEN_BUILDINFO = REPO_ROOT / "tools" / "gen-buildinfo.ps1"
 ARTIFACT_DETECTOR = REPO_ROOT / "tools" / "profiling" / "detect-playback-artifacts.ps1"
 GUI_SMOKE_RUNNER = REPO_ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
+GUI_SMOKE_PROCESS_BOUNDARY = (
+    REPO_ROOT / "tools" / "profiling" / "gui-smoke-process-boundary.psm1"
+)
 GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
 MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
@@ -306,6 +309,100 @@ def test_gui_smoke_legacy_option_set_omits_new_cli_flags(tmp_path: Path) -> None
     assert dry_run["validationPolicy"]["legacyGuiSmokeOptions"] is True
     assert dry_run["validationPolicy"]["requireLookAssist"] is False
 
+    refused = subprocess.run(
+        [
+            *completed.args,
+            "-TargetPresentedFrames",
+            "2",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert refused.returncode != 0
+    refused_text = " ".join((refused.stdout + refused.stderr).split())
+    assert "cannot be combined with" in refused_text
+    assert "-LegacyGuiSmokeOptions" in refused_text
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App process ownership is Windows-specific")
+def test_gui_smoke_process_boundary_kills_hung_process_tree(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    child_pid_path = tmp_path / "child.pid"
+    module_literal = str(GUI_SMOKE_PROCESS_BOUNDARY).replace("'", "''")
+    child_pid_literal = str(child_pid_path).replace("'", "''")
+    parent_code = (
+        "import pathlib, subprocess, time; "
+        f"p=subprocess.Popen([{sys.executable!r}, '-c', 'import time; time.sleep(60)']); "
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(p.pid), encoding='ascii'); "
+        "time.sleep(60)"
+    )
+    parent_code_literal = parent_code.replace("'", "''")
+    python_literal = str(sys.executable).replace("'", "''")
+    command = rf"""
+Import-Module '{module_literal}' -Force
+$childPidPath = '{child_pid_literal}'
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = '{python_literal}'
+$start.UseShellExecute = $false
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+[void]$start.ArgumentList.Add('-c')
+[void]$start.ArgumentList.Add('{parent_code_literal}')
+$parent = [Diagnostics.Process]::new()
+$parent.StartInfo = $start
+[void]$parent.Start()
+$stdoutTask = $parent.StandardOutput.ReadToEndAsync()
+$stderrTask = $parent.StandardError.ReadToEndAsync()
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+while (-not (Test-Path -LiteralPath $childPidPath) -and [DateTime]::UtcNow -lt $deadline) {{
+    Start-Sleep -Milliseconds 25
+}}
+if (-not (Test-Path -LiteralPath $childPidPath)) {{ throw 'child pid was not published' }}
+$childPid = [int](Get-Content -LiteralPath $childPidPath -Raw)
+$result = Wait-GuiSmokeProcessBounded -Process $parent -StandardOutputTask $stdoutTask -StandardErrorTask $stderrTask -TimeoutMs 500 -TerminationGraceMs 5000 -StreamDrainMs 5000
+Start-Sleep -Milliseconds 200
+[pscustomobject]@{{
+    result = $result
+    childPid = $childPid
+    childAlive = [bool](Get-Process -Id $childPid -ErrorAction SilentlyContinue)
+}} | ConvertTo-Json -Depth 8 -Compress
+"""
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    observed = json.loads(completed.stdout.strip())
+    boundary = observed["result"]
+    assert boundary["timedOut"] is True
+    assert boundary["exitCode"] == 124
+    assert boundary["treeKillAttempted"] is True
+    assert boundary["treeKillSucceeded"] is True
+    assert boundary["terminationConfirmed"] is True
+    assert boundary["stdoutDrained"] is True
+    assert boundary["stderrDrained"] is True
+    assert observed["childAlive"] is False
+
 
 @pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
 def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None:
@@ -586,11 +683,27 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
     assert "QCryptographicHash::Sha256" in main_window
     assert "TargetPresentedFrames" in runner
     assert '"--presented-frames"' in runner
+    assert "Wait-GuiSmokeProcessBounded" in runner
+    assert "$process.WaitForExit()" not in runner
+    assert "cannot be combined with -LegacyGuiSmokeOptions" in runner
+    assert "treeKillSucceeded" in runner
+    assert "terminationConfirmed" in runner
+    assert "GUI smoke completed but did not write screenshot" in runner
+    assert 'throw "GUI smoke completed but did not write screenshot' not in runner
     assert "targetPresentedFrames = 0" in main_window_header
     assert "m_playbackSmokeTargetPresentedFrames" in main_window_header
     assert 'QStringLiteral("presented-frames")' in main_cpp
     assert "exact presented-frame target was not met" in main_window
     assert "m_playbackSmokePresentedFrames >= m_playbackSmokeTargetPresentedFrames" in main_window
+    note_start = main_window.index("void MainWindow::notePlaybackSmokePresentedFrame(")
+    finish_start = main_window.index(
+        "void MainWindow::finishPlaybackSmokeTelemetry", note_start
+    )
+    note_body = main_window[note_start:finish_start]
+    stop_index = note_body.rindex("m_playbackSmokeTargetPresentedFrames > 0")
+    assert stop_index > note_body.rindex("m_playbackSmokeRenderTotalSumMs +=")
+    assert stop_index > note_body.rindex("m_playbackSmokeDrawTotalSumMs +=")
+    assert "Accumulate the target frame before stopping" in note_body[stop_index:]
     assert NEUTRAL_RECEIPT.read_text(encoding="utf-8") == (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<receipt version="4">\n'

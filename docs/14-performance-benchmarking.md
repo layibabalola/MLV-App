@@ -606,6 +606,15 @@ screenshots, artifact detection, and lifecycle stress. Such runs must not enter
 an A/B or be cited as visual playback, Auto sampler, FPS, cadence, color, or
 product-card completion proof. Baseline and candidate must each pass validation
 independently before comparison.
+The wrapper also owns a fail-closed process boundary. `-ProcessTimeoutMs` may
+set an explicit bounded wall limit; otherwise the wrapper derives one from the
+requested playback, settling, and capture windows. A hung app is terminated as
+a full process tree, stdout/stderr are drained with bounded waits, and the
+result records timeout exit `124` plus kill/drain evidence. Exact
+`-TargetPresentedFrames` runs cannot use `-LegacyGuiSmokeOptions`, and the
+target frame is included in timing accumulators before synchronous stop/final
+telemetry. Missing screenshots and nonzero child exits are written into the
+durable result before the wrapper returns failure.
 For playback backend-selection evidence, pass `-GpuPlaybackReconBackend <name>`
 to `run-release-playback-profile.ps1`, `run-release-gui-smoke.ps1`, or the
 UltraMagnus P3 wrapper; the wrappers set `MLVAPP_GPU_PLAYBACK_RECON_BACKEND`.
