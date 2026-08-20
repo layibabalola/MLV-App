@@ -23,7 +23,7 @@ BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
 RELEASE_RUNTIME_ADMISSION = REPO_ROOT / "tools" / "release-runtime-admission.psm1"
 MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
 NEUTRAL_RECEIPT = REPO_ROOT / "tests" / "fixtures" / "receipts" / "neutral_look_assist_off_v4.marxml"
-SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-d8224107-20260820.json"
+SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-71d9f494-20260820.json"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
