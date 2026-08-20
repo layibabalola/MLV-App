@@ -9,6 +9,27 @@ are allowed when they are derived from repo-owned truth and do not become a
 second mutation authority. Its sticky local URL is
 `http://127.0.0.1:8765/closeout`.
 
+## Candidate Acceptance
+
+The dashboard's repo-state feed includes `candidateAcceptance`, a read-only
+summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
+`candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
+integration tree, range diff, policy, and validation plan into one exact tuple.
+Review and hosted surfaces bind that tuple and never carry forward after drift.
+
+The acceptance state is deliberately batched:
+
+- `collecting`: at least one required surface has not reported a terminal verdict.
+- `changes_required`: all surfaces are terminal and one consolidated fix batch
+  contains every rehearsal/review/hosted blocker.
+- `ready`: the integrated rehearsal and every same-tuple surface passed.
+- `missing` or `invalid`: the generated feed is absent or fails its ledger hash.
+
+The dashboard must not offer approval, rebless, publication, redistribution, or
+provider-activation controls for this ledger. Agent and hosted verdicts are
+evidence only. Human-only authority boundaries continue to be enforced by their
+own registered policy actors.
+
 ## Operator Phases
 
 The dashboard should present the closeout flow as four explicit phases:

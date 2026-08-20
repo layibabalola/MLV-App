@@ -771,6 +771,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "CLAUDE.md",
             "closeout.config.json",
             "tools/repo_hygiene/brokered_closeout.py",
+            "tools/repo_hygiene/candidate_acceptance.py",
+            "tools/repo_hygiene/test_candidate_acceptance.py",
+            "tools/factory/capture-github-acceptance.ps1",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
             "tools/closeout/Invoke-CloseoutCli.ps1",
@@ -815,6 +818,12 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "hardClean",
             "runtimeServices",
             "blockerAutoRemediation",
+            "candidateAcceptance",
+            "candidateAcceptance.requiredSurfaces",
+            "candidateAcceptance.batchUntilAllSurfacesTerminal",
+            "candidateAcceptance.carryApprovalsAcrossCandidateTuples",
+            "candidateAcceptance.agentApprovalsGrantHumanAuthority",
+            "candidateAcceptance.requireReadyForFinalize",
             "closeoutAddendumPersistence",
             "finalizeLoop",
             "remediationFreeze",
@@ -999,6 +1008,12 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
             "test_closeout_tooling_stale_reports_missing_power_shell_policy",
+            "test_range_diff_check_catches_whitespace_already_committed_in_feature",
+            "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch",
+            "test_tuple_drift_never_carries_approval",
+            "test_agent_record_cannot_escalate_human_authority",
+            "test_finalize_requires_same_tuple_ready_before_content_review",
+            "test_github_capture_is_exact_head_terminal_and_fail_closed",
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -1010,6 +1025,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_content_review_approval_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_identity"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def evaluate"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1295,6 +1314,22 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "prunePatchEquivalentBranches": True,
         "maxConflictFilesForAgent": 8,
         "explicitProtectedWorktreeActions": [],
+    },
+    "candidateAcceptance": {
+        "enabled": True,
+        "schema": "candidate-acceptance.v1",
+        "stateRoot": ".claude-state/closeout/acceptance",
+        "requiredSurfaces": [
+            "content-self",
+            "content-stranger-1",
+            "content-stranger-2",
+            "hosted-tests",
+            "hosted-codeql",
+        ],
+        "batchUntilAllSurfacesTerminal": True,
+        "carryApprovalsAcrossCandidateTuples": False,
+        "agentApprovalsGrantHumanAuthority": False,
+        "requireReadyForFinalize": False,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }
@@ -6477,6 +6512,15 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
         return {"status": "blocked", **base_guard, "detection": detection}
+    from .candidate_acceptance import validate_for_finalize as validate_candidate_acceptance_for_finalize
+
+    acceptance_guard = validate_candidate_acceptance_for_finalize(repo_root, config, detection)
+    if acceptance_guard:
+        reason = str(acceptance_guard["reason"])
+        write_audit(repo_root, config, reason, acceptance_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **acceptance_guard, "detection": detection}
     content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
     if content_guard:
         reason = str(content_guard["reason"])
@@ -7836,26 +7880,51 @@ def simulate_clean_integration(
                 "conflicts": conflicts,
                 "validationStatus": "not_reached",
             }
-        diff_check = run_git(integration_path, ["diff", "--check"])
+        integration_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        integration_tree = tree_hash(integration_path, integration_head)
+        range_spec = "%s..%s" % (target_head, integration_head)
+        diff_check = run_git(integration_path, ["diff", "--check", range_spec])
         if diff_check.returncode != 0:
             return {
                 "clean": False,
                 "reason": "diff_check_failed",
                 "attempt": attempt,
+                "integrationHead": integration_head,
+                "integrationTree": integration_tree,
+                "range": range_spec,
                 "returncode": diff_check.returncode,
                 "stdout": diff_check.stdout[-2000:],
                 "stderr": diff_check.stderr[-2000:],
                 "validationStatus": "diff_check_failed",
             }
-        validations = run_validations(repo_root, config, integration_path)
+        changed = run_git(integration_path, ["diff", "--name-only", range_spec], check=True)
+        changed_paths = sorted({normalize_rel(line) for line in changed.stdout.splitlines() if normalize_rel(line)})
+        diff = run_git(integration_path, ["diff", "--no-ext-diff", "--binary", range_spec], check=True)
+        diff_sha256 = hashlib.sha256(diff.stdout.encode("utf-8", errors="surrogateescape")).hexdigest()
+        validations = run_validations(repo_root, config, integration_path, changed_paths=changed_paths)
         failed = next((item for item in validations if item["returncode"] != 0), None)
         if failed:
-            return {"clean": False, "reason": "validation_failed", "attempt": attempt, "validations": validations, "validationStatus": "failed"}
+            return {
+                "clean": False,
+                "reason": "validation_failed",
+                "attempt": attempt,
+                "integrationHead": integration_head,
+                "integrationTree": integration_tree,
+                "range": range_spec,
+                "diffSha256": diff_sha256,
+                "changedPaths": changed_paths,
+                "validations": validations,
+                "validationStatus": "failed",
+            }
         return {
             "clean": True,
             "reason": "clean_merge_and_validation_passed",
             "attempt": attempt,
-            "integrationHead": git_stdout(integration_path, ["rev-parse", "HEAD"]),
+            "integrationHead": integration_head,
+            "integrationTree": integration_tree,
+            "range": range_spec,
+            "diffSha256": diff_sha256,
+            "changedPaths": changed_paths,
             "validations": validations,
             "validationStatus": "passed",
         }
@@ -8314,6 +8383,9 @@ def repo_state_snapshot(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    from .candidate_acceptance import latest_summary as candidate_acceptance_latest_summary
+
+    candidate_acceptance = candidate_acceptance_latest_summary(repo_root, config)
     ledger = repo_state_ledger_config(config)
     dashboard = repo_state_dashboard_spec(config)
     rollback = rollback_policy(config)
@@ -8430,6 +8502,7 @@ def repo_state_snapshot(
             "latestCloseoutCleanTruth": state_audits["latestCloseoutCleanTruth"],
             "history": closeout_history,
         },
+        "candidateAcceptance": candidate_acceptance,
         "dashboard": {
             "enabled": bool(dashboard.get("enabled", True)),
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
