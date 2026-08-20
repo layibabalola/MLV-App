@@ -166,9 +166,12 @@ five required surfaces, canonical repository, and finalize requirement cannot
 be weakened by candidate configuration. Candidate-acceptance records are
 non-authenticating process evidence and never replace the separately pinned
 human content-review gate, which remains mandatory in both phases.
-Finalize uses the bounded current Python interpreter with isolated stdlib HTTPS
-against the public `api.github.com` checks endpoint. It executes no PATH-selected
-provider client and strips proxy, certificate, and Python path overrides.
+Finalize uses the fixed OS-protected system curl against the public
+`api.github.com` checks endpoint. It executes no PATH-selected provider client,
+and the network request imports none of Python's user-writable HTTPS runtime.
+Curl configuration/proxies and redirect following are disabled, HTTP 200 is
+required, and the protected client's path, ownership/ACL, platform signature
+where available, size, and hash are revalidated after the bounded query.
 The shared hybrid closeout contract lives in
 [`CLOSEOUT-CANONICAL-CONTRACT.md`](CLOSEOUT-CANONICAL-CONTRACT.md) and its
 drift sentinel is [`CLOSEOUT-CANONICAL-CONTRACT.sha256`](CLOSEOUT-CANONICAL-CONTRACT.sha256);

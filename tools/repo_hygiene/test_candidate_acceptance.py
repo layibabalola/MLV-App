@@ -28,7 +28,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     final_integration_mismatches,
     latest_summary,
     provider_surface_record,
-    isolated_github_query_command,
+    system_curl_github_query_command,
     surface_record,
     validation_plan,
     validate_for_finalize,
@@ -462,17 +462,26 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "timedOut": False,
             "outputCapped": False,
             "cpuStalled": False,
-            "stdout": json.dumps(provider["response"]),
+            "stdout": json.dumps(provider["response"]) + "\n200",
             "stderr": "",
         }
         with tempfile.TemporaryDirectory() as client_temp:
-            provider_client = Path(client_temp) / ("python.exe" if os.name == "nt" else "python")
-            provider_client.write_bytes(b"current-python-client")
+            provider_client = Path(client_temp) / ("curl.exe" if os.name == "nt" else "curl")
+            provider_client.write_bytes(b"system-curl-client")
+            identity = {
+                "kind": "os-protected-system-curl",
+                "path": str(provider_client.resolve()),
+                "size": provider_client.stat().st_size,
+                "sha256": hashlib.sha256(b"system-curl-client").hexdigest(),
+                "trust": {"ownerSid": "trusted", "unsafeWriteGrants": []},
+            }
             with mock.patch.dict(
                 os.environ,
                 {
                     "GH_HOST": "attacker.invalid",
                     "HTTPS_PROXY": "https://attacker.invalid",
+                    "CURL_HOME": "candidate-curl-config",
+                    "CURL_CA_BUNDLE": "attacker-ca.pem",
                     "SSL_CERT_FILE": "attacker-ca.pem",
                     "PYTHONPATH": "candidate-python-path",
                 },
@@ -480,8 +489,11 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
                 return_value=self.repo_root,
             ), mock.patch(
-                "tools.repo_hygiene.candidate_acceptance.sys.executable",
-                str(provider_client),
+                "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+                return_value=identity,
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=provider_client.resolve(),
             ), mock.patch(
                 "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
                 return_value=completed,
@@ -495,16 +507,23 @@ class CandidateAcceptanceTests(unittest.TestCase):
         command = bounded.call_args.args[2]
         self.assertEqual(str(provider_client.resolve()), command[0])
         self.assertTrue(Path(command[0]).is_absolute())
-        self.assertEqual(["-I", "-c"], command[1:3])
-        self.assertIn('HTTPSConnection(\n    "api.github.com"', command[3])
-        self.assertEqual(["layibabalola/MLV-App", FEATURE], command[4:6])
-        for key in ("GH_HOST", "HTTPS_PROXY", "SSL_CERT_FILE", "PYTHONPATH"):
+        self.assertEqual("-q", command[1])
+        self.assertIn("--proxy", command)
+        self.assertEqual("", command[command.index("--proxy") + 1])
+        self.assertIn("--noproxy", command)
+        self.assertEqual("*", command[command.index("--noproxy") + 1])
+        self.assertNotIn("--location", command)
+        self.assertEqual(
+            f"https://api.github.com/repos/layibabalola/MLV-App/commits/{FEATURE}/check-runs?per_page=100",
+            command[-1],
+        )
+        for key in ("GH_HOST", "HTTPS_PROXY", "CURL_HOME", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "PYTHONPATH"):
             self.assertNotIn(key, bounded.call_args.kwargs["env"])
         self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
         self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
-        self.assertEqual("current-python-stdlib-https", payload["providerClient"]["kind"])
+        self.assertEqual("os-protected-system-curl", payload["providerClient"]["kind"])
         self.assertEqual(str(provider_client.resolve()), payload["providerClient"]["path"])
-        self.assertEqual(hashlib.sha256(b"current-python-client").hexdigest(), payload["providerClient"]["sha256"])
+        self.assertEqual(hashlib.sha256(b"system-curl-client").hexdigest(), payload["providerClient"]["sha256"])
 
     def test_live_provider_query_ignores_candidate_and_path_executable_shadowing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -516,52 +535,136 @@ class CandidateAcceptanceTests(unittest.TestCase):
             fake_python = repo / ("python.exe" if os.name == "nt" else "python")
             fake_gh.write_bytes(b"candidate-gh")
             fake_python.write_bytes(b"candidate-python")
-            client, command = isolated_github_query_command(
-                "layibabalola/MLV-App",
-                FEATURE,
-                4096,
-            )
-            self.assertEqual(Path(os.sys.executable).resolve(), client)
+            system_curl = root / ("curl.exe" if os.name == "nt" else "curl")
+            system_curl.write_bytes(b"protected-system-curl")
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=system_curl.resolve(),
+            ):
+                client, command = system_curl_github_query_command(
+                    "layibabalola/MLV-App", FEATURE, 4096
+                )
+            self.assertEqual(system_curl.resolve(), client)
             self.assertEqual(str(client), command[0])
             self.assertNotIn(str(fake_gh), command)
             self.assertNotIn(str(fake_python), command)
             self.assertNotIn("gh", command[:3])
+            self.assertNotIn("python", command[:3])
 
-    def test_live_provider_python_client_bytes_must_stay_stable_during_query(self) -> None:
+    def test_live_provider_system_curl_identity_must_stay_stable_during_query(self) -> None:
         provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
         completed = {
             "returncode": 0,
             "timedOut": False,
             "outputCapped": False,
             "cpuStalled": False,
-            "stdout": json.dumps(provider["response"]),
+            "stdout": json.dumps(provider["response"]) + "\n200",
             "stderr": "",
         }
         with tempfile.TemporaryDirectory() as external_temp:
-            provider_client = Path(external_temp) / ("python.exe" if os.name == "nt" else "python")
+            provider_client = Path(external_temp) / ("curl.exe" if os.name == "nt" else "curl")
             provider_client.write_bytes(b"before")
-
-            def mutate_client(*_args, **_kwargs):
-                provider_client.write_bytes(b"after-with-different-bytes")
-                return completed
-
+            before = {
+                "kind": "os-protected-system-curl",
+                "path": str(provider_client.resolve()),
+                "size": 6,
+                "sha256": hashlib.sha256(b"before").hexdigest(),
+                "trust": {"unsafeWriteGrants": []},
+            }
+            after = json.loads(json.dumps(before))
+            after["sha256"] = hashlib.sha256(b"after!").hexdigest()
             with mock.patch(
                 "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
                 return_value=self.repo_root,
             ), mock.patch(
-                "tools.repo_hygiene.candidate_acceptance.sys.executable",
-                str(provider_client),
+                "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+                side_effect=[before, after],
+            ), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+                return_value=provider_client.resolve(),
             ), mock.patch(
                 "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
-                side_effect=mutate_client,
+                return_value=completed,
             ):
-                with self.assertRaisesRegex(HygieneError, "provider client bytes changed"):
+                with self.assertRaisesRegex(HygieneError, "system curl identity changed"):
                     _live_github_provider_payload(
                         self.repo_root,
                         self.config,
                         "layibabalola/MLV-App",
                         FEATURE,
                     )
+
+    def test_live_provider_system_curl_rejects_redirect_status(self) -> None:
+        provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        identity = {
+            "kind": "os-protected-system-curl",
+            "path": str(Path(os.sys.executable).resolve()),
+            "size": Path(os.sys.executable).stat().st_size,
+            "sha256": hashlib.sha256(Path(os.sys.executable).read_bytes()).hexdigest(),
+            "trust": {"unsafeWriteGrants": []},
+        }
+        completed = {
+            "returncode": 0,
+            "timedOut": False,
+            "outputCapped": False,
+            "cpuStalled": False,
+            "stdout": json.dumps(provider["response"]) + "\n302",
+            "stderr": "",
+        }
+        with mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+            return_value=self.repo_root,
+        ), mock.patch(
+            "tools.repo_hygiene.candidate_acceptance._trusted_system_curl_identity",
+            return_value=identity,
+        ), mock.patch(
+            "tools.repo_hygiene.candidate_acceptance._system_curl_path",
+            return_value=Path(os.sys.executable).resolve(),
+        ), mock.patch(
+            "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+            return_value=completed,
+        ):
+            with self.assertRaisesRegex(HygieneError, "unexpected HTTP status: 302"):
+                _live_github_provider_payload(self.repo_root, self.config, "layibabalola/MLV-App", FEATURE)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL/signature trust shape")
+    def test_live_provider_system_curl_rejects_user_writable_or_unsigned_client(self) -> None:
+        from tools.repo_hygiene.candidate_acceptance import _trusted_system_curl_identity
+
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"candidate-controlled-curl")
+            base = {
+                "returncode": 0,
+                "timedOut": False,
+                "outputCapped": False,
+                "cpuStalled": False,
+                "stderr": "",
+            }
+            unsafe = dict(base, stdout=json.dumps({
+                "ownerSid": "S-1-5-18",
+                "signatureStatus": "Valid",
+                "signerSubject": "CN=Microsoft Windows, O=Microsoft Corporation",
+                "signerThumbprint": "A" * 40,
+                "unsafeWriteGrants": [{"sid": "S-1-5-32-545", "rights": "Write"}],
+            }))
+            unsigned = dict(base, stdout=json.dumps({
+                "ownerSid": "S-1-5-18",
+                "signatureStatus": "NotSigned",
+                "signerSubject": "",
+                "signerThumbprint": "",
+                "unsafeWriteGrants": [],
+            }))
+            with mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._system_curl_path", return_value=client
+            ), mock.patch(
+                "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+                side_effect=[unsafe, unsigned],
+            ):
+                with self.assertRaisesRegex(HygieneError, "grants write authority"):
+                    _trusted_system_curl_identity(self.repo_root, self.config)
+                with self.assertRaisesRegex(HygieneError, "valid Microsoft signature"):
+                    _trusted_system_curl_identity(self.repo_root, self.config)
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
@@ -1018,10 +1121,18 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn('"annotations_count" not in output', python_source)
         self.assertIn("hosted surfaces require record-hosted", python_source)
         self.assertIn("def verify_live_provider", python_source)
-        self.assertIn("def isolated_github_query_command", python_source)
-        self.assertIn('"api.github.com"', python_source)
-        self.assertIn('"-I"', python_source)
+        self.assertIn("def _trusted_system_curl_identity", python_source)
+        self.assertIn("def system_curl_github_query_command", python_source)
+        self.assertIn("https://api.github.com", python_source)
+        self.assertIn('"-q"', python_source)
+        self.assertIn('"--proxy"', python_source)
+        self.assertIn('"--noproxy"', python_source)
+        self.assertIn('"\\n%{http_code}"', python_source)
+        self.assertIn("Get-AuthenticodeSignature", python_source)
+        self.assertIn("unsafeWriteGrants", python_source)
         self.assertIn("run_bounded_closeout_process", python_source)
+        self.assertIn('"CURL_HOME"', python_source)
+        self.assertIn('"CURL_CA_BUNDLE"', python_source)
         self.assertIn('"SSL_CERT_FILE"', python_source)
         self.assertIn('"PYTHONPATH"', python_source)
 

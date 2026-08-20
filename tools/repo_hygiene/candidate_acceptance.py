@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import os
-import sys
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -407,60 +407,175 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     ]
 
 
-_GITHUB_CHECKS_QUERY_SCRIPT = r"""
-import http.client
-import json
-import ssl
-import sys
-
-repository, head_sha, raw_limit = sys.argv[1:4]
-limit = int(raw_limit)
-connection = http.client.HTTPSConnection(
-    "api.github.com",
-    443,
-    timeout=20,
-    context=ssl.create_default_context(),
-)
-try:
-    connection.request(
-        "GET",
-        f"/repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "MLV-App-candidate-acceptance/1",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    response = connection.getresponse()
-    body = response.read(limit + 1)
-    if response.status != 200:
-        raise RuntimeError(f"GitHub API HTTP {response.status}: {body[:1000].decode('utf-8', 'replace')}")
-    if len(body) > limit:
-        raise RuntimeError("GitHub API response exceeded the provider response cap")
-    json.loads(body)
-    sys.stdout.buffer.write(body)
-finally:
-    connection.close()
+_WINDOWS_CURL_TRUST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$clientPath = 'C:\Windows\System32\curl.exe'
+$item = Get-Item -LiteralPath $clientPath -Force
+if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+    throw 'system curl must not be a reparse point'
+}
+Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -Force -ErrorAction Stop
+$signature = Get-AuthenticodeSignature -LiteralPath $clientPath
+$acl = Get-Acl -LiteralPath $clientPath
+$ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$weakSids = @($currentSid, 'S-1-1-0', 'S-1-5-11', 'S-1-5-32-544', 'S-1-5-32-545')
+$writeMask = [int64]([System.Security.AccessControl.FileSystemRights]::WriteData -bor
+    [System.Security.AccessControl.FileSystemRights]::AppendData -bor
+    [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
+    [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [System.Security.AccessControl.FileSystemRights]::Delete -bor
+    [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+$unsafeWriteGrants = @()
+foreach ($rule in $acl.Access) {
+    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+    if (([int64]$rule.FileSystemRights -band $writeMask) -eq 0) { continue }
+    try {
+        $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
+        continue
+    }
+    if ($weakSids -contains $sid) {
+        $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+    }
+}
+[ordered]@{
+    ownerSid = $ownerSid
+    signatureStatus = [string]$signature.Status
+    signerSubject = [string]$signature.SignerCertificate.Subject
+    signerThumbprint = [string]$signature.SignerCertificate.Thumbprint
+    unsafeWriteGrants = @($unsafeWriteGrants)
+} | ConvertTo-Json -Depth 8 -Compress
 """
 
 
-def isolated_github_query_command(repository: str, head_sha: str, max_output_bytes: int) -> tuple[Path, List[str]]:
-    """Build a PATH-independent stdlib HTTPS query under this exact interpreter."""
+def _system_curl_path() -> Path:
+    if os.name == "nt":
+        client = Path(r"C:\Windows\System32\curl.exe")
+    else:
+        client = Path("/usr/bin/curl")
+    resolved = client.resolve()
+    if not resolved.is_absolute() or not resolved.is_file():
+        raise HygieneError("candidate acceptance OS-protected system curl is unavailable")
+    if os.name == "nt":
+        if str(resolved).casefold() != str(client).casefold():
+            raise HygieneError("candidate acceptance system curl path is not canonical")
+    elif resolved != Path("/usr/bin/curl"):
+        raise HygieneError("candidate acceptance system curl must resolve to /usr/bin/curl")
+    return resolved
 
-    client = Path(sys.executable).resolve()
-    if not client.is_absolute() or not client.is_file():
-        raise HygieneError("candidate acceptance Python provider client is unavailable")
+
+def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return fail-closed ownership/signature evidence for the OS curl binary."""
+
+    client = _system_curl_path()
+    trust: Dict[str, Any]
+    if os.name == "nt":
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        if not powershell.is_file():
+            raise HygieneError("Windows system PowerShell is unavailable for curl trust verification")
+        from .brokered_closeout import run_bounded_closeout_process
+
+        trust_env = dict(os.environ)
+        for key in ("PSModulePath", "POWERSHELL_TELEMETRY_OPTOUT", "__PSLockdownPolicy"):
+            trust_env.pop(key, None)
+        completed = run_bounded_closeout_process(
+            repo_root,
+            config,
+            [
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                _WINDOWS_CURL_TRUST_SCRIPT,
+            ],
+            timeout_ms=30000,
+            max_output_bytes=65536,
+            recovery_command="restore the Microsoft-signed OS curl binary and its protected ACL",
+            normalize_failure_text=False,
+            env=trust_env,
+            resource_overrides={"profile": "provider-verification", "affinityCores": 2},
+        )
+        if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
+            raise HygieneError(f"system curl trust verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
+        try:
+            trust = json.loads(completed["stdout"])
+        except json.JSONDecodeError as exc:
+            raise HygieneError("system curl trust evidence is malformed") from exc
+        if trust.get("ownerSid") not in {
+            "S-1-5-18",
+            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+        }:
+            raise HygieneError("system curl owner is not Windows or TrustedInstaller")
+        if trust.get("signatureStatus") != "Valid" or "O=Microsoft Corporation" not in str(trust.get("signerSubject") or ""):
+            raise HygieneError("system curl does not have a valid Microsoft signature")
+        if trust.get("unsafeWriteGrants"):
+            raise HygieneError("system curl grants write authority to the current or a broad user principal")
+    else:
+        metadata = client.stat()
+        if metadata.st_uid != 0 or stat.S_ISLNK(metadata.st_mode) or metadata.st_mode & 0o022:
+            raise HygieneError("system curl must be root-owned and non-writable by group or other users")
+        trust = {
+            "ownerUid": metadata.st_uid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+            "unsafeWriteGrants": [],
+        }
+    return {
+        "kind": "os-protected-system-curl",
+        "path": str(client),
+        "size": client.stat().st_size,
+        "sha256": _file_sha256(client),
+        "trust": trust,
+    }
+
+
+def system_curl_github_query_command(
+    repository: str,
+    head_sha: str,
+    max_output_bytes: int,
+) -> tuple[Path, List[str]]:
+    """Build a config-free query through the exact OS-protected curl binary."""
+
+    provider_client = _system_curl_path()
+    if not provider_client.is_absolute() or not provider_client.is_file():
+        raise HygieneError("candidate acceptance system curl is unavailable")
     head = _require_sha(head_sha, "featureHead")
     if repository != CANONICAL_PROVIDER_REPOSITORY:
         raise HygieneError("live GitHub query repository must equal the canonical repository")
-    return client, [
-        str(client),
-        "-I",
-        "-c",
-        _GITHUB_CHECKS_QUERY_SCRIPT,
-        repository,
-        head,
+    url = f"https://api.github.com/repos/{repository}/commits/{head}/check-runs?per_page=100"
+    return provider_client, [
+        str(provider_client),
+        "-q",
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "20",
+        "--max-filesize",
         str(max_output_bytes),
+        "--proxy",
+        "",
+        "--noproxy",
+        "*",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "User-Agent: MLV-App-candidate-acceptance/1",
+        "--header",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "--write-out",
+        "\n%{http_code}",
+        url,
     ]
 
 
@@ -469,12 +584,17 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
     process_env = dict(os.environ)
     for key in (
         "GH_HOST",
+        "CURL_CA_BUNDLE",
+        "CURL_HOME",
+        "CURL_SSL_BACKEND",
         "HTTP_PROXY",
         "HTTPS_PROXY",
         "ALL_PROXY",
+        "NO_PROXY",
         "http_proxy",
         "https_proxy",
         "all_proxy",
+        "no_proxy",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
         "PYTHONHOME",
@@ -484,13 +604,10 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
     output_cap = min(closeout_max_process_output_bytes(config), 4 * 1024 * 1024)
-    provider_client, command = isolated_github_query_command(repository, head_sha, output_cap)
-    provider_client_identity = {
-        "kind": "current-python-stdlib-https",
-        "path": str(provider_client),
-        "size": provider_client.stat().st_size,
-        "sha256": _file_sha256(provider_client),
-    }
+    provider_client_identity = _trusted_system_curl_identity(repo_root, config)
+    provider_client, command = system_curl_github_query_command(repository, head_sha, output_cap)
+    if str(provider_client) != provider_client_identity["path"]:
+        raise HygieneError("system curl command path differs from the trusted client identity")
     completed = run_bounded_closeout_process(
         repo_root,
         config,
@@ -504,13 +621,13 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
     )
     if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
         raise HygieneError(f"live GitHub provider verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
-    if (
-        provider_client.stat().st_size != provider_client_identity["size"]
-        or _file_sha256(provider_client) != provider_client_identity["sha256"]
-    ):
-        raise HygieneError("candidate acceptance Python provider client bytes changed during live verification")
+    if _trusted_system_curl_identity(repo_root, config) != provider_client_identity:
+        raise HygieneError("candidate acceptance system curl identity changed during live verification")
+    body, separator, raw_status = completed["stdout"].rstrip().rpartition("\n")
+    if not separator or raw_status.strip() != "200":
+        raise HygieneError(f"live GitHub provider returned unexpected HTTP status: {raw_status.strip() or 'missing'}")
     try:
-        response = json.loads(completed["stdout"])
+        response = json.loads(body)
     except json.JSONDecodeError as exc:
         raise HygieneError("live GitHub provider response is malformed") from exc
     payload = {
