@@ -14,7 +14,7 @@ int MLVBlenderGetOutputWidth(MLVBlender_t * Blender);
 int MLVBlenderGetOutputHeight(MLVBlender_t * Blender);
 
 /* Exports an mlv fil to OutputPath */
-void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath);
+int MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath);
 
 /* Add an MLV */
 void MLVBlenderAddMLV(MLVBlender_t * Blender, const char * MLVPath);

@@ -299,6 +299,10 @@ TEST(SecuritySizing, RawInputMetadataCannotSelectAnOversizedRead)
                                           &packedSize, &allocationSize));
     ASSERT_FALSE(mlvRawFrameInputCapacity(1, 1, 14, 0,
                                           &packedSize, &allocationSize));
+    ASSERT_FALSE(mlvRawFrameInputCapacity(2, 4, 14, 0,
+                                          &packedSize, &allocationSize));
+    ASSERT_FALSE(dng_lj92_output_capacity(32768, 4, &allocationSize));
+    ASSERT_TRUE(dng_lj92_output_capacity(32767, 4, &allocationSize));
 
     dng_frame_info_t info = {};
     info.valid = 1;
@@ -312,6 +316,20 @@ TEST(SecuritySizing, RawInputMetadataCannotSelectAnOversizedRead)
                                                    &allocationSize));
     info.strip_byte_count = 60;
     ASSERT_FALSE(dng_reader_strip_allocation_size(&info, 64, &allocationSize));
+
+    uint8_t tinyStrip[2] = {};
+    uint16_t tinyOutput[1] = {};
+    info.width = static_cast<uint32_t>(INT_MAX);
+    info.height = static_cast<uint32_t>(INT_MAX);
+    info.bits_per_sample = 16;
+    info.compression = 1;
+    ASSERT_EQ(1, dng_reader_decode_strip(&info, tinyStrip, sizeof(tinyStrip),
+                                         tinyOutput));
+    info.width = 1;
+    info.height = 1;
+    info.bits_per_sample = 14;
+    ASSERT_EQ(1, dng_reader_decode_strip(&info, tinyStrip, sizeof(tinyStrip),
+                                         tinyOutput));
 }
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)

@@ -2861,7 +2861,7 @@ int mlvRawFrameInputCapacity(int width, int height, int bitdepth,
                              size_t * packed_size,
                              size_t * allocation_size)
 {
-    if(!packed_size || !allocation_size || width <= 0 || height <= 0
+    if(!packed_size || !allocation_size || width < 3 || height < 3
        || bitdepth <= 0 || bitdepth > 16
        || (size_t)width > SIZE_MAX / (size_t)height)
         return 0;
@@ -8665,8 +8665,13 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         uint8_t * frame_buf_compressed = calloc(compression_capacity, 1);
         if(!frame_buf_unpacked || !frame_buf_compressed)
         {
-            DEBUG( printf("\nCould not allocate memory for frame compressing\n"); )
-            ret = 1;
+            sprintf(error_message, "Could not allocate memory for frame compressing");
+            DEBUG( printf("\n%s\n", error_message); )
+            free(frame_buf_unpacked);
+            free(frame_buf_compressed);
+            free(frame_buf);
+            free(block_buf);
+            return 1;
         }
 
         if(!ret)
@@ -8706,8 +8711,11 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         uint16_t * frame_buf_unpacked = calloc(frame_size_unpacked, 1);
         if(!frame_buf_unpacked)
         {
-            DEBUG( printf("\nCould not allocate memory for frame decompressing\n"); )
-            ret = 1;
+            sprintf(error_message, "Could not allocate memory for frame decompressing");
+            DEBUG( printf("\n%s\n", error_message); )
+            free(frame_buf);
+            free(block_buf);
+            return 1;
         }
 
         if(!ret)

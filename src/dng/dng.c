@@ -2269,7 +2269,8 @@ int dng_decompress_image(uint16_t * output_buffer, size_t output_buffer_capacity
 
 int dng_lj92_output_capacity(int width, int height, size_t * output_capacity)
 {
-    if (!output_capacity || width <= 0 || height <= 1 || (height & 1) != 0 || width > INT_MAX / 2
+    if (!output_capacity || width <= 0 || height <= 1 || (height & 1) != 0
+        || width > UINT16_MAX / 2 || height / 2 > UINT16_MAX
         || (size_t)width > SIZE_MAX / (size_t)height) {
         return 0;
     }
@@ -2474,7 +2475,12 @@ static int dng_get_frame(mlvObject_t * mlv_data,
     {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
-        file_set_pos(fd, mlv_data->video_index[frame_index].block_offset, SEEK_SET);
+        if(file_set_pos(fd, mlv_data->video_index[frame_index].block_offset,
+                        SEEK_SET) != 0) {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
 
         mr_item_t item = {};
 
@@ -2543,6 +2549,11 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         }
         else   // uncompressed and fast pass
         {
+            dng_data->image_size = dng_get_image_size(
+                mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0
+                || dng_data->image_size > dng_data->image_capacity)
+                return LJ92_ERROR_CORRUPT;
             profile_stage_start = export_profile_stage_begin(profile_frame);
             dng_pack_image_bits(dng_data->image_buf,
                                 dng_data->image_buf_unpacked,
@@ -2557,7 +2568,12 @@ static int dng_get_frame(mlvObject_t * mlv_data,
     {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
-        file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset, SEEK_SET);
+        if(file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset,
+                        SEEK_SET) != 0) {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
 
         if (dng_data->raw_input_state == COMPRESSED_RAW) /* If lossless, decompress or pass trough */
         {
@@ -2573,6 +2589,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
+                return LJ92_ERROR_CORRUPT;
             }
             else
             {
@@ -2650,6 +2667,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
 #ifndef STDOUT_SILENT
                 printf("Can not read raw frame from %s\n", mlv_data->path);
 #endif
+                return LJ92_ERROR_CORRUPT;
             }
             else
             {

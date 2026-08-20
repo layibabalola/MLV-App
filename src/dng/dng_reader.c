@@ -239,7 +239,7 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
     const int h   = (int)info->height;
     uint32_t bpp = info->bits_per_sample;
     const size_t pixels = (size_t)w * (size_t)h;
-    if(pixels == 0) return 1;
+    if(pixels == 0 || pixels > SIZE_MAX / sizeof(uint16_t)) return 1;
 
     if(info->compression == DNG_READER_COMPRESSION_LJ92)
     {
@@ -259,7 +259,7 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
      *       16-bit words, so we first byte-swap each word back BE->LE and then
      *       call that exact helper -- making the round-trip bit-identical to the
      *       writer instead of re-deriving the rotate math by hand. */
-    const size_t bytes_16bit = pixels * 2;
+    const size_t bytes_16bit = pixels * sizeof(uint16_t);
 
     /* Recover bits-per-sample when the BitsPerSample(258) tag is absent or zero
      * (some writer paths fill the IFD before the per-frame bit depth is known
@@ -268,6 +268,7 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
      * unpack mask 0 and every output pixel becomes zero (the all-zeros bug). */
     if((bpp == 0 || bpp > 16) && strip_size < bytes_16bit)
     {
+        if(strip_size > (size_t)(UINT64_MAX / 8u)) return 1;
         uint32_t derived = (uint32_t)((uint64_t)strip_size * 8u / pixels);
         if(derived >= 8 && derived <= 16) bpp = derived;
     }
@@ -287,10 +288,16 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
      * layout back to little-endian, then delegate to the proven inverse of the
      * writer (dng_unpack_image_bits). The +2 word tail guards the 32-bit fetch
      * dng_unpack_image_bits performs on the final word. */
-    const size_t packed_bytes = ((size_t)pixels * bpp + 7) / 8;
+    if(pixels > (SIZE_MAX - 7u) / (size_t)bpp) return 1;
+    const size_t packed_bits = pixels * (size_t)bpp;
+    if((packed_bits & 15u) != 0) return 1;
+    const size_t packed_bytes = packed_bits / 8u;
     if(strip_size < packed_bytes) return 1;
 
-    size_t le_words = (packed_bytes + 1) / 2 + 2;
+    if(packed_bytes > SIZE_MAX - 1u) return 1;
+    const size_t payload_words = (packed_bytes + 1u) / 2u;
+    if(payload_words > SIZE_MAX / sizeof(uint16_t) - 2u) return 1;
+    size_t le_words = payload_words + 2u;
     uint16_t * le = (uint16_t *)calloc(le_words, sizeof(uint16_t));
     if(!le) return 1;
     const uint8_t * sp = strip;

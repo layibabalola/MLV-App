@@ -1,5 +1,6 @@
 // g++ main.cpp `pkg-config gtkmm-3.0 --cflags --libs`
 #include <string>
+#include <cstdio>
 #include <gtkmm.h>
 
 /* Main parts of the program are here */
@@ -96,7 +97,8 @@ MLVBlenderGUI::MLVBlenderGUI()
         dialog.add_button("Save", Gtk::RESPONSE_OK);
         int result = dialog.run();
         std::string saved_path = dialog.get_filename();
-        MLVBlenderExportMLV(blender, saved_path.c_str());
+        if (MLVBlenderExportMLV(blender, saved_path.c_str()) != 0)
+            std::fprintf(stderr, "MLV export failed: %s\n", saved_path.c_str());
         // this->UpdateInterface();
         return true;
     });
