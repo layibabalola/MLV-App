@@ -37,6 +37,18 @@ EXPECTED_BINARY_KIND_POLICY = {
         "unsupported and fails an executable kind claim."
     ),
 }
+RELEASE_TARGET_BINARY_POLICY = {
+    "linux-x86_64": {"format": "elf", "machine": "x86_64"},
+    "macos-arm64": {"format": "macho", "machine": "arm64"},
+    "macos-x86_64": {"format": "macho", "machine": "x86_64"},
+    "windows-x86_64": {"format": "pe", "machine": "x86_64"},
+}
+RELEASE_WORKFLOW_TARGETS = {
+    ".github/workflows/Linux.yml": "linux-x86_64",
+    ".github/workflows/macOS-Arm64.yml": "macos-arm64",
+    ".github/workflows/macOS-Intel.yml": "macos-x86_64",
+    ".github/workflows/Windows.yml": "windows-x86_64",
+}
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -376,6 +388,116 @@ def _unique_marker(text: str, marker: Any, label: str) -> int:
     return text.index(marker)
 
 
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _executable_workflow_marker(
+    text: str,
+    marker: Any,
+    label: str,
+    *,
+    require_scalar_run: bool = False,
+) -> int:
+    """Locate one marker and prove that it belongs to a GitHub Actions run step."""
+    marker_index = _unique_marker(text, marker, label)
+    lines = text.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    marker_line = -1
+    for index, line in enumerate(lines):
+        offsets.append(offset)
+        if offset <= marker_index < offset + len(line):
+            marker_line = index
+        offset += len(line)
+    _require(marker_line >= 0, f"{label} marker line cannot be resolved")
+
+    line = lines[marker_line].rstrip("\r\n")
+    stripped = line.lstrip(" ")
+    _require(not stripped.startswith("#"), f"{label} marker is inert workflow text, not a run command")
+    indent = _line_indent(line)
+    run_line = -1
+    scalar_run = bool(
+        re.match(r"^run\s*:\s*\S", stripped) and stripped.split(":", 1)[1].strip() == marker
+    )
+    if scalar_run:
+        run_line = marker_line
+    else:
+        _require(stripped == marker, f"{label} marker must be the exact executable command line")
+        for index in range(marker_line - 1, -1, -1):
+            candidate = lines[index].rstrip("\r\n")
+            candidate_stripped = candidate.lstrip(" ")
+            if not candidate_stripped or candidate_stripped.startswith("#"):
+                continue
+            candidate_indent = _line_indent(candidate)
+            if candidate_indent >= indent:
+                continue
+            if re.fullmatch(r"run\s*:\s*[|>][+-]?\s*", candidate_stripped):
+                run_line = index
+            break
+    _require(run_line >= 0, f"{label} marker is inert workflow text, not a run command")
+    _require(
+        not require_scalar_run or scalar_run,
+        f"{label} integrity gate must be the complete scalar run command",
+    )
+
+    run_indent = _line_indent(lines[run_line])
+    step_start = -1
+    for index in range(run_line - 1, -1, -1):
+        candidate = lines[index].rstrip("\r\n")
+        candidate_stripped = candidate.lstrip(" ")
+        if not candidate_stripped or candidate_stripped.startswith("#"):
+            continue
+        candidate_indent = _line_indent(candidate)
+        if candidate_indent >= run_indent:
+            continue
+        if candidate_stripped.startswith("- name:"):
+            step_start = index
+        break
+    _require(step_start >= 0, f"{label} marker is not contained by a named executable workflow step")
+    step_indent = _line_indent(lines[step_start])
+    step_end = len(lines)
+    for index in range(step_start + 1, len(lines)):
+        candidate = lines[index].rstrip("\r\n")
+        if _line_indent(candidate) == step_indent and candidate.lstrip(" ").startswith("- name:"):
+            step_end = index
+            break
+    for candidate in lines[step_start:step_end]:
+        candidate_stripped = candidate.lstrip(" ")
+        control_key = candidate_stripped.split(":", 1)[0].strip().strip("\"'")
+        _require(
+            control_key not in {"if", "continue-on-error", "shell"},
+            f"{label} marker belongs to a conditional or fail-open workflow step",
+        )
+    return marker_index
+
+
+def _workflow_job_for_marker(text: str, marker_index: int, label: str) -> str:
+    lines = text.splitlines(keepends=True)
+    offset = 0
+    marker_line = -1
+    jobs_line = -1
+    jobs_indent = -1
+    for index, line in enumerate(lines):
+        if line.lstrip(" ").rstrip("\r\n") == "jobs:":
+            jobs_line = index
+            jobs_indent = _line_indent(line)
+        if offset <= marker_index < offset + len(line):
+            marker_line = index
+            break
+        offset += len(line)
+    _require(marker_line > jobs_line >= 0, f"{label} is not inside the workflow jobs map")
+    job_indent = jobs_indent + 2
+    for index in range(marker_line, jobs_line, -1):
+        candidate = lines[index].rstrip("\r\n")
+        if _line_indent(candidate) != job_indent:
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9_.-]+):\s*", candidate.lstrip(" "))
+        if match:
+            return match.group(1)
+    raise PayloadIntegrityError(f"{label} is not inside a named workflow job")
+
+
 def _validate_consumer_claim(
     repo_root: Path,
     payload_path: Any,
@@ -436,9 +558,32 @@ def _validate_consumer_claim(
         gate_text = gate_file.read_text(encoding="utf-8")
     except OSError as exc:
         raise PayloadIntegrityError(f"{label} cannot read integrity gate {gate_path}: {exc}") from exc
-    gate_index = _unique_marker(gate_text, gate.get("marker"), f"{label}.integrity_gate.marker")
+    declared_target = RELEASE_WORKFLOW_TARGETS.get(gate_path)
+    _require(
+        declared_target == target,
+        f"{label} target {target!r} does not match canonical release workflow "
+        f"{gate_path!r} target {declared_target!r}",
+    )
+    gate_index = _executable_workflow_marker(
+        gate_text,
+        gate.get("marker"),
+        f"{label}.integrity_gate.marker",
+        require_scalar_run=True,
+    )
     boundary_marker = gate.get("must_precede")
-    boundary_index = _unique_marker(gate_text, boundary_marker, f"{label}.integrity_gate.must_precede")
+    boundary_index = _executable_workflow_marker(
+        gate_text, boundary_marker, f"{label}.integrity_gate.must_precede"
+    )
+    gate_job = _workflow_job_for_marker(
+        gate_text, gate_index, f"{label}.integrity_gate.marker"
+    )
+    boundary_job = _workflow_job_for_marker(
+        gate_text, boundary_index, f"{label}.integrity_gate.must_precede"
+    )
+    _require(
+        gate_job == boundary_job,
+        f"{label} integrity gate and extraction/build boundary are in different workflow jobs",
+    )
     _require(gate_index < boundary_index,
              f"{label} integrity gate does not precede its extraction/build boundary")
     if gate_path == consumer_path:
@@ -481,6 +626,124 @@ def _validate_readiness(readiness: Any, payloads: list[dict[str, Any]]) -> None:
                      f"{record_id} provenance {field} is not verified")
         _require(provenance.get("license_notice_in_archive") is True,
                  f"{record_id} does not carry its verified license notice")
+
+
+def _machine_supports(machine: Any, required: str) -> bool:
+    return isinstance(machine, str) and required in machine.split("+")
+
+
+def _workflow_payload_ids(repo_root: Path, target: str) -> set[str]:
+    workflow_paths = [path for path, declared in RELEASE_WORKFLOW_TARGETS.items() if declared == target]
+    _require(len(workflow_paths) == 1, f"release target {target} does not have exactly one canonical workflow")
+    workflow_path = workflow_paths[0]
+    try:
+        workflow_text = (repo_root / workflow_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise PayloadIntegrityError(f"cannot read canonical release workflow {workflow_path}: {exc}") from exc
+    extraction_pattern = re.compile(
+        r"(?m)^[ ]*(?:PYTHONPATH=(?:\"[^\"]*\"|'[^']*'|\S+)\s+)?python\s+-m\s+"
+        r"tools\.repo_hygiene\.extract_vendored_native_payload\b[^\r\n]*"
+        r"--payload-id\s+([A-Za-z0-9._-]+)\b[^\r\n]*$"
+    )
+    extraction_commands = [match.group(0).strip() for match in extraction_pattern.finditer(workflow_text)]
+    payload_ids = [match.group(1) for match in extraction_pattern.finditer(workflow_text)]
+    extractor_references = workflow_text.count("tools.repo_hygiene.extract_vendored_native_payload")
+    payload_flag_references = len(re.findall(r"--payload-id\b", workflow_text))
+    _require(
+        extractor_references == len(extraction_commands)
+        and payload_flag_references == len(extraction_commands),
+        f"canonical release workflow {workflow_path} contains a payload extraction that is not "
+        "a complete single-line command",
+    )
+    _require(payload_ids, f"canonical release workflow {workflow_path} has no payload extraction commands")
+    _require(
+        len(payload_ids) == len(set(payload_ids)),
+        f"canonical release workflow {workflow_path} repeats a payload id",
+    )
+    for payload_id, command in zip(payload_ids, extraction_commands, strict=True):
+        _executable_workflow_marker(
+            workflow_text,
+            command,
+            f"canonical release workflow {workflow_path} payload {payload_id}",
+        )
+    return set(payload_ids)
+
+
+def _validate_release_target_compatibility(
+    repo_root: Path,
+    manifest: dict[str, Any],
+    target: str,
+) -> dict[str, Any]:
+    """Require every payload selected by one release target to be native-compatible."""
+    policy = RELEASE_TARGET_BINARY_POLICY.get(target)
+    _require(policy is not None, f"unsupported release payload target: {target!r}")
+    payloads = manifest.get("payloads")
+    _require(isinstance(payloads, list), "payload manifest payloads must be a list")
+    workflow_payload_ids = _workflow_payload_ids(repo_root, target)
+    declared_payload_ids = {
+        str(record.get("id"))
+        for record in payloads
+        if isinstance(record, dict)
+        and any(
+            isinstance(consumer, dict) and consumer.get("target") == target
+            for consumer in record.get("consumers", [])
+        )
+    }
+    _require(
+        declared_payload_ids == workflow_payload_ids,
+        f"release target {target} extraction/consumer payload mismatch: workflow extracts "
+        f"{sorted(workflow_payload_ids)}, manifest declares {sorted(declared_payload_ids)}",
+    )
+    admitted: list[dict[str, Any]] = []
+    for record in payloads:
+        _require(isinstance(record, dict), "every payload record must be an object")
+        consumers = record.get("consumers")
+        _require(isinstance(consumers, list), f"{record.get('id', 'payload')} consumers must be a list")
+        matches = [
+            consumer
+            for consumer in consumers
+            if isinstance(consumer, dict) and consumer.get("target") == target
+        ]
+        _require(len(matches) <= 1, f"{record.get('id', 'payload')} declares target {target} more than once")
+        if not matches:
+            continue
+        consumer = matches[0]
+        status = consumer.get("status")
+        _require(
+            status == "active-release-workflow",
+            f"release target {target} rejects payload {record.get('id', 'payload')}: "
+            f"consumer status is {status!r}, not 'active-release-workflow'",
+        )
+        selected_members = record.get("selected_members")
+        _require(
+            isinstance(selected_members, list) and selected_members,
+            f"{record.get('id', 'payload')} selected_members must be a non-empty list",
+        )
+        for index, selected in enumerate(selected_members):
+            label = f"{record.get('id', 'payload')}.selected_members[{index}]"
+            _require(isinstance(selected, dict), f"{label} must be an object")
+            binary = selected.get("binary")
+            _require(isinstance(binary, dict), f"{label}.binary must be an object")
+            _require(
+                binary.get("format") == policy["format"],
+                f"release target {target} rejects {label}: expected {policy['format']}, "
+                f"observed {binary.get('format')!r}",
+            )
+            _require(
+                _machine_supports(binary.get("machine"), policy["machine"]),
+                f"release target {target} rejects {label}: required architecture "
+                f"{policy['machine']}, observed {binary.get('machine')!r}",
+            )
+            admitted.append(
+                {
+                    "kind": selected.get("kind"),
+                    "machine": binary["machine"],
+                    "output_name": selected.get("output_name"),
+                    "payload_id": record.get("id"),
+                }
+            )
+    _require(admitted, f"release target {target} has no admitted native payload members")
+    return {"status": "pass", "target": target, "members": admitted}
 
 
 def _validate_provenance(record: dict[str, Any]) -> None:
@@ -733,14 +996,27 @@ def validate_manifest(repo_root: Path, manifest: dict[str, Any]) -> dict[str, An
     }
 
 
-def validate(repo_root: Path, manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
+def validate(
+    repo_root: Path,
+    manifest_path: Path = DEFAULT_MANIFEST,
+    *,
+    required_target: str | None = None,
+) -> dict[str, Any]:
     repo_root = repo_root.resolve()
     manifest_file = manifest_path if manifest_path.is_absolute() else repo_root / manifest_path
     try:
         raw = manifest_file.read_bytes()
     except OSError as exc:
         raise PayloadIntegrityError(f"cannot read payload manifest {manifest_file}: {exc}") from exc
-    return validate_manifest(repo_root, _parse_manifest_bytes(raw, str(manifest_file)))
+    manifest = _parse_manifest_bytes(raw, str(manifest_file))
+    result = validate_manifest(repo_root, manifest)
+    if required_target is not None:
+        result["target_compatibility"] = _validate_release_target_compatibility(
+            repo_root,
+            manifest,
+            required_target,
+        )
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -752,9 +1028,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="also fail when the separately tracked redistribution-readiness status is blocked",
     )
+    parser.add_argument(
+        "--require-target-compatible",
+        choices=sorted(RELEASE_TARGET_BINARY_POLICY),
+        help="fail unless every native payload selected by this release target has the required architecture",
+    )
     args = parser.parse_args(argv)
     try:
-        result = validate(args.repo_root, args.manifest)
+        result = validate(
+            args.repo_root,
+            args.manifest,
+            required_target=args.require_target_compatible,
+        )
     except PayloadIntegrityError as exc:
         print(f"vendored native payload integrity: FAIL: {exc}", file=sys.stderr)
         return 1

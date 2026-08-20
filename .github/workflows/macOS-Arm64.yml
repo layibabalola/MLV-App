@@ -51,7 +51,7 @@ jobs:
         python -m pip check
 
     - name: Verify vendored native payload integrity
-      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root . --require-target-compatible macos-arm64
               
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build
