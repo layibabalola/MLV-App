@@ -123,6 +123,9 @@ TEST( ExportProcess, PipelineDrainsHighVolumeStderrWithoutStalling )
         std::cerr << "High-volume stderr pipeline failed: "
                   << pipeline.diagnostics().toStdString() << "\n";
     }
+    // The matcher returns zero only after receiving the exact line and EOF, so
+    // finish() proves transfer. The shared diagnostic tail intentionally makes
+    // no cross-process ordering guarantee; assert only its deterministic cap.
     ASSERT_TRUE( finished );
     const QString diagnostic_text = pipeline.diagnostics();
     const QByteArray diagnostic_bytes = diagnostic_text.toUtf8();
@@ -130,18 +133,15 @@ TEST( ExportProcess, PipelineDrainsHighVolumeStderrWithoutStalling )
 
     bool saw_first_noise = false;
     bool saw_last_noise = false;
-    bool saw_verified_data = false;
     const QStringList diagnostic_lines = diagnostic_text.split(
         QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts );
     for ( const QString &line : diagnostic_lines ) {
         const QString trimmed = line.trimmed();
         saw_first_noise = saw_first_noise || trimmed == QStringLiteral("NOISY-STDERR-1");
         saw_last_noise = saw_last_noise || trimmed == QStringLiteral("NOISY-STDERR-4000");
-        saw_verified_data = saw_verified_data || trimmed == QStringLiteral("PIPELINE-DATA-VERIFIED");
     }
     ASSERT_FALSE( saw_first_noise );
     ASSERT_TRUE( saw_last_noise );
-    ASSERT_TRUE( saw_verified_data );
 }
 
 TEST( ExportProcess, PipelineMidStreamChildDeathIsFailureWithDiagnostics )

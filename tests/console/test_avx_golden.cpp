@@ -59,9 +59,10 @@ static QString find_tool(const QString & env_name, const QStringList & candidate
 static void prepend_to_path(QProcessEnvironment * environment, const QStringList & directories)
 {
 #ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity path_case_sensitivity = Qt::CaseInsensitive;
     QStringList parts;
     for (const QString & directory : directories) {
-        if (!directory.isEmpty() && !parts.contains(directory, Qt::CaseInsensitive)) {
+        if (!directory.isEmpty() && !parts.contains(directory, path_case_sensitivity)) {
             parts.append(directory);
         }
     }
@@ -72,11 +73,12 @@ static void prepend_to_path(QProcessEnvironment * environment, const QStringList
         QDir(windows_root).absolutePath()
     };
     for (const QString & directory : system_directories) {
-        if (!parts.contains(directory, Qt::CaseInsensitive)) {
+        if (!parts.contains(directory, path_case_sensitivity)) {
             parts.append(directory);
         }
     }
 #else
+    constexpr Qt::CaseSensitivity path_case_sensitivity = Qt::CaseSensitive;
     QString inherited_path;
     const QStringList inherited_keys = environment->keys();
     for (const QString & key : inherited_keys) {
@@ -91,7 +93,7 @@ static void prepend_to_path(QProcessEnvironment * environment, const QStringList
 
     QStringList parts = inherited_path.split(QDir::listSeparator(), Qt::SkipEmptyParts);
     for (const QString & directory : directories) {
-        if (!directory.isEmpty() && !parts.contains(directory, Qt::CaseInsensitive)) {
+        if (!directory.isEmpty() && !parts.contains(directory, path_case_sensitivity)) {
             parts.prepend(directory);
         }
     }
@@ -99,7 +101,11 @@ static void prepend_to_path(QProcessEnvironment * environment, const QStringList
 
     const QStringList keys = environment->keys();
     for (const QString & key : keys) {
+#ifdef Q_OS_WIN
         if (key.compare(QStringLiteral("PATH"), Qt::CaseInsensitive) == 0) {
+#else
+        if (key == QStringLiteral("PATH")) {
+#endif
             environment->remove(key);
         }
     }
