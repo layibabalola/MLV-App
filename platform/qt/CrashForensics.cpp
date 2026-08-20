@@ -907,6 +907,10 @@ QString runMetadataJson()
     QJsonArray cmdline;
     for (const QString & arg : g_commandLine) cmdline.append(arg);
     root.insert(QStringLiteral("command_line"), cmdline);
+    root.insert(QStringLiteral("process_id"),
+                static_cast<double>( QCoreApplication::applicationPid() ));
+    root.insert(QStringLiteral("gui_smoke_run_nonce"),
+                qEnvironmentVariable("MLVAPP_GUI_SMOKE_RUN_NONCE"));
 
     root.insert(QStringLiteral("log_file"), g_logFilePath);
     root.insert(QStringLiteral("logs_directory"), g_logsDir);

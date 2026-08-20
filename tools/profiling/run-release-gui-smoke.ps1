@@ -366,6 +366,27 @@ function Get-ScreenshotImageMetadata {
     }
 }
 
+function Get-EvidenceFileBinding {
+    param(
+        [string]$Path,
+        [string]$Label,
+        [switch]$Optional
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if ($Optional) { return $null }
+        throw "$Label file not found: $Path"
+    }
+    $resolvedPath = (Resolve-Path -LiteralPath $Path).Path
+    $item = Get-Item -LiteralPath $resolvedPath
+    [pscustomobject]@{
+        path = $resolvedPath
+        length = $item.Length
+        sha256 = (Get-FileHash -LiteralPath $resolvedPath -Algorithm SHA256).Hash
+    }
+}
+
 function Add-ColorArtifactScannerType {
     Add-Type -AssemblyName System.Drawing
     if ("MlvGuiSmokeColorArtifactScanner" -as [type]) {
@@ -856,7 +877,9 @@ $outputDir = Split-Path -Parent $outputPath
 if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
     New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 }
-$logRoot = Join-Path $outputDir "logs"
+$runNonce = [Guid]::NewGuid().ToString("N")
+$outputStem = [IO.Path]::GetFileNameWithoutExtension($outputPath)
+$logRoot = Join-Path $outputDir ("logs-{0}-{1}" -f $outputStem, $runNonce)
 New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
 
 $screenshotPath = $null
@@ -1090,6 +1113,26 @@ if (-not $smokeMutexAcquired) {
     throw "Timed out waiting for another GUI smoke run to release the shared MLVApp log parser."
 }
 
+$buildManifestPath = Join-Path (Split-Path -Parent $exe) "build-manifest.json"
+$receiptPath = $null
+for ($argumentIndex = 0; $argumentIndex -lt $arguments.Count; ++$argumentIndex) {
+    if ([string]$arguments[$argumentIndex] -eq "--receipt" -and
+        $argumentIndex + 1 -lt $arguments.Count) {
+        $receiptPath = [string]$arguments[$argumentIndex + 1]
+        break
+    }
+}
+$captureInputBindings = [pscustomobject]@{
+    executable = Get-EvidenceFileBinding -Path $exe -Label "executable"
+    clip = Get-EvidenceFileBinding -Path $inputPath -Label "clip"
+    receipt = if ($receiptPath) {
+        Get-EvidenceFileBinding -Path $receiptPath -Label "receipt"
+    } else { $null }
+    buildManifest = Get-EvidenceFileBinding `
+        -Path $buildManifestPath -Label "build manifest" -Optional
+}
+$captureBindingFailures = @()
+
 $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
 $startInfo.FileName = $exe
 $startInfo.WorkingDirectory = $root
@@ -1102,6 +1145,7 @@ foreach ($argument in $arguments) {
 }
 
 $envBlock = $startInfo.EnvironmentVariables
+$envBlock["MLVAPP_GUI_SMOKE_RUN_NONCE"] = $runNonce
 if (-not $useAutoPlaybackThreads) {
     $envBlock["MLVAPP_PLAYBACK_MAX_THREADS"] = $Threads
 }
@@ -1226,6 +1270,15 @@ if ($logFile) {
     }
 }
 
+# Preserve the exact lines consumed by this result in a per-run immutable
+# snapshot.  The aggregate rotating app log is allowed to grow later and is
+# therefore diagnostic only; comparison authority comes from this snapshot.
+$runLogSnapshotPath = "$outputPath.run.log"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[System.IO.File]::WriteAllLines($runLogSnapshotPath, [string[]]$recentLines, $utf8NoBom)
+$runLogSnapshotBinding = Get-EvidenceFileBinding `
+    -Path $runLogSnapshotPath -Label "run log snapshot"
+
 $runMetadataLine = $recentLines |
     Where-Object { $_ -like "*run_metadata=*" -and $_ -like "*--gui-smoke-playback*" } |
     Select-Object -Last 1
@@ -1316,6 +1369,17 @@ $runMetadata = $null
 if ($runMetadataLine -and $runMetadataLine -match 'run_metadata=(?<json>\{.*\})') {
     $runMetadata = $Matches["json"] | ConvertFrom-Json
 }
+if ($null -eq $runMetadata) {
+    $captureBindingFailures += "Run metadata was missing from the per-run log snapshot."
+}
+else {
+    if ([string](Get-ObjectPropertyValue $runMetadata "gui_smoke_run_nonce") -ne $runNonce) {
+        $captureBindingFailures += "Run metadata nonce did not match the launcher nonce."
+    }
+    if ([int64](Get-ObjectPropertyValue $runMetadata "process_id") -ne [int64]$process.Id) {
+        $captureBindingFailures += "Run metadata process id did not match the launched process."
+    }
+}
 
 $playbackStart = if ($playbackStartLine) { Convert-PlaybackLogLineToObject $playbackStartLine } else { $null }
 $playbackSummary = if ($summaryLine) { Convert-PlaybackLogLineToObject $summaryLine } else { $null }
@@ -1348,6 +1412,25 @@ $windowScreenshotLog = if ($windowScreenshotLine) { Convert-PlaybackLogLineToObj
 $screenshotLog = if ($screenshotLine) { Convert-PlaybackLogLineToObject $screenshotLine } else { $null }
 if ($screenshotCapture -and $screenshotLog -and (Get-ObjectPropertyValue $screenshotLog "method")) {
     $screenshotCapture.method = [string](Get-ObjectPropertyValue $screenshotLog "method")
+    $screenshotCapture | Add-Member -NotePropertyName frame `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "frame") -Force
+    $screenshotCapture | Add-Member -NotePropertyName serial `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "serial") -Force
+    $screenshotCapture | Add-Member -NotePropertyName generation `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "generation") -Force
+    $screenshotCapture | Add-Member -NotePropertyName eventSha256 `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "sha256") -Force
+    $screenshotCapture | Add-Member -NotePropertyName eventLength `
+        -NotePropertyValue (Get-ObjectPropertyValue $screenshotLog "bytes") -Force
+    if ([string]$screenshotCapture.image.sha256 -ne [string]$screenshotCapture.eventSha256 -or
+        [int64]$screenshotCapture.length -ne [int64]$screenshotCapture.eventLength -or
+        [int]$screenshotCapture.image.width -ne [int](Get-ObjectPropertyValue $screenshotLog "width") -or
+        [int]$screenshotCapture.image.height -ne [int](Get-ObjectPropertyValue $screenshotLog "height")) {
+        $captureBindingFailures += "Screenshot bytes/dimensions do not match the app capture event."
+    }
+}
+elseif ($screenshotCapture) {
+    $captureBindingFailures += "Screenshot capture event was missing."
 }
 $windowScreenshotFpsStatusText = Get-ObjectPropertyValue $windowScreenshotLog "fps_status"
 $windowScreenshotFpsStatusValue = Convert-FpsStatusTextToValue $windowScreenshotFpsStatusText
@@ -1514,6 +1597,7 @@ $colorArtifactScanPassed =
     -not ($colorArtifactFailureVerdicts -contains $colorArtifactVerdict)
 
 $validationFailures = @()
+$validationFailures += $captureBindingFailures
 if ($null -ne $process -and $process.ExitCode -ne 0) {
     $validationFailures += "MLVApp exited with code $($process.ExitCode)."
 }
@@ -1726,12 +1810,17 @@ if ($ExerciseClipLifecycleStress) {
 }
 
 $result = [pscustomobject]@{
-    schema = "mlvapp-gui-smoke-result.v1"
+    schema = "mlvapp-gui-smoke-result.v2"
     capturedAtUtc = $endUtc.ToString("o")
     repoRoot = $root
     exePath = $exe
     clipPath = $inputPath
     outputPath = $outputPath
+    evidence = [pscustomobject]@{
+        runNonce = $runNonce
+        inputs = $captureInputBindings
+        runLogSnapshot = $runLogSnapshotBinding
+    }
     launch = [pscustomobject]@{
         workingDirectory = $root
         arguments = $arguments
@@ -1866,7 +1955,8 @@ $result = [pscustomobject]@{
         visibleBottomLeftGuiProof = $fpsStatusCropCapture
     }
     log = [pscustomobject]@{
-        path = if ($logFile) { $logFile.FullName } else { $null }
+        path = $runLogSnapshotPath
+        aggregateSourcePath = if ($logFile) { $logFile.FullName } else { $null }
         runMetadata = $runMetadata
         playbackStart = $playbackStart
         summary = $playbackSummary

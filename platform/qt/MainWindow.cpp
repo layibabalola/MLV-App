@@ -9219,6 +9219,20 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             qApp->processEvents( QEventLoop::AllEvents );
         }
 
+        // Capture the presentation identity before copying pixels.  The smoke
+        // evidence consumer must be able to bind the PNG to the exact frame
+        // and request serial that were displayed at capture time, rather than
+        // inferring that identity later from the end-of-run summary.
+        const int screenshotFrame = m_lastPresentedRequestContextValid
+            ? static_cast<int>( m_lastPresentedRequestContext.frameNumber )
+            : -1;
+        const qulonglong screenshotSerial =
+            static_cast<qulonglong>( m_lastPresentedRequestSerial );
+        const qulonglong screenshotGeneration = m_lastPresentedRequestContextValid
+            ? static_cast<qulonglong>(
+                  m_lastPresentedRequestContext.presentationGeneration )
+            : 0;
+
         QPixmap screenshot;
         QString screenshotMethod = QStringLiteral("app_internal_presented_pixmap");
         if( ( GpuDisplayViewport::isTexturePresentationActive( ui->graphicsView )
@@ -9256,13 +9270,30 @@ int MainWindow::runGuiPlaybackSmoke(const GuiPlaybackSmokeOptions & options)
             return 9;
         }
 
+        QFile screenshotFile( screenshotInfo.absoluteFilePath() );
+        if( !screenshotFile.open( QIODevice::ReadOnly ) )
+        {
+            err << "[GUI-SMOKE] ERROR: failed to reopen screenshot for evidence binding: "
+                << screenshotInfo.absoluteFilePath() << "\n";
+            return 9;
+        }
+        const qint64 screenshotBytes = screenshotFile.size();
+        const QByteArray screenshotSha256 = QCryptographicHash::hash(
+            screenshotFile.readAll(), QCryptographicHash::Sha256 ).toHex();
+        screenshotFile.close();
+
         logInteractionEvent(
             QStringLiteral("gui_smoke.screenshot"),
-            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4")
+            QStringLiteral("path=\"%1\" width=%2 height=%3 method=%4 bytes=%5 sha256=%6 frame=%7 serial=%8 generation=%9")
                 .arg( screenshotInfo.absoluteFilePath() )
                 .arg( screenshot.width() )
                 .arg( screenshot.height() )
-                .arg( screenshotMethod ) );
+                .arg( screenshotMethod )
+                .arg( screenshotBytes )
+                .arg( QString::fromLatin1( screenshotSha256 ) )
+                .arg( screenshotFrame )
+                .arg( screenshotSerial )
+                .arg( screenshotGeneration ) );
     }
 
     if( ui->actionPlay->isChecked() )

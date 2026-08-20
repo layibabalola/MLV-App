@@ -16,6 +16,8 @@ ARTIFACT_DETECTOR = REPO_ROOT / "tools" / "profiling" / "detect-playback-artifac
 GUI_SMOKE_RUNNER = REPO_ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
 GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
 BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
+MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
+NEUTRAL_RECEIPT = REPO_ROOT / "tests" / "fixtures" / "receipts" / "neutral_look_assist_off_v4.marxml"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -552,3 +554,30 @@ def test_release_builder_resolves_source_root_before_changing_directory() -> Non
     resolve_index = source.index("$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path")
     push_index = source.index("Push-Location $bd")
     assert resolve_index < push_index
+
+
+def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
+    comparer = GUI_SMOKE_COMPARER.read_text(encoding="utf-8")
+    runner = GUI_SMOKE_RUNNER.read_text(encoding="utf-8")
+    main_window = MAIN_WINDOW.read_text(encoding="utf-8")
+
+    assert 'schema = "gui-smoke-ab-compare.v3"' in comparer
+    assert 'schema = "mlvapp-gui-smoke-result.v2"' in runner
+    assert "Assert-RecordedFileBinding" in comparer
+    assert "Get-EmbeddedBuildStamp" in comparer
+    assert "missing MZ header" in comparer
+    assert "same-tree A/B is forbidden" in comparer
+    assert "build manifest is dirty, unbound, or not independently runnable" in comparer
+    assert "per-run log snapshot" in comparer
+    assert "screenshot bytes/frame/serial are not atomically bound" in comparer
+    assert "MLVAPP_GUI_SMOKE_RUN_NONCE" in runner
+    assert "logs-{0}-{1}" in runner
+    assert "eventSha256" in runner
+    assert "frame=%7 serial=%8 generation=%9" in main_window
+    assert "QCryptographicHash::Sha256" in main_window
+    assert NEUTRAL_RECEIPT.read_text(encoding="utf-8") == (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<receipt version="4">\n'
+        '  <lookAssistEnabled>0</lookAssistEnabled>\n'
+        '</receipt>\n'
+    )

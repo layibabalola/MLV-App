@@ -43,6 +43,97 @@ function Resolve-ExistingFileBinding {
     }
 }
 
+function Assert-RecordedFileBinding {
+    param(
+        [object]$Actual,
+        [object]$Recorded,
+        [string]$Label
+    )
+
+    if ($null -eq $Recorded) {
+        throw "$Label capture-time binding is missing."
+    }
+    $recordedPath = [string](Get-NestedValue -Object $Recorded -Path "path")
+    $recordedSha = [string](Get-NestedValue -Object $Recorded -Path "sha256")
+    $recordedLength = Get-NestedValue -Object $Recorded -Path "length"
+    if (-not [string]::Equals($Actual.path, $recordedPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $Actual.sha256 -ne $recordedSha -or
+        [int64]$Actual.length -ne [int64]$recordedLength) {
+        throw "$Label current bytes do not match its capture-time binding."
+    }
+}
+
+function Convert-PlaybackLogLineToObject {
+    param([string]$Line)
+
+    $result = [ordered]@{}
+    $matches = [regex]::Matches($Line, '(?<key>[A-Za-z0-9_]+)=(?<value>"[^"]*"|\S+)')
+    foreach ($match in $matches) {
+        $key = $match.Groups["key"].Value
+        $rawValue = $match.Groups["value"].Value.Trim('"')
+        $integer = 0L
+        $doubleValue = 0.0
+        if ([long]::TryParse($rawValue, [ref]$integer)) {
+            $result[$key] = $integer
+        }
+        elseif ([double]::TryParse(
+            $rawValue,
+            [System.Globalization.NumberStyles]::Float,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [ref]$doubleValue)) {
+            $result[$key] = $doubleValue
+        }
+        else {
+            $result[$key] = $rawValue
+        }
+    }
+    [pscustomobject]$result
+}
+
+function Get-EmbeddedBuildStamp {
+    param([string]$Path)
+
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 256 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+        throw "Executable is not a PE image (missing MZ header)."
+    }
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+    if ($peOffset -lt 0x40 -or $peOffset + 4 -gt $bytes.Length -or
+        $bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45 -or
+        $bytes[$peOffset + 2] -ne 0 -or $bytes[$peOffset + 3] -ne 0) {
+        throw "Executable is not a valid PE image (missing PE signature)."
+    }
+    $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+    $matches = [regex]::Matches(
+        $text,
+        'MLVAPP_BUILDSTAMP_v1\|sha=([0-9a-f]{40})\|dirty=([01])')
+    if ($matches.Count -ne 1) {
+        throw "Executable must contain exactly one MLVAPP_BUILDSTAMP_v1 field."
+    }
+    [pscustomobject]@{
+        sha = $matches[0].Groups[1].Value
+        dirty = [int]$matches[0].Groups[2].Value
+    }
+}
+
+function Assert-UniqueLaunchArguments {
+    param(
+        [object[]]$Arguments,
+        [string]$Label
+    )
+
+    $seen = @{}
+    foreach ($argument in $Arguments) {
+        $text = [string]$argument
+        if (-not $text.StartsWith("--", [StringComparison]::Ordinal)) { continue }
+        $name = $text.Split('=', 2)[0]
+        if ($seen.ContainsKey($name)) {
+            throw "$Label launch arguments repeat controlling option $name."
+        }
+        $seen[$name] = $true
+    }
+}
+
 function Get-NestedValue {
     param(
         [object]$Object,
@@ -130,21 +221,92 @@ function Get-LegEvidenceBinding {
     )
 
     $json = Resolve-ExistingFileBinding -Path $JsonPath -Label "$Name smoke JSON"
+    if ([string](Get-NestedValue $Smoke "schema") -ne "mlvapp-gui-smoke-result.v2") {
+        throw "$Name smoke result schema is not mlvapp-gui-smoke-result.v2."
+    }
     $exe = Resolve-ExistingFileBinding `
         -Path (Get-NestedValue -Object $Smoke -Path "exePath") `
+        -Label "$Name executable"
+    Assert-RecordedFileBinding `
+        -Actual $exe -Recorded (Get-NestedValue $Smoke "evidence.inputs.executable") `
         -Label "$Name executable"
     $clip = Resolve-ExistingFileBinding `
         -Path (Get-NestedValue -Object $Smoke -Path "clipPath") `
         -Label "$Name clip"
+    Assert-RecordedFileBinding `
+        -Actual $clip -Recorded (Get-NestedValue $Smoke "evidence.inputs.clip") `
+        -Label "$Name clip"
     $receipt = Resolve-ExistingFileBinding `
         -Path (Get-LaunchArgumentValue -Smoke $Smoke -Name "--receipt") `
         -Label "$Name receipt"
+    Assert-RecordedFileBinding `
+        -Actual $receipt -Recorded (Get-NestedValue $Smoke "evidence.inputs.receipt") `
+        -Label "$Name receipt"
     $log = Resolve-ExistingFileBinding `
-        -Path (Get-FirstNestedValue -Object $Smoke -Paths @("log.path", "log.runMetadata.log_file")) `
-        -Label "$Name source log"
-    $buildSha = [string](Get-NestedValue -Object $Smoke -Path "log.runMetadata.build_sha")
+        -Path (Get-NestedValue -Object $Smoke -Path "log.path") `
+        -Label "$Name per-run source log"
+    Assert-RecordedFileBinding `
+        -Actual $log -Recorded (Get-NestedValue $Smoke "evidence.runLogSnapshot") `
+        -Label "$Name per-run source log"
+
+    $manifest = Resolve-ExistingFileBinding `
+        -Path (Get-NestedValue $Smoke "evidence.inputs.buildManifest.path") `
+        -Label "$Name build manifest"
+    Assert-RecordedFileBinding `
+        -Actual $manifest -Recorded (Get-NestedValue $Smoke "evidence.inputs.buildManifest") `
+        -Label "$Name build manifest"
+    $manifestData = Get-Content -LiteralPath $manifest.path -Raw | ConvertFrom-Json -Depth 50
+    $buildSha = [string](Get-NestedValue -Object $manifestData -Path "head")
     $git = Get-GitTreeBinding -Smoke $Smoke -BuildSha $buildSha -Label $Name
-    $commandLine = @(Get-NestedValue -Object $Smoke -Path "log.runMetadata.command_line")
+    if ((Get-NestedValue $manifestData "dirty") -ne $false -or
+        [int](Get-NestedValue $manifestData "provenanceStampDirty") -ne 0 -or
+        (Get-NestedValue $manifestData "provenanceStampShaMatchesHead") -ne $true -or
+        [string](Get-NestedValue $manifestData "provenanceStampSha") -ne $buildSha -or
+        [string](Get-NestedValue $manifestData "sha256") -ne $exe.sha256 -or
+        [string](Get-NestedValue $manifestData "exe") -ne [IO.Path]::GetFileName($exe.path) -or
+        (Get-NestedValue $manifestData "selfContained") -ne $true -or
+        [int](Get-NestedValue $manifestData "launchProbe.exitCode") -ne 0) {
+        throw "$Name build manifest is dirty, unbound, or not independently runnable."
+    }
+    $stamp = Get-EmbeddedBuildStamp -Path $exe.path
+    if ($stamp.sha -ne $buildSha -or $stamp.dirty -ne 0) {
+        throw "$Name embedded provenance stamp does not bind a clean manifest head."
+    }
+
+    $logLines = @(Get-Content -LiteralPath $log.path)
+    $rawPaths = @(
+        "log.raw.runMetadata",
+        "log.raw.summary",
+        "log.raw.visualState",
+        "log.raw.screenshotEvent"
+    )
+    foreach ($rawPath in $rawPaths) {
+        $rawLine = [string](Get-NestedValue $Smoke $rawPath)
+        if ([string]::IsNullOrWhiteSpace($rawLine) -or
+            @($logLines | Where-Object { $_ -ceq $rawLine }).Count -ne 1) {
+            throw "$Name $rawPath is missing or not unique in the per-run log snapshot."
+        }
+    }
+
+    $rawMetadata = [string](Get-NestedValue $Smoke "log.raw.runMetadata")
+    if ($rawMetadata -notmatch 'run_metadata=(?<json>\{.*\})') {
+        throw "$Name run metadata line is malformed."
+    }
+    $loggedMetadata = $Matches["json"] | ConvertFrom-Json -Depth 50
+    if ((Convert-ToStableValueText $loggedMetadata) -ne
+        (Convert-ToStableValueText (Get-NestedValue $Smoke "log.runMetadata"))) {
+        throw "$Name parsed run metadata differs from the per-run log snapshot."
+    }
+    $nonce = [string](Get-NestedValue $Smoke "evidence.runNonce")
+    if ($nonce -notmatch '^[0-9a-f]{32}$' -or
+        [string](Get-NestedValue $loggedMetadata "gui_smoke_run_nonce") -ne $nonce -or
+        [int64](Get-NestedValue $loggedMetadata "process_id") -ne
+            [int64](Get-NestedValue $Smoke "process.id") -or
+        [string](Get-NestedValue $loggedMetadata "build_sha") -ne $buildSha) {
+        throw "$Name run nonce/process/build binding is invalid."
+    }
+
+    $commandLine = @(Get-NestedValue -Object $loggedMetadata -Path "command_line")
     if ($commandLine.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$commandLine[0])) {
         throw "$Name log metadata does not record the launched executable."
     }
@@ -153,6 +315,7 @@ function Get-LegEvidenceBinding {
         throw "$Name executable path does not match log run metadata."
     }
     $launchArguments = @(Get-NestedValue -Object $Smoke -Path "launch.arguments")
+    Assert-UniqueLaunchArguments -Arguments $launchArguments -Label $Name
     $loggedArguments = @($commandLine | Select-Object -Skip 1)
     if ((Convert-ToStableValueText $launchArguments) -ne (Convert-ToStableValueText $loggedArguments)) {
         throw "$Name launch arguments do not match log run metadata."
@@ -162,12 +325,60 @@ function Get-LegEvidenceBinding {
         throw "$Name clip path does not match its --input argument."
     }
 
+    $summary = Convert-PlaybackLogLineToObject `
+        -Line ([string](Get-NestedValue $Smoke "log.raw.summary"))
+    $visualState = Convert-PlaybackLogLineToObject `
+        -Line ([string](Get-NestedValue $Smoke "log.raw.visualState"))
+    $screenshotEvent = Convert-PlaybackLogLineToObject `
+        -Line ([string](Get-NestedValue $Smoke "log.raw.screenshotEvent"))
+    if ((Convert-ToStableValueText $visualState) -ne
+        (Convert-ToStableValueText (Get-NestedValue $Smoke "visualQuality.visualState"))) {
+        throw "$Name visual state differs from the per-run log snapshot."
+    }
+    if ([int64](Get-NestedValue $summary "last_presented_frame") -ne
+            [int64](Get-NestedValue $Smoke "validation.lastPresentedFrame") -or
+        [int64](Get-NestedValue $summary "first_presented_frame") -ne
+            [int64](Get-NestedValue $Smoke "validation.firstPresentedFrame") -or
+        [int64](Get-NestedValue $summary "presented_frames") -ne
+            [int64](Get-NestedValue $Smoke "validation.presentedFrames")) {
+        throw "$Name playback summary differs from the per-run log snapshot."
+    }
+
+    $screenshotPath = Resolve-SmokeScreenshotPath -Smoke $Smoke
+    $screenshot = Resolve-ExistingFileBinding -Path $screenshotPath -Label "$Name screenshot"
+    $image = Get-ImageMetadata -Path $screenshot.path
+    $capture = Get-NestedValue $Smoke "screenshot.capture"
+    if (-not [string]::Equals(
+            $screenshot.path, [string](Get-NestedValue $screenshotEvent "path"),
+            [StringComparison]::OrdinalIgnoreCase) -or
+        $screenshot.sha256 -ne [string](Get-NestedValue $capture "image.sha256") -or
+        $screenshot.sha256 -ne [string](Get-NestedValue $screenshotEvent "sha256") -or
+        [int64]$screenshot.length -ne [int64](Get-NestedValue $capture "length") -or
+        [int64]$screenshot.length -ne [int64](Get-NestedValue $screenshotEvent "bytes") -or
+        [int]$image.width -ne [int](Get-NestedValue $screenshotEvent "width") -or
+        [int]$image.height -ne [int](Get-NestedValue $screenshotEvent "height") -or
+        [int64](Get-NestedValue $capture "frame") -ne [int64](Get-NestedValue $screenshotEvent "frame") -or
+        [int64](Get-NestedValue $capture "serial") -ne [int64](Get-NestedValue $screenshotEvent "serial") -or
+        [int64](Get-NestedValue $capture "generation") -ne [int64](Get-NestedValue $screenshotEvent "generation") -or
+        [int64](Get-NestedValue $screenshotEvent "frame") -ne
+            [int64](Get-NestedValue $summary "last_presented_frame") -or
+        [int64](Get-NestedValue $screenshotEvent "serial") -le 0) {
+        throw "$Name screenshot bytes/frame/serial are not atomically bound to the run log."
+    }
+
     [pscustomobject]@{
         json = $json
         executable = $exe
         clip = $clip
         receipt = $receipt
         sourceLog = $log
+        buildManifest = $manifest
+        buildManifestData = $manifestData
+        embeddedStamp = $stamp
+        screenshot = $screenshot
+        screenshotEvent = $screenshotEvent
+        summary = $summary
+        visualState = $visualState
         git = $git
     }
 }
@@ -331,12 +542,14 @@ function Get-ImageMetadata {
 
     Add-Type -AssemblyName System.Drawing
     $resolved = (Resolve-Path -LiteralPath $Path).Path
+    $item = Get-Item -LiteralPath $resolved
     $image = [System.Drawing.Image]::FromFile($resolved)
     try {
         [pscustomobject]@{
             path = $resolved
             width = $image.Width
             height = $image.Height
+            length = $item.Length
             sha256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
         }
     }
@@ -455,6 +668,24 @@ $screenshotCompare = Compare-SmokeScreenshots `
     -RequestedSampleStep $SampleStep
 
 $failures = @()
+$declaredBeforeCommit = [string](Get-NestedValue $beforeSmoke "log.runMetadata.build_sha")
+$declaredAfterCommit = [string](Get-NestedValue $afterSmoke "log.runMetadata.build_sha")
+if (-not [string]::IsNullOrWhiteSpace($declaredBeforeCommit) -and
+    $declaredBeforeCommit -eq $declaredAfterCommit) {
+    $failures += "Before and after build commits are identical; same-arm A/B is forbidden."
+}
+try {
+    $declaredBeforeGit = Get-GitTreeBinding `
+        -Smoke $beforeSmoke -BuildSha $declaredBeforeCommit -Label "before declared"
+    $declaredAfterGit = Get-GitTreeBinding `
+        -Smoke $afterSmoke -BuildSha $declaredAfterCommit -Label "after declared"
+    if ($declaredBeforeGit.tree -eq $declaredAfterGit.tree) {
+        $failures += "Before and after build trees are identical; same-tree A/B is forbidden."
+    }
+}
+catch {
+    $failures += "Declared Git binding failed: $($_.Exception.Message)"
+}
 $evidenceBindings = $null
 try {
     $beforeBinding = Get-LegEvidenceBinding `
@@ -477,6 +708,9 @@ try {
     if ($beforeBinding.git.commit -eq $afterBinding.git.commit) {
         $failures += "Before and after build commits are identical; same-arm A/B is forbidden."
     }
+    if ($beforeBinding.git.tree -eq $afterBinding.git.tree) {
+        $failures += "Before and after build trees are identical; same-tree A/B is forbidden."
+    }
     if (-not [string]::Equals($beforeBinding.clip.path, $afterBinding.clip.path, [StringComparison]::OrdinalIgnoreCase) -or
         $beforeBinding.clip.sha256 -ne $afterBinding.clip.sha256) {
         $failures += "Before and after legs do not bind the same clip bytes."
@@ -484,6 +718,10 @@ try {
     if (-not [string]::Equals($beforeBinding.receipt.path, $afterBinding.receipt.path, [StringComparison]::OrdinalIgnoreCase) -or
         $beforeBinding.receipt.sha256 -ne $afterBinding.receipt.sha256) {
         $failures += "Before and after legs do not bind the same receipt bytes."
+    }
+    if ((Convert-ToStableValueText $beforeBinding.visualState) -ne
+        (Convert-ToStableValueText $afterBinding.visualState)) {
+        $failures += "Before and after full visual-state telemetry differs."
     }
 }
 catch {
@@ -585,7 +823,7 @@ if ($FailOnScreenshotDelta) {
 }
 
 $result = [pscustomobject]@{
-    schema = "gui-smoke-ab-compare.v2"
+    schema = "gui-smoke-ab-compare.v3"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     before = [pscustomobject]@{
         jsonPath = $beforeJsonPath
