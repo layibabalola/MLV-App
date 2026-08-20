@@ -1,0 +1,29 @@
+{
+  "artifactKind": "closeout",
+  "branch": "codex/candidate-acceptance-batching-20260819",
+  "closeoutCleanTruth": {
+    "authoritativeSource": "repoClosedPostcondition.closeoutCleanTruth",
+    "reason": "evidence_repair_precedes_repo_closed_postcondition",
+    "status": "pending"
+  },
+  "createdAt": "2026-08-20T05:48:42+00:00",
+  "detectorHash": "c92c8b0e86959db3b272504d51820d6e",
+  "eligible": true,
+  "featureHead": "e0f193c6b556970ea2fe12cb3572ce866dad2e0e",
+  "pinnedRefs": {
+    "feature": {
+      "branch": "codex/candidate-acceptance-batching-20260819",
+      "head": "e0f193c6b556970ea2fe12cb3572ce866dad2e0e"
+    },
+    "target": {
+      "branch": "master",
+      "head": "cfc4e19b92b2aa2078930030d46f18d2b276f48f",
+      "mode": "remote",
+      "ref": "refs/remotes/fork/master",
+      "remote": "fork"
+    }
+  },
+  "schemaVersion": "1.0",
+  "targetHead": "cfc4e19b92b2aa2078930030d46f18d2b276f48f",
+  "workBlockId": "wb-a9cc6b29e4d740d9"
+}
