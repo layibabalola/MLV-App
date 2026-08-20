@@ -19,6 +19,7 @@ extern "C" {
 #include "../../platform/qt/DualIsoPatternMapping.h"
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +37,14 @@ extern "C" {
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+
+extern "C" int dualisoHistogramGeometryForTesting(int width,
+                                                    int height,
+                                                    int active_y1,
+                                                    size_t * pixel_count,
+                                                    size_t * sample_capacity,
+                                                    size_t * highlight_capacity,
+                                                    int * first_sample_y);
 
 TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
 {
@@ -95,6 +104,63 @@ TEST(DualIsoPipeline, HistogramMedianHandlesFullUint16WhiteRange)
     ASSERT_EQ(2u, hist_get_bin(histogram, 65535));
     ASSERT_EQ(65535, hist_median(histogram));
     hist_destroy(histogram);
+}
+
+TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBeforeAllocation)
+{
+    size_t pixel_count = 0;
+    size_t sample_capacity = 0;
+    size_t highlight_capacity = 0;
+    int first_sample_y = 0;
+
+    ASSERT_EQ(1, dualisoHistogramGeometryForTesting(1920,
+                                                    1080,
+                                                    10,
+                                                    &pixel_count,
+                                                    &sample_capacity,
+                                                    &highlight_capacity,
+                                                    &first_sample_y));
+    ASSERT_EQ(static_cast<size_t>(1920u * 1080u), pixel_count);
+    ASSERT_EQ((static_cast<size_t>(1922u) * static_cast<size_t>(1082u)) / 9u,
+              sample_capacity);
+    const size_t expected_highlight_capacity =
+        std::max(sample_capacity / 50u, static_cast<size_t>(1u));
+    ASSERT_EQ(expected_highlight_capacity, highlight_capacity);
+    ASSERT_EQ(12, first_sample_y);
+
+    ASSERT_EQ(1, dualisoHistogramGeometryForTesting(3,
+                                                    5,
+                                                    0,
+                                                    &pixel_count,
+                                                    &sample_capacity,
+                                                    &highlight_capacity,
+                                                    &first_sample_y));
+    ASSERT_EQ(static_cast<size_t>(15), pixel_count);
+    ASSERT_EQ(static_cast<size_t>(3), sample_capacity);
+    ASSERT_EQ(static_cast<size_t>(1), highlight_capacity);
+    ASSERT_EQ(2, first_sample_y);
+
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(0, 1080, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 4, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, -1,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, 1076,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(INT_MAX, 5, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(INT_MAX, INT_MAX, 0,
+                                                    &pixel_count, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
+    ASSERT_EQ(0, dualisoHistogramGeometryForTesting(1920, 1080, 0,
+                                                    nullptr, &sample_capacity,
+                                                    &highlight_capacity, &first_sample_y));
 }
 #include <QString>
 #include <QTemporaryDir>
@@ -5547,6 +5613,73 @@ static int synthetic_dual_iso_prepare_state(struct raw_info raw,
                                         1,
                                         scratch,
                                         state);
+}
+
+TEST(DualIsoPipeline, HistogramMatchRejectsUniformFrameWithoutPublishingGpuState)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    const struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    std::vector<uint16_t> frame(static_cast<size_t>(raw.width)
+                              * static_cast<size_t>(raw.height),
+                                static_cast<uint16_t>(raw.white_level));
+    dualiso_full20bit_scratch_t scratch = {};
+    dualiso_gpu_recon_state_t state;
+    std::memset(&state, 0xA5, sizeof(state));
+    int iso_pattern = 1;
+    int auto_correction = -2;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+
+    const int rc = diso_prepare_gpu_recon_state(raw,
+                                                 frame.data(),
+                                                 0,
+                                                 100,
+                                                 200,
+                                                 &iso_pattern,
+                                                 &auto_correction,
+                                                 &ev_correction,
+                                                 &black_delta,
+                                                 1,
+                                                 0,
+                                                 1,
+                                                 0,
+                                                 1,
+                                                 1,
+                                                 &scratch,
+                                                 &state);
+
+    ASSERT_EQ(0, rc);
+    ASSERT_EQ(0, state.valid);
+    ASSERT_EQ(-2, auto_correction);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+
+    iso_pattern = 1;
+    auto_correction = -2;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_get_full20bit(raw,
+                                    frame.data(),
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(-2, auto_correction);
+    ASSERT_EQ(1.0, ev_correction);
+    ASSERT_EQ(-1, black_delta);
+    free_dualiso_full20bit_scratch(&scratch);
 }
 
 static std::string synthetic_phase_pattern_list(const std::vector<int> & patterns)

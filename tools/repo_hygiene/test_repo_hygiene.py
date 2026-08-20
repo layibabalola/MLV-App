@@ -2345,6 +2345,25 @@ class RepoHygieneTests(unittest.TestCase):
             "no x86 CPU builtin may remain reachable on ARM outside the architecture guard",
         )
 
+    def test_dualiso_histogram_match_has_one_checked_reachable_implementation(self) -> None:
+        source = (ROOT / "src" / "mlv" / "llrawproc" / "dualiso.c").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(
+            "static int _match_exposures(",
+            source,
+            "the unreachable pre-2025 matcher must not reintroduce unsafe duplicate arithmetic",
+        )
+        self.assertEqual(source.count("static int match_by_histogram("), 1)
+        self.assertEqual(source.count("static int match_exposures("), 1)
+        self.assertEqual(source.count("static int dualiso_checked_histogram_geometry("), 1)
+        self.assertIn("checked_pixels > (size_t)INT_MAX", source)
+        self.assertIn("checked_samples > (size_t)INT_MAX", source)
+        self.assertIn("hi_n < highlight_capacity", source)
+        self.assertIn("if (hi_n >= highlight_capacity) break;", source)
+        self.assertIn("if (n == 0) return 0;", source)
+        self.assertIn("if (!match_by_histogram(raw_info,", source)
+
     def test_release_sources_remain_cxx14_and_c_memory_portable(self) -> None:
         for source_root in (ROOT / "src", ROOT / "platform" / "qt"):
             for source_path in sorted(source_root.rglob("*")):

@@ -1106,7 +1106,13 @@ static int ensure_histogram_match_scratch(dualiso_full20bit_scratch_t * scratch,
                                           size_t sample_count,
                                           size_t highlight_count)
 {
-    if (!scratch)
+    if (!scratch
+        || pixel_count == 0
+        || sample_count == 0
+        || highlight_count == 0
+        || pixel_count > SIZE_MAX / sizeof(int)
+        || sample_count > SIZE_MAX / sizeof(int)
+        || highlight_count > SIZE_MAX / sizeof(int))
     {
         return 0;
     }
@@ -2192,237 +2198,143 @@ static int identify_bright_and_dark_fields(struct raw_info raw_info,
     return 1;
 }
 
-static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, double * corr_ev, int * white_darkened, int * is_bright)
+static int dualiso_checked_histogram_geometry(int width,
+                                              int height,
+                                              int active_y1,
+                                              size_t * pixel_count,
+                                              size_t * sample_capacity,
+                                              size_t * highlight_capacity,
+                                              int * first_sample_y)
 {
-    /* guess ISO - find the factor and the offset for matching the bright and dark images */
-    int black20 = raw_info.black_level;
-    int white20 = MIN(raw_info.white_level, *white_darkened);
-    int black = black20/16;
-    int white = white20/16;
-    int clip0 = white - black;
-    int clip  = clip0 * 0.95;    /* there may be nonlinear response in very bright areas */
-    
-    int w = raw_info.width;
-    int h = raw_info.height;
-    int y0 = raw_info.active_area.y1 + 2;
-    
-    /* quick interpolation for matching */
-    if (w <= 0 || h <= 0
-        || (size_t)w > SIZE_MAX / (size_t)h
-        || (size_t)w * (size_t)h > SIZE_MAX / sizeof(int)) {
+    if (!pixel_count || !sample_capacity || !highlight_capacity || !first_sample_y
+        || width <= 0 || height < 5 || active_y1 < 0 || active_y1 > height - 5)
+    {
         return 0;
     }
-    const size_t image_pixels = (size_t)w * (size_t)h;
-    int* dark   = malloc(image_pixels * sizeof(dark[0]));
-    int* bright = malloc(image_pixels * sizeof(bright[0]));
-    if (!dark || !bright) {
-        free(dark);
-        free(bright);
+
+    const size_t checked_width = (size_t)width;
+    const size_t checked_height = (size_t)height;
+    if (checked_width > SIZE_MAX / checked_height)
+    {
         return 0;
     }
-    memset(dark, 0, image_pixels * sizeof(dark[0]));
-    memset(bright, 0, image_pixels * sizeof(bright[0]));
-    
-    //#pragma omp parallel for
-    for (int y = y0; y < h-2; y += 3)
-    {
-        int* native = BRIGHT_ROW ? bright : dark;
-        int* interp = BRIGHT_ROW ? dark : bright;
 
-        for (int x = 0; x < w; x += 3)
-        {
-            int pa = raw_get_pixel_20to16(x, y-2) - black;
-            int pb = raw_get_pixel_20to16(x, y+2) - black;
-            int pn = raw_get_pixel_20to16(x, y) - black;
-            int pi = (pa + pb + 1) / 2;
-            if (pa >= clip || pb >= clip) pi = clip0;               /* pixel too bright? discard */
-            if (pi >= clip) pn = clip0;                             /* interpolated pixel not good? discard the other one too */
-            interp[x + y * w] = pi;
-            native[x + y * w] = pn;
-        }
-    }
-    
-    /*
-     * Robust line fit (match unclipped data):
-     * - use (median_bright, median_dark) as origin
-     * - select highlights between 98 and 99.9th percentile to find the slope (ISO)
-     * - choose the slope that explains the largest number of highlight points (inspired from RANSAC)
-     *
-     * Rationale:
-     * - exposure matching is important to be correct in bright_highlights (which are combined with dark_midtones)
-     * - low percentiles are likely affected by noise (this process is essentially a histogram matching)
-     * - as ad-hoc as it looks, it's the only method that passed all the test samples so far.
-     */
-    int nmax = (w+2) * (h+2) / 9;   /* downsample by 3x3 for speed */
-    int * tmp = malloc(nmax * sizeof(tmp[0]));
-    
-    /* median_bright */
-    int n = 0;
-    for (int y = y0; y < h-2; y += 3)
+    const size_t checked_pixels = checked_width * checked_height;
+    if (checked_pixels > (size_t)INT_MAX || checked_pixels > SIZE_MAX / sizeof(int))
     {
-        for (int x = 0; x < w; x += 3)
-        {
-            int b = bright[x + y*w];
-            if (b >= clip) continue;
-            tmp[n++] = b;
-        }
-    }
-    int bmed = median_int_wirth(tmp, n);
-    
-    int * bps = 0;
-    
-    /* also compute the range for bright pixels (used to find the slope) */
-    int b_lo = kth_smallest_int(tmp, n, n*98/100);
-    int b_hi = kth_smallest_int(tmp, n, n*99.9/100);
-    
-    /* median_dark */
-    n = 0;
-    for (int y = y0; y < h-2; y += 3)
-    {
-        for (int x = 0; x < w; x += 3)
-        {
-            int d = dark[x + y*w];
-            int b = bright[x + y*w];
-            if (b >= clip) continue;
-            tmp[n++] = d;
-        }
-    }
-    int dmed = median_int_wirth(tmp, n);
-    
-    int * dps = 0;
-    
-    /* select highlights used to find the slope (ISO) */
-    /* (98th percentile => up to 2% highlights) */
-    int hi_nmax = nmax/50;
-    int hi_n = 0;
-    int* hi_dark = malloc(hi_nmax * sizeof(hi_dark[0]));
-    int* hi_bright = malloc(hi_nmax * sizeof(hi_bright[0]));
-    
-    for (int y = y0; y < h-2; y += 3)
-    {
-        for (int x = 0; x < w; x += 3)
-        {
-            int d = dark[x + y*w];
-            int b = bright[x + y*w];
-            if (b >= b_hi) continue;
-            if (b <= b_lo) continue;
-            hi_dark[hi_n] = d;
-            hi_bright[hi_n] = b;
-            hi_n++;
-            if (hi_n >= hi_nmax) break;
-        }
-    }
-    
-    //~ printf("Selected %d highlight points (max %d)\n", hi_n, hi_nmax);
-    
-    double a = 0;
-    double b = 0;
-    
-    int best_score = 0;
-    for (double ev = 0; ev < 6; ev += 0.002)
-    {
-        double test_a = pow(2, -ev);
-        double test_b = dmed - bmed * test_a;
-        
-        int score = 0;
-        for (int i = 0; i < hi_n; i++)
-        {
-            int d = hi_dark[i];
-            int b = hi_bright[i];
-            int e = d - (b*test_a + test_b);
-            if (ABS(e) < 50) score++;
-        }
-        if (score > best_score)
-        {
-            best_score = score;
-            a = test_a;
-            b = test_b;
-            //~ printf("%f: %d\n", a, score);
-        }
-    }
-    free(hi_dark); hi_dark = 0;
-    free(hi_bright); hi_bright = 0;
-    free(tmp); tmp = 0;
-    
-    free(dark);
-    free(bright);
-    if (dps) free(dps);
-    if (bps) free(bps);
-    
-    /* apply the correction */
-    double b20 = b * 16;
-    //#pragma omp parallel for collapse(2)
-    for (int y = 0; y < h; y ++)
-    {
-        for (int x = 0; x < w; x ++)
-        {
-            int p = raw_get_pixel32(x, y);
-            if (p == 0) continue;
-
-            if (BRIGHT_ROW)
-            {
-                /* bright exposure: darken and apply the black offset (fixme: why not half?) */
-                p = (p - black20) * a + black20 + b20*a;
-            }
-            else
-            {
-                p = p - b20 + b20*a;
-            }
-
-            /* out of range? */
-            /* note: this breaks M24-1127 */
-            //p = COERCE(p, 0, 0xFFFFF);
-            
-            raw_set_pixel20(x, y, p);
-        }
-    }
-    *white_darkened = (white20 - black20 + b20) * a + black20;
-    
-    double factor = 1/a;
-    if (factor < 1.2 || !isfinite(factor))
-    {
-#ifndef STDOUT_SILENT
-        printf("Doesn't look like interlaced ISO\n");
-#endif
         return 0;
     }
-    
-    *corr_ev = log2(factor);
-#ifndef STDOUT_SILENT
-    printf("ISO difference  : %.2f EV (%d)\n", log2(factor), (int)round(factor*100));
-    printf("Black delta     : %.2f\n", b/4); /* we want to display black delta for the 14-bit original data, but we have computed it from 16-bit data */
-#endif
+
+    /* Preserve the historical floor((w + 2) * (h + 2) / 9) capacity exactly,
+     * but perform the additions and product in the allocation's size domain. */
+    const size_t padded_width = checked_width + 2u;
+    const size_t padded_height = checked_height + 2u;
+    if (padded_width > SIZE_MAX / padded_height)
+    {
+        return 0;
+    }
+
+    const size_t checked_samples = (padded_width * padded_height) / 9u;
+    if (checked_samples == 0
+        || checked_samples > (size_t)INT_MAX
+        || checked_samples > SIZE_MAX / sizeof(int))
+    {
+        return 0;
+    }
+
+    const size_t checked_highlights = MAX(checked_samples / 50u, (size_t)1u);
+    if (checked_highlights > (size_t)INT_MAX
+        || checked_highlights > SIZE_MAX / sizeof(int))
+    {
+        return 0;
+    }
+
+    *pixel_count = checked_pixels;
+    *sample_capacity = checked_samples;
+    *highlight_capacity = checked_highlights;
+    *first_sample_y = active_y1 + 2;
     return 1;
 }
 
-static void match_by_histogram(struct raw_info raw_info,
-                               uint32_t * raw_buffer_32,
-                               double * ev_correction,
-                               int * black_delta,
-                               int * white_darkened,
-                               int * is_bright,
-                               dualiso_full20bit_scratch_t * scratch)
+/* Production-linked test seam for hostile geometry without allocating a
+ * synthetic multi-gigabyte frame. Not part of the public llrawproc API. */
+int dualisoHistogramGeometryForTesting(int width,
+                                       int height,
+                                       int active_y1,
+                                       size_t * pixel_count,
+                                       size_t * sample_capacity,
+                                       size_t * highlight_capacity,
+                                       int * first_sample_y);
+int dualisoHistogramGeometryForTesting(int width,
+                                       int height,
+                                       int active_y1,
+                                       size_t * pixel_count,
+                                       size_t * sample_capacity,
+                                       size_t * highlight_capacity,
+                                       int * first_sample_y)
 {
+    return dualiso_checked_histogram_geometry(width,
+                                              height,
+                                              active_y1,
+                                              pixel_count,
+                                              sample_capacity,
+                                              highlight_capacity,
+                                              first_sample_y);
+}
+
+static int match_by_histogram(struct raw_info raw_info,
+                              uint32_t * raw_buffer_32,
+                              double * ev_correction,
+                              int * black_delta,
+                              int * white_darkened,
+                              int * is_bright,
+                              dualiso_full20bit_scratch_t * scratch)
+{
+    if (!raw_buffer_32 || !ev_correction || !black_delta || !white_darkened || !is_bright || !scratch)
+    {
+        return 0;
+    }
+
     /* guess ISO - find the factor and the offset for matching the bright and dark images */
     int black20 = raw_info.black_level;
     int white20 = MIN(raw_info.white_level, *white_darkened);
+    if (black20 < 0 || white20 <= black20)
+    {
+        return 0;
+    }
     int black = black20/16;
     int white = white20/16;
+    if (white <= black)
+    {
+        return 0;
+    }
     int clip0 = white - black;
     int clip  = clip0 * 0.95;    /* there may be nonlinear response in very bright areas */
 
     int w = raw_info.width;
     int h = raw_info.height;
-    int y0 = raw_info.active_area.y1 + 2;
+    int y0 = 0;
+    size_t pixel_count = 0;
+    size_t sample_capacity = 0;
+    size_t highlight_capacity = 0;
+    if (!dualiso_checked_histogram_geometry(w,
+                                            h,
+                                            raw_info.active_area.y1,
+                                            &pixel_count,
+                                            &sample_capacity,
+                                            &highlight_capacity,
+                                            &y0))
+    {
+        return 0;
+    }
 
     /* quick interpolation for matching */
-    const size_t pixel_count = (size_t)w * (size_t)h;
-    int nmax = (w+2) * (h+2) / 9;   /* downsample by 3x3 for speed */
-    int hi_nmax = MAX(nmax/50, 1);
-
-    if (!ensure_histogram_match_scratch(scratch, pixel_count, (size_t)nmax, (size_t)hi_nmax))
+    if (!ensure_histogram_match_scratch(scratch,
+                                        pixel_count,
+                                        sample_capacity,
+                                        highlight_capacity))
     {
-        return;
+        return 0;
     }
 
     int * dark = scratch->histogram_match_dark;
@@ -2442,8 +2354,9 @@ static void match_by_histogram(struct raw_info raw_info,
             int pi = (pa + pb + 1) / 2;
             if (pa >= clip || pb >= clip) pi = clip0;               /* pixel too bright? discard */
             if (pi >= clip) pn = clip0;                             /* interpolated pixel not good? discard the other one too */
-            interp[x + y * w] = pi;
-            native[x + y * w] = pn;
+            const size_t pixel_index = (size_t)y * (size_t)w + (size_t)x;
+            interp[pixel_index] = pi;
+            native[pixel_index] = pn;
         }
     }
 
@@ -2461,21 +2374,28 @@ static void match_by_histogram(struct raw_info raw_info,
     int * tmp = scratch->histogram_match_tmp;
 
     /* median_bright */
-    int n = 0;
+    size_t n = 0;
     for (int y = y0; y < h-2; y += 3)
     {
         for (int x = 0; x < w; x += 3)
         {
-            int b = bright[x + y*w];
+            const size_t pixel_index = (size_t)y * (size_t)w + (size_t)x;
+            int b = bright[pixel_index];
             if (b >= clip) continue;
+            if (n >= sample_capacity) return 0;
             tmp[n++] = b;
         }
     }
-    int bmed = median_int_wirth(tmp, n);
+    if (n == 0) return 0;
+    const int bright_sample_count = (int)n;
+    int bmed = median_int_wirth(tmp, bright_sample_count);
 
     /* also compute the range for bright pixels (used to find the slope) */
-    int b_lo = kth_smallest_int(tmp, n, n*98/100);
-    int b_hi = kth_smallest_int(tmp, n, n*99.9/100);
+    const int bright_lo_index = (int)(((uint64_t)n * 98u) / 100u);
+    const int bright_hi_index = (int)(((uint64_t)n * 999u) / 1000u);
+    int b_lo = kth_smallest_int(tmp, bright_sample_count, bright_lo_index);
+    int b_hi = kth_smallest_int(tmp, bright_sample_count, bright_hi_index);
+    if (b_hi <= b_lo) return 0;
 
     /* median_dark */
     n = 0;
@@ -2483,36 +2403,41 @@ static void match_by_histogram(struct raw_info raw_info,
     {
         for (int x = 0; x < w; x += 3)
         {
-            int d = dark[x + y*w];
-            int b = bright[x + y*w];
+            const size_t pixel_index = (size_t)y * (size_t)w + (size_t)x;
+            int d = dark[pixel_index];
+            int b = bright[pixel_index];
             if (b >= clip) continue;
+            if (n >= sample_capacity) return 0;
             tmp[n++] = d;
         }
     }
-    int dmed = median_int_wirth(tmp, n);
+    if (n == 0) return 0;
+    int dmed = median_int_wirth(tmp, (int)n);
 
     /* select highlights used to find the slope (ISO) */
     /* (98th percentile => up to 2% highlights) */
-    int hi_n = 0;
+    size_t hi_n = 0;
     int* hi_dark = scratch->histogram_match_hi_dark;
     int* hi_bright = scratch->histogram_match_hi_bright;
 
-    for (int y = y0; y < h-2; y += 3)
+    for (int y = y0; y < h-2 && hi_n < highlight_capacity; y += 3)
     {
         for (int x = 0; x < w; x += 3)
         {
-            int d = dark[x + y*w];
-            int b = bright[x + y*w];
+            const size_t pixel_index = (size_t)y * (size_t)w + (size_t)x;
+            int d = dark[pixel_index];
+            int b = bright[pixel_index];
             if (b >= b_hi) continue;
             if (b <= b_lo) continue;
+            if (hi_n >= highlight_capacity) break;
             hi_dark[hi_n] = d;
             hi_bright[hi_n] = b;
             hi_n++;
-            if (hi_n >= hi_nmax) break;
         }
     }
+    if (hi_n == 0) return 0;
 
-    //~ printf("Selected %d highlight points (max %d)\n", hi_n, hi_nmax);
+    //~ printf("Selected %zu highlight points (max %zu)\n", hi_n, highlight_capacity);
 
     double a = 0;
     double b = 0;
@@ -2524,7 +2449,7 @@ static void match_by_histogram(struct raw_info raw_info,
         double test_b = dmed - bmed * test_a;
 
         int score = 0;
-        for (int i = 0; i < hi_n; i++)
+        for (size_t i = 0; i < hi_n; i++)
         {
             int d = hi_dark[i];
             int b = hi_bright[i];
@@ -2540,8 +2465,24 @@ static void match_by_histogram(struct raw_info raw_info,
         }
     }
 
-    *ev_correction = log2(1/a);
-    *black_delta = b * 16;
+    if (best_score <= 0 || !(a > 0.0) || !isfinite(a) || !isfinite(b))
+    {
+        return 0;
+    }
+
+    const double matched_ev = log2(1.0 / a);
+    const double matched_black_delta = b * 16.0;
+    if (!isfinite(matched_ev)
+        || !isfinite(matched_black_delta)
+        || matched_black_delta < (double)INT_MIN
+        || matched_black_delta > (double)INT_MAX)
+    {
+        return 0;
+    }
+
+    *ev_correction = matched_ev;
+    *black_delta = (int)matched_black_delta;
+    return 1;
 }
 
 static int compute_match_exposure_scalars(struct raw_info raw_info,
@@ -2591,7 +2532,16 @@ static int compute_match_exposure_scalars(struct raw_info raw_info,
         {
             return -1;
         }
-        match_by_histogram(raw_info, raw_buffer_32, &_ev_correction, &_black_delta, white_darkened, is_bright, scratch);
+        if (!match_by_histogram(raw_info,
+                                raw_buffer_32,
+                                &_ev_correction,
+                                &_black_delta,
+                                white_darkened,
+                                is_bright,
+                                scratch))
+        {
+            return 0;
+        }
     }
 
     if (*ev_correction != 1)
@@ -6355,7 +6305,10 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                          0,
                                          NULL,
                                          NULL);
-    (void)expo_matched;
+    if (requires_full20_match && expo_matched <= 0)
+    {
+        DUALISO_GPU_PREP_RETURN(0);
+    }
     const double corr_ev = ABS(*ev_correction);
     g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);
 
@@ -6565,6 +6518,10 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     int white_darkened = white_bright;
     stage_start = mlv_stage_timing_now();
     int expo_matched = match_exposures(raw_info, raw_buffer_32, dark_frame, iso1, iso2, auto_correction, ev_correction, black_delta, &white_darkened, is_bright, scratch);
+    if (*auto_correction == -2 && expo_matched <= 0)
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
     double corr_ev = ABS(*ev_correction);
     g_dualiso_full20bit_timing.match_ms += dualiso_debug_elapsed_ms(stage_start);
 
