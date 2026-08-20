@@ -713,6 +713,14 @@ class ReleaseEvidenceTests(unittest.TestCase):
         self.assertEqual(contract["scope"], "single-build-observation")
         self.assertFalse(contract["assurance_limits"]["redistribution_ready"])
         self.assertFalse(contract["assurance_limits"]["reproducibility_claim"])
+        self.assertEqual(
+            contract["assurance_limits"]["payload_promotion_provider_authority"],
+            "NOT_INSTALLED",
+        )
+        self.assertIn("repository-owner approval claim", contract["assurance_limits"]["payload_promotion_gate"])
+        self.assertIn("agent reviews cannot grant", contract["assurance_limits"]["payload_promotion_gate"])
+        self.assertIn("target-owned isolated verifier", contract["assurance_limits"]["payload_promotion_gate"])
+        self.assertIn("candidate Python startup/import control", contract["assurance_limits"]["payload_promotion_gate"])
         self.assertEqual(set(contract["workflow_targets"]), {"linux", "macos-arm64", "macos-x86_64", "windows"})
         inventory = contract["inventory"]
         self.assertIn("size 0", inventory["zero_byte_directory_members"])
