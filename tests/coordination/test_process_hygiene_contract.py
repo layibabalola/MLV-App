@@ -597,6 +597,9 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
     assert receipt["baseline"]["clean"] is True
     assert receipt["candidate"]["launchProbeExitCode"] == 0
     assert receipt["baseline"]["launchProbeExitCode"] == 0
+    assert receipt["verifier"]["sourceHashConvention"] == (
+        "GIT_BLOB_BYTES_CANONICAL_LF"
+    )
 
     source_bindings = (
         (GUI_SMOKE_COMPARER, receipt["verifier"]["comparerSha256"]),
@@ -604,7 +607,12 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
         (NEUTRAL_RECEIPT, receipt["renderContract"]["receiptSha256"]),
     )
     for path, expected in source_bindings:
-        assert hashlib.sha256(path.read_bytes()).hexdigest().upper() == expected
+        # Git stores these text subjects with LF bytes, while a Windows
+        # checkout can materialize all or only some lines as CRLF.  Bind the
+        # portable committed-object bytes rather than an autocrlf-dependent
+        # worktree representation.
+        canonical_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+        assert hashlib.sha256(canonical_bytes).hexdigest().upper() == expected
 
     clips = receipt["clips"]
     assert [clip["name"] for clip in clips] == [
