@@ -2166,6 +2166,10 @@ static void llrawproc_free_worker_state(llrawprocWorkerState_t * worker)
     free_dualiso_full20bit_scratch(&worker->diso_full20bit_scratch);
     memset(&worker->diso_full20bit_scratch, 0, sizeof(worker->diso_full20bit_scratch));
 
+    free(worker->dual_iso_failure_backup);
+    worker->dual_iso_failure_backup = NULL;
+    worker->dual_iso_failure_backup_capacity_bytes = 0;
+
     worker->dng_bit_depth = 0;
     worker->dng_black_level = 0;
     worker->dng_white_level = 0;
@@ -2320,6 +2324,32 @@ static void llrawproc_restore_worker_runtime_state(
     worker->dng_black_level = state->dng_black_level;
     worker->dng_white_level = state->dng_white_level;
     worker->prev_black_level = -1;
+}
+
+static uint16_t * llrawproc_worker_capture_dual_iso_failure_backup(
+    llrawprocWorkerState_t * worker,
+    const uint16_t * source,
+    size_t source_bytes)
+{
+    if (!worker || !source || source_bytes == 0)
+    {
+        return NULL;
+    }
+
+    if (worker->dual_iso_failure_backup_capacity_bytes < source_bytes)
+    {
+        uint16_t * resized = (uint16_t *)realloc(worker->dual_iso_failure_backup,
+                                                 source_bytes);
+        if (!resized)
+        {
+            return NULL;
+        }
+        worker->dual_iso_failure_backup = resized;
+        worker->dual_iso_failure_backup_capacity_bytes = source_bytes;
+    }
+
+    memcpy(worker->dual_iso_failure_backup, source, source_bytes);
+    return worker->dual_iso_failure_backup;
 }
 
 static llrawproc_runtime_state_t llrawproc_capture_shared_runtime_state(const llrawprocObject_t * shared)
@@ -3138,9 +3168,13 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
         if (restricted_lossless)
         {
-            if (dual_iso_mode == 1 && worker->diso_auto_correction == -2)
+            if (dual_iso_mode == 1)
             {
-                dual_iso_failure_backup = (uint16_t *)malloc(raw_image_size);
+                dual_iso_failure_backup =
+                    llrawproc_worker_capture_dual_iso_failure_backup(
+                        worker,
+                        raw_image_buff,
+                        raw_image_size);
                 if (!dual_iso_failure_backup)
                 {
                     if (original_bits_per_pixel < 14)
@@ -3152,7 +3186,6 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                     if (using_stack_worker) llrawproc_free_worker_state(worker);
                     return;
                 }
-                memcpy(dual_iso_failure_backup, raw_image_buff, raw_image_size);
             }
             const double dual_iso_start = mlv_stage_timing_now();
 #ifndef STDOUT_SILENT
@@ -3748,7 +3781,6 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
                 llrawproc_worker_ensure_luts(worker, raw_info.black_level);
             }
             }
-            free(dual_iso_failure_backup);
             dual_iso_failure_backup = NULL;
         }
         else if (dual_iso_mode == 2)
@@ -4187,21 +4219,21 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
         uint16_t * dual_iso_failure_backup = NULL;
         if (restricted_lossless)
         {
-            if (worker->diso_auto_correction == -2)
+            dual_iso_failure_backup =
+                llrawproc_worker_capture_dual_iso_failure_backup(
+                    worker,
+                    raw_image_buff,
+                    raw_image_size);
+            if (!dual_iso_failure_backup)
             {
-                dual_iso_failure_backup = (uint16_t *)malloc(raw_image_size);
-                if (!dual_iso_failure_backup)
+                if (original_bits_per_pixel < 14)
                 {
-                    if (original_bits_per_pixel < 14)
-                    {
-                        undo_14bit(raw_image_buff,
-                                   raw_image_size,
-                                   original_bits_per_pixel);
-                    }
-                    if (using_stack_worker) llrawproc_free_worker_state(worker);
-                    return 0;
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
                 }
-                memcpy(dual_iso_failure_backup, raw_image_buff, raw_image_size);
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return 0;
             }
             const double dual_iso_start = mlv_stage_timing_now();
             int low_iso = MIN(diso1, diso2);
@@ -4271,7 +4303,6 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
                            raw_image_size,
                            original_bits_per_pixel);
             }
-            free(dual_iso_failure_backup);
             llrawproc_restore_worker_runtime_state(
                 worker,
                 &worker->seeded_runtime_state);
@@ -4284,8 +4315,6 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
             }
             return 0;
         }
-        free(dual_iso_failure_backup);
-
         if (has_explicit_auto_match)
         {
             worker->diso_ev_correction = explicit_ev_correction;

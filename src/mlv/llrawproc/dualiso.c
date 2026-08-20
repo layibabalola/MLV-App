@@ -2259,6 +2259,46 @@ static int dualiso_checked_histogram_geometry(int width,
     return 1;
 }
 
+static int dualiso_checked_full20_frame_geometry(struct raw_info raw_info,
+                                                 size_t * pixel_count)
+{
+    if (!pixel_count
+        || raw_info.width <= 0
+        || raw_info.height <= 0
+        || raw_info.black_level < 0
+        || raw_info.white_level <= raw_info.black_level
+        || raw_info.black_level > INT_MAX / 64
+        || raw_info.white_level > INT_MAX / 64
+        || raw_info.active_area.x1 < 0
+        || raw_info.active_area.y1 < 0
+        || raw_info.active_area.x2 < raw_info.active_area.x1
+        || raw_info.active_area.y2 < raw_info.active_area.y1
+        || raw_info.active_area.x2 > raw_info.width
+        || raw_info.active_area.y2 > raw_info.height)
+    {
+        return 0;
+    }
+
+    const size_t checked_width = (size_t)raw_info.width;
+    const size_t checked_height = (size_t)raw_info.height;
+    if (checked_width > SIZE_MAX / checked_height)
+    {
+        return 0;
+    }
+
+    const size_t checked_pixels = checked_width * checked_height;
+    if (checked_pixels == 0
+        || checked_pixels > (size_t)INT_MAX
+        || checked_pixels > SIZE_MAX / sizeof(uint32_t)
+        || checked_pixels > SIZE_MAX / sizeof(uint16_t))
+    {
+        return 0;
+    }
+
+    *pixel_count = checked_pixels;
+    return 1;
+}
+
 /* Production-linked test seam for hostile geometry without allocating a
  * synthetic multi-gigabyte frame. Not part of the public llrawproc API. */
 int dualisoHistogramGeometryForTesting(int width,
@@ -2514,7 +2554,12 @@ static int compute_match_exposure_scalars(struct raw_info raw_info,
         int low_iso = MIN(iso1, iso2);
         int high_iso = MAX(iso1, iso2);
 
-        _ev_correction = log2(high_iso / low_iso);
+        if (low_iso <= 0 || high_iso <= 0)
+        {
+            return 0;
+        }
+
+        _ev_correction = log2((double)high_iso / (double)low_iso);
 
         // ISO 6400 having the same brightness as ISO 3200 on 650D. Not sure about other cameras.
         // Anyway, ISO 6400 and higher is considerred useless.
@@ -2554,6 +2599,10 @@ static int compute_match_exposure_scalars(struct raw_info raw_info,
 
     if (*black_delta != -1)
     {
+        if (*black_delta < INT_MIN / 64 || *black_delta > INT_MAX / 64)
+        {
+            return 0;
+        }
         _black_delta = *black_delta * 64;
     }
 
@@ -6233,7 +6282,6 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
     const int effective_chroma_smooth_method =
         dualiso_supported_chroma_smooth_method(chroma_smooth_method);
 
-    if (w <= 0 || h <= 0) DUALISO_GPU_PREP_RETURN(0);
     if (interp_method != 1 || !use_fullres || effective_chroma_smooth_method > 1)
     {
         DUALISO_GPU_PREP_RETURN(0);
@@ -6247,6 +6295,10 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
 
     const int requires_full20_match = (staged_auto_correction == -2);
     size_t checked_full20_pixels = 0;
+    if (!dualiso_checked_full20_frame_geometry(raw_info, &checked_full20_pixels))
+    {
+        DUALISO_GPU_PREP_RETURN(0);
+    }
     if (requires_full20_match)
     {
         size_t checked_sample_capacity = 0;
@@ -6352,7 +6404,7 @@ int diso_prepare_gpu_recon_state(struct raw_info raw_info,
                                          0,
                                          NULL,
                                          NULL);
-    if (requires_full20_match && expo_matched <= 0)
+    if (expo_matched <= 0)
     {
         DUALISO_GPU_PREP_RETURN(0);
     }
@@ -6463,7 +6515,11 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
     const int effective_chroma_smooth_method =
         dualiso_supported_chroma_smooth_method(chroma_smooth_method);
     
-    if (w <= 0 || h <= 0) DUALISO_FULL20_RETURN(0);
+    size_t original_full20_pixels = 0;
+    if (!dualiso_checked_full20_frame_geometry(raw_info, &original_full20_pixels))
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
 
     /* RGGB or GBRG? */
     //int rggb = identify_rggb_or_gbrg(raw_info, image_data, scratch);
@@ -6471,6 +6527,14 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     if (!rggb) /* this code assumes RGGB, so we need to skip one line */
     {
+        if (raw_info.pitch <= 0
+            || (size_t)raw_info.pitch >= original_full20_pixels
+            || raw_info.active_area.y1 == INT_MAX
+            || raw_info.active_area.y2 == INT_MIN
+            || raw_info.height <= 1)
+        {
+            DUALISO_FULL20_RETURN(0);
+        }
         image_data += raw_info.pitch;
         raw_info.active_area.y1++;
         raw_info.active_area.y2--;
@@ -6478,14 +6542,8 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
         h--;
     }
 
-    if (w <= 0 || h <= 0 || (size_t)w > SIZE_MAX / (size_t)h)
-    {
-        DUALISO_FULL20_RETURN(0);
-    }
-    size_t checked_full20_pixels = (size_t)w * (size_t)h;
-    if (checked_full20_pixels > (size_t)INT_MAX
-        || checked_full20_pixels > SIZE_MAX / sizeof(uint32_t)
-        || checked_full20_pixels > SIZE_MAX / sizeof(uint16_t))
+    size_t checked_full20_pixels = 0;
+    if (!dualiso_checked_full20_frame_geometry(raw_info, &checked_full20_pixels))
     {
         DUALISO_FULL20_RETURN(0);
     }
@@ -6626,7 +6684,7 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
                                        &white_darkened,
                                        is_bright,
                                        scratch);
-    if (staged_auto_correction == -2 && expo_matched <= 0)
+    if (expo_matched <= 0)
     {
         DUALISO_FULL20_RETURN(0);
     }

@@ -218,6 +218,88 @@ TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBef
                                     &hostile_scratch));
     ASSERT_EQ(1, iso_pattern);
     ASSERT_EQ(static_cast<uint16_t>(1234), sentinel_pixel);
+
+    /* Public entries must reject hostile geometry for every matching mode,
+     * not only the histogram (-2) path. */
+    iso_pattern = 1;
+    auto_correction = -1;
+    ev_correction = 1.0;
+    black_delta = -1;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_raw,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(hostile_raw,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
+
+    struct raw_info hostile_levels = hostile_raw;
+    hostile_levels.width = 1;
+    hostile_levels.height = 1;
+    hostile_levels.pitch = 1;
+    hostile_levels.active_area.x2 = 1;
+    hostile_levels.active_area.y2 = 1;
+    hostile_levels.black_level = INT_MAX;
+    hostile_levels.white_level = INT_MAX;
+    ASSERT_EQ(0, diso_prepare_gpu_recon_state(hostile_levels,
+                                               &sentinel_pixel,
+                                               0,
+                                               100,
+                                               200,
+                                               &iso_pattern,
+                                               &auto_correction,
+                                               &ev_correction,
+                                               &black_delta,
+                                               1,
+                                               0,
+                                               1,
+                                               0,
+                                               1,
+                                               1,
+                                               &hostile_scratch,
+                                               &hostile_state));
+    ASSERT_EQ(0, diso_get_full20bit(hostile_levels,
+                                    &sentinel_pixel,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    1,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &hostile_scratch));
     free_dualiso_full20bit_scratch(&hostile_scratch);
 }
 #include <QString>
@@ -5761,6 +5843,7 @@ TEST(DualIsoPipeline, HistogramMatchRejectsLowSeparationWithoutPublishingControl
                 static_cast<uint16_t>((bright_row ? 5200 : 5000) + texture);
         }
     }
+    const std::vector<uint16_t> original_frame = frame;
 
     dualiso_full20bit_scratch_t scratch = {};
     dualiso_gpu_recon_state_t state = {};
@@ -5791,6 +5874,7 @@ TEST(DualIsoPipeline, HistogramMatchRejectsLowSeparationWithoutPublishingControl
     ASSERT_EQ(1.0, ev_correction);
     ASSERT_EQ(-1, black_delta);
     ASSERT_TRUE(scratch.histogram_match_pixel_capacity > 0);
+    ASSERT_TRUE(frame == original_frame);
 
     iso_pattern = 0;
     auto_correction = -2;
@@ -5815,6 +5899,7 @@ TEST(DualIsoPipeline, HistogramMatchRejectsLowSeparationWithoutPublishingControl
     ASSERT_EQ(1.0, ev_correction);
     ASSERT_EQ(-1, black_delta);
     ASSERT_EQ(0, iso_pattern);
+    ASSERT_TRUE(frame == original_frame);
     free_dualiso_full20bit_scratch(&scratch);
 }
 
@@ -5894,6 +5979,36 @@ TEST(DualIsoPipeline, ScaledLlrawprocRejectsUniformHistogramMatchFailure)
     ASSERT_TRUE(full_frame == original_full_frame);
     ASSERT_EQ(1, shared->diso_pattern);
     ASSERT_EQ(-2, shared->diso_auto_correction);
+    ASSERT_EQ(1.0, shared->diso_ev_correction);
+    ASSERT_EQ(-1, shared->diso_black_delta);
+    ASSERT_EQ(original_dng_black, shared->dng_black_level);
+    ASSERT_EQ(original_dng_white, shared->dng_white_level);
+    ASSERT_EQ(original_dng_depth, shared->dng_bit_depth);
+
+    /* Restricted-range scaling mutates the input before reconstruction.
+     * A non-histogram failure must roll those bytes and all runtime state
+     * back too, rather than relying on the -2-only backup. */
+    fixture.video()->MLVI.videoClass |= MLV_VIDEO_CLASS_FLAG_LJ92;
+    fixture.video()->RAWI.raw_info.white_level =
+        std::min(fixture.video()->RAWI.raw_info.white_level, 14000);
+    shared->diso_pattern = 99;
+    shared->diso_auto_correction = -1;
+    shared->diso_ev_correction = 1.0;
+    shared->diso_black_delta = -1;
+
+    std::vector<uint16_t> restricted_frame(
+        static_cast<size_t>(width) * static_cast<size_t>(height),
+        static_cast<uint16_t>(3000));
+    const std::vector<uint16_t> original_restricted_frame = restricted_frame;
+    ASSERT_EQ(0, applyLLRawProcObject_with_dims(fixture.video(),
+                                                restricted_frame.data(),
+                                                restricted_frame.size()
+                                                    * sizeof(restricted_frame[0]),
+                                                width,
+                                                height));
+    ASSERT_TRUE(restricted_frame == original_restricted_frame);
+    ASSERT_EQ(99, shared->diso_pattern);
+    ASSERT_EQ(-1, shared->diso_auto_correction);
     ASSERT_EQ(1.0, shared->diso_ev_correction);
     ASSERT_EQ(-1, shared->diso_black_delta);
     ASSERT_EQ(original_dng_black, shared->dng_black_level);

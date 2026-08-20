@@ -2360,14 +2360,22 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertEqual(source.count("static int match_by_histogram("), 1)
         self.assertEqual(source.count("static int match_exposures("), 1)
         self.assertEqual(source.count("static int dualiso_checked_histogram_geometry("), 1)
+        self.assertEqual(source.count("static int dualiso_checked_full20_frame_geometry("), 1)
         self.assertIn("checked_pixels > (size_t)INT_MAX", source)
         self.assertIn("checked_samples > (size_t)INT_MAX", source)
         self.assertIn("hi_n < highlight_capacity", source)
         self.assertIn("if (hi_n >= highlight_capacity) break;", source)
         self.assertIn("if (n == 0) return 0;", source)
         self.assertIn("if (!match_by_histogram(raw_info,", source)
+        self.assertGreaterEqual(
+            source.count("dualiso_checked_full20_frame_geometry(raw_info,"), 3
+        )
+        self.assertIn("*black_delta > INT_MAX / 64", source)
         self.assertIn("const int dual_iso_recon_ok =", llrawproc_source)
         self.assertIn("if (!dual_iso_recon_ok)", llrawproc_source)
+        self.assertIn(
+            "llrawproc_worker_capture_dual_iso_failure_backup(", llrawproc_source
+        )
         self.assertIn("return 0;", llrawproc_source)
 
     def test_release_sources_remain_cxx14_and_c_memory_portable(self) -> None:

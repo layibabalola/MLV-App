@@ -64,6 +64,8 @@ typedef struct
     vertical_stripes_scratch_t vertical_stripes_scratch;
     dualiso_preview_scratch_t diso_preview_scratch;
     dualiso_full20bit_scratch_t diso_full20bit_scratch;
+    uint16_t * dual_iso_failure_backup;
+    size_t dual_iso_failure_backup_capacity_bytes;
 
     int diso_pattern;
     int diso_auto_correction;
