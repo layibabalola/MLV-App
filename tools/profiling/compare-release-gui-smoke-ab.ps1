@@ -346,10 +346,13 @@ function Get-LegEvidenceBinding {
 
     $screenshotPath = Resolve-SmokeScreenshotPath -Smoke $Smoke
     $screenshot = Resolve-ExistingFileBinding -Path $screenshotPath -Label "$Name screenshot"
+    $eventScreenshot = Resolve-ExistingFileBinding `
+        -Path ([string](Get-NestedValue $screenshotEvent "path")) `
+        -Label "$Name screenshot event"
     $image = Get-ImageMetadata -Path $screenshot.path
     $capture = Get-NestedValue $Smoke "screenshot.capture"
     if (-not [string]::Equals(
-            $screenshot.path, [string](Get-NestedValue $screenshotEvent "path"),
+            $screenshot.path, $eventScreenshot.path,
             [StringComparison]::OrdinalIgnoreCase) -or
         $screenshot.sha256 -ne [string](Get-NestedValue $capture "image.sha256") -or
         $screenshot.sha256 -ne [string](Get-NestedValue $screenshotEvent "sha256") -or

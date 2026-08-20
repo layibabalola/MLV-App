@@ -569,6 +569,7 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
     assert "same-tree A/B is forbidden" in comparer
     assert "build manifest is dirty, unbound, or not independently runnable" in comparer
     assert "per-run log snapshot" in comparer
+    assert 'Label "$Name screenshot event"' in comparer
     assert "screenshot bytes/frame/serial are not atomically bound" in comparer
     assert "MLVAPP_GUI_SMOKE_RUN_NONCE" in runner
     assert "logs-{0}-{1}" in runner
