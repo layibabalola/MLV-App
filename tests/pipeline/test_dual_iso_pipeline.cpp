@@ -1199,6 +1199,101 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     ASSERT_EQ(std::string(retained_info.unique_camera_model),
               std::string(reopened->camid.cameraName[UNIQ]));
     ASSERT_TRUE(reopened->camid.cameraName[UNIQ][0] != '\0');
+
+    /* Close the metadata loop: reopen the folder through the production MLV
+     * object, write a new DNG from that object, then parse and compare it to
+     * the first-generation writer output. */
+    QTemporaryDir reexport_dir;
+    ASSERT_TRUE(reexport_dir.isValid());
+    int32_t retained_scale[4] = {
+        retained_info.default_scale[0], retained_info.default_scale[1],
+        retained_info.default_scale[2], retained_info.default_scale[3]
+    };
+    dngObject_t * reexport_dng = initDngObject(
+        reopened, UNCOMPRESSED_RAW, 1.0, retained_scale);
+    ASSERT_TRUE(reexport_dng != nullptr);
+    const QString reexport_path = reexport_dir.filePath(QStringLiteral("reexport.dng"));
+    QByteArray reexport_path_bytes = reexport_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(reopened, reexport_dng, 0,
+                              reexport_path_bytes.data(), nullptr));
+    freeDngObject(reexport_dng);
+    dng_frame_info_t reexport_info = {};
+    ASSERT_EQ(0, dng_reader_parse_file(reexport_path_bytes.constData(), &reexport_info));
+    ASSERT_EQ(retained_info.width, reexport_info.width);
+    ASSERT_EQ(retained_info.height, reexport_info.height);
+    ASSERT_EQ(retained_info.bits_per_sample, reexport_info.bits_per_sample);
+    ASSERT_EQ(retained_info.cfa_pattern, reexport_info.cfa_pattern);
+    ASSERT_EQ(retained_info.black_level, reexport_info.black_level);
+    ASSERT_EQ(retained_info.white_level, reexport_info.white_level);
+    ASSERT_EQ(std::string(retained_info.camera_model),
+              std::string(reexport_info.camera_model));
+    ASSERT_EQ(std::string(retained_info.unique_camera_model),
+              std::string(reexport_info.unique_camera_model));
+    ASSERT_EQ(0, std::memcmp(retained_info.active_area,
+                             reexport_info.active_area,
+                             sizeof(retained_info.active_area)));
+    ASSERT_EQ(0, std::memcmp(retained_info.default_crop_origin,
+                             reexport_info.default_crop_origin,
+                             sizeof(retained_info.default_crop_origin)));
+    ASSERT_EQ(0, std::memcmp(retained_info.default_crop_size,
+                             reexport_info.default_crop_size,
+                             sizeof(retained_info.default_crop_size)));
+    ASSERT_EQ(0, std::memcmp(retained_info.baseline_exposure,
+                             reexport_info.baseline_exposure,
+                             sizeof(retained_info.baseline_exposure)));
+    ASSERT_EQ(0, std::memcmp(retained_info.baseline_exposure_offset,
+                             reexport_info.baseline_exposure_offset,
+                             sizeof(retained_info.baseline_exposure_offset)));
+    uint32_t retained_gains[3] = {};
+    uint32_t reexport_gains[3] = {};
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(retained_info.as_shot_neutral,
+                                             retained_gains));
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(reexport_info.as_shot_neutral,
+                                             reexport_gains));
+    ASSERT_EQ(retained_gains[0], reexport_gains[0]);
+    ASSERT_EQ(retained_gains[1], reexport_gains[1]);
+    ASSERT_EQ(retained_gains[2], reexport_gains[2]);
+    ASSERT_EQ(0, std::memcmp(retained_info.default_scale,
+                             reexport_info.default_scale,
+                             sizeof(retained_info.default_scale)));
+    ASSERT_EQ(0, std::memcmp(retained_info.frame_rate,
+                             reexport_info.frame_rate,
+                             sizeof(retained_info.frame_rate)));
+    ASSERT_EQ(retained_info.iso, reexport_info.iso);
+    ASSERT_EQ(0, std::memcmp(retained_info.color_matrix1,
+                             reexport_info.color_matrix1,
+                             sizeof(retained_info.color_matrix1)));
+    ASSERT_EQ(0, std::memcmp(retained_info.color_matrix2,
+                             reexport_info.color_matrix2,
+                             sizeof(retained_info.color_matrix2)));
+    ASSERT_EQ(0, std::memcmp(retained_info.forward_matrix1,
+                             reexport_info.forward_matrix1,
+                             sizeof(retained_info.forward_matrix1)));
+    ASSERT_EQ(0, std::memcmp(retained_info.forward_matrix2,
+                             reexport_info.forward_matrix2,
+                             sizeof(retained_info.forward_matrix2)));
+
+    dngObject_t * compressed_reexport = initDngObject(
+        reopened, COMPRESSED_RAW, 1.0, retained_scale);
+    ASSERT_TRUE(compressed_reexport != nullptr);
+    const QString compressed_reexport_path =
+        reexport_dir.filePath(QStringLiteral("reexport-compressed.dng"));
+    QByteArray compressed_reexport_bytes = compressed_reexport_path.toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrame(reopened, compressed_reexport, 0,
+                              compressed_reexport_bytes.data(), nullptr));
+    freeDngObject(compressed_reexport);
+    dng_frame_info_t compressed_reexport_info = {};
+    const std::vector<uint16_t> reexport_pixels =
+        dng_decode_bayer16_from_file(reexport_path, nullptr);
+    const std::vector<uint16_t> compressed_reexport_pixels =
+        dng_decode_bayer16_from_file(compressed_reexport_path,
+                                     &compressed_reexport_info);
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&reexport_info,
+                                                        &compressed_reexport_info));
+    ASSERT_EQ(reexport_pixels.size(), compressed_reexport_pixels.size());
+    ASSERT_EQ(0, std::memcmp(reexport_pixels.data(),
+                             compressed_reexport_pixels.data(),
+                             reexport_pixels.size() * sizeof(uint16_t)));
     freeMlvObject(reopened);
 
     /* A later frame may not silently replace calibration inherited from frame

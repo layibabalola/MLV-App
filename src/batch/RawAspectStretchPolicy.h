@@ -14,6 +14,55 @@ struct RawAspectStretchSelection
     bool valid = false;
 };
 
+struct RawAspectRenderedDimensions
+{
+    int width = 0;
+    int height = 0;
+    bool valid = false;
+};
+
+/* Convert the receipt stretch controls into an integer output geometry without
+ * silently dropping a horizontal factor from the legacy vertical-1/3
+ * representation.  Rendered paths historically represent V_033 as horizontal
+ * x3, so the effective X scale is stretchX*3 and the effective Y scale is 1.
+ * Nearest-integer rounding is shared by GUI and batch paths; callers provide
+ * the largest dimension their downstream encoder can represent. */
+inline RawAspectRenderedDimensions rawAspectRenderedDimensions(
+    int sourceWidth,
+    int sourceHeight,
+    double stretchFactorX,
+    double stretchFactorY,
+    int maximumDimension)
+{
+    RawAspectRenderedDimensions result;
+    if(sourceWidth <= 0 || sourceHeight <= 0 || maximumDimension <= 0
+       || !std::isfinite(stretchFactorX) || !std::isfinite(stretchFactorY)
+       || stretchFactorX <= 0.0 || stretchFactorY <= 0.0)
+        return result;
+
+    const double effectiveX = stretchFactorX
+        * (stretchFactorY == STRETCH_V_033 ? 3.0 : 1.0);
+    const double effectiveY = stretchFactorY == STRETCH_V_033
+        ? 1.0 : stretchFactorY;
+    const double scaledWidth = static_cast<double>(sourceWidth) * effectiveX;
+    const double scaledHeight = static_cast<double>(sourceHeight) * effectiveY;
+    if(!std::isfinite(scaledWidth) || !std::isfinite(scaledHeight)
+       || scaledWidth <= 0.0 || scaledHeight <= 0.0)
+        return result;
+
+    const double roundedWidth = std::floor(scaledWidth + 0.5);
+    const double roundedHeight = std::floor(scaledHeight + 0.5);
+    if(roundedWidth < 1.0 || roundedHeight < 1.0
+       || roundedWidth > static_cast<double>(maximumDimension)
+       || roundedHeight > static_cast<double>(maximumDimension))
+        return result;
+
+    result.width = static_cast<int>(roundedWidth);
+    result.height = static_cast<int>(roundedHeight);
+    result.valid = true;
+    return result;
+}
+
 /* Select the exact pair of application stretch controls whose Y/X ratio
  * represents RAWC sampling_y/sampling_x. Index 3's vertical factor is 1/3;
  * the GUI implements that as an equivalent horizontal x3 presentation. */

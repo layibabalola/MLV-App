@@ -11158,8 +11158,8 @@ void MainWindow::startExportPipe(QString fileName)
         colorTag = SPACETAG_UNKNOWN;
 
     //Dimension & scaling
-    uint16_t width = getMlvWidth(m_pMlvObject);
-    uint16_t height = getMlvHeight(m_pMlvObject);
+    int width = getMlvWidth(m_pMlvObject);
+    int height = getMlvHeight(m_pMlvObject);
     bool scaled = false;
     if( m_resizeFilterEnabled )
     {
@@ -11181,17 +11181,21 @@ void MainWindow::startExportPipe(QString fileName)
     else if( m_exportQueue.first()->stretchFactorX() != 1.0
           || m_exportQueue.first()->stretchFactorY() != 1.0 )
     {
-        //Upscale only
-        if( m_exportQueue.first()->stretchFactorY() == STRETCH_V_033 )
+        const RawAspectRenderedDimensions dimensions = rawAspectRenderedDimensions(
+            getMlvWidth( m_pMlvObject ),
+            getMlvHeight( m_pMlvObject ),
+            m_exportQueue.first()->stretchFactorX(),
+            m_exportQueue.first()->stretchFactorY(),
+            std::numeric_limits<uint16_t>::max());
+        if( !dimensions.valid )
         {
-            width = getMlvWidth( m_pMlvObject ) * 3;
-            height = getMlvHeight( m_pMlvObject );
+            QMessageBox::critical( this,
+                                   tr( "File export failed" ),
+                                   tr( "Rendered stretch dimensions are invalid or too large." ) );
+            return;
         }
-        else
-        {
-            width = getMlvWidth( m_pMlvObject ) * m_exportQueue.first()->stretchFactorX();
-            height = getMlvHeight( m_pMlvObject ) * m_exportQueue.first()->stretchFactorY();
-        }
+        width = dimensions.width;
+        height = dimensions.height;
         scaled = true;
     }
     if( m_codecProfile == CODEC_H264
@@ -11223,6 +11227,15 @@ void MainWindow::startExportPipe(QString fileName)
         scaled = scaled || alignedWidth != width || alignedHeight != height;
         width = alignedWidth;
         height = alignedHeight;
+    }
+    if( width <= 0 || height <= 0
+     || width > std::numeric_limits<uint16_t>::max()
+     || height > std::numeric_limits<uint16_t>::max() )
+    {
+        QMessageBox::critical( this,
+                               tr( "File export failed" ),
+                               tr( "Rendered output dimensions are invalid or too large." ) );
+        return;
     }
 
     //FFMpeg export
@@ -12576,8 +12589,8 @@ void MainWindow::startExportAVFoundation(QString fileName)
     else avfCodec = AVF_CODEC_PRORES_4444;
 
     //Dimension & scaling
-    uint16_t width = getMlvWidth(m_pMlvObject);
-    uint16_t height = getMlvHeight(m_pMlvObject);
+    int width = getMlvWidth(m_pMlvObject);
+    int height = getMlvHeight(m_pMlvObject);
     bool scaled = false;
     if( m_resizeFilterEnabled )
     {
@@ -12599,17 +12612,21 @@ void MainWindow::startExportAVFoundation(QString fileName)
     else if( m_exportQueue.first()->stretchFactorX() != 1.0
           || m_exportQueue.first()->stretchFactorY() != 1.0 )
     {
-        //Upscale only
-        if( m_exportQueue.first()->stretchFactorY() == STRETCH_V_033 )
+        const RawAspectRenderedDimensions dimensions = rawAspectRenderedDimensions(
+            getMlvWidth( m_pMlvObject ),
+            getMlvHeight( m_pMlvObject ),
+            m_exportQueue.first()->stretchFactorX(),
+            m_exportQueue.first()->stretchFactorY(),
+            std::numeric_limits<uint16_t>::max());
+        if( !dimensions.valid )
         {
-            width = getMlvWidth( m_pMlvObject ) * 3;
-            height = getMlvHeight( m_pMlvObject );
+            QMessageBox::critical( this,
+                                   tr( "File export failed" ),
+                                   tr( "Rendered stretch dimensions are invalid or too large." ) );
+            return;
         }
-        else
-        {
-            width = getMlvWidth( m_pMlvObject ) * m_exportQueue.first()->stretchFactorX();
-            height = getMlvHeight( m_pMlvObject ) * m_exportQueue.first()->stretchFactorY();
-        }
+        width = dimensions.width;
+        height = dimensions.height;
         scaled = true;
     }
     if( m_codecProfile == CODEC_H264
@@ -12627,6 +12644,15 @@ void MainWindow::startExportAVFoundation(QString fileName)
             height += height % 2;
             scaled = true;
         }
+    }
+    if( width <= 0 || height <= 0
+     || width > std::numeric_limits<uint16_t>::max()
+     || height > std::numeric_limits<uint16_t>::max() )
+    {
+        QMessageBox::critical( this,
+                               tr( "File export failed" ),
+                               tr( "Rendered output dimensions are invalid or too large." ) );
+        return;
     }
 
     //Init Encoder

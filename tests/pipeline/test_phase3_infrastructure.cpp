@@ -509,6 +509,19 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_TRUE(combined.valid);
     ASSERT_EQ(1, combined.horizontalIndex);
     ASSERT_EQ(1, combined.verticalIndex);
+    const RawAspectRenderedDimensions v033Combined =
+        rawAspectRenderedDimensions(100, 100, STRETCH_H_125, STRETCH_V_033, 65535);
+    ASSERT_TRUE(v033Combined.valid);
+    ASSERT_EQ(375, v033Combined.width);
+    ASSERT_EQ(100, v033Combined.height);
+    const RawAspectRenderedDimensions rounded =
+        rawAspectRenderedDimensions(3, 3, STRETCH_H_125, STRETCH_V_100, 65535);
+    ASSERT_TRUE(rounded.valid);
+    ASSERT_EQ(4, rounded.width);
+    ASSERT_EQ(3, rounded.height);
+    ASSERT_FALSE(rawAspectRenderedDimensions(65535, 100,
+                                              STRETCH_H_125, STRETCH_V_033,
+                                              65535).valid);
 
     const int32_t baseline[] = { 5, 4 };
     const int32_t baselineOffset[] = { -1, 4 };
@@ -534,7 +547,7 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_EQ(0, fittedTint);
     double tintedMultipliers[3] = {};
     get_kelvin_multipliers_rgb(6500.0, tintedMultipliers);
-    const double effectiveTint = std::pow(4.0, 1.75) * 10.0;
+    const double effectiveTint = std::pow(0.4, 1.75) * 10.0;
     tintedMultipliers[2] += effectiveTint / 11.0;
     tintedMultipliers[0] += effectiveTint / 19.0;
     const double tintedLowest = std::min(tintedMultipliers[0],
@@ -551,7 +564,7 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_EQ(40, fittedTint);
     processingObject_t * renderedWhiteBalance = initProcessingObject();
     ASSERT_TRUE(renderedWhiteBalance != nullptr);
-    processingSetWhiteBalance(renderedWhiteBalance, 6500.0, 40.0);
+    processingSetWhiteBalance(renderedWhiteBalance, 6500.0, 4.0);
     for(int channel = 0; channel < 3; ++channel)
         ASSERT_NEAR(tintedMultipliers[channel],
                     renderedWhiteBalance->wb_multipliers[channel], 1e-12);
@@ -666,6 +679,38 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
 
     QByteArray invalidNeutral = makeDng(true);
     ASSERT_NE(0, parseBytes("zero-neutral-denominator.dng", invalidNeutral, &parsed));
+
+    auto withExtraEntry = [&](uint16_t tag, uint16_t type,
+                              uint32_t count, uint32_t value) {
+        QByteArray bytes = makeDng(false);
+        put16(bytes, 8, 13u);
+        const int offset = 10 + 12 * 12;
+        put16(bytes, offset, tag);
+        put16(bytes, offset + 2, type);
+        put32(bytes, offset + 4, count);
+        put32(bytes, offset + 8, value);
+        return bytes;
+    };
+
+    QByteArray embeddedModel = withExtraEntry(tcModel, ttAscii, 6, 256);
+    embeddedModel.replace(256, 6, QByteArray("A\0BAD\0", 6));
+    ASSERT_NE(0, parseBytes("embedded-nul-model.dng", embeddedModel, &parsed));
+
+    QByteArray embeddedUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 6, 256);
+    embeddedUnique.replace(256, 6, QByteArray("U\0BAD\0", 6));
+    ASSERT_NE(0, parseBytes("embedded-nul-unique.dng", embeddedUnique, &parsed));
+
+    QByteArray invalidActive = withExtraEntry(tcActiveArea, ttLong, 4, 256);
+    put32(invalidActive, 256, 3); put32(invalidActive, 260, 0);
+    put32(invalidActive, 264, 2); put32(invalidActive, 268, 4);
+    ASSERT_NE(0, parseBytes("reversed-active-area.dng", invalidActive, &parsed));
+
+    QByteArray zeroBaseline = withExtraEntry(tcBaselineExposure, ttSRational, 1, 256);
+    put32(zeroBaseline, 256, 1); put32(zeroBaseline, 260, 0);
+    ASSERT_NE(0, parseBytes("zero-baseline-denominator.dng", zeroBaseline, &parsed));
+
+    QByteArray cropOriginOnly = withExtraEntry(tcDefaultCropOrigin, ttShort, 2, 0);
+    ASSERT_NE(0, parseBytes("crop-origin-without-size.dng", cropOriginOnly, &parsed));
 }
 
 TEST(SecuritySizing, BlenderRejectsEmptyCropAndBindsExportRangeAndSampleMaximum)

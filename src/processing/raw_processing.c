@@ -4798,7 +4798,11 @@ static void processing_wb_controls_to_multipliers(int kelvin, int receipt_tint,
                                                   double multipliers[3])
 {
     get_kelvin_multipliers_rgb((double)kelvin, multipliers);
-    const double tint = processing_receipt_tint_to_render_tint((double)receipt_tint);
+    /* Receipt/UI tint is stored as -100..100, while every production caller
+     * passes receiptTint/10 to processingSetWhiteBalance. Model that exact
+     * call boundary here so fitting cannot converge on a 10x stronger tint. */
+    const double tint = processing_receipt_tint_to_render_tint(
+        (double)receipt_tint / 10.0);
     multipliers[2] += tint / 11.0;
     multipliers[0] += tint / 19.0;
     const double lowest = MIN(MIN(multipliers[0], multipliers[1]), multipliers[2]);

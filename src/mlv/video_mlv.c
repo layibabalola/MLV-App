@@ -9208,7 +9208,11 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
 {
     if (!video || !dirPath || !error_message) return MLV_ERR_INVALID;
     video->path = malloc( strlen(dirPath) + 1 );
-    if (!video->path) return MLV_ERR_OPEN;
+    if (!video->path)
+    {
+        snprintf(error_message, 256, "Out of memory copying CinemaDNG folder path");
+        return MLV_ERR_OPEN;
+    }
     memcpy(video->path, dirPath, strlen(dirPath));
     video->path[strlen(dirPath)] = 0x0;
 
@@ -9329,7 +9333,11 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
      * non-NULL video_index keeps the rest of the object consistent (some code
      * indexes it for frame numbers / time). One entry per frame. */
     video->video_index = (frame_index_t *)calloc(video->frames ? video->frames : 1, sizeof(frame_index_t));
-    if (!video->video_index) return MLV_ERR_OPEN;
+    if (!video->video_index)
+    {
+        snprintf(error_message, 256, "Out of memory indexing DNG folder:  %.194s", video->path);
+        return MLV_ERR_OPEN;
+    }
     for (uint32_t i = 0; i < video->frames; i++)
     {
         video->video_index[i].frame_type   = 1;
@@ -9347,12 +9355,14 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     {
         free(dng_files);
         free(dng_mutex);
+        snprintf(error_message, 256, "Out of memory preparing DNG folder handles:  %.183s", video->path);
         return MLV_ERR_OPEN;
     }
     if (pthread_mutex_init(dng_mutex, NULL) != 0)
     {
         free(dng_files);
         free(dng_mutex);
+        snprintf(error_message, 256, "Could not initialize DNG folder lock:  %.192s", video->path);
         return MLV_ERR_OPEN;
     }
     video->file = dng_files;
@@ -9417,8 +9427,9 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     }
     else
     {
-        video->RAWI.raw_info.crop.origin[0] = video->RAWI.raw_info.active_area.x1;
-        video->RAWI.raw_info.crop.origin[1] = video->RAWI.raw_info.active_area.y1;
+        /* DefaultCropOrigin is relative to ActiveArea, not to the full image. */
+        video->RAWI.raw_info.crop.origin[0] = 0;
+        video->RAWI.raw_info.crop.origin[1] = 0;
         video->RAWI.raw_info.crop.size[0] = video->RAWI.raw_info.active_area.x2
                                           - video->RAWI.raw_info.active_area.x1;
         video->RAWI.raw_info.crop.size[1] = video->RAWI.raw_info.active_area.y2
@@ -9489,7 +9500,11 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
 
     /* NON compressed frame size. */
     const uint64_t dng_frame_bytes = ((uint64_t)dng_pixels * fi->bits_per_sample + 7u) / 8u;
-    if (dng_frame_bytes > UINT32_MAX) return MLV_ERR_INVALID;
+    if (dng_frame_bytes > UINT32_MAX)
+    {
+        snprintf(error_message, 256, "CinemaDNG frame size is not representable:  %.180s", video->path);
+        return MLV_ERR_INVALID;
+    }
     video->frame_size = (uint32_t)dng_frame_bytes;
 
     /* Calculate framerate. */
@@ -9502,13 +9517,19 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     if ((size_t)(video->frames ? video->frames : 1u) > SIZE_MAX / sizeof(uint16_t *)
         || dng_pixels > SIZE_MAX / 3u
         || dng_pixels * 3u > SIZE_MAX / sizeof(uint16_t))
+    {
+        snprintf(error_message, 256, "CinemaDNG cache size is not representable:  %.180s", video->path);
         return MLV_ERR_INVALID;
+    }
     video->rgb_raw_frames = (uint16_t **)malloc( sizeof(uint16_t *) * (video->frames ? video->frames : 1) );
     video->rgb_raw_current_frame_words = (uint64_t)getMlvWidth(video) * getMlvHeight(video) * 3;
     video->rgb_raw_current_frame = (uint16_t *)malloc( video->rgb_raw_current_frame_words * sizeof(uint16_t) );
     video->cached_frames = (uint8_t *)calloc( sizeof(uint8_t), (video->frames ? video->frames : 1) );
     if (!video->rgb_raw_frames || !video->rgb_raw_current_frame || !video->cached_frames)
+    {
+        snprintf(error_message, 256, "Out of memory creating DNG frame cache:  %.187s", video->path);
         return MLV_ERR_OPEN;
+    }
 
     isMlvActive(video) = 1;
 

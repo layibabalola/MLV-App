@@ -423,6 +423,8 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                    || e.count > 32u
                    || !dng_reader_range_fits(data_off, e.count, got)
                    || buf[data_off + e.count - 1u] != 0
+                   || (e.count > 1u
+                       && memchr(buf + data_off, 0, e.count - 1u) != NULL)
                    || have_model)
                 { free(buf); return 1; }
                 memcpy(out->camera_model, buf + data_off, e.count);
@@ -434,6 +436,8 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                    || e.count > sizeof(out->unique_camera_model)
                    || !dng_reader_range_fits(data_off, e.count, got)
                    || buf[data_off + e.count - 1u] != 0
+                   || (e.count > 1u
+                       && memchr(buf + data_off, 0, e.count - 1u) != NULL)
                    || have_unique_model)
                 { free(buf); return 1; }
                 memcpy(out->unique_camera_model, buf + data_off, e.count);
@@ -462,12 +466,18 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
     if(out->has_default_crop_origin != out->has_default_crop_size) return 1;
     if(out->has_default_crop_origin)
     {
+        const uint64_t crop_width = out->has_active_area
+            ? (uint64_t)(out->active_area[3] - out->active_area[1])
+            : (uint64_t)out->width;
+        const uint64_t crop_height = out->has_active_area
+            ? (uint64_t)(out->active_area[2] - out->active_area[0])
+            : (uint64_t)out->height;
         const uint64_t crop_x2 = (uint64_t)out->default_crop_origin[0]
                                + out->default_crop_size[0];
         const uint64_t crop_y2 = (uint64_t)out->default_crop_origin[1]
                                + out->default_crop_size[1];
         if(out->default_crop_size[0] == 0u || out->default_crop_size[1] == 0u
-           || crop_x2 > out->width || crop_y2 > out->height) return 1;
+           || crop_x2 > crop_width || crop_y2 > crop_height) return 1;
     }
     if(out->strip_offset == 0 || out->strip_byte_count == 0) return 1;
     if(out->compression != DNG_READER_COMPRESSION_NONE &&

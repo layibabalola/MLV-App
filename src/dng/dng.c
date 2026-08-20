@@ -38,6 +38,7 @@
 #include "dng_tag_types.h"
 #include "dng_tag_values.h"
 #include "../mlv/camid/camera_id.h"
+#include "../mlv/video_mlv.h"
 
 #include "../mlv/liblj92/lj92.h"
 #include "../mlv/llrawproc/llrawproc.h"
@@ -1616,7 +1617,7 @@ static uint32_t add_array(int32_t * array, uint8_t * buffer, uint32_t * data_off
     return result;
 }
 
-static uint32_t add_string(char * str, uint8_t * buffer, uint32_t * data_offset)
+static uint32_t add_string(const char * str, uint8_t * buffer, uint32_t * data_offset)
 {
     uint32_t result = 0;
     size_t length = strlen(str) + 1;
@@ -1862,7 +1863,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
         memcpy(serial, mlv_data->IDNT.cameraSerial, 32);
         
         /* 'Unique Camera Model' Tag */
-        char * unique_model = camid->cameraName[UNIQ];
+        const char * unique_model = camid->cameraName[UNIQ];
 
         char unique_model2[64] = "";
         if (loadDngPropertiesString(props_buffer, "UniqueCameraModel", unique_model2, 64) > 0) {
@@ -1988,6 +1989,25 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
                               dng_data->overrides.baseline_exposure);
         }
 
+        int32_t dng_active_area[4] = {
+            mlv_data->RAWI.raw_info.dng_active_area[0],
+            mlv_data->RAWI.raw_info.dng_active_area[1],
+            mlv_data->RAWI.raw_info.dng_active_area[2],
+            mlv_data->RAWI.raw_info.dng_active_area[3]
+        };
+        if(dng_active_area[0] < 0 || dng_active_area[1] < 0
+           || dng_active_area[2] <= dng_active_area[0]
+           || dng_active_area[3] <= dng_active_area[1]
+           || (uint32_t)dng_active_area[2] > mlv_data->RAWI.yRes
+           || (uint32_t)dng_active_area[3] > mlv_data->RAWI.xRes)
+        {
+            dng_active_area[0] = 0;
+            dng_active_area[1] = 0;
+            dng_active_area[2] = mlv_data->RAWI.yRes;
+            dng_active_area[3] = mlv_data->RAWI.xRes;
+        }
+        const int32_t active_width = dng_active_area[3] - dng_active_area[1];
+        const int32_t active_height = dng_active_area[2] - dng_active_area[0];
         int32_t default_crop_origin[2] = {
             mlv_data->RAWI.raw_info.crop.origin[0],
             mlv_data->RAWI.raw_info.crop.origin[1]
@@ -1996,21 +2016,17 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             mlv_data->RAWI.raw_info.crop.size[0],
             mlv_data->RAWI.raw_info.crop.size[1]
         };
-        const int32_t active_width = mlv_data->RAWI.raw_info.active_area.x2
-                                   - mlv_data->RAWI.raw_info.active_area.x1;
-        const int32_t active_height = mlv_data->RAWI.raw_info.active_area.y2
-                                    - mlv_data->RAWI.raw_info.active_area.y1;
         if(default_crop_origin[0] < 0 || default_crop_origin[1] < 0
            || default_crop_size[0] <= 0 || default_crop_size[1] <= 0
            || default_crop_origin[0] > UINT16_MAX
            || default_crop_origin[1] > UINT16_MAX
            || default_crop_size[0] > UINT16_MAX
            || default_crop_size[1] > UINT16_MAX
-           || (int64_t)default_crop_origin[0] + default_crop_size[0] > mlv_data->RAWI.xRes
-           || (int64_t)default_crop_origin[1] + default_crop_size[1] > mlv_data->RAWI.yRes)
+           || (int64_t)default_crop_origin[0] + default_crop_size[0] > active_width
+           || (int64_t)default_crop_origin[1] + default_crop_size[1] > active_height)
         {
-            default_crop_origin[0] = mlv_data->RAWI.raw_info.active_area.x1;
-            default_crop_origin[1] = mlv_data->RAWI.raw_info.active_area.y1;
+            default_crop_origin[0] = 0;
+            default_crop_origin[1] = 0;
             default_crop_size[0] = active_width;
             default_crop_size[1] = active_height;
         }
@@ -2088,7 +2104,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcCameraSerialNumber,          ttAscii,    STRING_ENTRY(serial, header, &data_offset)},
             {tcCalibrationIlluminant1,      ttShort,    1,      lsStandardLightA},
             {tcCalibrationIlluminant2,      ttShort,    1,      lsD65},
-            {tcActiveArea,                  ttLong,     ARRAY_ENTRY(mlv_data->RAWI.raw_info.dng_active_area, header, &data_offset, 4)},
+            {tcActiveArea,                  ttLong,     ARRAY_ENTRY(dng_active_area, header, &data_offset, 4)},
             {tcForwardMatrix1,              ttSRational,RATIONAL_ENTRY(camid->ForwardMatrix1, header, &data_offset, 18)},
             {tcForwardMatrix2,              ttSRational,RATIONAL_ENTRY(camid->ForwardMatrix2, header, &data_offset, 18)},
             {tcTimeCodes,                   ttByte,     8,      add_timecode(frame_rate_f, tc_frame, header, &data_offset)},
@@ -2495,10 +2511,64 @@ static int dng_get_frame(mlvObject_t * mlv_data,
     dng_reset_deferred_payload_compress(dng_data);
     llrpResetDngBWLevels(mlv_data);
 
-    FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
-
-    if (isMcrawLoaded(mlv_data))
+    /* A CinemaDNG-folder clip has no backing MLV FILE*. Decode it through the
+     * folder reader, then enter the same llrawproc + pack/compress boundary as
+     * other inputs. This also makes folder-open -> DNG re-export a real
+     * supported path instead of falling through to file_set_pos(NULL, ...). */
+    if(isDngFolderLoaded(mlv_data))
     {
+        profile_stage_start = export_profile_stage_begin(profile_frame);
+        if(getMlvRawFrameUint16(mlv_data, frame_index,
+                                dng_data->image_buf_unpacked) != 0)
+        {
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE,
+                                     profile_stage_start);
+            return LJ92_ERROR_CORRUPT;
+        }
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_DECODE,
+                                 profile_stage_start);
+
+        profile_stage_start = export_profile_stage_begin(profile_frame);
+        apply_llrawproc_locked(mlv_data, dng_data->image_buf_unpacked,
+                               dng_data->image_size_unpacked);
+        export_profile_stage_end(profile_frame, EXPORT_PROFILE_LLRAWPROC,
+                                 profile_stage_start);
+        export_profile_note_llrawproc_breakdown(profile_frame);
+        export_profile_note_gpu_export_telemetry(profile_frame);
+
+        if(dng_data->raw_output_state == COMPRESSED_RAW
+           || dng_data->raw_output_state == COMPRESSED_ORIG)
+        {
+            ret = dng_prepare_compressed_frame(
+                mlv_data, dng_data, frame_index,
+                mlv_data->RAWI.raw_info.bits_per_pixel,
+                defer_compress_to_payload, profile_frame);
+            if(ret != 0) return ret;
+        }
+        else
+        {
+            dng_data->image_size = dng_get_image_size(
+                mlv_data, IMG_SIZE_PACKED, frame_index);
+            if(dng_data->image_size == 0
+               || dng_data->image_size > dng_data->image_capacity)
+                return LJ92_ERROR_CORRUPT;
+            profile_stage_start = export_profile_stage_begin(profile_frame);
+            dng_pack_image_bits(dng_data->image_buf,
+                                dng_data->image_buf_unpacked,
+                                mlv_data->RAWI.xRes,
+                                mlv_data->RAWI.yRes,
+                                mlv_data->RAWI.raw_info.bits_per_pixel,
+                                1);
+            export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK,
+                                     profile_stage_start);
+        }
+    }
+    else
+    {
+        FILE *fd = mlv_data->file[mlv_data->video_index[frame_index].chunk_num];
+
+        if (isMcrawLoaded(mlv_data))
+        {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
         if(file_set_pos(fd, mlv_data->video_index[frame_index].block_offset,
@@ -2590,8 +2660,8 @@ static int dng_get_frame(mlvObject_t * mlv_data,
             export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_PACK, profile_stage_start);
         }
     }
-    else
-    {
+        else
+        {
         /* Move to start of frame in file and read the RAW data */
         profile_stage_start = export_profile_stage_begin(profile_frame);
         if(file_set_pos(fd, mlv_data->video_index[frame_index].frame_offset,
@@ -2757,6 +2827,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                 }
             }
         }
+    }
     }
 
     profile_stage_start = export_profile_stage_begin(profile_frame);
