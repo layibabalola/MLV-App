@@ -19,7 +19,7 @@ GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-sm
 BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
 MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
 NEUTRAL_RECEIPT = REPO_ROOT / "tests" / "fixtures" / "receipts" / "neutral_look_assist_off_v4.marxml"
-SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-f401bf9a-20260820.json"
+SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-d8224107-20260820.json"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -610,6 +610,8 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
     assert receipt["baseline"]["clean"] is True
     assert receipt["candidate"]["launchProbeExitCode"] == 0
     assert receipt["baseline"]["launchProbeExitCode"] == 0
+    assert receipt["renderContract"]["targetPresentedFrames"] == 2
+    assert receipt["verifier"]["failOnScreenshotDelta"] is True
     assert receipt["verifier"]["sourceHashConvention"] == (
         "GIT_BLOB_BYTES_CANONICAL_LF"
     )
@@ -657,6 +659,10 @@ def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
         "M16-1243",
     ]
     assert all(clip["verdict"] == "PASS" for clip in clips)
+    assert all(clip["sameScreenshotSha256"] is True for clip in clips)
+    assert all(clip["meanAbsRgbDelta"] == 0.0 for clip in clips)
+    assert all(clip["maxAbsRgbDelta"] == 0 for clip in clips)
+    assert all(clip["changedSampleRatio"] == 0.0 for clip in clips)
     assert all(clip["meanAbsRgbDelta"] <= 2.0 for clip in clips)
     assert all(clip["changedSampleRatio"] <= 0.01 for clip in clips)
     assert all(len(clip["comparisonJsonSha256"]) == 64 for clip in clips)
