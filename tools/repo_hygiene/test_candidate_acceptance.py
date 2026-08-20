@@ -28,7 +28,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     final_integration_mismatches,
     latest_summary,
     provider_surface_record,
-    resolve_external_github_cli,
+    isolated_github_query_command,
     surface_record,
     validation_plan,
     validate_for_finalize,
@@ -465,15 +465,23 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "stdout": json.dumps(provider["response"]),
             "stderr": "",
         }
-        with tempfile.TemporaryDirectory() as external_temp:
-            github_cli = Path(external_temp) / ("gh.exe" if os.name == "nt" else "gh")
-            github_cli.write_bytes(b"external-gh-client")
-            with mock.patch.dict(os.environ, {"GH_HOST": "attacker.invalid"}), mock.patch(
+        with tempfile.TemporaryDirectory() as client_temp:
+            provider_client = Path(client_temp) / ("python.exe" if os.name == "nt" else "python")
+            provider_client.write_bytes(b"current-python-client")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "GH_HOST": "attacker.invalid",
+                    "HTTPS_PROXY": "https://attacker.invalid",
+                    "SSL_CERT_FILE": "attacker-ca.pem",
+                    "PYTHONPATH": "candidate-python-path",
+                },
+            ), mock.patch(
                 "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
                 return_value=self.repo_root,
             ), mock.patch(
-                "tools.repo_hygiene.candidate_acceptance.resolve_external_github_cli",
-                return_value=github_cli,
+                "tools.repo_hygiene.candidate_acceptance.sys.executable",
+                str(provider_client),
             ), mock.patch(
                 "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
                 return_value=completed,
@@ -485,51 +493,41 @@ class CandidateAcceptanceTests(unittest.TestCase):
                     FEATURE,
                 )
         command = bounded.call_args.args[2]
-        self.assertEqual(str(github_cli), command[0])
+        self.assertEqual(str(provider_client.resolve()), command[0])
         self.assertTrue(Path(command[0]).is_absolute())
-        self.assertEqual(["--hostname", "github.com"], command[2:4])
-        self.assertNotIn("GH_HOST", bounded.call_args.kwargs["env"])
-        if os.name == "nt":
-            self.assertEqual("1", bounded.call_args.kwargs["env"]["NoDefaultCurrentDirectoryInExePath"])
+        self.assertEqual(["-I", "-c"], command[1:3])
+        self.assertIn('HTTPSConnection(\n    "api.github.com"', command[3])
+        self.assertEqual(["layibabalola/MLV-App", FEATURE], command[4:6])
+        for key in ("GH_HOST", "HTTPS_PROXY", "SSL_CERT_FILE", "PYTHONPATH"):
+            self.assertNotIn(key, bounded.call_args.kwargs["env"])
         self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
         self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
-        self.assertEqual(str(github_cli), payload["githubCli"]["path"])
-        self.assertEqual(hashlib.sha256(b"external-gh-client").hexdigest(), payload["githubCli"]["sha256"])
+        self.assertEqual("current-python-stdlib-https", payload["providerClient"]["kind"])
+        self.assertEqual(str(provider_client.resolve()), payload["providerClient"]["path"])
+        self.assertEqual(hashlib.sha256(b"current-python-client").hexdigest(), payload["providerClient"]["sha256"])
 
-    def test_live_provider_cli_rejects_candidate_and_git_contained_shadowing(self) -> None:
+    def test_live_provider_query_ignores_candidate_and_path_executable_shadowing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             repo = root / "repo"
-            candidate_bin = repo / "bin"
-            external_bin = root / "external-bin"
-            git_contained_bin = root / "tool-source" / "bin"
             repo.mkdir()
             self.git(repo, "init")
-            (git_contained_bin.parent / ".git").mkdir(parents=True)
-            candidate_bin.mkdir()
-            external_bin.mkdir()
-            git_contained_bin.mkdir()
-            executable = "gh.exe" if os.name == "nt" else "gh"
-            candidate_cli = candidate_bin / executable
-            git_contained_cli = git_contained_bin / executable
-            external_cli = external_bin / executable
-            for path in (candidate_cli, git_contained_cli, external_cli):
-                path.write_bytes(b"fixture")
-                if os.name != "nt":
-                    path.chmod(0o755)
-
-            resolved = resolve_external_github_cli(
-                repo,
-                {"PATH": os.pathsep.join((str(candidate_bin), str(git_contained_bin), str(external_bin)))},
+            fake_gh = repo / ("gh.exe" if os.name == "nt" else "gh")
+            fake_python = repo / ("python.exe" if os.name == "nt" else "python")
+            fake_gh.write_bytes(b"candidate-gh")
+            fake_python.write_bytes(b"candidate-python")
+            client, command = isolated_github_query_command(
+                "layibabalola/MLV-App",
+                FEATURE,
+                4096,
             )
-            self.assertEqual(external_cli.resolve(), resolved)
-            with self.assertRaisesRegex(HygieneError, "outside every Git repository/worktree"):
-                resolve_external_github_cli(
-                    repo,
-                    {"PATH": os.pathsep.join((str(candidate_bin), str(git_contained_bin)))},
-                )
+            self.assertEqual(Path(os.sys.executable).resolve(), client)
+            self.assertEqual(str(client), command[0])
+            self.assertNotIn(str(fake_gh), command)
+            self.assertNotIn(str(fake_python), command)
+            self.assertNotIn("gh", command[:3])
 
-    def test_live_provider_cli_bytes_must_stay_stable_during_query(self) -> None:
+    def test_live_provider_python_client_bytes_must_stay_stable_during_query(self) -> None:
         provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
         completed = {
             "returncode": 0,
@@ -540,24 +538,24 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "stderr": "",
         }
         with tempfile.TemporaryDirectory() as external_temp:
-            github_cli = Path(external_temp) / ("gh.exe" if os.name == "nt" else "gh")
-            github_cli.write_bytes(b"before")
+            provider_client = Path(external_temp) / ("python.exe" if os.name == "nt" else "python")
+            provider_client.write_bytes(b"before")
 
             def mutate_client(*_args, **_kwargs):
-                github_cli.write_bytes(b"after-with-different-bytes")
+                provider_client.write_bytes(b"after-with-different-bytes")
                 return completed
 
             with mock.patch(
                 "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
                 return_value=self.repo_root,
             ), mock.patch(
-                "tools.repo_hygiene.candidate_acceptance.resolve_external_github_cli",
-                return_value=github_cli,
+                "tools.repo_hygiene.candidate_acceptance.sys.executable",
+                str(provider_client),
             ), mock.patch(
                 "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
                 side_effect=mutate_client,
             ):
-                with self.assertRaisesRegex(HygieneError, "bytes changed"):
+                with self.assertRaisesRegex(HygieneError, "provider client bytes changed"):
                     _live_github_provider_payload(
                         self.repo_root,
                         self.config,
@@ -1020,10 +1018,12 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn('"annotations_count" not in output', python_source)
         self.assertIn("hosted surfaces require record-hosted", python_source)
         self.assertIn("def verify_live_provider", python_source)
-        self.assertIn('"--hostname"', python_source)
-        self.assertIn('"github.com"', python_source)
+        self.assertIn("def isolated_github_query_command", python_source)
+        self.assertIn('"api.github.com"', python_source)
+        self.assertIn('"-I"', python_source)
         self.assertIn("run_bounded_closeout_process", python_source)
-        self.assertIn('process_env.pop("GH_HOST", None)', python_source)
+        self.assertIn('"SSL_CERT_FILE"', python_source)
+        self.assertIn('"PYTHONPATH"', python_source)
 
         command = (
             "$errors=$null; $tokens=$null; "

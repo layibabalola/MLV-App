@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -406,94 +407,108 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     ]
 
 
-def _path_is_inside_git_repository(path: Path) -> bool:
-    """Return True when path is nested in a Git worktree or bare repository."""
+_GITHUB_CHECKS_QUERY_SCRIPT = r"""
+import http.client
+import json
+import ssl
+import sys
 
-    current = path.resolve().parent
-    while True:
-        if (current / ".git").exists():
-            return True
-        if (current / "HEAD").is_file() and (current / "objects").is_dir() and (current / "refs").is_dir():
-            return True
-        if current.parent == current:
-            return False
-        current = current.parent
+repository, head_sha, raw_limit = sys.argv[1:4]
+limit = int(raw_limit)
+connection = http.client.HTTPSConnection(
+    "api.github.com",
+    443,
+    timeout=20,
+    context=ssl.create_default_context(),
+)
+try:
+    connection.request(
+        "GET",
+        f"/repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "MLV-App-candidate-acceptance/1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    response = connection.getresponse()
+    body = response.read(limit + 1)
+    if response.status != 200:
+        raise RuntimeError(f"GitHub API HTTP {response.status}: {body[:1000].decode('utf-8', 'replace')}")
+    if len(body) > limit:
+        raise RuntimeError("GitHub API response exceeded the provider response cap")
+    json.loads(body)
+    sys.stdout.buffer.write(body)
+finally:
+    connection.close()
+"""
 
 
-def resolve_external_github_cli(
-    repo_root: Path,
-    process_env: Optional[Dict[str, str]] = None,
-) -> Path:
-    """Resolve gh from explicit PATH entries, never from a candidate checkout.
+def isolated_github_query_command(repository: str, head_sha: str, max_output_bytes: int) -> tuple[Path, List[str]]:
+    """Build a PATH-independent stdlib HTTPS query under this exact interpreter."""
 
-    Windows searches the current directory before PATH for bare executable names.
-    Enumerating only absolute PATH directories and rejecting every Git-contained
-    candidate prevents a feature branch from substituting its own ``gh.exe`` for
-    the provider client used by the finalize-time trust query.
-    """
-
-    repo = resolve_repo_root(repo_root)
-    env = process_env if process_env is not None else os.environ
-    executable = "gh.exe" if os.name == "nt" else "gh"
-    for raw_entry in str(env.get("PATH") or "").split(os.pathsep):
-        entry = raw_entry.strip().strip('"')
-        if not entry:
-            continue
-        directory = Path(os.path.expandvars(os.path.expanduser(entry)))
-        if not directory.is_absolute():
-            continue
-        try:
-            candidate = (directory / executable).resolve()
-        except OSError:
-            continue
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
-            continue
-        if candidate == repo or repo in candidate.parents:
-            continue
-        if _path_is_inside_git_repository(candidate):
-            continue
-        return candidate
-    raise HygieneError("GitHub CLI must resolve to an absolute executable outside every Git repository/worktree")
+    client = Path(sys.executable).resolve()
+    if not client.is_absolute() or not client.is_file():
+        raise HygieneError("candidate acceptance Python provider client is unavailable")
+    head = _require_sha(head_sha, "featureHead")
+    if repository != CANONICAL_PROVIDER_REPOSITORY:
+        raise HygieneError("live GitHub query repository must equal the canonical repository")
+    return client, [
+        str(client),
+        "-I",
+        "-c",
+        _GITHUB_CHECKS_QUERY_SCRIPT,
+        repository,
+        head,
+        str(max_output_bytes),
+    ]
 
 
 def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root)
     process_env = dict(os.environ)
-    process_env.pop("GH_HOST", None)
-    if os.name == "nt":
-        process_env["NoDefaultCurrentDirectoryInExePath"] = "1"
-    github_cli = resolve_external_github_cli(repo_root, process_env)
-    github_cli_identity = {
-        "path": str(github_cli),
-        "size": github_cli.stat().st_size,
-        "sha256": _file_sha256(github_cli),
-    }
-    command = [
-        str(github_cli),
-        "api",
-        "--hostname",
-        "github.com",
-        "-H",
-        "Accept: application/vnd.github+json",
-        f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
-    ]
+    for key in (
+        "GH_HOST",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "PYTHONHOME",
+        "PYTHONPATH",
+    ):
+        process_env.pop(key, None)
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
+    output_cap = min(closeout_max_process_output_bytes(config), 4 * 1024 * 1024)
+    provider_client, command = isolated_github_query_command(repository, head_sha, output_cap)
+    provider_client_identity = {
+        "kind": "current-python-stdlib-https",
+        "path": str(provider_client),
+        "size": provider_client.stat().st_size,
+        "sha256": _file_sha256(provider_client),
+    }
     completed = run_bounded_closeout_process(
         repo_root,
         config,
         command,
         timeout_ms=60000,
-        max_output_bytes=closeout_max_process_output_bytes(config),
-        recovery_command="authenticate gh for github.com and rerun candidate acceptance",
+        max_output_bytes=output_cap,
+        recovery_command="restore public api.github.com HTTPS access and rerun candidate acceptance",
         normalize_failure_text=False,
         env=process_env,
         resource_overrides={"profile": "provider-verification", "affinityCores": 2},
     )
     if completed["returncode"] != 0 or completed.get("timedOut") or completed.get("outputCapped") or completed.get("cpuStalled"):
         raise HygieneError(f"live GitHub provider verification failed with exit {completed['returncode']}: {completed['stderr'][-1000:]}")
-    if github_cli.stat().st_size != github_cli_identity["size"] or _file_sha256(github_cli) != github_cli_identity["sha256"]:
-        raise HygieneError("GitHub CLI bytes changed during live provider verification")
+    if (
+        provider_client.stat().st_size != provider_client_identity["size"]
+        or _file_sha256(provider_client) != provider_client_identity["sha256"]
+    ):
+        raise HygieneError("candidate acceptance Python provider client bytes changed during live verification")
     try:
         response = json.loads(completed["stdout"])
     except json.JSONDecodeError as exc:
@@ -503,7 +518,7 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
         "capturedAt": utc_now(),
         "repository": repository,
         "headSha": head_sha,
-        "githubCli": github_cli_identity,
+        "providerClient": provider_client_identity,
         "response": response,
     }
     if not isinstance(response, dict) or not isinstance(response.get("check_runs"), list):

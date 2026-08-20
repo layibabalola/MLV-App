@@ -6698,6 +6698,42 @@ class BrokeredCloseoutTests(unittest.TestCase):
         self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "codex/test-work@{upstream}").stdout.strip(), "origin/codex/test-work")
         self.assertIn("evidence_repair", self.audit_types(repo))
 
+    def test_existing_evidence_is_refreshed_after_a_later_source_commit(self) -> None:
+        repo = self.init_repo(
+            config_updates={
+                "evidenceRepair": {
+                    "enabled": True,
+                    "evidenceRoot": ".closeout-evidence",
+                    "requiredArtifacts": ["metrics.json", "handoff.json", "session.json", "closeout.json"],
+                }
+            }
+        )
+        self.make_feature(repo, "wb-evidence-refresh")
+        initial_detection = detect_work_block(repo, work_block_id="wb-evidence-refresh")
+        initial = repair_missing_evidence(repo, load_closeout_config(repo), initial_detection, reason="test")
+        self.assertEqual("success", initial["status"], initial)
+
+        (repo / "later-source.txt").write_text("later source\n", encoding="utf-8")
+        git(repo, "add", "later-source.txt")
+        git(repo, "commit", "-m", "later source repair")
+        source_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+        refreshed_detection = detect_work_block(repo, work_block_id="wb-evidence-refresh")
+
+        refreshed = repair_missing_evidence(
+            repo,
+            load_closeout_config(repo),
+            refreshed_detection,
+            reason="candidate_acceptance_preflight",
+        )
+
+        self.assertEqual("success", refreshed["status"], refreshed)
+        self.assertEqual(source_head, git(repo, "rev-parse", "HEAD^").stdout.strip())
+        for artifact in ("metrics.json", "handoff.json", "session.json", "closeout.json"):
+            path = f".closeout-evidence/wb-evidence-refresh/{artifact}"
+            payload = json.loads(git(repo, "show", f"HEAD:{path}").stdout)
+            self.assertEqual(source_head, payload["featureHead"])
+            self.assertEqual("wb-evidence-refresh", payload["workBlockId"])
+
     def test_evidence_repair_refuses_claimed_evidence_path(self) -> None:
         repo = self.init_repo(
             remote=True,

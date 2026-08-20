@@ -917,6 +917,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_tooling_baseline_check_is_plan_only_during_finalize",
             "test_missing_evidence_is_generated_and_committed_before_publish",
+            "test_existing_evidence_is_refreshed_after_a_later_source_commit",
             "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
             "test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple",
             "test_finalize_loop_continues_when_evidence_repair_changes_tuple_and_pins_match",
@@ -1020,8 +1021,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "requiredTestFiles": [
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_acceptance_uses_two_phase_target_pinned_activation"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity"},
-            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_cli_rejects_candidate_and_git_contained_shadowing"},
-            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_cli_bytes_must_stay_stable_during_query"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_query_ignores_candidate_and_path_executable_shadowing"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_python_client_bytes_must_stay_stable_during_query"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},
             {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch"},
@@ -1062,7 +1063,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
-            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def resolve_external_github_cli"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def isolated_github_query_command"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def content_review_gate_trust_error"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
@@ -4047,7 +4048,43 @@ def evidence_missing_or_dirty(repo_root: Path, config: Dict[str, Any], work_bloc
         status = run_git(repo_root, ["status", "--porcelain=v1", "--", path])
         if status.stdout.strip() or not git_path_tracked(repo_root, path):
             missing.append(path)
-    return missing
+    if missing or not paths:
+        return missing
+
+    # Evidence is emitted as its own commit and describes that commit's parent.
+    # Merely finding tracked JSON is insufficient: a later source commit makes
+    # the old evidence stale even though every required path still exists.
+    head = git_stdout(repo_root, ["rev-parse", "HEAD"], required=False)
+    parent = git_stdout(repo_root, ["rev-parse", "HEAD^"], required=False)
+    if not head or not parent:
+        return paths
+    head_paths = {
+        normalize_rel(line)
+        for line in git_stdout(
+            repo_root,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            required=False,
+        ).splitlines()
+        if normalize_rel(line)
+    }
+    if head_paths != set(paths):
+        return paths
+    for path in paths:
+        last_commit = git_stdout(repo_root, ["log", "-1", "--format=%H", "--", path], required=False)
+        raw = git_stdout(repo_root, ["show", f"HEAD:{path}"], required=False)
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return paths
+        if (
+            last_commit != head
+            or not isinstance(payload, dict)
+            or payload.get("workBlockId") != work_block_id
+            or payload.get("featureHead") != parent
+            or payload.get("artifactKind") != Path(path).stem
+        ):
+            return paths
+    return []
 
 
 def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
