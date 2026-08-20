@@ -16,13 +16,14 @@ summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
 `candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
 integration tree, range diff, policy, and validation plan into one exact tuple.
 Review and hosted surfaces bind that tuple and never carry forward after drift.
-Hosted surfaces are derived only from an immutable SHA-named GitHub check-run snapshot
+Hosted surfaces are derived only from a content-addressed SHA-named GitHub check-run snapshot
 for the configured repository and exact feature head; generic review records cannot
-impersonate them. The latest ledger must be internally coherent and match immutable
-history before the dashboard or finalize treats it as ready. Finalize independently
+impersonate them. The latest ledger must be internally coherent and match its chained
+local history before the dashboard or finalize treats it as ready. Finalize independently
 re-queries the canonical GitHub repository and requires those live terminal check
 identities to equal the accepted records. Same-tuple revisions are anchored by a
-monotonic chain, so a missing chained history row is invalid rather than a fresh start.
+monotonic local chain: a missing row is invalid, and a recorded blocking verdict can
+only be cleared by a new candidate tuple.
 
 The acceptance state is deliberately batched:
 
@@ -36,6 +37,10 @@ The dashboard must not offer approval, rebless, publication, redistribution, or
 provider-activation controls for this ledger. Agent and hosted verdicts are
 evidence only. Human-only authority boundaries continue to be enforced by their
 own registered policy actors.
+The local chain and fixed reviewer labels are non-cryptographic process evidence. They
+detect accidental drift and ordinary replay, but do not authenticate a human or resist
+a privileged actor rewriting the entire generated-state directory. They must never be
+described or consumed as a substitute for the separate registered human authority gate.
 Finalize repeats the exact integrated rehearsal after any eligibility repair and
 compares the real merge tree and canonical diff hash with the accepted tuple before
 updating or pushing the target.

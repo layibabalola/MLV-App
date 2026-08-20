@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +12,7 @@ from unittest import mock
 from tools.repo_hygiene.brokered_closeout import simulate_clean_integration
 from tools.repo_hygiene.candidate_acceptance import (
     _hash,
+    _live_github_provider_payload,
     acceptance_root,
     CONTENT_REVIEWERS,
     candidate_identity,
@@ -50,7 +53,6 @@ class CandidateAcceptanceTests(unittest.TestCase):
         }
         provider_dir = self.repo_root / ".claude-state/closeout/acceptance/provider" / FEATURE
         provider_dir.mkdir(parents=True)
-        self.provider_path = provider_dir / "check-runs.json"
         names = [
             ("Repo Hygiene Python (windows-latest)", 15368),
             ("Repo Hygiene Python (ubuntu-latest)", 15368),
@@ -77,22 +79,28 @@ class CandidateAcceptanceTests(unittest.TestCase):
             }
             for index, (name, app_id) in enumerate(names, 1)
         ]
-        self.provider_path.write_text(
-            json.dumps(
-                {
-                    "schema": "candidate-acceptance-github-checks.v1",
-                    "capturedAt": "2026-08-20T00:01:00Z",
-                    "repository": "layibabalola/MLV-App",
-                    "headSha": FEATURE,
-                    "response": {"total_count": len(runs), "check_runs": runs},
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        self.write_provider(
+            {
+                "schema": "candidate-acceptance-github-checks.v1",
+                "capturedAt": "2026-08-20T00:01:00Z",
+                "repository": "layibabalola/MLV-App",
+                "headSha": FEATURE,
+                "response": {"total_count": len(runs), "check_runs": runs},
+            }
         )
 
     def tearDown(self) -> None:
         self.provider_temp.cleanup()
+
+    def write_provider(self, payload: dict) -> Path:
+        provider_dir = self.repo_root / ".claude-state/closeout/acceptance/provider" / FEATURE
+        provider_dir.mkdir(parents=True, exist_ok=True)
+        encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        path = provider_dir / f"check-runs-{digest}.json"
+        path.write_bytes(encoded)
+        self.provider_path = path
+        return path
 
     def candidate(self, *, clean: bool = True) -> tuple[dict, dict]:
         rehearsal = {
@@ -353,7 +361,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
         original = json.loads(self.provider_path.read_text(encoding="utf-8"))
         wrong_repo = json.loads(json.dumps(original))
         wrong_repo["repository"] = "someone-else/MLV-App"
-        self.provider_path.write_text(json.dumps(wrong_repo), encoding="utf-8")
+        self.write_provider(wrong_repo)
         with self.assertRaisesRegex(HygieneError, "repository"):
             provider_surface_record(
                 self.repo_root,
@@ -365,7 +373,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
         missing_annotations = json.loads(json.dumps(original))
         codeql = next(run for run in missing_annotations["response"]["check_runs"] if run["name"] == "CodeQL")
         codeql["output"].pop("annotations_count")
-        self.provider_path.write_text(json.dumps(missing_annotations), encoding="utf-8")
+        self.write_provider(missing_annotations)
         with self.assertRaisesRegex(HygieneError, "annotation count"):
             provider_surface_record(
                 self.repo_root,
@@ -375,12 +383,25 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 evidence_path=self.provider_path,
             )
 
+    def test_provider_record_rejects_mutable_non_addressed_evidence_path(self) -> None:
+        candidate, _ = self.candidate()
+        mutable = self.provider_path.with_name("check-runs.json")
+        mutable.write_bytes(self.provider_path.read_bytes())
+        with self.assertRaisesRegex(HygieneError, "SHA-addressed"):
+            provider_surface_record(
+                self.repo_root,
+                self.config,
+                candidate,
+                surface="hosted-tests",
+                evidence_path=mutable,
+            )
+
     def test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence(self) -> None:
         candidate, rehearsal = self.candidate()
         payload = json.loads(self.provider_path.read_text(encoding="utf-8"))
         codeql = next(run for run in payload["response"]["check_runs"] if run["name"] == "CodeQL")
         codeql["conclusion"] = "failure"
-        self.provider_path.write_text(json.dumps(payload), encoding="utf-8")
+        self.write_provider(payload)
         record = provider_surface_record(
             self.repo_root,
             self.config,
@@ -410,14 +431,43 @@ class CandidateAcceptanceTests(unittest.TestCase):
         product["status"] = "in_progress"
         product["conclusion"] = None
         with self.assertRaisesRegex(HygieneError, "not terminal"):
-            verify_live_provider(ledger, self.config, payload=live)
+            verify_live_provider(self.repo_root, ledger, self.config, payload=live)
 
         live = json.loads(self.provider_path.read_text(encoding="utf-8"))
         codeql = next(run for run in live["response"]["check_runs"] if run["name"] == "CodeQL")
         codeql["id"] = 999999
         codeql["details_url"] = "https://example.invalid/forged"
         with self.assertRaisesRegex(HygieneError, "drifted"):
-            verify_live_provider(ledger, self.config, payload=live)
+            verify_live_provider(self.repo_root, ledger, self.config, payload=live)
+
+    def test_live_provider_query_is_github_pinned_and_bounded(self) -> None:
+        provider = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        completed = {
+            "returncode": 0,
+            "timedOut": False,
+            "outputCapped": False,
+            "cpuStalled": False,
+            "stdout": json.dumps(provider["response"]),
+            "stderr": "",
+        }
+        with mock.patch.dict(os.environ, {"GH_HOST": "attacker.invalid"}), mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
+            return_value=self.repo_root,
+        ), mock.patch(
+            "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
+            return_value=completed,
+        ) as bounded:
+            payload = _live_github_provider_payload(
+                self.repo_root,
+                self.config,
+                "layibabalola/MLV-App",
+                FEATURE,
+            )
+        command = bounded.call_args.args[2]
+        self.assertEqual(["--hostname", "github.com"], command[2:4])
+        self.assertNotIn("GH_HOST", bounded.call_args.kwargs["env"])
+        self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
+        self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
@@ -468,6 +518,19 @@ class CandidateAcceptanceTests(unittest.TestCase):
             json.loads((self.repo_root / second_paths["latest"]).read_text(encoding="utf-8"))["capturedAt"],
         )
 
+    def test_provider_recapture_preserves_prior_content_addressed_ledger(self) -> None:
+        candidate, rehearsal = self.candidate()
+        first_provider = self.provider_path
+        first = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=self.records(candidate))
+        write_ledger(self.repo_root, self.config, first)
+        recaptured = json.loads(first_provider.read_text(encoding="utf-8"))
+        recaptured["capturedAt"] = "2026-08-20T02:00:00Z"
+        second_provider = self.write_provider(recaptured)
+        self.assertNotEqual(first_provider, second_provider)
+        self.assertTrue(first_provider.exists())
+        self.assertTrue(second_provider.exists())
+        self.assertTrue(latest_summary(self.repo_root, self.config)["ready"])
+
     def test_monotonic_chain_detects_deleted_same_tuple_blocker_history(self) -> None:
         candidate, rehearsal = self.candidate()
         blocked = self.run_evaluate(
@@ -479,7 +542,34 @@ class CandidateAcceptanceTests(unittest.TestCase):
         (self.repo_root / paths["history"]).unlink()
         summary = latest_summary(self.repo_root, self.config)
         self.assertEqual("invalid", summary["state"])
-        self.assertIn("history is missing", summary["error"])
+        self.assertIn("history is unreadable", summary["error"])
+
+    def test_same_tuple_blocker_cannot_be_muted_by_direct_writer_or_rehashed_chain(self) -> None:
+        candidate, rehearsal = self.candidate()
+        blocked = self.run_evaluate(
+            candidate=candidate,
+            rehearsal=rehearsal,
+            records=self.records(candidate, {"content-stranger-1": "CHANGES_REQUESTED"}),
+        )
+        ready = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=self.records(candidate))
+        write_ledger(self.repo_root, self.config, blocked)
+        with self.assertRaisesRegex(HygieneError, "same-tuple blocker is monotonic"):
+            write_ledger(self.repo_root, self.config, ready)
+
+        root = acceptance_root(self.repo_root, self.config)
+        tuple_hash = candidate["acceptanceTupleHash"]
+        ready_history = root / "history" / f"{tuple_hash}-{ready['ledgerHash']}.json"
+        ready_history.write_text(json.dumps(ready), encoding="utf-8")
+        chain_path = root / "ledger-chain.json"
+        chain = json.loads(chain_path.read_text(encoding="utf-8"))
+        chain["tuples"][tuple_hash].append(ready["ledgerHash"])
+        chain.pop("chainHash")
+        chain["chainHash"] = _hash(chain)
+        chain_path.write_text(json.dumps(chain), encoding="utf-8")
+        (root / "latest.json").write_text(json.dumps(ready), encoding="utf-8")
+        summary = latest_summary(self.repo_root, self.config)
+        self.assertEqual("invalid", summary["state"])
+        self.assertIn("same-tuple blocker is monotonic", summary["error"])
 
     def test_state_root_escape_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -574,6 +664,10 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn('"annotations_count" not in output', python_source)
         self.assertIn("hosted surfaces require record-hosted", python_source)
         self.assertIn("def verify_live_provider", python_source)
+        self.assertIn('"--hostname"', python_source)
+        self.assertIn('"github.com"', python_source)
+        self.assertIn("run_bounded_closeout_process", python_source)
+        self.assertIn('process_env.pop("GH_HOST", None)', python_source)
 
         command = (
             "$errors=$null; $tokens=$null; "
