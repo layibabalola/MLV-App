@@ -1798,34 +1798,39 @@ class BrokeredCloseoutTests(unittest.TestCase):
                 },
                 server_process_id=4321,
             )
+        fresh_now_ms = int(time.time() * 1000)
         fresh_bound_request = {
             **bound_request,
-            "helperObservedAtMs": int(time.time() * 1000),
+            "helperObservedAtMs": fresh_now_ms,
         }
-        with self.assertRaisesRegex(HygieneError, "missing previewToken"):
-            dashboard_action_request_payload(
-                repo,
-                {key: value for key, value in fresh_bound_request.items() if key != "previewToken"},
-                server_process_id=4321,
-            )
-        with self.assertRaisesRegex(HygieneError, "stale dashboard preview repo state"):
-            dashboard_action_request_payload(
-                repo,
-                {
-                    **fresh_bound_request,
-                    "previewRepoStateHash": "stale-hash",
-                },
-                server_process_id=4321,
-            )
-        with self.assertRaisesRegex(HygieneError, "stale dashboard preview token"):
-            dashboard_action_request_payload(
-                repo,
-                {
-                    **fresh_bound_request,
-                    "previewToken": "stale-token",
-                },
-                server_process_id=4321,
-            )
+        # Each negative targets preview evidence, not helper freshness. Freeze
+        # the validator clock so a contended repo snapshot cannot age the
+        # request into a different fail-closed branch first.
+        with mock.patch("tools.repo_hygiene.closeout_dashboard.time.time", return_value=fresh_now_ms / 1000.0):
+            with self.assertRaisesRegex(HygieneError, "missing previewToken"):
+                dashboard_action_request_payload(
+                    repo,
+                    {key: value for key, value in fresh_bound_request.items() if key != "previewToken"},
+                    server_process_id=4321,
+                )
+            with self.assertRaisesRegex(HygieneError, "stale dashboard preview repo state"):
+                dashboard_action_request_payload(
+                    repo,
+                    {
+                        **fresh_bound_request,
+                        "previewRepoStateHash": "stale-hash",
+                    },
+                    server_process_id=4321,
+                )
+            with self.assertRaisesRegex(HygieneError, "stale dashboard preview token"):
+                dashboard_action_request_payload(
+                    repo,
+                    {
+                        **fresh_bound_request,
+                        "previewToken": "stale-token",
+                    },
+                    server_process_id=4321,
+                )
 
     def test_closeout_dashboard_action_request_rejects_empty_tuple_values_and_path_escape(self) -> None:
         repo = self.init_repo(
