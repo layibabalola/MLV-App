@@ -262,6 +262,12 @@ class RepoHygieneTests(unittest.TestCase):
         main_window = (ROOT / "platform" / "qt" / "MainWindow.cpp").read_text(
             encoding="utf-8"
         )
+        aspect_policy = (
+            ROOT / "src" / "batch" / "RawAspectStretchPolicy.h"
+        ).read_text(encoding="utf-8")
+        batch_runner = (ROOT / "src" / "batch" / "BatchRunner.cpp").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('#include <inttypes.h>', blender)
         self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
@@ -362,6 +368,11 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("fi->compression == DNG_READER_COMPRESSION_NONE", video_mlv)
         self.assertIn("uint32_t dng_wb_gains[3] = { 1024, 1024, 1024 }", video_mlv)
         self.assertIn("mlvDngDefaultScaleToSampling", video_mlv)
+        self.assertIn("mlvDngAspectRatioIsSupported", video_mlv)
+        self.assertIn("mlvDngBaselineExposureToBias", video_mlv)
+        self.assertIn("video->RAWI.raw_info.dng_active_area", video_mlv)
+        self.assertIn("video->RAWI.raw_info.crop.origin", video_mlv)
+        self.assertIn("video->camid.cameraName[UNIQ]", video_mlv)
         self.assertIn("video->MLVI.sourceFpsNom     = fi->has_frame_rate", video_mlv)
         self.assertIn("video->EXPO.isoValue         = fi->has_iso", video_mlv)
         self.assertIn("FILE ** dng_files", video_mlv)
@@ -378,6 +389,12 @@ class RepoHygieneTests(unittest.TestCase):
             "tcCFARepeatPatternDim",
             "tcDefaultScale",
             "tcFrameRate",
+            "tcDefaultCropOrigin",
+            "tcDefaultCropSize",
+            "tcBaselineExposure",
+            "tcBaselineExposureOffset",
+            "tcModel",
+            "tcUniqueCameraModel",
             "tcExifIFD",
         ):
             self.assertIn(strict_tag, dng_reader)
@@ -385,8 +402,15 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("candidate->has_default_scale != expected->has_default_scale", dng_reader)
         self.assertIn("candidate->has_frame_rate != expected->has_frame_rate", dng_reader)
         self.assertIn("candidate->has_iso != expected->has_iso", dng_reader)
+        self.assertIn("candidate->has_baseline_exposure != expected->has_baseline_exposure", dng_reader)
+        self.assertIn("candidate->unique_camera_model", dng_reader)
         self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", raw_processing)
+        self.assertIn("best_error > 0.01", raw_processing)
         self.assertIn("processingWhiteBalanceControlsForAsShotNeutral", main_window)
+        self.assertIn("MLV_VIDEO_CLASS_FLAG_DNGSEQ ) == 0", main_window)
+        self.assertIn("rawAspectStretchSelectionForRatio", main_window)
+        self.assertIn("rawAspectStretchSelectionForRatio", aspect_policy)
+        self.assertIn("effectiveStretchFactors", batch_runner)
         self.assertIn("width > UINT16_MAX || height > UINT16_MAX", video_mlv)
         self.assertIn("width < 3 || height < 3", video_mlv)
         self.assertIn("(size_t)frame_size > raw_frame_capacity - 4u", video_mlv)

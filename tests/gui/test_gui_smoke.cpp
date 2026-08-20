@@ -728,6 +728,17 @@ void GuiSmokeTest::mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueez
     QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.3333), 3);
     QCOMPARE(mainWindowVerticalStretchIndexForMlvAspectRatio(0.0), 0);
 
+    const RawAspectStretchSelection horizontal125 =
+        rawAspectStretchSelectionForRatio(0.8);
+    QVERIFY(horizontal125.valid);
+    QCOMPARE(horizontal125.horizontalIndex, 1);
+    QCOMPARE(horizontal125.verticalIndex, 0);
+    const RawAspectStretchSelection combined =
+        rawAspectStretchSelectionForRatio(4.0 / 3.0);
+    QVERIFY(combined.valid);
+    QCOMPARE(combined.horizontalIndex, 1);
+    QCOMPARE(combined.verticalIndex, 1);
+
     QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 0.3333));
     QVERIFY(mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 3.0));
     QVERIFY(!mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(1.0, 1.0, 1.0));

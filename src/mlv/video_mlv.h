@@ -57,6 +57,16 @@ int mlvDngDefaultScaleToSampling(const int32_t scale[4],
                                  uint32_t * sampling_x,
                                  uint32_t * sampling_y);
 
+/* Return non-zero only for exact RAWC aspect ratios representable by the
+ * application's horizontal/vertical stretch controls in every output path. */
+int mlvDngAspectRatioIsSupported(uint32_t sampling_x, uint32_t sampling_y);
+
+/* Add BaselineExposure and BaselineExposureOffset without signed overflow,
+ * normalize the result, and retain an exact signed rational for re-export. */
+int mlvDngBaselineExposureToBias(const int32_t baseline[2],
+                                 const int32_t offset[2],
+                                 int32_t bias[2]);
+
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };
 enum open_mode { MLV_OPEN_FULL, MLV_OPEN_MAPP, MLV_OPEN_PREVIEW };

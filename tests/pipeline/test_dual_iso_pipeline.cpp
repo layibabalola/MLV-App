@@ -1089,6 +1089,7 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     ASSERT_TRUE(expected_bpp <= 16);
 
     std::vector<std::vector<uint16_t>> decoded_frames;
+    dng_frame_info_t retained_info = {};
     const int raw_states[] = { UNCOMPRESSED_RAW, COMPRESSED_RAW };
     for (int raw_state : raw_states) {
         const QString suffix = raw_state == COMPRESSED_RAW
@@ -1132,6 +1133,15 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
         ASSERT_TRUE(info.has_iso);
         ASSERT_EQ(static_cast<int32_t>(getMlvIso(fixture.video())), info.iso);
         ASSERT_TRUE(info.has_as_shot_neutral);
+        ASSERT_TRUE(info.has_active_area);
+        ASSERT_TRUE(info.has_default_crop_origin);
+        ASSERT_TRUE(info.has_default_crop_size);
+        ASSERT_TRUE(info.has_baseline_exposure);
+        ASSERT_TRUE(info.has_baseline_exposure_offset);
+        ASSERT_TRUE(info.camera_model[0] != '\0');
+        ASSERT_TRUE(info.unique_camera_model[0] != '\0');
+        if (decoded_frames.empty())
+            retained_info = info;
         decoded_frames.push_back(std::move(decoded));
     }
 
@@ -1157,6 +1167,38 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
     ASSERT_EQ(getMlvIso(fixture.video()), getMlvIso(reopened));
     ASSERT_TRUE(std::fabs(getMlvAspectRatio(reopened) - (5.0f / 3.0f)) < 0.0001f);
     ASSERT_EQ(6u, getMlvWbMode(reopened));
+    ASSERT_EQ(retained_info.active_area[0], reopened->RAWI.raw_info.active_area.y1);
+    ASSERT_EQ(retained_info.active_area[1], reopened->RAWI.raw_info.active_area.x1);
+    ASSERT_EQ(retained_info.active_area[2], reopened->RAWI.raw_info.active_area.y2);
+    ASSERT_EQ(retained_info.active_area[3], reopened->RAWI.raw_info.active_area.x2);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.y1,
+              reopened->RAWI.raw_info.dng_active_area[0]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.x1,
+              reopened->RAWI.raw_info.dng_active_area[1]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.y2,
+              reopened->RAWI.raw_info.dng_active_area[2]);
+    ASSERT_EQ(reopened->RAWI.raw_info.active_area.x2,
+              reopened->RAWI.raw_info.dng_active_area[3]);
+    ASSERT_EQ(retained_info.default_crop_origin[0],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.origin[0]));
+    ASSERT_EQ(retained_info.default_crop_origin[1],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.origin[1]));
+    ASSERT_EQ(retained_info.default_crop_size[0],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.size[0]));
+    ASSERT_EQ(retained_info.default_crop_size[1],
+              static_cast<uint32_t>(reopened->RAWI.raw_info.crop.size[1]));
+    int32_t expected_bias[2] = {};
+    ASSERT_TRUE(mlvDngBaselineExposureToBias(retained_info.baseline_exposure,
+                                             retained_info.baseline_exposure_offset,
+                                             expected_bias));
+    ASSERT_EQ(expected_bias[0], reopened->RAWI.raw_info.exposure_bias[0]);
+    ASSERT_EQ(expected_bias[1], reopened->RAWI.raw_info.exposure_bias[1]);
+    ASSERT_EQ(std::string(retained_info.camera_model),
+              std::string(reinterpret_cast<const char *>(reopened->IDNT.cameraName)));
+    ASSERT_TRUE(reopened->camid.cameraName[UNIQ] != nullptr);
+    ASSERT_EQ(std::string(retained_info.unique_camera_model),
+              std::string(reopened->camid.cameraName[UNIQ]));
+    ASSERT_TRUE(reopened->camid.cameraName[UNIQ][0] != '\0');
     freeMlvObject(reopened);
 
     /* A later frame may not silently replace calibration inherited from frame
@@ -1262,6 +1304,22 @@ TEST(DualIsoPipeline, DngExportOverridesWriteLookAssistDefaults)
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value, false) - 0.5) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 8, false) - 1.0) < 0.0001);
     ASSERT_TRUE(std::fabs(dng_read_rational_value(data, value + 16, false) - 0.25) < 0.0001);
+
+    dng_frame_info_t retained{};
+    ASSERT_EQ(0, dng_reader_parse_file(dng_path_bytes.constData(), &retained));
+    ASSERT_TRUE(retained.has_baseline_exposure);
+    ASSERT_EQ(static_cast<int64_t>(5) * retained.baseline_exposure[1],
+              static_cast<int64_t>(4) * retained.baseline_exposure[0]);
+    QByteArray folder_path = temp_dir.path().toLocal8Bit();
+    int open_error = MLV_ERR_NONE;
+    char open_message[256] = {};
+    mlvObject_t * reopened = initMlvObjectWithDngFolder(
+        folder_path.data(), MLV_OPEN_PREVIEW, &open_error, open_message);
+    ASSERT_TRUE(reopened != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_error);
+    ASSERT_EQ(5, reopened->RAWI.raw_info.exposure_bias[0]);
+    ASSERT_EQ(4, reopened->RAWI.raw_info.exposure_bias[1]);
+    freeMlvObject(reopened);
 }
 
 TEST(DualIsoPipeline, DngFocalPlaneResolutionIsStableAcrossSameProcessExports)

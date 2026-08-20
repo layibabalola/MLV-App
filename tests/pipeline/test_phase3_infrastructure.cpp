@@ -12,6 +12,7 @@
 #include "../../platform/qt/Phase3Mode.h"
 #include "../../platform/qt/Phase3StageTelemetry.h"
 #include "../../src/batch/WorkerThreadCount.h"
+#include "../../src/batch/RawAspectStretchPolicy.h"
 #include "../../src/debug/ForceSingleThread.h"
 #include "../../src/debug/FrameChecksum.h"
 #include "../../src/debug/StageTiming.h"
@@ -426,6 +427,20 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     expected.has_iso = 1;
     expected.iso = 800;
     std::strcpy(expected.camera_model, "metadata-anchor");
+    std::strcpy(expected.unique_camera_model, "metadata-anchor-unique");
+    expected.has_active_area = 1;
+    expected.has_default_crop_origin = 1;
+    expected.default_crop_origin[0] = 1;
+    expected.default_crop_origin[1] = 1;
+    expected.has_default_crop_size = 1;
+    expected.default_crop_size[0] = 3;
+    expected.default_crop_size[1] = 3;
+    expected.has_baseline_exposure = 1;
+    expected.baseline_exposure[0] = 5;
+    expected.baseline_exposure[1] = 4;
+    expected.has_baseline_exposure_offset = 1;
+    expected.baseline_exposure_offset[0] = 0;
+    expected.baseline_exposure_offset[1] = 1;
     candidate = expected;
     ASSERT_TRUE(dng_reader_processing_metadata_matches(&expected, &candidate));
     candidate.default_scale[2] = 4;
@@ -438,6 +453,15 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
     candidate = expected;
     std::strcpy(candidate.camera_model, "other-camera");
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    std::strcpy(candidate.unique_camera_model, "other-unique-camera");
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    candidate.default_crop_size[0] = 2;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    candidate.baseline_exposure[0] = 6;
     ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
 
     const int32_t neutral[] = { 1, 2, 1, 1, 2, 1 };
@@ -471,6 +495,29 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     const int32_t unrepresentableScale[] = { 1, 1, 256, 1 };
     ASSERT_FALSE(mlvDngDefaultScaleToSampling(unrepresentableScale,
                                               &samplingX, &samplingY));
+    ASSERT_TRUE(mlvDngAspectRatioIsSupported(3u, 5u));
+    ASSERT_TRUE(mlvDngAspectRatioIsSupported(5u, 4u));
+    ASSERT_TRUE(mlvDngAspectRatioIsSupported(3u, 4u));
+    ASSERT_FALSE(mlvDngAspectRatioIsSupported(7u, 11u));
+    const RawAspectStretchSelection horizontal125 =
+        rawAspectStretchSelectionForRatio(4.0 / 5.0);
+    ASSERT_TRUE(horizontal125.valid);
+    ASSERT_EQ(1, horizontal125.horizontalIndex);
+    ASSERT_EQ(0, horizontal125.verticalIndex);
+    const RawAspectStretchSelection combined =
+        rawAspectStretchSelectionForRatio(4.0 / 3.0);
+    ASSERT_TRUE(combined.valid);
+    ASSERT_EQ(1, combined.horizontalIndex);
+    ASSERT_EQ(1, combined.verticalIndex);
+
+    const int32_t baseline[] = { 5, 4 };
+    const int32_t baselineOffset[] = { -1, 4 };
+    int32_t bias[2] = {};
+    ASSERT_TRUE(mlvDngBaselineExposureToBias(baseline, baselineOffset, bias));
+    ASSERT_EQ(1, bias[0]);
+    ASSERT_EQ(1, bias[1]);
+    const int32_t invalidOffset[] = { 1, 0 };
+    ASSERT_FALSE(mlvDngBaselineExposureToBias(baseline, invalidOffset, bias));
 
     double kelvinMultipliers[3] = {};
     get_kelvin_multipliers_rgb(5200.0, kelvinMultipliers);
@@ -487,7 +534,7 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_EQ(0, fittedTint);
     double tintedMultipliers[3] = {};
     get_kelvin_multipliers_rgb(6500.0, tintedMultipliers);
-    const double effectiveTint = std::pow(0.4, 1.75) * 10.0;
+    const double effectiveTint = std::pow(4.0, 1.75) * 10.0;
     tintedMultipliers[2] += effectiveTint / 11.0;
     tintedMultipliers[0] += effectiveTint / 19.0;
     const double tintedLowest = std::min(tintedMultipliers[0],
@@ -502,9 +549,19 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
         tintedNeutral, &fittedTemperature, &fittedTint));
     ASSERT_EQ(6500, fittedTemperature);
     ASSERT_EQ(40, fittedTint);
+    processingObject_t * renderedWhiteBalance = initProcessingObject();
+    ASSERT_TRUE(renderedWhiteBalance != nullptr);
+    processingSetWhiteBalance(renderedWhiteBalance, 6500.0, 40.0);
+    for(int channel = 0; channel < 3; ++channel)
+        ASSERT_NEAR(tintedMultipliers[channel],
+                    renderedWhiteBalance->wb_multipliers[channel], 1e-12);
+    freeProcessingObject(renderedWhiteBalance);
     const double invalidNeutral[] = { 1.0, 0.0, 1.0 };
     ASSERT_FALSE(processingWhiteBalanceControlsForAsShotNeutral(
         invalidNeutral, &fittedTemperature, &fittedTint));
+    const double outOfModelNeutral[] = { 1.0, 1.0 / 1024.0, 1.0 };
+    ASSERT_FALSE(processingWhiteBalanceControlsForAsShotNeutral(
+        outOfModelNeutral, &fittedTemperature, &fittedTint));
 }
 
 TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)

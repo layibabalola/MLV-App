@@ -35,6 +35,7 @@ HEADERS += \
     $$REPO_ROOT/platform/qt/VectorScope.h \
     $$REPO_ROOT/platform/qt/WaveFormMonitor.h \
     $$REPO_ROOT/platform/qt/ZebraThresholds.h \
+    $$REPO_ROOT/src/batch/RawAspectStretchPolicy.h \
     $$REPO_ROOT/tests/common/hash_helpers.h \
     $$REPO_ROOT/tests/common/image_regression.h \
     $$REPO_ROOT/tests/common/repo_paths.h \

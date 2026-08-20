@@ -51,7 +51,12 @@ typedef struct
 
     int32_t  black_level;      /* tcBlackLevel (50714)                      */
     int32_t  white_level;      /* tcWhiteLevel (50717)                      */
+    int      has_active_area;
     int32_t  active_area[4];   /* tcActiveArea (50829): y1,x1,y2,x2         */
+    int      has_default_crop_origin;
+    uint32_t default_crop_origin[2]; /* tcDefaultCropOrigin: x,y             */
+    int      has_default_crop_size;
+    uint32_t default_crop_size[2];   /* tcDefaultCropSize: width,height      */
 
     /* Color science (each as 9 signed rationals -> stored as int*2 num/den
      * pairs exactly like camid expects: [num,den, num,den, ...]).
@@ -72,12 +77,17 @@ typedef struct
     int32_t  default_scale[4];    /* [x_num,x_den,y_num,y_den]             */
     int      has_frame_rate;      /* tcFrameRate (51044): signed rational  */
     int32_t  frame_rate[2];       /* [frames_per_second numerator,denom]    */
+    int      has_baseline_exposure;
+    int32_t  baseline_exposure[2]; /* tcBaselineExposure signed rational    */
+    int      has_baseline_exposure_offset;
+    int32_t  baseline_exposure_offset[2];
 
     /* EXIF metadata from the nested ExifIFD. */
     int      has_iso;
     int32_t  iso;              /* tcISOSpeedRatings (34855)                 */
 
-    char     camera_model[64]; /* tcUniqueCameraModel (50708) or Model     */
+    char     camera_model[64];        /* tcModel                              */
+    char     unique_camera_model[64]; /* tcUniqueCameraModel                  */
 } dng_frame_info_t;
 
 /* A whole enumerated folder of DNG frames. */

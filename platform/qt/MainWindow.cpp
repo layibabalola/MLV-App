@@ -14384,32 +14384,38 @@ void MainWindow::setSliders(ReceiptSettings *receipt, bool paste)
     on_comboBoxFilterName_currentIndexChanged( receipt->filterIndex() );
     ui->horizontalSliderFilterStrength->setValue( receipt->filterStrength() );
 
-    if( receipt->stretchFactorX() == STRETCH_H_100 ) ui->comboBoxHStretch->setCurrentIndex( 0 );
-    else if( receipt->stretchFactorX() == STRETCH_H_125 ) ui->comboBoxHStretch->setCurrentIndex( 1 );
-    else if( receipt->stretchFactorX() == STRETCH_H_133 ) ui->comboBoxHStretch->setCurrentIndex( 2 );
-    else if( receipt->stretchFactorX() == STRETCH_H_150 ) ui->comboBoxHStretch->setCurrentIndex( 3 );
-    else if( receipt->stretchFactorX() == STRETCH_H_167 ) ui->comboBoxHStretch->setCurrentIndex( 4 );
-    else if( receipt->stretchFactorX() == STRETCH_H_175 ) ui->comboBoxHStretch->setCurrentIndex( 5 );
-    else if( receipt->stretchFactorX() == STRETCH_H_180 ) ui->comboBoxHStretch->setCurrentIndex( 6 );
-    else ui->comboBoxHStretch->setCurrentIndex( 7 );
-    on_comboBoxHStretch_currentIndexChanged( ui->comboBoxHStretch->currentIndex() );
-
     const float ratioVFromMlv = m_pMlvObject ? getMlvAspectRatio( m_pMlvObject ) : 0.0f;
     const double mlvAspectRatio = ratioVFromMlv == 0.0f ? 1.0 : ratioVFromMlv;
-    if( receipt->stretchFactorY() == -1
+    const bool applyMlvAspect = receipt->stretchFactorY() == -1
      || mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
             receipt->stretchFactorX(),
             receipt->stretchFactorY(),
-            mlvAspectRatio ) )
+            mlvAspectRatio );
+    if( applyMlvAspect )
     {
-        // Neutral receipts should not suppress RAWC de-squeeze on anamorphic/binned clips.
+        const RawAspectStretchSelection selection =
+            rawAspectStretchSelectionForRatio( mlvAspectRatio );
+        ui->comboBoxHStretch->setCurrentIndex(
+            selection.valid ? selection.horizontalIndex : 0 );
         ui->comboBoxVStretch->setCurrentIndex(
-            mainWindowVerticalStretchIndexForMlvAspectRatio( mlvAspectRatio ) );
+            selection.valid ? selection.verticalIndex : 3 );
     }
-    else if( receipt->stretchFactorY() == STRETCH_V_100 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
-    else if( receipt->stretchFactorY() == STRETCH_V_167 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
-    else if( receipt->stretchFactorY() == STRETCH_V_300 ) ui->comboBoxVStretch->setCurrentIndex( 2 );
-    else ui->comboBoxVStretch->setCurrentIndex( 3 );
+    else
+    {
+        if( receipt->stretchFactorX() == STRETCH_H_100 ) ui->comboBoxHStretch->setCurrentIndex( 0 );
+        else if( receipt->stretchFactorX() == STRETCH_H_125 ) ui->comboBoxHStretch->setCurrentIndex( 1 );
+        else if( receipt->stretchFactorX() == STRETCH_H_133 ) ui->comboBoxHStretch->setCurrentIndex( 2 );
+        else if( receipt->stretchFactorX() == STRETCH_H_150 ) ui->comboBoxHStretch->setCurrentIndex( 3 );
+        else if( receipt->stretchFactorX() == STRETCH_H_167 ) ui->comboBoxHStretch->setCurrentIndex( 4 );
+        else if( receipt->stretchFactorX() == STRETCH_H_175 ) ui->comboBoxHStretch->setCurrentIndex( 5 );
+        else if( receipt->stretchFactorX() == STRETCH_H_180 ) ui->comboBoxHStretch->setCurrentIndex( 6 );
+        else ui->comboBoxHStretch->setCurrentIndex( 7 );
+        if( receipt->stretchFactorY() == STRETCH_V_100 ) ui->comboBoxVStretch->setCurrentIndex( 0 );
+        else if( receipt->stretchFactorY() == STRETCH_V_167 ) ui->comboBoxVStretch->setCurrentIndex( 1 );
+        else if( receipt->stretchFactorY() == STRETCH_V_300 ) ui->comboBoxVStretch->setCurrentIndex( 2 );
+        else ui->comboBoxVStretch->setCurrentIndex( 3 );
+    }
+    on_comboBoxHStretch_currentIndexChanged( ui->comboBoxHStretch->currentIndex() );
     on_comboBoxVStretch_currentIndexChanged( ui->comboBoxVStretch->currentIndex() );
 
     //Vignette after stretching in order to use stretching once only
@@ -28929,6 +28935,12 @@ void MainWindow::setWhiteBalanceFromMlv(ReceiptSettings *sliders)
         break;
     case 6: //Custom - fit the retained neutral to receipt controls
     {
+        if( ( m_pMlvObject->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_DNGSEQ ) == 0 )
+        {
+            sliders->setTemperature( 6000 );
+            sliders->setTint( 0 );
+            break;
+        }
         const double neutral[3] = {
             static_cast<double>( getMlvWbRgain( m_pMlvObject ) ) / 1024.0,
             static_cast<double>( getMlvWbGgain( m_pMlvObject ) ) / 1024.0,

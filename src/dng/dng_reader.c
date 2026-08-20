@@ -186,6 +186,7 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
     int have_planar = 0, have_cfa_repeat = 0;
     int have_black = 0, have_white = 0, have_active = 0;
     int have_exif_ifd = 0;
+    int have_model = 0, have_unique_model = 0;
     uint32_t exif_ifd_offset = 0;
     out->compression = DNG_READER_COMPRESSION_NONE;
 
@@ -305,9 +306,32 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 { free(buf); return 1; }
                 {
                     for(int k = 0; k < 4; k++)
-                        out->active_area[k] = (int32_t)rd_u32(buf + data_off + k * 4);
+                    {
+                        const uint32_t value = rd_u32(buf + data_off + k * 4);
+                        if(value > (uint32_t)INT32_MAX) { free(buf); return 1; }
+                        out->active_area[k] = (int32_t)value;
+                    }
                 }
                 have_active = 1;
+                out->has_active_area = 1;
+                break;
+
+            case tcDefaultCropOrigin:
+                if(out->has_default_crop_origin || !exact_contract(&e, ttShort, 2u)
+                   || !dng_reader_range_fits(data_off, 4u, got))
+                { free(buf); return 1; }
+                out->default_crop_origin[0] = rd_u16(buf + data_off);
+                out->default_crop_origin[1] = rd_u16(buf + data_off + 2u);
+                out->has_default_crop_origin = 1;
+                break;
+
+            case tcDefaultCropSize:
+                if(out->has_default_crop_size || !exact_contract(&e, ttShort, 2u)
+                   || !dng_reader_range_fits(data_off, 4u, got))
+                { free(buf); return 1; }
+                out->default_crop_size[0] = rd_u16(buf + data_off);
+                out->default_crop_size[1] = rd_u16(buf + data_off + 2u);
+                out->has_default_crop_size = 1;
                 break;
 
             case tcColorMatrix1:
@@ -363,6 +387,22 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 out->has_frame_rate = 1;
                 break;
 
+            case tcBaselineExposure:
+                if(out->has_baseline_exposure || !exact_contract(&e, ttSRational, 1u)
+                   || read_rationals(buf, got, data_off, 1, out->baseline_exposure)
+                   || out->baseline_exposure[1] == 0)
+                { free(buf); return 1; }
+                out->has_baseline_exposure = 1;
+                break;
+
+            case tcBaselineExposureOffset:
+                if(out->has_baseline_exposure_offset || !exact_contract(&e, ttSRational, 1u)
+                   || read_rationals(buf, got, data_off, 1, out->baseline_exposure_offset)
+                   || out->baseline_exposure_offset[1] == 0)
+                { free(buf); return 1; }
+                out->has_baseline_exposure_offset = 1;
+                break;
+
             case tcExifIFD:
                 if(have_exif_ifd || !exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
                 exif_ifd_offset = entry_scalar_u32(&e);
@@ -375,21 +415,29 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                  * duplicate in IFD0 rather than silently preferring one. */
                 free(buf); return 1;
 
-            case tcUniqueCameraModel:
             case tcModel:
                 if(e.type != ttAscii || e.count == 0
-                   || !dng_reader_range_fits(data_off, e.count, got))
+                   /* IDNT.cameraName is the retained/re-exported model and
+                    * holds at most 31 text bytes plus NUL. Reject truncation
+                    * rather than accepting metadata that cannot round-trip. */
+                   || e.count > 32u
+                   || !dng_reader_range_fits(data_off, e.count, got)
+                   || buf[data_off + e.count - 1u] != 0
+                   || have_model)
                 { free(buf); return 1; }
-                if(out->camera_model[0] == 0 && data_off < got)
-                {
-                    size_t n = e.count;
-                    if(n >= sizeof(out->camera_model)) n = sizeof(out->camera_model) - 1;
-                    if(dng_reader_range_fits(data_off, n, got))
-                    {
-                        memcpy(out->camera_model, buf + data_off, n);
-                        out->camera_model[n] = 0;
-                    }
-                }
+                memcpy(out->camera_model, buf + data_off, e.count);
+                have_model = 1;
+                break;
+
+            case tcUniqueCameraModel:
+                if(e.type != ttAscii || e.count == 0
+                   || e.count > sizeof(out->unique_camera_model)
+                   || !dng_reader_range_fits(data_off, e.count, got)
+                   || buf[data_off + e.count - 1u] != 0
+                   || have_unique_model)
+                { free(buf); return 1; }
+                memcpy(out->unique_camera_model, buf + data_off, e.count);
+                have_unique_model = 1;
                 break;
 
             default: break;
@@ -405,6 +453,22 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
        || !have_photometric || !have_samples || !have_rows || !have_planar
        || !have_cfa_repeat || out->width == 0 || out->height == 0) return 1;
     if(out->rows_per_strip != out->height) return 1;
+    if(out->has_active_area
+       && (out->active_area[0] < 0 || out->active_area[1] < 0
+           || out->active_area[2] <= out->active_area[0]
+           || out->active_area[3] <= out->active_area[1]
+           || (uint32_t)out->active_area[2] > out->height
+           || (uint32_t)out->active_area[3] > out->width)) return 1;
+    if(out->has_default_crop_origin != out->has_default_crop_size) return 1;
+    if(out->has_default_crop_origin)
+    {
+        const uint64_t crop_x2 = (uint64_t)out->default_crop_origin[0]
+                               + out->default_crop_size[0];
+        const uint64_t crop_y2 = (uint64_t)out->default_crop_origin[1]
+                               + out->default_crop_size[1];
+        if(out->default_crop_size[0] == 0u || out->default_crop_size[1] == 0u
+           || crop_x2 > out->width || crop_y2 > out->height) return 1;
+    }
     if(out->strip_offset == 0 || out->strip_byte_count == 0) return 1;
     if(out->compression != DNG_READER_COMPRESSION_NONE &&
        out->compression != DNG_READER_COMPRESSION_LJ92) return 1;
@@ -523,9 +587,15 @@ int dng_reader_processing_metadata_matches(const dng_frame_info_t * expected,
         || candidate->has_as_shot_neutral != expected->has_as_shot_neutral
         || candidate->has_default_scale != expected->has_default_scale
         || candidate->has_frame_rate != expected->has_frame_rate
+        || candidate->has_active_area != expected->has_active_area
+        || candidate->has_default_crop_origin != expected->has_default_crop_origin
+        || candidate->has_default_crop_size != expected->has_default_crop_size
+        || candidate->has_baseline_exposure != expected->has_baseline_exposure
+        || candidate->has_baseline_exposure_offset != expected->has_baseline_exposure_offset
         || candidate->has_iso != expected->has_iso
         || candidate->iso != expected->iso
         || strcmp(candidate->camera_model, expected->camera_model) != 0
+        || strcmp(candidate->unique_camera_model, expected->unique_camera_model) != 0
         || memcmp(candidate->active_area, expected->active_area,
                   sizeof(expected->active_area)) != 0)
         return 0;
@@ -550,7 +620,20 @@ int dng_reader_processing_metadata_matches(const dng_frame_info_t * expected,
                       sizeof(expected->default_scale)) == 0)
         && (!expected->has_frame_rate
             || memcmp(candidate->frame_rate, expected->frame_rate,
-                      sizeof(expected->frame_rate)) == 0);
+                      sizeof(expected->frame_rate)) == 0)
+        && (!expected->has_default_crop_origin
+            || memcmp(candidate->default_crop_origin, expected->default_crop_origin,
+                      sizeof(expected->default_crop_origin)) == 0)
+        && (!expected->has_default_crop_size
+            || memcmp(candidate->default_crop_size, expected->default_crop_size,
+                      sizeof(expected->default_crop_size)) == 0)
+        && (!expected->has_baseline_exposure
+            || memcmp(candidate->baseline_exposure, expected->baseline_exposure,
+                      sizeof(expected->baseline_exposure)) == 0)
+        && (!expected->has_baseline_exposure_offset
+            || memcmp(candidate->baseline_exposure_offset,
+                      expected->baseline_exposure_offset,
+                      sizeof(expected->baseline_exposure_offset)) == 0);
 }
 
 /* ------------------------------------------------------------------ */

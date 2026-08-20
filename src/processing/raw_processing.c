@@ -4785,15 +4785,20 @@ void processingSetSharpening(processingObject_t * processing, double sharpen)
     }
 }
 
+static double processing_receipt_tint_to_render_tint(double receipt_tint)
+{
+    const int negative = receipt_tint < 0.0;
+    if(negative) receipt_tint = -receipt_tint;
+    receipt_tint /= 10.0;
+    receipt_tint = pow(receipt_tint, 1.75) * 10.0;
+    return negative ? -receipt_tint : receipt_tint;
+}
+
 static void processing_wb_controls_to_multipliers(int kelvin, int receipt_tint,
                                                   double multipliers[3])
 {
     get_kelvin_multipliers_rgb((double)kelvin, multipliers);
-    double tint = (double)receipt_tint / 10.0;
-    const int negative = tint < 0.0;
-    if(negative) tint = -tint;
-    tint = pow(tint / 10.0, 1.75) * 10.0;
-    if(negative) tint = -tint;
+    const double tint = processing_receipt_tint_to_render_tint((double)receipt_tint);
     multipliers[2] += tint / 11.0;
     multipliers[0] += tint / 19.0;
     const double lowest = MIN(MIN(multipliers[0], multipliers[1]), multipliers[2]);
@@ -4843,7 +4848,10 @@ int processingWhiteBalanceControlsForAsShotNeutral(const double neutral[3],
             }
         }
     }
-    if(!isfinite(best_error)) return 0;
+    /* Refuse a finite but visibly wrong boundary-clamped approximation. The
+     * squared log-ratio residual is scale-independent; 0.01 corresponds to
+     * roughly a six-percent RMS channel-ratio error. */
+    if(!isfinite(best_error) || best_error > 0.01) return 0;
     *wbTemp = best_temperature;
     *wbTint = best_tint;
     return 1;
@@ -4879,11 +4887,7 @@ void processingSetWhiteBalance(processingObject_t * processing, double WBKelvin,
     if (WBTint != processing->wb_tint)
     {
         /* Non-linear tint makes control finer in the middle */
-        int is_negative = (WBTint < 0.0);
-        if (is_negative) WBTint = -WBTint;
-        WBTint /= 10.0;
-        WBTint = pow(WBTint, 1.75) * 10.0;
-        if (is_negative) WBTint = -WBTint;
+        WBTint = processing_receipt_tint_to_render_tint(WBTint);
 
         processing->wb_tint = WBTint;
     }

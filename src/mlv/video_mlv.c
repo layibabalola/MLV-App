@@ -2965,6 +2965,74 @@ int mlvDngDefaultScaleToSampling(const int32_t scale[4],
     return 1;
 }
 
+int mlvDngAspectRatioIsSupported(uint32_t sampling_x, uint32_t sampling_y)
+{
+    if(sampling_x == 0u || sampling_y == 0u) return 0;
+    static const uint32_t horizontal[][2] = {
+        {1u,1u}, {5u,4u}, {4u,3u}, {3u,2u},
+        {5u,3u}, {7u,4u}, {9u,5u}, {2u,1u}
+    };
+    static const uint32_t vertical[][2] = {
+        {1u,1u}, {5u,3u}, {3u,1u}, {1u,3u}
+    };
+    for(size_t h = 0; h < sizeof(horizontal) / sizeof(horizontal[0]); ++h)
+    {
+        for(size_t v = 0; v < sizeof(vertical) / sizeof(vertical[0]); ++v)
+        {
+            /* sampling_y/sampling_x == vertical/horizontal */
+            const uint64_t left = (uint64_t)sampling_y * vertical[v][1]
+                                * horizontal[h][0];
+            const uint64_t right = (uint64_t)sampling_x * vertical[v][0]
+                                 * horizontal[h][1];
+            if(left == right) return 1;
+        }
+    }
+    return 0;
+}
+
+static uint64_t mlvAbsI64ToU64(int64_t value)
+{
+    return value < 0 ? (uint64_t)(-(value + 1)) + 1u : (uint64_t)value;
+}
+
+int mlvDngBaselineExposureToBias(const int32_t baseline[2],
+                                 const int32_t offset[2],
+                                 int32_t bias[2])
+{
+    if(!baseline || !offset || !bias
+       || baseline[1] == 0 || offset[1] == 0) return 0;
+    int64_t bnum = baseline[0], bden = baseline[1];
+    int64_t onum = offset[0], oden = offset[1];
+    if(bden < 0) { bnum = -bnum; bden = -bden; }
+    if(oden < 0) { onum = -onum; oden = -oden; }
+    const uint64_t denominator_gcd = mlvGcdU64((uint64_t)bden, (uint64_t)oden);
+    const int64_t bscale = oden / (int64_t)denominator_gcd;
+    const int64_t oscale = bden / (int64_t)denominator_gcd;
+    const uint64_t babs = mlvAbsI64ToU64(bnum);
+    const uint64_t oabs = mlvAbsI64ToU64(onum);
+    if((babs != 0u && (uint64_t)bscale > (uint64_t)INT64_MAX / babs)
+       || (oabs != 0u && (uint64_t)oscale > (uint64_t)INT64_MAX / oabs))
+        return 0;
+    const int64_t bterm = bnum * bscale;
+    const int64_t oterm = onum * oscale;
+    if((oterm > 0 && bterm > INT64_MAX - oterm)
+       || (oterm < 0 && bterm < INT64_MIN - oterm)) return 0;
+    const int64_t numerator = bterm + oterm;
+    if((uint64_t)bden > (uint64_t)INT64_MAX / (uint64_t)bscale) return 0;
+    const int64_t denominator = bden * bscale;
+    if(denominator <= 0) return 0;
+    const uint64_t divisor = mlvGcdU64(mlvAbsI64ToU64(numerator),
+                                      (uint64_t)denominator);
+    if(divisor == 0u) return 0;
+    const int64_t normalized_num = numerator / (int64_t)divisor;
+    const int64_t normalized_den = denominator / (int64_t)divisor;
+    if(normalized_num < INT32_MIN || normalized_num > INT32_MAX
+       || normalized_den <= 0 || normalized_den > INT32_MAX) return 0;
+    bias[0] = (int32_t)normalized_num;
+    bias[1] = (int32_t)normalized_den;
+    return 1;
+}
+
 /* Unpack or decompress original raw data */
 static int getMlvRawFrameUint16Direct(mlvObject_t * video, uint64_t frameIndex, uint16_t * unpackedFrame)
 {
@@ -9227,6 +9295,30 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         snprintf(error_message, 256, "Unsupported CinemaDNG pixel aspect in folder:  %.185s", video->path);
         return MLV_ERR_INVALID;
     }
+    if (!mlvDngAspectRatioIsSupported(dng_sampling_x, dng_sampling_y))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "CinemaDNG pixel aspect is not representable:  %.178s", video->path);
+        return MLV_ERR_INVALID;
+    }
+    const int32_t zero_exposure[2] = { 0, 1 };
+    const int32_t * baseline_exposure = fi->has_baseline_exposure
+        ? fi->baseline_exposure : zero_exposure;
+    const int32_t * baseline_offset = fi->has_baseline_exposure_offset
+        ? fi->baseline_exposure_offset : zero_exposure;
+    int32_t dng_exposure_bias[2] = { 0, 1 };
+    if (!mlvDngBaselineExposureToBias(baseline_exposure,
+                                      baseline_offset,
+                                      dng_exposure_bias))
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256, "Invalid CinemaDNG baseline exposure in folder:  %.180s", video->path);
+        return MLV_ERR_INVALID;
+    }
 
     /* In preview mode only the first frame is needed. */
     uint32_t frame_count = seq->count;
@@ -9275,8 +9367,8 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->RAWI.raw_info.black_level      = fi->black_level;
     video->RAWI.raw_info.white_level      = fi->white_level ? fi->white_level : (int32_t)sample_max;
     video->RAWI.raw_info.cfa_pattern      = (int32_t)fi->cfa_pattern;
-    video->RAWI.raw_info.exposure_bias[0] = 0;
-    video->RAWI.raw_info.exposure_bias[1] = 0;
+    video->RAWI.raw_info.exposure_bias[0] = dng_exposure_bias[0];
+    video->RAWI.raw_info.exposure_bias[1] = dng_exposure_bias[1];
 
     /* Preserve DefaultScale through the source-of-truth RAWC aspect path used
      * by every playback/export/present route. */
@@ -9305,6 +9397,32 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         video->RAWI.raw_info.active_area.y1 = 0;
         video->RAWI.raw_info.active_area.x2 = fi->width;
         video->RAWI.raw_info.active_area.y2 = fi->height;
+    }
+    if(fi->has_active_area)
+        memcpy(video->RAWI.raw_info.dng_active_area, fi->active_area,
+               sizeof(video->RAWI.raw_info.dng_active_area));
+    else
+    {
+        video->RAWI.raw_info.dng_active_area[0] = 0;
+        video->RAWI.raw_info.dng_active_area[1] = 0;
+        video->RAWI.raw_info.dng_active_area[2] = (int32_t)fi->height;
+        video->RAWI.raw_info.dng_active_area[3] = (int32_t)fi->width;
+    }
+    if(fi->has_default_crop_origin)
+    {
+        video->RAWI.raw_info.crop.origin[0] = (int32_t)fi->default_crop_origin[0];
+        video->RAWI.raw_info.crop.origin[1] = (int32_t)fi->default_crop_origin[1];
+        video->RAWI.raw_info.crop.size[0] = (int32_t)fi->default_crop_size[0];
+        video->RAWI.raw_info.crop.size[1] = (int32_t)fi->default_crop_size[1];
+    }
+    else
+    {
+        video->RAWI.raw_info.crop.origin[0] = video->RAWI.raw_info.active_area.x1;
+        video->RAWI.raw_info.crop.origin[1] = video->RAWI.raw_info.active_area.y1;
+        video->RAWI.raw_info.crop.size[0] = video->RAWI.raw_info.active_area.x2
+                                          - video->RAWI.raw_info.active_area.x1;
+        video->RAWI.raw_info.crop.size[1] = video->RAWI.raw_info.active_area.y2
+                                          - video->RAWI.raw_info.active_area.y1;
     }
 
     /* Color matrices: prefer the values baked into the DNG; fall back to the
@@ -9350,7 +9468,10 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
 
     memcpy(&video->IDNT.blockType, "IDNT", 4);
     video->IDNT.blockSize        = sizeof(mlv_idnt_hdr_t);
-    snprintf((char *)video->IDNT.cameraName, 31, "%s", fi->camera_model[0] ? fi->camera_model : "CinemaDNG");
+    snprintf((char *)video->IDNT.cameraName, sizeof(video->IDNT.cameraName),
+             "%s", fi->camera_model[0] ? fi->camera_model : "CinemaDNG");
+    if(fi->unique_camera_model[0])
+        video->camid.cameraName[UNIQ] = fi->unique_camera_model;
 
     memcpy(&video->EXPO.blockType, "EXPO", 4);
     video->EXPO.blockSize        = sizeof(mlv_expo_hdr_t);

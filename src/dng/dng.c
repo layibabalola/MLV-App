@@ -1988,6 +1988,33 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
                               dng_data->overrides.baseline_exposure);
         }
 
+        int32_t default_crop_origin[2] = {
+            mlv_data->RAWI.raw_info.crop.origin[0],
+            mlv_data->RAWI.raw_info.crop.origin[1]
+        };
+        int32_t default_crop_size[2] = {
+            mlv_data->RAWI.raw_info.crop.size[0],
+            mlv_data->RAWI.raw_info.crop.size[1]
+        };
+        const int32_t active_width = mlv_data->RAWI.raw_info.active_area.x2
+                                   - mlv_data->RAWI.raw_info.active_area.x1;
+        const int32_t active_height = mlv_data->RAWI.raw_info.active_area.y2
+                                    - mlv_data->RAWI.raw_info.active_area.y1;
+        if(default_crop_origin[0] < 0 || default_crop_origin[1] < 0
+           || default_crop_size[0] <= 0 || default_crop_size[1] <= 0
+           || default_crop_origin[0] > UINT16_MAX
+           || default_crop_origin[1] > UINT16_MAX
+           || default_crop_size[0] > UINT16_MAX
+           || default_crop_size[1] > UINT16_MAX
+           || (int64_t)default_crop_origin[0] + default_crop_size[0] > mlv_data->RAWI.xRes
+           || (int64_t)default_crop_origin[1] + default_crop_size[1] > mlv_data->RAWI.yRes)
+        {
+            default_crop_origin[0] = mlv_data->RAWI.raw_info.active_area.x1;
+            default_crop_origin[1] = mlv_data->RAWI.raw_info.active_area.y1;
+            default_crop_size[0] = active_width;
+            default_crop_size[1] = active_height;
+        }
+
         /* Time code stuff */
         //number of frames since midnight
         int tc_frame = (int)mlv_data->video_index[frame_index].frame_number;// + (uint64_t)((mlv_data->RTCI.tm_hour * 3600 + mlv_data->RTCI.tm_min * 60 + mlv_data->RTCI.tm_sec) * mlv_data->MLVI.sourceFpsNom) / (uint64_t)mlv_data->MLVI.sourceFpsDenom;
@@ -2052,8 +2079,8 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcBlackLevel,                  ttLong,     1,      black_level},
             {tcWhiteLevel,                  ttLong,     1,      white_level},
             {tcDefaultScale,                ttRational, RATIONAL_ENTRY(par, header, &data_offset, 4)},
-            {tcDefaultCropOrigin,           ttShort,    2,      PACK(mlv_data->RAWI.raw_info.crop.origin)},
-            {tcDefaultCropSize,             ttShort,    2,      PACK2((mlv_data->RAWI.raw_info.active_area.x2 - mlv_data->RAWI.raw_info.active_area.x1), (mlv_data->RAWI.raw_info.active_area.y2 - mlv_data->RAWI.raw_info.active_area.y1))},
+            {tcDefaultCropOrigin,           ttShort,    2,      PACK(default_crop_origin)},
+            {tcDefaultCropSize,             ttShort,    2,      PACK(default_crop_size)},
             {tcColorMatrix1,                ttSRational,RATIONAL_ENTRY(camid->ColorMatrix1, header, &data_offset, 18)},
             {tcColorMatrix2,                ttSRational,RATIONAL_ENTRY(camid->ColorMatrix2, header, &data_offset, 18)},
             {tcAsShotNeutral,               ttRational, RATIONAL_ENTRY(wbal, header, &data_offset, 6)},

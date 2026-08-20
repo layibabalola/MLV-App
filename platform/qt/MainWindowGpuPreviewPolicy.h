@@ -9,6 +9,7 @@
 #define MAINWINDOWGPUPREVIEWPOLICY_H
 
 #include "GpuDisplayViewport.h"
+#include "../../src/batch/RawAspectStretchPolicy.h"
 #include <QSize>
 #include <Qt>
 #include <cmath>
@@ -406,10 +407,9 @@ inline QSize mainWindowGpuTexturePresentDisplaySize(
 inline int mainWindowVerticalStretchIndexForMlvAspectRatio(double aspectRatio)
 {
     if (!std::isfinite(aspectRatio) || aspectRatio <= 0.0) return 0;
-    if (aspectRatio > 0.9 && aspectRatio < 1.1) return 0;
-    if (aspectRatio > 1.6 && aspectRatio < 1.7) return 1;
-    if (aspectRatio > 2.9 && aspectRatio < 3.1) return 2;
-    return 3;
+    const RawAspectStretchSelection selection =
+        rawAspectStretchSelectionForRatio(aspectRatio);
+    return selection.valid ? selection.verticalIndex : 3;
 }
 
 inline bool mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
@@ -417,9 +417,13 @@ inline bool mainWindowShouldApplyMlvAspectForNeutralReceiptStretch(
     double receiptStretchY,
     double aspectRatio)
 {
-    const int aspectStretchIndex =
-        mainWindowVerticalStretchIndexForMlvAspectRatio(aspectRatio);
-    if (aspectStretchIndex == 0) return false;
+    const RawAspectStretchSelection selection =
+        rawAspectStretchSelectionForRatio(aspectRatio);
+    if (selection.valid
+        && selection.horizontalIndex == 0 && selection.verticalIndex == 0)
+        return false;
+    if (!selection.valid
+        && (!std::isfinite(aspectRatio) || aspectRatio <= 0.0)) return false;
 
     constexpr double kNeutralTolerance = 0.0001;
     return std::isfinite(receiptStretchX)
