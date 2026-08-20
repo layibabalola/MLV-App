@@ -416,11 +416,23 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     clip.write_bytes(b"same clip bytes")
     receipt.write_bytes(b"<receipt version=\"4\"/>")
     fixture_repo = tmp_path / "git-fixture"
+    fixture_template = tmp_path / "git-template"
+    fixture_hooks = fixture_template / "hooks"
+    fixture_hooks.mkdir(parents=True)
     fixture_git_env = os.environ.copy()
+    for key in tuple(fixture_git_env):
+        if key.upper().startswith("GIT_"):
+            fixture_git_env.pop(key)
     fixture_git_env["GIT_CONFIG_NOSYSTEM"] = "1"
     fixture_git_env["GIT_CONFIG_GLOBAL"] = os.devnull
     subprocess.run(
-        ["git", "init", str(fixture_repo)],
+        [
+            "git",
+            "init",
+            "--object-format=sha1",
+            f"--template={fixture_template}",
+            str(fixture_repo),
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -449,6 +461,8 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
                 "user.email=mlv-app-test@example.invalid",
                 "-c",
                 "commit.gpgSign=false",
+                "-c",
+                f"core.hooksPath={fixture_hooks}",
                 "commit",
                 "-m",
                 f"fixture-{index}",
@@ -471,6 +485,23 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
                 env=fixture_git_env,
             ).stdout.strip()
         )
+    assert len(commits) == 2
+    assert all(len(commit) == 40 and int(commit, 16) >= 0 for commit in commits)
+    assert commits[0] != commits[1]
+    trees = [
+        subprocess.run(
+            ["git", "show", "-s", "--format=%T", commit],
+            cwd=fixture_repo,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+            env=fixture_git_env,
+        ).stdout.strip()
+        for commit in commits
+    ]
+    assert all(len(tree) == 40 and int(tree, 16) >= 0 for tree in trees)
+    assert trees[0] != trees[1]
 
     def write_smoke(path: Path, last_frame: int, build_sha: str) -> None:
         exe = tmp_path / f"{path.stem}.exe"
@@ -572,6 +603,7 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     assert result["verdict"] == "FAIL"
     assert result["presentedFrameEvidence"]["before"]["lastPresentedFrame"] == 104
     assert result["presentedFrameEvidence"]["after"]["lastPresentedFrame"] == 105
+    assert not any("Declared Git binding failed" in failure for failure in result["failures"])
     assert any("not frame-locked" in failure for failure in result["failures"])
 
 
