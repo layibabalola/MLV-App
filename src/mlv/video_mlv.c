@@ -3547,15 +3547,42 @@ void setMlvProcessing(mlvObject_t * video, processingObject_t * processing)
     /* explicitely switch whitebalance find flag off to get right matrix values */
     video->processing->wbFindActive = 0;
 
-    /* Vignette alloc */
-    video->processing->vignette_mask = realloc(
-        video->processing->vignette_mask,
-        (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video) * sizeof(float));
+    const int processing_width = getMlvWidth(video);
+    const int processing_height = getMlvHeight(video);
+    size_t processing_pixels = 0;
+    if (processing_width > 0 && processing_height > 0
+        && (size_t)processing_width <= SIZE_MAX / (size_t)processing_height) {
+        processing_pixels = (size_t)processing_width * (size_t)processing_height;
+    }
 
-    /* Gradient alloc */
-    video->processing->gradient_mask = realloc(
-        video->processing->gradient_mask,
-        (size_t)getMlvWidth(video) * (size_t)getMlvHeight(video) * sizeof(uint16_t));
+    /* Vignette alloc.  Never retain an undersized old buffer after realloc
+     * failure: disable the position-dependent stage instead. */
+    float *vignette_mask = processing_pixels > 0
+        && processing_pixels <= SIZE_MAX / sizeof(float)
+        ? realloc(video->processing->vignette_mask,
+                  processing_pixels * sizeof(float))
+        : NULL;
+    if (vignette_mask) {
+        video->processing->vignette_mask = vignette_mask;
+    } else {
+        free(video->processing->vignette_mask);
+        video->processing->vignette_mask = NULL;
+        video->processing->vignette_strength = 0;
+    }
+
+    /* Gradient alloc follows the same fail-closed ownership rule. */
+    uint16_t *gradient_mask = processing_pixels > 0
+        && processing_pixels <= SIZE_MAX / sizeof(uint16_t)
+        ? realloc(video->processing->gradient_mask,
+                  processing_pixels * sizeof(uint16_t))
+        : NULL;
+    if (gradient_mask) {
+        video->processing->gradient_mask = gradient_mask;
+    } else {
+        free(video->processing->gradient_mask);
+        video->processing->gradient_mask = NULL;
+        video->processing->gradient_enable = 0;
+    }
 
     /* MATRIX stuff (not working, so commented out - 
      * processing object defaults to 1,0,0,0,1,0,0,0,1) */
@@ -5572,8 +5599,16 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
-    size_t frame_size = (size_t)width * (size_t)height * sizeof(uint16_t) * 3u;
-    uint64_t pixels_count = (uint64_t)width * height;
+    if (!outputFrame || width <= 0 || height <= 0
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t frame_pixels = (size_t)width * (size_t)height;
+    if (frame_pixels > SIZE_MAX / (sizeof(uint16_t) * 3u)) {
+        return;
+    }
+    size_t frame_size = frame_pixels * sizeof(uint16_t) * 3u;
+    uint64_t pixels_count = frame_pixels;
     mlv_reset_last_raw_stage_telemetry();
     resetMlvLastDebayerStageMilliseconds();
     mlv_cache_ensure_window(video, frameIndex);

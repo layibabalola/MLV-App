@@ -56,6 +56,10 @@
 #define ARRAY2D_H_
 #include <csignal>  // for raise()
 #include <cassert>
+#include <cstddef>
+#include <cstring>
+#include <limits>
+#include <new>
 
 // flags for use
 #define ARRAY2D_LOCK_DATA   1
@@ -63,7 +67,6 @@
 #define ARRAY2D_BYREFERENCE 4
 #define ARRAY2D_VERBOSE     8
 
-#include <cstring>
 #include <cstdio>
 
 
@@ -77,14 +80,42 @@ private:
     T ** ptr;
     T * data;
     bool lock; // useful lock to ensure data is not changed anymore.
+
+    static std::size_t checked_element_count(int w, int h, int offset = 0)
+    {
+        if (w <= 0 || h <= 0 || offset < 0) {
+            throw std::bad_array_new_length();
+        }
+
+        const std::size_t width = static_cast<std::size_t>(w);
+        const std::size_t height = static_cast<std::size_t>(h);
+        const std::size_t extra = static_cast<std::size_t>(offset);
+        if (height > std::numeric_limits<std::size_t>::max() / width) {
+            throw std::bad_array_new_length();
+        }
+        const std::size_t logical = width * height;
+        if (extra > std::numeric_limits<std::size_t>::max() - logical
+            || logical + extra > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::bad_array_new_length();
+        }
+        return logical + extra;
+    }
+
     void ar_realloc(int w, int h, int offset = 0)
     {
-        if ((ptr) && ((h > y) || (4 * h < y))) {
+        const std::size_t allocationCount = checked_element_count(w, h, offset);
+        const std::size_t logicalCount = checked_element_count(w, h);
+        const std::size_t previousCount =
+            (x > 0 && y > 0) ? checked_element_count(x, y) : 0;
+
+        if ((ptr) && ((h > y) || (h < y / 4))) {
             delete[] ptr;
             ptr = nullptr;
         }
 
-        if ((data) && (((h * w) > (x * y)) || ((h * w) < ((x * y) / 4)))) {
+        if ((data) && (offset != 0
+                       || logicalCount > previousCount
+                       || logicalCount < previousCount / 4u)) {
             delete[] data;
             data = nullptr;
         }
@@ -94,14 +125,15 @@ private:
         }
 
         if (data == nullptr) {
-            data = new T[h * w + offset];
+            data = new T[allocationCount];
         }
 
         x = w;
         y = h;
 
         for (int i = 0; i < h; i++) {
-            ptr[i] = data + offset + w * i;
+            ptr[i] = data + static_cast<std::size_t>(offset)
+                + static_cast<std::size_t>(w) * static_cast<std::size_t>(i);
         }
 
         owner = 1;
@@ -119,26 +151,28 @@ public:
     // creator type1
     array2D(int w, int h, unsigned int flgs = 0)
     {
+        const std::size_t elementCount = checked_element_count(w, h);
         flags = flgs;
         lock = flags & ARRAY2D_LOCK_DATA;
-        data = new T[h * w];
+        data = new T[elementCount];
         owner = 1;
         x = w;
         y = h;
         ptr = new T*[h];
 
         for (int i = 0; i < h; i++) {
-            ptr[i] = data + i * w;
+            ptr[i] = data + static_cast<std::size_t>(i) * static_cast<std::size_t>(w);
         }
 
         if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data, 0, static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(T));
+            memset(data, 0, elementCount * sizeof(T));
         }
     }
 
     // creator type 2
     array2D(int w, int h, T ** source, unsigned int flgs = 0)
     {
+        const std::size_t elementCount = checked_element_count(w, h);
         flags = flgs;
         //if (lock) { printf("array2D attempt to overwrite data\n");raise(SIGSEGV);}
         lock = flags & ARRAY2D_LOCK_DATA;
@@ -147,7 +181,7 @@ public:
         owner = (flags & ARRAY2D_BYREFERENCE) ? 0 : 1;
 
         if (owner) {
-            data = new T[h * w];
+            data = new T[elementCount];
         } else {
             data = nullptr;
         }
@@ -158,7 +192,7 @@ public:
 
         for (int i = 0; i < h; i++) {
             if (owner) {
-                ptr[i] = data + i * w;
+                ptr[i] = data + static_cast<std::size_t>(i) * static_cast<std::size_t>(w);
 
                 for (int j = 0; j < w; j++) {
                     ptr[i][j] = source[i][j];
@@ -241,7 +275,8 @@ public:
         ar_realloc(w, h, offset);
 
         if (flags & ARRAY2D_CLEAR_DATA) {
-            memset(data + offset, 0, static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(T));
+            const std::size_t elementCount = checked_element_count(w, h);
+            memset(data + offset, 0, elementCount * sizeof(T));
         }
     }
 
@@ -263,7 +298,8 @@ public:
         lock = flags & ARRAY2D_LOCK_DATA;
 
         ar_realloc(w, h);
-        memcpy(data, copy, w * h * sizeof(T));
+        const std::size_t elementCount = checked_element_count(w, h);
+        memcpy(data, copy, elementCount * sizeof(T));
     }
     int width() const
     {

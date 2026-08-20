@@ -22,6 +22,7 @@
 
 #include <cmath>
 #include <climits>
+#include <limits>
 #include "bayerhelper.h"
 #include "librtprocess.h"
 #include "opthelper.h"
@@ -71,7 +72,18 @@ rpError vng4_demosaic (int width, int height, const float * const *rawData, floa
 
     constexpr unsigned int colors = 4;
 
-    const size_t pixelCount = static_cast<size_t>(height) * static_cast<size_t>(width);
+    if (width <= 0 || height <= 0) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t widthElements = static_cast<size_t>(width);
+    const size_t heightElements = static_cast<size_t>(height);
+    if (heightElements > std::numeric_limits<size_t>::max() / widthElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t pixelCount = heightElements * widthElements;
+    if (pixelCount > std::numeric_limits<size_t>::max() / sizeof(float[4])) {
+        return RP_MEMORY_ERROR;
+    }
     float (*image)[4] = (float (*)[4]) calloc(pixelCount, sizeof * image);
 
     if (!image) {

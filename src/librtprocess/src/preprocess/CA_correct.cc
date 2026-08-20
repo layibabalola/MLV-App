@@ -23,6 +23,7 @@
 ////////////////////////////////////////////////////////////////
 
 #include <memory>
+#include <limits>
 
 #include "bayerhelper.h"
 #include "gauss.h"
@@ -158,6 +159,9 @@ rpError CA_correct(
     // local variables
     const int W = winw - winx;
     const int H = winh - winy;
+    if (W <= 0 || H <= 0 || W == std::numeric_limits<int>::max()) {
+        return RP_MEMORY_ERROR;
+    }
 
     std::unique_ptr<JaggedArray<float>> redFactor;
     std::unique_ptr<JaggedArray<float>> blueFactor;
@@ -204,21 +208,41 @@ rpError CA_correct(
     const int vblsz = ceil((float)(height + border2) / (ts - border2) + 2 + vz1);
     const int hblsz = ceil((float)(width + border2) / (ts - border2) + 2 + hz1);
 
+    const size_t widthElements = static_cast<size_t>(width);
+    const size_t heightElements = static_cast<size_t>(height);
+    const size_t vblockElements = static_cast<size_t>(vblsz);
+    const size_t hblockElements = static_cast<size_t>(hblsz);
+    if (heightElements > std::numeric_limits<size_t>::max() / widthElements
+        || vblockElements > std::numeric_limits<size_t>::max() / hblockElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t imageElements = heightElements * widthElements;
+    const size_t blockCount = vblockElements * hblockElements;
+    constexpr size_t blockStride = 2u * 2u + 1u;
+    if (blockCount > std::numeric_limits<size_t>::max() / blockStride) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t blockElements = blockCount * blockStride;
+    if (blockElements > std::numeric_limits<size_t>::max() - imageElements
+        || imageElements + blockElements > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        return RP_MEMORY_ERROR;
+    }
+
     //temporary array to store simple interpolation of G
-    std::unique_ptr<float[]> buffer(new (std::nothrow) float[height * width + vblsz * hblsz * (2 * 2 + 1)]);
+    std::unique_ptr<float[]> buffer(new (std::nothrow) float[imageElements + blockElements]);
 
     float *Gtmp = buffer.get();
     if (!Gtmp) {
         return RP_MEMORY_ERROR;
     }
 
-    float *RawDataTmp = Gtmp + (winh * (winw + (winw & 1))) / 2;
+    float *RawDataTmp = Gtmp + imageElements / 2u;
     //block CA shift values and weight assigned to block
-    float *const blockwt = Gtmp + height * width;
+    float *const blockwt = Gtmp + imageElements;
     memset(blockwt,
            0,
-           static_cast<size_t>(vblsz) * static_cast<size_t>(hblsz) * (2u * 2u + 1u) * sizeof(float));
-    float (*blockshifts)[2][2] = (float (*)[2][2])(blockwt + vblsz * hblsz);
+           blockElements * sizeof(float));
+    float (*blockshifts)[2][2] = (float (*)[2][2])(blockwt + blockCount);
 
     // Because we can't break parallel processing, we need a switch do handle the errors
     bool processpasstwo = true;

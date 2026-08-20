@@ -16,6 +16,7 @@
 #include "../../src/debug/FrameChecksum.h"
 #include "../../src/debug/StageTiming.h"
 #include "../../src/debug/StageTimingCsvSink.h"
+#include "../../src/librtprocess/src/include/array2D.h"
 
 #include <QByteArray>
 #include <QDir>
@@ -26,6 +27,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <omp.h>
 #include <string>
 #include <vector>
@@ -76,6 +78,28 @@ void clearPhase3KillSwitches()
 }
 
 } // namespace
+
+TEST(SecuritySizing, Array2DRejectsOverflowBeforeAllocation)
+{
+    bool rejected = false;
+    try
+    {
+        array2D<uint64_t> impossible(std::numeric_limits<int>::max(),
+                                     std::numeric_limits<int>::max(),
+                                     ARRAY2D_CLEAR_DATA);
+        (void)impossible;
+    }
+    catch (const std::bad_array_new_length &)
+    {
+        rejected = true;
+    }
+    catch (const std::bad_alloc &)
+    {
+        ::minitest::fail(__FILE__, __LINE__,
+                         "array2D rejects overflow before attempting allocation");
+    }
+    ASSERT_TRUE(rejected);
+}
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)
 {

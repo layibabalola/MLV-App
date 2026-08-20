@@ -231,6 +231,12 @@ class RepoHygieneTests(unittest.TestCase):
         raw_processing = (
             ROOT / "src" / "processing" / "raw_processing.c"
         ).read_text(encoding="utf-8")
+        array2d = (
+            ROOT / "src" / "librtprocess" / "src" / "include" / "array2D.h"
+        ).read_text(encoding="utf-8")
+        ca_rt = (ROOT / "src" / "ca_correct" / "CA_correct_RT.c").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('#include <inttypes.h>', blender)
         self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
@@ -266,16 +272,26 @@ class RepoHygieneTests(unittest.TestCase):
         )
 
         self.assertIn('static inline void agx_store_float_triplet_fast', raw_processing)
-        self.assertIn(
-            'agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b, '
-            '&pixg[0], &pixg[1], &pixg[2]);',
+        self.assertRegex(
             raw_processing,
+            r'agx_store_float_triplet_fast\(agx_out_r,\s*agx_out_g,\s*agx_out_b,\s*'
+            r'&pixg\[0\],\s*&pixg\[1\],\s*&pixg\[2\]\);',
         )
         self.assertNotIn(
             'agx_store_u16_triplet_fast(agx_out_r, agx_out_g, agx_out_b, '
             '&pixg[0], &pixg[1], &pixg[2]);',
             raw_processing,
         )
+
+        self.assertIn("checked_element_count(w, h, offset)", array2d)
+        self.assertNotIn("new T[h * w]", array2d)
+        self.assertNotIn("memset(data, 0, (size_t)w * (size_t)h", array2d)
+        self.assertIn("size_t tile_pixels = 0;", ca_rt)
+        self.assertIn(
+            "const size_t RawDataTmp_sz = tile_pixels / 2u + tile_pixels % 2u;",
+            ca_rt,
+        )
+        self.assertNotIn("calloc(TS*TS/2", ca_rt)
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")

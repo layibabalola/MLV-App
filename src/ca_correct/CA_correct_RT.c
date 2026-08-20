@@ -53,6 +53,15 @@ static inline int FC(int row, int col)
         return 1;  /* green */
 }
 
+static int ca_checked_mul_size(size_t left, size_t right, size_t *result)
+{
+    if (left != 0u && right > SIZE_MAX / left) {
+        return 0;
+    }
+    *result = left * right;
+    return 1;
+}
+
 //SSEFUNCTION
 void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
     int tilex, int tiley, int tilew, int tileh, uint8_t autoCA, float cared, float cablue)
@@ -79,8 +88,12 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   if (width <= 0 || height <= 0 || tilew <= 0 || tileh <= 0) {
     return;
   }
-  const size_t image_pixels = (size_t)height * (size_t)width;
-  const size_t tile_pixels = (size_t)tileh * (size_t)tilew;
+  size_t image_pixels = 0;
+  size_t tile_pixels = 0;
+  if (!ca_checked_mul_size((size_t)height, (size_t)width, &image_pixels)
+      || !ca_checked_mul_size((size_t)tileh, (size_t)tilew, &tile_pixels)) {
+    return;
+  }
   //temporary array to store simple interpolation of G
   float (*Gtmp);
   Gtmp = (float (*)) calloc(image_pixels, sizeof * Gtmp);
@@ -89,8 +102,8 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   float (*RawDataTmp);
 //  RawDataTmp = (float*) malloc( height * width * sizeof(float) / 2);
 //  size_t RawDataTmp_sz = height * width / 2;
-  RawDataTmp = (float*) malloc((tile_pixels / 2u) * sizeof(float));
-  size_t RawDataTmp_sz = tile_pixels / 2u;
+  const size_t RawDataTmp_sz = tile_pixels / 2u + tile_pixels % 2u;
+  RawDataTmp = (float*) calloc(RawDataTmp_sz, sizeof(float));
 
   if( !Gtmp || !RawDataTmp ) {
     //std::cout<<"CA_correct_RT: cannot allocate RawDataTmp buffer of size "<<RawDataTmp_sz*sizeof(float)<<std::endl;
@@ -131,8 +144,17 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
   vblsz = ceil((float)(height + border2) / (TS - border2) + 2 + vz1);
   hblsz = ceil((float)(width + border2) / (TS - border2) + 2 + hz1);
 
-  const size_t block_count = (size_t)vblsz * (size_t)hblsz;
-  const size_t buffer1_size = block_count * (3u * 2u + 1u) * sizeof(float);
+  size_t block_count = 0;
+  size_t buffer1_elements = 0;
+  size_t buffer1_size = 0;
+  if (vblsz <= 0 || hblsz <= 0
+      || !ca_checked_mul_size((size_t)vblsz, (size_t)hblsz, &block_count)
+      || !ca_checked_mul_size(block_count, 3u * 2u + 1u, &buffer1_elements)
+      || !ca_checked_mul_size(buffer1_elements, sizeof(float), &buffer1_size)) {
+    free(Gtmp);
+    free(RawDataTmp);
+    return;
+  }
   buffer1 = (char *) malloc(buffer1_size);
 
   if( !buffer1 ) {
@@ -557,7 +579,9 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
           //for (row = rr + top, cc = border + (FC(rr, 2) & 1), indx = (row * width + cc + left) >> 1; cc < cc1 - border; cc += 2, indx++) {
           for (row = rr + top, cc = border + (FC(rr, 2) & 1), indx = ((row-tiley) * tilew + cc + left - tilex) >> 1; cc < cc1 - border; cc += 2, indx++) {
             col = cc + left;
-            if( (size_t)indx >= RawDataTmp_sz ) {};//std::cout<<"CA_correct_RT: row="<<row<<"  cc="<<cc<<"  left="<<left<<"  indx="<<indx<<"  border="<<border<<std::endl;
+            if (indx < 0 || (size_t)indx >= RawDataTmp_sz) {
+              continue;
+            }
             RawDataTmp[indx] = 65535.0f * rgb[c][(rr) * TS + cc] + 0.5f;
             if(0 && top==0&&left==0 && row<16) {};
             //std::cout<<"(1) row="<<row<<" col="<<cc+left<<"  RawDataTmp["<<indx<<"]="<<RawDataTmp[indx]<<std::endl;
@@ -578,7 +602,9 @@ void CA_correct_RT(float **rawData, int winx, int winy, int winw, int winh,
     //for(row = tiley; row < tiley+tileh; row++)
     //  for(col = tilex + (FC(row, 0) & 1), indx = (row * width + col) >> 1; col < tilex+tilew; col += 2, indx++) {
         if(0 && tiley==8&&tilex==8 && row<16 && col<16) {}; //std::cout<<"(2) row="<<row<<" col="<<col<<"  RawDataTmp["<<indx<<"]="<<RawDataTmp[indx]<<std::endl;
-        rawData[row+tiley][col+tilex] = RawDataTmp[indx];
+        if (indx >= 0 && (size_t)indx < RawDataTmp_sz) {
+          rawData[row+tiley][col+tilex] = RawDataTmp[indx];
+        }
       }
 
 

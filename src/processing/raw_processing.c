@@ -3705,7 +3705,8 @@ void apply_processing_object( processingObject_t * processing,
                         const double agx_out_b = result[0]*agx_m6+result[1]*agx_m7+result[2]*agx_m8;
                         const double color_cam_agx_matrix_b_start =
                             (capture_breakdown && color_cam_wb_probe_agx_matrix_detail) ? omp_get_wtime() : 0.0;
-                        agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b, &pixg[0], &pixg[1], &pixg[2]);
+                        agx_store_float_triplet_fast(agx_out_r, agx_out_g, agx_out_b,
+                                                     &pixg[0], &pixg[1], &pixg[2]);
                         if( capture_breakdown && color_cam_wb_probe_agx_matrix_detail )
                         {
                             core_timing->color_cam_agx_matrix_r_ms +=

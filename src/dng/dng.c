@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 #include <pthread.h>
 #include <time.h>
 
@@ -2155,6 +2156,14 @@ void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int 
 /* decompress LJ92 image to output_buffer */
 int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp)
 {
+    if (!output_buffer || !input_buffer || width <= 0 || height <= 0
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    const int expected_width = width;
+    const int expected_height = height;
+    const size_t expected_pixels = (size_t)width * (size_t)height;
     int components = 1;
     lj92 decoder_object;
 
@@ -2164,17 +2173,22 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, (size_t)width * (size_t)height * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_pixels * sizeof(uint16_t));
         return ret;
     }
 
-    ret = lj92_decode(decoder_object, output_buffer, width * height * components, 0, NULL, 0);
+    if (width != expected_width || height != expected_height || components != 1
+        || expected_pixels > (size_t)INT_MAX) {
+        ret = LJ92_ERROR_CORRUPT;
+    } else {
+        ret = lj92_decode(decoder_object, output_buffer, (int)expected_pixels, 0, NULL, 0);
+    }
     if(ret != LJ92_ERROR_NONE)
     {
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, (size_t)width * (size_t)height * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_pixels * sizeof(uint16_t));
     }
 
     lj92_close(decoder_object);
@@ -2189,12 +2203,24 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
                                        uint32_t bpp,
                                        exportProfileFrame_t * profile_frame)
 {
+    if (!output_buffer || !input_buffer || !output_buffer_size
+        || width <= 0 || height <= 0 || width > INT_MAX / 2
+        || (size_t)width > SIZE_MAX / (size_t)height
+        || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    const size_t input_pixels = (size_t)width * (size_t)height;
     uint8_t * compressed = NULL;
     int new_width = width * 2;
     int new_height = height / 2;
 
     double profile_stage_start = export_profile_stage_begin(profile_frame);
-    int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp, new_width * new_height, 0, NULL, 0, &compressed, (int*)output_buffer_size);
+    if (new_height <= 0 || new_width > INT_MAX / new_height) {
+        return LJ92_ERROR_CORRUPT;
+    }
+    int ret = lj92_encode(input_buffer, new_width, new_height, (int)bpp,
+                          new_width * new_height, 0, NULL, 0,
+                          &compressed, (int*)output_buffer_size);
     export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_ENCODE, profile_stage_start);
 
     if(ret == LJ92_ERROR_NONE)
@@ -2203,13 +2229,13 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
         memcpy(output_buffer, compressed, *output_buffer_size);
         export_profile_stage_end(profile_frame, EXPORT_PROFILE_DNG_COMPRESS_COPY, profile_stage_start);
 #ifndef STDOUT_SILENT
-        size_t input_buffer_size = (size_t)width * (size_t)height * 2u;
+        size_t input_buffer_size = input_pixels * sizeof(uint16_t);
         printf("LJ92 encoder: "FMT_SIZE" -> "FMT_SIZE" (%2.2f%% ratio)\n", *output_buffer_size, input_buffer_size, ((float)*output_buffer_size * 100.0f) / (float)input_buffer_size);
 #endif
     }
     else
     {
-        *output_buffer_size = (size_t)width * (size_t)height * sizeof(uint16_t);
+        *output_buffer_size = input_pixels * sizeof(uint16_t);
         memset(output_buffer, 0, *output_buffer_size);
 #ifndef STDOUT_SILENT
         printf("LJ92 encoder: failed with error code (%d)\n", ret);

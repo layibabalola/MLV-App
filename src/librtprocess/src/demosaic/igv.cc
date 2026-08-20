@@ -17,6 +17,7 @@
  *  along with RawTherapee.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <cmath>
+#include <limits>
 
 #include "bayerhelper.h"
 #include "librtprocess.h"
@@ -55,13 +56,25 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
     constexpr float eps = 1e-5f, epssq = 1e-5f; //mod epssq -10f =>-5f Jacques 3/2013 to prevent artifact (divide by zero)
 
     constexpr int h1 = 1, h2 = 2, h3 = 3, h5 = 5;
+    if (winw <= 0 || winh <= 0 || winw > std::numeric_limits<int>::max() / h5) {
+        return RP_MEMORY_ERROR;
+    }
     const int width = winw, height = winh;
     const int v1 = 1 * width, v2 = 2 * width, v3 = 3 * width, v5 = 5 * width;
 
-    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t widthElements = static_cast<size_t>(width);
+    const size_t heightElements = static_cast<size_t>(height);
+    if (heightElements > std::numeric_limits<size_t>::max() / widthElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t pixelCount = widthElements * heightElements;
+    if (pixelCount > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        return RP_MEMORY_ERROR;
+    }
     float *rgbarray = (float (*)) malloc(pixelCount * sizeof(float));
-    float *vdif = (float (*)) calloc(pixelCount / 2u, sizeof * vdif);
-    float *hdif = (float (*)) calloc(pixelCount / 2u, sizeof * hdif);
+    const size_t halfPixelCount = pixelCount / 2u + pixelCount % 2u;
+    float *vdif = (float (*)) calloc(halfPixelCount, sizeof * vdif);
+    float *hdif = (float (*)) calloc(halfPixelCount, sizeof * hdif);
     float *chrarray = (float (*)) calloc(pixelCount, sizeof(float));
 
     if(!rgbarray || !vdif || !hdif || !chrarray) {
@@ -451,13 +464,26 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
 
     constexpr float eps = 1e-5f, epssq = 1e-5f; //mod epssq -10f =>-5f Jacques 3/2013 to prevent artifact (divide by zero)
     constexpr int h1 = 1, h2 = 2, h3 = 3, h4 = 4, h5 = 5, h6 = 6;
+    if (winw <= 0 || winh <= 0 || winw > std::numeric_limits<int>::max() / h6) {
+        return RP_MEMORY_ERROR;
+    }
     const int width = winw, height = winh;
     const int v1 = 1 * width, v2 = 2 * width, v3 = 3 * width, v4 = 4 * width, v5 = 5 * width, v6 = 6 * width;
 
-    float *rgbarray = (float (*)) calloc((width * height * 3), sizeof(float));
-    float *vdif = (float (*)) calloc(width * height / 2, sizeof * vdif);
-    float *hdif = (float (*)) calloc(width * height / 2, sizeof * hdif);
-    float *chrarray = (float (*)) calloc(width * height * 2, sizeof(float));
+    const size_t widthElements = static_cast<size_t>(width);
+    const size_t heightElements = static_cast<size_t>(height);
+    if (heightElements > std::numeric_limits<size_t>::max() / widthElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t pixelCount = widthElements * heightElements;
+    if (pixelCount > std::numeric_limits<size_t>::max() / (3u * sizeof(float))) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t halfPixelCount = pixelCount / 2u + pixelCount % 2u;
+    float *rgbarray = (float (*)) calloc(pixelCount * 3u, sizeof(float));
+    float *vdif = (float (*)) calloc(halfPixelCount, sizeof * vdif);
+    float *hdif = (float (*)) calloc(halfPixelCount, sizeof * hdif);
+    float *chrarray = (float (*)) calloc(pixelCount * 2u, sizeof(float));
 
     if(!rgbarray || !vdif || !hdif || !chrarray) {
         if (rgbarray) {
@@ -477,13 +503,13 @@ rpError igv_demosaic(int winw, int winh, const float * const *rawData, float **r
 
     float* rgb[3];
     rgb[0] = rgbarray;
-    rgb[1] = rgbarray + (width * height);
-    rgb[2] = rgbarray + 2*(width * height);
+    rgb[1] = rgbarray + pixelCount;
+    rgb[2] = rgbarray + 2u * pixelCount;
 
     float* chr[4];
 
     chr[0] = chrarray;
-    chr[1] = chrarray + (width * height);
+    chr[1] = chrarray + pixelCount;
 
     // mapped chr[2] and chr[3] to hdif and hdif, because these are out of use, when chr[2] and chr[3] are used
     chr[2] = hdif;

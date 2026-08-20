@@ -16,6 +16,23 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
+static int checked_audio_capacity(uint64_t current_size,
+                                  uint64_t item_size,
+                                  uint64_t remaining_items,
+                                  uint64_t *capacity)
+{
+    if (remaining_items != 0u && item_size > UINT64_MAX / remaining_items) {
+        return 0;
+    }
+    const uint64_t remaining_size = remaining_items * item_size;
+    if (item_size > UINT64_MAX - current_size
+        || remaining_size > UINT64_MAX - current_size - item_size) {
+        return 0;
+    }
+    *capacity = current_size + item_size + remaining_size;
+    return *capacity <= SIZE_MAX;
+}
+
 static const char * iXML =
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
     "<BWFXML>"
@@ -222,6 +239,7 @@ void readMlvAudioData(mlvObject_t * video)
     int fread_err = 1;
     uint64_t mlv_audio_buffer_offset = 0;
     uint64_t allocated_size = initMlvAudioSize(video);
+    if (allocated_size > SIZE_MAX) return;
     uint8_t * mlv_audio_buffer = allocated_size ? malloc(allocated_size) : NULL;
     uint64_t mlv_audio_size = allocated_size;
 
@@ -247,13 +265,40 @@ void readMlvAudioData(mlvObject_t * video)
             file_set_pos(video->file[0], video->audio_index[i].block_offset, SEEK_SET);
 
             /* Read data header */
-            fread_err &= fread(&hdr_item, sizeof(mr_item_t), 1, video->file[0]);
+            const size_t header_read = fread(&hdr_item, sizeof(mr_item_t), 1, video->file[0]);
+            fread_err &= header_read;
+            if (header_read != 1u) {
+                pthread_mutex_unlock(video->main_file_mutex + video->audio_index[i].chunk_num);
+                free(mlv_audio_buffer);
+                return;
+            }
+
+            if (hdr_item.size > UINT64_MAX - mlv_audio_size)
+            {
+                pthread_mutex_unlock(video->main_file_mutex + video->audio_index[i].chunk_num);
+                free(mlv_audio_buffer);
+                return;
+            }
 
             if (mlv_audio_size + hdr_item.size > allocated_size)
             {
-                allocated_size = mlv_audio_size + hdr_item.size
-                    + (size_t)(video->audios - i) * (size_t)hdr_item.size;
-                mlv_audio_buffer = realloc(mlv_audio_buffer, allocated_size);
+                uint64_t required_size = 0;
+                if (!checked_audio_capacity(mlv_audio_size,
+                                            hdr_item.size,
+                                            (uint64_t)(video->audios - i),
+                                            &required_size)) {
+                    pthread_mutex_unlock(video->main_file_mutex + video->audio_index[i].chunk_num);
+                    free(mlv_audio_buffer);
+                    return;
+                }
+                uint8_t *resized = realloc(mlv_audio_buffer, (size_t)required_size);
+                if (!resized) {
+                    pthread_mutex_unlock(video->main_file_mutex + video->audio_index[i].chunk_num);
+                    free(mlv_audio_buffer);
+                    return;
+                }
+                mlv_audio_buffer = resized;
+                allocated_size = required_size;
             }
 
             /* Read to location of audio */

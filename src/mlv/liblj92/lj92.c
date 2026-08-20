@@ -1133,7 +1133,20 @@ int lj92_open(lj92* lj,
     int ret = findSoI(self);
 
     if (ret == LJ92_ERROR_NONE) {
-        u16* rowcache = (u16*)calloc((size_t)self->x * (size_t)self->components * 2u, sizeof(u16));
+        if (self->x <= 0 || self->components <= 0
+            || (size_t)self->x > SIZE_MAX / (size_t)self->components) {
+            ret = LJ92_ERROR_NO_MEMORY;
+        }
+    }
+
+    if (ret == LJ92_ERROR_NONE) {
+        const size_t row_elements = (size_t)self->x * (size_t)self->components;
+        if (row_elements > SIZE_MAX / (2u * sizeof(u16))) {
+            ret = LJ92_ERROR_NO_MEMORY;
+        }
+        u16* rowcache = ret == LJ92_ERROR_NONE
+            ? (u16*)calloc(row_elements, 2u * sizeof(u16))
+            : NULL;
         if (rowcache == NULL) ret = LJ92_ERROR_NO_MEMORY;
         else {
             self->rowcache = rowcache;

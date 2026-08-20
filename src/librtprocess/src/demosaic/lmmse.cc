@@ -17,6 +17,7 @@
  *  along with RawTherapee.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include <cmath>
+#include <limits>
 
 #include "bayerhelper.h"
 #include "rt_math.h"
@@ -195,6 +196,12 @@ rpError lmmse_demosaic(int width, int height, const float * const *rawData, floa
     }
 
     constexpr int ba = 4;
+    if (width <= 0 || height <= 0
+        || width > std::numeric_limits<int>::max() - 2 * ba
+        || height > std::numeric_limits<int>::max() - 2 * ba
+        || width + 2 * ba > std::numeric_limits<int>::max() / 4) {
+        return RP_MEMORY_ERROR;
+    }
     const int rr1 = height + 2 * ba;
     const int cc1 = width + 2 * ba;
     const int w1 = cc1;
@@ -229,8 +236,16 @@ rpError lmmse_demosaic(int width, int height, const float * const *rawData, floa
 
     float *rix[5];
     float *qix[5] {nullptr};
-    const size_t planeElements = static_cast<size_t>(rr1) * static_cast<size_t>(cc1);
-    float *buffer = (float *)calloc(planeElements * 5u, sizeof(float));
+    const size_t rrElements = static_cast<size_t>(rr1);
+    const size_t ccElements = static_cast<size_t>(cc1);
+    if (rrElements > std::numeric_limits<size_t>::max() / ccElements) {
+        return RP_MEMORY_ERROR;
+    }
+    const size_t planeElements = rrElements * ccElements;
+    if (planeElements > std::numeric_limits<size_t>::max() / (5u * sizeof(float))) {
+        return RP_MEMORY_ERROR;
+    }
+    float *buffer = (float *)calloc(planeElements, 5u * sizeof(float));
 
     if (!buffer) { // allocation of big block of memory failed, try to get 5 smaller ones
         printf("lmmse_interpolate_omp: allocation of big memory block failed, try to get 5 smaller ones now...\n");
@@ -260,7 +275,7 @@ rpError lmmse_demosaic(int width, int height, const float * const *rawData, floa
         qix[0] = buffer;
 
         for (int i = 1; i < 5; i++) {
-            qix[i] = qix[i - 1] + rr1 * cc1;
+            qix[i] = qix[i - 1] + planeElements;
         }
     }
 

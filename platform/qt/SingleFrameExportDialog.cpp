@@ -110,10 +110,16 @@ void SingleFrameExportDialog::exportViaQt()
         * (size_t)getMlvHeight(m_pMlvObject)
         * sizeof(uint8_t);
     uint8_t *pRawImage = (uint8_t*)malloc(rawImageBytes);
+    if( !pRawImage ) return;
     getMlvProcessedFrame8( m_pMlvObject, m_frameNr, pRawImage, 1 );
 
     uint8_t * imgBufferScaled8;
     imgBufferScaled8 = ( uint8_t* )malloc( getMlvWidth(m_pMlvObject) * stretchX * getMlvHeight(m_pMlvObject) * stretchY * 3 * sizeof( uint8_t ) );
+    if( !imgBufferScaled8 )
+    {
+        free( pRawImage );
+        return;
+    }
 
     avir_scale_thread_pool scaling_pool;
     avir::CImageResizerVars vars; vars.ThreadPool = &scaling_pool;

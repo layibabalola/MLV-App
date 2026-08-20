@@ -2207,9 +2207,19 @@ static int _match_exposures(struct raw_info raw_info, uint32_t * raw_buffer_32, 
     int y0 = raw_info.active_area.y1 + 2;
     
     /* quick interpolation for matching */
+    if (w <= 0 || h <= 0
+        || (size_t)w > SIZE_MAX / (size_t)h
+        || (size_t)w * (size_t)h > SIZE_MAX / sizeof(int)) {
+        return 0;
+    }
     const size_t image_pixels = (size_t)w * (size_t)h;
     int* dark   = malloc(image_pixels * sizeof(dark[0]));
     int* bright = malloc(image_pixels * sizeof(bright[0]));
+    if (!dark || !bright) {
+        free(dark);
+        free(bright);
+        return 0;
+    }
     memset(dark, 0, image_pixels * sizeof(dark[0]));
     memset(bright, 0, image_pixels * sizeof(bright[0]));
     
