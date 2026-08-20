@@ -118,6 +118,12 @@ int dng_reader_strip_allocation_size(const dng_frame_info_t * info,
                                      uint64_t file_size,
                                      size_t * allocation_size);
 
+/* Reject per-frame processing metadata drift that would otherwise be decoded
+ * into buffers and calibration state derived from frame zero. Strip offsets,
+ * byte counts and compression may vary per frame; geometry/CFA/range may not. */
+int dng_reader_processing_metadata_matches(const dng_frame_info_t * expected,
+                                           const dng_frame_info_t * candidate);
+
 #ifdef __cplusplus
 }
 #endif

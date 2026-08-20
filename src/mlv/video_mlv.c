@@ -2900,8 +2900,26 @@ int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
         return 0;
 
     const size_t pixels = (size_t)width * (size_t)height;
-    if(pixels == 0 || pixels > (size_t)INT_MAX) return 0;
+    if(pixels == 0 || pixels > (size_t)INT_MAX / 3u
+       || pixels > SIZE_MAX / (size_t)bits_per_sample
+       || ((pixels * (size_t)bits_per_sample) & 15u) != 0)
+        return 0;
     *pixel_count = pixels;
+    return 1;
+}
+
+int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3])
+{
+    if(!neutral || !gains) return 0;
+    for(int channel = 0; channel < 3; channel++)
+    {
+        const int32_t numerator = neutral[channel * 2];
+        const int32_t denominator = neutral[channel * 2 + 1];
+        if(numerator <= 0 || denominator <= 0) return 0;
+        const double gain = ((double)denominator / (double)numerator) * 1024.0;
+        if(!isfinite(gain) || gain < 1.0 || gain > (double)UINT32_MAX) return 0;
+        gains[channel] = (uint32_t)gain;
+    }
     return 1;
 }
 
@@ -9087,13 +9105,13 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     dng_sequence_t * seq = (dng_sequence_t *)calloc(1, sizeof(dng_sequence_t));
     if (!seq)
     {
-        sprintf(error_message, "Out of memory opening DNG folder:  %s", video->path);
+        snprintf(error_message, 256, "Out of memory opening DNG folder:  %.200s", video->path);
         return MLV_ERR_OPEN;
     }
     if (dng_sequence_open(dirPath, seq) != 0 || !seq->info.valid)
     {
         free(seq);
-        sprintf(error_message, "No readable CinemaDNG frames in folder:  %s", video->path);
+        snprintf(error_message, 256, "No readable CinemaDNG frames in folder:  %.195s", video->path);
         DEBUG( printf("\n%s\n", error_message); )
         return MLV_ERR_OPEN;
     }
@@ -9108,7 +9126,7 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         dng_sequence_free(seq);
         free(seq);
         video->dng_sequence = NULL;
-        sprintf(error_message, "Unsupported CinemaDNG geometry in folder:  %s", video->path);
+        snprintf(error_message, 256, "Unsupported CinemaDNG geometry in folder:  %.190s", video->path);
         return MLV_ERR_INVALID;
     }
     const uint32_t sample_max = fi->bits_per_sample == 16
@@ -9123,7 +9141,7 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
         dng_sequence_free(seq);
         free(seq);
         video->dng_sequence = NULL;
-        sprintf(error_message, "Invalid CinemaDNG sample range in folder:  %s", video->path);
+        snprintf(error_message, 256, "Invalid CinemaDNG sample range in folder:  %.188s", video->path);
         return MLV_ERR_INVALID;
     }
 
@@ -9148,10 +9166,22 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     /* No multi-file chunk model here, but allocate a 1-element file/mutex array
      * so any incidental file[0]/mutex[0] access stays valid. */
     video->filenum = 1;
-    video->file = (FILE **)calloc(1, sizeof(FILE *));
-    video->main_file_mutex = calloc(sizeof(pthread_mutex_t), 1);
-    if (!video->file || !video->main_file_mutex) return MLV_ERR_OPEN;
-    pthread_mutex_init(video->main_file_mutex, NULL);
+    FILE ** dng_files = (FILE **)calloc(1, sizeof(FILE *));
+    pthread_mutex_t * dng_mutex = (pthread_mutex_t *)calloc(1, sizeof(pthread_mutex_t));
+    if (!dng_files || !dng_mutex)
+    {
+        free(dng_files);
+        free(dng_mutex);
+        return MLV_ERR_OPEN;
+    }
+    if (pthread_mutex_init(dng_mutex, NULL) != 0)
+    {
+        free(dng_files);
+        free(dng_mutex);
+        return MLV_ERR_OPEN;
+    }
+    video->file = dng_files;
+    video->main_file_mutex = dng_mutex;
 
     /* RAWI geometry + calibration straight from the DNG IFD. */
     memcpy(&video->RAWI.blockType, "RAWI", 4);
@@ -9222,15 +9252,17 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->WBAL.wb_mode          = 6;     // CUSTOM
     video->WBAL.timestamp        = 0;
     video->WBAL.kelvin           = 0;
-    if (fi->has_as_shot_neutral &&
-        fi->as_shot_neutral[0] && fi->as_shot_neutral[2] && fi->as_shot_neutral[4])
+    if (fi->has_as_shot_neutral)
     {
-        double nr = (double)fi->as_shot_neutral[0] / (double)fi->as_shot_neutral[1];
-        double ng = (double)fi->as_shot_neutral[2] / (double)fi->as_shot_neutral[3];
-        double nb = (double)fi->as_shot_neutral[4] / (double)fi->as_shot_neutral[5];
-        video->WBAL.wbgain_r     = (nr != 0.0) ? (uint32_t)((1.0 / nr) * 1024) : 1024;
-        video->WBAL.wbgain_g     = (ng != 0.0) ? (uint32_t)((1.0 / ng) * 1024) : 1024;
-        video->WBAL.wbgain_b     = (nb != 0.0) ? (uint32_t)((1.0 / nb) * 1024) : 1024;
+        uint32_t gains[3] = { 0, 0, 0 };
+        if (!mlvDngAsShotNeutralToWbGains(fi->as_shot_neutral, gains))
+        {
+            snprintf(error_message, 256, "Invalid CinemaDNG white balance in folder:  %.188s", video->path);
+            return MLV_ERR_INVALID;
+        }
+        video->WBAL.wbgain_r = gains[0];
+        video->WBAL.wbgain_g = gains[1];
+        video->WBAL.wbgain_b = gains[2];
     }
 
     memcpy(&video->IDNT.blockType, "IDNT", 4);

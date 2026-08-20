@@ -45,6 +45,9 @@ int mlvDngSequenceGeometryIsRepresentable(uint32_t width, uint32_t height,
                                           uint32_t bits_per_sample,
                                           size_t * pixel_count);
 
+/* Convert three positive AsShotNeutral rationals into bounded MLV WB gains. */
+int mlvDngAsShotNeutralToWbGains(const int32_t neutral[6], uint32_t gains[3]);
+
 /* return error codes of and open modes of openMlvClip() */
 enum mlv_err { MLV_ERR_NONE, MLV_ERR_OPEN, MLV_ERR_IO, MLV_ERR_CORRUPTED, MLV_ERR_INVALID };
 enum open_mode { MLV_OPEN_FULL, MLV_OPEN_MAPP, MLV_OPEN_PREVIEW };

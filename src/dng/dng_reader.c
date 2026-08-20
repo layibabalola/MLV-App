@@ -54,8 +54,18 @@ static size_t type_size(uint16_t type)
         case ttShort: case ttSShort: case ttUnicode:               return 2;
         case ttLong: case ttSLong: case ttFloat: case ttIFD:       return 4;
         case ttRational: case ttSRational: case ttDouble: case ttComplex: return 8;
-        default: return 1;
+        default: return 0;
     }
+}
+
+static int scalar_u32_contract(const dng_ifd_entry_t * e)
+{
+    return e && e->count == 1u && (e->type == ttShort || e->type == ttLong);
+}
+
+static int exact_contract(const dng_ifd_entry_t * e, uint16_t type, uint32_t count)
+{
+    return e && e->type == type && e->count == count;
 }
 
 /* Read a single scalar value of an entry as a uint32 (handles inline storage
@@ -79,6 +89,22 @@ static int read_rationals(const uint8_t * buf, size_t buf_size,
         out[i * 2 + 1] = (int32_t)rd_u32(buf + off + i * 8 + 4);
     }
     return 0;
+}
+
+static int rational_denominators_nonzero(const int32_t * values, uint32_t nrats)
+{
+    if(!values) return 0;
+    for(uint32_t i = 0; i < nrats; i++)
+        if(values[i * 2u + 1u] == 0) return 0;
+    return 1;
+}
+
+static int positive_rationals(const int32_t * values, uint32_t nrats)
+{
+    if(!values) return 0;
+    for(uint32_t i = 0; i < nrats; i++)
+        if(values[i * 2u] <= 0 || values[i * 2u + 1u] <= 0) return 0;
+    return 1;
 }
 
 int dng_reader_range_fits(uint64_t offset, uint64_t length, size_t extent_size)
@@ -126,8 +152,8 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
         return 1;
     }
 
-    int have_w = 0, have_h = 0;
-    out->bits_per_sample = 14;            /* sensible default */
+    int have_w = 0, have_h = 0, have_bps = 0;
+    int have_strip_offset = 0, have_strip_count = 0, have_cfa = 0;
     out->compression = DNG_READER_COMPRESSION_NONE;
 
     for(uint16_t i = 0; i < nentries; i++)
@@ -141,33 +167,48 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
 
         /* Byte offset of out-of-line data: the 4-byte value field holds an
          * offset (file-relative) when total data size > 4 bytes. */
-        uint64_t data_bytes = (uint64_t)type_size(e.type) * e.count;
+        const size_t element_size = type_size(e.type);
+        if(element_size == 0 || e.count == 0) { free(buf); return 1; }
+        uint64_t data_bytes = (uint64_t)element_size * e.count;
         uint64_t data_off   = (data_bytes > 4) ? e.value : (uint64_t)(ep + 8 - buf);
 
         switch(e.tag)
         {
-            case tcImageWidth:  out->width  = entry_scalar_u32(&e); have_w = 1; break;
-            case tcImageLength: out->height = entry_scalar_u32(&e); have_h = 1; break;
+            case tcImageWidth:
+                if(!scalar_u32_contract(&e)) { free(buf); return 1; }
+                out->width = entry_scalar_u32(&e); have_w = 1; break;
+            case tcImageLength:
+                if(!scalar_u32_contract(&e)) { free(buf); return 1; }
+                out->height = entry_scalar_u32(&e); have_h = 1; break;
             case tcBitsPerSample:
             {
+                if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
                 const uint32_t value = entry_scalar_u32(&e);
-                if(value > 16u) { free(buf); return 1; }
+                if(value == 0u || value > 16u) { free(buf); return 1; }
                 out->bits_per_sample = (uint16_t)value;
+                have_bps = 1;
                 break;
             }
             case tcCompression:
             {
+                if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
                 const uint32_t value = entry_scalar_u32(&e);
                 if(value > UINT16_MAX) { free(buf); return 1; }
                 out->compression = (uint16_t)value;
                 break;
             }
-            case tcStripOffsets:    out->strip_offset     = entry_scalar_u32(&e); break;
-            case tcStripByteCounts: out->strip_byte_count = entry_scalar_u32(&e); break;
+            case tcStripOffsets:
+                if(!exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
+                out->strip_offset = entry_scalar_u32(&e); have_strip_offset = 1; break;
+            case tcStripByteCounts:
+                if(!exact_contract(&e, ttLong, 1u)) { free(buf); return 1; }
+                out->strip_byte_count = entry_scalar_u32(&e); have_strip_count = 1; break;
 
             case tcCFAPattern:
                 /* ttByte count4: 4 bytes give 2x2 mosaic order. Stored inline. */
-                if(e.count == 4 && dng_reader_range_fits(data_off, 4u, got))
+                if(!exact_contract(&e, ttByte, 4u)
+                   || !dng_reader_range_fits(data_off, 4u, got))
+                { free(buf); return 1; }
                 {
                     const uint8_t * cp = buf + data_off;
                     /* Pack as the writer does: byte0 | byte1<<8 | byte2<<16 | byte3<<24 */
@@ -175,14 +216,21 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                                      | ((uint32_t)cp[1] << 8)
                                      | ((uint32_t)cp[2] << 16)
                                      | ((uint32_t)cp[3] << 24);
+                    have_cfa = 1;
                 }
                 break;
 
-            case tcBlackLevel: out->black_level = (int32_t)entry_scalar_u32(&e); break;
-            case tcWhiteLevel: out->white_level = (int32_t)entry_scalar_u32(&e); break;
+            case tcBlackLevel:
+                if(!scalar_u32_contract(&e)) { free(buf); return 1; }
+                out->black_level = (int32_t)entry_scalar_u32(&e); break;
+            case tcWhiteLevel:
+                if(!scalar_u32_contract(&e)) { free(buf); return 1; }
+                out->white_level = (int32_t)entry_scalar_u32(&e); break;
 
             case tcActiveArea:
-                if(e.count == 4 && dng_reader_range_fits(data_off, 16u, got))
+                if(!exact_contract(&e, ttLong, 4u)
+                   || !dng_reader_range_fits(data_off, 16u, got))
+                { free(buf); return 1; }
                 {
                     for(int k = 0; k < 4; k++)
                         out->active_area[k] = (int32_t)rd_u32(buf + data_off + k * 4);
@@ -190,33 +238,52 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 break;
 
             case tcColorMatrix1:
-                if(e.count == 9 && !read_rationals(buf, got, data_off, 9, out->color_matrix1))
-                    out->has_color_matrix1 = 1;
+                if(!exact_contract(&e, ttSRational, 9u)
+                   || read_rationals(buf, got, data_off, 9, out->color_matrix1)
+                   || !rational_denominators_nonzero(out->color_matrix1, 9u))
+                { free(buf); return 1; }
+                out->has_color_matrix1 = 1;
                 break;
             case tcColorMatrix2:
-                if(e.count == 9 && !read_rationals(buf, got, data_off, 9, out->color_matrix2))
-                    out->has_color_matrix2 = 1;
+                if(!exact_contract(&e, ttSRational, 9u)
+                   || read_rationals(buf, got, data_off, 9, out->color_matrix2)
+                   || !rational_denominators_nonzero(out->color_matrix2, 9u))
+                { free(buf); return 1; }
+                out->has_color_matrix2 = 1;
                 break;
             case tcForwardMatrix1:
-                if(e.count == 9 && !read_rationals(buf, got, data_off, 9, out->forward_matrix1))
-                    out->has_forward_matrix1 = 1;
+                if(!exact_contract(&e, ttSRational, 9u)
+                   || read_rationals(buf, got, data_off, 9, out->forward_matrix1)
+                   || !rational_denominators_nonzero(out->forward_matrix1, 9u))
+                { free(buf); return 1; }
+                out->has_forward_matrix1 = 1;
                 break;
             case tcForwardMatrix2:
-                if(e.count == 9 && !read_rationals(buf, got, data_off, 9, out->forward_matrix2))
-                    out->has_forward_matrix2 = 1;
+                if(!exact_contract(&e, ttSRational, 9u)
+                   || read_rationals(buf, got, data_off, 9, out->forward_matrix2)
+                   || !rational_denominators_nonzero(out->forward_matrix2, 9u))
+                { free(buf); return 1; }
+                out->has_forward_matrix2 = 1;
                 break;
 
             case tcAsShotNeutral:
-                if(e.count == 3 && !read_rationals(buf, got, data_off, 3, out->as_shot_neutral))
-                    out->has_as_shot_neutral = 1;
+                if(!exact_contract(&e, ttRational, 3u)
+                   || read_rationals(buf, got, data_off, 3, out->as_shot_neutral)
+                   || !positive_rationals(out->as_shot_neutral, 3u))
+                { free(buf); return 1; }
+                out->has_as_shot_neutral = 1;
                 break;
 
             case tcISOSpeedRatings:
+                if(!exact_contract(&e, ttShort, 1u)) { free(buf); return 1; }
                 out->iso = (int32_t)entry_scalar_u32(&e);
                 break;
 
             case tcUniqueCameraModel:
             case tcModel:
+                if(e.type != ttAscii || e.count == 0
+                   || !dng_reader_range_fits(data_off, e.count, got))
+                { free(buf); return 1; }
                 if(out->camera_model[0] == 0 && data_off < got)
                 {
                     size_t n = e.count;
@@ -235,22 +302,11 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
 
     free(buf);
 
-    if(!have_w || !have_h || out->width == 0 || out->height == 0) return 1;
+    if(!have_w || !have_h || !have_bps || !have_strip_offset || !have_strip_count
+       || !have_cfa || out->width == 0 || out->height == 0) return 1;
     if(out->strip_offset == 0 || out->strip_byte_count == 0) return 1;
     if(out->compression != DNG_READER_COMPRESSION_NONE &&
        out->compression != DNG_READER_COMPRESSION_LJ92) return 1;
-    if(out->bits_per_sample == 0)
-    {
-        if(out->compression != DNG_READER_COMPRESSION_NONE) return 1;
-        const uint64_t pixels = (uint64_t)out->width * out->height;
-        if(pixels == 0 || out->strip_byte_count > UINT64_MAX / 8u) return 1;
-        const uint64_t total_bits = out->strip_byte_count * 8u;
-        if(total_bits % pixels != 0) return 1;
-        const uint64_t derived = total_bits / pixels;
-        if(derived == 0 || derived > 16u) return 1;
-        out->bits_per_sample = (uint16_t)derived;
-    }
-
     out->valid = 1;
     return 0;
 }
@@ -362,6 +418,20 @@ int dng_reader_strip_allocation_size(const dng_frame_info_t * info,
     return 1;
 }
 
+int dng_reader_processing_metadata_matches(const dng_frame_info_t * expected,
+                                           const dng_frame_info_t * candidate)
+{
+    if(!expected || !candidate || !expected->valid || !candidate->valid) return 0;
+    return candidate->width == expected->width
+        && candidate->height == expected->height
+        && candidate->bits_per_sample == expected->bits_per_sample
+        && candidate->cfa_pattern == expected->cfa_pattern
+        && candidate->black_level == expected->black_level
+        && candidate->white_level == expected->white_level
+        && memcmp(candidate->active_area, expected->active_area,
+                  sizeof(expected->active_area)) == 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Per-frame fetch.                                                    */
 /* ------------------------------------------------------------------ */
@@ -379,8 +449,7 @@ int dng_sequence_get_bayer16(const dng_sequence_t * seq, uint32_t index, uint16_
 
     /* Guard against geometry mismatch with the sequence -- the caller's buffer
      * is sized for seq->info dimensions. */
-    if(fi.width != seq->info.width || fi.height != seq->info.height
-       || fi.bits_per_sample != seq->info.bits_per_sample) return 1;
+    if(!dng_reader_processing_metadata_matches(&seq->info, &fi)) return 1;
 
     FILE * f = fopen(seq->paths[index], "rb");
     if(!f) return 1;

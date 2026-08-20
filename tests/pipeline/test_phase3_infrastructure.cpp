@@ -21,6 +21,8 @@
 #include "../../src/ca_correct/CA_correct_RT.h"
 #include "../../src/dng/dng.h"
 #include "../../src/dng/dng_reader.h"
+#include "../../src/dng/dng_tag_codes.h"
+#include "../../src/dng/dng_tag_types.h"
 extern "C" {
 #include "../../src/mlv/video_mlv.h"
 #include "../../platform/mlv_blender/MLVBlender.h"
@@ -363,6 +365,111 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(4, 65540, 14, &pixels));
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(4, 4, 17, &pixels));
     ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(2, 4, 14, &pixels));
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(40000, 40000, 14, &pixels));
+    ASSERT_FALSE(mlvDngSequenceGeometryIsRepresentable(3, 3, 14, &pixels));
+
+    dng_frame_info_t expected{};
+    expected.valid = 1;
+    expected.width = 4;
+    expected.height = 4;
+    expected.bits_per_sample = 14;
+    expected.cfa_pattern = 0x02010100u;
+    expected.black_level = 512;
+    expected.white_level = 15000;
+    expected.active_area[2] = 4;
+    expected.active_area[3] = 4;
+    dng_frame_info_t candidate = expected;
+    ASSERT_TRUE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate.cfa_pattern ^= 1u;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+    candidate = expected;
+    candidate.white_level--;
+    ASSERT_FALSE(dng_reader_processing_metadata_matches(&expected, &candidate));
+
+    const int32_t neutral[] = { 1, 2, 1, 1, 2, 1 };
+    uint32_t gains[3] = {};
+    ASSERT_TRUE(mlvDngAsShotNeutralToWbGains(neutral, gains));
+    ASSERT_EQ(2048u, gains[0]);
+    ASSERT_EQ(1024u, gains[1]);
+    ASSERT_EQ(512u, gains[2]);
+    const int32_t zeroDenominator[] = { 1, 2, 1, 0, 2, 1 };
+    ASSERT_FALSE(mlvDngAsShotNeutralToWbGains(zeroDenominator, gains));
+    const int32_t negativeNumerator[] = { -1, 2, 1, 1, 2, 1 };
+    ASSERT_FALSE(mlvDngAsShotNeutralToWbGains(negativeNumerator, gains));
+}
+
+TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
+{
+    QTemporaryDir temporary;
+    ASSERT_TRUE(temporary.isValid());
+
+    auto put16 = [](QByteArray & bytes, int offset, uint16_t value) {
+        bytes[offset] = static_cast<char>(value & 0xffu);
+        bytes[offset + 1] = static_cast<char>((value >> 8) & 0xffu);
+    };
+    auto put32 = [](QByteArray & bytes, int offset, uint32_t value) {
+        for (int shift = 0; shift < 32; shift += 8)
+            bytes[offset + shift / 8] = static_cast<char>((value >> shift) & 0xffu);
+    };
+    auto makeDng = [&](bool withNeutral) {
+        const uint16_t entryCount = withNeutral ? 7u : 6u;
+        QByteArray bytes(224, '\0');
+        bytes[0] = 'I';
+        bytes[1] = 'I';
+        put16(bytes, 2, 42);
+        put32(bytes, 4, 8);
+        put16(bytes, 8, entryCount);
+        auto entry = [&](int index, uint16_t tag, uint16_t type,
+                         uint32_t count, uint32_t value) {
+            const int offset = 10 + index * 12;
+            put16(bytes, offset, tag);
+            put16(bytes, offset + 2, type);
+            put32(bytes, offset + 4, count);
+            put32(bytes, offset + 8, value);
+        };
+        entry(0, tcImageWidth, ttLong, 1, 4);
+        entry(1, tcImageLength, ttLong, 1, 4);
+        entry(2, tcBitsPerSample, ttShort, 1, 14);
+        entry(3, tcStripOffsets, ttLong, 1, 192);
+        entry(4, tcStripByteCounts, ttLong, 1, 28);
+        entry(5, tcCFAPattern, ttByte, 4, 0x02010100u);
+        if (withNeutral)
+        {
+            entry(6, tcAsShotNeutral, ttRational, 3, 112);
+            put32(bytes, 112, 1); put32(bytes, 116, 1);
+            put32(bytes, 120, 1); put32(bytes, 124, 0);
+            put32(bytes, 128, 1); put32(bytes, 132, 1);
+        }
+        return bytes;
+    };
+    auto parseBytes = [&](const QString & name, const QByteArray & bytes,
+                          dng_frame_info_t * parsed) {
+        QFile file(temporary.filePath(name));
+        if (!file.open(QIODevice::WriteOnly)) return -1;
+        if (file.write(bytes) != bytes.size()) return -1;
+        file.close();
+        return dng_reader_parse_file(file.fileName().toUtf8().constData(), parsed);
+    };
+
+    dng_frame_info_t parsed{};
+    QByteArray valid = makeDng(false);
+    ASSERT_EQ(0, parseBytes("valid.dng", valid, &parsed));
+    ASSERT_EQ(14u, parsed.bits_per_sample);
+
+    QByteArray missingBits = valid;
+    put16(missingBits, 10 + 2 * 12, 65000);
+    ASSERT_NE(0, parseBytes("missing-bits.dng", missingBits, &parsed));
+
+    QByteArray wrongBitsCount = valid;
+    put32(wrongBitsCount, 10 + 2 * 12 + 4, 2);
+    ASSERT_NE(0, parseBytes("wrong-bits-count.dng", wrongBitsCount, &parsed));
+
+    QByteArray multipleStrips = valid;
+    put32(multipleStrips, 10 + 3 * 12 + 4, 2);
+    ASSERT_NE(0, parseBytes("multiple-strips.dng", multipleStrips, &parsed));
+
+    QByteArray invalidNeutral = makeDng(true);
+    ASSERT_NE(0, parseBytes("zero-neutral-denominator.dng", invalidNeutral, &parsed));
 }
 
 TEST(SecuritySizing, BlenderRejectsEmptyCropAndBindsExportRangeAndSampleMaximum)
