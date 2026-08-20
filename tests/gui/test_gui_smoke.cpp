@@ -747,7 +747,7 @@ void GuiSmokeTest::mainWindowMlvAspectKeepsNeutralReceiptFromSuppressingDesqueez
     const RawAspectRenderedDimensions fractional =
         rawAspectRenderedDimensions(3, 3, STRETCH_H_125, STRETCH_V_100, 65535);
     QVERIFY(fractional.valid);
-    QCOMPARE(fractional.width, 4);
+    QCOMPARE(fractional.width, 3);
     QCOMPARE(fractional.height, 3);
     QVERIFY(!rawAspectRenderedDimensions(65535, 100,
                                          STRETCH_H_125, STRETCH_V_033,

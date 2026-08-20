@@ -1200,6 +1200,13 @@ TEST(DualIsoPipeline, DngExportWritesBitsPerSampleBeforeHeaderForCompressedAndUn
               std::string(reopened->camid.cameraName[UNIQ]));
     ASSERT_TRUE(reopened->camid.cameraName[UNIQ][0] != '\0');
 
+    /* Folder frames can mix compression encodings and the folder abstraction
+     * retains decoded samples, not immutable original strip bytes. The Fast
+     * pass-through mode must fail closed rather than decode/process/rewrite. */
+    int32_t fast_par[4] = { 1, 1, 5, 3 };
+    ASSERT_TRUE(initDngObject(reopened, UNCOMPRESSED_ORIG, 1.0, fast_par)
+                == nullptr);
+
     /* Close the metadata loop: reopen the folder through the production MLV
      * object, write a new DNG from that object, then parse and compare it to
      * the first-generation writer output. */

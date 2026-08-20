@@ -514,11 +514,11 @@ TEST(SecuritySizing, DngOffsetsAndFolderGeometryFailClosedBeforeNarrowing)
     ASSERT_TRUE(v033Combined.valid);
     ASSERT_EQ(375, v033Combined.width);
     ASSERT_EQ(100, v033Combined.height);
-    const RawAspectRenderedDimensions rounded =
+    const RawAspectRenderedDimensions truncated =
         rawAspectRenderedDimensions(3, 3, STRETCH_H_125, STRETCH_V_100, 65535);
-    ASSERT_TRUE(rounded.valid);
-    ASSERT_EQ(4, rounded.width);
-    ASSERT_EQ(3, rounded.height);
+    ASSERT_TRUE(truncated.valid);
+    ASSERT_EQ(3, truncated.width);
+    ASSERT_EQ(3, truncated.height);
     ASSERT_FALSE(rawAspectRenderedDimensions(65535, 100,
                                               STRETCH_H_125, STRETCH_V_033,
                                               65535).valid);
@@ -641,6 +641,23 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
     ASSERT_EQ(0, parseBytes("valid.dng", valid, &parsed));
     ASSERT_EQ(14u, parsed.bits_per_sample);
 
+    QTemporaryDir missingUniqueDirectory;
+    ASSERT_TRUE(missingUniqueDirectory.isValid());
+    QFile missingUniqueFile(missingUniqueDirectory.filePath("000000.dng"));
+    ASSERT_TRUE(missingUniqueFile.open(QIODevice::WriteOnly));
+    ASSERT_EQ(valid.size(), missingUniqueFile.write(valid));
+    missingUniqueFile.close();
+    QByteArray missingUniquePath = missingUniqueDirectory.path().toLocal8Bit();
+    int missingUniqueError = MLV_ERR_NONE;
+    char missingUniqueMessage[256] = {};
+    mlvObject_t * missingUniqueObject = initMlvObjectWithDngFolder(
+        missingUniquePath.data(), MLV_OPEN_FULL,
+        &missingUniqueError, missingUniqueMessage);
+    ASSERT_TRUE(missingUniqueObject != nullptr);
+    ASSERT_EQ(MLV_ERR_INVALID, missingUniqueError);
+    ASSERT_TRUE(std::strstr(missingUniqueMessage, "UniqueCameraModel") != nullptr);
+    freeMlvObject(missingUniqueObject);
+
     QByteArray missingBits = valid;
     put16(missingBits, 10 + 2 * 12, 65000);
     ASSERT_NE(0, parseBytes("missing-bits.dng", missingBits, &parsed));
@@ -696,9 +713,15 @@ TEST(SecuritySizing, DngIfdContractsRejectMissingOrMalformedCriticalMetadata)
     embeddedModel.replace(256, 6, QByteArray("A\0BAD\0", 6));
     ASSERT_NE(0, parseBytes("embedded-nul-model.dng", embeddedModel, &parsed));
 
+    QByteArray emptyModel = withExtraEntry(tcModel, ttAscii, 1, 0);
+    ASSERT_NE(0, parseBytes("empty-model.dng", emptyModel, &parsed));
+
     QByteArray embeddedUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 6, 256);
     embeddedUnique.replace(256, 6, QByteArray("U\0BAD\0", 6));
     ASSERT_NE(0, parseBytes("embedded-nul-unique.dng", embeddedUnique, &parsed));
+
+    QByteArray emptyUnique = withExtraEntry(tcUniqueCameraModel, ttAscii, 1, 0);
+    ASSERT_NE(0, parseBytes("empty-unique.dng", emptyUnique, &parsed));
 
     QByteArray invalidActive = withExtraEntry(tcActiveArea, ttLong, 4, 256);
     put32(invalidActive, 256, 3); put32(invalidActive, 260, 0);

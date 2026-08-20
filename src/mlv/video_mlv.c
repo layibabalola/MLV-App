@@ -9233,6 +9233,15 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     video->dng_sequence = seq;
 
     const dng_frame_info_t * fi = &seq->info;
+    if(fi->unique_camera_model[0] == '\0')
+    {
+        dng_sequence_free(seq);
+        free(seq);
+        video->dng_sequence = NULL;
+        snprintf(error_message, 256,
+                 "CinemaDNG UniqueCameraModel is missing:  %.181s", video->path);
+        return MLV_ERR_INVALID;
+    }
     size_t dng_pixels = 0;
     if (!mlvDngSequenceGeometryIsRepresentable(fi->width, fi->height,
                                                 fi->bits_per_sample,
@@ -9480,9 +9489,9 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     memcpy(&video->IDNT.blockType, "IDNT", 4);
     video->IDNT.blockSize        = sizeof(mlv_idnt_hdr_t);
     snprintf((char *)video->IDNT.cameraName, sizeof(video->IDNT.cameraName),
-             "%s", fi->camera_model[0] ? fi->camera_model : "CinemaDNG");
-    if(fi->unique_camera_model[0])
-        video->camid.cameraName[UNIQ] = fi->unique_camera_model;
+             "%s", fi->camera_model[0]
+                 ? fi->camera_model : fi->unique_camera_model);
+    video->camid.cameraName[UNIQ] = fi->unique_camera_model;
 
     memcpy(&video->EXPO.blockType, "EXPO", 4);
     video->EXPO.blockSize        = sizeof(mlv_expo_hdr_t);

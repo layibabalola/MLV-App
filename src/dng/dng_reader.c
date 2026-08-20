@@ -416,7 +416,7 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 free(buf); return 1;
 
             case tcModel:
-                if(e.type != ttAscii || e.count == 0
+                if(e.type != ttAscii || e.count <= 1u
                    /* IDNT.cameraName is the retained/re-exported model and
                     * holds at most 31 text bytes plus NUL. Reject truncation
                     * rather than accepting metadata that cannot round-trip. */
@@ -432,7 +432,7 @@ int dng_reader_parse_file(const char * path, dng_frame_info_t * out)
                 break;
 
             case tcUniqueCameraModel:
-                if(e.type != ttAscii || e.count == 0
+                if(e.type != ttAscii || e.count <= 1u
                    || e.count > sizeof(out->unique_camera_model)
                    || !dng_reader_range_fits(data_off, e.count, got)
                    || buf[data_off + e.count - 1u] != 0

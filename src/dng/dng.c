@@ -2853,6 +2853,16 @@ dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, i
         return NULL;
     }
 
+    /* Fast/original export promises byte-for-byte payload pass-through. A
+     * CinemaDNG folder may mix compressed and uncompressed frames, while its
+     * current source abstraction exposes decoded bayer samples rather than a
+     * retained per-frame strip. Refuse this mode instead of silently applying
+     * llrawproc and rewriting the payload under a pass-through label. */
+    if(isDngFolderLoaded(mlv_data) && raw_state == UNCOMPRESSED_ORIG) {
+        free(dng_data);
+        return NULL;
+    }
+
     dng_data->fps_float = fps;
     memcpy(dng_data->par, par, sizeof(int32_t) * 4);
 

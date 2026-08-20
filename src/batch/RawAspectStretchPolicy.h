@@ -25,8 +25,10 @@ struct RawAspectRenderedDimensions
  * silently dropping a horizontal factor from the legacy vertical-1/3
  * representation.  Rendered paths historically represent V_033 as horizontal
  * x3, so the effective X scale is stretchX*3 and the effective Y scale is 1.
- * Nearest-integer rounding is shared by GUI and batch paths; callers provide
- * the largest dimension their downstream encoder can represent. */
+ * Preserve the legacy positive-value truncation used by GUI and batch paths;
+ * the only behavioral repair here is retaining the horizontal factor when
+ * V_033 is represented as horizontal x3. Callers provide the largest
+ * dimension their downstream encoder can represent. */
 inline RawAspectRenderedDimensions rawAspectRenderedDimensions(
     int sourceWidth,
     int sourceHeight,
@@ -50,15 +52,15 @@ inline RawAspectRenderedDimensions rawAspectRenderedDimensions(
        || scaledWidth <= 0.0 || scaledHeight <= 0.0)
         return result;
 
-    const double roundedWidth = std::floor(scaledWidth + 0.5);
-    const double roundedHeight = std::floor(scaledHeight + 0.5);
-    if(roundedWidth < 1.0 || roundedHeight < 1.0
-       || roundedWidth > static_cast<double>(maximumDimension)
-       || roundedHeight > static_cast<double>(maximumDimension))
+    const double truncatedWidth = std::floor(scaledWidth);
+    const double truncatedHeight = std::floor(scaledHeight);
+    if(truncatedWidth < 1.0 || truncatedHeight < 1.0
+       || truncatedWidth > static_cast<double>(maximumDimension)
+       || truncatedHeight > static_cast<double>(maximumDimension))
         return result;
 
-    result.width = static_cast<int>(roundedWidth);
-    result.height = static_cast<int>(roundedHeight);
+    result.width = static_cast<int>(truncatedWidth);
+    result.height = static_cast<int>(truncatedHeight);
     result.valid = true;
     return result;
 }
