@@ -49,7 +49,6 @@ foreach ($run in $runs) {
 
 $providerRoot = Join-Path $root ".claude-state\closeout\acceptance\provider\$HeadSha"
 New-Item -ItemType Directory -Path $providerRoot -Force | Out-Null
-$providerPath = Join-Path $providerRoot 'check-runs.json'
 $providerEnvelope = [ordered]@{
     schema = 'candidate-acceptance-github-checks.v1'
     capturedAt = [DateTimeOffset]::UtcNow.ToString('o')
@@ -57,7 +56,19 @@ $providerEnvelope = [ordered]@{
     headSha = $HeadSha
     response = $payload
 }
-$providerEnvelope | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $providerPath -Encoding utf8NoBOM
+$providerTemp = Join-Path $providerRoot ('.check-runs-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+$providerEnvelope | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $providerTemp -Encoding utf8NoBOM
+$providerHash = (Get-FileHash -LiteralPath $providerTemp -Algorithm SHA256).Hash.ToLowerInvariant()
+$providerPath = Join-Path $providerRoot ("check-runs-$providerHash.json")
+if (Test-Path -LiteralPath $providerPath -PathType Leaf) {
+    $existingHash = (Get-FileHash -LiteralPath $providerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($existingHash -cne $providerHash) {
+        throw "Content-addressed GitHub provider evidence path has drifted."
+    }
+    Remove-Item -LiteralPath $providerTemp -Force -ErrorAction Stop
+} else {
+    Move-Item -LiteralPath $providerTemp -Destination $providerPath -ErrorAction Stop
+}
 
 function Select-LatestCheck([string]$Name) {
     $matches = @($runs | Where-Object { [string]$_.name -ceq $Name })

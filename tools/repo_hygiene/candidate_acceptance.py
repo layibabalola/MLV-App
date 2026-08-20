@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -15,6 +16,7 @@ SCHEMA = "candidate-acceptance.v1"
 SURFACE_SCHEMA = "candidate-acceptance-surface.v1"
 FIX_BATCH_SCHEMA = "acceptance-fix-batch.v1"
 PROVIDER_SCHEMA = "candidate-acceptance-github-checks.v1"
+CHAIN_SCHEMA = "candidate-acceptance-chain.v1"
 DEFAULT_REQUIRED_SURFACES = (
     "content-self",
     "content-stranger-1",
@@ -22,6 +24,12 @@ DEFAULT_REQUIRED_SURFACES = (
     "hosted-tests",
     "hosted-codeql",
 )
+CANONICAL_PROVIDER_REPOSITORY = "layibabalola/MLV-App"
+CONTENT_REVIEWERS = {
+    "content-self": "root",
+    "content-stranger-1": "release_combined_review",
+    "content-stranger-2": "release_failopen_review",
+}
 TERMINAL_VERDICTS = {"APPROVE", "CHANGES_REQUESTED", "UNAVAILABLE"}
 BLOCKING_VERDICTS = {"CHANGES_REQUESTED", "UNAVAILABLE"}
 HOSTED_SURFACES = {"hosted-tests", "hosted-codeql"}
@@ -78,16 +86,19 @@ def acceptance_root(repo_root: Path, config: Dict[str, Any]) -> Path:
     return root
 
 
-def required_surfaces(config: Dict[str, Any], override: Optional[Sequence[str]] = None) -> List[str]:
-    raw: Iterable[Any]
-    if override:
-        raw = override
-    else:
-        raw = _acceptance_config(config).get("requiredSurfaces") or DEFAULT_REQUIRED_SURFACES
+def required_surfaces(config: Dict[str, Any]) -> List[str]:
+    raw: Iterable[Any] = _acceptance_config(config).get("requiredSurfaces") or DEFAULT_REQUIRED_SURFACES
     result = [str(item).strip() for item in raw if str(item).strip()]
-    if not result or len(result) != len(set(result)):
-        raise HygieneError("candidate acceptance required surfaces must be a non-empty unique list")
+    if result != list(DEFAULT_REQUIRED_SURFACES):
+        raise HygieneError("candidate acceptance required surfaces must equal the mandatory surface set")
     return result
+
+
+def provider_repository(config: Dict[str, Any]) -> str:
+    repository = str(_acceptance_config(config).get("providerRepository") or "").strip()
+    if repository != CANONICAL_PROVIDER_REPOSITORY:
+        raise HygieneError("candidate acceptance providerRepository must equal the canonical repository")
+    return repository
 
 
 def validation_plan(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -277,6 +288,62 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
     ]
 
 
+def _live_github_provider_payload(repository: str, head_sha: str) -> Dict[str, Any]:
+    command = [
+        "gh",
+        "api",
+        "-H",
+        "Accept: application/vnd.github+json",
+        f"repos/{repository}/commits/{head_sha}/check-runs?per_page=100",
+    ]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HygieneError(f"live GitHub provider verification failed: {exc}") from exc
+    if completed.returncode != 0:
+        raise HygieneError(f"live GitHub provider verification failed with exit {completed.returncode}: {completed.stderr[-1000:]}")
+    try:
+        response = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise HygieneError("live GitHub provider response is malformed") from exc
+    payload = {
+        "schema": PROVIDER_SCHEMA,
+        "capturedAt": utc_now(),
+        "repository": repository,
+        "headSha": head_sha,
+        "response": response,
+    }
+    if not isinstance(response, dict) or not isinstance(response.get("check_runs"), list):
+        raise HygieneError("live GitHub provider response is malformed")
+    total = response.get("total_count")
+    if not isinstance(total, int) or total < 0 or total > 100 or total != len(response["check_runs"]):
+        raise HygieneError("live GitHub provider response is truncated or exceeds the single-page bound")
+    return payload
+
+
+def verify_live_provider(ledger: Dict[str, Any], config: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> None:
+    candidate = ledger.get("candidate") if isinstance(ledger.get("candidate"), dict) else {}
+    repository = provider_repository(config)
+    head_sha = _require_sha(candidate.get("featureHead"), "featureHead")
+    live = payload if payload is not None else _live_github_provider_payload(repository, head_sha)
+    hosted_records = {
+        str(record.get("surface")): record
+        for record in ledger.get("surfaces") or []
+        if isinstance(record, dict) and record.get("surface") in HOSTED_SURFACES
+    }
+    if set(hosted_records) != HOSTED_SURFACES:
+        raise HygieneError("ready candidate acceptance ledger lacks both hosted provider records")
+    for surface in sorted(HOSTED_SURFACES):
+        selected = _selected_github_checks(live, surface, candidate, repository)
+        if any(item.get("status") != "completed" for item in selected):
+            raise HygieneError(f"live GitHub provider surface is not terminal: {surface}")
+        if _provider_failures(selected):
+            raise HygieneError(f"live GitHub provider surface is not successful: {surface}")
+        recorded = hosted_records[surface].get("providerEvidence")
+        if not isinstance(recorded, dict) or recorded.get("selectedChecks") != selected:
+            raise HygieneError(f"live GitHub provider evidence drifted from the accepted record: {surface}")
+
+
 def provider_surface_record(
     repo_root: Path,
     config: Dict[str, Any],
@@ -285,9 +352,7 @@ def provider_surface_record(
     surface: str,
     evidence_path: Path,
 ) -> Dict[str, Any]:
-    repository = str(_acceptance_config(config).get("providerRepository") or "").strip()
-    if not repository:
-        raise HygieneError("candidate acceptance providerRepository is required")
+    repository = provider_repository(config)
     evidence_path = evidence_path.resolve()
     provider_root = (acceptance_root(repo_root, config) / "provider").resolve()
     if provider_root not in evidence_path.parents:
@@ -372,7 +437,7 @@ def _validate_surface(
             if _file_sha256(evidence_path) != evidence.get("sha256"):
                 return "provider_evidence_hash_mismatch"
             payload = _provider_payload(evidence_path)
-            repository = str(_acceptance_config(config).get("providerRepository") or "")
+            repository = provider_repository(config)
             selected = _selected_github_checks(payload, surface_name, candidate, repository)
         except (HygieneError, OSError, json.JSONDecodeError, ValueError):
             return "provider_evidence_invalid"
@@ -380,6 +445,8 @@ def _validate_surface(
             return "provider_evidence_identity_mismatch"
         if evidence.get("selectedChecks") != selected:
             return "provider_selected_checks_mismatch"
+        if any(item.get("status") != "completed" for item in selected):
+            return "provider_checks_nonterminal"
         expected_verdict = "CHANGES_REQUESTED" if _provider_failures(selected) else "APPROVE"
         expected_reviewer = f"github:{repository}"
         expected_session = "github-checks:" + candidate["featureHead"] + ":" + ",".join(
@@ -391,6 +458,8 @@ def _validate_surface(
             return "provider_identity_mismatch"
         if record.get("findings") != _provider_findings(selected):
             return "provider_findings_mismatch"
+    elif surface_name in CONTENT_REVIEWERS and record.get("reviewer") != CONTENT_REVIEWERS[surface_name]:
+        return "content_reviewer_identity_mismatch"
     return None
 
 
@@ -534,12 +603,52 @@ def _atomic_json(path: Path, payload: Dict[str, Any]) -> None:
             os.unlink(temp_name)
 
 
+def _chain_path(repo_root: Path, config: Dict[str, Any]) -> Path:
+    return acceptance_root(repo_root, config) / "ledger-chain.json"
+
+
+def _chain_error(payload: Dict[str, Any]) -> Optional[str]:
+    if payload.get("schema") != CHAIN_SCHEMA or not isinstance(payload.get("tuples"), dict):
+        return "candidate acceptance chain schema mismatch"
+    clean = dict(payload)
+    supplied = clean.pop("chainHash", None)
+    if supplied != _hash(clean):
+        return "candidate acceptance chain hash mismatch"
+    for tuple_hash, hashes in payload["tuples"].items():
+        if len(str(tuple_hash)) != 64 or not isinstance(hashes, list) or not hashes or len(hashes) != len(set(hashes)):
+            return "candidate acceptance chain tuple history is malformed"
+        if any(len(str(item)) != 64 for item in hashes):
+            return "candidate acceptance chain ledger hash is malformed"
+    return None
+
+
+def _load_chain(repo_root: Path, config: Dict[str, Any], *, allow_initialize: bool) -> Dict[str, Any]:
+    path = _chain_path(repo_root, config)
+    if not path.exists():
+        root = acceptance_root(repo_root, config)
+        prior_state = (root / "latest.json").exists() or (root / "history").exists()
+        if prior_state or not allow_initialize:
+            raise HygieneError("candidate acceptance monotonic chain is missing")
+        chain = {"schema": CHAIN_SCHEMA, "tuples": {}}
+        chain["chainHash"] = _hash(chain)
+        return chain
+    try:
+        chain = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HygieneError(f"candidate acceptance monotonic chain is unreadable: {exc}") from exc
+    if not isinstance(chain, dict) or _chain_error(chain):
+        raise HygieneError(_chain_error(chain) if isinstance(chain, dict) else "candidate acceptance chain is malformed")
+    return chain
+
+
 def write_ledger(repo_root: Path, config: Dict[str, Any], ledger: Dict[str, Any]) -> Dict[str, str]:
     repo_root = repo_root.resolve()
     ledger_error = _ledger_error(ledger, repo_root=repo_root, config=config)
     if ledger_error:
         raise HygieneError(f"candidate acceptance ledger is incoherent: {ledger_error}")
     root = acceptance_root(repo_root, config)
+    chain = _load_chain(repo_root, config, allow_initialize=True)
+    tuple_hash = str(ledger["candidate"]["acceptanceTupleHash"])
     history = root / "history" / f"{ledger['candidate']['acceptanceTupleHash']}-{ledger['ledgerHash']}.json"
     latest = root / "latest.json"
     if history.exists():
@@ -550,6 +659,14 @@ def write_ledger(repo_root: Path, config: Dict[str, Any], ledger: Dict[str, Any]
             raise HygieneError("candidate acceptance history path collision")
     else:
         _atomic_json(history, ledger)
+    tuple_chain = chain["tuples"].setdefault(tuple_hash, [])
+    if ledger["ledgerHash"] not in tuple_chain:
+        tuple_chain.append(ledger["ledgerHash"])
+        chain.pop("chainHash", None)
+        chain["chainHash"] = _hash(chain)
+        _atomic_json(_chain_path(repo_root, config), chain)
+    elif tuple_chain[-1] != ledger["ledgerHash"]:
+        raise HygieneError("candidate acceptance cannot replay an older same-tuple ledger as latest")
     _atomic_json(latest, ledger)
     return {
         "latest": normalize_rel(str(latest.relative_to(repo_root))),
@@ -571,6 +688,19 @@ def latest_summary(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     ledger_error = _ledger_error(payload, repo_root=repo_root, config=config)
     if ledger_error:
         return {"schema": SCHEMA, "state": "invalid", "path": rel_path, "ready": False, "error": ledger_error}
+    try:
+        chain = _load_chain(repo_root, config, allow_initialize=False)
+    except HygieneError as exc:
+        return {"schema": SCHEMA, "state": "invalid", "path": rel_path, "ready": False, "error": str(exc)}
+    tuple_chain = chain["tuples"].get(str(payload["candidate"]["acceptanceTupleHash"]))
+    if not isinstance(tuple_chain, list) or not tuple_chain or tuple_chain[-1] != payload.get("ledgerHash"):
+        return {"schema": SCHEMA, "state": "invalid", "path": rel_path, "ready": False, "error": "latest ledger is not the monotonic chain tip"}
+    for chained_hash in tuple_chain:
+        chained_path = acceptance_root(repo_root, config) / "history" / (
+            f"{payload['candidate']['acceptanceTupleHash']}-{chained_hash}.json"
+        )
+        if not chained_path.exists():
+            return {"schema": SCHEMA, "state": "invalid", "path": rel_path, "ready": False, "error": "monotonic chain history is missing"}
     history = acceptance_root(repo_root, config) / "history" / (
         f"{payload['candidate']['acceptanceTupleHash']}-{payload['ledgerHash']}.json"
     )
@@ -666,15 +796,22 @@ def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Di
     policy = _acceptance_config(config)
     enabled = bool(policy.get("enabled", True))
     required = bool(policy.get("requireReadyForFinalize", True))
-    tooling_enforced = bool(config.get("toolingBaseline", {}).get("enabled", True))
-    if tooling_enforced and (not enabled or not required):
+    try:
+        configured_surfaces = required_surfaces(config)
+        provider_repository(config)
+    except HygieneError as exc:
+        return {
+            "status": "blocked",
+            "reason": "candidate_acceptance_policy_weakened",
+            "detail": str(exc),
+            "recoveryCommand": "restore the mandatory candidateAcceptance policy and rerun acceptance",
+        }
+    if not enabled or not required:
         return {
             "status": "blocked",
             "reason": "candidate_acceptance_policy_disabled",
             "recoveryCommand": "restore the tracked mandatory candidateAcceptance policy and rerun acceptance",
         }
-    if not enabled or not required:
-        return None
     summary = latest_summary(repo_root, config)
     expected = {
         "targetHead": detection.get("targetHead"),
@@ -687,6 +824,20 @@ def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Di
         if summary.get(key) != value
     }
     if summary.get("state") == "ready" and not mismatches:
+        latest_path = acceptance_root(repo_root, config) / "latest.json"
+        try:
+            ledger = json.loads(latest_path.read_text(encoding="utf-8"))
+            verify_live_provider(ledger, config)
+        except (HygieneError, OSError, json.JSONDecodeError) as exc:
+            mismatches["liveProvider"] = {"expected": "exact terminal provider checks", "actual": str(exc)}
+        if mismatches:
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_not_ready",
+                "candidateAcceptance": summary,
+                "mismatches": mismatches,
+                "recoveryCommand": "capture exact-head GitHub acceptance evidence and rerun acceptance",
+            }
         from .brokered_closeout import simulate_clean_integration
 
         rehearsal = simulate_clean_integration(
@@ -753,9 +904,12 @@ def _surface_record_paths(repo_root: Path, config: Dict[str, Any], tuple_hash: s
 def _historical_surface_records(repo_root: Path, config: Dict[str, Any], tuple_hash: str) -> List[Dict[str, Any]]:
     history_root = acceptance_root(repo_root, config) / "history"
     records: Dict[str, Dict[str, Any]] = {}
-    if not history_root.exists():
+    chain_path = _chain_path(repo_root, config)
+    if not history_root.exists() and not chain_path.exists():
         return []
-    for path in sorted(history_root.glob(f"{tuple_hash}-*.json")):
+    chain = _load_chain(repo_root, config, allow_initialize=False)
+    for ledger_hash in chain["tuples"].get(tuple_hash, []):
+        path = history_root / f"{tuple_hash}-{ledger_hash}.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -851,6 +1005,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
         raise HygieneError("candidate acceptance ledger lacks candidate identity")
     if args.surface in HOSTED_SURFACES:
         raise HygieneError("hosted surfaces require record-hosted with content-addressed provider evidence")
+    expected_reviewer = CONTENT_REVIEWERS.get(args.surface)
+    if expected_reviewer is None:
+        raise HygieneError("record accepts only mandatory content review surfaces")
+    if args.reviewer != expected_reviewer:
+        raise HygieneError(f"{args.surface} must be recorded by reviewer {expected_reviewer}")
     findings = []
     for raw in args.finding:
         parsed = json.loads(raw)

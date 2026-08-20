@@ -11,6 +11,7 @@ from tools.repo_hygiene.brokered_closeout import simulate_clean_integration
 from tools.repo_hygiene.candidate_acceptance import (
     _hash,
     acceptance_root,
+    CONTENT_REVIEWERS,
     candidate_identity,
     evaluate,
     final_integration_mismatches,
@@ -19,6 +20,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     surface_record,
     validation_plan,
     validate_for_finalize,
+    verify_live_provider,
     write_ledger,
 )
 from tools.repo_hygiene.core import HygieneError
@@ -129,11 +131,11 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 continue
             records.append(
                 surface_record(
-                candidate,
-                surface=surface,
-                verdict=verdicts.get(surface, "APPROVE"),
-                reviewer=f"reviewer-{index}",
-                session_id=f"session-{index}",
+                    candidate,
+                    surface=surface,
+                    verdict=verdicts.get(surface, "APPROVE"),
+                    reviewer=CONTENT_REVIEWERS[surface],
+                    session_id=f"session-{index}",
                 findings=(
                     [{"id": f"finding-{surface}", "invariant": "exact tuple remains valid", "falsifier": "mutate tuple"}]
                     if verdicts.get(surface) == "CHANGES_REQUESTED"
@@ -209,7 +211,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
             candidate,
             surface="content-stranger-1",
             verdict="APPROVE",
-            reviewer=records[0]["reviewer"],
+            reviewer=CONTENT_REVIEWERS["content-stranger-1"],
             session_id=records[0]["sessionId"],
             created_at="2026-08-20T00:01:00Z",
         )
@@ -217,7 +219,6 @@ class CandidateAcceptanceTests(unittest.TestCase):
         result = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=records)
         self.assertEqual("changes_required", result["state"])
         self.assertIn("duplicate-review-session", [item["id"] for item in result["blockers"]])
-        self.assertIn("duplicate-review-reviewer", [item["id"] for item in result["blockers"]])
 
     def test_agent_record_cannot_escalate_human_authority(self) -> None:
         candidate, rehearsal = self.candidate()
@@ -239,7 +240,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
             candidate,
             surface="content-stranger-1",
             verdict="CHANGES_REQUESTED",
-            reviewer="blocking-reviewer",
+            reviewer=CONTENT_REVIEWERS["content-stranger-1"],
             session_id="blocking-session",
             findings=[{"id": "persistent-blocker", "invariant": "a fix requires a new tuple"}],
             created_at="2026-08-20T00:00:01Z",
@@ -248,7 +249,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
             candidate,
             surface="content-stranger-1",
             verdict="APPROVE",
-            reviewer="later-reviewer",
+            reviewer=CONTENT_REVIEWERS["content-stranger-1"],
             session_id="later-session",
             created_at="2026-08-20T00:10:00Z",
         )
@@ -268,8 +269,8 @@ class CandidateAcceptanceTests(unittest.TestCase):
             session_id="different-session",
         )
         result = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=records)
-        self.assertEqual("changes_required", result["state"])
-        self.assertIn("duplicate-review-reviewer", [item["id"] for item in result["blockers"]])
+        self.assertEqual("collecting", result["state"])
+        self.assertEqual("content_reviewer_identity_mismatch", result["staleSurfaceRecords"][0]["reason"])
 
     def test_all_same_surface_blocking_findings_survive_consolidation(self) -> None:
         candidate, rehearsal = self.candidate()
@@ -280,7 +281,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
                     candidate,
                     surface="content-stranger-1",
                     verdict="CHANGES_REQUESTED",
-                    reviewer=f"reviewer-{finding_id}",
+                    reviewer=CONTENT_REVIEWERS["content-stranger-1"],
                     session_id=f"session-{finding_id}",
                     findings=[{"id": finding_id}],
                     created_at=created_at,
@@ -401,11 +402,39 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertEqual("collecting", ledger["state"])
         self.assertEqual("provider_verdict_mismatch", ledger["staleSurfaceRecords"][0]["reason"])
 
+    def test_nonterminal_or_fabricated_provider_state_cannot_finalize(self) -> None:
+        candidate, rehearsal = self.candidate()
+        ledger = self.run_evaluate(candidate=candidate, rehearsal=rehearsal, records=self.records(candidate))
+        live = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        product = next(run for run in live["response"]["check_runs"] if run["name"] == "Windows Product Oracles")
+        product["status"] = "in_progress"
+        product["conclusion"] = None
+        with self.assertRaisesRegex(HygieneError, "not terminal"):
+            verify_live_provider(ledger, self.config, payload=live)
+
+        live = json.loads(self.provider_path.read_text(encoding="utf-8"))
+        codeql = next(run for run in live["response"]["check_runs"] if run["name"] == "CodeQL")
+        codeql["id"] = 999999
+        codeql["details_url"] = "https://example.invalid/forged"
+        with self.assertRaisesRegex(HygieneError, "drifted"):
+            verify_live_provider(ledger, self.config, payload=live)
+
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
+        config["toolingBaseline"]["enabled"] = False
         config["candidateAcceptance"]["requireReadyForFinalize"] = False
         guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
         self.assertEqual("candidate_acceptance_policy_disabled", guard["reason"])
+
+        config = json.loads(json.dumps(self.config))
+        config["candidateAcceptance"]["requiredSurfaces"] = ["content-self"]
+        guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
+        self.assertEqual("candidate_acceptance_policy_weakened", guard["reason"])
+
+        config = json.loads(json.dumps(self.config))
+        config["candidateAcceptance"]["providerRepository"] = "someone-else/MLV-App"
+        guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
+        self.assertEqual("candidate_acceptance_policy_weakened", guard["reason"])
 
     def test_final_integration_tree_or_diff_drift_is_blocking(self) -> None:
         accepted = {"integrationTree": "a" * 40, "diffSha256": "b" * 64}
@@ -439,6 +468,19 @@ class CandidateAcceptanceTests(unittest.TestCase):
             json.loads((self.repo_root / second_paths["latest"]).read_text(encoding="utf-8"))["capturedAt"],
         )
 
+    def test_monotonic_chain_detects_deleted_same_tuple_blocker_history(self) -> None:
+        candidate, rehearsal = self.candidate()
+        blocked = self.run_evaluate(
+            candidate=candidate,
+            rehearsal=rehearsal,
+            records=self.records(candidate, {"content-stranger-1": "CHANGES_REQUESTED"}),
+        )
+        paths = write_ledger(self.repo_root, self.config, blocked)
+        (self.repo_root / paths["history"]).unlink()
+        summary = latest_summary(self.repo_root, self.config)
+        self.assertEqual("invalid", summary["state"])
+        self.assertIn("history is missing", summary["error"])
+
     def test_state_root_escape_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(HygieneError, "must stay under"):
@@ -469,7 +511,9 @@ class CandidateAcceptanceTests(unittest.TestCase):
             validate_for_finalize(self.repo_root, self.config, detection)["reason"],
         )
         write_ledger(self.repo_root, self.config, ledger)
-        with mock.patch("tools.repo_hygiene.brokered_closeout.simulate_clean_integration", return_value=rehearsal):
+        with mock.patch("tools.repo_hygiene.candidate_acceptance._live_github_provider_payload", return_value=json.loads(self.provider_path.read_text(encoding="utf-8"))), mock.patch(
+            "tools.repo_hygiene.brokered_closeout.simulate_clean_integration", return_value=rehearsal
+        ):
             self.assertIsNone(validate_for_finalize(self.repo_root, self.config, detection))
             drifted = {**detection, "featureHead": "9" * 40}
             guard = validate_for_finalize(self.repo_root, self.config, drifted)
@@ -508,6 +552,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
             "Check-run response exceeds the fail-closed single-page bound",
             "Check-run response contains a different head SHA",
             "candidate-acceptance-github-checks.v1",
+            "check-runs-$providerHash.json",
             "'record-hosted'",
             "[string]$_.status -cne 'completed'",
             "Repo Hygiene Python (windows-latest)",
@@ -528,6 +573,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("providerRepository", python_source)
         self.assertIn('"annotations_count" not in output', python_source)
         self.assertIn("hosted surfaces require record-hosted", python_source)
+        self.assertIn("def verify_live_provider", python_source)
 
         command = (
             "$errors=$null; $tokens=$null; "
@@ -596,6 +642,8 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 target_branch="master",
             )
             self.git(repo, "config", "color.ui", "always")
+            self.git(repo, "config", "diff.context", "10")
+            self.git(repo, "config", "diff.indentHeuristic", "true")
             colored = simulate_clean_integration(
                 repo,
                 config,

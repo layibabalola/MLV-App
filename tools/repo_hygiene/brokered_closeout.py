@@ -1025,6 +1025,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_generic_records_cannot_impersonate_hosted_surfaces",
             "test_provider_repository_and_annotation_shape_are_fail_closed",
             "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence",
+            "test_nonterminal_or_fabricated_provider_state_cannot_finalize",
+            "test_monotonic_chain_detects_deleted_same_tuple_blocker_history",
             "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced",
             "test_diff_identity_is_independent_of_git_color_configuration",
             "test_final_integration_tree_or_diff_drift_is_blocking",
@@ -1044,6 +1046,8 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def integration_range_evidence"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
@@ -7893,28 +7897,36 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
 
 def integration_range_evidence(repo_path: Path, target_head: str, integration_head: str) -> Dict[str, Any]:
     range_spec = "%s..%s" % (target_head, integration_head)
-    prefix = ["-c", "color.ui=false", "-c", "core.quotepath=false", "-c", "diff.external=", "-c", "diff.renames=false"]
-    diff_check = run_git(repo_path, prefix + ["diff", "--check", "--no-color", "--no-ext-diff", "--no-textconv", range_spec])
+    prefix = [
+        "-c", "color.ui=false",
+        "-c", "core.quotepath=false",
+        "-c", "diff.external=",
+        "-c", "diff.renames=false",
+        "-c", "diff.context=3",
+        "-c", "diff.interHunkContext=0",
+        "-c", "diff.indentHeuristic=false",
+    ]
+    diff_check = run_git(repo_path, prefix + ["diff", "--check", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", range_spec])
     changed = run_git(
         repo_path,
-        prefix + ["diff", "--name-only", "-z", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", range_spec],
+        prefix
+        + ["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", target_head, integration_head],
         check=True,
     )
     changed_paths = sorted({normalize_rel(path) for path in changed.stdout.split("\0") if normalize_rel(path)})
-    diff = run_git(
+    raw_identity = run_git(
         repo_path,
         prefix
         + [
-            "diff",
-            "--binary",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--raw",
+            "-z",
+            "--full-index",
             "--no-renames",
-            "--diff-algorithm=myers",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            range_spec,
+            target_head,
+            integration_head,
         ],
         check=True,
     )
@@ -7924,7 +7936,7 @@ def integration_range_evidence(repo_path: Path, target_head: str, integration_he
         "diffCheckStdout": diff_check.stdout,
         "diffCheckStderr": diff_check.stderr,
         "integrationTree": tree_hash(repo_path, integration_head),
-        "diffSha256": hashlib.sha256(diff.stdout.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "diffSha256": hashlib.sha256(raw_identity.stdout.encode("utf-8", errors="surrogateescape")).hexdigest(),
         "changedPaths": changed_paths,
     }
 
