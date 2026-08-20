@@ -409,46 +409,115 @@ def _provider_findings(selected: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
 
 _WINDOWS_CURL_TRUST_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
-$clientPath = 'C:\Windows\System32\curl.exe'
-$item = Get-Item -LiteralPath $clientPath -Force
-if (-not $item.PSIsContainer -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-    throw 'system curl must not be a reparse point'
-}
+$ClientPath = $env:MLVAPP_SYSTEM_CURL_PATH
+if ([string]::IsNullOrWhiteSpace($ClientPath)) { throw 'system curl path is missing' }
 Import-Module -Name (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1') -Force -ErrorAction Stop
-$signature = Get-AuthenticodeSignature -LiteralPath $clientPath
-$acl = Get-Acl -LiteralPath $clientPath
-$ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
-$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$weakSids = @($currentSid, 'S-1-1-0', 'S-1-5-11', 'S-1-5-32-544', 'S-1-5-32-545')
-$writeMask = [int64]([System.Security.AccessControl.FileSystemRights]::WriteData -bor
+$clientItem = Get-Item -LiteralPath $ClientPath -Force
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+$currentSid = $identity.User.Value
+$broadSids = @('S-1-1-0', 'S-1-5-4', 'S-1-5-11', 'S-1-5-32-545')
+$trustedOwnerSids = @('S-1-5-18', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+$fileWriteMask = [int64]([System.Security.AccessControl.FileSystemRights]::WriteData -bor
     [System.Security.AccessControl.FileSystemRights]::AppendData -bor
     [System.Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
     [System.Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+    [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
     [System.Security.AccessControl.FileSystemRights]::Delete -bor
     [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
     [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
-$unsafeWriteGrants = @()
-foreach ($rule in $acl.Access) {
-    if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
-    if (([int64]$rule.FileSystemRights -band $writeMask) -eq 0) { continue }
-    try {
-        $sid = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    } catch {
-        $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
-        continue
+$directoryReplaceMask = [int64]([System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
+    [System.Security.AccessControl.FileSystemRights]::Delete -bor
+    [System.Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+    [System.Security.AccessControl.FileSystemRights]::TakeOwnership)
+$chain = [System.Collections.Generic.List[object]]::new()
+$cursor = $clientItem.Directory
+while ($null -ne $cursor) {
+    $chain.Insert(0, $cursor)
+    $cursor = $cursor.Parent
+}
+$chain.Add($clientItem)
+$pathTrust = @()
+foreach ($pathItem in $chain) {
+    if ($pathItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "system curl trust path must not contain a reparse point: $($pathItem.FullName)"
     }
-    if ($weakSids -contains $sid) {
-        $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+    $acl = Get-Acl -LiteralPath $pathItem.FullName
+    $ownerSid = ([System.Security.Principal.NTAccount]$acl.Owner).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    $unsafeWriteGrants = @()
+    $effectiveMask = if ($pathItem -is [System.IO.DirectoryInfo]) { $directoryReplaceMask } else { $fileWriteMask }
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { continue }
+        if ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+        if (([int64]$rule.FileSystemRights -band $effectiveMask) -eq 0) { continue }
+        try {
+            $sidObject = $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier])
+            $sid = $sidObject.Value
+        } catch {
+            $unsafeWriteGrants += [ordered]@{ sid = [string]$rule.IdentityReference; rights = [string]$rule.FileSystemRights }
+            continue
+        }
+        $currentTokenCanWrite = ($sid -eq $currentSid) -or $principal.IsInRole($sidObject)
+        if ($currentTokenCanWrite -or ($broadSids -contains $sid)) {
+            $unsafeWriteGrants += [ordered]@{ sid = $sid; rights = [string]$rule.FileSystemRights }
+        }
+    }
+    $pathTrust += [ordered]@{
+        path = $pathItem.FullName
+        ownerSid = $ownerSid
+        ownerTrusted = $trustedOwnerSids -contains $ownerSid
+        unsafeWriteGrants = @($unsafeWriteGrants)
     }
 }
+$signature = Get-AuthenticodeSignature -LiteralPath $ClientPath
 [ordered]@{
-    ownerSid = $ownerSid
     signatureStatus = [string]$signature.Status
     signerSubject = [string]$signature.SignerCertificate.Subject
     signerThumbprint = [string]$signature.SignerCertificate.Thumbprint
-    unsafeWriteGrants = @($unsafeWriteGrants)
+    pathTrust = @($pathTrust)
 } | ConvertTo-Json -Depth 8 -Compress
 """
+
+
+def _minimal_system_child_environment() -> Dict[str, str]:
+    """Return a fixed environment with no loader, proxy, config, or runtime injection."""
+
+    if os.name == "nt":
+        return {
+            "SystemRoot": r"C:\Windows",
+            "WINDIR": r"C:\Windows",
+            "PATH": r"C:\Windows\System32",
+            "NoDefaultCurrentDirectoryInExePath": "1",
+        }
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+
+
+def _trusted_unix_curl_path_chain(client: Path) -> List[Dict[str, Any]]:
+    """Validate every fixed-path component that can replace the Unix curl binary."""
+
+    chain = [*reversed(client.parents), client]
+    evidence: List[Dict[str, Any]] = []
+    for index, path in enumerate(chain):
+        metadata = path.lstat()
+        expected_directory = index < len(chain) - 1
+        if stat.S_ISLNK(metadata.st_mode):
+            raise HygieneError(f"system curl trust path must not contain a symbolic link: {path}")
+        if expected_directory and not stat.S_ISDIR(metadata.st_mode):
+            raise HygieneError(f"system curl trust ancestor is not a directory: {path}")
+        if not expected_directory and not stat.S_ISREG(metadata.st_mode):
+            raise HygieneError("system curl must be a regular file")
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise HygieneError(f"system curl trust path must be root-owned and not group/other writable: {path}")
+        evidence.append({
+            "path": str(path),
+            "ownerUid": metadata.st_uid,
+            "mode": stat.S_IMODE(metadata.st_mode),
+        })
+    return evidence
 
 
 def _system_curl_path() -> Path:
@@ -478,9 +547,8 @@ def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Di
             raise HygieneError("Windows system PowerShell is unavailable for curl trust verification")
         from .brokered_closeout import run_bounded_closeout_process
 
-        trust_env = dict(os.environ)
-        for key in ("PSModulePath", "POWERSHELL_TELEMETRY_OPTOUT", "__PSLockdownPolicy"):
-            trust_env.pop(key, None)
+        trust_env = _minimal_system_child_environment()
+        trust_env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
         completed = run_bounded_closeout_process(
             repo_root,
             config,
@@ -507,23 +575,18 @@ def _trusted_system_curl_identity(repo_root: Path, config: Dict[str, Any]) -> Di
             trust = json.loads(completed["stdout"])
         except json.JSONDecodeError as exc:
             raise HygieneError("system curl trust evidence is malformed") from exc
-        if trust.get("ownerSid") not in {
-            "S-1-5-18",
-            "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-        }:
-            raise HygieneError("system curl owner is not Windows or TrustedInstaller")
+        path_trust = trust.get("pathTrust")
+        if not isinstance(path_trust, list) or len(path_trust) < 3:
+            raise HygieneError("system curl path-chain trust evidence is incomplete")
+        if any(not isinstance(item, dict) or not item.get("ownerTrusted") for item in path_trust):
+            raise HygieneError("system curl path chain is not owned by Windows or TrustedInstaller")
         if trust.get("signatureStatus") != "Valid" or "O=Microsoft Corporation" not in str(trust.get("signerSubject") or ""):
             raise HygieneError("system curl does not have a valid Microsoft signature")
-        if trust.get("unsafeWriteGrants"):
-            raise HygieneError("system curl grants write authority to the current or a broad user principal")
+        if any(item.get("unsafeWriteGrants") for item in path_trust):
+            raise HygieneError("system curl path chain grants replacement authority to the current token or a broad principal")
     else:
-        metadata = client.stat()
-        if metadata.st_uid != 0 or stat.S_ISLNK(metadata.st_mode) or metadata.st_mode & 0o022:
-            raise HygieneError("system curl must be root-owned and non-writable by group or other users")
         trust = {
-            "ownerUid": metadata.st_uid,
-            "mode": stat.S_IMODE(metadata.st_mode),
-            "unsafeWriteGrants": [],
+            "pathTrust": _trusted_unix_curl_path_chain(client),
         }
     return {
         "kind": "os-protected-system-curl",
@@ -581,26 +644,7 @@ def system_curl_github_query_command(
 
 def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root)
-    process_env = dict(os.environ)
-    for key in (
-        "GH_HOST",
-        "CURL_CA_BUNDLE",
-        "CURL_HOME",
-        "CURL_SSL_BACKEND",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "no_proxy",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "PYTHONHOME",
-        "PYTHONPATH",
-    ):
-        process_env.pop(key, None)
+    process_env = _minimal_system_child_environment()
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
     output_cap = min(closeout_max_process_output_bytes(config), 4 * 1024 * 1024)

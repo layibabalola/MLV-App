@@ -17,6 +17,9 @@ from tools.repo_hygiene.brokered_closeout import (
     verify_closeout_tooling_current,
 )
 from tools.repo_hygiene.candidate_acceptance import (
+    _minimal_system_child_environment,
+    _trusted_unix_curl_path_chain,
+    _WINDOWS_CURL_TRUST_SCRIPT,
     _hash,
     _live_github_provider_payload,
     acceptance_root,
@@ -484,6 +487,14 @@ class CandidateAcceptanceTests(unittest.TestCase):
                     "CURL_CA_BUNDLE": "attacker-ca.pem",
                     "SSL_CERT_FILE": "attacker-ca.pem",
                     "PYTHONPATH": "candidate-python-path",
+                    "LD_PRELOAD": "candidate-owned.so",
+                    "LD_LIBRARY_PATH": "candidate-libs",
+                    "LD_AUDIT": "candidate-audit.so",
+                    "DYLD_INSERT_LIBRARIES": "candidate-owned.dylib",
+                    "DYLD_LIBRARY_PATH": "candidate-dylibs",
+                    "DYLD_FRAMEWORK_PATH": "candidate-frameworks",
+                    "DYLD_FALLBACK_LIBRARY_PATH": "candidate-fallback-libs",
+                    "DYLD_FALLBACK_FRAMEWORK_PATH": "candidate-fallback-frameworks",
                 },
             ), mock.patch(
                 "tools.repo_hygiene.candidate_acceptance.resolve_repo_root",
@@ -517,8 +528,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
             f"https://api.github.com/repos/layibabalola/MLV-App/commits/{FEATURE}/check-runs?per_page=100",
             command[-1],
         )
-        for key in ("GH_HOST", "HTTPS_PROXY", "CURL_HOME", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "PYTHONPATH"):
+        for key in (
+            "GH_HOST", "HTTPS_PROXY", "CURL_HOME", "CURL_CA_BUNDLE", "SSL_CERT_FILE", "PYTHONPATH",
+            "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_FALLBACK_FRAMEWORK_PATH",
+        ):
             self.assertNotIn(key, bounded.call_args.kwargs["env"])
+        self.assertEqual(_minimal_system_child_environment(), bounded.call_args.kwargs["env"])
         self.assertEqual(60000, bounded.call_args.kwargs["timeout_ms"])
         self.assertEqual("candidate-acceptance-github-checks.v1", payload["schema"])
         self.assertEqual("os-protected-system-curl", payload["providerClient"]["kind"])
@@ -642,18 +658,26 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 "stderr": "",
             }
             unsafe = dict(base, stdout=json.dumps({
-                "ownerSid": "S-1-5-18",
                 "signatureStatus": "Valid",
                 "signerSubject": "CN=Microsoft Windows, O=Microsoft Corporation",
                 "signerThumbprint": "A" * 40,
-                "unsafeWriteGrants": [{"sid": "S-1-5-32-545", "rights": "Write"}],
+                "pathTrust": [{
+                    "path": str(client),
+                    "ownerSid": "S-1-5-18",
+                    "ownerTrusted": True,
+                    "unsafeWriteGrants": [{"sid": "S-1-5-4", "rights": "WriteData"}],
+                }] * 3,
             }))
             unsigned = dict(base, stdout=json.dumps({
-                "ownerSid": "S-1-5-18",
                 "signatureStatus": "NotSigned",
                 "signerSubject": "",
                 "signerThumbprint": "",
-                "unsafeWriteGrants": [],
+                "pathTrust": [{
+                    "path": str(client),
+                    "ownerSid": "S-1-5-18",
+                    "ownerTrusted": True,
+                    "unsafeWriteGrants": [],
+                }] * 3,
             }))
             with mock.patch(
                 "tools.repo_hygiene.candidate_acceptance._system_curl_path", return_value=client
@@ -661,10 +685,64 @@ class CandidateAcceptanceTests(unittest.TestCase):
                 "tools.repo_hygiene.brokered_closeout.run_bounded_closeout_process",
                 side_effect=[unsafe, unsigned],
             ):
-                with self.assertRaisesRegex(HygieneError, "grants write authority"):
+                with self.assertRaisesRegex(HygieneError, "grants replacement authority"):
                     _trusted_system_curl_identity(self.repo_root, self.config)
                 with self.assertRaisesRegex(HygieneError, "valid Microsoft signature"):
                     _trusted_system_curl_identity(self.repo_root, self.config)
+
+    @unittest.skipUnless(os.name == "nt", "Windows ACL token-group classification")
+    def test_windows_system_curl_trust_classifies_enabled_group_and_ancestor_replacement(self) -> None:
+        powershell = Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+        with tempfile.TemporaryDirectory() as temp:
+            client = Path(temp) / "curl.exe"
+            client.write_bytes(b"unsigned-test-client")
+            add_rule = (
+                "$acl=Get-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH;"
+                "$sid=[System.Security.Principal.SecurityIdentifier]::new('S-1-5-4');"
+                "$rule=[System.Security.AccessControl.FileSystemAccessRule]::new("
+                "$sid,[System.Security.AccessControl.FileSystemRights]::WriteData,"
+                "[System.Security.AccessControl.AccessControlType]::Allow);"
+                "$null=$acl.AddAccessRule($rule);"
+                "Set-Acl -LiteralPath $env:MLVAPP_SYSTEM_CURL_PATH -AclObject $acl"
+            )
+            env = _minimal_system_child_environment()
+            env["MLVAPP_SYSTEM_CURL_PATH"] = str(client)
+            subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", add_rule],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            completed = subprocess.run(
+                [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _WINDOWS_CURL_TRUST_SCRIPT],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            trust = json.loads(completed.stdout)
+            same_path = lambda value, expected: os.path.normcase(str(Path(value).resolve())) == os.path.normcase(str(expected.resolve()))
+            file_trust = next(item for item in trust["pathTrust"] if same_path(item["path"], client))
+            self.assertTrue(any(item["sid"] == "S-1-5-4" for item in file_trust["unsafeWriteGrants"]))
+            parent_trust = next(item for item in trust["pathTrust"] if same_path(item["path"], client.parent))
+            self.assertFalse(parent_trust["ownerTrusted"])
+            self.assertTrue(any(item["unsafeWriteGrants"] for item in trust["pathTrust"][:-1]))
+
+    @unittest.skipUnless(os.name != "nt", "Unix fixed-path ownership and ancestry")
+    def test_unix_system_curl_trust_rejects_writable_ancestor(self) -> None:
+        actual = _trusted_unix_curl_path_chain(Path("/usr/bin/curl"))
+        self.assertEqual(["/", "/usr", "/usr/bin", "/usr/bin/curl"], [item["path"] for item in actual])
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp) / "candidate-writable"
+            parent.mkdir()
+            client = parent / "curl"
+            client.write_bytes(b"fake")
+            client.chmod(0o555)
+            with self.assertRaisesRegex(HygieneError, "root-owned and not group/other writable"):
+                _trusted_unix_curl_path_chain(client)
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
@@ -1130,11 +1208,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn('"\\n%{http_code}"', python_source)
         self.assertIn("Get-AuthenticodeSignature", python_source)
         self.assertIn("unsafeWriteGrants", python_source)
+        self.assertIn("$principal.IsInRole($sidObject)", python_source)
+        self.assertIn("DeleteSubdirectoriesAndFiles", python_source)
+        self.assertIn("def _minimal_system_child_environment", python_source)
+        self.assertIn("def _trusted_unix_curl_path_chain", python_source)
+        self.assertIn('"PATH": "/usr/bin:/bin"', python_source)
+        self.assertIn('"NoDefaultCurrentDirectoryInExePath": "1"', python_source)
         self.assertIn("run_bounded_closeout_process", python_source)
-        self.assertIn('"CURL_HOME"', python_source)
-        self.assertIn('"CURL_CA_BUNDLE"', python_source)
-        self.assertIn('"SSL_CERT_FILE"', python_source)
-        self.assertIn('"PYTHONPATH"', python_source)
 
         command = (
             "$errors=$null; $tokens=$null; "
