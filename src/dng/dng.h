@@ -97,7 +97,8 @@ typedef struct dngPayloadWriter dngPayloadWriter_t;
 void dng_unpack_image_bits(uint16_t * input_buffer, uint16_t * output_buffer, int width, int height, uint32_t bpp);
 void dng_pack_image_bits(uint16_t * input_buffer, uint16_t * output_buffer, int width, int height, uint32_t bpp, int big_endian);
 int dng_compress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t * output_buffer_size, int width, int height, uint32_t bpp);
-int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp);
+int dng_lj92_output_capacity(int width, int height, size_t * output_capacity);
+int dng_decompress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp);
 
 /* routines to initialize, save and free DNG exporting struct */
 dngObject_t * initDngObject(mlvObject_t * mlv_data, int raw_state, double fps, int32_t par[4]);

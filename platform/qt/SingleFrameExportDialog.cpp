@@ -219,6 +219,13 @@ void SingleFrameExportDialog::exportDng()
 
     //Init DNG data struct
     dngObject_t * cinemaDng = initDngObject( m_pMlvObject, ui->comboBoxCodec->currentIndex(), 1, picAR ); // 2nd param: 0 = uncompresed, 1 = lossless
+    if( !cinemaDng )
+    {
+        QMessageBox::critical( this, tr( "MLV App - Export file error" ),
+                               tr( "Could not allocate the DNG export buffers for: %1\n" ).arg( fileName ),
+                               QMessageBox::Cancel, QMessageBox::Cancel );
+        return;
+    }
 
     //Save cDNG frame
 #ifdef Q_OS_UNIX

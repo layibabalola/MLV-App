@@ -152,7 +152,7 @@ TEST(SecuritySizing, ResizeAndImageKernelsRejectHostileDimensionsBeforeIndexing)
     bool allocationRejected = false;
     try
     {
-        throwing(3, 3);
+        throwing(3, 3, ARRAY2D_LOCK_DATA);
     }
     catch (const std::bad_alloc &)
     {
@@ -163,6 +163,10 @@ TEST(SecuritySizing, ResizeAndImageKernelsRejectHostileDimensionsBeforeIndexing)
     ASSERT_EQ(2, throwing.width());
     ASSERT_EQ(2, throwing.height());
     ASSERT_EQ(73, throwing[0][0].value);
+    ASSERT_FALSE(throwing.is_locked());
+    throwing(3, 3);
+    ASSERT_EQ(3, throwing.width());
+    ASSERT_EQ(3, throwing.height());
 
     const unsigned bayerCfa[2][2] = {{0u, 1u}, {1u, 2u}};
     const unsigned fourColorCfa[2][2] = {{0u, 1u}, {3u, 2u}};
@@ -179,6 +183,9 @@ TEST(SecuritySizing, ResizeAndImageKernelsRejectHostileDimensionsBeforeIndexing)
               vng4_demosaic(std::numeric_limits<int>::max(),
                             std::numeric_limits<int>::max(),
                             nullptr, nullptr, nullptr, nullptr, fourColorCfa, progress));
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              vng4_demosaic(50000, 6000,
+                            nullptr, nullptr, nullptr, nullptr, fourColorCfa, progress));
 
     double fitParams[2][2][16] = {};
     ASSERT_EQ(RP_MEMORY_ERROR,
@@ -186,6 +193,12 @@ TEST(SecuritySizing, ResizeAndImageKernelsRejectHostileDimensionsBeforeIndexing)
                          std::numeric_limits<int>::max(), 1,
                          false, 1, 0.0, 0.0, false,
                          nullptr, nullptr, bayerCfa, progress,
+                         fitParams, false));
+    ASSERT_EQ(RP_MEMORY_ERROR,
+              CA_correct(std::numeric_limits<int>::min(), 0,
+                         std::numeric_limits<int>::max(), 1,
+                         false, 1, 0.0, 0.0, true,
+                         nullptr, reinterpret_cast<float **>(static_cast<uintptr_t>(1)), bayerCfa, progress,
                          fitParams, false));
 
     CA_correct_RT(nullptr, 0, 0,
@@ -218,6 +231,36 @@ TEST(SecuritySizing, DngCompressorRejectsExpansionBeyondCallerCapacity)
     {
         ASSERT_EQ(UINT16_C(0xa55a), value);
     }
+
+    size_t capacity = 0;
+    ASSERT_FALSE(dng_lj92_output_capacity(4, 3, &capacity));
+    ASSERT_FALSE(dng_lj92_output_capacity(50000, 40000, &capacity));
+
+    outputSize = sizeof(output);
+    ASSERT_TRUE(dng_compress_image(output, sizeof(output), input, &outputSize,
+                                   4, 3, 14) != 0);
+    ASSERT_EQ(static_cast<size_t>(0), outputSize);
+
+    uint16_t decoded[4] = {UINT16_C(0xa55a), UINT16_C(0xa55a),
+                           UINT16_C(0xa55a), UINT16_C(0xa55a)};
+    ASSERT_TRUE(dng_decompress_image(decoded, sizeof(uint16_t), output, sizeof(output),
+                                     2, 2, 14) != 0);
+    for (const uint16_t value : decoded)
+    {
+        ASSERT_EQ(UINT16_C(0xa55a), value);
+    }
+
+    uint16_t packed[16] = {};
+    uint16_t unpacked[16] = {};
+    for (size_t i = 0; i < 16; ++i) input[i] = static_cast<uint16_t>(i * 701u);
+    dng_pack_image_bits(packed, input, 4, 4, 14, 0);
+    dng_unpack_image_bits(unpacked, packed, 4, 4, 14);
+    for (size_t i = 0; i < 16; ++i)
+    {
+        ASSERT_EQ(input[i], unpacked[i]);
+    }
+
+    ASSERT_TRUE(saveDngFrame(nullptr, nullptr, 0, nullptr, nullptr) != 0);
 }
 
 TEST(Phase3Mode, DefaultKillSwitchStateKeepsModesAvailable)

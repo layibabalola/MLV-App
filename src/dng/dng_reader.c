@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "dng_tag_codes.h"
 #include "dng_tag_types.h"
@@ -231,6 +232,9 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
 {
     if(!info || !strip || !out16 || !info->valid) return 1;
 
+    if(info->width == 0 || info->height == 0
+       || info->width > (uint32_t)INT_MAX || info->height > (uint32_t)INT_MAX
+       || (size_t)info->width > SIZE_MAX / (size_t)info->height) return 1;
     const int w   = (int)info->width;
     const int h   = (int)info->height;
     uint32_t bpp = info->bits_per_sample;
@@ -241,7 +245,8 @@ int dng_reader_decode_strip(const dng_frame_info_t * info,
     {
         /* Reuse the existing LJ92 wrapper. It re-reads true geometry/bitdepth
          * from the JPEG SOF, so the passed w/h/bpp are advisory. */
-        return dng_decompress_image(out16, (uint16_t *)strip, strip_size, w, h, bpp);
+        return dng_decompress_image(out16, pixels * sizeof(uint16_t),
+                                    (uint16_t *)strip, strip_size, w, h, bpp);
     }
 
     /* Uncompressed strip. Two sub-cases:

@@ -69,6 +69,7 @@
 #define ARRAY2D_VERBOSE     8
 
 #include <cstdio>
+#include <stdexcept>
 
 
 template<typename T>
@@ -275,10 +276,10 @@ public:
     // or use as resize of 2D array
     void operator()(int w, int h, unsigned int flgs = 0, int offset = 0)
     {
-        flags = flgs;
+        const unsigned int requestedFlags = flgs;
 
-        if (flags & ARRAY2D_VERBOSE) {
-            printf("got init request %dx%d flags=%u\n", w, h, flags);
+        if (requestedFlags & ARRAY2D_VERBOSE) {
+            printf("got init request %dx%d flags=%u\n", w, h, requestedFlags);
             printf("previous was data %p ptr %p \n", data, ptr);
         }
 
@@ -287,23 +288,23 @@ public:
             raise( SIGSEGV);
         }
 
-        lock = flags & ARRAY2D_LOCK_DATA;
-
+        const std::size_t elementCount = checked_element_count(w, h);
         ar_realloc(w, h, offset);
 
-        if (flags & ARRAY2D_CLEAR_DATA) {
-            const std::size_t elementCount = checked_element_count(w, h);
+        if (requestedFlags & ARRAY2D_CLEAR_DATA) {
             memset(data + offset, 0, elementCount * sizeof(T));
         }
+        flags = requestedFlags;
+        lock = requestedFlags & ARRAY2D_LOCK_DATA;
     }
 
     // import from flat data
     void operator()(int w, int h, T* copy, unsigned int flgs = 0)
     {
-        flags = flgs;
+        const unsigned int requestedFlags = flgs;
 
-        if (flags & ARRAY2D_VERBOSE) {
-            printf("got init request %dx%d flags=%u\n", w, h, flags);
+        if (requestedFlags & ARRAY2D_VERBOSE) {
+            printf("got init request %dx%d flags=%u\n", w, h, requestedFlags);
             printf("previous was data %p ptr %p \n", data, ptr);
         }
 
@@ -312,11 +313,14 @@ public:
             raise( SIGSEGV);
         }
 
-        lock = flags & ARRAY2D_LOCK_DATA;
-
-        ar_realloc(w, h);
         const std::size_t elementCount = checked_element_count(w, h);
+        if (elementCount != 0 && !copy) {
+            throw std::invalid_argument("array2D import source is null");
+        }
+        ar_realloc(w, h);
         memcpy(data, copy, elementCount * sizeof(T));
+        flags = requestedFlags;
+        lock = requestedFlags & ARRAY2D_LOCK_DATA;
     }
     int width() const
     {
@@ -325,6 +329,10 @@ public:
     int height() const
     {
         return y;
+    }
+    bool is_locked() const noexcept
+    {
+        return lock != 0;
     }
 
     operator bool()

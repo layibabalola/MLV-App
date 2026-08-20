@@ -82,7 +82,7 @@ rpError vng4_demosaic (int width, int height, const float * const *rawData, floa
         return RP_MEMORY_ERROR;
     }
     const size_t pixelCount = heightElements * widthElements;
-    if (pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())
+    if (pixelCount > static_cast<size_t>(std::numeric_limits<int>::max()) / 8u
         || pixelCount > std::numeric_limits<size_t>::max() / sizeof(float[4])) {
         return RP_MEMORY_ERROR;
     }

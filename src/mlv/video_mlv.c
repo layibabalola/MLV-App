@@ -8417,10 +8417,32 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
 {
     mlv_vidf_hdr_t vidf_hdr = { 0 };
 
+    if(!video || !output_mlv || !error_message || video->RAWI.xRes == 0 || video->RAWI.yRes == 0
+       || video->RAWI.raw_info.bits_per_pixel == 0
+       || (size_t)video->RAWI.xRes > SIZE_MAX / (size_t)video->RAWI.yRes)
+    {
+        if(error_message) sprintf(error_message, "Invalid frame dimensions");
+        return 1;
+    }
     int write_ok = (export_mode == MLV_AVERAGED_FRAME) ? 0 : 1;
-    uint32_t pixel_count = video->RAWI.xRes * video->RAWI.yRes;
-    uint32_t frame_size_packed = (uint32_t)(pixel_count * video->RAWI.raw_info.bits_per_pixel / 8);
-    uint32_t frame_size_unpacked = pixel_count * 2;
+    const size_t pixel_count = (size_t)video->RAWI.xRes * (size_t)video->RAWI.yRes;
+    if(pixel_count > SIZE_MAX / sizeof(uint16_t)
+       || pixel_count > (SIZE_MAX / video->RAWI.raw_info.bits_per_pixel))
+    {
+        sprintf(error_message, "Frame dimensions exceed addressable memory");
+        return 1;
+    }
+    const size_t frame_size_unpacked = pixel_count * sizeof(uint16_t);
+    const size_t packed_bits = pixel_count * video->RAWI.raw_info.bits_per_pixel;
+    const size_t frame_size_packed_size = (packed_bits + 7u) / 8u;
+    size_t compression_capacity = 0;
+    if(frame_size_packed_size > UINT32_MAX
+       || !dng_lj92_output_capacity(video->RAWI.xRes, video->RAWI.yRes, &compression_capacity))
+    {
+        sprintf(error_message, "Frame dimensions exceed MLV/LJ92 limits");
+        return 1;
+    }
+    const uint32_t frame_size_packed = (uint32_t)frame_size_packed_size;
     uint32_t max_frame_number = frame_end - frame_start + 1;
 
     int chunk = video->video_index[frame_index].chunk_num;
@@ -8440,8 +8462,21 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
     vidf_hdr.blockSize -= vidf_hdr.frameSpace;
     vidf_hdr.frameSpace = 0;
 
-    /* for safety allocate max possible size buffer for VIDF block, calculated for 16bits per pixel */
-    uint8_t * block_buf = calloc(sizeof(mlv_vidf_hdr_t) + frame_size_unpacked, 1);
+    size_t frame_capacity = frame_size_unpacked;
+    if(compression_capacity > frame_capacity) frame_capacity = compression_capacity;
+    if((size_t)frame_size > frame_capacity) frame_capacity = frame_size;
+    if(export_mode == MLV_DF_INT && video->DARK.blockSize > sizeof(mlv_dark_hdr_t))
+    {
+        const size_t dark_payload = video->DARK.blockSize - sizeof(mlv_dark_hdr_t);
+        if(dark_payload > frame_capacity) frame_capacity = dark_payload;
+    }
+    if(frame_capacity > UINT32_MAX - sizeof(mlv_vidf_hdr_t))
+    {
+        sprintf(error_message, "VIDF frame exceeds block-size limit");
+        return 1;
+    }
+    /* Allocate for the largest legal packed, unpacked, compressed, or pass-through frame. */
+    uint8_t * block_buf = calloc(sizeof(mlv_vidf_hdr_t) + frame_capacity, 1);
     if(!block_buf)
     {
         sprintf(error_message, "Could not allocate memory for VIDF block");
@@ -8449,7 +8484,7 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         return 1;
     }
     /* for safety allocate max possible size buffer for image data, calculated for 16bits per pixel */
-    uint8_t * frame_buf = calloc(frame_size_unpacked, 1);
+    uint8_t * frame_buf = calloc(frame_capacity, 1);
     if(!frame_buf)
     {
         sprintf(error_message, "Could not allocate memory for VIDF frame");
@@ -8501,7 +8536,10 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         }
         if(isMlvCompressed(video))
         {
-            int ret = dng_decompress_image(frame_buf_unpacked, (uint16_t*)frame_buf, frame_size, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
+                                           (uint16_t*)frame_buf, frame_size,
+                                           video->RAWI.xRes, video->RAWI.yRes,
+                                           video->RAWI.raw_info.bits_per_pixel);
             if(ret != LJ92_ERROR_NONE)
             {
                 sprintf(error_message, "Averaging: could not decompress frame:  LJ92_ERROR %u", ret);
@@ -8516,14 +8554,14 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         {
             dng_unpack_image_bits(frame_buf_unpacked, (uint16_t*)frame_buf, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
         }
-        for(uint32_t i = 0; i < pixel_count; i++)
+        for(size_t i = 0; i < pixel_count; i++)
         {
             avg_buf[i] += frame_buf_unpacked[i];
         }
 
         if(frame_index == frame_end - 1)
         {
-            for(uint32_t i = 0; i < pixel_count; i++)
+            for(size_t i = 0; i < pixel_count; i++)
             {
                 frame_buf_unpacked[i] = (avg_buf[i] + max_frame_number / 2) / max_frame_number;
             }
@@ -8544,7 +8582,7 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         size_t frame_size_compressed = 0;
 
         uint16_t * frame_buf_unpacked = calloc(frame_size_unpacked, 1);
-        uint16_t * frame_buf_compressed = calloc(frame_size_unpacked, 1);
+        uint8_t * frame_buf_compressed = calloc(compression_capacity, 1);
         if(!frame_buf_unpacked || !frame_buf_compressed)
         {
             DEBUG( printf("\nCould not allocate memory for frame compressing\n"); )
@@ -8554,8 +8592,8 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
         if(!ret)
         {
             dng_unpack_image_bits(frame_buf_unpacked, (uint16_t*)frame_buf, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
-            ret = dng_compress_image(frame_buf_compressed,
-                                     frame_size_unpacked,
+            ret = dng_compress_image((uint16_t*)frame_buf_compressed,
+                                     compression_capacity,
                                      frame_buf_unpacked,
                                      &frame_size_compressed,
                                      video->RAWI.xRes,
@@ -8567,20 +8605,14 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
                 memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
                 memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), (uint8_t*)frame_buf_compressed, frame_size_compressed);
             }
-            else // if compression error then save original uncompressed raw
+            else
             {
-                memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
-                memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size);
-
-                /* patch MLVI header and set back videoClass to 1 (uncompressed) */
-                uint64_t current_pos = file_get_pos(output_mlv);
-                file_set_pos(output_mlv, 32, SEEK_SET);
-                uint16_t videoClass = 0x1;
-                if(fwrite(&videoClass, sizeof(uint16_t), 1, output_mlv) != 1)
-                {
-                    DEBUG( printf("\nCould not patch videoClass in MLV header\n"); )
-                }
-                file_set_pos(output_mlv, current_pos, SEEK_SET);
+                sprintf(error_message, "Could not compress frame: LJ92_ERROR %d", ret);
+                free(frame_buf_unpacked);
+                free(frame_buf_compressed);
+                free(frame_buf);
+                free(block_buf);
+                return ret ? ret : 1;
             }
         }
 
@@ -8600,7 +8632,10 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
 
         if(!ret)
         {
-            int ret = dng_decompress_image(frame_buf_unpacked, (uint16_t*)frame_buf, frame_size, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel);
+            int ret = dng_decompress_image(frame_buf_unpacked, frame_size_unpacked,
+                                           (uint16_t*)frame_buf, frame_size,
+                                           video->RAWI.xRes, video->RAWI.yRes,
+                                           video->RAWI.raw_info.bits_per_pixel);
             if(ret == LJ92_ERROR_NONE)
             {
                 dng_pack_image_bits((uint16_t*)frame_buf, frame_buf_unpacked, video->RAWI.xRes, video->RAWI.yRes, video->RAWI.raw_info.bits_per_pixel, 0);
@@ -8608,20 +8643,13 @@ int saveMlvAVFrame(mlvObject_t * video, FILE * output_mlv, int export_audio, int
                 memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
                 memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size_packed);
             }
-            else // if decompression error then save original lossless raw
+            else
             {
-                memcpy(block_buf, &vidf_hdr, sizeof(mlv_vidf_hdr_t));
-                memcpy((block_buf + sizeof(mlv_vidf_hdr_t)), frame_buf, frame_size);
-
-                /* patch MLVI header and set back videoClass to 0x21 (lossless) */
-                uint64_t current_pos = file_get_pos(output_mlv);
-                file_set_pos(output_mlv, 32, SEEK_SET);
-                uint16_t videoClass = 0x1 | MLV_VIDEO_CLASS_FLAG_LJ92;
-                if(fwrite(&videoClass, sizeof(uint16_t), 1, output_mlv) != 1)
-                {
-                    DEBUG( printf("\nCould not patch videoClass in MLV header\n"); )
-                }
-                file_set_pos(output_mlv, current_pos, SEEK_SET);
+                sprintf(error_message, "Could not decompress frame: LJ92_ERROR %d", ret);
+                free(frame_buf_unpacked);
+                free(frame_buf);
+                free(block_buf);
+                return ret ? ret : 1;
             }
         }
 

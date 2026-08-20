@@ -2094,23 +2094,34 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
 */
 void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int width, int height, uint32_t bpp)
 {
-    uint32_t pixel_count = width * height;
-    uint32_t mask = (1 << bpp) - 1;
+    if (!output_buffer || !input_buffer || width <= 0 || height <= 0 || bpp == 0 || bpp > 16
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / (size_t)bpp) {
+        return;
+    }
+    const size_t packed_words = (pixel_count * (size_t)bpp + 15u) / 16u;
+    uint32_t mask = (UINT32_C(1) << bpp) - 1u;
     uint16_t *packed_bits = input_buffer;
     uint16_t *unpacked_bits = output_buffer;
 
     #pragma omp parallel for
-    for (uint32_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
+    for (size_t pixel_index = 0; pixel_index < pixel_count; pixel_index++)
     {
-        uint32_t bits_offset = pixel_index * bpp;
-        uint32_t bits_address = bits_offset / 16;
-        uint32_t bits_shift = bits_offset % 16;
+        const size_t bits_offset = pixel_index * (size_t)bpp;
+        const size_t bits_address = bits_offset / 16u;
+        const uint32_t bits_shift = (uint32_t)(bits_offset % 16u);
 
         /* fetch two 16 bit words into a 32 bit register and correct it plus shift it as needed.
         after the 32 bit fetch, the two 16 bit words will be swapped, so use a ROR to align them correctly.
         ROR by 16 to swap 16 bit words plus the bits needed to put the needed pixel bits to right position */
         uint32_t rotate_value = 16 + ((32 - bpp) - bits_shift);
-        uint32_t uncorrected_data = *((uint32_t *)&packed_bits[bits_address]);
+        const uint32_t low_word = packed_bits[bits_address];
+        const uint32_t high_word = bits_address + 1u < packed_words
+            ? packed_bits[bits_address + 1u] : 0u;
+        const uint32_t uncorrected_data = low_word | (high_word << 16u);
         uint32_t data = ROR32(uncorrected_data, rotate_value);
 
         unpacked_bits[pixel_index] = (uint16_t)(data & mask);
@@ -2126,15 +2137,22 @@ void dng_unpack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, in
 */
 void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int width, int height, uint32_t bpp, int big_endian)
 {
-    uint32_t pixel_count = width * height;
+    if (!output_buffer || !input_buffer || width <= 0 || height <= 0 || bpp == 0 || bpp > 16
+        || (size_t)width > SIZE_MAX / (size_t)height) {
+        return;
+    }
+    const size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / (size_t)bpp) {
+        return;
+    }
     uint32_t bits_free = 16 - bpp;
     uint16_t *unpacked_bits = input_buffer;
     uint16_t *packed_bits = output_buffer;
 
     packed_bits[0] = unpacked_bits[0] << bits_free;
-    for (uint32_t pixel_index = 1; pixel_index < pixel_count; pixel_index++)
+    for (size_t pixel_index = 1; pixel_index < pixel_count; pixel_index++)
     {
-        uint32_t bits_offset = (pixel_index * bits_free) % 16;
+        uint32_t bits_offset = (uint32_t)((pixel_index * (size_t)bits_free) % 16u);
         uint32_t bits_to_rol = bits_free + bits_offset + (bits_offset > 0) * 16;
 
         /* increment pointer by two bytes but fetch 32 bit words from input and outbut buffers.
@@ -2143,7 +2161,8 @@ void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int 
         mask/zero high 16 bits of 32 bit word of packed buffer and do logical OR to ROLed unpacked one.
         make current packed 16 bit word big endian to satisfy DNG spec */
         uint32_t data = ROL32((uint32_t)unpacked_bits[pixel_index], bits_to_rol);
-        *(uint32_t *)packed_bits = (*(uint32_t *)packed_bits & 0x0000FFFF) | data;
+        packed_bits[0] = (uint16_t)(packed_bits[0] | (uint16_t)data);
+        packed_bits[1] = (uint16_t)(data >> 16u);
 
         if(bits_offset > 0 && bits_offset <= bpp)
         {
@@ -2154,24 +2173,31 @@ void dng_pack_image_bits(uint16_t * output_buffer, uint16_t * input_buffer, int 
 }
 
 /* decompress LJ92 image to output_buffer */
-int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp)
+int dng_decompress_image(uint16_t * output_buffer, size_t output_buffer_capacity, uint16_t * input_buffer, size_t input_buffer_size, int width, int height, uint32_t bpp)
 {
-    if (!output_buffer || !input_buffer || width <= 0 || height <= 0
+    if (!output_buffer || !input_buffer || input_buffer_size == 0 || input_buffer_size > (size_t)INT_MAX
+        || width <= 0 || height <= 0
         || (size_t)width > SIZE_MAX / (size_t)height
         || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
         return LJ92_ERROR_CORRUPT;
     }
     const size_t expected_pixels = (size_t)width * (size_t)height;
+    const size_t expected_bytes = expected_pixels * sizeof(uint16_t);
+    if (output_buffer_capacity < expected_bytes || bpp == 0 || bpp > 16) {
+        return LJ92_ERROR_CORRUPT;
+    }
     int components = 1;
+    int decoded_bpp = 0;
     lj92 decoder_object;
 
-    int ret = lj92_open(&decoder_object, (uint8_t*)input_buffer, input_buffer_size, &width, &height, (int*)&bpp, &components);
+    const uint32_t expected_bpp = bpp;
+    int ret = lj92_open(&decoder_object, (uint8_t*)input_buffer, input_buffer_size, &width, &height, &decoded_bpp, &components);
     if(ret != LJ92_ERROR_NONE)
     {
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, expected_pixels * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_bytes);
         return ret;
     }
 
@@ -2183,8 +2209,13 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
     } else {
         decoded_pixels = (size_t)width * (size_t)height * (size_t)components;
     }
+    /* MLV-App's lossless encoder represents the row-paired Bayer stream as
+     * two LJ92 components. Accept only the native one- or two-component
+     * layouts, and require their decoded sample total and bit depth to match
+     * the caller's retained RAW geometry exactly. */
     if (ret == LJ92_ERROR_NONE
-        && (decoded_pixels != expected_pixels || expected_pixels > (size_t)INT_MAX)) {
+        && ((components != 1 && components != 2) || decoded_bpp != (int)expected_bpp
+            || decoded_pixels != expected_pixels || expected_pixels > (size_t)INT_MAX)) {
         ret = LJ92_ERROR_CORRUPT;
     }
     if (ret == LJ92_ERROR_NONE) {
@@ -2195,16 +2226,16 @@ int dng_decompress_image(uint16_t * output_buffer, uint16_t * input_buffer, size
 #ifndef STDOUT_SILENT
         printf("LJ92 decoder: Failed with error code (%d)\n", ret);
 #endif
-        memset(output_buffer, 0, expected_pixels * sizeof(uint16_t));
+        memset(output_buffer, 0, expected_bytes);
     }
 
     lj92_close(decoder_object);
     return ret;
 }
 
-static int dng_lj92_output_capacity(int width, int height, size_t * output_capacity)
+int dng_lj92_output_capacity(int width, int height, size_t * output_capacity)
 {
-    if (!output_capacity || width <= 0 || height <= 1 || width > INT_MAX / 2
+    if (!output_capacity || width <= 0 || height <= 1 || (height & 1) != 0 || width > INT_MAX / 2
         || (size_t)width > SIZE_MAX / (size_t)height) {
         return 0;
     }
@@ -2214,7 +2245,8 @@ static int dng_lj92_output_capacity(int width, int height, size_t * output_capac
     }
     const int encoded_width = width * 2;
     const int encoded_height = height / 2;
-    if (encoded_height <= 0 || encoded_width > INT_MAX / encoded_height) {
+    if (encoded_height <= 0 || encoded_width > INT_MAX / encoded_height
+        || encoded_width * encoded_height > (INT_MAX - 200) / 3) {
         return 0;
     }
     *output_capacity = input_pixels * 3u + 200u;
@@ -2231,7 +2263,7 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
                                        exportProfileFrame_t * profile_frame)
 {
     if (!output_buffer || !input_buffer || !output_buffer_size
-        || width <= 0 || height <= 0 || width > INT_MAX / 2
+        || width <= 0 || height <= 0 || bpp == 0 || bpp > 16 || width > INT_MAX / 2
         || (size_t)width > SIZE_MAX / (size_t)height
         || (size_t)width * (size_t)height > SIZE_MAX / sizeof(uint16_t)) {
         if (output_buffer_size) *output_buffer_size = 0;
@@ -2256,7 +2288,7 @@ static int dng_compress_image_profiled(uint16_t * output_buffer,
                           new_width * new_height, 0, NULL, 0,
                           &compressed, &encoded_length);
     if (ret == LJ92_ERROR_NONE
-        && (encoded_length < 0
+        && (!compressed || encoded_length < 0
             || (size_t)encoded_length > maximum_encoded_size
             || (size_t)encoded_length > output_buffer_capacity)) {
         ret = LJ92_ERROR_CORRUPT;
@@ -2496,6 +2528,11 @@ static int dng_get_frame(mlvObject_t * mlv_data,
         if (dng_data->raw_input_state == COMPRESSED_RAW) /* If lossless, decompress or pass trough */
         {
             dng_data->image_size = dng_get_image_size(mlv_data, IMG_SIZE_LOSLESS, frame_index);
+            if(dng_data->image_size == 0 || dng_data->image_size > dng_data->image_capacity)
+            {
+                export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
+                return LJ92_ERROR_CORRUPT;
+            }
             if(fread(dng_data->image_buf, dng_data->image_size, 1, fd) != 1)
             {
                 export_profile_stage_end(profile_frame, EXPORT_PROFILE_RAW_READ, profile_stage_start);
@@ -2516,6 +2553,7 @@ static int dng_get_frame(mlvObject_t * mlv_data,
             {
                 profile_stage_start = export_profile_stage_begin(profile_frame);
                 ret = dng_decompress_image(dng_data->image_buf_unpacked,
+                                           dng_data->image_capacity,
                                            dng_data->image_buf,
                                            dng_data->image_size,
                                            mlv_data->RAWI.xRes,
@@ -3408,6 +3446,7 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 /* save DNG file */
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *prop_filename)
 {
+    if(!mlv_data || !dng_data || !dng_filename) return 1;
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3462,6 +3501,7 @@ int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_
 /* free all buffers used for DNG creation */
 void freeDngObject(dngObject_t * dng_data)
 {
+    if(!dng_data) return;
     export_profile_write_json();
     if(dng_data->header_buf) free(dng_data->header_buf);
     if(dng_data->image_buf) free(dng_data->image_buf);

@@ -168,42 +168,6 @@ rpError CA_correct(
     const int W = static_cast<int>(wideW);
     const int H = static_cast<int>(wideH);
 
-    std::unique_ptr<JaggedArray<float>> redFactor;
-    std::unique_ptr<JaggedArray<float>> blueFactor;
-    std::unique_ptr<JaggedArray<float>> oldraw;
-    if (avoidColourshift) {
-        redFactor.reset(new JaggedArray<float>((W + 1 - 2 * cb) / 2, (H + 1 - 2 * cb) / 2));
-        blueFactor.reset(new JaggedArray<float>((W + 1 - 2 * cb) / 2, (H + 1 - 2 * cb) / 2));
-        oldraw.reset(new JaggedArray<float>((W + 1- 2 * cb) / 2, H- 2 * cb));
-        if(!*redFactor.get() || !*blueFactor.get() || !*oldraw.get()) {
-            return RP_MEMORY_ERROR;
-        }
-        // copy raw values before ca correction
-#ifdef _OPENMP
-        #pragma omp parallel for
-#endif
-        for (int i = cb; i < H - cb; ++i) {
-            for (int j = cb + (fc(cfarray, i + winy, winx) & 1); j < W - cb; j += 2) {
-                (*oldraw)[i - cb][(j - cb) / 2] = rawDataIn[i + winy][j + winx];
-            }
-        }
-    }
-
-    if (rawDataOut && rawDataOut != rawDataIn) {
-        // copy raw values before ca correction
-#ifdef _OPENMP
-        #pragma omp parallel for
-#endif
-        for (int i = 0; i < H; ++i) {
-            for (int j = 0; j < W; ++j) {
-                rawDataOut[i + winy][j + winx] = rawDataIn[i + winy][j + winx];
-            }
-        }
-    }
-
-    double progress = 0.0;
-    setProgCancel(progress);
-
     const int width = W + (W & 1), height = H;
     constexpr int border = 8;
     constexpr int border2 = 16;
@@ -240,6 +204,42 @@ rpError CA_correct(
         || imageElements + blockElements > std::numeric_limits<size_t>::max() / sizeof(float)) {
         return RP_MEMORY_ERROR;
     }
+
+    std::unique_ptr<JaggedArray<float>> redFactor;
+    std::unique_ptr<JaggedArray<float>> blueFactor;
+    std::unique_ptr<JaggedArray<float>> oldraw;
+    if (avoidColourshift) {
+        redFactor.reset(new JaggedArray<float>((W + 1 - 2 * cb) / 2, (H + 1 - 2 * cb) / 2));
+        blueFactor.reset(new JaggedArray<float>((W + 1 - 2 * cb) / 2, (H + 1 - 2 * cb) / 2));
+        oldraw.reset(new JaggedArray<float>((W + 1- 2 * cb) / 2, H- 2 * cb));
+        if(!*redFactor.get() || !*blueFactor.get() || !*oldraw.get()) {
+            return RP_MEMORY_ERROR;
+        }
+        // copy raw values before ca correction
+#ifdef _OPENMP
+        #pragma omp parallel for
+#endif
+        for (int i = cb; i < H - cb; ++i) {
+            for (int j = cb + (fc(cfarray, i + winy, winx) & 1); j < W - cb; j += 2) {
+                (*oldraw)[i - cb][(j - cb) / 2] = rawDataIn[i + winy][j + winx];
+            }
+        }
+    }
+
+    if (rawDataOut && rawDataOut != rawDataIn) {
+        // copy raw values before ca correction
+#ifdef _OPENMP
+        #pragma omp parallel for
+#endif
+        for (int i = 0; i < H; ++i) {
+            for (int j = 0; j < W; ++j) {
+                rawDataOut[i + winy][j + winx] = rawDataIn[i + winy][j + winx];
+            }
+        }
+    }
+
+    double progress = 0.0;
+    setProgCancel(progress);
 
     //temporary array to store simple interpolation of G
     std::unique_ptr<float[]> buffer(new (std::nothrow) float[imageElements + blockElements]);

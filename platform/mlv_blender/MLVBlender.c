@@ -105,24 +105,38 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
 {
     /************************* CALCULATE RESULT SIZE **************************/
 
-    int max_x = INT_MIN;
-    int max_y = INT_MIN;
-    int min_x = INT_MAX;
-    int min_y = INT_MAX;
+    if (!Blender || Blender->num_mlvs <= 0 || !Blender->mlvs) return;
+
+    int64_t max_x = INT64_MIN;
+    int64_t max_y = INT64_MIN;
+    int64_t min_x = INT64_MAX;
+    int64_t min_y = INT64_MAX;
 
     for (int i = 0; i < Blender->num_mlvs; ++i)
     {
         printf(" * Blending image from video %i\n", i);
         MLVBlender_mlv_t * mlv = Blender->mlvs + i;
 
+        if (!mlv->mlv || mlv->width <= 0 || mlv->height <= 0
+            || mlv->crop_left < 0 || mlv->crop_right < 0
+            || mlv->crop_top < 0 || mlv->crop_bottom < 0
+            || mlv->crop_left > mlv->width - mlv->crop_right
+            || mlv->crop_bottom > mlv->height - mlv->crop_top) {
+            free(Blender->blended_output);
+            Blender->blended_output = NULL;
+            Blender->output_width = 0;
+            Blender->output_height = 0;
+            return;
+        }
+
         /* Left edge */
-        int x1 = mlv->offset_x + mlv->crop_left;
+        int64_t x1 = (int64_t)mlv->offset_x + mlv->crop_left;
         /* Right edge */
-        int x2 = mlv->offset_x + mlv->width - 1 - mlv->crop_right;
+        int64_t x2 = (int64_t)mlv->offset_x + mlv->width - 1 - mlv->crop_right;
         /* Bottom edge */
-        int y1 = mlv->offset_y + mlv->crop_bottom;
+        int64_t y1 = (int64_t)mlv->offset_y + mlv->crop_bottom;
         /* Top edge */
-        int y2 = mlv->offset_y + mlv->height - 1 - mlv->crop_top;
+        int64_t y2 = (int64_t)mlv->offset_y + mlv->height - 1 - mlv->crop_top;
 
         if (x1 < min_x) min_x = x1;
         if (x2 > max_x) max_x = x2;
@@ -130,13 +144,32 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
         if (y2 > max_y) max_y = y2;
     }
 
-    size_t output_width = max_x - min_x + 1;
-    size_t output_height = max_y - min_y + 1;
-    Blender->output_width = output_width;
-    Blender->output_height = output_height;
+    uint64_t wide_output_width = (uint64_t)(max_x - min_x) + 1u;
+    uint64_t wide_output_height = (uint64_t)(max_y - min_y) + 1u;
+    if (wide_output_width > (uint64_t)INT_MAX || wide_output_height > (uint64_t)INT_MAX
+        || wide_output_width > SIZE_MAX / wide_output_height
+        || (size_t)(wide_output_width * wide_output_height) > SIZE_MAX / sizeof(float)) {
+        free(Blender->blended_output);
+        Blender->blended_output = NULL;
+        Blender->output_width = 0;
+        Blender->output_height = 0;
+        return;
+    }
 
+    size_t output_width = (size_t)wide_output_width;
+    size_t output_height = (size_t)wide_output_height;
+    float * blended_output = calloc(output_width * output_height, sizeof(float));
+    if (!blended_output) {
+        free(Blender->blended_output);
+        Blender->blended_output = NULL;
+        Blender->output_width = 0;
+        Blender->output_height = 0;
+        return;
+    }
     free(Blender->blended_output);
-    Blender->blended_output = calloc(output_width * output_height, sizeof(float));
+    Blender->blended_output = blended_output;
+    Blender->output_width = (int)output_width;
+    Blender->output_height = (int)output_height;
 
     /***************************** BEGIN BLENDING *****************************/
 
@@ -148,6 +181,14 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
 
         size_t frame_size = (size_t)mlv->width * (size_t)mlv->height;
         uint16_t * frame_data = malloc(frame_size * sizeof(uint16_t));
+        if (!frame_data || getMlvFrames(mlv->mlv) == 0) {
+            free(frame_data);
+            free(Blender->blended_output);
+            Blender->blended_output = NULL;
+            Blender->output_width = 0;
+            Blender->output_height = 0;
+            return;
+        }
 
         /* If we are past the end of the MLV just keep using it's last frame */
         uint64_t get_frame;
@@ -268,7 +309,7 @@ void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex)
     }
 }
 
-uint16_t * MLVBlenderGetOutput(MLVBlender_t * Blender)
+float * MLVBlenderGetOutput(MLVBlender_t * Blender)
 {
     return Blender->blended_output;
 }
@@ -285,6 +326,7 @@ int MLVBlenderGetOutputHeight(MLVBlender_t * Blender)
 
 void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 {
+    if (!Blender || !OutputPath || Blender->num_mlvs <= 0 || !Blender->mlvs) return;
     /* Set length to longest vid */
     uint64_t longest_vid = Blender->mlvs[0].num_frames;
     int longest_vid_index = 0;
@@ -303,6 +345,12 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
 
     FILE * mlv_output_file = fopen(OutputPath, "wb");
 
+    if (!mlv_object || !mlv_output_file) {
+        if (mlv_object) freeMlvObject(mlv_object);
+        if (mlv_output_file) fclose(mlv_output_file);
+        return;
+    }
+
     MLVBlenderBlend(Blender, 0);
 
     char error[256];
@@ -312,7 +360,24 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
     size_t output_height = MLVBlenderGetOutputHeight(Blender);
     size_t result_width = output_width - (output_width % 8);
     size_t result_height = output_height - (output_height % 2);
-    size_t frame_size = output_width * output_height;
+    if (result_width == 0 || result_height == 0
+        || result_width > (size_t)UINT16_MAX || result_height > (size_t)UINT16_MAX
+        || result_width > SIZE_MAX / result_height) {
+        freeMlvObject(mlv_object);
+        fclose(mlv_output_file);
+        remove(OutputPath);
+        return;
+    }
+    size_t frame_size = result_width * result_height;
+    size_t compressed_capacity = 0;
+    if (frame_size > SIZE_MAX / sizeof(uint16_t)
+        || !dng_lj92_output_capacity((int)result_width, (int)result_height,
+                                     &compressed_capacity)) {
+        freeMlvObject(mlv_object);
+        fclose(mlv_output_file);
+        remove(OutputPath);
+        return;
+    }
 
     /* Set fake dimensions inside MLV object and save headers */
     getMlvWidth(mlv_object) = result_width;
@@ -337,9 +402,17 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         saveMlvHeaders(mlv_object, mlv_output_file, 0, MLV_COMPRESS, 0, longest_vid, "MLVStitcher", error);
 
     uint16_t * buffer16 = malloc(sizeof(uint16_t) * frame_size);
-    uint8_t * buffer_compressed = malloc(2 * frame_size * sizeof(uint16_t));
+    uint8_t * buffer_compressed = malloc(compressed_capacity);
+    if (!buffer16 || !buffer_compressed) {
+        free(buffer16);
+        free(buffer_compressed);
+        freeMlvObject(mlv_object);
+        fclose(mlv_output_file);
+        remove(OutputPath);
+        return;
+    }
 
-
+    int export_failed = 0;
     for (uint64_t f = 0; f < longest_vid; ++f)
     {
         printf("Exporting frame %" PRIu64 "/%" PRIu64 "\n", f, longest_vid);
@@ -352,7 +425,7 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         for (size_t y = 0; y < result_height; ++y)
         {
             float * src_pix = Blender->blended_output + y * output_width;
-            uint16_t * dst_pix = buffer16 + (output_height-1-y) * result_width;
+            uint16_t * dst_pix = buffer16 + (result_height - 1u - y) * result_width;
 
             for (size_t x = 0; x < result_width; ++x)
             {
@@ -365,13 +438,18 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
         }
 
         size_t frame_size_compressed = 0;
-        int ret = dng_compress_image(buffer_compressed,
-                                     2 * frame_size * sizeof(uint16_t),
+        int ret = dng_compress_image((uint16_t *)buffer_compressed,
+                                     compressed_capacity,
                                      buffer16,
                                      &frame_size_compressed,
                                      result_width,
                                      result_height,
                                      bitdepth);
+        if (ret != 0 || frame_size_compressed == 0
+            || frame_size_compressed > compressed_capacity) {
+            export_failed = 1;
+            break;
+        }
 
         /* Write frame */
         mlv_vidf_hdr_t vidf_hdr = { 0 };
@@ -397,6 +475,11 @@ void MLVBlenderExportMLV(MLVBlender_t * Blender, const char * OutputPath)
     freeMlvObject(mlv_object);
 
     fclose(mlv_output_file);
+
+    if (export_failed) {
+        remove(OutputPath);
+        return;
+    }
 
     puts("yes");
     return;

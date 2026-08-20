@@ -9,7 +9,7 @@ void free_MLVBlender(MLVBlender_t * Blender);
 
 /* Generate and get output */
 void MLVBlenderBlend(MLVBlender_t * Blender, uint64_t FrameIndex);
-uint16_t * MLVBlenderGetOutput(MLVBlender_t * Blender);
+float * MLVBlenderGetOutput(MLVBlender_t * Blender);
 int MLVBlenderGetOutputWidth(MLVBlender_t * Blender);
 int MLVBlenderGetOutputHeight(MLVBlender_t * Blender);
 

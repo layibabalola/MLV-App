@@ -250,6 +250,15 @@ class RepoHygieneTests(unittest.TestCase):
             ROOT / "src" / "librtprocess" / "src" / "demosaic" / "vng4.cc"
         ).read_text(encoding="utf-8")
         dng = (ROOT / "src" / "dng" / "dng.c").read_text(encoding="utf-8")
+        dng_reader = (ROOT / "src" / "dng" / "dng_reader.c").read_text(
+            encoding="utf-8"
+        )
+        lj92 = (ROOT / "src" / "mlv" / "liblj92" / "lj92.c").read_text(
+            encoding="utf-8"
+        )
+        video_mlv = (ROOT / "src" / "mlv" / "video_mlv.c").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn('#include <inttypes.h>', blender)
         self.assertIn('"Exporting frame %" PRIu64 "/%" PRIu64', blender)
@@ -313,12 +322,33 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("pixelCount > static_cast<size_t>(std::numeric_limits<int>::max())", igv)
         self.assertIn("planeElements > static_cast<size_t>(std::numeric_limits<int>::max())", lmmse)
         self.assertIn("width > std::numeric_limits<int>::max() / 16", vng4)
+        self.assertIn("std::numeric_limits<int>::max()) / 8u", vng4)
+        self.assertIn("const unsigned int requestedFlags = flgs", array2d)
+        self.assertIn("flags = requestedFlags;", array2d)
+        self.assertIn("bool is_locked() const noexcept", array2d)
         self.assertIn("int encoded_length = 0;", dng)
         self.assertNotIn("(int*)output_buffer_size", dng)
         self.assertIn("size_t output_buffer_capacity", dng)
         self.assertIn("(size_t)encoded_length > output_buffer_capacity", dng)
         self.assertIn("dng_data->image_capacity", dng)
         self.assertIn("decoded_pixels != expected_pixels", dng)
+        self.assertIn("components != 1 && components != 2", dng)
+        self.assertIn("decoded_bpp != (int)expected_bpp", dng)
+        self.assertIn("output_buffer_capacity < expected_bytes", dng)
+        self.assertIn("dng_data->image_size > dng_data->image_capacity", dng)
+        self.assertIn("(height & 1) != 0", dng)
+        self.assertIn("encoded_width * encoded_height > (INT_MAX - 200) / 3", dng)
+        self.assertIn("info->width == 0 || info->height == 0", dng_reader)
+        self.assertIn("pixels * sizeof(uint16_t)", dng_reader)
+        self.assertIn("(INT_MAX - 200) / 3 / height", lj92)
+        self.assertIn("if (rowcache == NULL) return LJ92_ERROR_NO_MEMORY;", lj92)
+        self.assertIn("uint8_t *shrunk = realloc", lj92)
+        self.assertIn("size_t compression_capacity = 0;", video_mlv)
+        self.assertIn("compression_capacity > frame_capacity", video_mlv)
+        self.assertIn("dng_lj92_output_capacity", blender)
+        self.assertIn("result_width > (size_t)UINT16_MAX", blender)
+        self.assertIn("frame_size_compressed > compressed_capacity", blender)
+        self.assertIn("remove(OutputPath);", blender)
 
     def test_ci_product_oracles_are_isolated_from_factory_bridge_failures(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")

@@ -12120,6 +12120,13 @@ ProcessResult MainWindow::exportCdngSequence(
     /* --- Init DNG struct --- */
     double fps = getMlvFramerate( mlvObject );
     dngObject_t *cinemaDng = initDngObject( mlvObject, codecProfile - 6, fps, picAR );
+    if( !cinemaDng )
+    {
+        result.success = false;
+        result.errorMessage = QStringLiteral("Could not allocate DNG export buffers");
+        result.elapsedSeconds = timer.elapsed() / 1000.0;
+        return result;
+    }
 
     /* Render one frame for raw correction init */
     uint32_t frameSize = getMlvWidth( mlvObject ) * getMlvHeight( mlvObject ) * 3;
