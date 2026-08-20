@@ -1351,7 +1351,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "explicitProtectedWorktreeActions": [],
     },
     "candidateAcceptance": {
-        "enabled": False,
+        "enabled": True,
         "schema": "candidate-acceptance.v1",
         "stateRoot": ".claude-state/closeout/acceptance",
         "providerRepository": "layibabalola/MLV-App",
@@ -1365,7 +1365,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "batchUntilAllSurfacesTerminal": True,
         "carryApprovalsAcrossCandidateTuples": False,
         "agentApprovalsGrantHumanAuthority": False,
-        "requireReadyForFinalize": False,
+        "requireReadyForFinalize": True,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }

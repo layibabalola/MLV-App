@@ -15,9 +15,9 @@ The dashboard's repo-state feed includes `candidateAcceptance`, a read-only
 summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
 `candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
 integration tree, range diff, policy, and validation plan into one exact tuple.
-The infrastructure lands in a deliberately dormant first phase. A later,
-separately reviewed candidate may activate only the two activation booleans
-against that landed target policy. Activation before the dormant policy exists,
+The infrastructure landed in a deliberately dormant first phase. The
+separately reviewed activation is now landed with only the two activation
+booleans enabled against that target policy. Activation before the dormant policy exists,
 policy drift during activation, or any later disablement is fail-closed. This
 two-phase rule lands the code, provider adapter, path-aware test inventory, and
 symbol/config guards before the gate can authorize a finalize; the activation

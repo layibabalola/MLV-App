@@ -1104,7 +1104,7 @@
     "explicitProtectedWorktreeActions": []
   },
   "candidateAcceptance": {
-    "enabled": false,
+    "enabled": true,
     "schema": "candidate-acceptance.v1",
     "stateRoot": ".claude-state/closeout/acceptance",
     "providerRepository": "layibabalola/MLV-App",
@@ -1118,7 +1118,7 @@
     "batchUntilAllSurfacesTerminal": true,
     "carryApprovalsAcrossCandidateTuples": false,
     "agentApprovalsGrantHumanAuthority": false,
-    "requireReadyForFinalize": false
+    "requireReadyForFinalize": true
   },
   "scripts": [
     "start-work-block.ps1",

@@ -758,11 +758,11 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("candidate_acceptance_final_tree_mismatch", finalize)
         self.assertIn("integration_range_evidence(integration_path, target[\"head\"], merged_head)", finalize)
 
-    def test_tracked_policy_stages_dormant_barrier_without_human_authority(self) -> None:
+    def test_tracked_policy_activates_barrier_without_human_authority(self) -> None:
         config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         policy = config["candidateAcceptance"]
-        self.assertFalse(policy["enabled"])
-        self.assertFalse(policy["requireReadyForFinalize"])
+        self.assertTrue(policy["enabled"])
+        self.assertTrue(policy["requireReadyForFinalize"])
         self.assertEqual("layibabalola/MLV-App", policy["providerRepository"])
         self.assertTrue(policy["batchUntilAllSurfacesTerminal"])
         self.assertFalse(policy["carryApprovalsAcrossCandidateTuples"])
@@ -772,28 +772,28 @@ class CandidateAcceptanceTests(unittest.TestCase):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
         dashboard = (ROOT / "docs/19-closeout-dashboard-spec.md").read_text(encoding="utf-8")
-        self.assertIn("first landing is deliberately dormant while the tooling baseline remains mandatory", agents)
+        self.assertIn("first landing was deliberately dormant while the tooling baseline remained mandatory", agents)
         self.assertIn(
-            "may change only `candidateAcceptance.enabled` and `candidateAcceptance.requireReadyForFinalize` "
-            "from `false` to `true` against the pinned dormant target policy",
+            "separately reviewed activation is now landed: `candidateAcceptance.enabled` and "
+            "`candidateAcceptance.requireReadyForFinalize` are both `true`",
             agents,
         )
         self.assertIn("must exactly equal the copy loaded from the pinned target commit in both phases", agents)
         self.assertIn("must never replace that human approval gate", agents)
-        self.assertIn("deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)", claude)
+        self.assertIn("was deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`)", claude)
         self.assertIn("tests, and tooling-baseline inventory are\nalready mandatory", claude)
-        self.assertIn("may change only\nthose two booleans against the pinned dormant target policy", claude)
+        self.assertIn("is now active (`enabled=true`,\n`requireReadyForFinalize=true`)", claude)
         self.assertIn("non-authenticating process evidence and never replace", claude)
         self.assertIn("human content-review gate, which remains mandatory in both phases", claude)
         self.assertIn("deliberately dormant first phase", dashboard)
-        self.assertIn("activate only the two activation booleans\nagainst that landed target policy", dashboard)
+        self.assertIn("separately reviewed activation is now landed with only the two activation\nbooleans enabled", dashboard)
         self.assertIn("must exactly match the\ncopy loaded from the pinned target commit", dashboard)
 
     def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
         tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
-        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])
-        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["requireReadyForFinalize"])
+        self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])
+        self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["requireReadyForFinalize"])
         self.assertTrue(tracked["repoSweep"]["evidencePreservingPrune"]["enabled"])
         self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["repoSweep"]["evidencePreservingPrune"]["enabled"])
 

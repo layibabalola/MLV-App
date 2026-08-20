@@ -157,11 +157,11 @@ whenever feasible: update `AGENTS.md`/`CLAUDE.md` for agent policy,
 `tools/repo_hygiene/test_brokered_closeout.py` or tooling-baseline required
 symbols/tests for executable coverage. If implementation is not feasible,
 record an explicit closeout blocker or roadmap item before final response.
-Candidate acceptance uses a fail-closed two-phase rollout. Its first landing is
-deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`) while
+Candidate acceptance uses a fail-closed two-phase rollout. Its first landing
+was deliberately dormant (`enabled=false`, `requireReadyForFinalize=false`) while
 the acceptance code, hosted adapter, tests, and tooling-baseline inventory are
-already mandatory. A later, separately reviewed activation may change only
-those two booleans against the pinned dormant target policy. Once active, the
+already mandatory. The separately reviewed activation is now active (`enabled=true`,
+`requireReadyForFinalize=true`) against the pinned dormant target policy. Once active, the
 five required surfaces, canonical repository, and finalize requirement cannot
 be weakened by candidate configuration. Candidate-acceptance records are
 non-authenticating process evidence and never replace the separately pinned
