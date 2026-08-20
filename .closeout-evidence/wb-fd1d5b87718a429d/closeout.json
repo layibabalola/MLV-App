@@ -6,14 +6,14 @@
     "reason": "evidence_repair_precedes_repo_closed_postcondition",
     "status": "pending"
   },
-  "createdAt": "2026-08-20T20:19:04+00:00",
-  "detectorHash": "bc270b4534aabfc066d7f384dc35d596",
+  "createdAt": "2026-08-20T20:38:44+00:00",
+  "detectorHash": "022a0282d5b5674c46f4078850a1b5c9",
   "eligible": true,
-  "featureHead": "e6d633d7a1fd3e1032ded53511b81f133290f249",
+  "featureHead": "a42eee63da4c1cfb8a553c5474194cf40c27c213",
   "pinnedRefs": {
     "feature": {
       "branch": "codex/work-block/wb-fd1d5b87718a429d",
-      "head": "e6d633d7a1fd3e1032ded53511b81f133290f249"
+      "head": "a42eee63da4c1cfb8a553c5474194cf40c27c213"
     },
     "target": {
       "branch": "master",
