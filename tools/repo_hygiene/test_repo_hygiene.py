@@ -2378,6 +2378,10 @@ class RepoHygieneTests(unittest.TestCase):
         self.assertIn("if (num < 2)", source)
         self.assertIn("if (final_blend_result < 0)", source)
         self.assertIn("white - black >= 16383u * 64u", source)
+        self.assertIn("raw_info.width < 33 || raw_info.height < 33", source)
+        self.assertIn("llrawproc_checked_14bit_frame_extents(", llrawproc_source)
+        self.assertNotIn("override_w * override_h * 14 / 8", llrawproc_source)
+        self.assertNotIn("raw_info->width * raw_info->height * 14 / 8", llrawproc_source)
         self.assertIn("const int dual_iso_recon_ok =", llrawproc_source)
         self.assertIn("if (!dual_iso_recon_ok)", llrawproc_source)
         self.assertIn(

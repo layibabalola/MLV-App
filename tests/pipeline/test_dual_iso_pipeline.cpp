@@ -45,6 +45,25 @@ extern "C" int dualisoHistogramGeometryForTesting(int width,
                                                     size_t * sample_capacity,
                                                     size_t * highlight_capacity,
                                                     int * first_sample_y);
+extern "C" int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                                          int height,
+                                                          uint32_t * frame_size);
+
+TEST(DualIsoPipeline, FourteenBitFrameSizeUsesCheckedWideArithmetic)
+{
+    uint32_t frame_size = 0;
+    ASSERT_EQ(1, llrawprocChecked14BitFrameSizeForTesting(1920, 1080, &frame_size));
+    ASSERT_EQ(static_cast<uint32_t>(3628800), frame_size);
+
+    /* The historical signed-int expression overflowed even though this
+     * final size is representable. */
+    ASSERT_EQ(1, llrawprocChecked14BitFrameSizeForTesting(50000, 40000, &frame_size));
+    ASSERT_EQ(static_cast<uint32_t>(3500000000u), frame_size);
+
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(INT_MAX, 2, &frame_size));
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(0, 1080, &frame_size));
+    ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(1920, 1080, nullptr));
+}
 
 TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
 {
@@ -355,18 +374,18 @@ TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBef
     ASSERT_TRUE(lut_edge_canary == original_lut_edge_canary);
 
     struct raw_info hostile_pitch = {};
-    hostile_pitch.width = 4;
-    hostile_pitch.height = 5;
-    hostile_pitch.pitch = 5;
+    hostile_pitch.width = 5;
+    hostile_pitch.height = 7;
+    hostile_pitch.pitch = 6;
     hostile_pitch.bits_per_pixel = 14;
     hostile_pitch.black_level = 1024;
     hostile_pitch.white_level = 15000;
     hostile_pitch.active_area.x1 = 0;
     hostile_pitch.active_area.y1 = 0;
-    hostile_pitch.active_area.x2 = 4;
-    hostile_pitch.active_area.y2 = 5;
+    hostile_pitch.active_area.x2 = 5;
+    hostile_pitch.active_area.y2 = 7;
     hostile_pitch.cfa_pattern = 0x01000201; /* exact GBRG one-row shift path */
-    std::vector<uint16_t> pitch_canary(20, static_cast<uint16_t>(2345));
+    std::vector<uint16_t> pitch_canary(35, static_cast<uint16_t>(2345));
     const std::vector<uint16_t> original_pitch_canary = pitch_canary;
     iso_pattern = 1;
     auto_correction = -1;
@@ -448,6 +467,46 @@ TEST(DualIsoPipeline, HistogramMatchGeometryRejectsOverflowAndInvalidSamplingBef
                                     1,
                                     &hostile_scratch));
     ASSERT_TRUE(tiny_canary == original_tiny_canary);
+
+    const int unsafe_amaze_dimensions[][2] = {
+        {5, 6},
+        {32, 32},
+    };
+    for (const auto & dimensions : unsafe_amaze_dimensions)
+    {
+        struct raw_info unsafe_amaze = tiny_geometry;
+        unsafe_amaze.width = dimensions[0];
+        unsafe_amaze.height = dimensions[1];
+        unsafe_amaze.pitch = dimensions[0];
+        unsafe_amaze.active_area.x2 = dimensions[0];
+        unsafe_amaze.active_area.y2 = dimensions[1];
+        std::vector<uint16_t> unsafe_amaze_canary(
+            static_cast<size_t>(dimensions[0]) * static_cast<size_t>(dimensions[1]),
+            static_cast<uint16_t>(4567));
+        const std::vector<uint16_t> original_unsafe_amaze_canary =
+            unsafe_amaze_canary;
+        iso_pattern = 1;
+        auto_correction = -1;
+        ev_correction = 1.0;
+        black_delta = -1;
+        ASSERT_EQ(0, diso_get_full20bit(unsafe_amaze,
+                                        unsafe_amaze_canary.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &hostile_scratch));
+        ASSERT_TRUE(unsafe_amaze_canary == original_unsafe_amaze_canary);
+    }
 
     struct raw_info zero_thread_raw = tiny_geometry;
     zero_thread_raw.width = 8;
@@ -5963,6 +6022,50 @@ static int synthetic_dual_iso_prepare_state(struct raw_info raw,
                                         1,
                                         scratch,
                                         state);
+}
+
+TEST(DualIsoPipeline, AmazeMinimumGeometryExecutesWithoutCrossingCanaries)
+{
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.width = 33;
+    raw.height = 33;
+    raw.pitch = 33;
+    raw.frame_size = raw.width * raw.height * 14 / 8;
+    raw.active_area.x2 = raw.width;
+    raw.active_area.y2 = raw.height;
+    const std::vector<uint16_t> source = synthetic_dual_iso_phase_frame(raw, 0);
+    std::vector<uint16_t> guarded(source.size() + 2u, static_cast<uint16_t>(0));
+    guarded.front() = static_cast<uint16_t>(0x1111);
+    guarded.back() = static_cast<uint16_t>(0x2222);
+    std::copy(source.begin(), source.end(), guarded.begin() + 1);
+
+    dualiso_full20bit_scratch_t scratch = {};
+    int iso_pattern = 1;
+    int auto_correction = -1;
+    double ev_correction = 1.0;
+    int black_delta = -1;
+    ASSERT_EQ(1, diso_get_full20bit(raw,
+                                    guarded.data() + 1,
+                                    0,
+                                    100,
+                                    200,
+                                    &iso_pattern,
+                                    &auto_correction,
+                                    &ev_correction,
+                                    &black_delta,
+                                    0,
+                                    0,
+                                    1,
+                                    0,
+                                    1,
+                                    1,
+                                    &scratch));
+    ASSERT_EQ(static_cast<uint16_t>(0x1111), guarded.front());
+    ASSERT_EQ(static_cast<uint16_t>(0x2222), guarded.back());
+    free_dualiso_full20bit_scratch(&scratch);
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)

@@ -20,6 +20,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -2505,21 +2506,91 @@ static void deflicker(mlvObject_t * video, uint16_t * raw_image_buff, size_t raw
     video->RAWI.raw_info.exposure_bias[1] = 10000;
 }
 
-/* convert uncompressed 10/12bit raw data to 14bit for subsequent processing */
-static void make_14bit(uint16_t * raw_image_buff, size_t raw_image_size, struct raw_info * raw_info)
+static int llrawproc_checked_14bit_frame_extents(int width,
+                                                int height,
+                                                size_t * pixel_count,
+                                                uint32_t * frame_size)
 {
-    uint32_t pixel_count = raw_image_size / 2;
-    int bits_shift = 14 - raw_info->bits_per_pixel;
-    raw_info->black_level <<= bits_shift;
-    raw_info->white_level <<= bits_shift;
+    if (!pixel_count || !frame_size || width <= 0 || height <= 0)
+    {
+        return 0;
+    }
+
+    const size_t checked_width = (size_t)width;
+    const size_t checked_height = (size_t)height;
+    if (checked_width > SIZE_MAX / checked_height)
+    {
+        return 0;
+    }
+    const size_t checked_pixels = checked_width * checked_height;
+    if (checked_pixels > SIZE_MAX / 14u)
+    {
+        return 0;
+    }
+    const size_t checked_frame_size = checked_pixels * 14u / 8u;
+    if (checked_frame_size > UINT32_MAX)
+    {
+        return 0;
+    }
+
+    *pixel_count = checked_pixels;
+    *frame_size = (uint32_t)checked_frame_size;
+    return 1;
+}
+
+/* Production-linked arithmetic seam; it performs no allocation or frame
+ * access and lets boundary tests exercise otherwise impractical dimensions. */
+int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                             int height,
+                                             uint32_t * frame_size);
+int llrawprocChecked14BitFrameSizeForTesting(int width,
+                                             int height,
+                                             uint32_t * frame_size)
+{
+    size_t pixel_count = 0;
+    return llrawproc_checked_14bit_frame_extents(width,
+                                                height,
+                                                &pixel_count,
+                                                frame_size);
+}
+
+/* convert uncompressed 10/12bit raw data to 14bit for subsequent processing */
+static int make_14bit(uint16_t * raw_image_buff, size_t raw_image_size, struct raw_info * raw_info)
+{
+    size_t expected_pixel_count = 0;
+    uint32_t frame_size = 0;
+    if (!raw_image_buff || !raw_info
+        || raw_info->bits_per_pixel <= 0 || raw_info->bits_per_pixel >= 14
+        || !llrawproc_checked_14bit_frame_extents(raw_info->width,
+                                                  raw_info->height,
+                                                  &expected_pixel_count,
+                                                  &frame_size)
+        || expected_pixel_count > SIZE_MAX / sizeof(uint16_t)
+        || expected_pixel_count * sizeof(uint16_t) != raw_image_size)
+    {
+        return 0;
+    }
+
+    const int bits_shift = 14 - raw_info->bits_per_pixel;
+    const int level_scale = 1 << bits_shift;
+    if (raw_info->black_level < 0 || raw_info->white_level < 0
+        || raw_info->black_level > INT_MAX / level_scale
+        || raw_info->white_level > INT_MAX / level_scale)
+    {
+        return 0;
+    }
+
+    raw_info->black_level *= level_scale;
+    raw_info->white_level *= level_scale;
     raw_info->bits_per_pixel = 14;
-    raw_info->frame_size = raw_info->width * raw_info->height * 14 / 8;
+    raw_info->frame_size = frame_size;
 
     #pragma omp parallel for
-    for(uint32_t i = 0; i < pixel_count; ++i)
+    for(size_t i = 0; i < expected_pixel_count; ++i)
     {
         raw_image_buff[i] <<= bits_shift;
     }
+    return 1;
 }
 
 /* undo 14bit conversion to initial bit depth with rounding error minimizing */
@@ -2800,7 +2871,11 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
     if (original_bits_per_pixel < 14)
     {
-        make_14bit(raw_image_buff, raw_image_size, &raw_info);
+        if (!make_14bit(raw_image_buff, raw_image_size, &raw_info))
+        {
+            if (using_stack_worker) llrawproc_free_worker_state(worker);
+            return;
+        }
     }
 
     llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
@@ -4046,8 +4121,17 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
         g_llrawproc_last_total_ms = (mlv_stage_timing_now() - apply_start) * 1000.0;
         return 1; /* nothing to do — no recon, no fix */
     }
-    if (override_w <= 0 || override_h <= 0) return 0;
-    if ((size_t)override_w * (size_t)override_h * sizeof(uint16_t) != raw_image_size) return 0;
+    size_t override_pixel_count = 0;
+    uint32_t override_frame_size = 0;
+    if (!llrawproc_checked_14bit_frame_extents(override_w,
+                                              override_h,
+                                              &override_pixel_count,
+                                              &override_frame_size)
+        || override_pixel_count > SIZE_MAX / sizeof(uint16_t)
+        || override_pixel_count * sizeof(uint16_t) != raw_image_size)
+    {
+        return 0;
+    }
 
     /* Bail if the receipt enables features that are unsafe at scaled
      * resolution. Aggressive preview explicitly treats those stages as
@@ -4080,7 +4164,7 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
     /* The Dual ISO core receives uint16_t samples and defines pitch in
      * samples, matching the full-resolution caller. */
     raw_info.pitch = override_w;
-    raw_info.frame_size = (uint32_t)(override_w * override_h * 14 / 8);
+    raw_info.frame_size = override_frame_size;
     raw_info.active_area.x1 = 0;
     raw_info.active_area.y1 = 0;
     raw_info.active_area.x2 = override_w;
@@ -4106,7 +4190,11 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
 
     if (original_bits_per_pixel < 14)
     {
-        make_14bit(raw_image_buff, raw_image_size, &raw_info);
+        if (!make_14bit(raw_image_buff, raw_image_size, &raw_info))
+        {
+            if (using_stack_worker) llrawproc_free_worker_state(worker);
+            return 0;
+        }
     }
 
     llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);

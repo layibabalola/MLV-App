@@ -2270,6 +2270,9 @@ static int dualiso_checked_full20_frame_geometry(struct raw_info raw_info,
         || raw_info.white_level <= raw_info.black_level
         || raw_info.black_level > 16383
         || raw_info.white_level > 16383
+        /* A 16383-code signal maps to exactly +14 EV.  ev2raw's positive
+         * domain ends at +14 EV exclusive, so that metadata endpoint would
+         * become a one-past lookup in mean23 interpolation. */
         || raw_info.white_level - raw_info.black_level >= 16383
         || raw_info.black_level > INT_MAX / 64
         || raw_info.white_level > INT_MAX / 64
@@ -6587,6 +6590,13 @@ int diso_get_full20bit(struct raw_info raw_info, uint16_t * image_data, int dark
 
     size_t checked_full20_pixels = 0;
     if (!dualiso_checked_full20_frame_geometry(raw_info, &checked_full20_pixels))
+    {
+        DUALISO_FULL20_RETURN(0);
+    }
+    /* AMaZE fills its 16-pixel top/left corners from source coordinates
+     * 32..17, so both dimensions must contain index 32.  Mean23 does not
+     * use that reflection border and retains the smaller shared minimum. */
+    if (interp_method == 0 && (raw_info.width < 33 || raw_info.height < 33))
     {
         DUALISO_FULL20_RETURN(0);
     }
