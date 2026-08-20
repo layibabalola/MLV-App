@@ -48,6 +48,12 @@ extern "C" int dualisoHistogramGeometryForTesting(int width,
 extern "C" int llrawprocChecked14BitFrameSizeForTesting(int width,
                                                           int height,
                                                           uint32_t * frame_size);
+extern "C" int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                                          uint16_t * image_data,
+                                                          size_t pixel_count,
+                                                          int low_iso,
+                                                          int high_iso);
+extern "C" void dualisoSetAmazeThreadCreateFailureForTesting(int thread_index);
 
 TEST(DualIsoPipeline, FourteenBitFrameSizeUsesCheckedWideArithmetic)
 {
@@ -63,6 +69,40 @@ TEST(DualIsoPipeline, FourteenBitFrameSizeUsesCheckedWideArithmetic)
     ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(INT_MAX, 2, &frame_size));
     ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(0, 1080, &frame_size));
     ASSERT_EQ(0, llrawprocChecked14BitFrameSizeForTesting(1920, 1080, nullptr));
+}
+
+TEST(DualIsoPipeline, RestrictedRangeScalingRejectsInvalidStateBeforeMutation)
+{
+    struct raw_info raw = {};
+    raw.width = 4;
+    raw.height = 4;
+    raw.pitch = 4;
+    raw.bits_per_pixel = 14;
+    raw.black_level = 1024;
+    raw.white_level = 1024;
+    std::vector<uint16_t> frame(16u, static_cast<uint16_t>(2048));
+    const std::vector<uint16_t> original_frame = frame;
+    const struct raw_info original_raw = raw;
+
+    ASSERT_EQ(0, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size(),
+                                                          100,
+                                                          200));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(original_raw.black_level, raw.black_level);
+    ASSERT_EQ(original_raw.white_level, raw.white_level);
+
+    raw.white_level = 14000;
+    const struct raw_info valid_levels_raw = raw;
+    ASSERT_EQ(0, llrawprocScaleRestrictedRangeForTesting(&raw,
+                                                          frame.data(),
+                                                          frame.size() - 1u,
+                                                          100,
+                                                          200));
+    ASSERT_TRUE(frame == original_frame);
+    ASSERT_EQ(valid_levels_raw.black_level, raw.black_level);
+    ASSERT_EQ(valid_levels_raw.white_level, raw.white_level);
 }
 
 TEST(DualIsoPipeline, HistogramBinsRemainExactAcrossUint16Boundary)
@@ -6066,6 +6106,70 @@ TEST(DualIsoPipeline, AmazeMinimumGeometryExecutesWithoutCrossingCanaries)
     ASSERT_EQ(static_cast<uint16_t>(0x1111), guarded.front());
     ASSERT_EQ(static_cast<uint16_t>(0x2222), guarded.back());
     free_dualiso_full20bit_scratch(&scratch);
+}
+
+TEST(DualIsoPipeline, AmazeWorkerFailuresAreTransactional)
+{
+    struct ScopedAmazeFailureReset
+    {
+        ~ScopedAmazeFailureReset()
+        {
+            dualisoSetAmazeThreadCreateFailureForTesting(-1);
+            amazeDemosaicSetAllocationFailureForTesting(0);
+        }
+    } reset;
+
+    ScopedDualIsoPhaseEnv phase_env;
+    phase_env.set(QByteArrayLiteral("0"));
+
+    struct raw_info raw = synthetic_dual_iso_phase_raw_info();
+    raw.width = 33;
+    raw.height = 33;
+    raw.pitch = 33;
+    raw.frame_size = raw.width * raw.height * 14 / 8;
+    raw.active_area.x2 = raw.width;
+    raw.active_area.y2 = raw.height;
+    const std::vector<uint16_t> source = synthetic_dual_iso_phase_frame(raw, 0);
+
+    auto expect_failure_without_publication = [&](bool allocation_failure) {
+        std::vector<uint16_t> frame = source;
+        const std::vector<uint16_t> original_frame = frame;
+        dualiso_full20bit_scratch_t scratch = {};
+        int iso_pattern = 1;
+        int auto_correction = -1;
+        double ev_correction = 1.0;
+        int black_delta = -1;
+
+        amazeDemosaicSetAllocationFailureForTesting(allocation_failure ? 1 : 0);
+        dualisoSetAmazeThreadCreateFailureForTesting(allocation_failure ? -1 : 0);
+        ASSERT_EQ(0, diso_get_full20bit(raw,
+                                        frame.data(),
+                                        0,
+                                        100,
+                                        200,
+                                        &iso_pattern,
+                                        &auto_correction,
+                                        &ev_correction,
+                                        &black_delta,
+                                        0,
+                                        0,
+                                        1,
+                                        0,
+                                        1,
+                                        1,
+                                        &scratch));
+        ASSERT_TRUE(frame == original_frame);
+        ASSERT_EQ(1, iso_pattern);
+        ASSERT_EQ(-1, auto_correction);
+        ASSERT_EQ(1.0, ev_correction);
+        ASSERT_EQ(-1, black_delta);
+        free_dualiso_full20bit_scratch(&scratch);
+        amazeDemosaicSetAllocationFailureForTesting(0);
+        dualisoSetAmazeThreadCreateFailureForTesting(-1);
+    };
+
+    expect_failure_without_publication(false);
+    expect_failure_without_publication(true);
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)

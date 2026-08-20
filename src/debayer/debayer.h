@@ -53,7 +53,7 @@ typedef struct {
 } amazeinfo_t;
 
 /* Amaze demosaic */
-void
+int
 #ifdef __MINGW32__
 /* Needed for win32/mingw (might need include gaurd with another compiler) */
 __attribute__ ((force_align_arg_pointer))
@@ -61,5 +61,9 @@ __attribute__ ((force_align_arg_pointer))
 
 /*AMaZE algo*/
 demosaic(amazeinfo_t * inputdata);
+
+/* Test-only fault injection for the AMaZE worker's private tile allocation.
+ * Production leaves this disabled. */
+void amazeDemosaicSetAllocationFailureForTesting(int enabled);
 
 #endif

@@ -117,8 +117,18 @@
     #pragma GCC diagnostic ignored "-Wunused-variable"
 
 
-    void demosaic(amazeinfo_t * inputdata) /* All arguments in 1 struct for posix */
+    static int g_amaze_force_allocation_failure_for_testing = 0;
+
+    void amazeDemosaicSetAllocationFailureForTesting(int enabled)
     {
+        g_amaze_force_allocation_failure_for_testing = enabled ? 1 : 0;
+    }
+
+    int demosaic(amazeinfo_t * inputdata) /* All arguments in 1 struct for posix */
+    {
+        if (!inputdata)
+            return 0;
+
         float ** restrict rawData = inputdata->rawData;    /* holds preprocessed pixel values, rawData[i][j] corresponds to the ith row and jth column */
         float ** restrict red = inputdata->red;        /* the interpolated red plane */
         float ** restrict green = inputdata->green;      /* the interpolated green plane */
@@ -246,7 +256,11 @@
 
     #define CLF 1
         // assign working space
-        buffer = (char *) calloc(22*sizeof(float)*TS*TS + sizeof(char)*TS*TSH+23*CLF*64 + 63, 1);
+        buffer = g_amaze_force_allocation_failure_for_testing
+               ? NULL
+               : (char *) calloc(22*sizeof(float)*TS*TS + sizeof(char)*TS*TSH+23*CLF*64 + 63, 1);
+        if (!buffer)
+            return 0;
         char 	*data;
         data = (char*)( ( (uintptr_t)buffer + (uintptr_t)63) / 64 * 64);
 
@@ -1489,4 +1503,5 @@
     t2 = clock() - t1;
     //printf("Amaze took %.2f s\n", (double)t2 / CLOCKS_PER_SEC);
 
+    return 1;
     }

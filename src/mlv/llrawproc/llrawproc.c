@@ -2609,38 +2609,35 @@ static void undo_14bit(uint16_t * raw_image_buff, size_t raw_image_size, uint32_
 }
 
 /* rescale restricted to imaginary 10-12bit levels of lossless raw data to about real 14bit range */
-static void _scale_restricted_range(struct raw_info * raw_info, uint16_t * image_data)
+static int scale_restricted_range(struct raw_info * raw_info,
+                                  uint16_t * image_data,
+                                  size_t pixel_count,
+                                  int low_iso,
+                                  int high_iso)
 {
-    uint32_t pixel_count = raw_info->width * raw_info->height;
-    /* find min and max level values in the currecnt raw frame */
-    int32_t min_level = image_data[0];
-    int32_t max_level = image_data[0];
-    for(uint32_t i = 1; i < pixel_count; ++i)
+    if (!raw_info || !image_data || pixel_count == 0
+        || raw_info->width <= 0 || raw_info->height <= 0)
     {
-        if(image_data[i] < min_level) min_level = image_data[i];
-        if(image_data[i] > max_level) max_level = image_data[i];
+        return 0;
     }
-#ifndef STDOUT_SILENT
-    printf("min_level = %d, max_level = %d\n", min_level, max_level);
-#endif
-    raw_info->black_level = MAX(min_level, raw_info->black_level);
-    raw_info->white_level = MAX(max_level, raw_info->white_level);
 
-    int32_t scaled_white_level = 16200;
-    double scale_ratio = (double)(scaled_white_level - raw_info->black_level) / (double)(raw_info->white_level - raw_info->black_level);
-    raw_info->white_level = scaled_white_level;
-
-#pragma omp parallel for
-    for(uint32_t i = 0; i < pixel_count; ++i)
+    const size_t width = (size_t)raw_info->width;
+    const size_t height = (size_t)raw_info->height;
+    if (width > SIZE_MAX / height || width * height != pixel_count
+        || raw_info->black_level < 0 || raw_info->black_level > 16383
+        || raw_info->white_level < 0 || raw_info->white_level > 16383
+        || raw_info->white_level <= raw_info->black_level)
     {
-        image_data[i] = MIN( (uint16_t)((double)((image_data[i] - raw_info->black_level) * scale_ratio + raw_info->black_level) + 0.5), 16383);
+        return 0;
     }
-}
 
-/* rescale restricted to imaginary 10-12bit levels of lossless raw data to about real 14bit range */
-static void scale_restricted_range(struct raw_info * raw_info, uint16_t * image_data, int low_iso, int high_iso)
-{
-    int32_t bd = ceil(log2(raw_info->white_level - raw_info->black_level));
+    const int32_t signal_span = raw_info->white_level - raw_info->black_level;
+    const double bd_value = ceil(log2((double)signal_span));
+    if (!isfinite(bd_value) || bd_value < 0.0 || bd_value > 14.0)
+    {
+        return 0;
+    }
+    const int32_t bd = (int32_t)bd_value;
 
     // Digital gain? Add 1 bit…
     int32_t add_bit = 0;
@@ -2650,20 +2647,68 @@ static void scale_restricted_range(struct raw_info * raw_info, uint16_t * image_
         add_bit = 1;
     }
 
-    int32_t actual_white_level = raw_info->black_level + ((1 << (bd + add_bit)) - 1);
-    int32_t scaled_white_level = (raw_info->white_level - raw_info->black_level) * (1 << (14 - bd));
+    const int32_t actual_shift = bd + add_bit;
+    const int32_t scaled_shift = 14 - bd;
+    if (actual_shift < 0 || actual_shift > 15
+        || scaled_shift < 0 || scaled_shift > 14)
+    {
+        return 0;
+    }
 
-    double scale_ratio = (double)(scaled_white_level - raw_info->black_level) / (double)(actual_white_level - raw_info->black_level);
+    const uint32_t actual_span = (1u << (uint32_t)actual_shift) - 1u;
+    const uint32_t scaled_factor = 1u << (uint32_t)scaled_shift;
+    const int64_t actual_white_wide = (int64_t)raw_info->black_level + actual_span;
+    const int64_t scaled_white_wide = (int64_t)signal_span * scaled_factor;
+    if (actual_white_wide <= raw_info->black_level || actual_white_wide > INT_MAX
+        || scaled_white_wide <= raw_info->black_level || scaled_white_wide > 16383)
+    {
+        return 0;
+    }
 
-    raw_info->white_level = scaled_white_level;
+    const int32_t actual_white_level = (int32_t)actual_white_wide;
+    const int32_t scaled_white_level = (int32_t)scaled_white_wide;
 
-    uint32_t pixel_count = raw_info->width * raw_info->height;
+    const double scale_ratio =
+        (double)(scaled_white_level - raw_info->black_level)
+        / (double)(actual_white_level - raw_info->black_level);
+    if (!isfinite(scale_ratio) || scale_ratio <= 0.0)
+    {
+        return 0;
+    }
 
     #pragma omp parallel for
-    for (uint32_t i = 0; i < pixel_count; ++i)
+    for (size_t i = 0; i < pixel_count; ++i)
     {
-        image_data[i] = MIN((uint16_t)((double)((image_data[i] - raw_info->black_level) * scale_ratio + raw_info->black_level) + 0.5), 16383);
+        const double scaled =
+            (double)(image_data[i] - raw_info->black_level) * scale_ratio
+            + raw_info->black_level;
+        image_data[i] = scaled <= 0.0
+                      ? 0
+                      : scaled >= 16383.0
+                      ? 16383
+                      : (uint16_t)(scaled + 0.5);
     }
+    raw_info->white_level = scaled_white_level;
+    return 1;
+}
+
+/* Production-linked fail-closed seam for hostile arithmetic tests. */
+int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                            uint16_t * image_data,
+                                            size_t pixel_count,
+                                            int low_iso,
+                                            int high_iso);
+int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_info,
+                                            uint16_t * image_data,
+                                            size_t pixel_count,
+                                            int low_iso,
+                                            int high_iso)
+{
+    return scale_restricted_range(raw_info,
+                                  image_data,
+                                  pixel_count,
+                                  low_iso,
+                                  high_iso);
 }
 
 /* initialise low level raw processing struct */
@@ -3240,9 +3285,27 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 
         uint16_t * dual_iso_failure_backup = NULL;
         int restricted_lossless = (video->MLVI.videoClass & MLV_VIDEO_CLASS_FLAG_LJ92) && raw_info.white_level < 15000;
+        size_t restricted_pixel_count = 0;
 
         if (restricted_lossless)
         {
+            uint32_t restricted_frame_size = 0;
+            if (!llrawproc_checked_14bit_frame_extents(raw_info.width,
+                                                       raw_info.height,
+                                                       &restricted_pixel_count,
+                                                       &restricted_frame_size)
+                || restricted_pixel_count > SIZE_MAX / sizeof(uint16_t)
+                || restricted_pixel_count * sizeof(uint16_t) != raw_image_size)
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return;
+            }
             if (dual_iso_mode == 1)
             {
                 dual_iso_failure_backup =
@@ -3269,7 +3332,21 @@ void applyLLRawProcObjectWorker(mlvObject_t * video,
 #endif
             int low_iso = MIN(diso1, diso2);
             int high_iso = MAX(diso1, diso2);
-            scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
+            if (!scale_restricted_range(&raw_info,
+                                        raw_image_buff,
+                                        restricted_pixel_count,
+                                        low_iso,
+                                        high_iso))
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return;
+            }
             llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
 #ifndef STDOUT_SILENT
             printf("Raw_Black = %d, Raw_White = %d <= AFTER SCALING\n", raw_info.black_level, raw_info.white_level);
@@ -4328,7 +4405,24 @@ int applyLLRawProcObject_with_dims(mlvObject_t * video,
             const double dual_iso_start = mlv_stage_timing_now();
             int low_iso = MIN(diso1, diso2);
             int high_iso = MAX(diso1, diso2);
-            scale_restricted_range(&raw_info, raw_image_buff, low_iso, high_iso);
+            if (!scale_restricted_range(&raw_info,
+                                        raw_image_buff,
+                                        override_pixel_count,
+                                        low_iso,
+                                        high_iso))
+            {
+                if (original_bits_per_pixel < 14)
+                {
+                    undo_14bit(raw_image_buff,
+                               raw_image_size,
+                               original_bits_per_pixel);
+                }
+                llrawproc_restore_worker_runtime_state(
+                    worker,
+                    &worker->seeded_runtime_state);
+                if (using_stack_worker) llrawproc_free_worker_state(worker);
+                return 0;
+            }
             llrawproc_worker_reset_dng_bw_levels(worker, &raw_info);
             dual_iso_ms += (mlv_stage_timing_now() - dual_iso_start) * 1000.0;
         }

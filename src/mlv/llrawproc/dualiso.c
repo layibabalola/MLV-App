@@ -3052,12 +3052,23 @@ typedef struct
 {
     amazeinfo_t* info;
     double* elapsed_ms;
+    int* succeeded;
 } amaze_demosaic_thread_arg_t;
+
+static int g_dualiso_amaze_thread_create_failure_for_testing = -1;
+
+void dualisoSetAmazeThreadCreateFailureForTesting(int thread_index);
+void dualisoSetAmazeThreadCreateFailureForTesting(int thread_index)
+{
+    g_dualiso_amaze_thread_create_failure_for_testing = thread_index;
+}
 
 static void* demosaic_wrapper(void* arg) {
     amaze_demosaic_thread_arg_t* thread_arg = (amaze_demosaic_thread_arg_t*)arg;
     double start = mlv_stage_timing_now();
-    demosaic(thread_arg->info);
+    const int succeeded = demosaic(thread_arg->info);
+    if (thread_arg->succeeded)
+        *thread_arg->succeeded = succeeded;
     if (thread_arg->elapsed_ms)
         *thread_arg->elapsed_ms = dualiso_debug_elapsed_ms(start);
     return NULL;
@@ -3187,11 +3198,16 @@ static inline int amaze_interpolate(struct raw_info raw_info,
 
     pthread_t* thread_id = (pthread_t*)scratch->amaze_thread_id;
     amazeinfo_t* amaze_arguments = (amazeinfo_t*)scratch->amaze_arguments;
+    const int requested_demosaic_threads = threads;
+    int created_demosaic_threads = 0;
+    int demosaic_thread_creation_failed = 0;
     double demosaic_worker_ms[threads];
+    int demosaic_worker_succeeded[threads];
     amaze_demosaic_thread_arg_t demosaic_thread_args[threads];
 
     for (int thread = 0; thread < threads; ++thread) {
         demosaic_worker_ms[thread] = 0.0;
+        demosaic_worker_succeeded[thread] = 0;
     }
     g_dualiso_full20bit_timing.interp_amaze_demosaic_setup_ms +=
         dualiso_debug_elapsed_ms(amaze_stage_start);
@@ -3210,24 +3226,46 @@ static inline int amaze_interpolate(struct raw_info raw_info,
         };
         demosaic_thread_args[thread] = (amaze_demosaic_thread_arg_t) {
             &amaze_arguments[thread],
-            &demosaic_worker_ms[thread]
+            &demosaic_worker_ms[thread],
+            &demosaic_worker_succeeded[thread]
         };
 
-        pthread_create(&thread_id[thread], NULL, demosaic_wrapper, &demosaic_thread_args[thread]);
+        const int create_result =
+            g_dualiso_amaze_thread_create_failure_for_testing == thread
+            ? 1
+            : pthread_create(&thread_id[thread],
+                             NULL,
+                             demosaic_wrapper,
+                             &demosaic_thread_args[thread]);
+        if (create_result != 0)
+        {
+            demosaic_thread_creation_failed = 1;
+            break;
+        }
+        created_demosaic_threads++;
     }
     g_dualiso_full20bit_timing.interp_amaze_demosaic_create_ms +=
         dualiso_debug_elapsed_ms(amaze_stage_start);
 
     amaze_stage_start = mlv_stage_timing_now();
-    for (int thread = 0; thread < threads; ++thread) {
+    for (int thread = 0; thread < created_demosaic_threads; ++thread) {
         pthread_join(thread_id[thread], NULL);
     }
     g_dualiso_full20bit_timing.interp_amaze_demosaic_join_ms +=
         dualiso_debug_elapsed_ms(amaze_stage_start);
 
+    if (demosaic_thread_creation_failed
+        || created_demosaic_threads != requested_demosaic_threads)
+        return 0;
+    for (int thread = 0; thread < created_demosaic_threads; ++thread)
+    {
+        if (!demosaic_worker_succeeded[thread])
+            return 0;
+    }
+
     double demosaic_worker_total_ms = 0.0;
     double demosaic_worker_max_ms = 0.0;
-    for (int thread = 0; thread < threads; ++thread) {
+    for (int thread = 0; thread < created_demosaic_threads; ++thread) {
         demosaic_worker_total_ms += demosaic_worker_ms[thread];
         if (demosaic_worker_ms[thread] > demosaic_worker_max_ms)
             demosaic_worker_max_ms = demosaic_worker_ms[thread];
@@ -3237,7 +3275,7 @@ static inline int amaze_interpolate(struct raw_info raw_info,
     g_dualiso_full20bit_timing.interp_amaze_demosaic_worker_max_ms +=
         demosaic_worker_max_ms;
     g_dualiso_full20bit_timing.interp_amaze_demosaic_worker_count +=
-        threads;
+        created_demosaic_threads;
     g_dualiso_full20bit_timing.interp_amaze_demosaic_ms +=
         dualiso_debug_elapsed_ms(demosaic_stage_start);
 
