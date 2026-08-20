@@ -119,6 +119,7 @@ def recover_bridge_session(
     start_watcher: bool = True,
     force_takeover: bool = False,
 ) -> Dict[str, Any]:
+    storage = AgentBridge(state_dir).storage
     before = inspect_bridge_runtime(
         state_dir=state_dir,
         agent=agent,
@@ -154,6 +155,7 @@ def recover_bridge_session(
             project=project_name,
             cwd=cwd,
             python_executable="py",
+            storage=storage,
         )
         if start_watcher:
             watcher_process = ensure_watcher(watcher_config_path, state_dir=state_dir)

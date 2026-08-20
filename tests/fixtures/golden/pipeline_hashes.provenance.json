@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "artifact": {
+    "path": "tests/fixtures/golden/pipeline_hashes.json",
+    "sha256": "89ce4ad45e378f38db8bab1efe3660056dc14c16bd71d8e3ec6da08fbac01f4a",
+    "hash_mode": "lf_normalized_sha256",
+    "key_count": 15,
+    "content_state": "committed_historical_golden",
+    "introduced_by": "fc9c0a6d6d97cc885b92236333209504530f326b",
+    "external_observations": [
+      {
+        "kind": "hosted_golden_check_claim",
+        "run_id": 32273540367,
+        "head_sha": "08f38ea73887e9ae3b3e84673f03d82267473fab",
+        "conclusion": "success",
+        "url": "https://github.com/layibabalola/MLV-App/actions/runs/32273540367",
+        "verification": "externally_asserted_unvalidated",
+        "local_git_correlation": {
+          "head_commit_present": true,
+          "artifact_blob_matches": true,
+          "introduced_by_is_ancestor": true,
+          "head_is_ancestor_of_source_state": true
+        }
+      }
+    ]
+  },
+  "review": {
+    "status": "ratified",
+    "scope": {
+      "artifact": "complete",
+      "keys": [
+        "tiny_dual_iso.debayer.amaze.cpu.frame0",
+        "tiny_dual_iso.debayer.bilinear.cpu.frame0",
+        "tiny_dual_iso.full16.frame0",
+        "tiny_dual_iso.full16.frame1",
+        "tiny_dual_iso.gpu_preview_subset.exposure_0_75.frame0",
+        "tiny_dual_iso.gpu_preview_subset.exposure_0_75.signature.frame0",
+        "tiny_dual_iso.gpu_preview_subset.frame0",
+        "tiny_dual_iso.gpu_preview_subset.frame1",
+        "tiny_dual_iso.gpu_preview_subset.signature.frame0",
+        "tiny_dual_iso.gpu_preview_subset.signature.frame1",
+        "tiny_dual_iso.preview_processing.cpu.frame0",
+        "tiny_dual_iso.preview16.frame0",
+        "tiny_dual_iso.preview16.frame1",
+        "tiny_dual_iso.preview16_vs_full_psnr.frame0",
+        "tiny_dual_iso.preview16_vs_full_psnr.frame1"
+      ]
+    },
+    "reason": "The repository owner approved the exact 15-key before/after synchronization at 08f38ea73887e9ae3b3e84673f03d82267473fab after the deterministic hosted producer and frozen known-good output agreed.",
+    "approval_witness": {
+      "path": "receipts/pipeline-golden-sync-human-approval-20260819.json",
+      "sha256": "77232c9e283e1d4b731b52de1de8b855d6874ff2c311144c6248e9d3b15cc538",
+      "hash_mode": "lf_normalized_sha256"
+    }
+  },
+  "unknowns": {
+    "original_generation_run": null,
+    "generator_executable_sha256": null,
+    "runner_image_revision": null,
+    "whole_artifact_review_range": "e87b5133397240d5ebf3307625e8379be81e48f4..08f38ea73887e9ae3b3e84673f03d82267473fab"
+  },
+  "generator": {
+    "executable": "pipeline_tests.exe",
+    "source_state_commit": "6195dc24714ccbe1a3b7481723e031c7c21ee1a1",
+    "dependency_snapshot": {
+      "complete": false,
+      "scope": "listed_generator_sources_and_declared_fixture_receipt_inputs_only",
+      "excluded": [
+        "transitive product implementation sources",
+        "compiler and Qt binary hashes",
+        "runner image contents"
+      ]
+    },
+    "emit_arguments": [
+      "--hash-output",
+      "<output-json>"
+    ],
+    "check_arguments": [
+      "--check-golden"
+    ],
+    "toolchain": {
+      "os": "windows-latest",
+      "qt": "6.10.2",
+      "compiler": "MinGW 13.1",
+      "evidence": {
+        "path": ".github/workflows/tests.yml",
+        "sha256": "1825963c161c2b361fc3fd88db06173a2f4abbf5b545e325c4685a851fd7eec6",
+        "hash_mode": "lf_normalized_sha256"
+      }
+    },
+    "sources": [
+      {
+        "path": "tests/pipeline/test_main.cpp",
+        "sha256": "d24db81759b5805b86b8e0b7ea967589cd70fa60f8216b834d9e0753bb94aea8",
+        "hash_mode": "lf_normalized_sha256"
+      },
+      {
+        "path": "tests/pipeline/test_backend_parametric_debayer_shell.cpp",
+        "sha256": "d6183858c2f5509042bf0ebc4db96879442d2751fd38cdc511edb706233f47c3",
+        "hash_mode": "lf_normalized_sha256"
+      },
+      {
+        "path": "tests/pipeline/test_backend_parametric_shell.cpp",
+        "sha256": "2cfb87ebbe7d24dbd63b5e641c3de930a2dc4c225efd6057ac02d7b3608949ca",
+        "hash_mode": "lf_normalized_sha256"
+      },
+      {
+        "path": "tests/pipeline/test_dual_iso_pipeline.cpp",
+        "sha256": "c47c9d2a94b78c48f5637dde6903c27eb026633b534d2c1ee5d5ee2b4f53e347",
+        "hash_mode": "lf_normalized_sha256"
+      },
+      {
+        "path": "tests/pipeline/test_gpu_preview_processing.cpp",
+        "sha256": "b4c73455cb66b8f934c8e4a1e8636c391eae7efe0610bafe280702b499332b7e",
+        "hash_mode": "lf_normalized_sha256"
+      }
+    ],
+    "producer_tests": [
+      "BackendParametricDebayerShell.CpuRenderDebayerAmazeProducesStableHash",
+      "BackendParametricDebayerShell.CpuRenderDebayerBilinearProducesStableHash",
+      "BackendParametricShell.CpuRenderPreviewProcessingSubsetProducesStableHash",
+      "DualIsoPipeline.TinyDualIsoFullFramesMatchGolden",
+      "DualIsoPipeline.TinyDualIsoPreviewFramesMatchGoldenAndStayCloseToFull",
+      "GpuPreviewProcessing.ExposureStopsChangesSubsetConfigAndStableOutput",
+      "GpuPreviewProcessing.TinyDualIsoReceiptSubsetGoldenOutputIsStable"
+    ]
+  },
+  "inputs": [
+    {
+      "role": "fixture",
+      "path": "tests/fixtures/clips/tiny_dual_iso.mlv",
+      "sha256": "ed3c1ba340e1e269347b5ff860ae1224a2ae12583a4dca390f5f82409a60ce12",
+      "hash_mode": "raw_sha256"
+    },
+    {
+      "role": "receipt",
+      "path": "tests/fixtures/receipts/tiny_dual_iso_hq.marxml",
+      "sha256": "9b20e5de8cdee22f6eeda968d11d16fa619d43bf1289406add8c49a25bf142ec",
+      "hash_mode": "lf_normalized_sha256"
+    }
+  ],
+  "cross_golden": {
+    "phase3": {
+      "path": "tests/fixtures/phase3_baselines/golden.json",
+      "sha256": "7535fd8e42825a5cce59be468b5782548d5cdc82b83a6454bb56d9f3644b996b",
+      "hash_mode": "lf_normalized_sha256",
+      "review": {
+        "status": "git_integrated_external_review_asserted",
+        "scope": [
+          "tiny_dual_iso.full16.frame0",
+          "tiny_dual_iso.full16.frame1"
+        ],
+        "reviewed_range": "3e02eaea7a39b1a86b22f61e43017af3cd4f14f6..cbae456144e2dc9092d78c87853de37d1bbe937a",
+        "landed_commit": "e59d8f9f7db769e197f5d24205ef14c1f7b50b89",
+        "external_review_witness": {
+          "verification": "externally_asserted_unvalidated",
+          "tracked_approval_witness": null,
+          "reason": "The reviewed range and integration merge are locally Git-verifiable; no tracked approval artifact was found, so review approval remains an external assertion."
+        }
+      }
+    },
+    "pairs": [
+      {
+        "pipeline_key": "tiny_dual_iso.full16.frame0",
+        "phase3_clip": "tiny_dual_iso_hq",
+        "phase3_frame": 0,
+        "phase3_format": "rgb16",
+        "status": "aligned"
+      },
+      {
+        "pipeline_key": "tiny_dual_iso.full16.frame1",
+        "phase3_clip": "tiny_dual_iso_hq",
+        "phase3_frame": 1,
+        "phase3_format": "rgb16",
+        "status": "aligned"
+      }
+    ]
+  }
+}

@@ -14,7 +14,6 @@
 #include <QStandardPaths>
 
 #include <cmath>
-#include <numeric>
 
 /* Shared type header for batch mode.
  * Include this instead of MainWindow.h to avoid circular dependencies.
@@ -3438,7 +3437,14 @@ batchRenderedVideoFfmpegDumpFacts(const QString & dumpText)
         facts.sampleAspectRatio = QStringLiteral("1:1(implied)");
         if( facts.width > 0 && facts.height > 0 )
         {
-            const int divisor = std::gcd( facts.width, facts.height );
+            int divisor = facts.width;
+            int remainder = facts.height;
+            while( remainder != 0 )
+            {
+                const int next = divisor % remainder;
+                divisor = remainder;
+                remainder = next;
+            }
             facts.displayAspectRatio = QStringLiteral("%1:%2")
                 .arg( facts.width / divisor ).arg( facts.height / divisor );
         }

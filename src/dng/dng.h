@@ -112,6 +112,7 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer, mlvObject_t *
 int saveDngFrameViaPayload(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *props_filename);
 void freeDngObject(dngObject_t * dng_data);
+void resetDngExportProfilerForTesting(void);
 
 #ifdef __cplusplus
 }

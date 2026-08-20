@@ -12,6 +12,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
@@ -24,6 +25,7 @@ from hypothesis import strategies as st
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bootstrap_session
+import compact
 import powershell_runtime
 from agent_bridge import (
     PROJECT_BACKPRESSURE_LIMIT,
@@ -36,18 +38,51 @@ from agent_bridge import (
 )
 from bootstrap_session import bootstrap, detect_bootstrap_origin, restart_watcher_for_code_change, sweep_orphan_watchers, watcher_code_signature
 from codex_app_server_wake import build_wake_prompt, resolve_listen_url
-from compact import prune_audit_logs, reap_stale_server_pids
+from compact import (
+    compact_inbox as storage_compact_inbox,
+    prune_audit_logs as storage_prune_audit_logs,
+    reap_stale_server_pids as storage_reap_stale_server_pids,
+    rotate_audit_log as storage_rotate_audit_log,
+)
 from configure_watcher import configure_watcher
 from consume_inbox import consume
 from core.addressing import AgentInbox, MessageKind, ProjectInbox, SenderContext, SessionInbox
 from core.auth import LOCAL_DEFAULT_MACHINE_ID, LOCAL_DEFAULT_TENANT_ID, LocalUserAuth
-from core.paths import BridgeRootMovedError, ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths
-from core.processes import acquire_singleton_lease, heartbeat_lease, release_lease
-from core.runtime import build_peer_runtime_breadcrumb, peer_runtime_path_for_state_dir, read_runtime_breadcrumb, write_runtime_breadcrumb
+from core.paths import (
+    BridgeRootMovedError,
+    ensure_bridge_root_manifest,
+    expand_path_arg,
+    resolve_bridge_paths,
+    resolve_moved_root_chain,
+)
+import core.storage as storage_module
+from core.processes import (
+    acquire_singleton_lease as storage_acquire_singleton_lease,
+    heartbeat_lease as storage_heartbeat_lease,
+    release_lease as storage_release_lease,
+)
+from core.runtime import (
+    build_peer_runtime_breadcrumb as storage_build_peer_runtime_breadcrumb,
+    peer_runtime_path_for_state_dir,
+    read_runtime_breadcrumb as storage_read_runtime_breadcrumb,
+    write_runtime_breadcrumb as storage_write_runtime_breadcrumb,
+)
 from core.routing import RoutingStatus, resolve_route
-from core.settings import load_settings, settings_path_for_state_dir
-from core.storage import append_jsonl, read_json, read_jsonl, with_schema_version, write_json, write_jsonl
-from core.transport import LocalFilesystemTransport
+from core.settings import load_settings as storage_load_settings, settings_path_for_state_dir
+from core.storage import (
+    StorageCapability,
+    UnsafeStoragePathError,
+    append_jsonl as storage_append_jsonl,
+    audit_private_path as storage_audit_private_path,
+    audit_private_tree as storage_audit_private_tree,
+    read_json as storage_read_json,
+    read_jsonl as storage_read_jsonl,
+    validate_storage_path as storage_validate_storage_path,
+    with_schema_version,
+    write_json as storage_write_json,
+    write_jsonl as storage_write_jsonl,
+)
+from core.transport import LocalFilesystemTransport as StorageLocalFilesystemTransport
 from dashboard_launcher import _self_heal_watcher_if_needed
 from dashboard_server import DEFAULT_DASHBOARD_PORT, start_dashboard_server
 from migrate_root import migrate_root
@@ -61,15 +96,120 @@ import watcher
 
 
 ROOT = Path(__file__).resolve().parents[2]
+_TEST_STORAGE: ContextVar[StorageCapability] = ContextVar("agent_bridge_test_storage")
+
+
+def _test_storage() -> StorageCapability:
+    return _TEST_STORAGE.get()
+
+
+def read_json(path, default):
+    return storage_read_json(path, default, storage=_test_storage())
+
+
+def write_json(path, value):
+    return storage_write_json(path, value, storage=_test_storage())
+
+
+def read_jsonl(path):
+    return storage_read_jsonl(path, storage=_test_storage())
+
+
+def append_jsonl(path, row):
+    return storage_append_jsonl(path, row, storage=_test_storage())
+
+
+def write_jsonl(path, rows):
+    return storage_write_jsonl(path, rows, storage=_test_storage())
+
+
+def audit_private_path(path, *, platform_name=None):
+    return storage_audit_private_path(
+        path, platform_name=platform_name, storage=_test_storage()
+    )
+
+
+def audit_private_tree(path, *, platform_name=None):
+    return storage_audit_private_tree(
+        path, platform_name=platform_name, storage=_test_storage()
+    )
+
+
+def validate_storage_path(path, **kwargs):
+    return storage_validate_storage_path(path, storage=kwargs.pop("storage", _test_storage()))
+
+
+def acquire_singleton_lease(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_acquire_singleton_lease(*args, **kwargs)
+
+
+def heartbeat_lease(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_heartbeat_lease(*args, **kwargs)
+
+
+def release_lease(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_release_lease(*args, **kwargs)
+
+
+def build_peer_runtime_breadcrumb(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_build_peer_runtime_breadcrumb(*args, **kwargs)
+
+
+def read_runtime_breadcrumb(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_read_runtime_breadcrumb(*args, **kwargs)
+
+
+def write_runtime_breadcrumb(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_write_runtime_breadcrumb(*args, **kwargs)
+
+
+def load_settings(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_load_settings(*args, **kwargs)
+
+
+def LocalFilesystemTransport(*args, **kwargs):
+    if not args and "storage" not in kwargs:
+        kwargs["storage"] = _test_storage()
+    return StorageLocalFilesystemTransport(*args, **kwargs)
+
+
+def compact_inbox(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_compact_inbox(*args, **kwargs)
+
+
+def prune_audit_logs(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_prune_audit_logs(*args, **kwargs)
+
+
+def reap_stale_server_pids(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_reap_stale_server_pids(*args, **kwargs)
+
+
+def rotate_audit_log(*args, **kwargs):
+    kwargs.setdefault("storage", _test_storage())
+    return storage_rotate_audit_log(*args, **kwargs)
 
 
 class AgentBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="agent-bridge-test-"))
+        self.storage = StorageCapability.bind_trusted(self.tempdir)
+        self._storage_token = _TEST_STORAGE.set(self.storage)
         self.state_dir = self.tempdir / "state"
         watcher._SESSION_REGISTRY_CACHE.clear()
 
     def tearDown(self) -> None:
+        _TEST_STORAGE.reset(self._storage_token)
         shutil.rmtree(self.tempdir, ignore_errors=True)
 
     def test_project_identity_uses_git_common_root(self) -> None:
@@ -95,6 +235,14 @@ class AgentBridgeTests(unittest.TestCase):
 
         legacy = resolve_bridge_paths(state_dir=legacy_state, env={"USERPROFILE": str(self.tempdir)})
         self.assertEqual(legacy.root, self.tempdir / "legacy-root")
+
+    def test_bridge_paths_resolve_relative_custom_root_at_configuration_boundary(self) -> None:
+        relative_root = Path(".claude-state") / "relative-agent-bridge-test"
+
+        paths = resolve_bridge_paths(bridge_root=relative_root, reject_moved=False)
+
+        self.assertTrue(paths.root.is_absolute())
+        self.assertEqual(paths.root, (Path.cwd() / relative_root).absolute())
 
     def test_expand_path_arg_expands_windows_and_unix_style_env_vars(self) -> None:
         env = {
@@ -329,6 +477,17 @@ class AgentBridgeTests(unittest.TestCase):
         (root_c / "MOVED_TO.json").write_text(json.dumps({"active_root": str(root_a)}), encoding="utf-8")
         with self.assertRaises(ValueError):
             resolve_bridge_paths(bridge_root=root_a)
+
+    def test_bridge_paths_reject_relative_moved_target_before_probing_it(self) -> None:
+        source = self.tempdir / "old-root"
+        source.mkdir()
+        (source / "MOVED_TO.json").write_text(
+            json.dumps({"active_root": "../untrusted-relative-root"}),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(UnsafeStoragePathError, "must be absolute"):
+            resolve_bridge_paths(bridge_root=source)
 
     def test_bridge_root_manifest_is_created_once(self) -> None:
         paths = resolve_bridge_paths(bridge_root=self.tempdir / "manifest-root")
@@ -1584,7 +1743,9 @@ $result | ConvertTo-Json -Compress
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            # Hosted Windows cold starts occasionally exceed 15 seconds. Keep the
+            # smoke fail-closed with a finite process-level ceiling and no retry.
+            timeout=30,
         )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1708,6 +1869,164 @@ $result | ConvertTo-Json -Compress
         self.assertEqual(rows, [{"id": "ok"}])
         self.assertTrue(inbox.with_suffix(".quarantine.jsonl").exists())
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits are not Windows DACLs")
+    def test_core_storage_enforces_private_posix_modes(self) -> None:
+        state_dir = self.tempdir / "nested" / "bridge" / "state"
+        state_path = state_dir / "state.json"
+        inbox = state_dir / "inbox-codex.jsonl"
+        legacy = state_dir / "legacy.json"
+        write_json(state_path, {"paused": False})
+        append_jsonl(inbox, {"id": "ok"})
+        legacy.write_text('{"legacy": true}\n', encoding="utf-8")
+        os.chmod(legacy, 0o644)
+        self.assertEqual(read_json(legacy, {}), {"legacy": True})
+        with inbox.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write("{bad json\n")
+        read_jsonl(inbox)
+
+        for path in (self.tempdir / "nested", self.tempdir / "nested" / "bridge", state_dir):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700, str(path))
+        for path in (state_path, inbox, legacy, inbox.with_suffix(".quarantine.jsonl")):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600, str(path))
+        self.assertTrue(audit_private_tree(self.tempdir / "nested")["ok"])
+
+    def test_windows_storage_permission_audit_fails_closed_without_dacl_claim(self) -> None:
+        self.tempdir.mkdir(parents=True, exist_ok=True)
+        result = audit_private_path(self.tempdir, platform_name="nt")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "windows_acl_unverified")
+        self.assertIn("DACL", result["message"])
+
+    def test_compact_permission_audit_authorizes_root_in_fresh_process(self) -> None:
+        bridge_root = self.tempdir / "fresh-audit-root"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        if os.name != "nt":
+            os.chmod(bridge_root, 0o700)
+            os.chmod(state_dir, 0o700)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "compact.py"),
+                "--state-dir",
+                str(state_dir),
+                "--audit-permissions-only",
+            ],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        report = json.loads(result.stdout)
+        self.assertEqual(report["scope"], "bridge_root")
+        self.assertNotEqual(report["status"], "unsafe_path")
+        self.assertNotIn("no agent-bridge storage root has been authorized", result.stdout + result.stderr)
+        if os.name == "nt":
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(report["results"][0]["status"], "windows_acl_unverified")
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(report["ok"])
+            self.assertTrue(all(item["status"] == "private" for item in report["results"]))
+
+    def test_recover_state_cli_authorizes_root_in_fresh_process(self) -> None:
+        state_dir = self.tempdir / "fresh-recovery-root" / "state"
+        state_dir.mkdir(parents=True)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).resolve().parent / "recover_state.py"),
+                "--state-dir",
+                str(state_dir),
+            ],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(report["ok"])
+        self.assertEqual(Path(report["state_dir"]), state_dir)
+        self.assertNotIn("no agent-bridge storage root has been authorized", result.stdout + result.stderr)
+
+    def test_watcher_cli_authorizes_root_before_lease_in_fresh_process(self) -> None:
+        bridge_root = self.tempdir / "fresh-watcher-root"
+        state_dir = bridge_root / "state"
+        config_path = bridge_root / "watcher-config.json"
+        state_dir.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "sessions": [
+                        {
+                            "agent": "codex",
+                            "session_id": "codex-live",
+                            "inbox": str(state_dir / "inbox-codex.jsonl"),
+                            "on_message": "log",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        proc = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve().parent / "watcher.py"), "--config", str(config_path)],
+            cwd=Path(__file__).resolve().parent,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        lease_path = state_dir / "locks" / "watcher.lock"
+        observed_lease = False
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if lease_path.exists():
+                    observed_lease = True
+                    break
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate(timeout=5)
+
+        self.assertTrue(observed_lease, stderr or stdout)
+        self.assertNotIn("no agent-bridge storage root has been authorized", stdout + stderr)
+
+    @unittest.skipIf(os.name == "nt", "creating symlinks is privilege-dependent on Windows")
+    def test_core_storage_rejects_symlink_escape_and_audit_reports_link(self) -> None:
+        bridge_root = self.tempdir / "bridge"
+        state_dir = bridge_root / "state"
+        outside = self.tempdir / "outside"
+        write_json(state_dir / "state.json", {"paused": False})
+        outside.mkdir(mode=0o700)
+        escape = state_dir / "escape"
+        escape.symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaises(UnsafeStoragePathError):
+            write_json(escape / "leaked.json", {"secret": True})
+
+        self.assertFalse((outside / "leaked.json").exists())
+        report = audit_private_tree(bridge_root)
+        self.assertFalse(report["ok"])
+        link_results = [
+            result for result in report["results"]
+            if result["status"] == "link_or_reparse"
+        ]
+        self.assertEqual(len(link_results), 1)
+        self.assertEqual(Path(link_results[0]["path"]), escape)
+
     def test_core_storage_corrupt_json_returns_default(self) -> None:
         state_path = self.tempdir / "corrupt-state.json"
         state_path.write_text("{bad json", encoding="utf-8")
@@ -1717,18 +2036,307 @@ $result | ConvertTo-Json -Compress
         self.assertEqual(result, {"safe": True})
         self.assertEqual(state_path.read_text(encoding="utf-8"), "{bad json")
 
+    def test_core_storage_requires_absolute_paths_and_rejects_traversal(self) -> None:
+        relative = Path("state") / "relative.json"
+        traversal = self.tempdir / "state" / ".." / ".." / "escaped.json"
+
+        with self.assertRaisesRegex(UnsafeStoragePathError, "must be absolute"):
+            write_json(relative, {"secret": True})
+        with self.assertRaisesRegex(UnsafeStoragePathError, "may not contain '..'"):
+            write_json(traversal, {"secret": True})
+
+        self.assertFalse((Path.cwd() / relative).exists())
+        self.assertFalse((self.tempdir.parent / "escaped.json").exists())
+
+    def test_core_storage_rejects_clean_absolute_path_outside_authorized_root(self) -> None:
+        outside = self.tempdir.parent / (self.tempdir.name + "-outside.json")
+        self.assertTrue(outside.is_absolute())
+
+        with self.assertRaisesRegex(UnsafeStoragePathError, "outside its authorized root"):
+            write_json(outside, {"secret": True})
+        with self.assertRaisesRegex(UnsafeStoragePathError, "outside its authorized root"):
+            validate_storage_path(outside)
+
+        self.assertFalse(outside.exists())
+
+    def test_core_storage_authorized_absolute_path_is_canonical_and_writable(self) -> None:
+        target = self.tempdir / "state" / "authorized.json"
+
+        validated = validate_storage_path(target)
+        write_json(target, {"safe": True})
+
+        self.assertEqual(validated, target)
+        self.assertEqual(read_json(target, {}), {"safe": True})
+
+    def test_storage_capabilities_do_not_share_cross_root_authority(self) -> None:
+        root_a = self.tempdir / "root-a"
+        root_b = self.tempdir / "root-b"
+        root_a.mkdir()
+        root_b.mkdir()
+        cap_a = StorageCapability.bind_trusted(root_a)
+        cap_b = StorageCapability.bind_trusted(root_b)
+
+        cap_b.write_json(root_b / "state.json", {"owner": "b"})
+        with self.assertRaisesRegex(UnsafeStoragePathError, "outside its authorized root"):
+            cap_a.write_json(root_b / "leaked.json", {"owner": "a"})
+
+        self.assertFalse((root_b / "leaked.json").exists())
+
+    def test_watcher_storage_helper_cannot_self_authorize_outside_owner_root(self) -> None:
+        owner_root = self.tempdir / "watcher-owner"
+        outside_root = self.tempdir / "watcher-outside"
+        owner_root.mkdir()
+        outside_root.mkdir()
+        owner = StorageCapability.bind_trusted(owner_root)
+        outside_path = outside_root / "state.json"
+
+        with self.assertRaisesRegex(
+            UnsafeStoragePathError, "outside its authorized root"
+        ):
+            watcher.storage_write_json(
+                outside_path, {"escaped": True}, storage=owner
+            )
+
+        self.assertFalse(outside_path.exists())
+
+    def test_watcher_hot_reload_rejects_outside_inbox_before_session_swap(self) -> None:
+        bridge_root = self.tempdir / "watcher-hot-reload"
+        state_dir = bridge_root / "state"
+        outside_root = self.tempdir / "watcher-hot-reload-outside"
+        state_dir.mkdir(parents=True)
+        outside_root.mkdir()
+        storage = StorageCapability.bind_trusted(bridge_root)
+        config_path = bridge_root / "watcher-config.json"
+        valid_inbox = state_dir / "inbox-codex.jsonl"
+        outside_inbox = outside_root / "inbox-codex.jsonl"
+        valid_config = {
+            "sessions": [
+                {
+                    "agent": "codex",
+                    "session_id": "codex-live",
+                    "inbox": str(valid_inbox),
+                    "on_message": "log",
+                }
+            ]
+        }
+        storage.write_json(config_path, valid_config)
+        stop_event = threading.Event()
+        processed_inboxes: List[str] = []
+        sleeps = 0
+
+        def fake_process(session_config, **_kwargs):
+            processed_inboxes.append(str(session_config["inbox"]))
+            return []
+
+        def fake_sleep(_seconds):
+            nonlocal sleeps
+            if sleeps == 0:
+                storage.write_json(
+                    config_path,
+                    {
+                        "sessions": [
+                            {
+                                "agent": "codex",
+                                "session_id": "codex-live",
+                                "inbox": str(outside_inbox),
+                                "on_message": "log",
+                            }
+                        ]
+                    },
+                )
+                future = time.time() + 5
+                os.utime(config_path, (future, future))
+            else:
+                stop_event.set()
+            sleeps += 1
+
+        with (
+            patch("watcher.process_session_once", side_effect=fake_process),
+            patch("watcher.run_compaction"),
+            patch("watcher.should_compact", return_value=False),
+            patch("watcher._maybe_queue_commit_monitor_restart_controls", return_value=[]),
+            patch("watcher._maybe_queue_monitor_stale_control", return_value=None),
+            patch("watcher._maybe_notify_mcp_server_restart"),
+            patch("watcher.time.sleep", side_effect=fake_sleep),
+        ):
+            watcher.watch(config_path, stop_event=stop_event, storage=storage)
+
+        self.assertGreaterEqual(len(processed_inboxes), 2)
+        self.assertEqual({str(valid_inbox)}, set(processed_inboxes))
+        self.assertFalse(outside_inbox.exists())
+
+    def test_watcher_config_accepts_canonical_bridge_session_registry(self) -> None:
+        bridge_root = self.tempdir / "watcher-canonical-registry"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
+        canonical_registry = bridge_root / "session.json"
+
+        sessions = watcher._validate_watcher_config(
+            {
+                "sessions": [
+                    {
+                        "agent": "claude",
+                        "session_id": "claude-live",
+                        "inbox": str(state_dir / "inbox-claude.jsonl"),
+                        "session_registry": str(canonical_registry),
+                    }
+                ]
+            },
+            state_dir=state_dir,
+            storage=storage,
+        )
+
+        self.assertEqual(str(canonical_registry), sessions[0]["session_registry"])
+
+    def test_watcher_config_rejects_state_local_and_noncanonical_registries(self) -> None:
+        bridge_root = self.tempdir / "watcher-noncanonical-registry"
+        state_dir = bridge_root / "state"
+        state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
+
+        for registry_path in (
+            state_dir / "session.json",
+            bridge_root / "alternate-session.json",
+        ):
+            with self.subTest(registry_path=registry_path):
+                with self.assertRaisesRegex(
+                    UnsafeStoragePathError, "canonical bridge registry path"
+                ):
+                    watcher._validate_watcher_config(
+                        {
+                            "sessions": [
+                                {
+                                    "agent": "claude",
+                                    "session_id": "claude-live",
+                                    "inbox": str(state_dir / "inbox-claude.jsonl"),
+                                    "session_registry_path": str(registry_path),
+                                }
+                            ]
+                        },
+                        state_dir=state_dir,
+                        storage=storage,
+                    )
+
+    def test_failed_redirect_chain_does_not_expand_source_capability(self) -> None:
+        roots = [self.tempdir / ("redirect-%d" % index) for index in range(7)]
+        for root in roots:
+            root.mkdir()
+        for source, target in zip(roots, roots[1:]):
+            StorageCapability.bind_trusted(source).write_json(
+                source / "MOVED_TO.json", {"active_root": str(target)}
+            )
+        source_cap = StorageCapability.bind_trusted(roots[0])
+
+        with self.assertRaisesRegex(ValueError, "exceeds 5 hop"):
+            resolve_moved_root_chain(roots[0], storage=source_cap)
+        with self.assertRaisesRegex(UnsafeStoragePathError, "outside its authorized root"):
+            source_cap.write_json(roots[3] / "leaked.json", {"leaked": True})
+
+        self.assertFalse((roots[3] / "leaked.json").exists())
+
+    def test_agent_bridge_corrupt_recovery_uses_capability_atomic_replace(self) -> None:
+        bridge = AgentBridge(self.state_dir)
+        source_paths = (
+            bridge.pending_actions_path,
+            bridge.execution_state_path,
+            bridge.implementation_journal_path,
+            bridge.cross_project_pending_path,
+            bridge.session_registry_path,
+        )
+        for path in source_paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{forced-corrupt", encoding="utf-8")
+
+        original_read_json = StorageCapability.read_json
+        original_atomic_replace = StorageCapability.atomic_replace
+
+        def forced_read_error(capability, path, default):
+            if path in source_paths:
+                raise OSError("forced corrupt recovery")
+            return original_read_json(capability, path, default)
+
+        with (
+            patch.object(
+                StorageCapability,
+                "read_json",
+                autospec=True,
+                side_effect=forced_read_error,
+            ),
+            patch.object(
+                StorageCapability,
+                "atomic_replace",
+                autospec=True,
+                side_effect=original_atomic_replace,
+            ) as capability_replace,
+        ):
+            bridge._load_pending_actions()
+            bridge._load_execution_state()
+            bridge._load_implementation_journal()
+            bridge._load_cross_project_pending()
+            bridge._load_session_registry()
+
+        self.assertEqual(5, capability_replace.call_count)
+        replaced_sources = {
+            call.args[1] for call in capability_replace.call_args_list
+        }
+        self.assertEqual(set(source_paths), replaced_sources)
+        for call in capability_replace.call_args_list:
+            capability, source, destination = call.args
+            self.assertIs(bridge.storage, capability)
+            self.assertEqual(source.parent, destination.parent)
+            self.assertIn(".corrupt.", destination.name)
+            self.assertFalse(source.exists())
+            self.assertTrue(destination.exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX dir-fd race falsifier")
+    def test_posix_parent_swap_cannot_redirect_write_outside_capability(self) -> None:
+        root = self.tempdir / "race-root"
+        state = root / "state"
+        moved_state = root / "state-held"
+        outside = self.tempdir / "race-outside"
+        state.mkdir(parents=True)
+        outside.mkdir()
+        cap = StorageCapability.bind_trusted(root)
+        target = state / "result.json"
+        swapped = False
+
+        def swap_parent(_target: Path) -> None:
+            nonlocal swapped
+            if swapped:
+                return
+            swapped = True
+            state.rename(moved_state)
+            state.symlink_to(outside, target_is_directory=True)
+
+        original = storage_module._POSIX_BEFORE_FINAL_OPEN_HOOK
+        storage_module._POSIX_BEFORE_FINAL_OPEN_HOOK = swap_parent
+        try:
+            with self.assertRaises(UnsafeStoragePathError):
+                cap.write_json(target, {"safe": True})
+        finally:
+            storage_module._POSIX_BEFORE_FINAL_OPEN_HOOK = original
+
+        self.assertFalse((outside / "result.json").exists())
+
+    def test_core_storage_refuses_filesystem_root_authorization(self) -> None:
+        anchor = Path(self.tempdir.anchor)
+        with self.assertRaisesRegex(UnsafeStoragePathError, "filesystem root"):
+            StorageCapability.bind_trusted(anchor)
+
     def test_core_storage_process_writers_preserve_jsonl_rows(self) -> None:
         inbox = self.tempdir / "concurrent-inbox.jsonl"
         script = r"""
 import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from core.storage import append_jsonl
+from core.storage import StorageCapability
 path = Path(sys.argv[2])
+storage = StorageCapability.bind_trusted(path.parent)
 prefix = sys.argv[3]
 count = int(sys.argv[4])
 for index in range(count):
-    append_jsonl(path, {"id": "%s-%03d" % (prefix, index), "writer": prefix, "index": index})
+    storage.append_jsonl(path, {"id": "%s-%03d" % (prefix, index), "writer": prefix, "index": index})
 """
         bridge_dir = str(Path(__file__).resolve().parent)
         processes = [
@@ -1993,7 +2601,9 @@ for index in range(count):
         )
         seen_ids = {"local-seen"}
 
-        watcher._save_watcher_state(state_path, seen_ids, pending=[])
+        watcher._save_watcher_state(
+            state_path, seen_ids, pending=[], storage=_test_storage()
+        )
 
         saved = read_json(state_path, {})
         self.assertEqual({"external-seen", "local-seen"}, set(saved["seen_ids"]))
@@ -2025,6 +2635,7 @@ for index in range(count):
             seen_ids=seen_ids,
             state_path=state_path,
             toasts_enabled=False,
+            storage=_test_storage(),
         )
 
         self.assertEqual(set(), seen_ids)
@@ -4133,7 +4744,13 @@ for index in range(count):
         self.assertIn("Agent Bridge - Codex (codex-li)", dashboard.data["markdown"])
         self.assertEqual(
             "Agent Bridge - Codex (...dex-live)",
-            watcher._runtime_session_display_label(self.state_dir, "codex", "codex-live", "mlv-app"),
+            watcher._runtime_session_display_label(
+                self.state_dir,
+                "codex",
+                "codex-live",
+                "mlv-app",
+                storage=_test_storage(),
+            ),
         )
 
     def test_recorded_non_primary_thread_title_surfaces_in_pairing_data(self) -> None:
@@ -4328,7 +4945,13 @@ for index in range(count):
         self.assertEqual("codex-li", codex_row["session_display"])
         self.assertEqual(
             "...dex-live",
-            watcher._runtime_session_display_label(self.state_dir, "codex", "codex-live", "mlv-app"),
+            watcher._runtime_session_display_label(
+                self.state_dir,
+                "codex",
+                "codex-live",
+                "mlv-app",
+                storage=_test_storage(),
+            ),
         )
 
     def test_mismatch_telemetry_without_title_clears_prior_trusted_title(self) -> None:
@@ -4360,6 +4983,7 @@ for index in range(count):
             session_id="codex-live",
             message_id="msg-empty-title-mismatch",
             command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4400,6 +5024,7 @@ for index in range(count):
             session_id="codex-live",
             message_id="msg-title-mismatch",
             command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4413,7 +5038,13 @@ for index in range(count):
         self.assertEqual("codex-li", codex_row["session_display"])
         self.assertEqual(
             "...dex-live",
-            watcher._runtime_session_display_label(self.state_dir, "codex", "codex-live", "mlv-app"),
+            watcher._runtime_session_display_label(
+                self.state_dir,
+                "codex",
+                "codex-live",
+                "mlv-app",
+                storage=_test_storage(),
+            ),
         )
 
     def test_generic_wake_title_is_unknown_not_false_mismatch(self) -> None:
@@ -4460,6 +5091,7 @@ for index in range(count):
             command_result={
                 "stdout": "\n".join(watcher.WAKE_TELEMETRY_PREFIX + json.dumps(item) for item in telemetry),
             },
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4494,6 +5126,7 @@ for index in range(count):
             session_id="codex-live",
             message_id="msg-delivery-priority",
             command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4552,6 +5185,7 @@ for index in range(count):
             session_id="codex-live",
             message_id="msg-generic-false-title",
             command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4591,6 +5225,7 @@ for index in range(count):
             session_id="codex-live",
             message_id="msg-empty-unknown-title",
             command_result={"stdout": watcher.WAKE_TELEMETRY_PREFIX + json.dumps(telemetry)},
+            storage=_test_storage(),
         )
 
         updated = read_runtime_breadcrumb(peer_runtime_path_for_state_dir(self.state_dir, "codex"))
@@ -4626,6 +5261,7 @@ for index in range(count):
                 ],
             },
             bridge.inbox_path("codex"),
+            storage=_test_storage(),
         )
 
         self.assertTrue(resolved["ok"], resolved)
@@ -4652,6 +5288,7 @@ for index in range(count):
                 "on_message_command_template": ["wake", "-RestoreThreadId", "{restore_thread_id}"],
             },
             bridge.inbox_path("codex"),
+            storage=_test_storage(),
         )
 
         self.assertTrue(resolved_with_restore["ok"], resolved_with_restore)
@@ -4686,6 +5323,7 @@ for index in range(count):
             },
             bridge.inbox_path("codex"),
             override_wake_message="Claude says check bridge inbox",
+            storage=_test_storage(),
         )
 
         self.assertTrue(resolved["ok"], resolved)
@@ -4711,7 +5349,9 @@ for index in range(count):
             },
         )
 
-        watcher._clear_override_wake_message(bridge.watcher_state_path)
+        watcher._clear_override_wake_message(
+            bridge.watcher_state_path, storage=_test_storage()
+        )
 
         state = read_json(bridge.watcher_state_path, {})
         self.assertNotIn("next_override_wake_message", state)
@@ -6115,6 +6755,7 @@ for index in range(count):
                 seen_ids={"msg-1"},
                 state_path=bridge.watcher_state_path,
                 toasts_enabled=False,
+                storage=_test_storage(),
             )
 
         closed_status = bridge.wake_breaker_status("codex-live").data["session"]
@@ -6184,6 +6825,7 @@ for index in range(count):
                 seen_ids={"msg-2"},
                 state_path=bridge.watcher_state_path,
                 toasts_enabled=False,
+                storage=_test_storage(),
             )
 
         closed_status = bridge.wake_breaker_status("codex-live").data["session"]
@@ -6302,6 +6944,7 @@ for index in range(count):
             seen_ids=seen_ids,
             state_path=bridge.watcher_state_path,
             toasts_enabled=False,
+            storage=_test_storage(),
         )
 
         self.assertEqual(processed, ["new-message"])
@@ -6339,6 +6982,7 @@ for index in range(count):
             seen_ids=seen_ids,
             state_path=bridge.watcher_state_path,
             toasts_enabled=False,
+            storage=_test_storage(),
         )
 
         self.assertEqual(processed, ["fallback-message"])
@@ -6384,7 +7028,13 @@ for index in range(count):
 
         seen_ids: set = set()
         self.assertEqual(
-            watcher.process_session_once(config, seen_ids=seen_ids, state_path=bridge.watcher_state_path, toasts_enabled=False),
+            watcher.process_session_once(
+                config,
+                seen_ids=seen_ids,
+                state_path=bridge.watcher_state_path,
+                toasts_enabled=False,
+                storage=_test_storage(),
+            ),
             ["old-message"],
         )
         write_json(
@@ -6403,7 +7053,13 @@ for index in range(count):
         )
 
         self.assertEqual(
-            watcher.process_session_once(config, seen_ids=seen_ids, state_path=bridge.watcher_state_path, toasts_enabled=False),
+            watcher.process_session_once(
+                config,
+                seen_ids=seen_ids,
+                state_path=bridge.watcher_state_path,
+                toasts_enabled=False,
+                storage=_test_storage(),
+            ),
             ["new-message"],
         )
 
@@ -6846,6 +7502,7 @@ for index in range(count):
                 seen_ids=set(),
                 state_path=state_path,
                 toasts_enabled=True,
+                storage=_test_storage(),
             )
             toast.assert_called_once()
         self.assertEqual(surfaced, [])
@@ -6892,8 +7549,20 @@ for index in range(count):
             "on_message": "log",
         }
 
-        surfaced = watcher.process_session_once(config, seen_ids=set(), state_path=state_path, toasts_enabled=False)
-        second = watcher.process_session_once(config, seen_ids=set(), state_path=state_path, toasts_enabled=False)
+        surfaced = watcher.process_session_once(
+            config,
+            seen_ids=set(),
+            state_path=state_path,
+            toasts_enabled=False,
+            storage=_test_storage(),
+        )
+        second = watcher.process_session_once(
+            config,
+            seen_ids=set(),
+            state_path=state_path,
+            toasts_enabled=False,
+            storage=_test_storage(),
+        )
 
         self.assertEqual(surfaced, ["claude-stale"])
         self.assertEqual(second, [])
@@ -6972,6 +7641,7 @@ for index in range(count):
             seen_ids=set(),
             state_path=state_path,
             toasts_enabled=False,
+            storage=_test_storage(),
         )
 
         self.assertEqual(surfaced, [])
@@ -7029,6 +7699,7 @@ for index in range(count):
             seen_ids=set(),
             state_path=state_path,
             toasts_enabled=False,
+            storage=_test_storage(),
         )
 
         self.assertEqual(surfaced, [])
@@ -7045,6 +7716,7 @@ for index in range(count):
         bridge_root = self.tempdir / "monitor-restart-root"
         state_dir = bridge_root / "state"
         state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
         inbox = state_dir / "inbox-claude.jsonl"
         state_path = bridge_root / "watcher-state.json"
         write_json(
@@ -7073,11 +7745,13 @@ for index in range(count):
             session_config=config,
             state_path=state_path,
             state_dir=state_dir,
+            storage=storage,
         )
         second = watcher._maybe_queue_monitor_stale_control(
             session_config=config,
             state_path=state_path,
             state_dir=state_dir,
+            storage=storage,
         )
 
         self.assertTrue(first)
@@ -7096,6 +7770,7 @@ for index in range(count):
         bridge_root = self.tempdir / "monitor-restart-wait-root"
         state_dir = bridge_root / "state"
         state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
         state_path = bridge_root / "watcher-state.json"
         config = {
             "agent": "claude",
@@ -7109,6 +7784,7 @@ for index in range(count):
             session_config=config,
             state_path=state_path,
             state_dir=state_dir,
+            storage=storage,
         )
 
         self.assertIsNone(queued)
@@ -7120,6 +7796,7 @@ for index in range(count):
         bridge_root = self.tempdir / "monitor-stale-runtime-root"
         state_dir = bridge_root / "state"
         state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
         inbox = state_dir / "inbox-claude.jsonl"
         state_path = bridge_root / "watcher-state.json"
         write_json(
@@ -7147,6 +7824,7 @@ for index in range(count):
             },
             state_path=state_path,
             state_dir=state_dir,
+            storage=storage,
         )
 
         self.assertTrue(queued)
@@ -7159,7 +7837,8 @@ for index in range(count):
         bridge_root = self.tempdir / "monitor-backpressure-root"
         state_dir = bridge_root / "state"
         state_dir.mkdir(parents=True)
-        bridge = AgentBridge(state_dir)
+        storage = StorageCapability.bind_trusted(bridge_root)
+        bridge = AgentBridge(state_dir, storage=storage)
         bridge.activate_session("claude", "claude-live", project="mlv-app")
         bridge.activate_session("codex", "codex-live", project="mlv-app")
         for index in range(SESSION_BACKPRESSURE_LIMIT):
@@ -7205,6 +7884,7 @@ for index in range(count):
             },
             state_path=state_path,
             state_dir=state_dir,
+            storage=storage,
         )
 
         self.assertTrue(control_id)
@@ -7218,6 +7898,7 @@ for index in range(count):
         bridge_root = self.tempdir / "monitor-commit-root"
         state_dir = bridge_root / "state"
         state_dir.mkdir(parents=True)
+        storage = StorageCapability.bind_trusted(bridge_root)
         state_path = bridge_root / "watcher-state.json"
         sessions = [
             {
@@ -7236,18 +7917,21 @@ for index in range(count):
                 sessions=sessions,
                 state_path=state_path,
                 state_dir=state_dir,
+                storage=storage,
             )
             changed = watcher._maybe_queue_commit_monitor_restart_controls(
                 config=config,
                 sessions=sessions,
                 state_path=state_path,
                 state_dir=state_dir,
+                storage=storage,
             )
             duplicate = watcher._maybe_queue_commit_monitor_restart_controls(
                 config=config,
                 sessions=sessions,
                 state_path=state_path,
                 state_dir=state_dir,
+                storage=storage,
             )
 
         self.assertEqual(baseline, [])
@@ -7482,7 +8166,19 @@ for index in range(count):
         status = bridge.bridge_process_status()
         self.assertEqual(status.data["watcher"]["lease"]["generation"], lease["generation"])
 
-        self.assertTrue(release_lease(lock_path, lease["pid"], lease["generation"]))
+        original_unlink = StorageCapability.unlink
+        with patch.object(
+            StorageCapability,
+            "unlink",
+            autospec=True,
+            side_effect=original_unlink,
+        ) as capability_unlink:
+            self.assertTrue(
+                release_lease(lock_path, lease["pid"], lease["generation"])
+            )
+        capability_unlink.assert_called_once_with(
+            self.storage, lock_path, missing_ok=True
+        )
         self.assertFalse(lock_path.exists())
 
     def test_settings_defaults_and_validation(self) -> None:
@@ -7621,7 +8317,15 @@ for index in range(count):
         self.assertTrue(repaired["backups"])
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8"))["sessions"], {})
         self.assertEqual(read_jsonl(inbox_path), [{"id": "ok"}])
-        self.assertTrue(inbox_path.with_suffix(".quarantine.jsonl").exists())
+        quarantine_path = inbox_path.with_suffix(".quarantine.jsonl")
+        self.assertTrue(quarantine_path.exists())
+        if os.name != "nt":
+            backup_dir = Path(repaired["backup_dir"])
+            self.assertEqual(backup_dir.stat().st_mode & 0o777, 0o700)
+            for path in (state_path, inbox_path, quarantine_path):
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600, str(path))
+            for backup in map(Path, repaired["backups"]):
+                self.assertEqual(backup.stat().st_mode & 0o777, 0o600, str(backup))
 
     def test_recover_state_scan_historical_reports_stale_root(self) -> None:
         old_root = self.tempdir / "old-root"
@@ -7740,18 +8444,141 @@ for index in range(count):
     def test_compact_prunes_old_rotated_audit_logs(self) -> None:
         self.state_dir.mkdir(parents=True)
         old_log = self.state_dir / "messages.2025-01.jsonl"
+        old_daily_log = self.state_dir / "messages.2025-01-31.jsonl"
         fresh_log = self.state_dir / "messages.2026-04.jsonl"
         quarantine = self.state_dir / "messages.quarantine.jsonl"
         old_log.write_text("{}\n", encoding="utf-8")
+        old_daily_log.write_text("{}\n", encoding="utf-8")
         fresh_log.write_text("{}\n", encoding="utf-8")
         quarantine.write_text("not-json\n", encoding="utf-8")
         os.utime(old_log, (0, 0))
+        os.utime(old_daily_log, (0, 0))
         os.utime(quarantine, (0, 0))
 
         result = prune_audit_logs(self.state_dir, retention_days=1)
-        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["removed"], 2)
         self.assertFalse(old_log.exists())
+        self.assertFalse(old_daily_log.exists())
         self.assertTrue(fresh_log.exists())
+        self.assertTrue(quarantine.exists())
+
+    def test_compact_prune_counts_only_successful_unlinks(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        old_log = self.state_dir / "messages.2025-01-01.jsonl"
+        old_log.write_text("{}\n", encoding="utf-8")
+        os.utime(old_log, (0, 0))
+        original_unlink = Path.unlink
+
+        def guarded_unlink(path: Path, *args: Any, **kwargs: Any) -> None:
+            if path == old_log:
+                raise PermissionError("test denial")
+            original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "unlink", guarded_unlink):
+            result = prune_audit_logs(self.state_dir, retention_days=1)
+
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(result["removed_paths"], [])
+        self.assertEqual(result["would_remove"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertTrue(old_log.exists())
+
+    def test_compact_rotates_low_volume_active_audit_by_age(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        active = self.state_dir / "messages.jsonl"
+        old_timestamp = "2026-04-01T00:00:00+00:00"
+        append_jsonl(active, {"id": "newer-first", "timestamp": "2026-04-02T12:00:00+00:00", "action": "test"})
+        append_jsonl(active, {"id": "old", "timestamp": old_timestamp, "action": "test"})
+
+        result = rotate_audit_log(
+            self.state_dir,
+            max_mb=1024,
+            max_age_days=1,
+            now=datetime(2026, 4, 3, 0, 0, 0, tzinfo=timezone.utc),
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["triggers"], ["age"])
+        rotated = self.state_dir / "messages.2026-04-01.jsonl"
+        self.assertEqual([row["id"] for row in read_jsonl(rotated)], ["newer-first", "old"])
+        self.assertEqual(read_jsonl(active)[0]["action"], "rotate_audit_log")
+
+    def test_compact_rotate_and_prune_share_global_state_lock(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        active = self.state_dir / "messages.jsonl"
+        append_jsonl(
+            active,
+            {"id": "old", "timestamp": "2026-04-01T00:00:00+00:00", "action": "test"},
+        )
+        archive_opened = threading.Event()
+        release_rotation = threading.Event()
+        prune_finished = threading.Event()
+        failures: List[BaseException] = []
+        original_open_private_text = StorageCapability.open_private_text
+
+        def blocking_archive_open(storage: StorageCapability, path: Path, mode: str):
+            handle = original_open_private_text(storage, path, mode)
+            if path.name == "messages.2026-04-01.jsonl" and mode == "a":
+                archive_opened.set()
+                if not release_rotation.wait(timeout=5):
+                    handle.close()
+                    raise TimeoutError("test did not release rotation")
+            return handle
+
+        def run_rotation() -> None:
+            try:
+                storage_rotate_audit_log(
+                    self.state_dir,
+                    max_mb=1024,
+                    max_age_days=1,
+                    now=datetime(2026, 4, 3, tzinfo=timezone.utc),
+                    storage=self.storage,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+        def run_prune() -> None:
+            try:
+                storage_prune_audit_logs(
+                    self.state_dir, retention_days=90, storage=self.storage
+                )
+            except BaseException as exc:
+                failures.append(exc)
+            finally:
+                prune_finished.set()
+
+        with patch.object(StorageCapability, "open_private_text", blocking_archive_open):
+            rotation_thread = threading.Thread(target=run_rotation)
+            rotation_thread.start()
+            self.assertTrue(archive_opened.wait(timeout=5))
+            prune_thread = threading.Thread(target=run_prune)
+            prune_thread.start()
+            self.assertFalse(prune_finished.wait(timeout=0.2))
+            release_rotation.set()
+            rotation_thread.join(timeout=5)
+            prune_thread.join(timeout=5)
+
+        self.assertFalse(rotation_thread.is_alive())
+        self.assertFalse(prune_thread.is_alive())
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            read_jsonl(self.state_dir / "messages.2026-04-01.jsonl")[0]["id"],
+            "old",
+        )
+
+    def test_compact_retention_never_silently_drops_unread_or_quarantine(self) -> None:
+        self.state_dir.mkdir(parents=True)
+        inbox = self.state_dir / "inbox-codex.jsonl"
+        stale = "2020-01-01T00:00:00+00:00"
+        append_jsonl(inbox, {"id": "unread", "created_at": stale, "read_at": None})
+        append_jsonl(inbox, {"id": "read", "created_at": stale, "read_at": stale})
+        quarantine = inbox.with_suffix(".quarantine.jsonl")
+        quarantine.write_text("recovery evidence\n", encoding="utf-8")
+
+        result = compact_inbox(self.state_dir, "codex", max_age_days=1, keep_last_read=0)
+
+        self.assertEqual(result["read_dropped"], 1)
+        self.assertEqual([row["id"] for row in read_jsonl(inbox)], ["unread"])
         self.assertTrue(quarantine.exists())
 
     def test_windows_toast_uses_expiry_and_tray_cap_settings(self) -> None:

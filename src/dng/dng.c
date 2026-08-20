@@ -326,6 +326,15 @@ static void export_profile_reset_frames(void)
     g_export_profile_async_writer_compress_used = 0;
 }
 
+void resetDngExportProfilerForTesting(void)
+{
+    pthread_mutex_lock(&g_export_profile_mutex);
+    g_export_profile_path[0] = '\0';
+    g_export_profile_build_id[0] = '\0';
+    export_profile_reset_frames();
+    pthread_mutex_unlock(&g_export_profile_mutex);
+}
+
 static void export_profile_note_async_writer_threads(size_t thread_count)
 {
     pthread_mutex_lock(&g_export_profile_mutex);
@@ -439,9 +448,12 @@ static int export_profile_configure_from_env(void)
         return 0;
     }
 
-    if(g_export_profile_path[0] != '\0' && strcmp(g_export_profile_path, output_path) != 0)
+    if(strcmp(g_export_profile_path, output_path) != 0)
     {
-        export_profile_write_json();
+        if(g_export_profile_path[0] != '\0')
+        {
+            export_profile_write_json();
+        }
         export_profile_reset_frames();
     }
 

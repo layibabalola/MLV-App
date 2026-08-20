@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .storage import read_json, write_json
+from .storage import StorageCapability
 
 
 def utc_now() -> str:
@@ -80,19 +80,24 @@ def build_lease(
     }
 
 
-def read_lease(lock_path: Path) -> Dict[str, Any]:
-    return read_json(lock_path, {})
+def read_lease(lock_path: Path, *, storage: StorageCapability) -> Dict[str, Any]:
+    return storage.read_json(lock_path, {})
 
 
-def write_lease(lock_path: Path, lease: Dict[str, Any]) -> None:
-    write_json(lock_path, lease)
+def write_lease(lock_path: Path, lease: Dict[str, Any], *, storage: StorageCapability) -> None:
+    storage.write_json(lock_path, lease)
 
 
-def lease_status(lock_path: Path, expected_command: Optional[List[str]] = None) -> Dict[str, Any]:
+def lease_status(
+    lock_path: Path,
+    expected_command: Optional[List[str]] = None,
+    *,
+    storage: StorageCapability,
+) -> Dict[str, Any]:
     if not lock_path.exists():
         return {"status": "missing", "running": False, "stale": False, "pid": None}
     try:
-        lease = read_lease(lock_path)
+        lease = read_lease(lock_path, storage=storage)
     except Exception:
         return {"status": "corrupt", "running": False, "stale": True, "pid": None}
     pid = int(lease.get("pid") or 0)
@@ -124,14 +129,15 @@ def acquire_singleton_lease(
     agent: Optional[str] = None,
     project: Optional[str] = None,
     session_id: Optional[str] = None,
+    storage: StorageCapability,
 ) -> Dict[str, Any]:
-    current = lease_status(lock_path, expected_command=command)
+    current = lease_status(lock_path, expected_command=command, storage=storage)
     if current["status"] == "running":
         return {"acquired": False, "status": "already_running", "pid": current["pid"], "lease": current["lease"]}
     if current["status"] in {"corrupt", "hash_mismatch"} and lock_path.exists():
         corrupt = lock_path.with_suffix(lock_path.suffix + ".corrupt.%s" % uuid.uuid4().hex[:8])
         try:
-            lock_path.replace(corrupt)
+            storage.atomic_replace(lock_path, corrupt)
         except OSError:
             pass
     lease = build_lease(
@@ -143,28 +149,32 @@ def acquire_singleton_lease(
         project=project,
         session_id=session_id,
     )
-    write_lease(lock_path, lease)
+    write_lease(lock_path, lease, storage=storage)
     return {"acquired": True, "status": "acquired", "pid": lease["pid"], "lease": lease}
 
 
-def heartbeat_lease(lock_path: Path, pid: int, generation: str) -> bool:
+def heartbeat_lease(
+    lock_path: Path, pid: int, generation: str, *, storage: StorageCapability
+) -> bool:
     try:
-        lease = read_lease(lock_path)
+        lease = read_lease(lock_path, storage=storage)
     except Exception:
         return False
     if int(lease.get("pid") or 0) != pid or lease.get("generation") != generation:
         return False
     lease["heartbeat_at"] = utc_now()
-    write_lease(lock_path, lease)
+    write_lease(lock_path, lease, storage=storage)
     return True
 
 
-def release_lease(lock_path: Path, pid: int, generation: str) -> bool:
+def release_lease(
+    lock_path: Path, pid: int, generation: str, *, storage: StorageCapability
+) -> bool:
     try:
-        lease = read_lease(lock_path)
+        lease = read_lease(lock_path, storage=storage)
     except Exception:
         return False
     if int(lease.get("pid") or 0) != pid or lease.get("generation") != generation:
         return False
-    lock_path.unlink(missing_ok=True)
+    storage.unlink(lock_path, missing_ok=True)
     return True

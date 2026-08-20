@@ -150,6 +150,63 @@ static QByteArray read_all_bytes(const QString & path)
     return file.readAll();
 }
 
+class ScopedAsyncWriterEnvironment
+{
+public:
+    ScopedAsyncWriterEnvironment()
+    {
+        static const char * const keys[] = {
+            "MLVAPP_EXPORT_STAGE_PROFILER",
+            "MLVAPP_EXPORT_STAGE_PROFILE_FILE",
+            "MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID",
+            "MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS",
+            "MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS"
+        };
+        for(const char * key : keys)
+        {
+            Entry entry;
+            entry.key = QByteArray(key);
+            entry.was_set = qEnvironmentVariableIsSet(key);
+            entry.value = qgetenv(key);
+            entries_.push_back(entry);
+        }
+    }
+
+    ~ScopedAsyncWriterEnvironment()
+    {
+        for(const Entry & entry : entries_)
+        {
+            if(entry.was_set)
+            {
+                qputenv(entry.key.constData(), entry.value);
+            }
+            else
+            {
+                qunsetenv(entry.key.constData());
+            }
+        }
+    }
+
+private:
+    struct Entry
+    {
+        QByteArray key;
+        QByteArray value;
+        bool was_set = false;
+    };
+    std::vector<Entry> entries_;
+};
+
+class ScopedDngExportProfilerReset
+{
+public:
+    ScopedDngExportProfilerReset() { resetDngExportProfilerForTesting(); }
+    ~ScopedDngExportProfilerReset() { resetDngExportProfilerForTesting(); }
+};
+
 static QByteArray export_tiny_dng_for_profiler_gate(int raw_state,
                                                     bool profiler_enabled,
                                                     const QString & dng_path,
@@ -3272,6 +3329,77 @@ TEST(DualIsoPipeline, DngFrameAsyncWriterPreservesExportStageProfiler)
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER");
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
     qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+}
+
+TEST(DualIsoPipeline, DngFrameAsyncWriterFreshProfileDoesNotInheritDisabledWriterJobs)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+
+    ScopedAsyncWriterEnvironment environment_guard;
+    ScopedDngExportProfilerReset profiler_guard;
+
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILER");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE");
+    qunsetenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID");
+    qunsetenv("MLVAPP_CDNG_EXPORT_PAYLOAD_HANDOFF");
+    qputenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER", QByteArrayLiteral("1"));
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_QUEUE_DEPTH");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_THREADS");
+    qunsetenv("MLVAPP_CDNG_EXPORT_ASYNC_WRITER_COMPRESS");
+
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+    std::vector<uint16_t> frame = fixture.renderFrame16(0, 1);
+    ASSERT_TRUE(!frame.empty());
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+
+    dngPayloadWriter_t * disabled_writer = createDngPayloadWriter();
+    ASSERT_TRUE(disabled_writer != nullptr);
+    QByteArray disabled_first_path = temp_dir.filePath(QStringLiteral("disabled-first.dng")).toLocal8Bit();
+    QByteArray disabled_second_path = temp_dir.filePath(QStringLiteral("disabled-second.dng")).toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(disabled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   disabled_first_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(disabled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   disabled_second_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(disabled_writer));
+
+    const QString profile_path = temp_dir.filePath(QStringLiteral("fresh-profile.json"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILER", QByteArrayLiteral("1"));
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_FILE", profile_path.toLocal8Bit());
+    qputenv("MLVAPP_EXPORT_STAGE_PROFILE_BUILD_ID", QByteArrayLiteral("fresh-profile-test"));
+
+    dngPayloadWriter_t * profiled_writer = createDngPayloadWriter();
+    ASSERT_TRUE(profiled_writer != nullptr);
+    QByteArray profiled_path = temp_dir.filePath(QStringLiteral("profiled.dng")).toLocal8Bit();
+    ASSERT_EQ(0, saveDngFrameViaAsyncPayloadWriter(profiled_writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   0,
+                                                   profiled_path.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(profiled_writer));
+    freeDngObject(dng);
+
+    const QJsonDocument doc = QJsonDocument::fromJson(read_all_bytes(profile_path));
+    ASSERT_TRUE(doc.isObject());
+    const QJsonObject root = doc.object();
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_thread_count")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_started")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_jobs_finished")).toInt());
+    ASSERT_EQ(1, root.value(QStringLiteral("async_writer_max_active")).toInt());
+
 }
 
 TEST(DualIsoPipeline, DngFrameAsyncWriterReportsConfiguredQueueDepth)
@@ -8535,6 +8663,7 @@ TEST(DualIsoPipeline, StandardPreviewScaleTwoUsesQuarterResShadowsHighlightsByDe
     /* Completion, not elapsed time, is the behavioral oracle.  Windows CI's
      * OpenMP clock can have a 1 ms tick, so a completed sub-millisecond stage
      * may legitimately report 0.0 ms. */
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresPathTakenForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
@@ -8571,6 +8700,7 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneCanUseQuarterResShadowsHighlightsWh
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 1);
     ASSERT_TRUE(!got.empty());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresPathTakenForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
@@ -8605,6 +8735,7 @@ TEST(DualIsoPipeline, StandardPreviewScaleOneUsesQuarterResShadowsHighlightsByDe
 
     const std::vector<uint8_t> got = fixture.renderFrame8Scaled(0, 1, 1);
     ASSERT_TRUE(!got.empty());
+    ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresPathTakenForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresDownsampleCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresRbfCompletedForTesting());
     ASSERT_EQ(1, processingGetLastShadowsHighlightsQuarterresUpsampleCompletedForTesting());
@@ -9097,6 +9228,8 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
 
     int prefetched_hits = 0;
     uint64_t mismatched_bytes = 0;
+    uint64_t first_prefetched_frame = 0;
+    std::vector<uint8_t> first_prefetched_bytes;
     for (int pass = 0; pass < 3 && prefetched_hits == 0; ++pass)
     {
         for (uint64_t f = 0; f < frame_count; ++f)
@@ -9105,6 +9238,11 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
             if (getMlvLastProcessed8PrefetchHit())
             {
                 ++prefetched_hits;
+                if (first_prefetched_bytes.empty())
+                {
+                    first_prefetched_frame = f;
+                    first_prefetched_bytes = got;
+                }
                 ASSERT_EQ(expected[f].size(), got.size());
                 for (std::size_t i = 0; i < got.size(); ++i)
                 {
@@ -9123,6 +9261,20 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectWorkerHitMatchesForegroundRefere
                 static_cast<unsigned long long>(mismatched_bytes));
     ASSERT_TRUE(prefetched_hits >= 1);
     ASSERT_EQ(static_cast<std::uint64_t>(0), mismatched_bytes);
+
+    /* Strongest cache oracle: compare the bytes from an observed prefetched
+     * hit with a forced processed8 miss in the SAME fixture, at the exact
+     * same frame and processing state. This catches a worker snapshot that
+     * is internally key-consistent but pixel-incomplete. */
+    ASSERT_FALSE(first_prefetched_bytes.empty());
+    ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
+    invalidateMlvProcessedPreviewCache(fixture.video());
+    const std::vector<uint8_t> forced_fresh =
+        fixture.renderFrame8Scaled(first_prefetched_frame, 1, 4);
+    ASSERT_EQ(0, getMlvLastProcessed8CacheHit());
+    ASSERT_EQ(0, getMlvLastProcessed8PrefetchHit());
+    ASSERT_TRUE(first_prefetched_bytes == forced_fresh);
 
     processingSetPlaybackPreviewMode(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
@@ -9303,6 +9455,213 @@ TEST(DualIsoPipeline, Processed8PrefetchIndirectUnsupportedStateKeepsSkip)
     ASSERT_EQ(0, prefetched_hits);
 
     fixture.processing()->lut_on = 0;
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
+TEST(DualIsoPipeline, Processed8PrefetchIndirectClarityKeepsSkip)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    MLVAPP_TEST_UNSETENV("MLVAPP_PROCESSED8_PREFETCH_INDIRECT");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+    fixture.processing()->use_cam_matrix = 0;
+    processingSetClarity(fixture.processing(), 0.5);
+    ASSERT_TRUE(processingCanUseDirect8BitOutput(fixture.processing()) == 0);
+
+    if ((fixture.width() % 4) != 0 || (fixture.height() % 4) != 0)
+    {
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    const uint64_t total_frames = getMlvFrames(fixture.video());
+    const uint64_t frame_count = (total_frames < 8) ? total_frames : 8;
+    int prefetched_hits = 0;
+    for (uint64_t f = 0; f < frame_count; ++f)
+    {
+        (void)fixture.renderFrame8Scaled(f, 1, 4);
+        prefetched_hits += getMlvLastProcessed8PrefetchHit() ? 1 : 0;
+        ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
+    }
+    ASSERT_EQ(0, prefetched_hits);
+
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
+TEST(DualIsoPipeline, Processed8InvalidationIsGenerationBarrierAndForcesSnapshotRefresh)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    if ((fixture.width() % 4) != 0 || (fixture.height() % 4) != 0)
+    {
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    (void)fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
+    ASSERT_EQ(0, fixture.video()->processed8_prefetch_snapshot_dirty);
+
+    /* pre_calc_levels is copied into the worker snapshot but deliberately is
+     * not part of the foreground state signature. Mutating one entry models
+     * the explicit-invalidation-only state for which snapshot_dirty exists. */
+    const uint16_t replacement =
+        static_cast<uint16_t>(fixture.processing()->pre_calc_levels[65535] ^ 1u);
+    fixture.processing()->pre_calc_levels[65535] = replacement;
+
+    uint32_t old_generation = 0;
+    pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+    old_generation = fixture.video()->processed8_prefetch_generation;
+    fixture.video()->processed8_prefetch_request_pending = 1;
+    pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+
+    invalidateMlvProcessedPreviewCache(fixture.video());
+
+    pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+    const uint32_t invalidated_generation = fixture.video()->processed8_prefetch_generation;
+    const int pending_after_invalidate = fixture.video()->processed8_prefetch_request_pending;
+    const int dirty_after_invalidate = fixture.video()->processed8_prefetch_snapshot_dirty;
+    bool any_live_slot_after_invalidate = false;
+    for (int slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
+    {
+        any_live_slot_after_invalidate = any_live_slot_after_invalidate
+            || fixture.video()->processed_8bit_cache_active[slot] != 0
+            || fixture.video()->processed_8bit_cache_state[slot] != 0;
+    }
+    pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+    ASSERT_EQ(old_generation + 1u, invalidated_generation);
+    ASSERT_EQ(0, pending_after_invalidate);
+    ASSERT_EQ(1, dirty_after_invalidate);
+    ASSERT_FALSE(any_live_slot_after_invalidate);
+
+    (void)fixture.renderFrame8Scaled(0, 1, 4);
+    pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+    const int dirty_after_request = fixture.video()->processed8_prefetch_snapshot_dirty;
+    const uint16_t snapshot_level =
+        fixture.video()->processed8_prefetch_processing->pre_calc_levels[65535];
+    pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+    ASSERT_EQ(0, dirty_after_request);
+    ASSERT_EQ(replacement, snapshot_level);
+    ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
+
+    processingSetPlaybackPreviewMode(0);
+    MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+}
+
+TEST(DualIsoPipeline, Processed8InvalidationRejectsInFlightOldGenerationStoreAndWakesWaiter)
+{
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "1");
+    processingSetPlaybackPreviewMode(1);
+    processingSetPlaybackAggressivePreviewMode(0);
+
+    QString error_message;
+    MlvPipelineFixture fixture;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error_message));
+    ASSERT_TRUE(fixture.loadReceipt(QStringLiteral("tests/fixtures/receipts/tiny_dual_iso_preview.marxml"),
+                                    &error_message));
+    ASSERT_TRUE(fixture.applyReceipt(&error_message));
+
+    if ((fixture.width() % 4) != 0 || (fixture.height() % 4) != 0
+        || getMlvFrames(fixture.video()) < 2)
+    {
+        processingSetPlaybackPreviewMode(0);
+        MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
+        return;
+    }
+
+    /* Pause a real worker after it has rendered frame 1 but before it may
+     * publish that frame. Invalidation must change generation while the
+     * worker is in flight, so its post-render store check rejects the slot. */
+    mlvSetProcessed8PrefetchPauseBeforeStoreForTesting(fixture.video(), 1);
+    (void)fixture.renderFrame8Scaled(0, 1, 4);
+    ASSERT_TRUE(mlvWaitForProcessed8PrefetchPausedBeforeStoreForTesting(fixture.video(), 5000));
+
+    invalidateMlvProcessedPreviewCache(fixture.video());
+    mlvSetProcessed8PrefetchPauseBeforeStoreForTesting(fixture.video(), 0);
+    ASSERT_TRUE(mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000));
+
+    pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+    bool any_published_slot = false;
+    for (int slot = 0; slot < MLV_PROCESSED_8BIT_CACHE_SLOTS; ++slot)
+    {
+        any_published_slot = any_published_slot
+            || fixture.video()->processed_8bit_cache_active[slot] != 0
+            || fixture.video()->processed_8bit_cache_state[slot] != 0
+            || fixture.video()->processed_8bit_cache_prefetched[slot] != 0;
+    }
+    pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+    /* Do not key this oracle only on the old generation: a broken publisher
+     * could stamp stale pixels with the current generation. The invalidated
+     * worker was the sole possible writer here, so any live slot is a stale
+     * publication and must fail the test. */
+    ASSERT_FALSE(any_published_slot);
+
+    /* The exact frame the invalidated worker attempted must now miss. */
+    MLVAPP_TEST_SETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH", "0");
+    const std::vector<uint8_t> forced_fresh = fixture.renderFrame8Scaled(1, 1, 4);
+    ASSERT_FALSE(forced_fresh.empty());
+    ASSERT_EQ(0, getMlvLastProcessed8CacheHit());
+    ASSERT_EQ(0, getMlvLastProcessed8PrefetchHit());
+
+    /* Also pin the condition-variable contract: an idle waiter blocked only
+     * by a pending request must wake when invalidation clears and broadcasts. */
+    pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+    fixture.video()->processed8_prefetch_request_pending = 1;
+    pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+
+    int waiter_result = 0;
+    const auto waiter_start = std::chrono::steady_clock::now();
+    std::thread waiter([&]() {
+        waiter_result = mlvWaitForProcessed8PrefetchIdleForTesting(fixture.video(), 5000);
+    });
+
+    bool waiter_is_blocked = false;
+    for (int attempt = 0; attempt < 5000 && !waiter_is_blocked; ++attempt)
+    {
+        pthread_mutex_lock(&fixture.video()->processed8_prefetch_mutex);
+        waiter_is_blocked = fixture.video()->processed8_prefetch_test_idle_waiters > 0;
+        pthread_mutex_unlock(&fixture.video()->processed8_prefetch_mutex);
+        if (!waiter_is_blocked)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    if (!waiter_is_blocked)
+    {
+        invalidateMlvProcessedPreviewCache(fixture.video());
+        waiter.join();
+        ASSERT_TRUE(waiter_is_blocked);
+    }
+    else
+    {
+        invalidateMlvProcessedPreviewCache(fixture.video());
+        waiter.join();
+    }
+    const double waiter_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - waiter_start).count();
+    ASSERT_EQ(1, waiter_result);
+    ASSERT_TRUE(waiter_ms < 1000.0);
+
     processingSetPlaybackPreviewMode(0);
     MLVAPP_TEST_UNSETENV("MLVAPP_EXPERIMENTAL_PROCESSED8_PREFETCH");
 }

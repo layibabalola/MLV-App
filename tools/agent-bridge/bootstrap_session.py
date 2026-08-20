@@ -23,6 +23,7 @@ from core.runtime import (
     write_runtime_breadcrumb,
 )
 from core.settings import load_settings
+from core.storage import StorageCapability
 from powershell_runtime import powershell_cim_command
 from project_identity import derive_project_identity
 
@@ -119,11 +120,16 @@ def watcher_code_signature() -> Dict[str, Any]:
     return {"schema_version": 1, "signature": digest.hexdigest(), "files": files}
 
 
-def _watcher_code_restart_reason(lease_path: Path, current_signature: Dict[str, Any]) -> Optional[str]:
+def _watcher_code_restart_reason(
+    lease_path: Path,
+    current_signature: Dict[str, Any],
+    *,
+    storage: StorageCapability,
+) -> Optional[str]:
     if not lease_path.exists():
         return "missing_lease"
     try:
-        lease = read_lease(lease_path)
+        lease = read_lease(lease_path, storage=storage)
     except Exception:
         return "unreadable_lease"
     previous = lease.get("watcher_code_signature")
@@ -226,18 +232,18 @@ def sweep_orphan_watchers(
     bridge: Optional[AgentBridge] = None,
 ) -> Dict[str, Any]:
     resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
+    bridge_for_audit = bridge or AgentBridge(resolved_state_dir)
     watcher_script_path = Path(__file__).with_name("watcher.py")
     watcher_script = watcher_script_path.resolve()
     resolved_config = watcher_config.resolve()
     lease_path = resolved_state_dir / "locks" / "watcher.lock"
     lease_pid: Optional[int] = None
     try:
-        lease = read_lease(lease_path)
+        lease = read_lease(lease_path, storage=bridge_for_audit.storage)
         lease_pid = int(lease.get("pid") or 0) or None
     except Exception:
         lease_pid = None
 
-    bridge_for_audit = bridge or AgentBridge(resolved_state_dir)
     killed: List[Dict[str, Any]] = []
     candidates = 0
     for process in _enumerate_watcher_processes():
@@ -298,13 +304,21 @@ def sweep_orphan_watchers(
     }
 
 
-def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+def restart_watcher_for_code_change(
+    watcher_config: Path,
+    state_dir: Optional[Path] = None,
+    *,
+    storage: Optional[StorageCapability] = None,
+) -> Dict[str, Any]:
     resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
+    capability = storage or resolve_bridge_paths(state_dir=resolved_state_dir).storage
     pid_path = watcher_config.parent / "watcher.pid"
     lease_path = resolved_state_dir / "locks" / "watcher.lock"
     current_signature = watcher_code_signature()
     pid_path_exists = pid_path.exists()
-    reason = _watcher_code_restart_reason(lease_path, current_signature)
+    reason = _watcher_code_restart_reason(
+        lease_path, current_signature, storage=capability
+    )
     if reason == "missing_lease" and not pid_path_exists:
         return {"status": "no_existing_watcher", "reason": reason, "watcher_code_signature": current_signature}
     if not reason:
@@ -313,12 +327,13 @@ def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Pa
     pid: Optional[int] = None
     if pid_path.exists():
         try:
-            pid = int(pid_path.read_text(encoding="utf-8").strip())
+            with capability.open_private_read_text(pid_path) as handle:
+                pid = int(handle.read().strip())
         except (ValueError, OSError):
             pid = None
     if pid is None:
         try:
-            lease = read_lease(lease_path)
+            lease = read_lease(lease_path, storage=capability)
             pid = int(lease.get("pid") or 0) or None
         except Exception:
             pid = None
@@ -326,8 +341,8 @@ def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Pa
     stopped = False
     if pid is not None and is_process_alive(pid):
         stopped = _terminate_process(pid)
-    pid_path.unlink(missing_ok=True)
-    lease_path.unlink(missing_ok=True)
+    capability.unlink(pid_path, missing_ok=True)
+    capability.unlink(lease_path, missing_ok=True)
     return {
         "status": "restart_required",
         "reason": reason,
@@ -337,7 +352,12 @@ def restart_watcher_for_code_change(watcher_config: Path, state_dir: Optional[Pa
     }
 
 
-def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Dict[str, Any]:
+def ensure_watcher(
+    watcher_config: Path,
+    state_dir: Optional[Path] = None,
+    *,
+    storage: Optional[StorageCapability] = None,
+) -> Dict[str, Any]:
     """Start the watcher daemon if it is not already running.
 
     Uses a role lease under state/locks plus watcher.pid compatibility marker.
@@ -346,12 +366,14 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
     pid_path = watcher_config.parent / "watcher.pid"
     watcher_script = Path(__file__).with_name("watcher.py")
     resolved_state_dir = state_dir or _state_dir_from_watcher_config(watcher_config)
+    capability = storage or resolve_bridge_paths(state_dir=resolved_state_dir).storage
     command = [sys.executable, str(watcher_script), "--config", str(watcher_config)]
     lease_path = resolved_state_dir / "locks" / "watcher.lock"
 
     if pid_path.exists():
         try:
-            existing_pid = int(pid_path.read_text(encoding="utf-8").strip())
+            with capability.open_private_read_text(pid_path) as handle:
+                existing_pid = int(handle.read().strip())
             if is_process_alive(existing_pid):
                 acquired = acquire_singleton_lease(
                     lease_path,
@@ -359,6 +381,7 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
                     command=command,
                     state_dir=resolved_state_dir,
                     pid=existing_pid,
+                    storage=capability,
                 )
                 return {
                     "status": "already_running",
@@ -370,7 +393,9 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
             pass
 
     # Stale or missing PID — spawn a fresh watcher
-    current_lease = lease_status(lease_path, expected_command=command)
+    current_lease = lease_status(
+        lease_path, expected_command=command, storage=capability
+    )
     if current_lease.get("status") == "running":
         return {
             "status": "already_running",
@@ -392,8 +417,9 @@ def ensure_watcher(watcher_config: Path, state_dir: Optional[Path] = None) -> Di
         pid=proc.pid,
     )
     lease_record["watcher_code_signature"] = watcher_code_signature()
-    write_lease(lease_path, lease_record)
-    pid_path.write_text(str(proc.pid), encoding="utf-8")
+    write_lease(lease_path, lease_record, storage=capability)
+    with capability.open_private_text(pid_path, "w") as handle:
+        handle.write(str(proc.pid))
     return {
         "status": "started",
         "pid": proc.pid,
@@ -427,10 +453,15 @@ def _thread_id_from_env(agent: str) -> Optional[str]:
     return value.strip() if value else None
 
 
-def _desktop_thread_id_for_bootstrap(agent: str, watcher_config: Optional[Path]) -> Optional[str]:
+def _desktop_thread_id_for_bootstrap(
+    agent: str,
+    watcher_config: Optional[Path],
+    *,
+    storage: StorageCapability,
+) -> Optional[str]:
     if watcher_config is not None and watcher_config.exists():
         try:
-            data = json.loads(watcher_config.read_text(encoding="utf-8"))
+            data = storage.read_json(watcher_config, {})
             if agent == "codex":
                 value = data.get(PARENT_THREAD_ID_KEY)
                 if value:
@@ -451,11 +482,16 @@ def _normalize_pairing_intent(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
-def _resolve_pairing_intent(state_dir: Path, explicit_intent: Optional[str]) -> Dict[str, Any]:
+def _resolve_pairing_intent(
+    state_dir: Path,
+    explicit_intent: Optional[str],
+    *,
+    storage: StorageCapability,
+) -> Dict[str, Any]:
     normalized_explicit = _normalize_pairing_intent(explicit_intent)
     if normalized_explicit:
         return {"intent": normalized_explicit, "source": "cli"}
-    settings = load_settings(state_dir)
+    settings = load_settings(state_dir, storage=storage)
     return {
         "intent": settings.default_pairing_intent,
         "source": "settings.json" if (Path(state_dir).parent / "settings.json").exists() else "hardcoded_default",
@@ -502,9 +538,15 @@ def _parse_runtime_dt(value: Any) -> Optional[datetime]:
     return parsed
 
 
-def _claude_monitor_runtime_status(*, state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+def _claude_monitor_runtime_status(
+    *,
+    state_dir: Path,
+    session_id: str,
+    project: str,
+    storage: StorageCapability,
+) -> Dict[str, Any]:
     runtime_path = monitor_runtime_path_for_state_dir(state_dir, "claude", session_id)
-    data = read_runtime_breadcrumb(runtime_path)
+    data = read_runtime_breadcrumb(runtime_path, storage=storage)
     base: Dict[str, Any] = {
         "path": str(runtime_path),
         "status": "missing",
@@ -556,7 +598,13 @@ def _claude_monitor_runtime_status(*, state_dir: Path, session_id: str, project:
     return base
 
 
-def _claude_monitor_reminder(*, state_dir: Path, session_id: str, project: str) -> Dict[str, Any]:
+def _claude_monitor_reminder(
+    *,
+    state_dir: Path,
+    session_id: str,
+    project: str,
+    storage: StorageCapability,
+) -> Dict[str, Any]:
     inbox_path = state_dir / "inbox-claude.jsonl"
     monitor_script = Path(__file__).resolve().parent / "bridge_monitor_poll.py"
     command_hint = (
@@ -564,7 +612,12 @@ def _claude_monitor_reminder(*, state_dir: Path, session_id: str, project: str) 
         "--agent claude --session-id %s --project %s --poll-interval-seconds 2\")"
         % (sys.executable, monitor_script, state_dir, session_id, project)
     )
-    runtime_status = _claude_monitor_runtime_status(state_dir=state_dir, session_id=session_id, project=project)
+    runtime_status = _claude_monitor_runtime_status(
+        state_dir=state_dir,
+        session_id=session_id,
+        project=project,
+        storage=storage,
+    )
     monitor_armed = runtime_status.get("status") == "current"
     return {
         "status": "required_until_thread_addressable_wake_exists",
@@ -649,8 +702,13 @@ def bootstrap(
     bootstrap_thread_id = _thread_id_from_env(agent)
     bootstrap_parent_thread_id = _parent_thread_id_from_env(agent)
     retargeted_to_parent = False
-    resolved_pairing = _resolve_pairing_intent(state_dir, pairing_intent)
-    resolved_pairing.setdefault("pending_pair_timeout_seconds", load_settings(state_dir).pending_pair_timeout_seconds)
+    resolved_pairing = _resolve_pairing_intent(
+        state_dir, pairing_intent, storage=bridge.storage
+    )
+    resolved_pairing.setdefault(
+        "pending_pair_timeout_seconds",
+        load_settings(state_dir, storage=bridge.storage).pending_pair_timeout_seconds,
+    )
 
     bridge._audit(
         {
@@ -723,7 +781,9 @@ def bootstrap(
             "exit_code": 3,
         }
 
-    desktop_thread_id = _desktop_thread_id_for_bootstrap(agent, watcher_config)
+    desktop_thread_id = _desktop_thread_id_for_bootstrap(
+        agent, watcher_config, storage=bridge.storage
+    )
     if retargeted_to_parent and bootstrap_parent_thread_id:
         desktop_thread_id = bootstrap_parent_thread_id
     elif bootstrap_origin == "parent" and bootstrap_thread_id:
@@ -915,6 +975,7 @@ def bootstrap(
         subagent_signals=subagent_signals,
         project_canonical_root=str(identity.get("canonical_root") or ""),
         project_identity_source=str(identity.get("source") or ""),
+        storage=bridge.storage,
     )
     bridge.record_session_runtime_metadata(
         agent=agent,
@@ -926,7 +987,11 @@ def bootstrap(
         project_canonical_root=str(identity.get("canonical_root") or ""),
         project_identity_source=str(identity.get("source") or ""),
     )
-    write_runtime_breadcrumb(peer_runtime_path_for_state_dir(state_dir, agent), peer_breadcrumb)
+    write_runtime_breadcrumb(
+        peer_runtime_path_for_state_dir(state_dir, agent),
+        peer_breadcrumb,
+        storage=bridge.storage,
+    )
 
     handshake = None
     delays = [2, 4, 8]
@@ -965,11 +1030,16 @@ def bootstrap(
             project=project_name,
             cwd=cwd,
             python_executable=sys.executable,
+            storage=bridge.storage,
         )
         if start_watcher:
             if restart_watcher_if_code_changed:
-                watcher_restart_check = restart_watcher_for_code_change(watcher_config, state_dir=state_dir)
-            watcher_process = ensure_watcher(watcher_config, state_dir=state_dir)
+                watcher_restart_check = restart_watcher_for_code_change(
+                    watcher_config, state_dir=state_dir, storage=bridge.storage
+                )
+            watcher_process = ensure_watcher(
+                watcher_config, state_dir=state_dir, storage=bridge.storage
+            )
             if watcher_restart_check is not None:
                 watcher_process["code_restart_check"] = watcher_restart_check
                 if (
@@ -986,7 +1056,12 @@ def bootstrap(
             }
 
     claude_monitor_reminder = (
-        _claude_monitor_reminder(state_dir=state_dir, session_id=new_session, project=project_name)
+        _claude_monitor_reminder(
+            state_dir=state_dir,
+            session_id=new_session,
+            project=project_name,
+            storage=bridge.storage,
+        )
         if agent == "claude"
         else None
     )

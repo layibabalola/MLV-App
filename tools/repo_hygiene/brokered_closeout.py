@@ -367,6 +367,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "approveTokens": ["APPROVE"],
         "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
         "requireHandoff": True,
+        "authorizedReviewSessions": ["5fc3fc6e-345f-40b8-bb3d-7abd6302b459"],
     },
     "validation": {
         "timeoutMs": 120000,
@@ -771,6 +772,9 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "CLAUDE.md",
             "closeout.config.json",
             "tools/repo_hygiene/brokered_closeout.py",
+            "tools/repo_hygiene/candidate_acceptance.py",
+            "tools/repo_hygiene/test_candidate_acceptance.py",
+            "tools/factory/capture-github-acceptance.ps1",
             "tools/repo_hygiene/work_block_cli.py",
             "tools/repo_hygiene/test_brokered_closeout.py",
             "tools/closeout/Invoke-CloseoutCli.ps1",
@@ -793,6 +797,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "contentReviewGate.coordinationFile",
             "contentReviewGate.handoffActor",
             "contentReviewGate.reviewActor",
+            "contentReviewGate.authorizedReviewSessions",
             "validation",
             "processResources",
             "powerShell",
@@ -815,6 +820,18 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "hardClean",
             "runtimeServices",
             "blockerAutoRemediation",
+            "repoSweep.maxNewInvestigationsPerRun",
+            "candidateAcceptance",
+            "candidateAcceptance.schema",
+            "candidateAcceptance.enabled",
+            "candidateAcceptance.providerRepository",
+            "candidateAcceptance.requiredSurfaces",
+            "candidateAcceptance.batchUntilAllSurfacesTerminal",
+            "candidateAcceptance.carryApprovalsAcrossCandidateTuples",
+            "candidateAcceptance.agentApprovalsGrantHumanAuthority",
+            "candidateAcceptance.requireReadyForFinalize",
+            "toolingBaseline.enabled",
+            "toolingBaseline.requiredTestFiles",
             "closeoutAddendumPersistence",
             "finalizeLoop",
             "remediationFreeze",
@@ -852,6 +869,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "remediation_freeze_removal",
         ],
         "requiredTests": [
+            "test_content_review_authorized_session_rotation_is_strict_singleton",
             "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
             "test_start_work_block_auto_branches_from_clean_protected_target",
             "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
@@ -900,6 +918,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_blocks_before_hygiene_blocker",
             "test_tooling_baseline_check_is_plan_only_during_finalize",
             "test_missing_evidence_is_generated_and_committed_before_publish",
+            "test_existing_evidence_is_refreshed_after_a_later_source_commit",
             "test_target_push_non_fast_forward_fetches_updates_local_target_and_reports_rerun",
             "test_finalize_loop_stops_on_repeated_identical_blocker_evidence_tuple",
             "test_finalize_loop_continues_when_evidence_repair_changes_tuple_and_pins_match",
@@ -1000,6 +1019,46 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
             "test_closeout_tooling_stale_reports_missing_power_shell_policy",
         ],
+        "requiredTestFiles": [
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_acceptance_uses_two_phase_target_pinned_activation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_active_policy_and_tooling_guards_stay_in_parity"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_query_ignores_candidate_and_path_executable_shadowing"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_system_curl_identity_must_stay_stable_during_query"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_system_curl_rejects_redirect_status"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_live_provider_system_curl_rejects_user_writable_or_unsigned_client"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_classifies_enabled_group_and_ancestor_replacement"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_rejects_user_module_shadowing"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_windows_system_curl_trust_rejects_null_dacl"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_unix_system_curl_trust_rejects_writable_ancestor"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tuple_drift_never_carries_approval"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_agent_record_cannot_escalate_human_authority"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_finalize_requires_same_tuple_ready_before_content_review"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_github_capture_is_exact_head_terminal_and_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_content_reviewers_must_be_distinct_even_with_different_sessions"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_all_same_surface_blocking_findings_survive_consolidation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_configured_quorum_cannot_be_replaced_by_one_surface_ledger"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_rehashed_ready_state_with_blockers_is_incoherent_and_finalize_blocks"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_generic_records_cannot_impersonate_hosted_surfaces"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_provider_repository_and_annotation_shape_are_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_nonterminal_or_fabricated_provider_state_cannot_finalize"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_monotonic_chain_detects_deleted_same_tuple_blocker_history"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_diff_identity_is_independent_of_git_color_configuration"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_final_integration_tree_or_diff_drift_is_blocking"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_repo_sweep_reuses_one_plan_and_one_dirty_probe_per_worktree"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_repo_sweep_investigations_resume_in_bounded_content_addressed_pages"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_repo_sweep_investigation_cache_rejects_dirty_source_item_drift"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_repo_sweep_cached_recommendation_cannot_be_rehashed_into_prune_authority"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_remote_feature_delete_fetches_when_tracking_ref_is_missing"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_remote_feature_delete_ignores_narrow_fetch_refspec_for_provider_truth"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_remote_feature_delete_lease_rejects_concurrent_advance"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_remote_feature_delete_blocks_ref_recreated_after_delete"},
+            {"path": "tools/repo_hygiene/test_brokered_closeout.py", "test": "test_remote_feature_delete_blocks_when_postdelete_exact_query_fails"},
+        ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def checkpoint_owned_dirty_action_id"},
@@ -1010,6 +1069,31 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_content_review_approval_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def target_candidate_acceptance_policy"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _activation_state"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_acceptance_enforced"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repository_has_canonical_acceptance_remote"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_identity"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def evaluate"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def validate_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def provider_surface_record"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def verify_live_provider"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _trusted_system_curl_identity"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _minimal_system_child_environment"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _trusted_unix_curl_path_chain"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def system_curl_github_query_command"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def content_review_gate_trust_error"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _load_chain"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def final_integration_mismatches"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def integration_range_evidence"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_sweep_plan"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repo_sweep_tuple"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def reusable_candidate_report"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def investigation_jobs"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def fresh_investigation_report"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def delete_remote_feature_ref"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def remote_provider_ref_snapshot"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def preserve_owned_dirty_split"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def apply_detached_dirty_preserve"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def cleanup_foreign_dirty_integrated_branch"},
@@ -1271,6 +1355,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "fetchBeforeRemoteSweep": True,
         "remoteFeaturePatterns": [],
         "pruneRemoteFeatureBranches": True,
+        "maxNewInvestigationsPerRun": 2,
         "cleanIntegrateRemoteFeatureBranches": True,
         "deleteRemoteFeatureAfterCleanIntegrate": True,
         "auditedBulkOverride": {
@@ -1295,6 +1380,23 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "prunePatchEquivalentBranches": True,
         "maxConflictFilesForAgent": 8,
         "explicitProtectedWorktreeActions": [],
+    },
+    "candidateAcceptance": {
+        "enabled": True,
+        "schema": "candidate-acceptance.v1",
+        "stateRoot": ".claude-state/closeout/acceptance",
+        "providerRepository": "layibabalola/MLV-App",
+        "requiredSurfaces": [
+            "content-self",
+            "content-stranger-1",
+            "content-stranger-2",
+            "hosted-tests",
+            "hosted-codeql",
+        ],
+        "batchUntilAllSurfacesTerminal": True,
+        "carryApprovalsAcrossCandidateTuples": False,
+        "agentApprovalsGrantHumanAuthority": False,
+        "requireReadyForFinalize": True,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }
@@ -3502,6 +3604,25 @@ def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, 
     return True, None
 
 
+def repository_has_canonical_acceptance_remote(repo_root: Path) -> bool:
+    result = run_git(repo_root, ["config", "--get-regexp", r"^remote\..*\.url$"])
+    if result.returncode != 0:
+        return False
+    canonical_urls = {
+        "https://github.com/layibabalola/mlv-app",
+        "git@github.com:layibabalola/mlv-app",
+        "ssh://git@github.com/layibabalola/mlv-app",
+    }
+    for line in result.stdout.splitlines():
+        _, _, raw_url = line.partition(" ")
+        normalized = raw_url.strip().lower().rstrip("/")
+        if normalized.endswith(".git"):
+            normalized = normalized[:-4]
+        if normalized in canonical_urls:
+            return True
+    return False
+
+
 def verify_closeout_tooling_current(
     repo_root_arg: Path,
     config: Optional[Dict[str, Any]] = None,
@@ -3513,10 +3634,77 @@ def verify_closeout_tooling_current(
     config = config or load_closeout_config(repo_root)
     raw_config = read_json(repo_root / CONFIG_PATH, {}) if (repo_root / CONFIG_PATH).exists() else {}
     baseline = config.get("toolingBaseline", {})
-    if not bool(baseline.get("enabled", False)):
+    raw_acceptance = raw_config.get("candidateAcceptance") if isinstance(raw_config, dict) else None
+    acceptance_bearing = (
+        isinstance(raw_acceptance, dict) and raw_acceptance.get("schema") == "candidate-acceptance.v1"
+    ) or repository_has_canonical_acceptance_remote(repo_root)
+    if not bool(baseline.get("enabled", False)) and not acceptance_bearing:
         return {"ok": True, "status": "disabled", "missing": [], "updated": [], "plannedUpdates": []}
 
     missing: List[Dict[str, Any]] = []
+    if acceptance_bearing and baseline.get("enabled") is not True:
+        missing.append({"kind": "baseline_enabled", "key": "toolingBaseline.enabled", "expected": True})
+    default_baseline = DEFAULT_CLOSEOUT_CONFIG["toolingBaseline"]
+    mandatory_paths = {
+        "tools/repo_hygiene/candidate_acceptance.py",
+        "tools/repo_hygiene/test_candidate_acceptance.py",
+        "tools/factory/capture-github-acceptance.ps1",
+    }
+    configured_paths = {normalize_rel(str(path)) for path in baseline.get("paths", [])}
+    for path in sorted(mandatory_paths - configured_paths):
+        missing.append({"kind": "baseline_path", "path": path})
+
+    mandatory_config_keys = {
+        str(key)
+        for key in default_baseline.get("requiredConfigKeys", [])
+        if str(key).startswith("candidateAcceptance") or str(key) == "toolingBaseline.requiredTestFiles"
+    }
+    mandatory_config_keys.add("repoSweep.maxNewInvestigationsPerRun")
+    configured_keys = {str(key) for key in baseline.get("requiredConfigKeys", [])}
+    for key in sorted(mandatory_config_keys - configured_keys):
+        missing.append({"kind": "baseline_config_requirement", "key": key})
+
+    mandatory_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in default_baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    configured_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    for path, test_name in sorted(mandatory_test_files - configured_test_files):
+        missing.append({"kind": "baseline_test_requirement", "path": path, "test": test_name})
+
+    mandatory_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in default_baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+        and (
+            normalize_rel(str(item.get("path") or "")) == "tools/repo_hygiene/candidate_acceptance.py"
+            or str(item.get("contains") or "")
+            in {
+                "def integration_range_evidence",
+                "def repository_has_canonical_acceptance_remote",
+                "def repo_sweep_plan",
+                "def repo_sweep_tuple",
+                "def reusable_candidate_report",
+                "def investigation_jobs",
+                "def fresh_investigation_report",
+                "def remote_provider_ref_snapshot",
+                "def delete_remote_feature_ref",
+            }
+        )
+    }
+    configured_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+    }
+    for path, contains in sorted(mandatory_symbols - configured_symbols):
+        missing.append({"kind": "baseline_symbol_requirement", "path": path, "contains": contains})
+
     for key in baseline.get("requiredConfigKeys", []):
         if config_path_value(raw_config, str(key)) is None:
             missing.append({"kind": "config_key", "key": str(key)})
@@ -3533,6 +3721,21 @@ def verify_closeout_tooling_current(
     for test_name in baseline.get("requiredTests", []):
         if str(test_name) not in test_text:
             missing.append({"kind": "test", "test": str(test_name), "path": normalize_rel(str(test_path.relative_to(repo_root))) if test_path.exists() else "tools/repo_hygiene/test_brokered_closeout.py"})
+    for required_test in baseline.get("requiredTestFiles", []):
+        if not isinstance(required_test, dict):
+            missing.append({"kind": "test", "test": str(required_test), "path": ""})
+            continue
+        path = normalize_rel(str(required_test.get("path") or ""))
+        test_name = str(required_test.get("test") or "")
+        candidate_path = repo_root / path
+        try:
+            candidate_path.resolve().relative_to(repo_root.resolve())
+        except (OSError, ValueError):
+            missing.append({"kind": "test", "test": test_name, "path": path})
+            continue
+        candidate_text = candidate_path.read_text(encoding="utf-8") if path and candidate_path.is_file() else ""
+        if not path or not test_name or test_name not in candidate_text:
+            missing.append({"kind": "test", "test": test_name, "path": path})
     for required in baseline.get("requiredSymbols", []):
         path = normalize_rel(str(required.get("path") or ""))
         contains = str(required.get("contains") or "")
@@ -3883,7 +4086,43 @@ def evidence_missing_or_dirty(repo_root: Path, config: Dict[str, Any], work_bloc
         status = run_git(repo_root, ["status", "--porcelain=v1", "--", path])
         if status.stdout.strip() or not git_path_tracked(repo_root, path):
             missing.append(path)
-    return missing
+    if missing or not paths:
+        return missing
+
+    # Evidence is emitted as its own commit and describes that commit's parent.
+    # Merely finding tracked JSON is insufficient: a later source commit makes
+    # the old evidence stale even though every required path still exists.
+    head = git_stdout(repo_root, ["rev-parse", "HEAD"], required=False)
+    parent = git_stdout(repo_root, ["rev-parse", "HEAD^"], required=False)
+    if not head or not parent:
+        return paths
+    head_paths = {
+        normalize_rel(line)
+        for line in git_stdout(
+            repo_root,
+            ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            required=False,
+        ).splitlines()
+        if normalize_rel(line)
+    }
+    if head_paths != set(paths):
+        return paths
+    for path in paths:
+        last_commit = git_stdout(repo_root, ["log", "-1", "--format=%H", "--", path], required=False)
+        raw = git_stdout(repo_root, ["show", f"HEAD:{path}"], required=False)
+        try:
+            payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return paths
+        if (
+            last_commit != head
+            or not isinstance(payload, dict)
+            or payload.get("workBlockId") != work_block_id
+            or payload.get("featureHead") != parent
+            or payload.get("artifactKind") != Path(path).stem
+        ):
+            return paths
+    return []
 
 
 def evidence_payloads(config: Dict[str, Any], detection: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -6477,13 +6716,6 @@ def _finalize_work_block_once(
         append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": "work_block_base_not_integrated"})
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "work_block_base_not_integrated"})
         return {"status": "blocked", **base_guard, "detection": detection}
-    content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
-    if content_guard:
-        reason = str(content_guard["reason"])
-        write_audit(repo_root, config, reason, content_guard, work_block_id=block_id, outcome="blocked")
-        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
-        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
-        return {"status": "blocked", **content_guard, "detection": detection}
     if expected_pinned_refs is not None and expected_pinned_refs != detection["pinnedRefs"]:
         payload = {"expectedPinnedRefs": expected_pinned_refs, "actualPinnedRefs": detection["pinnedRefs"]}
         write_audit(repo_root, config, "stale_refs", payload, work_block_id=block_id, outcome="blocked")
@@ -6496,6 +6728,22 @@ def _finalize_work_block_once(
         update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "repair_blocked"})
         return {"status": "blocked", "reason": "repair_blocked", "repair": repair, "detection": detection}
     detection = detect_work_block(repo_root, work_block_id=block_id)
+    from .candidate_acceptance import validate_for_finalize as validate_candidate_acceptance_for_finalize
+
+    acceptance_guard = validate_candidate_acceptance_for_finalize(repo_root, config, detection)
+    if acceptance_guard:
+        reason = str(acceptance_guard["reason"])
+        write_audit(repo_root, config, reason, acceptance_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **acceptance_guard, "detection": detection}
+    content_guard = validate_content_review_approval_for_finalize(repo_root, config, detection, manifest)
+    if content_guard:
+        reason = str(content_guard["reason"])
+        write_audit(repo_root, config, reason, content_guard, work_block_id=block_id, outcome="blocked")
+        append_event(repo_root, config, block_id, {"event": "finalize_blocked", "reason": reason})
+        update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": reason})
+        return {"status": "blocked", **content_guard, "detection": detection}
     evidence = finalize_evidence(config, detection)
     evidence_hash = stable_hash(evidence)
     candidate_id = finalize_candidate_id(block_id)
@@ -6586,13 +6834,56 @@ def _finalize_work_block_once(
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "merge_failed"})
             return {"status": "blocked", "reason": "merge_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        diff_check = run_git(integration_path, ["diff", "--check"])
-        if diff_check.returncode != 0:
-            payload = {"operation": "git_diff_check", "returncode": diff_check.returncode, "stdout": diff_check.stdout[-4000:], "stderr": diff_check.stderr[-4000:]}
+        merged_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        final_range = integration_range_evidence(integration_path, target["head"], merged_head)
+        if final_range["diffCheckReturncode"] != 0:
+            payload = {
+                "operation": "git_diff_check",
+                "range": final_range["range"],
+                "returncode": final_range["diffCheckReturncode"],
+                "stdout": final_range["diffCheckStdout"][-4000:],
+                "stderr": final_range["diffCheckStderr"][-4000:],
+            }
             write_audit(repo_root, config, "validation_failure", payload, work_block_id=block_id, outcome="blocked")
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
             return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
+        final_mismatches: Dict[str, Any] = {}
+        accepted: Dict[str, Any] = {}
+        from .candidate_acceptance import candidate_acceptance_enforced
+
+        try:
+            acceptance_enforced = candidate_acceptance_enforced(repo_root, config, detection)
+        except HygieneError as exc:
+            payload = {"operation": "candidate_acceptance_policy", "detail": str(exc)}
+            write_audit(repo_root, config, "candidate_acceptance_policy_invalid", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_policy_invalid"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_policy_invalid",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
+        if acceptance_enforced:
+            from .candidate_acceptance import (
+                final_integration_mismatches as candidate_acceptance_final_integration_mismatches,
+                latest_summary as candidate_acceptance_latest_summary,
+            )
+
+            accepted = candidate_acceptance_latest_summary(repo_root, config)
+            final_mismatches = candidate_acceptance_final_integration_mismatches(accepted, final_range)
+        if final_mismatches:
+            payload = {"operation": "candidate_acceptance_final_tree", "mismatches": final_mismatches, "range": final_range}
+            write_audit(repo_root, config, "candidate_acceptance_final_tree_mismatch", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_final_tree_mismatch"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_final_tree_mismatch",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
         validations = run_validations(
             repo_root,
             config,
@@ -6608,7 +6899,7 @@ def _finalize_work_block_once(
                 remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "validation_failed"})
             return {"status": "blocked", "reason": "validation_failed", "validations": validations, "runtimeLifecycle": runtime_lifecycle}
-        new_target_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        new_target_head = merged_head
         if target["mode"] == "remote":
             target_worktree_preflight = target_worktree_update_preflight(repo_root, target_branch, new_target_head)
             if target_worktree_preflight["status"] != "success":
@@ -7241,7 +7532,10 @@ def write_candidate_report(repo_root: Path, config: Dict[str, Any], report: Dict
     report_dir = repo_sweep_reports_root(repo_root, config) / safe_state_name(candidate_id)
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "latest-report.json"
-    enriched = {**report, "reportPath": str(report_path)}
+    enriched = {**report, "policyHash": config.get("policyHash"), "reportPath": str(report_path)}
+    enriched["evidenceHash"] = stable_hash(
+        {key: value for key, value in enriched.items() if key not in {"evidenceHash", "reportPath"}}
+    )
     write_json(report_path, enriched)
     write_audit(repo_root, config, "cleanup_retention", enriched, outcome="recorded")
     return enriched
@@ -7800,6 +8094,52 @@ def backup_branch_analysis(repo_root: Path, config: Dict[str, Any], plan: Dict[s
     }
 
 
+def integration_range_evidence(repo_path: Path, target_head: str, integration_head: str) -> Dict[str, Any]:
+    range_spec = "%s..%s" % (target_head, integration_head)
+    prefix = [
+        "-c", "color.ui=false",
+        "-c", "core.quotepath=false",
+        "-c", "diff.external=",
+        "-c", "diff.renames=false",
+        "-c", "diff.context=3",
+        "-c", "diff.interHunkContext=0",
+        "-c", "diff.indentHeuristic=false",
+    ]
+    diff_check = run_git(repo_path, prefix + ["diff", "--check", "--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", range_spec])
+    changed = run_git(
+        repo_path,
+        prefix
+        + ["diff-tree", "--no-commit-id", "-r", "--name-only", "-z", "--no-renames", target_head, integration_head],
+        check=True,
+    )
+    changed_paths = sorted({normalize_rel(path) for path in changed.stdout.split("\0") if normalize_rel(path)})
+    raw_identity = run_git(
+        repo_path,
+        prefix
+        + [
+            "diff-tree",
+            "--no-commit-id",
+            "-r",
+            "--raw",
+            "-z",
+            "--full-index",
+            "--no-renames",
+            target_head,
+            integration_head,
+        ],
+        check=True,
+    )
+    return {
+        "range": range_spec,
+        "diffCheckReturncode": diff_check.returncode,
+        "diffCheckStdout": diff_check.stdout,
+        "diffCheckStderr": diff_check.stderr,
+        "integrationTree": tree_hash(repo_path, integration_head),
+        "diffSha256": hashlib.sha256(raw_identity.stdout.encode("utf-8", errors="surrogateescape")).hexdigest(),
+        "changedPaths": changed_paths,
+    }
+
+
 def simulate_clean_integration(
     repo_root: Path,
     config: Dict[str, Any],
@@ -7836,26 +8176,49 @@ def simulate_clean_integration(
                 "conflicts": conflicts,
                 "validationStatus": "not_reached",
             }
-        diff_check = run_git(integration_path, ["diff", "--check"])
-        if diff_check.returncode != 0:
+        integration_head = git_stdout(integration_path, ["rev-parse", "HEAD"])
+        range_evidence = integration_range_evidence(integration_path, target_head, integration_head)
+        if range_evidence["diffCheckReturncode"] != 0:
             return {
                 "clean": False,
                 "reason": "diff_check_failed",
                 "attempt": attempt,
-                "returncode": diff_check.returncode,
-                "stdout": diff_check.stdout[-2000:],
-                "stderr": diff_check.stderr[-2000:],
+                "integrationHead": integration_head,
+                "integrationTree": range_evidence["integrationTree"],
+                "range": range_evidence["range"],
+                "returncode": range_evidence["diffCheckReturncode"],
+                "stdout": range_evidence["diffCheckStdout"][-2000:],
+                "stderr": range_evidence["diffCheckStderr"][-2000:],
                 "validationStatus": "diff_check_failed",
             }
-        validations = run_validations(repo_root, config, integration_path)
+        integration_tree = range_evidence["integrationTree"]
+        range_spec = range_evidence["range"]
+        changed_paths = range_evidence["changedPaths"]
+        diff_sha256 = range_evidence["diffSha256"]
+        validations = run_validations(repo_root, config, integration_path, changed_paths=changed_paths)
         failed = next((item for item in validations if item["returncode"] != 0), None)
         if failed:
-            return {"clean": False, "reason": "validation_failed", "attempt": attempt, "validations": validations, "validationStatus": "failed"}
+            return {
+                "clean": False,
+                "reason": "validation_failed",
+                "attempt": attempt,
+                "integrationHead": integration_head,
+                "integrationTree": integration_tree,
+                "range": range_spec,
+                "diffSha256": diff_sha256,
+                "changedPaths": changed_paths,
+                "validations": validations,
+                "validationStatus": "failed",
+            }
         return {
             "clean": True,
             "reason": "clean_merge_and_validation_passed",
             "attempt": attempt,
-            "integrationHead": git_stdout(integration_path, ["rev-parse", "HEAD"]),
+            "integrationHead": integration_head,
+            "integrationTree": integration_tree,
+            "range": range_spec,
+            "diffSha256": diff_sha256,
+            "changedPaths": changed_paths,
             "validations": validations,
             "validationStatus": "passed",
         }
@@ -8314,6 +8677,9 @@ def repo_state_snapshot(
 ) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
     config = load_closeout_config(repo_root)
+    from .candidate_acceptance import latest_summary as candidate_acceptance_latest_summary
+
+    candidate_acceptance = candidate_acceptance_latest_summary(repo_root, config)
     ledger = repo_state_ledger_config(config)
     dashboard = repo_state_dashboard_spec(config)
     rollback = rollback_policy(config)
@@ -8430,6 +8796,7 @@ def repo_state_snapshot(
             "latestCloseoutCleanTruth": state_audits["latestCloseoutCleanTruth"],
             "history": closeout_history,
         },
+        "candidateAcceptance": candidate_acceptance,
         "dashboard": {
             "enabled": bool(dashboard.get("enabled", True)),
             "localUrl": str(dashboard.get("localUrl") or "http://127.0.0.1:8765/closeout"),
@@ -8618,6 +8985,16 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     target = target_ref_for(repo_root, config)
     worktrees = parse_worktree_list(repo_root)
     worktree_by_branch = {item.get("branch"): item for item in worktrees if item.get("branch")}
+    dirty_by_worktree_path: Dict[str, Dict[str, Any]] = {}
+
+    def dirty_state_for(item: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not item:
+            return {"exists": False, "dirty": False, "paths": []}
+        path = str(item.get("path") or "")
+        if path not in dirty_by_worktree_path:
+            dirty_by_worktree_path[path] = worktree_dirty_state(Path(path))
+        return dirty_by_worktree_path[path]
+
     branch_plans: List[Dict[str, Any]] = []
     for row in local_branch_rows(repo_root):
         branch = str(row["branch"])
@@ -8625,7 +9002,7 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
         worktree = worktree_by_branch.get(branch)
         protected = is_protected_branch(config, branch)
         ancestor = is_ancestor(repo_root, head, target["head"])
-        dirty = worktree_dirty_state(Path(str(worktree["path"]))) if worktree else {"exists": False, "dirty": False, "paths": []}
+        dirty = dirty_state_for(worktree)
         checked_out = worktree is not None
         disposition = "retain"
         reason = "retained"
@@ -8662,7 +9039,7 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     worktree_plans: List[Dict[str, Any]] = []
     for item in worktrees:
         path = Path(str(item.get("path") or ""))
-        dirty = worktree_dirty_state(path)
+        dirty = dirty_state_for(item)
         detached = bool(item.get("detached") or not item.get("branch"))
         disposition = "retain_branch_worktree"
         reason = "branch worktree belongs to branch closeout"
@@ -8700,6 +9077,7 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     }
     plan = {
         "schemaVersion": BROKER_SCHEMA_VERSION,
+        "policyHash": config.get("policyHash"),
         "target": target,
         "branchPlans": branch_plans,
         "remoteFeaturePlans": remote_feature_plans,
@@ -8711,10 +9089,26 @@ def repo_sweep_plan(repo_root: Path, config: Dict[str, Any]) -> Dict[str, Any]:
     return plan
 
 
-def repo_sweep_tuple(repo_root_arg: Path) -> Dict[str, Any]:
+def repo_sweep_tuple(
+    repo_root_arg: Path,
+    *,
+    plan: Optional[Dict[str, Any]] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     repo_root = resolve_repo_root(repo_root_arg)
-    config = load_closeout_config(repo_root)
-    plan = repo_sweep_plan(repo_root, config)
+    if config is None:
+        config = load_closeout_config(repo_root)
+    if plan is None:
+        plan = repo_sweep_plan(repo_root, config)
+    else:
+        plan = json.loads(json.dumps(plan))
+        provided_evidence_hash = str(plan.pop("evidenceHash", ""))
+        expected_evidence_hash = stable_hash(plan)
+        if provided_evidence_hash != expected_evidence_hash:
+            raise HygieneError("repo sweep plan evidence hash is stale or invalid")
+        plan["evidenceHash"] = expected_evidence_hash
+    if plan.get("policyHash") != config.get("policyHash"):
+        raise HygieneError("repo sweep plan policy hash does not match the supplied config")
     tuple_hash = review_tuple_hash(
         REPO_SWEEP_CANDIDATE_ID,
         REPO_SWEEP_ACTION_ID,
@@ -8809,7 +9203,7 @@ def remote_feature_prune_candidate(config: Dict[str, Any], plan: Dict[str, Any],
 
 
 def report_candidate_id(prefix: str, item: Dict[str, Any]) -> str:
-    return "candidate:%s:%s" % (prefix, stable_hash({"branch": item.get("branch"), "head": item.get("head"), "path": item.get("path")}, 16))
+    return "candidate:%s:%s" % (prefix, stable_hash(item, 16))
 
 
 def investigation_agent_payload(config: Dict[str, Any], candidate_id: str, kind: str) -> Dict[str, Any]:
@@ -8984,6 +9378,7 @@ def investigate_branch_candidate(repo_root: Path, config: Dict[str, Any], plan: 
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "reportType": "repo_sweep_candidate_investigation",
         "candidateId": candidate_id,
+        "sourceItemHash": stable_hash(item),
         "branch": branch,
         "head": branch_head,
         "sourceDisposition": disposition,
@@ -9072,6 +9467,7 @@ def investigate_remote_feature_candidate(repo_root: Path, config: Dict[str, Any]
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "reportType": "repo_sweep_remote_feature_investigation",
         "candidateId": candidate_id,
+        "sourceItemHash": stable_hash(item),
         "remote": item.get("remote"),
         "remoteRef": item.get("ref"),
         "branch": branch,
@@ -9492,6 +9888,7 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
         "schemaVersion": BROKER_SCHEMA_VERSION,
         "reportType": "repo_sweep_worktree_investigation",
         "candidateId": candidate_id,
+        "sourceItemHash": stable_hash(item),
         "branch": None,
         "head": item.get("head"),
         "sourceDisposition": disposition,
@@ -9531,26 +9928,153 @@ def investigate_worktree_candidate(repo_root: Path, config: Dict[str, Any], plan
     return write_candidate_report(repo_root, config, report)
 
 
-def investigation_reports(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def reusable_candidate_report(
+    repo_root: Path,
+    config: Dict[str, Any],
+    plan: Dict[str, Any],
+    *,
+    candidate_id: str,
+    item: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    path = repo_sweep_reports_root(repo_root, config) / safe_state_name(candidate_id) / "latest-report.json"
+    if not path.is_file():
+        return None
+    try:
+        report = read_json(path, {})
+    except Exception:
+        return None
+    expected_hash = stable_hash(
+        {key: value for key, value in report.items() if key not in {"evidenceHash", "reportPath"}}
+    )
+    expected_target = plan["pinnedRefs"]["target"]
+    if (
+        report.get("candidateId") != candidate_id
+        or report.get("sourceItemHash") != stable_hash(item)
+        or report.get("head") != item.get("head")
+        or report.get("branch") != item.get("branch")
+        or report.get("sourceDisposition") != item.get("disposition")
+        or report.get("target") != expected_target
+        or report.get("policyHash") != config.get("policyHash")
+        or report.get("evidenceHash") != expected_hash
+    ):
+        return None
+    report["reportPath"] = str(path)
+    return report
+
+
+def investigation_jobs(config: Dict[str, Any], plan: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any], Any]]:
+    jobs: List[Tuple[str, Dict[str, Any], Any]] = []
+    backup_patterns = config.get("repoSweep", {}).get("backupBranchPatterns", [])
+    for item in plan["branchPlans"]:
+        if item.get("protected"):
+            continue
+        if item.get("disposition") == "prune_merged_branch" and not path_matches_any(str(item["branch"]), backup_patterns):
+            continue
+        jobs.append((report_candidate_id("repo-sweep-investigate", item), item, investigate_branch_candidate))
+    for item in plan.get("remoteFeaturePlans", []):
+        if item.get("disposition") in {"prune_integrated_remote_feature", "prune_patch_equivalent_remote_feature"}:
+            continue
+        jobs.append((report_candidate_id("repo-sweep-remote-feature-investigate", item), item, investigate_remote_feature_candidate))
+    for item in plan["worktreePlans"]:
+        if item.get("disposition") != "retain_dirty_detached_worktree":
+            continue
+        jobs.append((report_candidate_id("repo-sweep-worktree-investigate", item), item, investigate_worktree_candidate))
+    jobs.sort(key=lambda row: row[0])
+    return jobs
+
+
+def fresh_investigation_report(
+    repo_root: Path,
+    config: Dict[str, Any],
+    plan: Dict[str, Any],
+    candidate_id: str,
+) -> Dict[str, Any]:
+    for current_id, item, investigator in investigation_jobs(config, plan):
+        if current_id != candidate_id:
+            continue
+        report = investigator(repo_root, config, plan, item)
+        if report is None or report.get("candidateId") != candidate_id:
+            raise HygieneError("repo sweep investigation could not be recomputed for the selected candidate")
+        return report
+    raise HygieneError("repo sweep investigation candidate is absent from the current plan")
+
+
+def investigation_reports(repo_root: Path, config: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
     if not bool(config.get("repoSweep", {}).get("investigateRetainedCandidates", True)):
-        return []
-    branch_reports = [
-        report
-        for report in (investigate_branch_candidate(repo_root, config, plan, item) for item in plan["branchPlans"])
-        if report is not None
-    ]
-    remote_feature_reports = [
-        report
-        for report in (investigate_remote_feature_candidate(repo_root, config, plan, item) for item in plan.get("remoteFeaturePlans", []))
-        if report is not None
-    ]
-    worktree_reports = [
-        report
-        for report in (investigate_worktree_candidate(repo_root, config, plan, item) for item in plan["worktreePlans"])
-        if report is not None
-    ]
-    reports = branch_reports + remote_feature_reports + worktree_reports
-    return sorted(reports, key=lambda item: (str(item.get("actionClass")), str(item.get("branch")), str(item.get("head"))))
+        return {
+            "reports": [],
+            "total": 0,
+            "reused": 0,
+            "generated": 0,
+            "reusedCandidateIds": [],
+            "generatedCandidateIds": [],
+            "pendingCandidateIds": [],
+            "complete": True,
+        }
+    jobs = investigation_jobs(config, plan)
+    max_new = positive_int(config.get("repoSweep", {}).get("maxNewInvestigationsPerRun"), 2)
+    reports: List[Dict[str, Any]] = []
+    pending: List[str] = []
+    reused = 0
+    generated = 0
+    reused_candidate_ids: List[str] = []
+    generated_candidate_ids: List[str] = []
+    for candidate_id, item, investigator in jobs:
+        cached = reusable_candidate_report(
+            repo_root,
+            config,
+            plan,
+            candidate_id=candidate_id,
+            item=item,
+        )
+        if cached is not None:
+            reports.append(cached)
+            reused += 1
+            reused_candidate_ids.append(candidate_id)
+            continue
+        if generated >= max_new:
+            pending.append(candidate_id)
+            continue
+        report = investigator(repo_root, config, plan, item)
+        if report is not None:
+            reports.append(report)
+            generated += 1
+            generated_candidate_ids.append(candidate_id)
+    reports.sort(key=lambda item: (str(item.get("actionClass")), str(item.get("branch")), str(item.get("head"))))
+    return {
+        "reports": reports,
+        "total": len(jobs),
+        "reused": reused,
+        "generated": generated,
+        "reusedCandidateIds": reused_candidate_ids,
+        "generatedCandidateIds": generated_candidate_ids,
+        "maxNewPerRun": max_new,
+        "pendingCandidateIds": pending,
+        "complete": not pending,
+    }
+
+
+def repo_sweep_candidate_filter_matches(
+    requested_candidate_id: Optional[str],
+    candidate: Dict[str, Any],
+    report: Optional[Dict[str, Any]] = None,
+) -> bool:
+    if not requested_candidate_id:
+        return True
+    values = {str(candidate.get("candidateId") or "")}
+    pinned_branch = ((candidate.get("pinnedRefs") or {}).get("branch") or {}).get("branch")
+    if pinned_branch:
+        values.add(str(pinned_branch))
+    remote_feature = (candidate.get("pinnedRefs") or {}).get("remoteFeature") or {}
+    if remote_feature.get("ref"):
+        values.add(str(remote_feature.get("ref")))
+    if report:
+        values.add(str(report.get("candidateId") or ""))
+        if report.get("branch"):
+            values.add(str(report.get("branch")))
+        if report.get("remoteRef"):
+            values.add(str(report.get("remoteRef")))
+    return str(requested_candidate_id) in values
 
 
 def candidate_from_report(config: Dict[str, Any], plan: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
@@ -10885,30 +11409,102 @@ def apply_repo_sweep_clean_integrate(repo_root: Path, config: Dict[str, Any], pl
         write_audit(repo_root, config, "snapshot_pruning", {"action": "integration_worktree_remove", **removal}, outcome="success" if removal["returncode"] == 0 else "blocked")
 
 
+def remote_provider_ref_snapshot(repo_root: Path, *, remote: str, provider_ref: str) -> Dict[str, Any]:
+    query = run_git(repo_root, ["ls-remote", "--exit-code", "--heads", remote, provider_ref])
+    stdout = query.stdout.strip()
+    if query.returncode == 2 and not stdout:
+        return {"status": "absent", "returncode": query.returncode, "head": None, "ref": provider_ref}
+    if query.returncode != 0:
+        return {
+            "status": "blocked",
+            "reason": "remote_feature_exact_query_failed",
+            "returncode": query.returncode,
+            "ref": provider_ref,
+            "stdout": query.stdout[-2000:],
+            "stderr": query.stderr[-2000:],
+        }
+    rows = [line.split() for line in stdout.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 2 or rows[0][1] != provider_ref or not re.fullmatch(r"[0-9a-f]{40}", rows[0][0]):
+        return {
+            "status": "blocked",
+            "reason": "remote_feature_exact_query_malformed",
+            "returncode": query.returncode,
+            "ref": provider_ref,
+            "stdout": query.stdout[-2000:],
+            "stderr": query.stderr[-2000:],
+        }
+    return {"status": "present", "returncode": query.returncode, "head": rows[0][0], "ref": provider_ref}
+
+
 def delete_remote_feature_ref(repo_root: Path, config: Dict[str, Any], *, remote: str, branch: str, expected_head: str) -> Dict[str, Any]:
-    ref = f"refs/remotes/{remote}/{branch}"
-    current_head = rev_parse(repo_root, ref, required=False)
-    if current_head is None:
-        action = {"status": "success", "action": "delete_remote_branch", "remote": remote, "branch": branch, "alreadyMissing": True, "expectedHead": expected_head}
-        write_audit(repo_root, config, "remote_branch_deletion", action, outcome="success")
+    provider_ref = f"refs/heads/{branch}"
+    before = remote_provider_ref_snapshot(repo_root, remote=remote, provider_ref=provider_ref)
+    if before["status"] == "blocked":
+        action = {
+            "status": "blocked",
+            "reason": before["reason"],
+            "action": "delete_remote_branch",
+            "remote": remote,
+            "branch": branch,
+            "expectedHead": expected_head,
+            "providerQueryBefore": before,
+        }
+        write_audit(repo_root, config, "remote_branch_deletion", action, outcome="blocked")
         return action
-    if current_head != expected_head:
-        action = {"status": "blocked", "reason": "remote_feature_head_drifted", "remote": remote, "branch": branch, "expected": expected_head, "actual": current_head}
+    if before["status"] == "absent":
+        tracking_cleanup = run_git(repo_root, ["update-ref", "-d", f"refs/remotes/{remote}/{branch}"])
+        action = {
+            "status": "success" if tracking_cleanup.returncode == 0 else "blocked",
+            "action": "delete_remote_branch",
+            "remote": remote,
+            "branch": branch,
+            "alreadyMissing": True,
+            "expectedHead": expected_head,
+            "providerQueryBefore": before,
+            "trackingCleanupReturncode": tracking_cleanup.returncode,
+        }
+        if action["status"] != "success":
+            action["reason"] = "remote_tracking_ref_cleanup_failed"
+        write_audit(repo_root, config, "remote_branch_deletion", action, outcome=action["status"])
+        return action
+    if before["head"] != expected_head:
+        action = {"status": "blocked", "reason": "remote_feature_head_drifted", "remote": remote, "branch": branch, "expected": expected_head, "actual": before["head"], "providerQueryBefore": before}
         write_audit(repo_root, config, "stale_refs", action, outcome="blocked")
         return action
-    delete = run_git(repo_root, ["push", remote, "--delete", branch])
-    run_git(repo_root, ["fetch", "--prune", remote])
+    delete = run_git(
+        repo_root,
+        [
+            "push",
+            f"--force-with-lease={provider_ref}:{expected_head}",
+            remote,
+            f":{provider_ref}",
+        ],
+    )
+    after = remote_provider_ref_snapshot(repo_root, remote=remote, provider_ref=provider_ref)
+    tracking_cleanup = run_git(repo_root, ["update-ref", "-d", f"refs/remotes/{remote}/{branch}"]) if after["status"] == "absent" else None
+    absent_after_authoritative_query = after["status"] == "absent" and tracking_cleanup is not None and tracking_cleanup.returncode == 0
     action = {
-        "status": "success" if delete.returncode == 0 else "blocked",
+        "status": "success" if absent_after_authoritative_query else "blocked",
         "action": "delete_remote_branch",
         "remote": remote,
         "branch": branch,
         "expectedHead": expected_head,
         "returncode": delete.returncode,
+        "providerQueryBefore": before,
+        "providerQueryAfter": after,
+        "remoteTrackingHeadAfter": rev_parse(repo_root, f"refs/remotes/{remote}/{branch}", required=False),
+        "trackingCleanupReturncode": tracking_cleanup.returncode if tracking_cleanup is not None else None,
+        "alreadyMissingAfterAttempt": delete.returncode != 0 and absent_after_authoritative_query,
         "stdout": delete.stdout[-2000:],
         "stderr": delete.stderr[-2000:],
     }
-    write_audit(repo_root, config, "remote_branch_deletion", action, outcome="success" if delete.returncode == 0 else "blocked")
+    if action["status"] != "success":
+        action["reason"] = after.get("reason") or (
+            "remote_tracking_ref_cleanup_failed"
+            if after["status"] == "absent"
+            else "remote_feature_still_present_after_delete"
+        )
+    write_audit(repo_root, config, "remote_branch_deletion", action, outcome="success" if action["status"] == "success" else "blocked")
     return action
 
 
@@ -11211,7 +11807,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
     if not bool(config.get("repoSweep", {}).get("enabled", True)):
         return {"status": "disabled", "reason": "repoSweep.enabled is false"}
     plan = repo_sweep_plan(repo_root, config)
-    tuple_info = repo_sweep_tuple(repo_root)
+    tuple_info = repo_sweep_tuple(repo_root, plan=plan, config=config)
     backup_patterns = config.get("repoSweep", {}).get("backupBranchPatterns", [])
     prunable_branches = [
         item
@@ -11228,7 +11824,76 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
     candidate_stashes = [item for item in plan["stashPlans"] if item["disposition"] == "candidate_stash_drop"]
     branch_candidates = [branch_prune_candidate(config, plan, item) for item in prunable_branches]
     remote_feature_candidates = [remote_feature_prune_candidate(config, plan, item) for item in prunable_remote_features]
-    retained_reports = investigation_reports(repo_root, config, plan)
+    investigation_progress = investigation_reports(repo_root, config, plan)
+    reused_candidate_ids = set(investigation_progress.get("reusedCandidateIds") or [])
+    if apply and investigation_progress["complete"]:
+        reused_promoted_pairs = []
+        for cached_report in investigation_progress["reports"]:
+            if cached_report.get("candidateId") not in reused_candidate_ids:
+                continue
+            if cached_report.get("recommendedAction") not in {
+                "clean_integrate_now",
+                "clean_integrate_remote_now",
+                "dispatch_conflict_remediation",
+                "prune_now",
+                "prune_remote_now",
+                "cleanup_worktree_and_prune",
+                "split_now",
+                "switch_target_and_prune",
+                "preserve_detached_dirty_now",
+                "prune_generated_detached_dirty_now",
+            }:
+                continue
+            cached_candidate = candidate_from_report(config, plan, cached_report)
+            reused_promoted_pairs.append((cached_report, cached_candidate))
+        max_fresh = positive_int(config.get("repoSweep", {}).get("maxNewInvestigationsPerRun"), 2)
+        if not candidate_id and len(reused_promoted_pairs) > max_fresh:
+            result = {
+                "status": "blocked",
+                "reason": "repo_sweep_cached_investigations_require_exact_candidate",
+                "recoveryCommand": "Rerun repo sweep with --candidate-id for one promoted candidate so its recommendation is freshly recomputed.",
+                "candidateIds": [candidate["candidateId"] for _, candidate in reused_promoted_pairs],
+                "investigationProgress": investigation_progress,
+                "plan": plan,
+                "tuple": tuple_info,
+            }
+            write_audit(repo_root, config, "cleanup_retention", result, outcome="blocked")
+            return result
+        selected_reused_pairs = (
+            reused_promoted_pairs
+            if not candidate_id
+            else [
+                (report, candidate)
+                for report, candidate in reused_promoted_pairs
+                if repo_sweep_candidate_filter_matches(candidate_id, candidate, report)
+            ]
+        )
+        if candidate_id and len(selected_reused_pairs) > 1:
+            result = {
+                "status": "blocked",
+                "reason": "repo_sweep_cached_candidate_selection_is_ambiguous",
+                "candidateId": candidate_id,
+                "matchedReportIds": [report["candidateId"] for report, _ in selected_reused_pairs],
+                "plan": plan,
+                "tuple": tuple_info,
+            }
+            write_audit(repo_root, config, "cleanup_retention", result, outcome="blocked")
+            return result
+        if selected_reused_pairs:
+            fresh_reports: Dict[str, Dict[str, Any]] = {}
+            for cached_report, _ in selected_reused_pairs:
+                fresh_reports[str(cached_report["candidateId"])] = fresh_investigation_report(
+                    repo_root,
+                    config,
+                    plan,
+                    str(cached_report["candidateId"]),
+                )
+            investigation_progress["reports"] = [
+                fresh_reports.get(str(report.get("candidateId")), report)
+                for report in investigation_progress["reports"]
+            ]
+            investigation_progress["revalidatedCandidateIds"] = sorted(fresh_reports)
+    retained_reports = investigation_progress["reports"]
     promoted_reports = [
         report
         for report in retained_reports
@@ -11252,22 +11917,7 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
         candidate_stashes=candidate_stashes,
     )
     def candidate_filter_matches(candidate: Dict[str, Any], report: Optional[Dict[str, Any]] = None) -> bool:
-        if not candidate_id:
-            return True
-        values = {str(candidate.get("candidateId") or "")}
-        pinned_branch = ((candidate.get("pinnedRefs") or {}).get("branch") or {}).get("branch")
-        if pinned_branch:
-            values.add(str(pinned_branch))
-        remote_feature = (candidate.get("pinnedRefs") or {}).get("remoteFeature") or {}
-        if remote_feature.get("ref"):
-            values.add(str(remote_feature.get("ref")))
-        if report:
-            values.add(str(report.get("candidateId") or ""))
-            if report.get("branch"):
-                values.add(str(report.get("branch")))
-            if report.get("remoteRef"):
-                values.add(str(report.get("remoteRef")))
-        return str(candidate_id) in values
+        return repo_sweep_candidate_filter_matches(candidate_id, candidate, report)
 
     if not apply:
         payload = {
@@ -11279,9 +11929,25 @@ def repo_sweep(repo_root_arg: Path, *, apply: bool = False, candidate_id: Option
             "promotedCandidates": promoted_candidates,
             "followUpCandidates": follow_up_candidates,
             "applyScope": apply_scope,
+            "investigationProgress": investigation_progress,
         }
         write_audit(repo_root, config, "cleanup_retention", payload, outcome="recorded")
-        return {"status": "planned", **payload}
+        return {
+            "status": "planned" if investigation_progress["complete"] else "planned_partial",
+            "recoveryCommand": None if investigation_progress["complete"] else closeout_script_command("repo-sweep-closeout.ps1", config=config),
+            **payload,
+        }
+    if not investigation_progress["complete"]:
+        result = {
+            "status": "blocked",
+            "reason": "repo_sweep_investigations_pending",
+            "recoveryCommand": closeout_script_command("repo-sweep-closeout.ps1", config=config),
+            "investigationProgress": investigation_progress,
+            "plan": plan,
+            "tuple": tuple_info,
+        }
+        write_audit(repo_root, config, "cleanup_retention", result, outcome="blocked")
+        return result
     if not candidate_id:
         bulk_check = validate_repo_sweep_bulk_override(config, apply_scope, bulk_override)
         if not bulk_check["ok"]:
@@ -11740,6 +12406,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
         "contentReviewGate.coordinationFile",
         "contentReviewGate.handoffActor",
         "contentReviewGate.reviewActor",
+        "contentReviewGate.authorizedReviewSessions",
         "validation",
         "processResources",
         "powerShell",

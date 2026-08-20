@@ -1,0 +1,17 @@
+{
+  "extensions": [
+    {
+      "addsTo": {
+        "pack": "codeql/python-all",
+        "extensible": "barrierModel"
+      },
+      "data": [
+        [
+          "core.storage.StorageCapability",
+          "Member[validate].ReturnValue",
+          "path-injection"
+        ]
+      ]
+    }
+  ]
+}

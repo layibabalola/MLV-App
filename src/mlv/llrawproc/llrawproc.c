@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (C) 2017 Bouncyball
  *
  * This program is free software; you can redistribute it and/or
@@ -1868,6 +1868,31 @@ int llrpGpuExportBackendUnavailableForTesting(void);
 int llrpGpuExportBackendUnavailableForTesting(void)
 {
     return 1;
+}
+
+/* RenderFrameThread is shared by every desktop platform, while the dynamic
+ * GPU recon backend is Windows-only.  Keep the public preupload API complete
+ * here and fail closed when that backend cannot exist. */
+int llrpGpuPlaybackReconPreuploadFrame(uint64_t frame_id,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size);
+int llrpGpuPlaybackReconPreuploadFrame(uint64_t frame_id,
+                                      const uint16_t * raw_input_bayer14,
+                                      size_t raw_image_size)
+{
+    (void)frame_id;
+    (void)raw_input_bayer14;
+    (void)raw_image_size;
+    return 0;
+}
+
+int llrpGpuPlaybackReconGetLastPreuploadStatus(
+    llrpGpuPlaybackReconPreuploadStatus_t * status);
+int llrpGpuPlaybackReconGetLastPreuploadStatus(
+    llrpGpuPlaybackReconPreuploadStatus_t * status)
+{
+    if(status) memset(status, 0, sizeof(*status));
+    return 0;
 }
 
 static int llrawproc_gpu_export_try_replace(uint16_t * cpu_output,

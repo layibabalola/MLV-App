@@ -634,6 +634,12 @@ static int mlv_processed8_prefetch_indirect_x2_enabled(void)
 static int mlv_processed8_prefetch_indirect_state_supported(const processingObject_t * processing)
 {
     if (!processing) return 0;
+    /* The indirect worker carries the clarity scalar but not clarity_curve,
+     * which applyProcessingObject consumes whenever clarity is non-neutral.
+     * A wrong-content cache hit is worse than a miss: keep that state on the
+     * foreground path until the complete derived table is cloned and pinned
+     * by hit-vs-fresh parity coverage. */
+    if (fabs(processing->clarity) >= 0.01) return 0;
     if (processing->lut_on) return 0;
     if (processing->filter_on) return 0;
     if (processing->gradient_enable) return 0;
@@ -2291,6 +2297,28 @@ static void mlv_reset_processed8_prefetch_locked(mlvObject_t * video)
     mlv_reset_processed_frame_8bit_cache_locked(video);
 }
 
+void mlvInvalidateProcessed8PrefetchCache(mlvObject_t * video)
+{
+    if (!video)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    /* Generation is checked both before and after a worker render. Bumping it
+     * under the same mutex that protects slot publication prevents an
+     * in-flight old-generation render from repopulating a cleared cache. */
+    ++video->processed8_prefetch_generation;
+    mlv_reset_processed8_prefetch_locked(video);
+    /* Some user-controlled dual-ISO state deliberately relies on explicit
+     * invalidation instead of participating in the steady-state signature.
+     * Force the next request to refresh the private processing snapshot even
+     * if frame cadence, scale, threads, and signature otherwise still match. */
+    video->processed8_prefetch_snapshot_dirty = 1;
+    pthread_cond_broadcast(&video->processed8_prefetch_cond);
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+}
+
 static int mlv_render_processed_frame8_direct_with_processing(mlvObject_t * video,
                                                               processingObject_t * processing,
                                                               int syncProcessingLevels,
@@ -2330,7 +2358,8 @@ static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
      * encodes scale via Phase 4A, so this is in practice subsumed by the
      * stateSignature comparison below; we guard explicitly anyway in case
      * future hash refactors decouple them.) */
-    if ((video->processed8_prefetch_last_request_frame + 1 != frameIndex
+    if (video->processed8_prefetch_snapshot_dirty
+        || (video->processed8_prefetch_last_request_frame + 1 != frameIndex
          && video->processed8_prefetch_last_request_frame != frameIndex)
         || video->processed8_prefetch_last_request_threads != threads
         || video->processed8_prefetch_last_state_signature != stateSignature
@@ -2346,6 +2375,7 @@ static void mlv_processed8_prefetch_note_request(mlvObject_t * video,
 
         mlv_copy_processed8_prefetch_processing_state(video->processed8_prefetch_processing,
                                                       video->processing);
+        video->processed8_prefetch_snapshot_dirty = 0;
     }
     video->processed8_prefetch_last_request_frame = frameIndex;
     video->processed8_prefetch_last_request_threads = threads;
@@ -2531,6 +2561,20 @@ static void mlv_processed8_prefetch_execute_task(const mlv_processed8_prefetch_t
 
         int debugStored = 0;
         pthread_mutex_lock(&task->video->processed8_prefetch_mutex);
+        if (task->video->processed8_prefetch_test_pause_before_store)
+        {
+            task->video->processed8_prefetch_test_paused_before_store = 1;
+            pthread_cond_broadcast(&task->video->processed8_prefetch_cond);
+            while (task->video->processed8_prefetch_test_pause_before_store
+                   && !task->video->processed8_prefetch_stop
+                   && task->generation == task->video->processed8_prefetch_generation)
+            {
+                pthread_cond_wait(&task->video->processed8_prefetch_cond,
+                                  &task->video->processed8_prefetch_mutex);
+            }
+            task->video->processed8_prefetch_test_paused_before_store = 0;
+            pthread_cond_broadcast(&task->video->processed8_prefetch_cond);
+        }
         if (renderOk
             && !task->video->processed8_prefetch_stop
             && task->generation == task->video->processed8_prefetch_generation
@@ -7823,8 +7867,62 @@ int mlvWaitForProcessed8PrefetchIdleForTesting(mlvObject_t * video,
     }
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    ++video->processed8_prefetch_test_idle_waiters;
     while (video->processed8_prefetch_worker_busy
            || video->processed8_prefetch_request_pending)
+    {
+        const int wait_rc = pthread_cond_timedwait(&video->processed8_prefetch_cond,
+                                                   &video->processed8_prefetch_mutex,
+                                                   &deadline);
+        if (wait_rc == ETIMEDOUT)
+        {
+            --video->processed8_prefetch_test_idle_waiters;
+            pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+            return 0;
+        }
+    }
+    --video->processed8_prefetch_test_idle_waiters;
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+    return 1;
+}
+
+void mlvSetProcessed8PrefetchPauseBeforeStoreForTesting(mlvObject_t * video,
+                                                        int enabled)
+{
+    if (!video)
+    {
+        return;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    video->processed8_prefetch_test_pause_before_store = enabled ? 1 : 0;
+    pthread_cond_broadcast(&video->processed8_prefetch_cond);
+    pthread_mutex_unlock(&video->processed8_prefetch_mutex);
+}
+
+int mlvWaitForProcessed8PrefetchPausedBeforeStoreForTesting(mlvObject_t * video,
+                                                            uint32_t timeout_ms)
+{
+    if (!video)
+    {
+        return 0;
+    }
+
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    {
+        return 0;
+    }
+    deadline.tv_sec += (time_t)(timeout_ms / 1000u);
+    deadline.tv_nsec += (long)(timeout_ms % 1000u) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L)
+    {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    pthread_mutex_lock(&video->processed8_prefetch_mutex);
+    while (!video->processed8_prefetch_test_paused_before_store)
     {
         const int wait_rc = pthread_cond_timedwait(&video->processed8_prefetch_cond,
                                                    &video->processed8_prefetch_mutex,
@@ -7934,6 +8032,10 @@ mlvObject_t * initMlvObject()
     video->processed8_prefetch_last_request_threads = 0;
     video->processed8_prefetch_last_state_signature = 0;
     video->processed8_prefetch_generation = 1;
+    video->processed8_prefetch_snapshot_dirty = 1;
+    video->processed8_prefetch_test_pause_before_store = 0;
+    video->processed8_prefetch_test_paused_before_store = 0;
+    video->processed8_prefetch_test_idle_waiters = 0;
     video->raw_uint16_prefetch_thread_started = 0;
     video->raw_uint16_prefetch_stop = 0;
     video->raw_uint16_prefetch_request_pending = 0;

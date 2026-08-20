@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from core.settings import load_settings
 from core.paths import ensure_bridge_root_manifest, expand_path_arg, resolve_bridge_paths, session_registry_path_for_state_dir
-from core.storage import STATE_SCHEMA_VERSION
+from core.storage import STATE_SCHEMA_VERSION, StorageCapability
 from project_identity import derive_project_identity
 
 
@@ -17,20 +17,23 @@ PARENT_THREAD_PROVENANCE_KEY = "codex_parent_thread_provenance"
 PARENT_THREAD_ALLOWED_PROVENANCE = {"parent", "bootstrap-parent"}
 
 
-def read_json(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+def read_json(
+    path: Path, default: Dict[str, Any], *, storage: StorageCapability
+) -> Dict[str, Any]:
     if not path.exists():
         return dict(default)
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    data = storage.read_json(path, default)
     if not isinstance(data, dict):
         raise ValueError("%s must contain a JSON object" % path)
     return data
 
 
-def write_json(path: Path, value: Dict[str, Any]) -> None:
+def write_json(
+    path: Path, value: Dict[str, Any], *, storage: StorageCapability
+) -> None:
     if path.exists():
         try:
-            current = read_json(path, {})
+            current = read_json(path, {}, storage=storage)
         except Exception:
             current = {}
         if (
@@ -39,21 +42,19 @@ def write_json(path: Path, value: Dict[str, Any]) -> None:
         ):
             value[PARENT_THREAD_ID_KEY] = current.get(PARENT_THREAD_ID_KEY)
             value[PARENT_THREAD_PROVENANCE_KEY] = current.get(PARENT_THREAD_PROVENANCE_KEY, "parent")
-    path.parent.mkdir(parents=True, exist_ok=True)
     value.setdefault("schema_version", STATE_SCHEMA_VERSION)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp.replace(path)
+    storage.write_json(path, value)
 
 
-def load_registry(state_dir: Path) -> Dict[str, Any]:
+def load_registry(
+    state_dir: Path, *, storage: StorageCapability
+) -> Dict[str, Any]:
     return read_json(
         session_registry_path_for_state_dir(state_dir),
         {
             "projects": {},
         },
+        storage=storage,
     )
 
 
@@ -208,13 +209,15 @@ def configure_watcher(
     python_executable: str,
     parent_thread_id: Optional[str] = None,
     parent_thread_provenance: Optional[str] = None,
+    storage: Optional[StorageCapability] = None,
 ) -> Dict[str, Any]:
+    storage = storage or resolve_bridge_paths(state_dir=state_dir).storage
     identity = derive_project_identity(cwd)
     project_name = project or identity["rendezvous"]
     inbox = state_dir / ("inbox-%s.jsonl" % agent)
-    settings = load_settings(state_dir)
+    settings = load_settings(state_dir, storage=storage)
 
-    registry = load_registry(state_dir)
+    registry = load_registry(state_dir, storage=storage)
     projects = registry.get("projects", {})
     project_entry = projects.get(project_name, {}) if isinstance(projects, dict) else {}
     active = project_entry.get("active", {}) if isinstance(project_entry, dict) else {}
@@ -228,6 +231,7 @@ def configure_watcher(
             "_comment": "agent-bridge watcher config",
             "sessions": [],
         },
+        storage=storage,
     )
     config.setdefault("schema_version", STATE_SCHEMA_VERSION)
     config["canonical_root"] = str(identity["canonical_root"])
@@ -363,7 +367,7 @@ def configure_watcher(
     )
 
     config["sessions"] = kept_sessions + managed_entries
-    write_json(config_path, config)
+    write_json(config_path, config, storage=storage)
     return config
 
 
@@ -399,6 +403,7 @@ def main() -> None:
         python_executable=args.python,
         parent_thread_id=args.parent_thread_id,
         parent_thread_provenance=args.parent_thread_provenance,
+        storage=paths.storage,
     )
     print(json.dumps(config, indent=2, sort_keys=True))
 

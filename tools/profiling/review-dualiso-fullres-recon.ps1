@@ -64,6 +64,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "provenance-stamp.ps1")
+. (Join-Path $PSScriptRoot "gui-smoke-screenshot-provenance.ps1")
 
 $root = (Resolve-Path -LiteralPath $RepoRoot).Path
 if ([string]::IsNullOrWhiteSpace($ExePath)) {
@@ -106,6 +107,7 @@ if ($DryRun) {
 }
 
 $grabs = [ordered]@{}
+$legEvidence = [ordered]@{}
 # GATE-FAIRNESS: with -LockWhiteBalance, run both legs with --no-look-assist so they share one
 # deterministic default WB (the auto-WB is non-deterministic run-to-run). The gate computes its
 # metrics from the captured PNG, which --no-look-assist still produces, so the recon comparison is
@@ -133,7 +135,7 @@ foreach ($sf in @(2, 1)) {
         '-RepoRoot', $root, '-ExePath', $exe, '-Input', $clip,
         '-ScaleFactor', $sf, '-ExpectedScaleRequest', $sf,
         '-StartFrame', $StartFrame, '-Seconds', $Seconds, '-SettleMs', $SettleMs,
-        '-CaptureScreenshot', '-SkipWindowScreenshot',
+        '-CaptureScreenshot', '-RequireFreshScreenshotRender', '-FrameTelemetry', '-SkipWindowScreenshot',
         # Frame-matched A/B: BOTH legs must stop on the SAME end frame for the ratio to be valid, so
         # this gate opts OUT of the new default-on playback loop (the general smoke loops; this does not).
         '-NoLoop',
@@ -141,13 +143,80 @@ foreach ($sf in @(2, 1)) {
         '-ScreenshotOutputDir', (Join-Path $scaleDir 'shots')
     )
     $smokeArgs += $lockArgs
-    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $smoke @smokeArgs *> (Join-Path $scaleDir 'smoke.log')
+    $smokeLogPath = Join-Path $scaleDir 'smoke.log'
+    $resultPath = Join-Path $scaleDir 'result.json'
+    & pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $smoke @smokeArgs *> $smokeLogPath
+    $smokeExitCode = $LASTEXITCODE
     $png = Join-Path $scaleDir "shots\$clipBase.png"
-    if (-not (Test-Path -LiteralPath $png -PathType Leaf)) {
-        Write-Host "ERROR: scale=$sf produced no screenshot ($png). See $scaleDir\smoke.log" -ForegroundColor Red
+    try {
+        $smokeChildGate = Assert-GuiSmokeChildEvidenceReady `
+            -ExitCode $smokeExitCode `
+            -ResultExists (Test-Path -LiteralPath $resultPath -PathType Leaf) `
+            -ScreenshotExists (Test-Path -LiteralPath $png -PathType Leaf)
+    }
+    catch {
+        Write-Host "ERROR: scale=$sf smoke child failed before evidence consumption: $($_.Exception.Message) See $smokeLogPath" -ForegroundColor Red
         exit 2
     }
+    try {
+        $smokeResult = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        Write-Host "ERROR: scale=$sf result JSON is unreadable ($resultPath): $($_.Exception.Message)" -ForegroundColor Red
+        exit 2
+    }
+    $smokeValidation = $smokeResult.validation
+    $smokeProvenance = if ($smokeValidation) { $smokeValidation.screenshotProvenance } else { $null }
+    if ($null -eq $smokeValidation -or
+        -not $smokeValidation.ok -or
+        -not $smokeValidation.freshScreenshotRenderRequired -or
+        -not $smokeValidation.freshScreenshotRenderValidated -or
+        $null -eq $smokeProvenance -or
+        -not $smokeProvenance.validFresh) {
+        Write-Host "ERROR: scale=$sf result JSON lacks a passing fresh-render validation/provenance record ($resultPath)." -ForegroundColor Red
+        exit 2
+    }
+    $legEvidence["scale$sf"] = [ordered]@{
+        smokeExitCode = $smokeExitCode
+        smokeLog = $smokeLogPath
+        resultJson = $resultPath
+        childGate = $smokeChildGate
+        validation = $smokeValidation
+        screenshotProvenance = $smokeProvenance
+    }
     $grabs["scale$sf"] = $png
+}
+
+# A displayed-frame number alone does not prove that two screenshots are a
+# fair A/B. The M15-1320 false pair of 2026-08-18 displayed frame 93 in both
+# legs while one leg reached it after frames 90..93 (serial 7) and the other
+# started at 92 and rendered only frame 93 (serial 4). Require the complete
+# request/render/present history to match before any pixels enter the metric.
+$scalePairAllowedDifferences = @(
+    'effectiveState.visualState.scale_request',
+    'effectiveState.frame.scale_request',
+    'effectiveState.frame.scale_active',
+    'effectiveState.renderManifest.path_code',
+    'effectiveState.renderManifest.path_label',
+    'effectiveState.renderManifest.proxy_halvings',
+    'effectiveState.renderManifest.aggressive_preview',
+    'effectiveState.renderManifest.direct8',
+    'effectiveState.renderManifest.y_crop_rows',
+    'effectiveState.renderManifest.rendered_w',
+    'effectiveState.renderManifest.rendered_h',
+    'effectiveState.renderManifest.reduced',
+    'effectiveState.renderManifest.stretched_w',
+    'effectiveState.renderManifest.stretched_h'
+)
+try {
+    $pairComparison = Assert-GuiSmokeScreenshotPair `
+        -Left $legEvidence['scale2'].screenshotProvenance `
+        -Right $legEvidence['scale1'].screenshotProvenance `
+        -AllowedEffectiveStateDifferences $scalePairAllowedDifferences
+}
+catch {
+    Write-Host "ERROR: scale legs are not a comparable frame-history pair: $($_.Exception.Message)" -ForegroundColor Red
+    exit 2
 }
 
 # SCALE -> ASPECT-RATIO CHECK (2026-06-26): the playback scale must PRESERVE the aspect ratio -- a
@@ -262,6 +331,8 @@ $report = [ordered]@{
     clip = $clip
     startFrame = $StartFrame
     seconds = $Seconds
+    pairComparison = $pairComparison
+    legEvidence = $legEvidence
     scale2 = [ordered]@{ hline = $m2.hline; vline = $m2.vline; chromaSpeckle = $m2.chromaSpeckle; grab = $grabs["scale2"] }
     scale1 = [ordered]@{ hline = $m1.hline; vline = $m1.vline; chromaSpeckle = $m1.chromaSpeckle; grab = $grabs["scale1"] }
     ratios = [ordered]@{ hline = [Math]::Round($ratioH, 3); vline = [Math]::Round($ratioV, 3); chromaSpeckle = [Math]::Round($ratioC, 3) }
@@ -270,7 +341,7 @@ $report = [ordered]@{
     interpretation = "Ratios are full-res(scale=1)/default(scale=2) of the SAME frame; a correct fix collapses them toward 1.0. The ratio gate is blind to a fix that breaks BOTH legs equally, so an absolute ceiling on the default leg downgrades CLEAN->SUSPECT_EYEBALL_REQUIRED. A scalar cannot finally certify quality -- always eyeball the grabs."
 }
 $reportPath = Join-Path $OutputRoot "review-verdict.json"
-$report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+$report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $reportPath -Encoding UTF8
 
 Write-Host ""
 Write-Host ("scale=2 (default) : HLine {0:N2}  VLine {1:N2}  chromaSpeckle {2:N2}" -f $m2.hline, $m2.vline, $m2.chromaSpeckle)

@@ -241,6 +241,15 @@ typedef struct {
     int processed8_prefetch_last_request_threads;
     uint64_t processed8_prefetch_last_state_signature;
     uint32_t processed8_prefetch_generation;
+    /* Set by cache invalidation so the next request refreshes the worker's
+     * private processing snapshot even when the state signature is unchanged
+     * (some manually-invalidated state is intentionally absent from it). */
+    int processed8_prefetch_snapshot_dirty;
+    /* Deterministic cache-generation race seam. Production leaves both zero;
+     * tests may pause a completed worker render immediately before publish. */
+    int processed8_prefetch_test_pause_before_store;
+    int processed8_prefetch_test_paused_before_store;
+    int processed8_prefetch_test_idle_waiters;
     /* Phase E6: scaleFactor accompanying the most recent note_request. The
      * worker uses this to record the slot's `scale` lane (so render-thread
      * lookups at the same scale match) and to set

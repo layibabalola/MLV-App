@@ -87,6 +87,10 @@ void enableMlvCaching(mlvObject_t * video);
 /* Reset cache, to recache all frames, clears simgle frame cache too */
 void resetMlvCache(mlvObject_t * video);
 void invalidateMlvProcessedPreviewCache(mlvObject_t * video);
+/* Invalidates processed8 slots and barriers publication by the asynchronous
+ * prefetch worker. Foreground render lifecycle serialization remains the
+ * caller's responsibility, as it was for invalidateMlvProcessedPreviewCache. */
+void mlvInvalidateProcessed8PrefetchCache(mlvObject_t * video);
 void mlvCancelPreviewPrefetch(mlvObject_t * video);
 /* For setting how much can be cached - "MegaBytes" == MebiBytes (thanks dmilligan) */
 void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit);
@@ -229,6 +233,9 @@ int getMlvLastProcessed8CacheHitScaleFactor(void);
 int getMlvLastProcessed8PrefetchHit(void);
 int getMlvProcessed8PrefetchEnabledForTesting(const mlvObject_t * video);
 int mlvWaitForProcessed8PrefetchIdleForTesting(mlvObject_t * video, uint32_t timeout_ms);
+void mlvSetProcessed8PrefetchPauseBeforeStoreForTesting(mlvObject_t * video, int enabled);
+int mlvWaitForProcessed8PrefetchPausedBeforeStoreForTesting(mlvObject_t * video,
+                                                            uint32_t timeout_ms);
 
 /* Phase 4B-v2/v3/v4 telemetry — for parity tests and diagnostics. Returns the
  * path taken on the most recent v2 entry on the calling thread:

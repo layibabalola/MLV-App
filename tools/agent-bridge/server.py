@@ -21,6 +21,7 @@ from agent_bridge import AgentBridge, add_common_args
 from compact import reap_stale_server_pids
 from core.processes import is_process_alive
 from core.runtime import build_runtime_breadcrumb, write_runtime_breadcrumb
+from core.storage import StorageCapability
 from dashboard_server import DEFAULT_DASHBOARD_PORT, DashboardServerHandle, start_dashboard_server
 from powershell_runtime import powershell_cim_command
 
@@ -147,18 +148,28 @@ _dashboard_handle: Optional[DashboardServerHandle] = None
 _dashboard_handle_lock = threading.Lock()
 
 
-def _read_dashboard_runtime(state_dir: Path) -> Optional[dict]:
+def _read_dashboard_runtime(
+    state_dir: Path, *, storage: Optional[StorageCapability] = None
+) -> Optional[dict]:
     try:
+        capability = storage or StorageCapability.bind_trusted(Path(state_dir).parent)
         path = Path(state_dir) / _DASHBOARD_RUNTIME_FILENAME
         if not path.exists():
             return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = capability.read_json(path, {})
         return payload if isinstance(payload, dict) else None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 
 
-def _write_dashboard_runtime(state_dir: Path, *, handle: DashboardServerHandle, project: str) -> None:
+def _write_dashboard_runtime(
+    state_dir: Path,
+    *,
+    handle: DashboardServerHandle,
+    project: str,
+    storage: Optional[StorageCapability] = None,
+) -> None:
+    capability = storage or StorageCapability.bind_trusted(Path(state_dir).parent)
     path = Path(state_dir) / _DASHBOARD_RUNTIME_FILENAME
     payload = {
         "schema_version": 1,
@@ -169,15 +180,12 @@ def _write_dashboard_runtime(state_dir: Path, *, handle: DashboardServerHandle, 
         "token": handle.token,
         "csrf_token": handle.csrf_token,
         "project": project,
-        "updated_at": build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_dashboard", pid=os.getpid())[
+        "updated_at": build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_dashboard", pid=os.getpid(), storage=capability)[
             "timestamp"
         ],
         "source": "open_dashboard_mcp_tool",
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name("%s.%s.tmp" % (path.name, os.getpid()))
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    capability.write_json(path, payload)
 
 
 def _dashboard_runtime_healthy(runtime: dict, *, timeout_seconds: float = 3.0) -> bool:
@@ -214,18 +222,26 @@ def as_dict(result):
     return dataclasses.asdict(result)
 
 
-def register_server_pid(state_dir: Path):
+def register_server_pid(
+    state_dir: Path, *, storage: Optional[StorageCapability] = None
+):
     """Create a per-process MCP server marker and return its cleanup callback."""
+    capability = storage or StorageCapability.bind_trusted(Path(state_dir).parent)
     try:
-        reap_stale_server_pids(Path(state_dir), max_age_hours=0, dry_run=False)
+        reap_stale_server_pids(
+            Path(state_dir), max_age_hours=0, dry_run=False, storage=capability
+        )
     except Exception as exc:
         print("agent-bridge MCP server stale marker cleanup failed (non-fatal): %s" % exc, file=sys.stderr, flush=True)
     pid_dir = Path(state_dir) / "server-pids"
     pid_path = pid_dir / f"server-{os.getpid()}.pid"
     runtime_path = pid_dir / f"server-{os.getpid()}.json"
-    pid_dir.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
-    breadcrumb = build_runtime_breadcrumb(state_dir=Path(state_dir), role="mcp_server", pid=os.getpid())
+    capability.ensure_private_directory(pid_dir)
+    with capability.open_private_text(pid_path, "w") as handle:
+        handle.write(f"{os.getpid()}\n")
+    breadcrumb = build_runtime_breadcrumb(
+        state_dir=Path(state_dir), role="mcp_server", pid=os.getpid(), storage=capability
+    )
     for env_key, field in (
         ("AGENT_BRIDGE_WRAPPER_PID", "wrapper_pid"),
         ("AGENT_BRIDGE_WRAPPER_CREATION_DATE", "wrapper_creation_date"),
@@ -247,12 +263,12 @@ def register_server_pid(state_dir: Path):
                 except ValueError:
                     pass
             breadcrumb[field] = value
-    write_runtime_breadcrumb(runtime_path, breadcrumb)
+    write_runtime_breadcrumb(runtime_path, breadcrumb, storage=capability)
 
     def cleanup() -> None:
         try:
-            pid_path.unlink(missing_ok=True)
-            runtime_path.unlink(missing_ok=True)
+            capability.unlink(pid_path, missing_ok=True)
+            capability.unlink(runtime_path, missing_ok=True)
         except OSError:
             pass
 
@@ -389,16 +405,13 @@ def _jsonable(obj):
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
-def _write_json(path: Path, value: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True, default=_jsonable)
-        handle.write("\n")
-    tmp.replace(path)
-
-
-def write_tool_manifest(*, state_dir: Path, mcp: FastMCP) -> dict:
+def write_tool_manifest(
+    *,
+    state_dir: Path,
+    mcp: FastMCP,
+    storage: Optional[StorageCapability] = None,
+) -> dict:
+    capability = storage or StorageCapability.bind_trusted(Path(state_dir).parent)
     tools = []
     for info in mcp._tool_manager.list_tools():
         tool_payload = {
@@ -419,14 +432,17 @@ def write_tool_manifest(*, state_dir: Path, mcp: FastMCP) -> dict:
     ).hexdigest()
     manifest = {
         "schema_version": TOOL_MANIFEST_SCHEMA_VERSION,
-        "generated_at": build_runtime_breadcrumb(state_dir=state_dir, role="mcp_server", pid=os.getpid())["timestamp"],
+        "generated_at": build_runtime_breadcrumb(
+            state_dir=state_dir, role="mcp_server", pid=os.getpid(), storage=capability
+        )["timestamp"],
         "server_pid": os.getpid(),
         "tool_count": len(tools),
         "tool_names": tool_names,
         "signature": signature,
         "tools": tools,
     }
-    _write_json(Path(state_dir) / "tool-manifest.json", manifest)
+    plain_manifest = json.loads(json.dumps(manifest, default=_jsonable))
+    capability.write_json(Path(state_dir) / "tool-manifest.json", plain_manifest)
     return manifest
 
 
@@ -920,7 +936,7 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
         global _dashboard_handle
 
         selected_project = (project or "mlv-app").strip() or "mlv-app"
-        runtime = _read_dashboard_runtime(bridge.state_dir)
+        runtime = _read_dashboard_runtime(bridge.state_dir, storage=bridge.storage)
         if runtime and _dashboard_runtime_healthy(runtime):
             runtime_url = str(runtime.get("url") or "")
             runtime_token = str(runtime.get("token") or "")
@@ -963,7 +979,12 @@ def create_mcp(bridge: AgentBridge) -> FastMCP:
                     port=DEFAULT_DASHBOARD_PORT,
                     fallback_to_ephemeral=True,
                 )
-                _write_dashboard_runtime(bridge.state_dir, handle=_dashboard_handle, project=selected_project)
+                _write_dashboard_runtime(
+                    bridge.state_dir,
+                    handle=_dashboard_handle,
+                    project=selected_project,
+                    storage=bridge.storage,
+                )
             handle = _dashboard_handle
 
         url_with_token = _dashboard_token_url(handle.url, token=handle.token, project=selected_project)
@@ -1364,8 +1385,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     _install_windows_pipe_safety()
     bridge = create_bridge(args)
     mcp = create_mcp(bridge)
-    write_tool_manifest(state_dir=Path(args.state_dir), mcp=mcp)
-    cleanup_pid = register_server_pid(Path(args.state_dir))
+    write_tool_manifest(state_dir=Path(args.state_dir), mcp=mcp, storage=bridge.storage)
+    cleanup_pid = register_server_pid(Path(args.state_dir), storage=bridge.storage)
     atexit.register(cleanup_pid)
     start_wrapper_lifetime_watchdog(cleanup_pid)
 

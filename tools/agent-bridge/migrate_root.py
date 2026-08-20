@@ -12,7 +12,6 @@ from core.paths import (
     utc_now,
 )
 from core.processes import acquire_singleton_lease, is_process_alive, release_lease
-from core.storage import append_jsonl, read_json, write_json
 
 
 def _backup_stamp() -> str:
@@ -45,10 +44,12 @@ def _is_reparse_or_symlink(path: Path) -> bool:
 
 
 def _assert_source_redirect_writable(source_root: Path) -> Optional[str]:
+    paths = bridge_paths_for_root(source_root)
     probe = source_root / ".moved_to.write-test.tmp"
     try:
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
+        with paths.storage.open_private_text(probe, "w") as handle:
+            handle.write("ok")
+        paths.storage.unlink(probe, missing_ok=True)
         return None
     except OSError as exc:
         return str(exc)
@@ -60,7 +61,8 @@ def _live_processes(source_root: Path) -> List[Dict[str, Any]]:
 
     if paths.watcher_pid.exists():
         try:
-            pid = int(paths.watcher_pid.read_text(encoding="utf-8").strip())
+            with paths.storage.open_private_read_text(paths.watcher_pid) as handle:
+                pid = int(handle.read().strip())
             if is_process_alive(pid):
                 live.append({"kind": "watcher", "pid": pid, "path": str(paths.watcher_pid)})
         except (OSError, ValueError):
@@ -69,7 +71,8 @@ def _live_processes(source_root: Path) -> List[Dict[str, Any]]:
     if paths.server_pids_dir.exists():
         for marker in sorted(paths.server_pids_dir.glob("server-*.pid")):
             try:
-                pid = int(marker.read_text(encoding="utf-8").strip())
+                with paths.storage.open_private_read_text(marker) as handle:
+                    pid = int(handle.read().strip())
                 if is_process_alive(pid):
                     live.append({"kind": "mcp_server", "pid": pid, "path": str(marker)})
             except (OSError, ValueError):
@@ -82,7 +85,7 @@ def _rewrite_watcher_config(target_root: Path, source_root: Path) -> Dict[str, A
     if not paths.watcher_config.exists():
         return {"changed": False, "rewritten": 0}
 
-    config = read_json(paths.watcher_config, {})
+    config = paths.storage.read_json(paths.watcher_config, {})
     sessions = config.get("sessions", [])
     if not isinstance(sessions, list):
         raise ValueError("%s sessions must be a list" % paths.watcher_config)
@@ -100,7 +103,7 @@ def _rewrite_watcher_config(target_root: Path, source_root: Path) -> Dict[str, A
         rewritten += 1
 
     if rewritten:
-        write_json(paths.watcher_config, config)
+        paths.storage.write_json(paths.watcher_config, config)
     return {"changed": bool(rewritten), "rewritten": rewritten}
 
 
@@ -124,7 +127,7 @@ def _write_target_manifest(target_root: Path, source_root: Path, *, reason: str)
             "migration_history": history,
         }
     )
-    write_json(paths.manifest, manifest)
+    paths.storage.write_json(paths.manifest, manifest)
     return manifest
 
 
@@ -136,7 +139,7 @@ def _write_moved_to(source_root: Path, target_root: Path, target_manifest: Dict[
         "created_at": utc_now(),
         "migration_history": target_manifest.get("migration_history", []),
     }
-    write_json(paths.moved_to, moved)
+    paths.storage.write_json(paths.moved_to, moved)
     return moved
 
 
@@ -237,6 +240,7 @@ def migrate_root(
         role="migration",
         command=["migrate_root.py", str(source), str(target)],
         state_dir=source_paths.state_dir,
+        storage=source_paths.storage,
     )
     if not lease_result.get("acquired"):
         return {
@@ -265,7 +269,8 @@ def migrate_root(
             "skip_redirect": skip_redirect,
             "accepted": True,
         }
-        append_jsonl(bridge_paths_for_root(target).state_dir / "messages.jsonl", audit)
+        target_paths = bridge_paths_for_root(target)
+        target_paths.storage.append_jsonl(target_paths.state_dir / "messages.jsonl", audit)
         try:
             from recover_state import recover_state
 
@@ -284,7 +289,12 @@ def migrate_root(
             "mcp_config_snippets": _mcp_config_snippets(target),
         }
     finally:
-        release_lease(lease_path, int(lease["pid"]), str(lease["generation"]))
+        release_lease(
+            lease_path,
+            int(lease["pid"]),
+            str(lease["generation"]),
+            storage=source_paths.storage,
+        )
 
 
 def main() -> None:
