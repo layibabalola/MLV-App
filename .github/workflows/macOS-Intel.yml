@@ -2,7 +2,13 @@ name: macOS Intel Release
 
 on:
   workflow_dispatch:
-    branches: [ "master" ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   SOURCE_DIR:   ${{ github.workspace }}/platform
@@ -12,16 +18,40 @@ env:
 jobs:
   build:
 
-    runs-on: macos-13
+    runs-on: macos-15-intel
+    timeout-minutes: 120
 
     steps:
-    - uses: actions/checkout@master
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      with:
+        persist-credentials: false
 
     - name: Install llvm & Qt & OpenSSL
-      continue-on-error: true
-      uses: ConorMacBride/install-package@v1.1.0
+      uses: ConorMacBride/install-package@3e7ad059e07782ee54fa35f827df52aae0626f30 # v1.1.0
       with:
         brew: llvm qt5 openssl
+
+    - name: Verify macOS build toolchain
+      run: |
+        test -x "${{ env.QTDIR }}/qmake"
+        "${{ env.QTDIR }}/qmake" -v
+        LLVM_CXX="$(brew --prefix llvm)/bin/clang++"
+        test -x "$LLVM_CXX"
+        "$LLVM_CXX" --version
+
+    - name: Set up Python for payload verification
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version-file: ".python-version"
+
+    - name: Install hash-locked payload verification dependencies
+      run: |
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/pip.txt
+        python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes -r .github/requirements/repo-hygiene.txt
+        python -m pip check
+
+    - name: Verify vendored native payload integrity
+      run: python -m tools.repo_hygiene.vendored_native_payloads --repo-root .
               
     - name: Create build directory
       run:  mkdir ${{ env.SOURCE_DIR }}/build
@@ -29,13 +59,57 @@ jobs:
     - name: Build
       working-directory: ${{ env.SOURCE_DIR }}/build
       run:  |
-            ${{ env.QTDIR }}/qmake -r ${{ env.SOURCE_DIR }}/qt/MLVApp.pro
+            ${{ env.QTDIR }}/qmake -r ${{ env.SOURCE_DIR }}/qt/MLVApp.pro MLVAPP_SKIP_LEGACY_PAYLOAD_EXTRACTION=1
             make -j8
             ls -al
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id ffmpeg-macos-x86_64 --archive-reference ffmpegOSX.zip --output-dir "MLV App.app/Contents/MacOS" --verify-installed
+            PYTHONPATH="${{ github.workspace }}" python -m tools.repo_hygiene.extract_vendored_native_payload --repo-root "${{ github.workspace }}" --payload-id raw2mlv-macos-x86_64 --archive-reference raw2mlvOSX.zip --output-dir "MLV App.app/Contents/MacOS" --verify-installed
             ${{ env.QTDIR }}/macdeployqt MLV\ App.app -dmg
 
+    - name: Generate single-build release evidence
+      run: |
+           QMAKE_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["QTDIR"] + "/qmake"))')"
+           export LLVM_CXX="$(brew --prefix llvm)/bin/clang++"
+           COMPILER_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["LLVM_CXX"]))')"
+           DEPLOY_PATH="$(python -c 'import os; print(os.path.realpath(os.environ["QTDIR"] + "/macdeployqt"))')"
+           QT_VERSION="$(${QMAKE_PATH} -query QT_VERSION)"
+           COMPILER_VERSION="$("${COMPILER_PATH}" --version | head -n 1)"
+           python -m tools.release.release_evidence \
+             --repo-root "${{ github.workspace }}" \
+             --product "${{ github.workspace }}/platform/build/MLV App.dmg" \
+             --inventory-root "${{ github.workspace }}/platform/build/MLV App.app" \
+             --expected-main "Contents/MacOS/MLV App" \
+             --output-dir "${{ runner.temp }}/release-evidence" \
+             --label "macos-x86_64" \
+             --target-os "macos" \
+             --target-arch "x86_64" \
+             --repository "${{ github.repository }}" \
+             --source-ref "${{ github.ref }}" \
+             --commit "${{ github.sha }}" \
+             --run-id "${{ github.run_id }}" \
+             --run-attempt "${{ github.run_attempt }}" \
+             --runner-os "${{ runner.os }}" \
+             --runner-arch "${{ runner.arch }}" \
+             --runner-name "${{ runner.name }}" \
+             --runner-image-os "${ImageOS}" \
+             --runner-image-version "${ImageVersion}" \
+             --tool "qmake=${QMAKE_PATH}" \
+             --tool "compiler=${COMPILER_PATH}" \
+             --tool "macdeployqt=${DEPLOY_PATH}" \
+             --tool-version "qmake=${QT_VERSION}" \
+             --tool-version "compiler=${COMPILER_VERSION}" \
+             --tool-version "macdeployqt=qt-${QT_VERSION}"
+
+    - name: Save release evidence
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: MLVApp macOS Intel release evidence
+        path: ${{ runner.temp }}/release-evidence
+        if-no-files-found: error
+
     - name: Save build artifact
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
       with:
         name: MLVApp macOS Intel
         path: ${{ env.ARTIFACT }}
+        if-no-files-found: error

@@ -14,22 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Set
 
+from core.paths import resolve_bridge_paths
 from core.runtime import build_monitor_runtime_breadcrumb, monitor_runtime_path_for_state_dir, write_runtime_breadcrumb
+from core.storage import StorageCapability, UnsafeStoragePathError
 
 
-def iter_jsonl(path: Path) -> Iterable[Dict[str, object]]:
+def iter_jsonl(
+    path: Path, *, storage: StorageCapability
+) -> Iterable[Dict[str, object]]:
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                raw = line.strip()
-                if not raw:
-                    continue
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(parsed, dict):
-                    yield parsed
+        yield from storage.iter_jsonl_readonly(path)
     except FileNotFoundError:
         return
 
@@ -59,6 +53,16 @@ def main() -> int:
         inbox_path = state_dir / ("inbox-%s.jsonl" % args.agent)
     else:
         parser.error("one of --state-dir or --inbox is required")
+    state_dir = state_dir.absolute()
+    paths = resolve_bridge_paths(bridge_root=state_dir.parent)
+    paths.storage.validate(state_dir)
+    expected_inbox = state_dir / ("inbox-%s.jsonl" % args.agent)
+    if inbox_path.absolute() != expected_inbox:
+        raise UnsafeStoragePathError(
+            "--inbox must name the selected agent's fixed inbox under --state-dir"
+        )
+    inbox_path = expected_inbox
+    storage = paths.storage
     targets: Set[str] = {args.session_id, args.project}
     seen_ids: Set[str] = set()
     poll_interval = max(0.5, float(args.interval if args.interval is not None else (args.poll_interval_seconds or 2.0)))
@@ -81,9 +85,10 @@ def main() -> int:
             last_emit_at=last_emit_at,
             context_generation=os.environ.get("CLAUDE_CONTEXT_GENERATION") or os.environ.get("CODEX_CONTEXT_GENERATION"),
             started_at=started_at,
+            storage=storage,
         )
         try:
-            write_runtime_breadcrumb(runtime_path, payload)
+            write_runtime_breadcrumb(runtime_path, payload, storage=storage)
         except OSError as exc:
             print("[BRIDGE-MONITOR] runtime heartbeat write failed: %s" % exc, flush=True)
 
@@ -99,7 +104,7 @@ def main() -> int:
             flush=True,
         )
 
-    for row in iter_jsonl(inbox_path):
+    for row in iter_jsonl(inbox_path, storage=storage):
         message_id = str(row.get("id") or "").strip()
         if not message_id:
             continue
@@ -124,7 +129,7 @@ def main() -> int:
 
     while True:
         write_runtime()
-        for row in iter_jsonl(inbox_path):
+        for row in iter_jsonl(inbox_path, storage=storage):
             message_id = str(row.get("id") or "").strip()
             if not message_id or message_id in seen_ids:
                 continue

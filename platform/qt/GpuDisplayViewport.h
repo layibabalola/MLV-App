@@ -14,9 +14,9 @@
 #include "../../src/mlv/llrawproc/llrawproc.h"
 #include <QImage>
 #include <QOpenGLFunctions>
-#include <QtOpenGL/qopenglshaderprogram.h>
-#include <QtOpenGL/qopengltexture.h>
-#include <QtOpenGLWidgets/qopenglwidget.h>
+#include <QOpenGLShaderProgram>
+#include <QOpenGLTexture>
+#include <QOpenGLWidget>
 
 class QGraphicsPixmapItem;
 class QGraphicsView;

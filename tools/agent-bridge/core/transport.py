@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .auth import Identity
-from .storage import append_jsonl, read_jsonl, write_jsonl
+from .storage import StorageCapability
 
 
 class BridgeTransport(ABC):
@@ -52,11 +52,14 @@ class BridgeTransport(ABC):
 
 
 class LocalFilesystemTransport(BridgeTransport):
+    def __init__(self, storage: StorageCapability) -> None:
+        self.storage = storage
+
     def append_inbox(self, identity: Identity, inbox_path: Path, row: Dict[str, Any]) -> str:
         payload = dict(row)
         payload["tenant_id"] = identity.tenant_id
         payload["originator_machine_id"] = identity.machine_id
-        append_jsonl(inbox_path, payload)
+        self.storage.append_jsonl(inbox_path, payload)
         return str(payload.get("id") or "")
 
     def read_inbox(
@@ -70,7 +73,7 @@ class LocalFilesystemTransport(BridgeTransport):
     ) -> List[Dict[str, Any]]:
         wanted = set(session_ids or [])
         rows: List[Dict[str, Any]] = []
-        for row in read_jsonl(inbox_path):
+        for row in self.storage.read_jsonl(inbox_path):
             if not isinstance(row, dict):
                 continue
             tenant_id = row.get("tenant_id") or identity.tenant_id
@@ -98,7 +101,7 @@ class LocalFilesystemTransport(BridgeTransport):
     ) -> None:
         scoped_sessions = set(replace_session_ids or [])
         normalized: List[Dict[str, Any]] = []
-        for row in read_jsonl(inbox_path):
+        for row in self.storage.read_jsonl(inbox_path):
             tenant_id = row.get("tenant_id") or identity.tenant_id
             if tenant_id != identity.tenant_id:
                 normalized.append(dict(row))
@@ -110,7 +113,7 @@ class LocalFilesystemTransport(BridgeTransport):
             payload["tenant_id"] = identity.tenant_id
             payload["originator_machine_id"] = identity.machine_id
             normalized.append(payload)
-        write_jsonl(inbox_path, normalized)
+        self.storage.write_jsonl(inbox_path, normalized)
 
     def append_audit(self, identity: Identity, audit_path: Path, row: Dict[str, Any]) -> str:
         payload = dict(row)
@@ -120,7 +123,7 @@ class LocalFilesystemTransport(BridgeTransport):
             payload["schema_version"] = 2
         payload["tenant_id"] = identity.tenant_id
         payload["originator_machine_id"] = identity.machine_id
-        append_jsonl(audit_path, payload)
+        self.storage.append_jsonl(audit_path, payload)
         return str(payload.get("id") or "")
 
     def read_audit(
@@ -132,7 +135,7 @@ class LocalFilesystemTransport(BridgeTransport):
         max_count: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
-        for row in read_jsonl(audit_path):
+        for row in self.storage.read_jsonl(audit_path):
             if not isinstance(row, dict):
                 continue
             tenant_id = row.get("tenant_id") or identity.tenant_id

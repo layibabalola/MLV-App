@@ -367,6 +367,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "approveTokens": ["APPROVE"],
         "blockingTokens": ["CHANGES_REQUESTED", "BLOCKER"],
         "requireHandoff": True,
+        "authorizedReviewSessions": ["5fc3fc6e-345f-40b8-bb3d-7abd6302b459"],
     },
     "validation": {
         "timeoutMs": 120000,
@@ -796,6 +797,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "contentReviewGate.coordinationFile",
             "contentReviewGate.handoffActor",
             "contentReviewGate.reviewActor",
+            "contentReviewGate.authorizedReviewSessions",
             "validation",
             "processResources",
             "powerShell",
@@ -861,6 +863,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "remediation_freeze_removal",
         ],
         "requiredTests": [
+            "test_content_review_authorized_session_rotation_is_strict_singleton",
             "test_remediation_freeze_blocks_broker_bootstrap_lease_refresh_start_publish_finalize_and_hooks",
             "test_start_work_block_auto_branches_from_clean_protected_target",
             "test_start_work_block_blocks_dirty_protected_target_before_auto_branch",
@@ -11813,6 +11816,7 @@ def broker_contract(repo_root_arg: Path) -> Dict[str, Any]:
         "contentReviewGate.coordinationFile",
         "contentReviewGate.handoffActor",
         "contentReviewGate.reviewActor",
+        "contentReviewGate.authorizedReviewSessions",
         "validation",
         "processResources",
         "powerShell",

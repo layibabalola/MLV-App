@@ -96,7 +96,7 @@ QJsonValue integerOrNull(qint64 value)
 QString cpuFeatureList()
 {
     QStringList features;
-#if defined(__GNUC__)
+#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
     __builtin_cpu_init();
     if (__builtin_cpu_supports("sse4.2")) features << QStringLiteral("sse4.2");
     if (__builtin_cpu_supports("avx"))    features << QStringLiteral("avx");

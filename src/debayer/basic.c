@@ -34,7 +34,7 @@ void *MallocWithErrorMessage(size_t Size)
     void *Ptr;
     
     if(!(Ptr = malloc(Size)))
-        ErrorMessage("Memory allocation of %u bytes failed.\n", Size);
+        ErrorMessage("Memory allocation of %zu bytes failed.\n", Size);
         
     return Ptr;
 }
@@ -47,7 +47,7 @@ void *ReallocWithErrorMessage(void *Ptr, size_t Size)
     
     if(!(NewPtr = realloc(Ptr, Size)))
     {
-        ErrorMessage("Memory reallocation of %u bytes failed.\n", Size);
+        ErrorMessage("Memory reallocation of %zu bytes failed.\n", Size);
         Free(Ptr);  /* Free the previous block on failure */
     }
         
