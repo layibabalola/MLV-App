@@ -10,12 +10,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.repo_hygiene.brokered_closeout import simulate_clean_integration
+from tools.repo_hygiene.brokered_closeout import (
+    DEFAULT_CLOSEOUT_CONFIG,
+    load_closeout_config,
+    simulate_clean_integration,
+    verify_closeout_tooling_current,
+)
 from tools.repo_hygiene.candidate_acceptance import (
     _hash,
     _live_github_provider_payload,
     acceptance_root,
     CONTENT_REVIEWERS,
+    candidate_acceptance_enforced,
     candidate_identity,
     content_review_gate_trust_error,
     evaluate,
@@ -53,6 +59,12 @@ class CandidateAcceptanceTests(unittest.TestCase):
             },
             "validation": {"commands": []},
         }
+        self.enforcement_patcher = mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.candidate_acceptance_enforced",
+            return_value=True,
+        )
+        self.enforcement_patcher.start()
+        self.addCleanup(self.enforcement_patcher.stop)
         provider_dir = self.repo_root / ".claude-state/closeout/acceptance/provider" / FEATURE
         provider_dir.mkdir(parents=True)
         names = [
@@ -473,15 +485,61 @@ class CandidateAcceptanceTests(unittest.TestCase):
 
     def test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced(self) -> None:
         config = json.loads(json.dumps(self.config))
-        config["toolingBaseline"]["enabled"] = False
-        config["candidateAcceptance"]["requireReadyForFinalize"] = False
-        guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
-        self.assertEqual("candidate_acceptance_policy_disabled", guard["reason"])
-
-        config = json.loads(json.dumps(self.config))
         config["candidateAcceptance"]["requiredSurfaces"] = ["content-self"]
         guard = validate_for_finalize(self.repo_root, config, {"targetHead": TARGET, "featureHead": FEATURE})
         self.assertEqual("candidate_acceptance_policy_weakened", guard["reason"])
+
+    def test_acceptance_uses_two_phase_target_pinned_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            self.git(repo, "init")
+            self.git(repo, "config", "user.email", "candidate-acceptance@example.invalid")
+            self.git(repo, "config", "user.name", "Candidate Acceptance Test")
+
+            bootstrap = {"contentReviewGate": {"requireClaudeApprovalForFinalize": True}}
+            (repo / "closeout.config.json").write_text(json.dumps(bootstrap), encoding="utf-8")
+            self.git(repo, "add", "closeout.config.json")
+            self.git(repo, "commit", "-m", "pre-infrastructure target")
+            pre_infrastructure = self.git(repo, "rev-parse", "HEAD").strip()
+
+            dormant = json.loads(json.dumps(self.config))
+            dormant["candidateAcceptance"]["enabled"] = False
+            dormant["candidateAcceptance"]["requireReadyForFinalize"] = False
+            self.assertFalse(candidate_acceptance_enforced(repo, dormant, {"targetHead": pre_infrastructure}))
+            with self.assertRaisesRegex(HygieneError, "must land dormant"):
+                candidate_acceptance_enforced(repo, self.config, {"targetHead": pre_infrastructure})
+
+            (repo / "closeout.config.json").write_text(json.dumps(dormant), encoding="utf-8")
+            self.git(repo, "add", "closeout.config.json")
+            self.git(repo, "commit", "-m", "land dormant infrastructure")
+            dormant_target = self.git(repo, "rev-parse", "HEAD").strip()
+            self.assertFalse(candidate_acceptance_enforced(repo, dormant, {"targetHead": dormant_target}))
+            self.assertTrue(candidate_acceptance_enforced(repo, self.config, {"targetHead": dormant_target}))
+
+            drifted = json.loads(json.dumps(self.config))
+            drifted["candidateAcceptance"]["providerRepository"] = "someone-else/MLV-App"
+            with self.assertRaisesRegex(HygieneError, "only the two activation booleans"):
+                candidate_acceptance_enforced(repo, drifted, {"targetHead": dormant_target})
+
+            (repo / "closeout.config.json").write_text(json.dumps(self.config), encoding="utf-8")
+            self.git(repo, "add", "closeout.config.json")
+            self.git(repo, "commit", "-m", "activate candidate acceptance")
+            active_target = self.git(repo, "rev-parse", "HEAD").strip()
+            self.assertTrue(candidate_acceptance_enforced(repo, self.config, {"targetHead": active_target}))
+            for enabled, required in ((False, False), (True, False), (False, True)):
+                weakened = json.loads(json.dumps(self.config))
+                weakened["candidateAcceptance"]["enabled"] = enabled
+                weakened["candidateAcceptance"]["requireReadyForFinalize"] = required
+                with self.assertRaises(HygieneError):
+                    candidate_acceptance_enforced(repo, weakened, {"targetHead": active_target})
+            non_boolean = json.loads(json.dumps(self.config))
+            non_boolean["candidateAcceptance"]["enabled"] = "true"
+            with self.assertRaisesRegex(HygieneError, "must be boolean"):
+                candidate_acceptance_enforced(repo, non_boolean, {"targetHead": active_target})
+            active_drift = json.loads(json.dumps(self.config))
+            active_drift["candidateAcceptance"]["providerRepository"] = "someone-else/MLV-App"
+            with self.assertRaisesRegex(HygieneError, "differs from the active pinned target"):
+                candidate_acceptance_enforced(repo, active_drift, {"targetHead": active_target})
 
         config = json.loads(json.dumps(self.config))
         config["candidateAcceptance"]["providerRepository"] = "someone-else/MLV-App"
@@ -688,14 +746,131 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn("candidate_acceptance_final_tree_mismatch", finalize)
         self.assertIn("integration_range_evidence(integration_path, target[\"head\"], merged_head)", finalize)
 
-    def test_tracked_policy_enables_finalize_barrier_without_human_authority(self) -> None:
+    def test_tracked_policy_stages_dormant_barrier_without_human_authority(self) -> None:
         config = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
         policy = config["candidateAcceptance"]
-        self.assertTrue(policy["requireReadyForFinalize"])
+        self.assertFalse(policy["enabled"])
+        self.assertFalse(policy["requireReadyForFinalize"])
         self.assertEqual("layibabalola/MLV-App", policy["providerRepository"])
         self.assertTrue(policy["batchUntilAllSurfacesTerminal"])
         self.assertFalse(policy["carryApprovalsAcrossCandidateTuples"])
         self.assertFalse(policy["agentApprovalsGrantHumanAuthority"])
+
+    def test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity(self) -> None:
+        tracked = json.loads((ROOT / "closeout.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(tracked["candidateAcceptance"], DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"])
+        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["enabled"])
+        self.assertFalse(DEFAULT_CLOSEOUT_CONFIG["candidateAcceptance"]["requireReadyForFinalize"])
+        self.assertTrue(tracked["repoSweep"]["evidencePreservingPrune"]["enabled"])
+        self.assertTrue(DEFAULT_CLOSEOUT_CONFIG["repoSweep"]["evidencePreservingPrune"]["enabled"])
+
+        tracked_baseline = tracked["toolingBaseline"]
+        default_baseline = DEFAULT_CLOSEOUT_CONFIG["toolingBaseline"]
+        self.assertEqual(tracked_baseline["requiredTestFiles"], default_baseline["requiredTestFiles"])
+        self.assertIn("toolingBaseline.requiredTestFiles", tracked_baseline["requiredConfigKeys"])
+        required_paths = {entry["path"] for entry in tracked_baseline["requiredTestFiles"]}
+        self.assertEqual({"tools/repo_hygiene/test_candidate_acceptance.py"}, required_paths)
+        required_symbols = {(entry["path"], entry["contains"]) for entry in tracked_baseline["requiredSymbols"]}
+        self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def integration_range_evidence"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/candidate_acceptance.py", "def validate_for_finalize"), required_symbols)
+
+        current = verify_closeout_tooling_current(ROOT, load_closeout_config(ROOT), attempt_update=False, plan_only=True)
+        self.assertTrue(current["ok"], current)
+        mutated = load_closeout_config(ROOT)
+        mutated["toolingBaseline"]["autoUpdate"] = False
+        absent_test = "test_absent_" + "candidate_acceptance_guard"
+        mutated["toolingBaseline"]["requiredTestFiles"] = [
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": absent_test}
+        ]
+        stale = verify_closeout_tooling_current(ROOT, mutated, attempt_update=False, plan_only=True)
+        self.assertFalse(stale["ok"], stale)
+        self.assertIn(absent_test, {row.get("test") for row in stale["missing"]})
+
+        for label, weaken in (
+            (
+                "disabled and emptied baseline",
+                lambda baseline: baseline.update(
+                    {
+                        "enabled": False,
+                        "paths": [],
+                        "requiredConfigKeys": [],
+                        "requiredTestFiles": [],
+                        "requiredSymbols": [],
+                    }
+                ),
+            ),
+            ("omitted baseline enablement", lambda baseline: baseline.pop("enabled", None)),
+            ("empty test inventory", lambda baseline: baseline.__setitem__("requiredTestFiles", [])),
+            (
+                "substituted test path",
+                lambda baseline: baseline["requiredTestFiles"][0].__setitem__(
+                    "path", "tools/repo_hygiene/test_brokered_closeout.py"
+                ),
+            ),
+            (
+                "removed acceptance path",
+                lambda baseline: baseline.__setitem__(
+                    "paths", [path for path in baseline["paths"] if path != "tools/repo_hygiene/candidate_acceptance.py"]
+                ),
+            ),
+            (
+                "removed acceptance symbols",
+                lambda baseline: baseline.__setitem__(
+                    "requiredSymbols",
+                    [
+                        item
+                        for item in baseline["requiredSymbols"]
+                        if item["path"] != "tools/repo_hygiene/candidate_acceptance.py"
+                    ],
+                ),
+            ),
+            (
+                "removed activation config requirement",
+                lambda baseline: baseline.__setitem__(
+                    "requiredConfigKeys",
+                    [key for key in baseline["requiredConfigKeys"] if key != "candidateAcceptance.enabled"],
+                ),
+            ),
+        ):
+            weakened = load_closeout_config(ROOT)
+            weakened["toolingBaseline"]["autoUpdate"] = False
+            weaken(weakened["toolingBaseline"])
+            result = verify_closeout_tooling_current(ROOT, weakened, attempt_update=False, plan_only=True)
+            self.assertFalse(result["ok"], f"{label}: {result}")
+
+        for label, raw_acceptance in (
+            ("schema removed", {"enabled": False, "requireReadyForFinalize": False}),
+            (
+                "schema changed",
+                {"schema": "candidate-acceptance.v0", "enabled": False, "requireReadyForFinalize": False},
+            ),
+            ("acceptance object removed", None),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp:
+                repo = Path(temp)
+                self.git(repo, "init")
+                self.git(repo, "remote", "add", "fork", "https://github.com/layibabalola/MLV-App.git")
+                raw = {
+                    "toolingBaseline": {
+                        "enabled": False,
+                        "autoUpdate": False,
+                        "paths": [],
+                        "requiredConfigKeys": [],
+                        "requiredTestFiles": [],
+                        "requiredSymbols": [],
+                    }
+                }
+                if raw_acceptance is not None:
+                    raw["candidateAcceptance"] = raw_acceptance
+                (repo / "closeout.config.json").write_text(json.dumps(raw), encoding="utf-8")
+                result = verify_closeout_tooling_current(
+                    repo,
+                    load_closeout_config(repo),
+                    attempt_update=False,
+                    plan_only=True,
+                )
+                self.assertFalse(result["ok"], f"{label}: {result}")
+                self.assertIn("baseline_enabled", {row.get("kind") for row in result["missing"]})
 
         workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
         invocation = "python -m unittest tools.repo_hygiene.test_candidate_acceptance -v"

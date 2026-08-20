@@ -15,6 +15,13 @@ The dashboard's repo-state feed includes `candidateAcceptance`, a read-only
 summary of `.claude-state/closeout/acceptance/latest.json`. The underlying
 `candidate-acceptance.v1` ledger binds the target head, feature head, rehearsed
 integration tree, range diff, policy, and validation plan into one exact tuple.
+The infrastructure lands in a deliberately dormant first phase. A later,
+separately reviewed candidate may activate only the two activation booleans
+against that landed target policy. Activation before the dormant policy exists,
+policy drift during activation, or any later disablement is fail-closed. This
+two-phase rule lands the code, provider adapter, path-aware test inventory, and
+symbol/config guards before the gate can authorize a finalize; the activation
+change is limited to the two booleans.
 Review and hosted surfaces bind that tuple and never carry forward after drift.
 Hosted surfaces are derived only from a content-addressed SHA-named GitHub check-run snapshot
 for the configured repository and exact feature head; generic review records cannot

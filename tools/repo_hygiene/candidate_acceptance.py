@@ -31,6 +31,83 @@ CONTENT_REVIEWERS = {
 }
 
 
+def target_candidate_acceptance_policy(
+    repo_root: Path,
+    detection: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Read the candidate-acceptance activation root from the pinned target."""
+
+    target_head = _require_sha(detection.get("targetHead"), "targetHead")
+    from .brokered_closeout import git_stdout
+
+    raw = git_stdout(repo_root, ["show", f"{target_head}:closeout.config.json"], required=False)
+    if not raw:
+        raise HygieneError("pinned target closeout.config.json is unavailable")
+    try:
+        target_config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HygieneError("pinned target closeout.config.json is malformed") from exc
+    if not isinstance(target_config, dict):
+        raise HygieneError("pinned target closeout.config.json is malformed")
+    policy = target_config.get("candidateAcceptance")
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        raise HygieneError("pinned target candidateAcceptance policy is malformed")
+    return policy
+
+
+def _activation_state(policy: Dict[str, Any], label: str) -> bool:
+    for key in ("enabled", "requireReadyForFinalize"):
+        if not isinstance(policy.get(key), bool):
+            raise HygieneError(f"{label} candidateAcceptance.{key} must be boolean")
+    if policy["enabled"] != policy["requireReadyForFinalize"]:
+        raise HygieneError(f"{label} candidateAcceptance activation state is inconsistent")
+    return bool(policy["enabled"])
+
+
+def candidate_acceptance_enforced(
+    repo_root: Path,
+    config: Dict[str, Any],
+    detection: Dict[str, Any],
+) -> bool:
+    """Return whether this candidate must satisfy acceptance.
+
+    The infrastructure must first land dormant.  A later, separately reviewed
+    candidate may activate it against that landed policy.  Once the target is
+    active, candidates cannot disable or repoint it.
+    """
+
+    candidate = _acceptance_config(config)
+    target = target_candidate_acceptance_policy(repo_root, detection)
+    candidate_active = _activation_state(candidate, "candidate")
+    if target is None:
+        if not candidate_active:
+            return False
+        raise HygieneError("candidate acceptance infrastructure must land dormant before activation")
+
+    target_active = _activation_state(target, "pinned target")
+    if target_active:
+        if not candidate_active:
+            raise HygieneError("candidate cannot disable the pinned target candidateAcceptance barrier")
+        if canonical_json(candidate) != canonical_json(target):
+            raise HygieneError("candidate candidateAcceptance policy differs from the active pinned target")
+        return True
+
+    if not candidate_active:
+        if canonical_json(candidate) != canonical_json(target):
+            raise HygieneError("dormant candidateAcceptance policy differs from the pinned target")
+        return False
+    activation_candidate = dict(candidate)
+    activation_target = dict(target)
+    for policy in (activation_candidate, activation_target):
+        policy.pop("enabled", None)
+        policy.pop("requireReadyForFinalize", None)
+    if canonical_json(activation_candidate) != canonical_json(activation_target):
+        raise HygieneError("candidateAcceptance activation may change only the two activation booleans")
+    return True
+
+
 def content_review_gate_trust_error(
     repo_root: Path,
     config: Dict[str, Any],
@@ -903,10 +980,10 @@ def _ledger_error(
 
 
 def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    policy = _acceptance_config(config)
-    enabled = bool(policy.get("enabled", True))
-    required = bool(policy.get("requireReadyForFinalize", True))
     try:
+        enforced = candidate_acceptance_enforced(repo_root, config, detection)
+        if not enforced:
+            return None
         configured_surfaces = required_surfaces(config)
         provider_repository(config)
     except HygieneError as exc:
@@ -915,12 +992,6 @@ def validate_for_finalize(repo_root: Path, config: Dict[str, Any], detection: Di
             "reason": "candidate_acceptance_policy_weakened",
             "detail": str(exc),
             "recoveryCommand": "restore the mandatory candidateAcceptance policy and rerun acceptance",
-        }
-    if not enabled or not required:
-        return {
-            "status": "blocked",
-            "reason": "candidate_acceptance_policy_disabled",
-            "recoveryCommand": "restore the tracked mandatory candidateAcceptance policy and rerun acceptance",
         }
     summary = latest_summary(repo_root, config)
     expected = {

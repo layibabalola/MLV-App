@@ -201,6 +201,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
         )
         self.acceptance_patcher.start()
         self.addCleanup(self.acceptance_patcher.stop)
+        self.acceptance_enforcement_patcher = mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.candidate_acceptance_enforced",
+            return_value=False,
+        )
+        self.acceptance_enforcement_patcher.start()
+        self.addCleanup(self.acceptance_enforcement_patcher.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tempdir, ignore_errors=True)

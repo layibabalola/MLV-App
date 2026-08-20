@@ -821,12 +821,16 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "runtimeServices",
             "blockerAutoRemediation",
             "candidateAcceptance",
+            "candidateAcceptance.schema",
+            "candidateAcceptance.enabled",
             "candidateAcceptance.providerRepository",
             "candidateAcceptance.requiredSurfaces",
             "candidateAcceptance.batchUntilAllSurfacesTerminal",
             "candidateAcceptance.carryApprovalsAcrossCandidateTuples",
             "candidateAcceptance.agentApprovalsGrantHumanAuthority",
             "candidateAcceptance.requireReadyForFinalize",
+            "toolingBaseline.enabled",
+            "toolingBaseline.requiredTestFiles",
             "closeoutAddendumPersistence",
             "finalizeLoop",
             "remediationFreeze",
@@ -1012,24 +1016,29 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             "test_runtime_service_not_restarted_after_failed_validation_stale_refs_or_repo_closed_failure",
             "test_closeout_tooling_stale_reports_missing_hard_clean_gate",
             "test_closeout_tooling_stale_reports_missing_power_shell_policy",
-            "test_range_diff_check_catches_whitespace_already_committed_in_feature",
-            "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch",
-            "test_tuple_drift_never_carries_approval",
-            "test_agent_record_cannot_escalate_human_authority",
-            "test_finalize_requires_same_tuple_ready_before_content_review",
-            "test_github_capture_is_exact_head_terminal_and_fail_closed",
-            "test_content_reviewers_must_be_distinct_even_with_different_sessions",
-            "test_all_same_surface_blocking_findings_survive_consolidation",
-            "test_configured_quorum_cannot_be_replaced_by_one_surface_ledger",
-            "test_rehashed_ready_state_with_blockers_is_incoherent_and_finalize_blocks",
-            "test_generic_records_cannot_impersonate_hosted_surfaces",
-            "test_provider_repository_and_annotation_shape_are_fail_closed",
-            "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence",
-            "test_nonterminal_or_fabricated_provider_state_cannot_finalize",
-            "test_monotonic_chain_detects_deleted_same_tuple_blocker_history",
-            "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced",
-            "test_diff_identity_is_independent_of_git_color_configuration",
-            "test_final_integration_tree_or_diff_drift_is_blocking",
+        ],
+        "requiredTestFiles": [
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_acceptance_uses_two_phase_target_pinned_activation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tracked_and_default_dormant_policy_and_tooling_guards_stay_in_parity"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_collecting_ledger_blocker_is_already_monotonic"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_range_diff_check_catches_whitespace_already_committed_in_feature"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_blocker_waits_for_all_surfaces_then_emits_one_fix_batch"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_tuple_drift_never_carries_approval"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_agent_record_cannot_escalate_human_authority"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_finalize_requires_same_tuple_ready_before_content_review"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_github_capture_is_exact_head_terminal_and_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_content_reviewers_must_be_distinct_even_with_different_sessions"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_all_same_surface_blocking_findings_survive_consolidation"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_configured_quorum_cannot_be_replaced_by_one_surface_ledger"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_rehashed_ready_state_with_blockers_is_incoherent_and_finalize_blocks"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_generic_records_cannot_impersonate_hosted_surfaces"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_provider_repository_and_annotation_shape_are_fail_closed"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_hosted_verdict_cannot_be_rehashed_against_failing_provider_evidence"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_nonterminal_or_fabricated_provider_state_cannot_finalize"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_monotonic_chain_detects_deleted_same_tuple_blocker_history"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_mandatory_policy_cannot_be_disabled_when_tooling_baseline_is_enforced"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_diff_identity_is_independent_of_git_color_configuration"},
+            {"path": "tools/repo_hygiene/test_candidate_acceptance.py", "test": "test_final_integration_tree_or_diff_drift_is_blocking"},
         ],
         "requiredSymbols": [
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def bootstrap_response_broker_manifest"},
@@ -1041,6 +1050,10 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def auto_branch_from_protected_target"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_work_block_start_head_integrated"},
             {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def validate_content_review_approval_for_finalize"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def target_candidate_acceptance_policy"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def _activation_state"},
+            {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_acceptance_enforced"},
+            {"path": "tools/repo_hygiene/brokered_closeout.py", "contains": "def repository_has_canonical_acceptance_remote"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def candidate_identity"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def evaluate"},
             {"path": "tools/repo_hygiene/candidate_acceptance.py", "contains": "def latest_summary"},
@@ -1338,7 +1351,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "explicitProtectedWorktreeActions": [],
     },
     "candidateAcceptance": {
-        "enabled": True,
+        "enabled": False,
         "schema": "candidate-acceptance.v1",
         "stateRoot": ".claude-state/closeout/acceptance",
         "providerRepository": "layibabalola/MLV-App",
@@ -1352,7 +1365,7 @@ DEFAULT_CLOSEOUT_CONFIG: Dict[str, Any] = {
         "batchUntilAllSurfacesTerminal": True,
         "carryApprovalsAcrossCandidateTuples": False,
         "agentApprovalsGrantHumanAuthority": False,
-        "requireReadyForFinalize": True,
+        "requireReadyForFinalize": False,
     },
     "scripts": REQUIRED_SCRIPT_NAMES,
 }
@@ -3560,6 +3573,25 @@ def can_update_tooling_path(repo_root: Path, config: Dict[str, Any], path: str, 
     return True, None
 
 
+def repository_has_canonical_acceptance_remote(repo_root: Path) -> bool:
+    result = run_git(repo_root, ["config", "--get-regexp", r"^remote\..*\.url$"])
+    if result.returncode != 0:
+        return False
+    canonical_urls = {
+        "https://github.com/layibabalola/mlv-app",
+        "git@github.com:layibabalola/mlv-app",
+        "ssh://git@github.com/layibabalola/mlv-app",
+    }
+    for line in result.stdout.splitlines():
+        _, _, raw_url = line.partition(" ")
+        normalized = raw_url.strip().lower().rstrip("/")
+        if normalized.endswith(".git"):
+            normalized = normalized[:-4]
+        if normalized in canonical_urls:
+            return True
+    return False
+
+
 def verify_closeout_tooling_current(
     repo_root_arg: Path,
     config: Optional[Dict[str, Any]] = None,
@@ -3571,10 +3603,66 @@ def verify_closeout_tooling_current(
     config = config or load_closeout_config(repo_root)
     raw_config = read_json(repo_root / CONFIG_PATH, {}) if (repo_root / CONFIG_PATH).exists() else {}
     baseline = config.get("toolingBaseline", {})
-    if not bool(baseline.get("enabled", False)):
+    raw_acceptance = raw_config.get("candidateAcceptance") if isinstance(raw_config, dict) else None
+    acceptance_bearing = (
+        isinstance(raw_acceptance, dict) and raw_acceptance.get("schema") == "candidate-acceptance.v1"
+    ) or repository_has_canonical_acceptance_remote(repo_root)
+    if not bool(baseline.get("enabled", False)) and not acceptance_bearing:
         return {"ok": True, "status": "disabled", "missing": [], "updated": [], "plannedUpdates": []}
 
     missing: List[Dict[str, Any]] = []
+    if acceptance_bearing and baseline.get("enabled") is not True:
+        missing.append({"kind": "baseline_enabled", "key": "toolingBaseline.enabled", "expected": True})
+    default_baseline = DEFAULT_CLOSEOUT_CONFIG["toolingBaseline"]
+    mandatory_paths = {
+        "tools/repo_hygiene/candidate_acceptance.py",
+        "tools/repo_hygiene/test_candidate_acceptance.py",
+        "tools/factory/capture-github-acceptance.ps1",
+    }
+    configured_paths = {normalize_rel(str(path)) for path in baseline.get("paths", [])}
+    for path in sorted(mandatory_paths - configured_paths):
+        missing.append({"kind": "baseline_path", "path": path})
+
+    mandatory_config_keys = {
+        str(key)
+        for key in default_baseline.get("requiredConfigKeys", [])
+        if str(key).startswith("candidateAcceptance") or str(key) == "toolingBaseline.requiredTestFiles"
+    }
+    configured_keys = {str(key) for key in baseline.get("requiredConfigKeys", [])}
+    for key in sorted(mandatory_config_keys - configured_keys):
+        missing.append({"kind": "baseline_config_requirement", "key": key})
+
+    mandatory_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in default_baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    configured_test_files = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("test") or ""))
+        for item in baseline.get("requiredTestFiles", [])
+        if isinstance(item, dict)
+    }
+    for path, test_name in sorted(mandatory_test_files - configured_test_files):
+        missing.append({"kind": "baseline_test_requirement", "path": path, "test": test_name})
+
+    mandatory_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in default_baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+        and (
+            normalize_rel(str(item.get("path") or "")) == "tools/repo_hygiene/candidate_acceptance.py"
+            or str(item.get("contains") or "")
+            in {"def integration_range_evidence", "def repository_has_canonical_acceptance_remote"}
+        )
+    }
+    configured_symbols = {
+        (normalize_rel(str(item.get("path") or "")), str(item.get("contains") or ""))
+        for item in baseline.get("requiredSymbols", [])
+        if isinstance(item, dict)
+    }
+    for path, contains in sorted(mandatory_symbols - configured_symbols):
+        missing.append({"kind": "baseline_symbol_requirement", "path": path, "contains": contains})
+
     for key in baseline.get("requiredConfigKeys", []):
         if config_path_value(raw_config, str(key)) is None:
             missing.append({"kind": "config_key", "key": str(key)})
@@ -3591,6 +3679,21 @@ def verify_closeout_tooling_current(
     for test_name in baseline.get("requiredTests", []):
         if str(test_name) not in test_text:
             missing.append({"kind": "test", "test": str(test_name), "path": normalize_rel(str(test_path.relative_to(repo_root))) if test_path.exists() else "tools/repo_hygiene/test_brokered_closeout.py"})
+    for required_test in baseline.get("requiredTestFiles", []):
+        if not isinstance(required_test, dict):
+            missing.append({"kind": "test", "test": str(required_test), "path": ""})
+            continue
+        path = normalize_rel(str(required_test.get("path") or ""))
+        test_name = str(required_test.get("test") or "")
+        candidate_path = repo_root / path
+        try:
+            candidate_path.resolve().relative_to(repo_root.resolve())
+        except (OSError, ValueError):
+            missing.append({"kind": "test", "test": test_name, "path": path})
+            continue
+        candidate_text = candidate_path.read_text(encoding="utf-8") if path and candidate_path.is_file() else ""
+        if not path or not test_name or test_name not in candidate_text:
+            missing.append({"kind": "test", "test": test_name, "path": path})
     for required in baseline.get("requiredSymbols", []):
         path = normalize_rel(str(required.get("path") or ""))
         contains = str(required.get("contains") or "")
@@ -6667,10 +6770,24 @@ def _finalize_work_block_once(
             remove_worktree(repo_root, integration_path)
             update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "diff_check_failed"})
             return {"status": "blocked", "reason": "diff_check_failed", "detail": payload, "runtimeLifecycle": runtime_lifecycle}
-        acceptance_policy = config.get("candidateAcceptance", {})
         final_mismatches: Dict[str, Any] = {}
         accepted: Dict[str, Any] = {}
-        if bool(acceptance_policy.get("enabled", True)) and bool(acceptance_policy.get("requireReadyForFinalize", True)):
+        from .candidate_acceptance import candidate_acceptance_enforced
+
+        try:
+            acceptance_enforced = candidate_acceptance_enforced(repo_root, config, detection)
+        except HygieneError as exc:
+            payload = {"operation": "candidate_acceptance_policy", "detail": str(exc)}
+            write_audit(repo_root, config, "candidate_acceptance_policy_invalid", payload, work_block_id=block_id, outcome="blocked")
+            remove_worktree(repo_root, integration_path)
+            update_manifest(repo_root, config, block_id, {"state": "blocked", "blockedReason": "candidate_acceptance_policy_invalid"})
+            return {
+                "status": "blocked",
+                "reason": "candidate_acceptance_policy_invalid",
+                "detail": payload,
+                "runtimeLifecycle": runtime_lifecycle,
+            }
+        if acceptance_enforced:
             from .candidate_acceptance import (
                 final_integration_mismatches as candidate_acceptance_final_integration_mismatches,
                 latest_summary as candidate_acceptance_latest_summary,
