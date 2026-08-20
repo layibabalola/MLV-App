@@ -1,6 +1,7 @@
 import json
 import os
 import base64
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,7 @@ GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-sm
 BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
 MAIN_WINDOW = REPO_ROOT / "platform" / "qt" / "MainWindow.cpp"
 NEUTRAL_RECEIPT = REPO_ROOT / "tests" / "fixtures" / "receipts" / "neutral_look_assist_off_v4.marxml"
+SEALED_REAL_CLIP_RECEIPT = REPO_ROOT / "receipts" / "sealed-real-clip-ab-f401bf9a-20260820.json"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -582,3 +584,53 @@ def test_gui_smoke_ab_v3_requires_clean_capture_time_evidence() -> None:
         '  <lookAssistEnabled>0</lookAssistEnabled>\n'
         '</receipt>\n'
     )
+
+
+def test_sealed_real_clip_receipt_is_closed_and_source_bound() -> None:
+    receipt = json.loads(SEALED_REAL_CLIP_RECEIPT.read_text(encoding="utf-8"))
+
+    assert receipt["schema"] == "mlv-app/sealed-real-clip-ab-receipt/v1"
+    assert receipt["disposition"] == (
+        "LOCAL_SEALED_CORPUS_PASS_PENDING_HOSTED_AND_INDEPENDENT_RATIFICATION"
+    )
+    assert receipt["candidate"]["clean"] is True
+    assert receipt["baseline"]["clean"] is True
+    assert receipt["candidate"]["launchProbeExitCode"] == 0
+    assert receipt["baseline"]["launchProbeExitCode"] == 0
+
+    source_bindings = (
+        (GUI_SMOKE_COMPARER, receipt["verifier"]["comparerSha256"]),
+        (GUI_SMOKE_RUNNER, receipt["verifier"]["runnerSha256"]),
+        (NEUTRAL_RECEIPT, receipt["renderContract"]["receiptSha256"]),
+    )
+    for path, expected in source_bindings:
+        assert hashlib.sha256(path.read_bytes()).hexdigest().upper() == expected
+
+    clips = receipt["clips"]
+    assert [clip["name"] for clip in clips] == [
+        "M16-1347",
+        "M16-1327",
+        "M17-1207",
+        "M15-1320",
+        "M16-1210",
+        "M16-1243",
+    ]
+    assert all(clip["verdict"] == "PASS" for clip in clips)
+    assert all(clip["meanAbsRgbDelta"] <= 2.0 for clip in clips)
+    assert all(clip["changedSampleRatio"] <= 0.01 for clip in clips)
+    assert all(len(clip["comparisonJsonSha256"]) == 64 for clip in clips)
+    assert receipt["coverage"]["availableAndPassed"] == len(clips)
+    assert receipt["coverage"]["unavailable"] == ["M02-1344"]
+    assert receipt["coverage"]["allAvailablePassed"] is True
+
+    assert receipt["retention"]["rawArtifactsCommitted"] is False
+    assert receipt["retention"]["hostedPromotionRequired"] is True
+    assert receipt["scope"] == {
+        "providerAuthority": False,
+        "automaticLaunchGate": "CLOSED",
+        "mergeAuthority": False,
+        "releaseAuthority": False,
+        "reblessAuthority": False,
+        "humanBeforeAfterReviewRequired": True,
+        "independentAuditRequired": True,
+    }

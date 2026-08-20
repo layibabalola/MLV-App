@@ -1,0 +1,184 @@
+{
+  "schema": "mlv-app/sealed-real-clip-ab-receipt/v1",
+  "capturedAtUtc": "2026-08-20T14:45:51.5104487Z",
+  "disposition": "LOCAL_SEALED_CORPUS_PASS_PENDING_HOSTED_AND_INDEPENDENT_RATIFICATION",
+  "candidate": {
+    "productHead": "f401bf9a3f8fd96ee5ec1093cf8ee23dc0f73c77",
+    "productTree": "74fd8583a8b6dd04909d3e941f36ecd004711f13",
+    "exeSha256": "CC080AF52E60E36F15CB531B56B4D690E46686A9BE187EC3017F3CCDB1D03A2D",
+    "buildManifestSha256": "CE6BFFC93D498C5A2920698D366170A15359BC7DB369569D37535C9AC3FE510D",
+    "clean": true,
+    "selfContained": true,
+    "launchProbeExitCode": 0
+  },
+  "baseline": {
+    "protectedProductHead": "2fc6db2c9abf0fcc53367595ba0ea72afa3943e7",
+    "protectedProductTree": "0c9306c4b35658c830f6618b44d4b19a6358ef64",
+    "instrumentedHead": "cb97fe1320d594a0dfb4f3a0bdb272832d882c6f",
+    "instrumentedTree": "ff97bc05116a99cbfac0d7a9795f57188e1c5d22",
+    "instrumentationOnlyPaths": [
+      "platform/qt/CrashForensics.cpp",
+      "platform/qt/MainWindow.cpp",
+      "tools/build-release.ps1",
+      "tools/gen-buildinfo.ps1"
+    ],
+    "exeSha256": "48981089E36332638D3E01FC470B085183531FBEE464F485A00787E3414F5807",
+    "buildManifestSha256": "B8D26A28905FC2195927A22063EAC9541B7A280995ED9FBB2C38BF5040F9BC24",
+    "clean": true,
+    "selfContained": true,
+    "launchProbeExitCode": 0
+  },
+  "verifier": {
+    "head": "9254060a7e720968e906a744803453b27697e0f4",
+    "tree": "76237c20d09651c517e82772e04649e0ac8343c5",
+    "comparerGitBlob": "b594a63d35c94d742d5ae438d19f9876eae59698",
+    "comparerSha256": "4A7B2AAB759D0C468C02703C477DD5D47AF33E23DDFFE89AB2963455EB5C8052",
+    "runnerGitBlob": "4a7cb8dcac1c31a5c5b1690ff0f8c3de972776d9",
+    "runnerSha256": "97E0D3834A4E88EE991186E792909A95772708CD3D81D6EEB3F768BB1E79C410",
+    "schema": "gui-smoke-ab-compare.v3",
+    "maxMeanAbsRgbDelta": 2.0,
+    "maxChangedSampleRatio": 0.01,
+    "sampleStep": 4,
+    "failOnScreenshotDelta": true
+  },
+  "renderContract": {
+    "receiptGitBlob": "bf7c9464f9b967d3547d1ce5d3b7e5f746ecaf97",
+    "receiptSha256": "174A837B9496B36093542996E41AA9E36A39718A559CA6E5B624B92D1BEB7C24",
+    "lookAssistEnabled": false,
+    "workerThreads": 1,
+    "qualityMode": "auto",
+    "scaleRequest": 4,
+    "dropFrame": false,
+    "captureFrameLocked": true,
+    "fullVisualStateRequiredEqual": true,
+    "captureTimeExecutableClipReceiptManifestLogAndScreenshotBindingsRequired": true
+  },
+  "clips": [
+    {
+      "name": "M16-1347",
+      "clipSha256": "763E5A302A8D04E97D84CA7D281D65752529A6ED00BF5A7FF8BBB1E46609934D",
+      "frame": 97,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "DD8AD33FE111A3974AB0CAC4D37911A657F18B99E329E3EEA0E323C45988CFD2",
+      "afterScreenshotSha256": "DD8AD33FE111A3974AB0CAC4D37911A657F18B99E329E3EEA0E323C45988CFD2",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "7FB9483F4B5838558751A6524468D27D12E8042D1D9A72FE3ADD13A309C1004A",
+      "afterSmokeJsonSha256": "83275AAE76E5D3F347CADF89C351A139257A8597B03E81F5C1FF3E98AFACFCCF",
+      "comparisonJsonSha256": "81D85FD89F8F37C9EE10928571629570EC5CB97A35390C5D4DA28442DB873F34"
+    },
+    {
+      "name": "M16-1327",
+      "clipSha256": "CFDCD64DA9931DB94B2B4F938FEC1E10B8A742C2E79847975BDD6A986E137A3F",
+      "frame": 94,
+      "verdict": "PASS",
+      "sameScreenshotSha256": false,
+      "beforeScreenshotSha256": "5BE50C4D2157140C3FB0EA4299C74773122C925E2626BBD727C32E533E14C4F9",
+      "afterScreenshotSha256": "3763B7915800E4032384FEBDAC9817FAB660AD752AA3E076CB037BD8D1AEE398",
+      "meanAbsRgbDelta": 0.005017,
+      "maxAbsRgbDelta": 6,
+      "changedSampleRatio": 0.00003,
+      "beforeSmokeJsonSha256": "582DBAE303266E9FA104B68D376610ABF5C7E974B59BD9413CEB5FB8D2217E7B",
+      "afterSmokeJsonSha256": "53CDA2EF210FFFA7FE21BC637C35B1282E1BB6352D1E93175850314FEE4AB817",
+      "comparisonJsonSha256": "0B49F2EBC6700C3E3532572A17566CEBBBC319FBDEA6825DAF624C24D063AA0E"
+    },
+    {
+      "name": "M17-1207",
+      "clipSha256": "3BBB5034D8AB5D63A078517AF5A3098FFF89677BE37E78298317A19DEF043DCE",
+      "frame": 91,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "B91D9D19C41A8DDDBD34B867776DF5199FF0453F50F9A261047653D4CD9DF0E8",
+      "afterScreenshotSha256": "B91D9D19C41A8DDDBD34B867776DF5199FF0453F50F9A261047653D4CD9DF0E8",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "92B96FDC79A7AF83AB37C6A0D3C210AD6E724AD32EA2BB80DE65AC17C25693AD",
+      "afterSmokeJsonSha256": "6764EE61FAF802CB92C356F08B57525D85B421A0F4CD8800934A40EBA9C01D34",
+      "comparisonJsonSha256": "615CE9E2F9959FDF705095607C39EE59129B916A91DB38F47D6330F3CA393FD7"
+    },
+    {
+      "name": "M15-1320",
+      "clipSha256": "B72347ACE4F18981A9EA66DB9FC2DB9413718C99D4818A1846413B86B703CA1E",
+      "frame": 24,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "636FD5312662998C479FC1118784050610537470388C3AB4F9CD2712B019B52D",
+      "afterScreenshotSha256": "636FD5312662998C479FC1118784050610537470388C3AB4F9CD2712B019B52D",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "FB3ECC1B97C3A057CE1F459936B8FAFF20CEDC7C102FD094DFA13E464189C84E",
+      "afterSmokeJsonSha256": "6D4E970F0C984045EB1D460BE2647A46E194F1B833C5EB844DDCB32025178FA4",
+      "comparisonJsonSha256": "D63490138EBD5753F5E9DDB10E617E272D61A064E4D4919FCC8831E81E7DD38D"
+    },
+    {
+      "name": "M16-1210",
+      "clipSha256": "679EE976B0150C71CA26F7D8895C775AFDCA273FA7F907DB22CF7C3D58AF17CD",
+      "frame": 26,
+      "verdict": "PASS",
+      "sameScreenshotSha256": true,
+      "beforeScreenshotSha256": "6F4F2C7B27A9686B3AF4BA164BEB674E2DCBE1FB4687A606B50D0377A37E5E15",
+      "afterScreenshotSha256": "6F4F2C7B27A9686B3AF4BA164BEB674E2DCBE1FB4687A606B50D0377A37E5E15",
+      "meanAbsRgbDelta": 0.0,
+      "maxAbsRgbDelta": 0,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "4D43820EEF4F5BF47011F152F28187BBD967776D6F0D09493358B7C6BF6EDD8C",
+      "afterSmokeJsonSha256": "322D4C7D26AF2A698F8D3E626E2B5B31BCE184EC27B4A4CE39ED7564882AE019",
+      "comparisonJsonSha256": "40EA4F9926D42D5302B1C2908C2D56C394B1348145D54E0021FA55194D65BEB8"
+    },
+    {
+      "name": "M16-1243",
+      "clipSha256": "C8F09E1EA8E6C40F673BF465D2D4ADB90CA218BC9F78C6461DB5CD22CD3E01B9",
+      "frame": 28,
+      "verdict": "PASS",
+      "sameScreenshotSha256": false,
+      "beforeScreenshotSha256": "3B18CE4008DDE825943F5884C50DB74BD1FF5F2E9D9B44ABFCFA8C39850F7E18",
+      "afterScreenshotSha256": "D3E16C55A7F83041523ED6BC8D1E927C71FD54D5A571A8F1C9AB9A91C49AB640",
+      "meanAbsRgbDelta": 0.001327,
+      "maxAbsRgbDelta": 1,
+      "changedSampleRatio": 0.0,
+      "beforeSmokeJsonSha256": "E4503E445A63FB6DF703D474FA899D0CFB540534F53E1A1389D93ED041453B71",
+      "afterSmokeJsonSha256": "284DCC7F13EC7437A7586FC64C008DDD6FE88878AFB4C308E85FA9B4BF138515",
+      "comparisonJsonSha256": "C03FC087ACAB632664CA42D1B1AB9A580195F28BE4F8304EA78B0AD7C33C99EA"
+    }
+  ],
+  "coverage": {
+    "requiredNamedClips": [
+      "M16-1327",
+      "M16-1347",
+      "M17-1207",
+      "M15-1320",
+      "M16-1210",
+      "M16-1243",
+      "M02-1344"
+    ],
+    "availableAndPassed": 6,
+    "unavailable": [
+      "M02-1344"
+    ],
+    "allAvailablePassed": true,
+    "gpuPlaybackCovered": false,
+    "dngCdngExportCoveredByThisReceipt": false,
+    "batchHeadlessCoveredByThisReceipt": false,
+    "cadenceDisposition": "ADVISORY_SHORT_RUN_ONLY"
+  },
+  "retention": {
+    "rawArtifactsCommitted": false,
+    "rawArtifacts": "LOCAL_IGNORED_HASH_BOUND",
+    "comparisonReceiptsCommitted": false,
+    "independentRecomputationRequiresRetainedLocalArtifacts": true,
+    "hostedPromotionRequired": true
+  },
+  "scope": {
+    "providerAuthority": false,
+    "automaticLaunchGate": "CLOSED",
+    "mergeAuthority": false,
+    "releaseAuthority": false,
+    "reblessAuthority": false,
+    "humanBeforeAfterReviewRequired": true,
+    "independentAuditRequired": true
+  }
+}
