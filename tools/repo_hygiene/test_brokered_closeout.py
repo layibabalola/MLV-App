@@ -195,6 +195,12 @@ class BrokeredCloseoutTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = Path(tempfile.mkdtemp(prefix="brokered-closeout-test-"))
         self.repo_counter = 0
+        self.acceptance_patcher = mock.patch(
+            "tools.repo_hygiene.candidate_acceptance.validate_for_finalize",
+            return_value=None,
+        )
+        self.acceptance_patcher.start()
+        self.addCleanup(self.acceptance_patcher.stop)
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tempdir, ignore_errors=True)
