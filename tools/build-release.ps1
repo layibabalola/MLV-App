@@ -27,6 +27,7 @@ param(
     [switch]$AllowDirty
 )
 $ErrorActionPreference = 'Stop'
+$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
 $env:Path = "$QtBin;$MingwBin;$env:Path"
 $head  = (& git -C $SourceRoot rev-parse HEAD).Trim()
 $porcelain = (& git -C $SourceRoot status --porcelain)

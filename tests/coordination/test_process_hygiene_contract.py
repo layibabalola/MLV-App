@@ -15,6 +15,7 @@ GEN_BUILDINFO = REPO_ROOT / "tools" / "gen-buildinfo.ps1"
 ARTIFACT_DETECTOR = REPO_ROOT / "tools" / "profiling" / "detect-playback-artifacts.ps1"
 GUI_SMOKE_RUNNER = REPO_ROOT / "tools" / "profiling" / "run-release-gui-smoke.ps1"
 GUI_SMOKE_COMPARER = REPO_ROOT / "tools" / "profiling" / "compare-release-gui-smoke-ab.ps1"
+BUILD_RELEASE = REPO_ROOT / "tools" / "build-release.ps1"
 STDOUT_SENTINEL = "EXCLUSIVE_STDOUT_SENTINEL"
 STDERR_SENTINEL = "EXCLUSIVE_STDERR_SENTINEL"
 
@@ -358,3 +359,10 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     assert result["presentedFrameEvidence"]["before"]["lastPresentedFrame"] == 104
     assert result["presentedFrameEvidence"]["after"]["lastPresentedFrame"] == 105
     assert any("not frame-locked" in failure for failure in result["failures"])
+
+
+def test_release_builder_resolves_source_root_before_changing_directory() -> None:
+    source = BUILD_RELEASE.read_text(encoding="utf-8")
+    resolve_index = source.index("$SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path")
+    push_index = source.index("Push-Location $bd")
+    assert resolve_index < push_index
