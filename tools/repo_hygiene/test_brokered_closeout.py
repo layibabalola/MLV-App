@@ -1847,6 +1847,10 @@ class BrokeredCloseoutTests(unittest.TestCase):
             dashboard_action_request_payload(repo, request, server_process_id=1234)
         request["exactTuple"]["pinnedRefs"] = {"target": "HEAD"}
         request["exactTuple"]["policyHash"] = "policy"
+        # The preceding malformed-tuple calls may be expensive on a loaded host;
+        # refresh only the helper observation so this assertion reaches the
+        # independently targeted path-containment guard.
+        request["helperObservedAtMs"] = int(time.time() * 1000)
         with self.assertRaisesRegex(HygieneError, "dashboard action request root must stay under"):
             dashboard_action_request_payload(repo, request, server_process_id=1234)
         self.assertFalse((self.tempdir / "outside-action-requests").exists())
