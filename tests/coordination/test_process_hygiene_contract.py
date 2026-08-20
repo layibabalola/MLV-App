@@ -309,10 +309,74 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     if not pwsh:
         pytest.skip("PowerShell 7 is unavailable")
 
-    def write_smoke(path: Path, last_frame: int) -> None:
+    clip = tmp_path / "clip.mlv"
+    receipt = tmp_path / "locked.marxml"
+    clip.write_bytes(b"same clip bytes")
+    receipt.write_bytes(b"<receipt version=\"4\"/>")
+    commits = subprocess.run(
+        ["git", "rev-parse", "HEAD", "HEAD^"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.splitlines()
+
+    def write_smoke(path: Path, last_frame: int, build_sha: str) -> None:
+        exe = tmp_path / f"{path.stem}.exe"
+        log = tmp_path / f"{path.stem}.log"
+        exe.write_bytes(f"exe:{build_sha}".encode("ascii"))
+        log.write_bytes(f"log:{build_sha}".encode("ascii"))
         path.write_text(
             json.dumps(
                 {
+                    "repoRoot": str(REPO_ROOT),
+                    "exePath": str(exe),
+                    "clipPath": str(clip),
+                    "launch": {
+                        "arguments": [
+                            "--input",
+                            str(clip),
+                            "--receipt",
+                            str(receipt),
+                        ]
+                    },
+                    "log": {
+                        "path": str(log),
+                        "runMetadata": {
+                            "build_sha": build_sha,
+                            "command_line": [
+                                str(exe),
+                                "--input",
+                                str(clip),
+                                "--receipt",
+                                str(receipt),
+                            ],
+                        },
+                    },
+                    "visualQuality": {
+                        "visualState": {
+                            "look_assist_enabled": 0,
+                            "temperature": 6000,
+                            "tint": 0,
+                            "raw_black": 20470,
+                            "raw_white": 6000,
+                            "chroma_smooth": 0,
+                            "stretch_x": 3.0,
+                            "stretch_y": 1.0,
+                            "h_stretch_index": 0,
+                            "v_stretch_index": 3,
+                            "dual_iso_mode": 1,
+                            "dual_iso_interp": 0,
+                            "dual_iso_alias_map": 0,
+                            "dual_iso_fullres": 1,
+                            "drop_frame": 0,
+                            "scale_request": 4,
+                            "quality_mode": 2,
+                            "receipt_supplied": 1,
+                        },
+                        "colorArtifactScan": {"verdict": "clear-heuristic"},
+                    },
                     "validation": {
                         "ok": True,
                         "launchOnlyProbe": False,
@@ -327,8 +391,8 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
 
     before = tmp_path / "before.json"
     after = tmp_path / "after.json"
-    write_smoke(before, 104)
-    write_smoke(after, 105)
+    write_smoke(before, 104, commits[1])
+    write_smoke(after, 105, commits[0])
     completed = subprocess.run(
         [
             pwsh,
@@ -359,6 +423,128 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     assert result["presentedFrameEvidence"]["before"]["lastPresentedFrame"] == 104
     assert result["presentedFrameEvidence"]["after"]["lastPresentedFrame"] == 105
     assert any("not frame-locked" in failure for failure in result["failures"])
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MLV-App GUI smoke comparer is PowerShell-based")
+def test_gui_smoke_ab_rejects_same_build_identity(tmp_path: Path) -> None:
+    pwsh = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not pwsh:
+        pytest.skip("PowerShell 7 is unavailable")
+
+    build_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    ).stdout.strip()
+    clip = tmp_path / "clip.mlv"
+    receipt = tmp_path / "locked.marxml"
+    clip.write_bytes(b"same clip bytes")
+    receipt.write_bytes(b"<receipt version=\"4\"/>")
+
+    def write_smoke(path: Path, marker: str) -> None:
+        exe = tmp_path / f"{marker}.exe"
+        log = tmp_path / f"{marker}.log"
+        exe.write_bytes(f"different executable {marker}".encode("ascii"))
+        log.write_bytes(f"log {marker}".encode("ascii"))
+        state = {
+            "look_assist_enabled": 0,
+            "temperature": 6000,
+            "tint": 0,
+            "raw_black": 20470,
+            "raw_white": 6000,
+            "chroma_smooth": 0,
+            "stretch_x": 3.0,
+            "stretch_y": 1.0,
+            "h_stretch_index": 0,
+            "v_stretch_index": 3,
+            "dual_iso_mode": 1,
+            "dual_iso_interp": 0,
+            "dual_iso_alias_map": 0,
+            "dual_iso_fullres": 1,
+            "drop_frame": 0,
+            "scale_request": 4,
+            "quality_mode": 2,
+            "receipt_supplied": 1,
+        }
+        path.write_text(
+            json.dumps(
+                {
+                    "repoRoot": str(REPO_ROOT),
+                    "exePath": str(exe),
+                    "clipPath": str(clip),
+                    "launch": {
+                        "arguments": [
+                            "--input",
+                            str(clip),
+                            "--receipt",
+                            str(receipt),
+                        ]
+                    },
+                    "log": {
+                        "path": str(log),
+                        "runMetadata": {
+                            "build_sha": build_sha,
+                            "command_line": [
+                                str(exe),
+                                "--input",
+                                str(clip),
+                                "--receipt",
+                                str(receipt),
+                            ],
+                        },
+                    },
+                    "visualQuality": {
+                        "visualState": state,
+                        "colorArtifactScan": {"verdict": "clear-heuristic"},
+                    },
+                    "validation": {
+                        "ok": True,
+                        "launchOnlyProbe": False,
+                        "presentedFrames": 2,
+                        "firstPresentedFrame": 89,
+                        "lastPresentedFrame": 90,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    before = tmp_path / "before.json"
+    after = tmp_path / "after.json"
+    write_smoke(before, "before")
+    write_smoke(after, "after")
+    output = tmp_path / "comparison.json"
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(GUI_SMOKE_COMPARER),
+            "-Before",
+            str(before),
+            "-After",
+            str(after),
+            "-Output",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    result = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert result["verdict"] == "FAIL"
+    assert any("same-arm A/B is forbidden" in failure for failure in result["failures"])
 
 
 def test_release_builder_resolves_source_root_before_changing_directory() -> None:

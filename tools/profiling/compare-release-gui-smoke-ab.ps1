@@ -22,6 +22,27 @@ function Read-SmokeJson {
     Get-Content -LiteralPath $resolved -Raw | ConvertFrom-Json -Depth 100
 }
 
+function Resolve-ExistingFileBinding {
+    param(
+        [object]$Path,
+        [string]$Label
+    )
+
+    if ($null -eq $Path -or [string]::IsNullOrWhiteSpace([string]$Path)) {
+        throw "$Label path is missing."
+    }
+    $unresolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath([string]$Path)
+    if (-not (Test-Path -LiteralPath $unresolved -PathType Leaf)) {
+        throw "$Label file not found: $unresolved"
+    }
+    $resolved = (Resolve-Path -LiteralPath $unresolved).Path
+    [pscustomobject]@{
+        path = $resolved
+        sha256 = (Get-FileHash -LiteralPath $resolved -Algorithm SHA256).Hash
+        length = (Get-Item -LiteralPath $resolved).Length
+    }
+}
+
 function Get-NestedValue {
     param(
         [object]$Object,
@@ -55,6 +76,109 @@ function Get-FirstNestedValue {
         }
     }
     $null
+}
+
+function Get-LaunchArgumentValue {
+    param(
+        [object]$Smoke,
+        [string]$Name
+    )
+
+    $arguments = @(Get-NestedValue -Object $Smoke -Path "launch.arguments")
+    for ($index = 0; $index -lt $arguments.Count; ++$index) {
+        if ([string]$arguments[$index] -eq $Name) {
+            if ($index + 1 -ge $arguments.Count) {
+                throw "Launch argument $Name has no value."
+            }
+            return [string]$arguments[$index + 1]
+        }
+    }
+    throw "Launch argument $Name is missing."
+}
+
+function Get-GitTreeBinding {
+    param(
+        [object]$Smoke,
+        [string]$BuildSha,
+        [string]$Label
+    )
+
+    if ($BuildSha -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "$Label build SHA is not a full 40-character Git commit: $BuildSha"
+    }
+    $repoRoot = [string](Get-NestedValue -Object $Smoke -Path "repoRoot")
+    if ([string]::IsNullOrWhiteSpace($repoRoot) -or -not (Test-Path -LiteralPath $repoRoot -PathType Container)) {
+        throw "$Label repoRoot is missing or unavailable: $repoRoot"
+    }
+    $treeLines = @(& git -C $repoRoot show -s --format=%T $BuildSha 2>$null)
+    $gitExit = $LASTEXITCODE
+    $tree = $treeLines | Select-Object -First 1
+    if ($gitExit -ne 0 -or [string]$tree -notmatch '^[0-9a-fA-F]{40}$') {
+        throw "$Label build commit is unavailable in the recorded repository: $BuildSha"
+    }
+    [pscustomobject]@{
+        commit = $BuildSha.ToLowerInvariant()
+        tree = ([string]$tree).Trim().ToLowerInvariant()
+    }
+}
+
+function Get-LegEvidenceBinding {
+    param(
+        [string]$Name,
+        [object]$Smoke,
+        [string]$JsonPath
+    )
+
+    $json = Resolve-ExistingFileBinding -Path $JsonPath -Label "$Name smoke JSON"
+    $exe = Resolve-ExistingFileBinding `
+        -Path (Get-NestedValue -Object $Smoke -Path "exePath") `
+        -Label "$Name executable"
+    $clip = Resolve-ExistingFileBinding `
+        -Path (Get-NestedValue -Object $Smoke -Path "clipPath") `
+        -Label "$Name clip"
+    $receipt = Resolve-ExistingFileBinding `
+        -Path (Get-LaunchArgumentValue -Smoke $Smoke -Name "--receipt") `
+        -Label "$Name receipt"
+    $log = Resolve-ExistingFileBinding `
+        -Path (Get-FirstNestedValue -Object $Smoke -Paths @("log.path", "log.runMetadata.log_file")) `
+        -Label "$Name source log"
+    $buildSha = [string](Get-NestedValue -Object $Smoke -Path "log.runMetadata.build_sha")
+    $git = Get-GitTreeBinding -Smoke $Smoke -BuildSha $buildSha -Label $Name
+    $commandLine = @(Get-NestedValue -Object $Smoke -Path "log.runMetadata.command_line")
+    if ($commandLine.Count -eq 0 -or [string]::IsNullOrWhiteSpace([string]$commandLine[0])) {
+        throw "$Name log metadata does not record the launched executable."
+    }
+    $resolvedCommandExe = (Resolve-Path -LiteralPath ([string]$commandLine[0])).Path
+    if (-not [string]::Equals($resolvedCommandExe, $exe.path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Name executable path does not match log run metadata."
+    }
+    $launchArguments = @(Get-NestedValue -Object $Smoke -Path "launch.arguments")
+    $loggedArguments = @($commandLine | Select-Object -Skip 1)
+    if ((Convert-ToStableValueText $launchArguments) -ne (Convert-ToStableValueText $loggedArguments)) {
+        throw "$Name launch arguments do not match log run metadata."
+    }
+    $resolvedInput = (Resolve-Path -LiteralPath (Get-LaunchArgumentValue -Smoke $Smoke -Name "--input")).Path
+    if (-not [string]::Equals($resolvedInput, $clip.path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Name clip path does not match its --input argument."
+    }
+
+    [pscustomobject]@{
+        json = $json
+        executable = $exe
+        clip = $clip
+        receipt = $receipt
+        sourceLog = $log
+        git = $git
+    }
+}
+
+function Convert-ToStableValueText {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    $Value | ConvertTo-Json -Compress -Depth 16
 }
 
 function Convert-ToNullableDouble {
@@ -313,6 +437,16 @@ function Compare-SmokeScreenshots {
 
 $beforeSmoke = Read-SmokeJson -Path $Before
 $afterSmoke = Read-SmokeJson -Path $After
+$beforeJsonPath = (Resolve-Path -LiteralPath $Before).Path
+$afterJsonPath = (Resolve-Path -LiteralPath $After).Path
+$resolvedOutput = $null
+if (-not [string]::IsNullOrWhiteSpace($Output)) {
+    $resolvedOutput = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
+    if ([string]::Equals($resolvedOutput, $beforeJsonPath, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($resolvedOutput, $afterJsonPath, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Output must not overwrite either smoke JSON input."
+    }
+}
 $beforeScreenshot = Resolve-SmokeScreenshotPath -Smoke $beforeSmoke
 $afterScreenshot = Resolve-SmokeScreenshotPath -Smoke $afterSmoke
 $screenshotCompare = Compare-SmokeScreenshots `
@@ -321,6 +455,79 @@ $screenshotCompare = Compare-SmokeScreenshots `
     -RequestedSampleStep $SampleStep
 
 $failures = @()
+$evidenceBindings = $null
+try {
+    $beforeBinding = Get-LegEvidenceBinding `
+        -Name "before" -Smoke $beforeSmoke -JsonPath $beforeJsonPath
+    $afterBinding = Get-LegEvidenceBinding `
+        -Name "after" -Smoke $afterSmoke -JsonPath $afterJsonPath
+    $evidenceBindings = [pscustomobject]@{
+        before = $beforeBinding
+        after = $afterBinding
+    }
+    if ([string]::Equals($beforeBinding.json.path, $afterBinding.json.path, [StringComparison]::OrdinalIgnoreCase)) {
+        $failures += "Before and after smoke JSON paths must be distinct."
+    }
+    if ([string]::Equals($beforeBinding.executable.path, $afterBinding.executable.path, [StringComparison]::OrdinalIgnoreCase)) {
+        $failures += "Before and after executables must be distinct files."
+    }
+    if ($beforeBinding.executable.sha256 -eq $afterBinding.executable.sha256) {
+        $failures += "Before and after executables have the same SHA256; same-arm A/B is forbidden."
+    }
+    if ($beforeBinding.git.commit -eq $afterBinding.git.commit) {
+        $failures += "Before and after build commits are identical; same-arm A/B is forbidden."
+    }
+    if (-not [string]::Equals($beforeBinding.clip.path, $afterBinding.clip.path, [StringComparison]::OrdinalIgnoreCase) -or
+        $beforeBinding.clip.sha256 -ne $afterBinding.clip.sha256) {
+        $failures += "Before and after legs do not bind the same clip bytes."
+    }
+    if (-not [string]::Equals($beforeBinding.receipt.path, $afterBinding.receipt.path, [StringComparison]::OrdinalIgnoreCase) -or
+        $beforeBinding.receipt.sha256 -ne $afterBinding.receipt.sha256) {
+        $failures += "Before and after legs do not bind the same receipt bytes."
+    }
+}
+catch {
+    $failures += "Evidence binding failed: $($_.Exception.Message)"
+}
+
+$visualStateKeys = @(
+    "look_assist_enabled", "temperature", "tint", "raw_black", "raw_white",
+    "chroma_smooth", "stretch_x", "stretch_y", "h_stretch_index", "v_stretch_index",
+    "dual_iso_mode", "dual_iso_interp", "dual_iso_alias_map", "dual_iso_fullres",
+    "drop_frame", "scale_request", "quality_mode", "receipt_supplied"
+)
+$visualStateEvidence = [ordered]@{}
+foreach ($key in $visualStateKeys) {
+    $beforeValue = Get-NestedValue $beforeSmoke "visualQuality.visualState.$key"
+    $afterValue = Get-NestedValue $afterSmoke "visualQuality.visualState.$key"
+    $matches = (
+        $null -ne $beforeValue -and
+        $null -ne $afterValue -and
+        (Convert-ToStableValueText $beforeValue) -eq (Convert-ToStableValueText $afterValue)
+    )
+    $visualStateEvidence[$key] = [pscustomobject]@{
+        before = $beforeValue
+        after = $afterValue
+        matches = $matches
+    }
+    if (-not $matches) {
+        $failures += "Visual-state mismatch or missing value for $key."
+    }
+}
+
+foreach ($leg in @(
+    [pscustomobject]@{ Name = "before"; Smoke = $beforeSmoke },
+    [pscustomobject]@{ Name = "after"; Smoke = $afterSmoke }
+)) {
+    $colorVerdict = [string](Get-NestedValue $leg.Smoke "visualQuality.colorArtifactScan.verdict")
+    if ([string]::IsNullOrWhiteSpace($colorVerdict)) {
+        $failures += "$($leg.Name) smoke has no color-artifact verdict."
+    }
+    elseif ($colorVerdict -in @("suspect-block-or-bar", "scan-error")) {
+        $failures += "$($leg.Name) smoke color-artifact verdict is $colorVerdict."
+    }
+}
+
 $presentedFrameEvidence = [ordered]@{}
 foreach ($leg in @(
     [pscustomobject]@{ Name = "before"; Smoke = $beforeSmoke },
@@ -378,16 +585,18 @@ if ($FailOnScreenshotDelta) {
 }
 
 $result = [pscustomobject]@{
-    schema = "gui-smoke-ab-compare.v1"
+    schema = "gui-smoke-ab-compare.v2"
     generatedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     before = [pscustomobject]@{
-        jsonPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Before)
+        jsonPath = $beforeJsonPath
         screenshotPath = $beforeScreenshot
     }
     after = [pscustomobject]@{
-        jsonPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($After)
+        jsonPath = $afterJsonPath
         screenshotPath = $afterScreenshot
     }
+    evidenceBindings = $evidenceBindings
+    visualStateEvidence = [pscustomobject]$visualStateEvidence
     thresholds = [pscustomobject]@{
         failOnScreenshotDelta = [bool]$FailOnScreenshotDelta
         maxMeanAbsRgbDelta = $MaxMeanAbsRgbDelta
@@ -427,7 +636,6 @@ $result = [pscustomobject]@{
 
 $json = $result | ConvertTo-Json -Depth 24
 if (-not [string]::IsNullOrWhiteSpace($Output)) {
-    $resolvedOutput = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
     $outputDir = Split-Path -Parent $resolvedOutput
     if (-not [string]::IsNullOrWhiteSpace($outputDir)) {
         New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
