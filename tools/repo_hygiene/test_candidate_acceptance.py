@@ -250,6 +250,10 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertFalse(policy["carryApprovalsAcrossCandidateTuples"])
         self.assertFalse(policy["agentApprovalsGrantHumanAuthority"])
 
+        workflow = (ROOT / ".github/workflows/tests.yml").read_text(encoding="utf-8")
+        invocation = "python -m unittest tools.repo_hygiene.test_candidate_acceptance -v"
+        self.assertEqual(1, workflow.count(invocation))
+
     def test_github_capture_is_exact_head_terminal_and_fail_closed(self) -> None:
         source = (ROOT / "tools/factory/capture-github-acceptance.ps1").read_text(encoding="utf-8")
         for required in (
