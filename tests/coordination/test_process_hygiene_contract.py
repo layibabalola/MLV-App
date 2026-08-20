@@ -415,14 +415,55 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
     receipt = tmp_path / "locked.marxml"
     clip.write_bytes(b"same clip bytes")
     receipt.write_bytes(b"<receipt version=\"4\"/>")
-    commits = subprocess.run(
-        ["git", "rev-parse", "HEAD", "HEAD^"],
-        cwd=REPO_ROOT,
+    fixture_repo = tmp_path / "git-fixture"
+    subprocess.run(
+        ["git", "init", str(fixture_repo)],
         capture_output=True,
         text=True,
         timeout=10,
         check=True,
-    ).stdout.splitlines()
+    )
+    marker = fixture_repo / "marker.txt"
+    commits: list[str] = []
+    for index, value in enumerate(("before", "after")):
+        marker.write_text(value, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "marker.txt"],
+            cwd=fixture_repo,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=MLV-App Test",
+                "-c",
+                "user.email=mlv-app-test@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "commit",
+                "-m",
+                f"fixture-{index}",
+            ],
+            cwd=fixture_repo,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+        commits.append(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=fixture_repo,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout.strip()
+        )
 
     def write_smoke(path: Path, last_frame: int, build_sha: str) -> None:
         exe = tmp_path / f"{path.stem}.exe"
@@ -432,7 +473,7 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
         path.write_text(
             json.dumps(
                 {
-                    "repoRoot": str(REPO_ROOT),
+                    "repoRoot": str(fixture_repo),
                     "exePath": str(exe),
                     "clipPath": str(clip),
                     "launch": {
@@ -493,8 +534,8 @@ def test_gui_smoke_ab_requires_same_last_presented_frame(tmp_path: Path) -> None
 
     before = tmp_path / "before.json"
     after = tmp_path / "after.json"
-    write_smoke(before, 104, commits[1])
-    write_smoke(after, 105, commits[0])
+    write_smoke(before, 104, commits[0])
+    write_smoke(after, 105, commits[1])
     completed = subprocess.run(
         [
             pwsh,
