@@ -1,0 +1,88 @@
+{
+  "schema": "mlv-universal-control-supervisor-integration-review/v1",
+  "status": "ACCEPT_CANDIDATE_ONLY_ZERO_AUTHORITY",
+  "reviewedSubject": {
+    "commit": "55900233427ad1b85782859a114141ee29462511",
+    "tree": "5fdf3107dd3f22df8c732cde770fea009f9ea588",
+    "orderedParents": [
+      "a4bb0d7a2833e760ba1d0d6cfb53133d69f09c24",
+      "50db64d71bf62da041b9a6872c893382cd7cc79b"
+    ],
+    "artifact": {
+      "path": "docs/universal-token-control-supervisor-integration-candidate-2026-08-21.json",
+      "gitBlobOid": "8d7f6a52ecf4ff4aca784a65f19a62f22d98238a",
+      "bytes": 4308,
+      "sha256": "7E60822486E2CCC58B63C2079874E4C2B98514DC6B040D120D7B7D81DE3478E9"
+    },
+    "tests": {
+      "path": "tools/universal_token_control_supervisor_integration_candidate_tests.py",
+      "gitBlobOid": "836df9f24461ec43a58c5e70528936595156e94e",
+      "bytes": 10031,
+      "sha256": "5B83D3FB3B50AE1593F44968BD1BB0865D47540404190C1B6F16863FA79511D7"
+    }
+  },
+  "localExecutionEvidence": [
+    {"suite": "tools.provider_control.tests.test_mlv_lane_supervisor", "result": "PASS", "tests": 45},
+    {"suite": "tools/universal_token_control_supervisor_integration_candidate_tests.py", "result": "PASS", "tests": 8},
+    {"suite": "tools/universal_token_control_machine_observation_candidate_hostile_tests.py", "result": "PASS", "tests": 140}
+  ],
+  "independentReview": {
+    "routeId": "fleet-r63-mlv-r39-supervisor-integration-sonnet",
+    "lane": "sonnet",
+    "model": "claude-sonnet-5",
+    "effort": "max",
+    "role": "verifier",
+    "sessionId": "db648cd9-5cef-450e-9aad-445e53971168",
+    "packet": {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\headless-work-packets\\sonnet.json",
+      "bytes": 2031,
+      "sha256": "F8BCB0EDED1DBE52117530E80BB6601AE357E2A87496413C4B66AFE82D5C35FB"
+    },
+    "artifact": {
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\fleet-provider-capacity\\artifacts\\a55460a64212444194d117417412eb80.stdout.txt",
+      "bytes": 141775,
+      "sha256": "5D17489B3A5D02A35E06F3A87348381D660FED42064A97996F6730C665256C82"
+    },
+    "resultLine": {
+      "bytes": 5645,
+      "sha256": "67322D0EBEC021B9394E4DED25BCCD92035FC76A95648D88EFE3380227763271",
+      "subtype": "success",
+      "isError": false,
+      "verdict": "ACCEPT"
+    },
+    "consumptionReceipt": {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\headless-work-packets\\receipts\\sonnet.fleet-r63-mlv-r39-supervisor-integration-sonnet.f8bcb0eded1dbe52117530e80bb6601ae357e2a87496413c4b66afe82d5c35fb.consumed.json",
+      "bytes": 539,
+      "sha256": "7ADA2F5314253EC305B01C69CEEC4326EB734CFFFC3ADCF6F31A3EBE5C548CDE"
+    },
+    "verdict": "ACCEPT_CANDIDATE_ONLY",
+    "testExecutionPerformedByReviewer": false
+  },
+  "findingDisposition": {
+    "mergeCommitNotNamedInReviewedFiles": "CLOSED_BY_THIS_FORWARD_RECEIPT",
+    "eightAndOneHundredFortyResultsNotNamedInReviewedFiles": "CLOSED_BY_THIS_FORWARD_RECEIPT",
+    "reviewerReadOnlyExecutionLimitation": "RETAINED_TRUTHFULLY"
+  },
+  "acceptedBoundary": {
+    "functionalClosedSupervisorSourceIntegrated": true,
+    "universalRequestEnvelopeIntegrated": true,
+    "providerFreeControlSuiteIntegrated": true,
+    "productionLauncherWired": false,
+    "signedInstallation": false,
+    "runtimeActivation": false,
+    "qualityEquivalence": false,
+    "functionalityEquivalence": false,
+    "projectOwnerDisposition": false,
+    "adoption": false
+  },
+  "authority": {
+    "projectDisposition": false,
+    "fleetAdoption": false,
+    "installation": false,
+    "runtime": false,
+    "providerExecution": false,
+    "authentication": false,
+    "taskOrGateMutation": false,
+    "pushOrMerge": false
+  }
+}
