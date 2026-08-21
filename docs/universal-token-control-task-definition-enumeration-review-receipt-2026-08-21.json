@@ -1,0 +1,110 @@
+{
+  "schema": "mlv-app-universal-token-control-task-definition-review-receipt/v1",
+  "status": "ACCEPT_CANDIDATE_ONLY_ZERO_AUTHORITY",
+  "projectId": "mlv-app",
+  "candidate": {
+    "commit": "2ef9690649519d91197199d401d46fe3bb6d8dbb",
+    "tree": "fbe7b8666bc31ca3b7495f7be71c717a7692d4dd",
+    "parent": "06ea3ea5eb1329f59d2e9fdf474485c30b0cc651",
+    "artifact": {
+      "path": "docs/universal-token-control-task-definition-enumeration-candidate-2026-08-21.json",
+      "bytes": 15298,
+      "sha256": "F9E6F450461509BBF9F05200CFA73D499FF569C0CD8389261F0D4BE402D6E159"
+    },
+    "verifier": {
+      "path": "tools/verify_universal_token_control_task_definition_enumeration_candidate.py",
+      "bytes": 19696,
+      "sha256": "457F4152D8AB0F4F087938396B3ED659838CADFD765F4228A7CF56EBE11FC64F"
+    },
+    "hostileTests": {
+      "path": "tools/universal_token_control_task_definition_enumeration_candidate_hostile_tests.py",
+      "bytes": 6461,
+      "sha256": "570342491B2F7B2601951CE7F02E77B9C47719ECD8E42F62D0A913988B8A4D84"
+    }
+  },
+  "review": {
+    "routeId": "fleet-r62-mlv-r37-task-definitions-fable",
+    "lane": "fable",
+    "model": "claude-fable-5",
+    "effort": "max",
+    "role": "coordinator",
+    "availableTools": ["Read"],
+    "packet": {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\headless-work-packets\\fable.json",
+      "bytes": 2123,
+      "sha256": "DD56FDC80C75EC8776174379CC555B5C55767F6DD2C9555D23079FE4A83FE8E1"
+    },
+    "artifact": {
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\fleet-provider-capacity\\artifacts\\ecbacd1c731b4a999853464fc0071b93.stdout.txt",
+      "bytes": 131991,
+      "sha256": "55A8A414B90B06212D33656A94BB11201CE57976C68038E8D545F6F696476FE3"
+    },
+    "result": {
+      "lineNumber": 100,
+      "lineBytes": 9385,
+      "lineSha256": "36C9085A5D0E118803D5178011D54405037B55BAAFBE86D775C35D8359B409B3",
+      "resultCount": 1,
+      "subtype": "success",
+      "isError": false,
+      "sessionId": "eb44f7fd-6c07-4b4c-8373-ed59ce7a011e",
+      "structuredOutputBytes": 3809,
+      "structuredOutputSha256": "9E713B7865293025ABE1E9838BC46776B17D24E01297FEB731A82863E0757EC2",
+      "verdict": "ACCEPT"
+    },
+    "consumptionReceipt": {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\headless-work-packets\\receipts\\fable.fleet-r62-mlv-r37-task-definitions-fable.dd56fdc80c75ec8776174379cc555b5c55767f6dd2c9555d23079fe4a83fe8e1.consumed.json",
+      "bytes": 531,
+      "sha256": "E1E84C9E9138411C72DCBEBC4E2850BCE08DAA291E4411B1C123E5AE5928FCBE",
+      "authorizationId": "ceebeaa2-757a-443f-8fae-820c49079d5f",
+      "consumedAtUtc": "2026-08-21T11:38:47.5528200+00:00"
+    },
+    "lease": {
+      "sessionId": "eb44f7fd-6c07-4b4c-8373-ed59ce7a011e",
+      "state": "retired-by-directive",
+      "releasedAtLogTime": "2026-08-21T06:38:47-05:00"
+    }
+  },
+  "acceptedClaims": {
+    "allNonMicrosoftTaskDefinitionsExported": true,
+    "definitionCount": 41,
+    "unreadableDefinitionCount": 0,
+    "relevantDefinitionCount": 6,
+    "allRelevantDefinitionsAreSeparateGpuBenchFamily": true,
+    "taskDefinitionGapClosed": true,
+    "boundedRelevantHistoryGapClosed": true
+  },
+  "creditDenials": {
+    "launcherInventoryComplete": false,
+    "actionGraphComplete": false,
+    "semanticCompletenessClaimed": false,
+    "currentClosedGateProof": false,
+    "modelEffortRolePreservationProven": false,
+    "qualityEquivalence": false,
+    "functionalityEquivalence": false,
+    "installation": false,
+    "runtimeActivation": false,
+    "projectOwnerDisposition": false,
+    "adoption": false
+  },
+  "authority": {
+    "projectAdoption": false,
+    "fleetAdoption": false,
+    "dispositionCredit": false,
+    "installation": false,
+    "runtimeActivation": false,
+    "providerInvocation": false,
+    "authenticationAction": false,
+    "processSpawnResumeKill": false,
+    "schedulerOrTaskMutation": false,
+    "automationMutation": false,
+    "launcherMutation": false,
+    "automaticGateMutation": false,
+    "canaryCredit": false,
+    "mergeLandingPushRelease": false,
+    "qualityCredit": false,
+    "functionalityCredit": false,
+    "completenessCredit": false,
+    "absenceCredit": false
+  },
+  "nextLawfulStep": "Implement the project-owned exact CLOSED supervisor and request-envelope source candidate named by R37; do not install or claim adoption before separate review and installation proof."
+}
