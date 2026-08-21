@@ -677,23 +677,66 @@ def system_curl_github_query_command(
     ]
 
 
-def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
+def _live_github_json_payload(
+    repo_root: Path,
+    config: Dict[str, Any],
+    repository: str,
+    url: str,
+    *,
+    recovery_command: str,
+) -> Dict[str, Any]:
+    """Read one GitHub JSON resource through the OS-protected curl trust root."""
+
     repo_root = resolve_repo_root(repo_root)
+    if repository != CANONICAL_PROVIDER_REPOSITORY:
+        raise HygieneError("live GitHub query repository must equal the canonical repository")
+    api_prefix = f"https://api.github.com/repos/{repository}/"
+    if not isinstance(url, str) or not url.startswith(api_prefix):
+        raise HygieneError("live GitHub query URL must stay under the canonical repository API")
     process_env = _minimal_system_child_environment()
     from .brokered_closeout import closeout_max_process_output_bytes, run_bounded_closeout_process
 
     output_cap = min(closeout_max_process_output_bytes(config), 4 * 1024 * 1024)
     provider_client_identity = _trusted_system_curl_identity(repo_root, config)
-    provider_client, command = system_curl_github_query_command(repository, head_sha, output_cap)
+    provider_client = _system_curl_path()
     if str(provider_client) != provider_client_identity["path"]:
         raise HygieneError("system curl command path differs from the trusted client identity")
+    command = [
+        str(provider_client),
+        "-q",
+        "--silent",
+        "--show-error",
+        "--fail-with-body",
+        "--proto",
+        "=https",
+        "--tlsv1.2",
+        "--connect-timeout",
+        "10",
+        "--max-time",
+        "20",
+        "--max-filesize",
+        str(output_cap),
+        "--proxy",
+        "",
+        "--noproxy",
+        "*",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "User-Agent: MLV-App-candidate-acceptance/1",
+        "--header",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "--write-out",
+        "\n%{http_code}",
+        url,
+    ]
     completed = run_bounded_closeout_process(
         repo_root,
         config,
         command,
         timeout_ms=60000,
         max_output_bytes=output_cap,
-        recovery_command="restore public api.github.com HTTPS access and rerun candidate acceptance",
+        recovery_command=recovery_command,
         normalize_failure_text=False,
         env=process_env,
         resource_overrides={"profile": "provider-verification", "affinityCores": 2},
@@ -709,12 +752,84 @@ def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repos
         response = json.loads(body)
     except json.JSONDecodeError as exc:
         raise HygieneError("live GitHub provider response is malformed") from exc
-    payload = {
-        "schema": PROVIDER_SCHEMA,
+    return {
         "capturedAt": utc_now(),
         "repository": repository,
-        "headSha": head_sha,
         "providerClient": provider_client_identity,
+        "response": response,
+    }
+
+
+def live_github_issue_comment(
+    repo_root: Path,
+    config: Dict[str, Any],
+    repository: str,
+    comment_id: int,
+) -> Dict[str, Any]:
+    """Fetch one exact repository issue/PR comment from canonical GitHub."""
+
+    if not isinstance(comment_id, int) or isinstance(comment_id, bool) or comment_id <= 0:
+        raise HygieneError("live GitHub comment id must be a positive integer")
+    url = f"https://api.github.com/repos/{repository}/issues/comments/{comment_id}"
+    payload = _live_github_json_payload(
+        repo_root,
+        config,
+        repository,
+        url,
+        recovery_command="restore public api.github.com HTTPS access and rerun payload provenance validation",
+    )
+    if not isinstance(payload.get("response"), dict):
+        raise HygieneError("live GitHub issue comment response is malformed")
+    return payload
+
+
+def live_github_branch_head(
+    repo_root: Path,
+    config: Dict[str, Any],
+    repository: str,
+    branch: str,
+) -> str:
+    """Resolve one exact canonical GitHub branch through the protected provider client."""
+
+    if branch != "master":
+        raise HygieneError("live GitHub branch query is restricted to master")
+    url = f"https://api.github.com/repos/{repository}/git/ref/heads/{branch}"
+    payload = _live_github_json_payload(
+        repo_root,
+        config,
+        repository,
+        url,
+        recovery_command="restore public api.github.com HTTPS access and rerun payload provenance validation",
+    )
+    response = payload.get("response")
+    target = response.get("object") if isinstance(response, dict) else None
+    if (
+        not isinstance(response, dict)
+        or response.get("ref") != f"refs/heads/{branch}"
+        or not isinstance(target, dict)
+        or target.get("type") != "commit"
+    ):
+        raise HygieneError("live GitHub branch response is malformed")
+    return _require_sha(target.get("sha"), "live GitHub master head")
+
+
+def _live_github_provider_payload(repo_root: Path, config: Dict[str, Any], repository: str, head_sha: str) -> Dict[str, Any]:
+    head = _require_sha(head_sha, "featureHead")
+    url = f"https://api.github.com/repos/{repository}/commits/{head}/check-runs?per_page=100"
+    raw = _live_github_json_payload(
+        repo_root,
+        config,
+        repository,
+        url,
+        recovery_command="restore public api.github.com HTTPS access and rerun candidate acceptance",
+    )
+    response = raw["response"]
+    payload = {
+        "schema": PROVIDER_SCHEMA,
+        "capturedAt": raw["capturedAt"],
+        "repository": repository,
+        "headSha": head,
+        "providerClient": raw["providerClient"],
         "response": response,
     }
     if not isinstance(response, dict) or not isinstance(response.get("check_runs"), list):

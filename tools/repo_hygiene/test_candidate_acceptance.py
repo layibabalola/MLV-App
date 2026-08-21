@@ -30,6 +30,7 @@ from tools.repo_hygiene.candidate_acceptance import (
     evaluate,
     final_integration_mismatches,
     latest_summary,
+    live_github_branch_head,
     provider_surface_record,
     system_curl_github_query_command,
     surface_record,
@@ -540,6 +541,44 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertEqual("os-protected-system-curl", payload["providerClient"]["kind"])
         self.assertEqual(str(provider_client.resolve()), payload["providerClient"]["path"])
         self.assertEqual(hashlib.sha256(b"system-curl-client").hexdigest(), payload["providerClient"]["sha256"])
+
+    def test_live_github_master_head_is_provider_derived_and_exact(self) -> None:
+        response = {
+            "ref": "refs/heads/master",
+            "object": {"type": "commit", "sha": TARGET},
+        }
+        with mock.patch(
+            "tools.repo_hygiene.candidate_acceptance._live_github_json_payload",
+            return_value={"response": response},
+        ) as live:
+            self.assertEqual(
+                live_github_branch_head(
+                    self.repo_root,
+                    self.config,
+                    "layibabalola/MLV-App",
+                    "master",
+                ),
+                TARGET,
+            )
+        self.assertEqual(
+            live.call_args.args[3],
+            "https://api.github.com/repos/layibabalola/MLV-App/git/ref/heads/master",
+        )
+        for mutation in (
+            {"ref": "refs/heads/other", "object": {"type": "commit", "sha": TARGET}},
+            {"ref": "refs/heads/master", "object": {"type": "tag", "sha": TARGET}},
+            {"ref": "refs/heads/master", "object": {"type": "commit", "sha": "short"}},
+        ):
+            with self.subTest(mutation=mutation), mock.patch(
+                "tools.repo_hygiene.candidate_acceptance._live_github_json_payload",
+                return_value={"response": mutation},
+            ), self.assertRaises(HygieneError):
+                live_github_branch_head(
+                    self.repo_root,
+                    self.config,
+                    "layibabalola/MLV-App",
+                    "master",
+                )
 
     def test_live_provider_query_ignores_candidate_and_path_executable_shadowing(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1149,6 +1188,7 @@ class CandidateAcceptanceTests(unittest.TestCase):
             {
                 "tools/repo_hygiene/test_candidate_acceptance.py",
                 "tools/repo_hygiene/test_brokered_closeout.py",
+                "tools/repo_hygiene/test_vendored_native_payloads.py",
             },
             required_paths,
         )
@@ -1158,6 +1198,13 @@ class CandidateAcceptanceTests(unittest.TestCase):
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def investigation_jobs"), required_symbols)
         self.assertIn(("tools/repo_hygiene/brokered_closeout.py", "def fresh_investigation_report"), required_symbols)
         self.assertIn(("tools/repo_hygiene/candidate_acceptance.py", "def validate_for_finalize"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/candidate_acceptance.py", "def live_github_issue_comment"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/candidate_acceptance.py", "def live_github_branch_head"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/vendored_native_payloads.py", "def _verify_provider_owner_claim"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/vendored_native_payloads.py", "def _promotion_approval_body"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/vendored_native_payloads.py", "def _archive_bytes_snapshot"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/vendored_native_payloads.py", "def _load_promotion_claims"), required_symbols)
+        self.assertIn(("tools/repo_hygiene/vendored_native_payloads.py", "def _validate_promotion_verifier_unchanged"), required_symbols)
         self.assertIn("repoSweep.maxNewInvestigationsPerRun", tracked_baseline["requiredConfigKeys"])
 
         current = verify_closeout_tooling_current(ROOT, load_closeout_config(ROOT), attempt_update=False, plan_only=True)

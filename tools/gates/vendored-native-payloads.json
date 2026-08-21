@@ -42,7 +42,10 @@
   "redistribution_readiness": {
     "status": "blocked",
     "enforcement": "advisory",
+    "promotion_receipts": [],
     "blockers": [
+      "Target-owned isolated payload-promotion provider authority is NOT_INSTALLED; this receipt schema lands dormant and cannot promote redistribution readiness.",
+      "No payload has a hash-bound provenance promotion receipt plus a registered provider-verified repository-owner redistribution approval claim.",
       "No independently verified upstream checksum or reproducible build recipe is recorded for every executable payload.",
       "Only the Linux FFmpeg archive contains a redistributable license text; the other consumed archives lack complete bundled notices.",
       "The macOS Arm64 release consumes the x86_64-only ffmpegOSX.zip payload.",
