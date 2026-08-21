@@ -659,9 +659,11 @@ static void set_mlv_raw_cache_limit_megabytes_admitted(mlvObject_t * video,
                                                        frame_size);
     /* Ordinary sizing preserves the caller's prior running state even if a
      * replacement allocation fails and the old topology is retained.  An
-     * explicit enable commits running state only after materialization. */
+     * explicit enable starts a stopped cache only after materialization, but
+     * an idempotent enable keeps an already-running preserved topology live. */
     mlv_cache_restart_workers_if_needed(video,
-                                        force_running ? resized : was_running);
+                                        force_running ? (resized || was_running)
+                                                      : was_running);
 }
 
 /* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
