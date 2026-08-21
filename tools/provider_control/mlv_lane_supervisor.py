@@ -386,6 +386,84 @@ def tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
     return _tick(state_root, demand_path, shadow=False)
 
 
+_ZERO_FIELDS = (
+    "providerCalls", "providerProcesses", "inputTokens", "cachedInputTokens",
+    "reasoningTokens", "outputTokens",
+)
+
+
+def enforce_prelaunch_stop(result: Any) -> dict[str, Any]:
+    """Translate only an exact non-launch decision into a production stop receipt.
+
+    This is deliberately one-way: it has no authorization result and cannot become a
+    provider-resume seam.  Any new/unknown supervisor result must be reviewed before a
+    launcher can consume it.
+    """
+    if type(result) is not dict:
+        raise ControlError("PRELAUNCH_RESULT_INVALID")
+    common = {
+        "status", "reason", "automaticLaunchGate", "demandFingerprint", *_ZERO_FIELDS,
+    }
+    blocked = common | {"disposition", "blockers"}
+    idle = {"status", "demandFingerprint", *_ZERO_FIELDS}
+    keys = set(result)
+    source_status = result.get("status")
+    source_reason: str
+    blockers: list[str] | None = None
+    if keys == blocked:
+        if (
+            source_status != "REFUSED"
+            or result.get("reason") != "ACTIVATION_EVIDENCE_BLOCKED"
+            or result.get("automaticLaunchGate") != "CLOSED"
+            or result.get("disposition") != "DISTINGUISH"
+            or type(result.get("blockers")) is not list
+            or not result["blockers"]
+            or any(type(item) is not str or not item for item in result["blockers"])
+        ):
+            raise ControlError("PRELAUNCH_RESULT_INVALID")
+        source_reason = "ACTIVATION_EVIDENCE_BLOCKED"
+        blockers = list(result["blockers"])
+    elif keys == common:
+        if (
+            source_status != "REFUSED"
+            or result.get("reason") != "AUTOMATIC_LAUNCH_GATE_CLOSED"
+            or result.get("automaticLaunchGate") != "CLOSED"
+        ):
+            raise ControlError("PRELAUNCH_RESULT_INVALID")
+        source_reason = "AUTOMATIC_LAUNCH_GATE_CLOSED"
+    elif keys == idle:
+        if source_status not in {"IDLE_RECORDED", "IDLE_CHANGED", "IDLE_SKIPPED"}:
+            raise ControlError("PRELAUNCH_RESULT_INVALID")
+        source_reason = "NO_WORK"
+    else:
+        raise ControlError("PRELAUNCH_RESULT_INVALID")
+    fingerprint = result.get("demandFingerprint")
+    if (
+        type(fingerprint) is not str
+        or len(fingerprint) != 71
+        or not fingerprint.startswith("sha256:")
+        or any(char not in "0123456789abcdef" for char in fingerprint[7:])
+        or any(type(result.get(field)) is not int or result[field] != 0 for field in _ZERO_FIELDS)
+    ):
+        raise ControlError("PRELAUNCH_RESULT_INVALID")
+    stop = {
+        "schema": "mlv-provider-prelaunch-stop/v1",
+        "status": "STOPPED",
+        "reason": source_reason,
+        "sourceStatus": source_status,
+        "automaticLaunchGate": "CLOSED",
+        "demandFingerprint": fingerprint,
+        **{field: 0 for field in _ZERO_FIELDS},
+    }
+    if blockers is not None:
+        stop["blockers"] = blockers
+    return stop
+
+
+def prelaunch_boundary(state_root: Path, demand_path: Path) -> dict[str, Any]:
+    return enforce_prelaunch_stop(tick(state_root, demand_path))
+
+
 def shadow_tick(state_root: Path, demand_path: Path) -> dict[str, Any]:
     if os.environ.get(FAKE_ENV) != "1":
         raise ControlError("TEST_SEAM_DISABLED")
@@ -823,6 +901,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     commands = result.add_subparsers(dest="command", required=True)
     tick_cmd = commands.add_parser("tick"); tick_cmd.add_argument("--demand", type=Path, required=True)
+    prelaunch_cmd = commands.add_parser("prelaunch")
+    prelaunch_cmd.add_argument("--demand", type=Path, required=True)
     commands.add_parser("status")
     signal = commands.add_parser("observe-signal"); signal.add_argument("--event", required=True)
     fake = commands.add_parser("test-fake-provider")
@@ -839,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parser().parse_args(argv)
         if args.command == "tick": result = tick(args.state_root, args.demand)
+        elif args.command == "prelaunch": result = prelaunch_boundary(args.state_root, args.demand)
         elif args.command == "status":
             profile, bindings, supervisor_profile, inventory = load_contracts()
             enforce_state_root(args.state_root, profile, bindings)

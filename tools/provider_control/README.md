@@ -88,6 +88,16 @@ These are local fake-provider reference tests only: the slice is not installed o
 production command and does not establish SHADOW PASS, CONTAINMENT PASS, canary, adoption, or
 activation.
 
+The forward `prelaunch` command is a separate stop-only interception primitive. It runs the same
+strict production decision as `tick`, accepts only the exact CLOSED refusal or exact no-work result
+shapes, requires native integer zero for every provider/token counter, and emits
+`mlv-provider-prelaunch-stop/v1`. It has deliberately no authorization result: an unknown,
+authorization-shaped, type-coerced, or future OPEN result is `PRELAUNCH_RESULT_INVALID`. The
+tracked PowerShell wrapper exposes this command, but no scheduled task or legacy launcher points at
+it. The historically observed `MLV-LaneIgnitionWatchdog` project root and
+`ignite-dead-lanes.ps1` are absent on this machine, so this source improvement is not installation,
+runtime interception, or functionality credit.
+
 The disposition remains
 `DISTINGUISH(PENDING_INSTALLED_CHOKE_POINT_COMPLETE_ACTION_GRAPH_SHADOW_CONTAINMENT)`. The installer
 is audit-only and refuses `-Apply`. Do not enable/start the task, invoke a provider, open a gate, run

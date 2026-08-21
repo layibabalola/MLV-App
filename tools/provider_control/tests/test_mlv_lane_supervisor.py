@@ -430,11 +430,16 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(slot["shadowPassClaimed"])
         self.assertFalse(slot["containmentPassClaimed"])
         repo = ROOT.parents[1]
+        packet_commit = "50db64d71bf62da041b9a6872c893382cd7cc79b"
         for subject in packet["subjects"]:
-            path = repo / subject["path"]
             with self.subTest(path=subject["path"]):
-                self.assertEqual(path.stat().st_size, subject["bytes"])
-                self.assertEqual(supervisor.sha256_file(path)[7:], subject["sha256"])
+                raw = subprocess.run(
+                    ["git", "-C", str(repo), "cat-file", "blob",
+                     f"{packet_commit}:{subject['path']}"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
+                ).stdout
+                self.assertEqual(len(raw), subject["bytes"])
+                self.assertEqual(hashlib.sha256(raw).hexdigest(), subject["sha256"])
 
     def test_23_test_root_cannot_equal_alias_or_reparse_to_production(self):
         self.write_demand(demand(hasWork=True))
