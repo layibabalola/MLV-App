@@ -1715,21 +1715,55 @@ static void add_ifd(struct directory_entry * ifd, uint8_t * header, size_t * pos
     *position += sizeof(uint32_t);
 }
 
-static char * format_datetime(char * datetime, mlvObject_t * mlv_data)
+static char * format_datetime(char * datetime,
+                              size_t datetime_capacity,
+                              mlvObject_t * mlv_data,
+                              uint32_t frame_index)
 {
-    uint32_t seconds = mlv_data->RTCI.tm_sec + (uint32_t)((mlv_data->VIDF.timestamp - mlv_data->RTCI.timestamp) / 1000000);
-    uint32_t minutes = mlv_data->RTCI.tm_min + seconds / 60;
-    uint32_t hours = mlv_data->RTCI.tm_hour + minutes / 60;
-    uint32_t days = mlv_data->RTCI.tm_mday + hours / 24;
+    /* VIDF is mutable decode scratch and cache workers can advance it while a
+     * different frame is exported.  Bind DateTime to the indexed target frame
+     * instead, which is immutable after clip indexing. */
+    const uint64_t frame_timestamp = mlv_data->video_index[frame_index].frame_time;
+    /* MCRAW currently indexes milliseconds and CinemaDNG folders use a
+     * synthetic ordinal. Their historical DateTime behavior is clip-local
+     * RTCI with no frame offset, so preserve it until those formats expose a
+     * canonical microsecond timestamp. */
+    const int source_has_mlv_microsecond_timestamps =
+        (mlv_data->MLVI.videoClass & (MLV_VIDEO_CLASS_FLAG_MCRAW
+                                      | MLV_VIDEO_CLASS_FLAG_DNGSEQ)) == 0;
+    const uint64_t elapsed_seconds = source_has_mlv_microsecond_timestamps
+        && frame_timestamp >= mlv_data->RTCI.timestamp
+            ? (frame_timestamp - mlv_data->RTCI.timestamp) / 1000000u
+            : 0u;
+    const uint64_t seconds = (uint64_t)mlv_data->RTCI.tm_sec + elapsed_seconds;
+    const uint64_t minutes = (uint64_t)mlv_data->RTCI.tm_min + seconds / 60u;
+    const uint64_t hours = (uint64_t)mlv_data->RTCI.tm_hour + minutes / 60u;
+    const uint64_t days = (uint64_t)mlv_data->RTCI.tm_mday + hours / 24u;
     //TODO: days could also overflow in the month, but this is no longer simple modulo arithmetic like with hr:min:sec
-    sprintf(datetime, "%04d:%02d:%02d %02d:%02d:%02d",
-            1900 + mlv_data->RTCI.tm_year,
-            mlv_data->RTCI.tm_mon + 1,
-            days,
-            hours % 24,
-            minutes % 60,
-            seconds % 60);
+    snprintf(datetime,
+             datetime_capacity,
+             "%04d:%02d:%02llu %02llu:%02llu:%02llu",
+             1900 + mlv_data->RTCI.tm_year,
+             mlv_data->RTCI.tm_mon + 1,
+             (unsigned long long)days,
+             (unsigned long long)(hours % 24u),
+             (unsigned long long)(minutes % 60u),
+             (unsigned long long)(seconds % 60u));
     return datetime;
+}
+
+int dngFormatDateTimeForFrameForTesting(mlvObject_t * mlv_data,
+                                        uint32_t frame_index,
+                                        char * datetime,
+                                        size_t datetime_capacity)
+{
+    if(!mlv_data || !mlv_data->video_index || !datetime
+       || datetime_capacity == 0 || frame_index >= mlv_data->frames) {
+        return 0;
+    }
+
+    format_datetime(datetime, datetime_capacity, mlv_data, frame_index);
+    return 1;
 }
 
 /* returns the size of uncompressed image data. does not include header */
@@ -2098,7 +2132,7 @@ static void dng_fill_header(mlvObject_t * mlv_data, dngObject_t * dng_data, uint
             {tcStripByteCounts,             ttLong,     1,      dng_data->image_size},
             {tcPlanarConfiguration,         ttShort,    1,      pcInterleaved},
             {tcSoftware,                    ttAscii,    STRING_ENTRY(SOFTWARE_NAME, header, &data_offset)},
-            {tcDateTime,                    ttAscii,    STRING_ENTRY(format_datetime(datetime, mlv_data), header, &data_offset)},
+            {tcDateTime,                    ttAscii,    STRING_ENTRY(format_datetime(datetime, sizeof(datetime), mlv_data, frame_index), header, &data_offset)},
             {tcCFARepeatPatternDim,         ttShort,    2,      0x00020002}, //2x2
             {tcCFAPattern,                  ttByte,     4,      cfa_pattern},
             {tcExifIFD,                     ttLong,     1,      exif_ifd_offset},

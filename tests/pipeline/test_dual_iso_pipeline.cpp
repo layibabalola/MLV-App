@@ -56,6 +56,10 @@ extern "C" int llrawprocScaleRestrictedRangeForTesting(struct raw_info * raw_inf
                                                           int low_iso,
                                                           int high_iso);
 extern "C" void dualisoSetAmazeThreadCreateFailureForTesting(int thread_index);
+extern "C" int dngFormatDateTimeForFrameForTesting(mlvObject_t * mlv_data,
+                                                     uint32_t frame_index,
+                                                     char * datetime,
+                                                     size_t datetime_capacity);
 
 TEST(DualIsoPipeline, FourteenBitFrameSizeUsesCheckedWideArithmetic)
 {
@@ -3271,6 +3275,31 @@ TEST(DualIsoPipeline, GpuExportParityMatrixMissingDllFallbackIsByteInertAcrossCo
                 ASSERT_EQ(LLRP_GPU_EXPORT_SKIP_BACKEND_UNAVAILABLE,
                           llrpGpuExportLastSkipCodeForTesting());
 
+                preserve_gpu_export_gate_artifacts(suffix, cpu_dng, fallback_dng);
+                if (cpu_bytes != fallback_bytes) {
+                    qsizetype first_difference = -1;
+                    const qsizetype common_size = std::min(cpu_bytes.size(), fallback_bytes.size());
+                    for (qsizetype i = 0; i < common_size; ++i) {
+                        if (cpu_bytes.at(i) != fallback_bytes.at(i)) {
+                            first_difference = i;
+                            break;
+                        }
+                    }
+                    const QByteArray suffix_bytes = suffix.toLocal8Bit();
+                    std::fprintf(stderr,
+                                 "[gpu-export-missing-fallback] case=%s cpu_len=%lld "
+                                 "fallback_len=%lld first_diff=%lld cpu_byte=%u fallback_byte=%u\n",
+                                 suffix_bytes.constData(),
+                                 static_cast<long long>(cpu_bytes.size()),
+                                 static_cast<long long>(fallback_bytes.size()),
+                                 static_cast<long long>(first_difference),
+                                 first_difference >= 0
+                                     ? static_cast<unsigned int>(static_cast<unsigned char>(cpu_bytes.at(first_difference)))
+                                     : 0u,
+                                 first_difference >= 0
+                                     ? static_cast<unsigned int>(static_cast<unsigned char>(fallback_bytes.at(first_difference)))
+                                     : 0u);
+                }
                 ASSERT_TRUE(cpu_bytes == fallback_bytes);
             }
         }
@@ -3636,6 +3665,39 @@ TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
         ASSERT_TRUE(saved_bytes == payload_save_bytes);
         ASSERT_TRUE(saved_bytes == async_writer_bytes);
     }
+}
+
+TEST(DualIsoPipeline, DngDateTimeIsBoundToIndexedFrameNotMutableDecodeScratch)
+{
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    mlvObject_t * video = fixture.video();
+    ASSERT_TRUE(video != nullptr);
+    ASSERT_TRUE(video->video_index != nullptr);
+    ASSERT_TRUE(video->frames > 0);
+
+    char before[32] = {};
+    char after[32] = {};
+    ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
+                                                     0,
+                                                     before,
+                                                     sizeof(before)));
+
+    const uint64_t original_decode_timestamp = video->VIDF.timestamp;
+    video->VIDF.timestamp = original_decode_timestamp + 5000000u;
+    ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
+                                                     0,
+                                                     after,
+                                                     sizeof(after)));
+    video->VIDF.timestamp = original_decode_timestamp;
+
+    ASSERT_TRUE(std::strcmp(before, after) == 0);
+    ASSERT_TRUE(std::strlen(before) == 19u);
+    ASSERT_EQ(0, dngFormatDateTimeForFrameForTesting(video,
+                                                     video->frames,
+                                                     after,
+                                                     sizeof(after)));
 }
 
 TEST(DualIsoPipeline, DngFramePayloadReuseMatchesSaveDngFrame)
