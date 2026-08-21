@@ -202,13 +202,43 @@ class RepoHygieneTests(unittest.TestCase):
             / "repo_hygiene"
             / "sealed-real-clip-ab-receipt.schema.json"
         )
-        receipt_path = (
-            ROOT / "receipts" / "sealed-real-clip-ab-d8224107-20260820.json"
+        tracked = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--",
+                "receipts/sealed-real-clip-ab-*.json",
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        receipt_paths = [
+            ROOT / line
+            for line in tracked.stdout.splitlines()
+            if line.strip()
+        ]
+        self.assertGreater(len(receipt_paths), 0, "sealed receipt inventory is empty")
+        self.assertEqual(
+            sorted(receipt_paths),
+            receipt_paths,
+            "tracked sealed receipt inventory is not deterministic",
         )
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema)
-        validate_sealed_receipt(receipt, repo_root=ROOT, require_git_objects=True)
+        receipts = []
+        for receipt_path in receipt_paths:
+            with self.subTest(receipt=str(receipt_path.relative_to(ROOT))):
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                validate_sealed_receipt(
+                    receipt,
+                    repo_root=ROOT,
+                    require_git_objects=True,
+                )
+                receipts.append(receipt)
+
+        receipt = receipts[-1]
 
         hostile_mutations = []
         hostile = json.loads(json.dumps(receipt))
@@ -223,6 +253,11 @@ class RepoHygieneTests(unittest.TestCase):
         hostile = json.loads(json.dumps(receipt))
         hostile["clips"][0]["afterScreenshotSha256"] = "F" * 64
         hostile_mutations.append(("screenshot substitution", hostile))
+        hostile = json.loads(json.dumps(receipt))
+        hostile["clips"][0]["sameScreenshotSha256"] = False
+        hostile["clips"][0]["changedSampleRatio"] = 0.00003
+        hostile["clips"][0]["maxAbsRgbDelta"] = 6
+        hostile_mutations.append(("contradictory PASS measurement", hostile))
         hostile = json.loads(json.dumps(receipt))
         hostile["clips"].append(json.loads(json.dumps(hostile["clips"][0])))
         hostile_mutations.append(("duplicate clip", hostile))
