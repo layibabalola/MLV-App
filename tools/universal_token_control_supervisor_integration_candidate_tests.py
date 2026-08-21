@@ -19,6 +19,8 @@ FIRST_TREE = "fd6de9b74a0a2ed48fa751048ad5e215849bf9c8"
 SECOND = "50db64d71bf62da041b9a6872c893382cd7cc79b"
 SECOND_TREE = "ab58ec53414ff889eaa41a6689dde1141cc687ed"
 BASE = "30889f77e2000190b94d59f80f6a03b12ce3e0d3"
+MERGE_COMMIT = "55900233427ad1b85782859a114141ee29462511"
+MERGE_TREE = "5fdf3107dd3f22df8c732cde770fea009f9ea588"
 ARTIFACT_PATH = ARTIFACT.relative_to(ROOT).as_posix()
 TEST_PATH = Path(__file__).relative_to(ROOT).as_posix()
 PREFIXES = (
@@ -71,7 +73,10 @@ def source_paths() -> set[str]:
 
 
 def candidate_treeish() -> str:
-    return ":" if (ROOT / ".git").is_file() and git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False) else "HEAD"
+    if (ROOT / ".git").is_file() and git("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False):
+        return ":"
+    head = git("rev-parse", "HEAD").decode().strip()
+    return "HEAD" if head == MERGE_COMMIT else MERGE_COMMIT
 
 
 def verify_document(document: dict) -> None:
@@ -125,8 +130,11 @@ def verify_git_and_subjects(document: dict) -> None:
         if git("rev-parse", "HEAD").decode().strip() != FIRST or merge_head != SECOND:
             raise IntegrationError("STAGED_PARENT_INVALID")
     else:
-        if commit_tuple("HEAD")[1] != [FIRST, SECOND]:
+        if commit_tuple(MERGE_COMMIT) != (MERGE_TREE, [FIRST, SECOND]):
             raise IntegrationError("COMMITTED_PARENT_INVALID")
+        head = git("rev-parse", "HEAD").decode().strip()
+        if head != MERGE_COMMIT and commit_tuple(head)[1] != [MERGE_COMMIT]:
+            raise IntegrationError("FORWARD_DESCENDANT_INVALID")
     for path in source_paths():
         if oid(treeish, path) != oid(SECOND, path):
             raise IntegrationError("SOURCE_BLOB_DRIFT")
