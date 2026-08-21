@@ -552,11 +552,58 @@ int find_mlv_frame_to_cache(mlvObject_t * video, uint64_t * index) /* Outputs to
     return 0;
 }
 
-/* Adds one thread, active total can be checked in mlvObject->cache_thread_count */
+static volatile int g_mlv_cache_worker_pause_for_testing = 0;
+
+void mlvCacheSetWorkerStartPauseForTesting(int enabled)
+{
+    g_mlv_cache_worker_pause_for_testing = enabled != 0;
+}
+
+static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claimed);
+
+static void mlv_cache_worker_count_release(mlvObject_t * video)
+{
+    pthread_mutex_lock(&video->g_mutexCount);
+    video->cache_thread_count--;
+    pthread_mutex_unlock(&video->g_mutexCount);
+}
+
+static void * mlv_cache_thread_entry(void * opaque)
+{
+    mlvObject_t * video = (mlvObject_t *)opaque;
+    while (g_mlv_cache_worker_pause_for_testing)
+        usleep(100);
+    run_mlv_cache_thread(video, 1);
+    return NULL;
+}
+
+/* Adds one detached thread.  Claim the active count before pthread_create so
+ * object destruction cannot observe zero while a worker is pending start. */
 void add_mlv_cache_thread(mlvObject_t * video)
 {
+    if (!video) return;
+    pthread_mutex_lock(&video->g_mutexCount);
+    video->cache_thread_count++;
+    pthread_mutex_unlock(&video->g_mutexCount);
+
     pthread_t thread;
-    pthread_create(&thread, NULL, (void *)an_mlv_cache_thread, (void *)video);
+    if (pthread_create(&thread, NULL, mlv_cache_thread_entry, video) != 0)
+    {
+        mlv_cache_worker_count_release(video);
+        return;
+    }
+    if (pthread_detach(thread) != 0)
+    {
+        /* A valid newly created thread should detach.  If the platform
+         * refuses, join it here so its handle and object lifetime stay owned. */
+        (void)pthread_join(thread, NULL);
+    }
+}
+
+/* Synchronous entry retained for callers/tests; it owns its count claim. */
+void an_mlv_cache_thread(mlvObject_t * video)
+{
+    run_mlv_cache_thread(video, 0);
 }
 
 /* Add as many of these as you want :) */
@@ -567,13 +614,20 @@ void mlvCacheSetAllocationFailureForTesting(int enabled)
     g_mlv_cache_allocation_failure_for_testing = enabled != 0;
 }
 
-void an_mlv_cache_thread(mlvObject_t * video)
+static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claimed)
 {
-    if (!isMlvActive(video)) return;
-
-    pthread_mutex_lock( &video->g_mutexCount );
-    video->cache_thread_count++;
-    pthread_mutex_unlock( &video->g_mutexCount );
+    if (!video) return;
+    if (!counter_already_claimed)
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->cache_thread_count++;
+        pthread_mutex_unlock(&video->g_mutexCount);
+    }
+    if (!isMlvActive(video))
+    {
+        mlv_cache_worker_count_release(video);
+        return;
+    }
 
     uint32_t height = getMlvHeight(video);
     uint32_t width = getMlvWidth(video);
@@ -582,9 +636,7 @@ void an_mlv_cache_thread(mlvObject_t * video)
     if (width < 33 || height < 33
         || checked_width > SIZE_MAX / checked_height)
     {
-        pthread_mutex_lock(&video->g_mutexCount);
-        video->cache_thread_count--;
-        pthread_mutex_unlock(&video->g_mutexCount);
+        mlv_cache_worker_count_release(video);
         return;
     }
     const size_t pixelsize = checked_width * checked_height;
@@ -593,9 +645,7 @@ void an_mlv_cache_thread(mlvObject_t * video)
         || pixelsize > SIZE_MAX / sizeof(float)
         || checked_height > SIZE_MAX / sizeof(float *))
     {
-        pthread_mutex_lock(&video->g_mutexCount);
-        video->cache_thread_count--;
-        pthread_mutex_unlock(&video->g_mutexCount);
+        mlv_cache_worker_count_release(video);
         return;
     }
 
@@ -622,9 +672,7 @@ void an_mlv_cache_thread(mlvObject_t * video)
         free(blue2d);
         free(imagefloat2d);
         free(imagefloat1d);
-        pthread_mutex_lock(&video->g_mutexCount);
-        video->cache_thread_count--;
-        pthread_mutex_unlock(&video->g_mutexCount);
+        mlv_cache_worker_count_release(video);
         return;
     }
     for (size_t y = 0; y < checked_height; ++y)
@@ -731,9 +779,7 @@ void an_mlv_cache_thread(mlvObject_t * video)
     free(imagefloat2d);
     free(imagefloat1d);
 
-    pthread_mutex_lock( &video->g_mutexCount );
-    video->cache_thread_count--;
-    pthread_mutex_unlock( &video->g_mutexCount );
+    mlv_cache_worker_count_release(video);
 }
 
 /* Gets a freshly debayered frame every time ( temp memory should be Width * Height * sizeof(float) ) */

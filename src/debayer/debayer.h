@@ -70,4 +70,7 @@ void amazeDemosaicSetAllocationFailureForTesting(int enabled);
 /* Test-only fault injection for debayerAmaze's wrapper allocations. */
 void debayerAmazeSetAllocationFailureForTesting(int enabled);
 
+/* Test-only ordinal fault injection for multithread helper allocations. */
+void debayerAmazeSetAuxAllocationFailureForTesting(int allocation_index);
+
 #endif

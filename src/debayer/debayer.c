@@ -508,6 +508,7 @@ typedef struct
 
 static int g_debayer_amaze_thread_create_failure_for_testing = -1;
 static int g_debayer_amaze_allocation_failure_for_testing = 0;
+static int g_debayer_amaze_aux_allocation_failure_for_testing = -1;
 
 void debayerAmazeSetThreadCreateFailureForTesting(int thread_index)
 {
@@ -517,6 +518,18 @@ void debayerAmazeSetThreadCreateFailureForTesting(int thread_index)
 void debayerAmazeSetAllocationFailureForTesting(int enabled)
 {
     g_debayer_amaze_allocation_failure_for_testing = enabled != 0;
+}
+
+void debayerAmazeSetAuxAllocationFailureForTesting(int allocation_index)
+{
+    g_debayer_amaze_aux_allocation_failure_for_testing = allocation_index;
+}
+
+static void * debayer_amaze_aux_calloc(size_t count, size_t size, int allocation_index)
+{
+    if (g_debayer_amaze_aux_allocation_failure_for_testing == allocation_index)
+        return NULL;
+    return calloc(count, size);
 }
 
 static void * debayer_amaze_thread(void * opaque)
@@ -606,19 +619,17 @@ int debayerAmaze(uint16_t * __restrict debayerto, float * __restrict bayerdata, 
     else
     {
         const size_t thread_count = (size_t)threads;
-        int * startchunk_y = (int *)calloc(thread_count, sizeof(int));
-        int * endchunk_y = (int *)calloc(thread_count, sizeof(int));
-        pthread_t * thread_id = (pthread_t *)calloc(thread_count, sizeof(pthread_t));
-        amazeinfo_t * amaze_arguments = (amazeinfo_t *)calloc(thread_count, sizeof(amazeinfo_t));
+        int * startchunk_y = (int *)debayer_amaze_aux_calloc(thread_count, sizeof(int), 0);
+        int * endchunk_y = (int *)debayer_amaze_aux_calloc(thread_count, sizeof(int), 1);
+        pthread_t * thread_id = (pthread_t *)debayer_amaze_aux_calloc(thread_count, sizeof(pthread_t), 2);
+        amazeinfo_t * amaze_arguments = (amazeinfo_t *)debayer_amaze_aux_calloc(thread_count, sizeof(amazeinfo_t), 3);
         debayer_amaze_thread_arg_t * thread_arguments =
-            (debayer_amaze_thread_arg_t *)calloc(thread_count, sizeof(debayer_amaze_thread_arg_t));
+            (debayer_amaze_thread_arg_t *)debayer_amaze_aux_calloc(
+                thread_count, sizeof(debayer_amaze_thread_arg_t), 4);
         if (!startchunk_y || !endchunk_y || !thread_id || !amaze_arguments || !thread_arguments)
         {
-            free(startchunk_y);
-            free(endchunk_y);
-            free(thread_id);
-            free(amaze_arguments);
-            free(thread_arguments);
+            /* One cleanup owner below; leaving partial pointers intact avoids
+             * the historical double-free on a later common cleanup. */
             succeeded = 0;
         }
 

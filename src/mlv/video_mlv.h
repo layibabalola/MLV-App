@@ -316,6 +316,9 @@ void an_mlv_cache_thread(mlvObject_t * video);
 /* Test-only fault injection for cache-worker plane allocation. */
 void mlvCacheSetAllocationFailureForTesting(int enabled);
 
+/* Test-only barrier for validating the async launch/count lifetime contract. */
+void mlvCacheSetWorkerStartPauseForTesting(int enabled);
+
 /* Marks all frames as not cached */
 void mark_mlv_uncached(mlvObject_t * video);
 

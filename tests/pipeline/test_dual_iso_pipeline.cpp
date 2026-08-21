@@ -6198,6 +6198,7 @@ TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
         {
             debayerAmazeSetThreadCreateFailureForTesting(-1);
             debayerAmazeSetAllocationFailureForTesting(0);
+            debayerAmazeSetAuxAllocationFailureForTesting(-1);
             amazeDemosaicSetAllocationFailureForTesting(0);
         }
     } reset;
@@ -6229,6 +6230,18 @@ TEST(DualIsoPipeline, DirectAmazeFailuresDoNotPublishRgbOutput)
     ASSERT_TRUE(output == original_output);
 
     debayerAmazeSetAllocationFailureForTesting(0);
+    for (int allocation_index = 0; allocation_index < 5; ++allocation_index)
+    {
+        debayerAmazeSetAuxAllocationFailureForTesting(allocation_index);
+        ASSERT_EQ(0, debayerAmaze(output.data(),
+                                  input.data(),
+                                  width,
+                                  height,
+                                  2,
+                                  1024));
+        ASSERT_TRUE(output == original_output);
+    }
+    debayerAmazeSetAuxAllocationFailureForTesting(-1);
     /* The hostile caller count must be clamped before any storage extent or
      * chunk loop; failing worker 1 also proves partial-create cleanup. */
     debayerAmazeSetThreadCreateFailureForTesting(1);
@@ -6295,6 +6308,44 @@ TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
     ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
               static_cast<unsigned int>(fixture.video()->cached_frames[0]));
     fixture.video()->stop_caching = 1;
+}
+
+TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
+{
+    struct ScopedCacheWorkerPauseReset
+    {
+        ~ScopedCacheWorkerPauseReset()
+        {
+            mlvCacheSetWorkerStartPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    fixture.video()->stop_caching = 0;
+    mlvCacheSetWorkerStartPauseForTesting(1);
+
+    add_mlv_cache_thread(fixture.video());
+
+    pthread_mutex_lock(&fixture.video()->g_mutexCount);
+    const int reserved_worker_count = fixture.video()->cache_thread_count;
+    pthread_mutex_unlock(&fixture.video()->g_mutexCount);
+    ASSERT_EQ(1, reserved_worker_count);
+
+    fixture.video()->stop_caching = 1;
+    mlvCacheSetWorkerStartPauseForTesting(0);
+    bool stopped = false;
+    for (int attempt = 0; attempt < 5000; ++attempt)
+    {
+        pthread_mutex_lock(&fixture.video()->g_mutexCount);
+        stopped = fixture.video()->cache_thread_count == 0;
+        pthread_mutex_unlock(&fixture.video()->g_mutexCount);
+        if (stopped) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(stopped);
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
