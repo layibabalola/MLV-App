@@ -2486,6 +2486,25 @@ static void dng_reset_deferred_payload_compress(dngObject_t * dng_data)
     dng_data->payload_compress_input_bytes = 0;
 }
 
+static int dng_frame_request_is_valid(const mlvObject_t * mlv_data,
+                                      const dngObject_t * dng_data,
+                                      uint32_t frame_index)
+{
+    if(!mlv_data || !dng_data || !mlv_data->video_index
+       || frame_index >= mlv_data->frames) {
+        return 0;
+    }
+    if(isDngFolderLoaded(mlv_data)) return 1;
+    if(!mlv_data->file) return 0;
+
+    const uint16_t chunk_num = mlv_data->video_index[frame_index].chunk_num;
+    if(isMcrawLoaded(mlv_data)) {
+        return chunk_num == 0 && mlv_data->file[0];
+    }
+    return mlv_data->filenum > 0 && (int)chunk_num < mlv_data->filenum
+        && mlv_data->file[chunk_num];
+}
+
 static int dng_defer_compress_to_payload(dngObject_t * dng_data,
                                          mlvObject_t * mlv_data,
                                          uint32_t frame_index,
@@ -2552,6 +2571,8 @@ static int dng_get_frame(mlvObject_t * mlv_data,
                          exportProfileFrame_t * profile_frame,
                          int defer_compress_to_payload)
 {
+    if(!dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return 1;
+
     int ret = 0;
     double profile_stage_start = 0.0;
     dng_reset_deferred_payload_compress(dng_data);
@@ -3029,7 +3050,7 @@ dngFramePayload_t * buildDngFramePayload(mlvObject_t * mlv_data,
                                          uint32_t frame_index,
                                          const char *prop_filename)
 {
-    if(!mlv_data || !dng_data) return NULL;
+    if(!dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return NULL;
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, NULL, 0) != 0)
     {
@@ -3547,6 +3568,11 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
                                       char * dng_filename,
                                       const char *prop_filename)
 {
+    if(!writer || !dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) {
+        return 1;
+    }
+
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3554,14 +3580,6 @@ int saveDngFrameViaAsyncPayloadWriter(dngPayloadWriter_t * writer,
 
     export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
     profile_frame_start = export_profile_stage_begin(&profile_frame);
-
-    if(!writer || !dng_filename)
-    {
-        export_profile_producer_finish(&profile_frame, profile_frame_start);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
-        export_profile_frame_finish(&profile_frame, 0);
-        return 1;
-    }
 
     if(dng_get_frame(mlv_data,
                      dng_data,
@@ -3610,6 +3628,11 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
                            char * dng_filename,
                            const char *prop_filename)
 {
+    if(!dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) {
+        return 1;
+    }
+
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;
@@ -3617,14 +3640,6 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 
     export_profile_frame_begin(&profile_frame, mlv_data, dng_data, frame_index);
     profile_frame_start = export_profile_stage_begin(&profile_frame);
-
-    if(!dng_filename)
-    {
-        export_profile_producer_finish(&profile_frame, profile_frame_start);
-        export_profile_stage_end(&profile_frame, EXPORT_PROFILE_FRAME_TOTAL, profile_frame_start);
-        export_profile_frame_finish(&profile_frame, 0);
-        return 1;
-    }
 
     if(dng_get_frame(mlv_data, dng_data, frame_index, prop_filename, &profile_frame, 0) != 0)
     {
@@ -3665,7 +3680,8 @@ int saveDngFrameViaPayload(mlvObject_t * mlv_data,
 /* save DNG file */
 int saveDngFrame(mlvObject_t * mlv_data, dngObject_t * dng_data, uint32_t frame_index, char * dng_filename, const char *prop_filename)
 {
-    if(!mlv_data || !dng_data || !dng_filename) return 1;
+    if(!dng_filename
+       || !dng_frame_request_is_valid(mlv_data, dng_data, frame_index)) return 1;
     exportProfileFrame_t profile_frame;
     double profile_frame_start = 0.0;
     double profile_stage_start = 0.0;

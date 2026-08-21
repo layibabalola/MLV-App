@@ -12,6 +12,8 @@ extern "C" {
 #include "../../src/mlv/llrawproc/hist.h"
 }
 #include "../../src/dng/dng_reader.h"
+#include "../../src/dng/dng_tag_codes.h"
+#include "../../src/dng/dng_tag_types.h"
 #include "../../src/processing/raw_processing.h"
 #include "../../src/debayer/debayer.h"
 #include "../../src/batch/ReceiptApplier.h"
@@ -3669,35 +3671,220 @@ TEST(DualIsoPipeline, DngFramePayloadMatchesSaveDngFrameForPipelinePrep)
 
 TEST(DualIsoPipeline, DngDateTimeIsBoundToIndexedFrameNotMutableDecodeScratch)
 {
+    static constexpr uint16_t kDngTimeCodesTag = 51043;
     MlvPipelineFixture fixture;
     assert_fixture_ready(fixture);
 
     mlvObject_t * video = fixture.video();
     ASSERT_TRUE(video != nullptr);
     ASSERT_TRUE(video->video_index != nullptr);
-    ASSERT_TRUE(video->frames > 0);
+    ASSERT_TRUE(video->frames > 1);
 
-    char before[32] = {};
-    char after[32] = {};
+    const mlv_rtci_hdr_t original_rtci = video->RTCI;
+    const mlv_vidf_hdr_t original_vidf = video->VIDF;
+    const uint32_t original_video_class = video->MLVI.videoClass;
+    const uint64_t original_frame0_time = video->video_index[0].frame_time;
+    const uint64_t original_frame1_time = video->video_index[1].frame_time;
+
+    video->RTCI.tm_year = 126;
+    video->RTCI.tm_mon = 0;
+    video->RTCI.tm_mday = 2;
+    video->RTCI.tm_hour = 13;
+    video->RTCI.tm_min = 44;
+    video->RTCI.tm_sec = 2;
+    video->RTCI.timestamp = 1000000u;
+    video->video_index[0].frame_time = 1000000u;
+    video->video_index[1].frame_time = 62000000u;
+    video->MLVI.videoClass &= ~(MLV_VIDEO_CLASS_FLAG_MCRAW
+                                | MLV_VIDEO_CLASS_FLAG_DNGSEQ);
+
+    char frame0_datetime[32] = {};
+    char frame1_datetime[32] = {};
     ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
                                                      0,
-                                                     before,
-                                                     sizeof(before)));
-
-    const uint64_t original_decode_timestamp = video->VIDF.timestamp;
-    video->VIDF.timestamp = original_decode_timestamp + 5000000u;
+                                                     frame0_datetime,
+                                                     sizeof(frame0_datetime)));
     ASSERT_EQ(1, dngFormatDateTimeForFrameForTesting(video,
-                                                     0,
-                                                     after,
-                                                     sizeof(after)));
-    video->VIDF.timestamp = original_decode_timestamp;
+                                                     1,
+                                                     frame1_datetime,
+                                                     sizeof(frame1_datetime)));
+    ASSERT_TRUE(std::strcmp(frame0_datetime, "2026:01:02 13:44:02") == 0);
+    ASSERT_TRUE(std::strcmp(frame1_datetime, "2026:01:02 13:45:03") == 0);
 
-    ASSERT_TRUE(std::strcmp(before, after) == 0);
-    ASSERT_TRUE(std::strlen(before) == 19u);
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(video, UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+    dngFramePayload_t * frame0_payload = buildDngFramePayload(video, dng, 0, nullptr);
+    ASSERT_TRUE(frame0_payload != nullptr);
+    dngFramePayload_t * first_payload = buildDngFramePayload(video, dng, 1, nullptr);
+    ASSERT_TRUE(first_payload != nullptr);
+    video->VIDF.timestamp = original_vidf.timestamp + 5000000u;
+    dngFramePayload_t * second_payload = buildDngFramePayload(video, dng, 1, nullptr);
+    ASSERT_TRUE(second_payload != nullptr);
+
+    const QByteArray frame0_header(reinterpret_cast<const char *>(frame0_payload->header_buf),
+                                   static_cast<qsizetype>(frame0_payload->header_size));
+    const QByteArray first_header(reinterpret_cast<const char *>(first_payload->header_buf),
+                                  static_cast<qsizetype>(first_payload->header_size));
+    uint16_t datetime_type = 0;
+    uint32_t datetime_count = 0;
+    uint32_t datetime_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(first_header,
+                                    tcDateTime,
+                                    &datetime_type,
+                                    &datetime_count,
+                                    &datetime_offset));
+    ASSERT_EQ(ttAscii, datetime_type);
+    ASSERT_EQ(20u, datetime_count);
+    ASSERT_TRUE(datetime_offset + datetime_count
+                <= static_cast<uint32_t>(first_header.size()));
+    const QByteArray exported_datetime(first_header.constData() + datetime_offset,
+                                       static_cast<qsizetype>(datetime_count - 1));
+    ASSERT_TRUE(exported_datetime == QByteArrayLiteral("2026:01:02 13:45:03"));
+
+    uint16_t frame0_datetime_type = 0;
+    uint32_t frame0_datetime_count = 0;
+    uint32_t frame0_datetime_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(frame0_header,
+                                    tcDateTime,
+                                    &frame0_datetime_type,
+                                    &frame0_datetime_count,
+                                    &frame0_datetime_offset));
+    ASSERT_EQ(ttAscii, frame0_datetime_type);
+    ASSERT_EQ(20u, frame0_datetime_count);
+    ASSERT_TRUE(frame0_datetime_offset + frame0_datetime_count
+                <= static_cast<uint32_t>(frame0_header.size()));
+    const QByteArray exported_frame0_datetime(
+        frame0_header.constData() + frame0_datetime_offset,
+        static_cast<qsizetype>(frame0_datetime_count - 1));
+    ASSERT_TRUE(exported_frame0_datetime == QByteArrayLiteral("2026:01:02 13:44:02"));
+
+    uint16_t frame0_timecode_type = 0;
+    uint32_t frame0_timecode_count = 0;
+    uint32_t frame0_timecode_offset = 0;
+    uint16_t frame1_timecode_type = 0;
+    uint32_t frame1_timecode_count = 0;
+    uint32_t frame1_timecode_offset = 0;
+    ASSERT_TRUE(dng_find_ifd0_entry(frame0_header,
+                                    kDngTimeCodesTag,
+                                    &frame0_timecode_type,
+                                    &frame0_timecode_count,
+                                    &frame0_timecode_offset));
+    ASSERT_TRUE(dng_find_ifd0_entry(first_header,
+                                    kDngTimeCodesTag,
+                                    &frame1_timecode_type,
+                                    &frame1_timecode_count,
+                                    &frame1_timecode_offset));
+    ASSERT_EQ(ttByte, frame0_timecode_type);
+    ASSERT_EQ(ttByte, frame1_timecode_type);
+    ASSERT_EQ(8u, frame0_timecode_count);
+    ASSERT_EQ(8u, frame1_timecode_count);
+    ASSERT_TRUE(frame0_timecode_offset + 8u <= static_cast<uint32_t>(frame0_header.size()));
+    ASSERT_TRUE(frame1_timecode_offset + 8u <= static_cast<uint32_t>(first_header.size()));
+    ASSERT_TRUE(std::memcmp(frame0_header.constData() + frame0_timecode_offset,
+                            first_header.constData() + frame1_timecode_offset,
+                            8u) != 0);
+
+    ASSERT_EQ(first_payload->header_size, second_payload->header_size);
+    ASSERT_EQ(first_payload->image_size, second_payload->image_size);
+    ASSERT_TRUE(std::memcmp(first_payload->header_buf,
+                            second_payload->header_buf,
+                            first_payload->header_size) == 0);
+    ASSERT_TRUE(std::memcmp(first_payload->image_buf,
+                            second_payload->image_buf,
+                            first_payload->image_size) == 0);
+    freeDngFramePayload(frame0_payload);
+    freeDngFramePayload(first_payload);
+    freeDngFramePayload(second_payload);
+    freeDngObject(dng);
+
+    char non_mlv_datetime[32] = {};
+    video->MLVI.videoClass = original_video_class | MLV_VIDEO_CLASS_FLAG_MCRAW;
+    const int mcraw_format_status = dngFormatDateTimeForFrameForTesting(
+        video, 1, non_mlv_datetime, sizeof(non_mlv_datetime));
+    const bool mcraw_datetime_preserved =
+        std::strcmp(non_mlv_datetime, "2026:01:02 13:44:02") == 0;
+    video->MLVI.videoClass = original_video_class | MLV_VIDEO_CLASS_FLAG_DNGSEQ;
+    const int dngseq_format_status = dngFormatDateTimeForFrameForTesting(
+        video, 1, non_mlv_datetime, sizeof(non_mlv_datetime));
+    const bool dngseq_datetime_preserved =
+        std::strcmp(non_mlv_datetime, "2026:01:02 13:44:02") == 0;
+
+    video->RTCI = original_rtci;
+    video->VIDF = original_vidf;
+    video->MLVI.videoClass = original_video_class;
+    video->video_index[0].frame_time = original_frame0_time;
+    video->video_index[1].frame_time = original_frame1_time;
+
+    ASSERT_EQ(1, mcraw_format_status);
+    ASSERT_TRUE(mcraw_datetime_preserved);
+    ASSERT_EQ(1, dngseq_format_status);
+    ASSERT_TRUE(dngseq_datetime_preserved);
     ASSERT_EQ(0, dngFormatDateTimeForFrameForTesting(video,
                                                      video->frames,
-                                                     after,
-                                                     sizeof(after)));
+                                                     frame0_datetime,
+                                                     sizeof(frame0_datetime)));
+}
+
+TEST(DualIsoPipeline, DngPublicExportApisRejectInvalidFrameBeforePublishingOutput)
+{
+    QTemporaryDir temp_dir;
+    ASSERT_TRUE(temp_dir.isValid());
+    MlvPipelineFixture fixture;
+    assert_fixture_ready(fixture);
+
+    int32_t par[4] = { 1, 1, 1, 1 };
+    dngObject_t * dng = initDngObject(fixture.video(), UNCOMPRESSED_RAW, 1.0, par);
+    ASSERT_TRUE(dng != nullptr);
+    const uint32_t invalid_frame = fixture.video()->frames;
+    const QString direct_path = temp_dir.filePath(QStringLiteral("invalid-direct.dng"));
+    const QString payload_path = temp_dir.filePath(QStringLiteral("invalid-payload.dng"));
+    const QString async_path = temp_dir.filePath(QStringLiteral("invalid-async.dng"));
+    QByteArray direct_path_bytes = direct_path.toLocal8Bit();
+    QByteArray payload_path_bytes = payload_path.toLocal8Bit();
+    QByteArray async_path_bytes = async_path.toLocal8Bit();
+
+    ASSERT_TRUE(buildDngFramePayload(fixture.video(), dng, invalid_frame, nullptr) == nullptr);
+    ASSERT_EQ(1, saveDngFrame(fixture.video(),
+                              dng,
+                              invalid_frame,
+                              direct_path_bytes.data(),
+                              nullptr));
+    ASSERT_TRUE(!QFile::exists(direct_path));
+    ASSERT_EQ(1, saveDngFrameViaPayload(fixture.video(),
+                                        dng,
+                                        invalid_frame,
+                                        payload_path_bytes.data(),
+                                        nullptr));
+    ASSERT_TRUE(!QFile::exists(payload_path));
+
+    dngPayloadWriter_t * writer = createDngPayloadWriter();
+    ASSERT_TRUE(writer != nullptr);
+    ASSERT_EQ(1, saveDngFrameViaAsyncPayloadWriter(writer,
+                                                   fixture.video(),
+                                                   dng,
+                                                   invalid_frame,
+                                                   async_path_bytes.data(),
+                                                   nullptr));
+    ASSERT_EQ(0, finishDngPayloadWriter(writer));
+    ASSERT_TRUE(!QFile::exists(async_path));
+
+    ASSERT_TRUE(fixture.video()->filenum > 0);
+    const uint16_t original_chunk = fixture.video()->video_index[0].chunk_num;
+    fixture.video()->video_index[0].chunk_num =
+        static_cast<uint16_t>(fixture.video()->filenum);
+    const QString invalid_chunk_path =
+        temp_dir.filePath(QStringLiteral("invalid-chunk.dng"));
+    QByteArray invalid_chunk_path_bytes = invalid_chunk_path.toLocal8Bit();
+    const int invalid_chunk_status = saveDngFrame(fixture.video(),
+                                                  dng,
+                                                  0,
+                                                  invalid_chunk_path_bytes.data(),
+                                                  nullptr);
+    fixture.video()->video_index[0].chunk_num = original_chunk;
+    ASSERT_EQ(1, invalid_chunk_status);
+    ASSERT_TRUE(!QFile::exists(invalid_chunk_path));
+    freeDngObject(dng);
 }
 
 TEST(DualIsoPipeline, DngFramePayloadReuseMatchesSaveDngFrame)
