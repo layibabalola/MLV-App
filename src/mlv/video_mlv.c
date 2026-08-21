@@ -8092,7 +8092,6 @@ void freeMlvObject(mlvObject_t * video)
     pthread_mutex_lock(&video->g_mutexCount);
     video->cache_closing = 1;
     video->stop_caching = 1;
-    isMlvActive(video) = 0;
     pthread_mutex_unlock(&video->g_mutexCount);
     for (;;)
     {
@@ -8103,6 +8102,13 @@ void freeMlvObject(mlvObject_t * video)
         if (!cache_busy) break;
         usleep(100);
     }
+
+    /* is_active is read by admitted cache transactions and claimed workers.
+     * Publish the inactive state only after both populations have drained, so
+     * teardown never races those readers or changes an in-flight transaction. */
+    pthread_mutex_lock(&video->g_mutexCount);
+    isMlvActive(video) = 0;
+    pthread_mutex_unlock(&video->g_mutexCount);
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     video->processed8_prefetch_stop = 1;

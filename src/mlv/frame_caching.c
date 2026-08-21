@@ -637,27 +637,31 @@ static void set_mlv_raw_cache_limit_megabytes_admitted(mlvObject_t * video,
     {
         video->cache_limit_mb = megaByteLimit;
         video->cache_limit_bytes = bytes_limit;
+        if (force_running)
+        {
+            pthread_mutex_lock(&video->g_mutexCount);
+            video->stop_caching = 0;
+            pthread_mutex_unlock(&video->g_mutexCount);
+        }
         return;
     }
     if (!mlv_cache_checked_frame_layout(video, &frame_pix, &frame_size))
         return;
     const uint64_t frame_limit = MIN(bytes_limit / frame_size, getMlvFrames(video));
 
-    if (force_running)
-    {
-        pthread_mutex_lock(&video->g_mutexCount);
-        video->stop_caching = 0;
-        pthread_mutex_unlock(&video->g_mutexCount);
-    }
-    const int has_caching = mlv_cache_quiesce_workers(video);
+    const int was_running = mlv_cache_quiesce_workers(video);
     mlv_cache_pause_lifecycle_for_testing();
-    (void)mlv_cache_resize_transactional(video,
-                                         frame_limit,
-                                         bytes_limit,
-                                         megaByteLimit,
-                                         frame_pix,
-                                         frame_size);
-    mlv_cache_restart_workers_if_needed(video, has_caching);
+    const int resized = mlv_cache_resize_transactional(video,
+                                                       frame_limit,
+                                                       bytes_limit,
+                                                       megaByteLimit,
+                                                       frame_pix,
+                                                       frame_size);
+    /* Ordinary sizing preserves the caller's prior running state even if a
+     * replacement allocation fails and the old topology is retained.  An
+     * explicit enable commits running state only after materialization. */
+    mlv_cache_restart_workers_if_needed(video,
+                                        force_running ? resized : was_running);
 }
 
 /* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
@@ -1133,9 +1137,10 @@ static int get_mlv_raw_frame_debayered_checked( mlvObject_t * video,
     {
         uint16_t * raw_frame_u16 = (uint16_t *)temp_memory;
         int bit_shift = 0;
-        int raw_failed = isolated_analysis
-            ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
-            : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift);
+        const int raw_failed = g_mlv_cache_raw_acquisition_failure_for_testing
+            || (isolated_analysis
+                ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
+                : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift));
         if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
@@ -1157,9 +1162,10 @@ static int get_mlv_raw_frame_debayered_checked( mlvObject_t * video,
     {
         uint16_t * raw_frame_u16 = (uint16_t *)temp_memory;
         int bit_shift = 0;
-        int raw_failed = isolated_analysis
-            ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
-            : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift);
+        const int raw_failed = g_mlv_cache_raw_acquisition_failure_for_testing
+            || (isolated_analysis
+                ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
+                : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift));
         if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));

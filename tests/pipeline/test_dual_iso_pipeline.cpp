@@ -6327,26 +6327,31 @@ TEST(DualIsoPipeline, CacheRawAcquisitionFailureDoesNotPublishBlackFrame)
     QString error;
     ASSERT_TRUE(fixture.openTinyDualIso(&error));
     ASSERT_TRUE(error.isEmpty());
-    setMlvAlwaysUseAmaze(fixture.video());
     setMlvRawCacheLimitFrames(fixture.video(), 1);
     ASSERT_TRUE(fixture.video()->cache_memory_block != nullptr);
     const size_t frame_words = static_cast<size_t>(fixture.width())
         * static_cast<size_t>(fixture.height()) * 3u;
-    std::fill_n(fixture.video()->cache_memory_block,
-                frame_words,
-                static_cast<uint16_t>(0x5a5a));
-    mark_mlv_uncached(fixture.video());
-
     mlvCacheSetRawAcquisitionFailureForTesting(1);
-    mlvCacheSetStop(fixture.video(), 0);
-    an_mlv_cache_thread(fixture.video());
+    for (int debayer_mode = 0; debayer_mode < 2; ++debayer_mode)
+    {
+        if (debayer_mode == 0)
+            setMlvDontAlwaysUseAmaze(fixture.video());
+        else
+            setMlvAlwaysUseAmaze(fixture.video());
+        std::fill_n(fixture.video()->cache_memory_block,
+                    frame_words,
+                    static_cast<uint16_t>(0x5a5a));
+        mark_mlv_uncached(fixture.video());
+        mlvCacheSetStop(fixture.video(), 0);
+        an_mlv_cache_thread(fixture.video());
 
-    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
-    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
-              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
-    ASSERT_TRUE(std::all_of(fixture.video()->cache_memory_block,
-                            fixture.video()->cache_memory_block + frame_words,
-                            [](uint16_t value) { return value == 0x5a5a; }));
+        ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+        ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+                  static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+        ASSERT_TRUE(std::all_of(fixture.video()->cache_memory_block,
+                                fixture.video()->cache_memory_block + frame_words,
+                                [](uint16_t value) { return value == 0x5a5a; }));
+    }
     mlvCacheSetStop(fixture.video(), 1);
 }
 
@@ -6628,7 +6633,13 @@ TEST(DualIsoPipeline, CacheLifecycleSerializesOverlappingReplacementTransactions
         std::this_thread::yield();
     for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    ASSERT_TRUE(mlvCacheLifecyclePausedForTesting());
+    const bool lifecycle_paused = mlvCacheLifecyclePausedForTesting();
+    if (!lifecycle_paused)
+    {
+        mlvCacheSetLifecyclePauseForTesting(0);
+        clear_thread.join();
+    }
+    ASSERT_TRUE(lifecycle_paused);
 
     std::atomic<bool> resize_started{false};
     std::atomic<bool> resize_finished{false};
@@ -6719,6 +6730,56 @@ TEST(DualIsoPipeline, CacheDisableThenQueuedEnablePublishesEnabledStateAtomicall
     mlvCacheSetStop(opened.value, 1);
     while (mlvCacheWorkerCount(opened.value))
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+TEST(DualIsoPipeline, CacheEnableCommitsRunningStateOnlyAfterMaterialization)
+{
+    struct ScopedResizeFailureReset
+    {
+        ~ScopedResizeFailureReset()
+        {
+            mlvCacheSetResizeAllocationFailureForTesting(-1);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    ASSERT_TRUE(mlvCacheShouldStop(fixture.video()));
+    ASSERT_EQ(static_cast<uint64_t>(0),
+              getMlvRawCacheLimitFrames(fixture.video()));
+
+    for (int allocation_index = 0; allocation_index < 2; ++allocation_index)
+    {
+        mlvCacheSetResizeAllocationFailureForTesting(allocation_index);
+        enableMlvCaching(fixture.video());
+        ASSERT_TRUE(mlvCacheShouldStop(fixture.video()));
+        ASSERT_EQ(static_cast<uint64_t>(0),
+                  getMlvRawCacheLimitFrames(fixture.video()));
+        ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    }
+
+    mlvCacheSetResizeAllocationFailureForTesting(-1);
+    enableMlvCaching(fixture.video());
+    ASSERT_TRUE(!mlvCacheShouldStop(fixture.video()));
+    ASSERT_TRUE(getMlvRawCacheLimitFrames(fixture.video()) > 0);
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+TEST(DualIsoPipeline, CacheEnableRecordsRunningIntentWhileInactive)
+{
+    mlvObject_t * video = initMlvObject();
+    ASSERT_TRUE(video != nullptr);
+    mlvCacheSetStop(video, 1);
+    ASSERT_TRUE(mlvCacheShouldStop(video));
+    enableMlvCaching(video);
+    ASSERT_TRUE(!mlvCacheShouldStop(video));
+    ASSERT_EQ(static_cast<uint64_t>(290),
+              getMlvRawCacheLimitMegaBytes(video));
+    freeMlvObject(video);
 }
 
 TEST(DualIsoPipeline, CacheInvalidationPreventsStaleWorkerFromWritingSharedSlot)
@@ -6854,12 +6915,18 @@ TEST(DualIsoPipeline, CacheTeardownWaitsForAdmittedLifecycleTransaction)
     while (!free_started.load(std::memory_order_acquire))
         std::this_thread::yield();
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    ASSERT_FALSE(clear_finished.load(std::memory_order_acquire));
-    ASSERT_FALSE(free_finished.load(std::memory_order_acquire));
+    pthread_mutex_lock(&video->g_mutexCount);
+    const int active_while_admitted_owner_is_draining = isMlvActive(video);
+    pthread_mutex_unlock(&video->g_mutexCount);
+    const bool clear_was_blocked = !clear_finished.load(std::memory_order_acquire);
+    const bool free_was_blocked = !free_finished.load(std::memory_order_acquire);
 
     mlvCacheSetLifecyclePauseForTesting(0);
     clear_thread.join();
     free_thread.join();
+    ASSERT_TRUE(clear_was_blocked);
+    ASSERT_TRUE(free_was_blocked);
+    ASSERT_NE(0, active_while_admitted_owner_is_draining);
     ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
     ASSERT_TRUE(free_finished.load(std::memory_order_acquire));
 }

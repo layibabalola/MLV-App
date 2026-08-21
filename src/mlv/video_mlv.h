@@ -78,7 +78,13 @@ enum export_mode { MLV_FAST_PASS, MLV_COMPRESS, MLV_DECOMPRESS, MLV_AVERAGED_FRA
 /* from darkframe.c */
 extern int df_init(mlvObject_t * video);
 
-/* Frees all memory and closes file */
+/* Frees all memory and closes file.
+ *
+ * Lifetime contract: the caller must stop and join foreground render/UI/API
+ * users before calling this function.  freeMlvObject fences the asynchronous
+ * workers owned by the object (including cache workers and admitted cache
+ * topology operations); cache lifecycle admission is not a general external
+ * reference count for arbitrary concurrent render calls. */
 void freeMlvObject(mlvObject_t * video);
 
 /* To enable and disable caching */
