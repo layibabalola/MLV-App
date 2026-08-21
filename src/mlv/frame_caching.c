@@ -81,7 +81,46 @@ void mlvCacheSetStop(mlvObject_t * video, int stop)
 {
     if (!video) return;
     pthread_mutex_lock(&video->g_mutexCount);
-    video->stop_caching = stop != 0;
+    if (!video->cache_closing || stop)
+        video->stop_caching = stop != 0;
+    pthread_mutex_unlock(&video->g_mutexCount);
+}
+
+/* Claim lifecycle admission before waiting on the serialization mutex.  The
+ * claim lets teardown close admission and wait for both the current owner and
+ * already-queued callers without destroying a mutex beneath a waiter. */
+static int mlv_cache_lifecycle_enter(mlvObject_t * video)
+{
+    if (!video) return 0;
+    pthread_mutex_lock(&video->g_mutexCount);
+    if (video->cache_closing)
+    {
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return 0;
+    }
+    video->cache_lifecycle_users++;
+    pthread_mutex_unlock(&video->g_mutexCount);
+
+    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    pthread_mutex_lock(&video->g_mutexCount);
+    const int closing = video->cache_closing;
+    pthread_mutex_unlock(&video->g_mutexCount);
+    if (closing)
+    {
+        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->cache_lifecycle_users--;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return 0;
+    }
+    return 1;
+}
+
+static void mlv_cache_lifecycle_leave(mlvObject_t * video)
+{
+    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    pthread_mutex_lock(&video->g_mutexCount);
+    video->cache_lifecycle_users--;
     pthread_mutex_unlock(&video->g_mutexCount);
 }
 
@@ -277,10 +316,10 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
 {
     if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0) return;
 
-    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!mlv_cache_lifecycle_enter(video)) return;
     if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0)
     {
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
 
@@ -290,7 +329,7 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     pthread_mutex_unlock( &video->g_mutexFind );
     if (in_window)
     {
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
 
@@ -328,7 +367,7 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     {
         add_mlv_cache_thread(video);
     }
-    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    mlv_cache_lifecycle_leave(video);
 }
 
 void mlv_cache_request_playback_preroll(mlvObject_t * video,
@@ -427,7 +466,7 @@ static void mlv_cache_pause_lifecycle_for_testing(void);
 void disableMlvCaching(mlvObject_t * video)
 {
     if (!video) return;
-    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!mlv_cache_lifecycle_enter(video)) return;
     (void)mlv_cache_quiesce_workers(video);
     mlv_cache_pause_lifecycle_for_testing();
     /* Remove the memory (it's a tradition in MLV App libraries to leave a couple of bytes). */
@@ -446,13 +485,13 @@ void disableMlvCaching(mlvObject_t * video)
         pthread_mutex_unlock(&video->g_mutexFind);
         free(old_block);
         free(old_frames);
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     pthread_mutex_unlock(&video->g_mutexFind);
     free(replacement);
     free(replacement_frames);
-    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    mlv_cache_lifecycle_leave(video);
 }
 
 void enableMlvCaching(mlvObject_t * video)
@@ -596,10 +635,10 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
         return;
     const uint64_t frame_limit = MIN(bytes_limit / frame_size, getMlvFrames(video));
 
-    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!mlv_cache_lifecycle_enter(video)) return;
     if (!isMlvActive(video))
     {
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     const int has_caching = mlv_cache_quiesce_workers(video);
@@ -611,7 +650,7 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
                                          frame_pix,
                                          frame_size);
     mlv_cache_restart_workers_if_needed(video, has_caching);
-    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    mlv_cache_lifecycle_leave(video);
 }
 
 /* Not recommended */
@@ -630,10 +669,10 @@ void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
     const uint64_t bytes_limit = frame_size * frame_limit;
     const uint64_t mbyte_limit = bytes_limit / (1u << 20);
 
-    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!mlv_cache_lifecycle_enter(video)) return;
     if (!isMlvActive(video))
     {
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     const int has_caching = mlv_cache_quiesce_workers(video);
@@ -645,7 +684,7 @@ void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
                                          frame_pix,
                                          frame_size);
     mlv_cache_restart_workers_if_needed(video, has_caching);
-    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    mlv_cache_lifecycle_leave(video);
 }
 
 /* Marks all frames as not cached */
@@ -660,7 +699,7 @@ void mark_mlv_uncached(mlvObject_t * video)
 void clear_mlv_cache(mlvObject_t * video)
 {
     if (!video) return;
-    pthread_mutex_lock(&video->g_mutexCacheLifecycle);
+    if (!mlv_cache_lifecycle_enter(video)) return;
     const int restart = mlv_cache_quiesce_workers(video);
     mlv_cache_pause_lifecycle_for_testing();
     uint64_t frame_pixels = 0;
@@ -670,14 +709,14 @@ void clear_mlv_cache(mlvObject_t * video)
         || (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit))
     {
         mlv_cache_restart_workers_if_needed(video, restart);
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     const uint64_t block_bytes_u64 = frame_size * frame_limit;
     if (block_bytes_u64 > SIZE_MAX)
     {
         mlv_cache_restart_workers_if_needed(video, restart);
-        pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     const size_t bytes = block_bytes_u64 ? (size_t)block_bytes_u64 : 2u;
@@ -697,7 +736,7 @@ void clear_mlv_cache(mlvObject_t * video)
         free(old_block);
     }
     mlv_cache_restart_workers_if_needed(video, restart);
-    pthread_mutex_unlock(&video->g_mutexCacheLifecycle);
+    mlv_cache_lifecycle_leave(video);
 }
 
 /* Returns 1 on success, or 0 if all are cached */
@@ -819,6 +858,12 @@ static void mlv_cache_pause_before_publish_for_testing(void)
 }
 
 static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claimed);
+static int get_mlv_raw_frame_debayered_checked(mlvObject_t * video,
+                                               uint64_t frame_index,
+                                               float * temp_memory,
+                                               uint16_t * output_frame,
+                                               int debayer_type,
+                                               int isolated_analysis);
 
 static void mlv_cache_worker_count_release(mlvObject_t * video)
 {
@@ -845,6 +890,11 @@ void add_mlv_cache_thread(mlvObject_t * video)
 {
     if (!video) return;
     pthread_mutex_lock(&video->g_mutexCount);
+    if (video->cache_closing || video->stop_caching || !isMlvActive(video))
+    {
+        pthread_mutex_unlock(&video->g_mutexCount);
+        return;
+    }
     video->cache_thread_count++;
     pthread_mutex_unlock(&video->g_mutexCount);
 
@@ -882,6 +932,11 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
     if (!counter_already_claimed)
     {
         pthread_mutex_lock(&video->g_mutexCount);
+        if (video->cache_closing || !isMlvActive(video))
+        {
+            pthread_mutex_unlock(&video->g_mutexCount);
+            return;
+        }
         video->cache_thread_count++;
         pthread_mutex_unlock(&video->g_mutexCount);
     }
@@ -914,57 +969,20 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
 
     /* 2d array uglyness */
     const int force_allocation_failure = g_mlv_cache_allocation_failure_for_testing;
-    float  * __restrict imagefloat1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict imagefloat2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
-    float  * __restrict red1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict red2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
-    float  * __restrict green1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict green2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
-    float  * __restrict blue1d = force_allocation_failure ? NULL : (float *)malloc(pixelsize * sizeof(float));
-    float ** __restrict blue2d = force_allocation_failure ? NULL : (float **)malloc(checked_height * sizeof(float *));
+    float * __restrict imagefloat1d = force_allocation_failure
+        ? NULL
+        : (float *)malloc(pixelsize * sizeof(float));
     const size_t publish_words = pixelsize * 3u;
     uint16_t * __restrict publish_frame = force_allocation_failure
         ? NULL
         : (uint16_t *)malloc(publish_words * sizeof(uint16_t));
-    if (!imagefloat1d || !imagefloat2d
-        || !red1d || !red2d
-        || !green1d || !green2d
-        || !blue1d || !blue2d || !publish_frame)
+    if (!imagefloat1d || !publish_frame)
     {
-        free(red1d);
-        free(red2d);
-        free(green1d);
-        free(green2d);
-        free(blue1d);
-        free(blue2d);
-        free(imagefloat2d);
         free(imagefloat1d);
         free(publish_frame);
         mlv_cache_worker_count_release(video);
         return;
     }
-    for (size_t y = 0; y < checked_height; ++y)
-    {
-        const size_t row_offset = y * checked_width;
-        imagefloat2d[y] = imagefloat1d + row_offset;
-        red2d[y] = red1d + row_offset;
-        green2d[y] = green1d + row_offset;
-        blue2d[y] = blue1d + row_offset;
-    }
-
-    pthread_mutex_lock( &video->g_mutexCount );
-    amazeinfo_t amaze_params = {
-        .rawData =  imagefloat2d,
-        .red     =  red2d,
-        .green   =  green2d,
-        .blue    =  blue2d,
-        .winx    =  0,
-        .winy    =  0,
-        .winw    =  getMlvWidth(video),
-        .winh    =  getMlvHeight(video),
-        .cfa     =  0
-    };
-    pthread_mutex_unlock( &video->g_mutexCount );
 
     while (1 < 2)
     {
@@ -987,10 +1005,16 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
         video->cached_frames[cache_frame] = MLV_FRAME_BEING_CACHED;
         pthread_mutex_unlock( &video->g_mutexFind );
 
-        getMlvRawFrameFloat(video, cache_frame, imagefloat1d);
-
-        /* Single thread AMaZE */
-        const int demosaic_succeeded = demosaic(&amaze_params);
+        /* Use the same checked raw-processing, WB, CA and debayer path as the
+         * foreground reader.  The historical cache-local approximation
+         * skipped WB/CA and left a different RGB result in shared storage. */
+        const int demosaic_succeeded =
+            get_mlv_raw_frame_debayered_checked(video,
+                                                cache_frame,
+                                                imagefloat1d,
+                                                publish_frame,
+                                                doesMlvAlwaysUseAmaze(video),
+                                                0);
 
         if (!demosaic_succeeded)
         {
@@ -1008,16 +1032,9 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
             break;
         }
 
-        /* Convert into worker-private storage.  A generation change may make
-         * the former shared slot reusable, so no shared byte is touched until
-         * the final generation/status check under g_mutexFind. */
-        for (size_t i = 0; i < pixelsize - 10u; i++)
-        {
-            uint16_t * pix = publish_frame + (i * 3u);
-            pix[0] = (uint16_t)MIN(red1d[i], 65535);
-            pix[1] = (uint16_t)MIN(green1d[i], 65535);
-            pix[2] = (uint16_t)MIN(blue1d[i], 65535);
-        }
+        /* The complete foreground-equivalent frame is worker-private.  A
+         * generation change may make the former shared slot reusable, so no
+         * shared byte is touched until the final check under g_mutexFind. */
         mlv_cache_pause_before_publish_for_testing();
 
         pthread_mutex_lock( &video->g_mutexFind );
@@ -1029,7 +1046,7 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
             const uint64_t cache_slot = mlv_cache_slot_for_frame(video, cache_frame);
             memcpy(video->rgb_raw_frames[cache_slot],
                    publish_frame,
-                   (pixelsize - 10u) * 3u * sizeof(uint16_t));
+                   publish_words * sizeof(uint16_t));
             video->cached_frames[cache_frame] = MLV_FRAME_IS_CACHED;
         }
         else if (!stale_generation
@@ -1039,19 +1056,9 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
         }
         pthread_mutex_unlock( &video->g_mutexFind );
 
-        if (stale_generation)
-            break;
-
         DEBUG( printf("Debayered frame %llu/%llu has been cached.\n", cache_frame+1, video->cache_limit_frames); )
     }
 
-    free(red1d);
-    free(red2d);
-    free(green1d);
-    free(green2d);
-    free(blue1d);
-    free(blue2d);
-    free(imagefloat2d);
     free(imagefloat1d);
     free(publish_frame);
 
@@ -1083,12 +1090,12 @@ static int get_mlv_raw_frame_float_isolated_analysis(mlvObject_t * video,
     return 0;
 }
 
-static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
-                                              uint64_t frame_index,
-                                              float * temp_memory,
-                                              uint16_t * output_frame,
-                                              int debayer_type,
-                                              int isolated_analysis ) /* 0=bilinear 1=amaze ... */
+static int get_mlv_raw_frame_debayered_checked( mlvObject_t * video,
+                                                uint64_t frame_index,
+                                                float * temp_memory,
+                                                uint16_t * output_frame,
+                                                int debayer_type,
+                                                int isolated_analysis ) /* 0=bilinear 1=amaze ... */
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
@@ -1105,7 +1112,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
         if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
-            return;
+            return 0;
         }
 
         const double debayer_kernel_start = mlv_debayer_timing_now_seconds();
@@ -1116,7 +1123,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
                         debayer_threads,
                         bit_shift);
         g_mlv_last_debayer_kernel_ms = (mlv_debayer_timing_now_seconds() - debayer_kernel_start) * 1000.0;
-        return;
+        return 1;
     }
 
     if( debayer_type == 2 )
@@ -1129,7 +1136,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
         if (raw_failed)
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
-            return;
+            return 0;
         }
 
         const double debayer_kernel_start = mlv_debayer_timing_now_seconds();
@@ -1140,7 +1147,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
                        debayer_threads,
                        bit_shift);
         g_mlv_last_debayer_kernel_ms = (mlv_debayer_timing_now_seconds() - debayer_kernel_start) * 1000.0;
-        return;
+        return 1;
     }
 
     /* Get the raw data in B&W */
@@ -1149,7 +1156,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
         if (get_mlv_raw_frame_float_isolated_analysis(video, frame_index, temp_memory))
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
-            return;
+            return 0;
         }
     }
     else
@@ -1173,6 +1180,11 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
             const double ca_start = mlv_debayer_timing_now_seconds();
             /* 2d array for CA correction */
             float ** __restrict imagefloat2d = (float **)malloc(height * sizeof(float *));
+            if (!imagefloat2d)
+            {
+                memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
+                return 0;
+            }
             for (int y = 0; y < height; ++y) imagefloat2d[y] = (float *)(temp_memory+(y*width));
 
             /* the magic CA correction function */
@@ -1182,6 +1194,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
 
             lrtpCaCorrect( imagefloat2d, 0, 0, width, height,
                            0, 0, video->ca_red, video->ca_blue, 0 );
+            free(imagefloat2d);
             g_mlv_last_debayer_ca_ms = (mlv_debayer_timing_now_seconds() - ca_start) * 1000.0;
         }
     }
@@ -1203,7 +1216,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
                           getMlvBlackLevel(video)))
         {
             memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
-            return;
+            return 0;
         }
     }
     else if(debayer_type == 2 || debayer_type == 3)
@@ -1265,6 +1278,7 @@ static void get_mlv_raw_frame_debayered_impl( mlvObject_t * video,
             : "get_mlv_raw_frame_debayered";
         mlv_pipeline_capture(frame_index, output_frame, &meta);
     }
+    return 1;
 }
 
 void get_mlv_raw_frame_debayered( mlvObject_t * video,
@@ -1273,12 +1287,12 @@ void get_mlv_raw_frame_debayered( mlvObject_t * video,
                                   uint16_t * output_frame,
                                   int debayer_type ) /* 0=bilinear 1=amaze ... */
 {
-    get_mlv_raw_frame_debayered_impl(video,
-                                     frame_index,
-                                     temp_memory,
-                                     output_frame,
-                                     debayer_type,
-                                     0);
+    (void)get_mlv_raw_frame_debayered_checked(video,
+                                              frame_index,
+                                              temp_memory,
+                                              output_frame,
+                                              debayer_type,
+                                              0);
 }
 
 void get_mlv_raw_frame_debayered_isolated_analysis( mlvObject_t * video,
@@ -1287,10 +1301,10 @@ void get_mlv_raw_frame_debayered_isolated_analysis( mlvObject_t * video,
                                                     uint16_t * output_frame,
                                                     int debayer_type ) /* 0=bilinear 1=amaze ... */
 {
-    get_mlv_raw_frame_debayered_impl(video,
-                                     frame_index,
-                                     temp_memory,
-                                     output_frame,
-                                     debayer_type,
-                                     1);
+    (void)get_mlv_raw_frame_debayered_checked(video,
+                                              frame_index,
+                                              temp_memory,
+                                              output_frame,
+                                              debayer_type,
+                                              1);
 }

@@ -8085,11 +8085,24 @@ mlvObject_t * initMlvObject()
 /* Free all memory and close file */
 void freeMlvObject(mlvObject_t * video)
 {
+    if (!video) return;
+    /* Close admission atomically with worker claims.  Existing lifecycle
+     * owners/waiters and workers retain the object until they drain; no new
+     * cache operation or detached worker can enter after this transition. */
+    pthread_mutex_lock(&video->g_mutexCount);
+    video->cache_closing = 1;
+    video->stop_caching = 1;
     isMlvActive(video) = 0;
-
-    /* Stop caching and make sure using silly sleep trick */
-    mlvCacheSetStop(video, 1);
-    while (mlvCacheWorkerCount(video)) usleep(100);
+    pthread_mutex_unlock(&video->g_mutexCount);
+    for (;;)
+    {
+        pthread_mutex_lock(&video->g_mutexCount);
+        const int cache_busy = video->cache_thread_count != 0
+            || video->cache_lifecycle_users != 0;
+        pthread_mutex_unlock(&video->g_mutexCount);
+        if (!cache_busy) break;
+        usleep(100);
+    }
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     video->processed8_prefetch_stop = 1;
@@ -8155,13 +8168,14 @@ void freeMlvObject(mlvObject_t * video)
     if(video->main_file_mutex) free(video->main_file_mutex);
     pthread_mutex_destroy(&video->g_mutexFind);
     pthread_mutex_destroy(&video->g_mutexCount);
-    pthread_mutex_destroy(&video->g_mutexCacheLifecycle);
     pthread_mutex_destroy(&video->llrawproc_mutex);
     pthread_mutex_destroy(&video->llrawproc_worker_mutex);
     pthread_mutex_destroy(&video->processed8_prefetch_mutex);
     pthread_cond_destroy(&video->processed8_prefetch_cond);
     pthread_mutex_destroy(&video->raw_uint16_prefetch_mutex);
     pthread_cond_destroy(&video->raw_uint16_prefetch_cond);
+
+    pthread_mutex_destroy(&video->g_mutexCacheLifecycle);
 
     /* Main 1 */
     free(video);
