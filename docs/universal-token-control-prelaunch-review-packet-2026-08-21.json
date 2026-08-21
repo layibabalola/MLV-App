@@ -1,0 +1,31 @@
+{
+  "schema": "dng-headless-route.v1",
+  "route_id": "fleet-r64-mlv-r40-prelaunch-sonnet",
+  "lane": "sonnet",
+  "role": "verifier",
+  "authority": "read-only-review",
+  "objective": "Independently review published MLV prelaunch commit 65bcc9918a0c2bf844607163242caa43577ea713 using the exact binding, Git changeset, and hostile test. Verify only exact activation-blocked, CLOSED-gate, or no-work shapes with native zero counters can emit mlv-provider-prelaunch-stop/v1; authorization-shaped, unknown, extra-key, type-coerced, or future OPEN results fail closed; the wrapper exposes prelaunch without provider/task launch; and historical R15 evidence is checked against immutable commit 50db64d. Treat 7/7 and 45/45 as supplied evidence only. Confirm installation, wiring, runtime interception, functionality, disposition, provider/task/gate, and adoption authority remain false because the historical task/project root/launcher are absent. Return ACCEPT_CANDIDATE_ONLY or exact REVISE. Use Read only; do not execute tests/processes/auth, edit/publish, mutate tasks/gates/leases/packets/runtime, install, push, or claim disposition/adoption authority.",
+  "issued_at_utc": "2026-08-21T13:00:10.8080746Z",
+  "expires_at_utc": "2026-08-21T13:55:10.8112204Z",
+  "actionable_work": true,
+  "no_subagents": true,
+  "no_lane_reopen": true,
+  "subjects": [
+    {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\candidates\\mlv-r40-prelaunch-review\\REVIEW-BINDING.json",
+      "bytes": 4052,
+      "sha256": "6A167CA8A38AF0088F9E6C36482DE6E7F5D0E97928C004559A872D88119AC6A9"
+    },
+    {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\coordination\\candidates\\mlv-r40-prelaunch-review\\MLV-R40-PRELAUNCH-CHANGESET.patch",
+      "bytes": 14871,
+      "sha256": "BE1CA6EF4A17300F3F7F8EDBC8CDE8EECB6AD2A4A681EBFFE766BD581A1E420F"
+    },
+    {
+      "path": "C:\\code\\DngAutoProcessor - Claude\\.codex-tmp\\mlv-app-r39-supervisor-integration\\tools\\provider_control\\tests\\test_mlv_prelaunch_boundary.py",
+      "bytes": 5145,
+      "sha256": "68DC63C4AECA301029FCE7C3EF426D73D406BF78659C185D489ED668EE6B4CF5"
+    }
+  ],
+  "result_contract": "route-review-result.v1"
+}

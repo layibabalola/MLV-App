@@ -1,0 +1,120 @@
+{
+  "schema": "mlv-universal-control-prelaunch-review.v1",
+  "status": "ACCEPT_CANDIDATE_ONLY_ZERO_AUTHORITY",
+  "reviewed_subject": {
+    "commit": "65bcc9918a0c2bf844607163242caa43577ea713",
+    "tree": "fd2860d35095e86bc161c901036b9bb4d903c6e9",
+    "sole_parent": "6974cfd868cea2fb60f688d6bacaf087075f55f7",
+    "published_branch": "codex/mlv-r39-supervisor-integration",
+    "source": {
+      "path": "tools/provider_control/mlv_lane_supervisor.py",
+      "git_blob": "c56a8680e7c2e76c1da504043f1d20a2e01c2e35",
+      "bytes": 47181,
+      "sha256": "C807DBF42A20155E8C5B9FA69036B371E4F8C85423188C15430EF2F72AF5E8AB"
+    },
+    "wrapper": {
+      "path": "tools/provider_control/invoke-mlv-lane-supervisor.ps1",
+      "git_blob": "c2bd5b75119303f5a764973fc21028da8f8f9707",
+      "bytes": 837,
+      "sha256": "A63031BFC1AC5073FB0503A59555B833FB284B1AAEDEB6E0A6590F5B591CAC23"
+    },
+    "tests": {
+      "path": "tools/provider_control/tests/test_mlv_prelaunch_boundary.py",
+      "git_blob": "5dd2007d60c9649881e27ac5d82126d9d7dcc28b",
+      "bytes": 5145,
+      "sha256": "68DC63C4AECA301029FCE7C3EF426D73D406BF78659C185D489ED668EE6B4CF5"
+    }
+  },
+  "local_execution_evidence": [
+    {
+      "suite": "tools.provider_control.tests.test_mlv_prelaunch_boundary",
+      "result": "PASS",
+      "tests": 7
+    },
+    {
+      "suite": "tools.provider_control.tests.test_mlv_lane_supervisor",
+      "result": "PASS",
+      "tests": 45
+    }
+  ],
+  "independent_review": {
+    "route_id": "fleet-r64-mlv-r40-prelaunch-sonnet",
+    "lane": "sonnet",
+    "model": "claude-sonnet-5",
+    "effort": "max",
+    "role": "verifier",
+    "session_id": "223c9b6b-1bdb-4e35-8d3a-99884f371150",
+    "authorization_id": "ee33f602-274a-4212-8b05-b4b618c08a0e",
+    "packet_snapshot": {
+      "path": "docs/universal-token-control-prelaunch-review-packet-2026-08-21.json",
+      "bytes": 2185,
+      "sha256": "F81EBD20A0CEEB058F364CFD0A2E2BB8646124BB15E1944D6ACC454C37B01594"
+    },
+    "artifact": {
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\fleet-provider-capacity\\artifacts\\6ccdae6403a946178e99657f5ea7c156.stdout.txt",
+      "bytes": 202492,
+      "sha256": "0B72B7FC4B1FDE6CD993BBC8616358180DE49765B90144AA1BA5C5764CD55F85"
+    },
+    "result_snapshot": {
+      "path": "docs/universal-token-control-prelaunch-review-result-2026-08-21.jsonl",
+      "file_bytes": 8131,
+      "file_sha256": "C378D76A3BBBB8C2F419A59F1C7FC3FD6B1CAE3EA5CE53FDA1EF59299E2925DE",
+      "raw_line_bytes": 8130,
+      "raw_line_sha256": "36EF72027A33F3063F9FD5504AD7A27BCD88E60C6827EB5D1300012E1596B1B0",
+      "subtype": "success",
+      "is_error": false,
+      "verdict": "ACCEPT"
+    },
+    "consumption_snapshot": {
+      "path": "docs/universal-token-control-prelaunch-review-consumption-2026-08-21.json",
+      "file_bytes": 527,
+      "file_sha256": "40E6B91270CCE38B7FD8FFA0A0E20590B46F75720CAA783995DDE2871ED3C801",
+      "raw_receipt_bytes": 526,
+      "raw_receipt_sha256": "D685E222FA36C577F4F391FBE77E6DDB9B010361513BD9B05F5BE5A74995471F"
+    },
+    "provider_tools": [
+      "Read",
+      "StructuredOutput"
+    ],
+    "test_execution_performed_by_reviewer": false,
+    "verdict": "ACCEPT_CANDIDATE_ONLY",
+    "done_consumed_released_at": "2026-08-21T13:10:33.5275704+00:00"
+  },
+  "finding_disposition": {
+    "open_gate_hostile_missing": {
+      "status": "CLOSED_FORWARD_ONLY",
+      "commit": "ad8d7f5f29882774c8eb5ce2df7c3c8689e73158",
+      "tree": "b8b989b5abba708d58cd2287a7c965994e206e22",
+      "sole_parent": "65bcc9918a0c2bf844607163242caa43577ea713",
+      "test_blob": "f9ceb4e83b83d43263730e3a088e963857f598cf",
+      "test_bytes": 5552,
+      "test_sha256": "004C4CA77152B5D0A8849406D1B4DB8485CFDFCDCF18640B2E9AFE5D2C7A5F6A",
+      "result": "8/8 PASS"
+    },
+    "reviewer_did_not_execute_tests": "RETAINED_TRUTHFULLY",
+    "host_absence_not_independently_rederived": "RETAINED_TRUTHFULLY"
+  },
+  "accepted_boundary": {
+    "stop_only_prelaunch_source": true,
+    "unknown_and_authorization_shapes_fail_closed": true,
+    "native_zero_counters_required": true,
+    "published_candidate_branch": true,
+    "production_launcher_wired": false,
+    "signed_installation": false,
+    "runtime_interception": false,
+    "functionality_equivalence": false,
+    "quality_equivalence": false,
+    "project_owner_disposition": false,
+    "adoption": false
+  },
+  "disposition": "DISTINGUISH",
+  "authority": {
+    "project_disposition": false,
+    "fleet_adoption": false,
+    "installation": false,
+    "runtime": false,
+    "provider_execution": false,
+    "authentication": false,
+    "task_or_gate_mutation": false
+  }
+}
