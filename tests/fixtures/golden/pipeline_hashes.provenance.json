@@ -61,7 +61,7 @@
   },
   "generator": {
     "executable": "pipeline_tests.exe",
-    "source_state_commit": "51ffa4ca90cc92f3bad736f937c5696a8d8fdc01",
+    "source_state_commit": "03ae63d39fd7b6e9aae64d9a10b25824aca66439",
     "dependency_snapshot": {
       "complete": false,
       "scope": "listed_generator_sources_and_declared_fixture_receipt_inputs_only",
@@ -106,7 +106,7 @@
       },
       {
         "path": "tests/pipeline/test_dual_iso_pipeline.cpp",
-        "sha256": "3c62b67ab5947cb9eaf528bb4ed4aaccfddd70c77a0ed5b670160c00d0e7df0a",
+        "sha256": "a39c1876e3a4b2f4b1c8d99e01e1b16d491ac5b5b02d50575caa741c1dfe116c",
         "hash_mode": "lf_normalized_sha256"
       },
       {
