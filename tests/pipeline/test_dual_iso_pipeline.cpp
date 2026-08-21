@@ -6313,6 +6313,43 @@ TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
     mlvCacheSetStop(fixture.video(), 1);
 }
 
+TEST(DualIsoPipeline, CacheRawAcquisitionFailureDoesNotPublishBlackFrame)
+{
+    struct ScopedCacheRawFailureReset
+    {
+        ~ScopedCacheRawFailureReset()
+        {
+            mlvCacheSetRawAcquisitionFailureForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvAlwaysUseAmaze(fixture.video());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    ASSERT_TRUE(fixture.video()->cache_memory_block != nullptr);
+    const size_t frame_words = static_cast<size_t>(fixture.width())
+        * static_cast<size_t>(fixture.height()) * 3u;
+    std::fill_n(fixture.video()->cache_memory_block,
+                frame_words,
+                static_cast<uint16_t>(0x5a5a));
+    mark_mlv_uncached(fixture.video());
+
+    mlvCacheSetRawAcquisitionFailureForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    an_mlv_cache_thread(fixture.video());
+
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
+              static_cast<unsigned int>(fixture.video()->cached_frames[0]));
+    ASSERT_TRUE(std::all_of(fixture.video()->cache_memory_block,
+                            fixture.video()->cache_memory_block + frame_words,
+                            [](uint16_t value) { return value == 0x5a5a; }));
+    mlvCacheSetStop(fixture.video(), 1);
+}
+
 TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
 {
     struct ScopedCacheWorkerPauseReset
@@ -6435,13 +6472,22 @@ TEST(DualIsoPipeline, DefaultCachePolicySurvivesInactiveInitialization)
         any_cached_frame = any_cached_frame
             || opened.value->cached_frames[frame] == MLV_FRAME_IS_CACHED;
     ASSERT_TRUE(any_cached_frame);
+    ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_IS_CACHED),
+              static_cast<unsigned int>(opened.value->cached_frames[0]));
 
     std::vector<uint16_t> cached_frame(frame_words);
-    getMlvRawFrameDebayered(opened.value, 0, cached_frame.data());
+    pthread_mutex_lock(&opened.value->g_mutexFind);
+    const uint64_t cached_slot = mlv_cache_slot_for_frame(opened.value, 0);
+    std::copy_n(opened.value->rgb_raw_frames[cached_slot],
+                frame_words,
+                cached_frame.begin());
+    pthread_mutex_unlock(&opened.value->g_mutexFind);
     MlvPipelineFixture uncached_fixture;
     QString uncached_error;
     ASSERT_TRUE(uncached_fixture.openTinyDualIso(&uncached_error));
     ASSERT_TRUE(uncached_error.isEmpty());
+    ASSERT_EQ(static_cast<uint64_t>(0),
+              getMlvRawCacheLimitFrames(uncached_fixture.video()));
     const std::vector<uint16_t> uncached_frame = uncached_fixture.renderDebayeredFrame16(0);
     ASSERT_TRUE(cached_frame == uncached_frame);
 }
@@ -6604,6 +6650,75 @@ TEST(DualIsoPipeline, CacheLifecycleSerializesOverlappingReplacementTransactions
     ASSERT_TRUE(resize_finished.load(std::memory_order_acquire));
     ASSERT_EQ(static_cast<uint64_t>(2), getMlvRawCacheLimitFrames(fixture.video()));
     ASSERT_TRUE(fixture.video()->cache_memory_block != nullptr);
+}
+
+TEST(DualIsoPipeline, CacheDisableThenQueuedEnablePublishesEnabledStateAtomically)
+{
+    struct ScopedLifecyclePauseReset
+    {
+        ~ScopedLifecyclePauseReset()
+        {
+            mlvCacheSetLifecyclePauseForTesting(0);
+        }
+    } reset;
+
+    QByteArray clip_path = repo_file_path(
+        QStringLiteral("tests/fixtures/clips/tiny_dual_iso.mlv")).toLocal8Bit();
+    int open_code = MLV_ERR_NONE;
+    char open_error[256] = { 0 };
+    struct ScopedVideo
+    {
+        mlvObject_t * value = nullptr;
+        ~ScopedVideo() { if (value) freeMlvObject(value); }
+    } opened;
+    opened.value = initMlvObjectWithClip(clip_path.data(),
+                                        MLV_OPEN_FULL,
+                                        &open_code,
+                                        open_error);
+    ASSERT_TRUE(opened.value != nullptr);
+    ASSERT_EQ(MLV_ERR_NONE, open_code);
+    mlvCacheSetStop(opened.value, 1);
+    while (mlvCacheWorkerCount(opened.value))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    mlvCacheSetLifecyclePauseForTesting(1);
+    std::atomic<bool> disable_started{false};
+    std::atomic<bool> disable_finished{false};
+    std::thread disable_thread([&]() {
+        disable_started.store(true, std::memory_order_release);
+        disableMlvCaching(opened.value);
+        disable_finished.store(true, std::memory_order_release);
+    });
+    while (!disable_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    ASSERT_TRUE(mlvCacheLifecyclePausedForTesting());
+
+    std::atomic<bool> enable_started{false};
+    std::atomic<bool> enable_finished{false};
+    std::thread enable_thread([&]() {
+        enable_started.store(true, std::memory_order_release);
+        enableMlvCaching(opened.value);
+        enable_finished.store(true, std::memory_order_release);
+    });
+    while (!enable_started.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT_FALSE(disable_finished.load(std::memory_order_acquire));
+    ASSERT_FALSE(enable_finished.load(std::memory_order_acquire));
+
+    mlvCacheSetLifecyclePauseForTesting(0);
+    disable_thread.join();
+    enable_thread.join();
+    ASSERT_TRUE(disable_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(enable_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(!mlvCacheShouldStop(opened.value));
+    ASSERT_TRUE(getMlvRawCacheLimitFrames(opened.value) > 0);
+    ASSERT_TRUE(opened.value->cache_memory_block != nullptr);
+    mlvCacheSetStop(opened.value, 1);
+    while (mlvCacheWorkerCount(opened.value))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
 }
 
 TEST(DualIsoPipeline, CacheInvalidationPreventsStaleWorkerFromWritingSharedSlot)

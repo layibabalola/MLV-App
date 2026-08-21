@@ -312,16 +312,10 @@ uint64_t mlv_cache_slot_for_frame(mlvObject_t * video, uint64_t frameIndex)
     return frameIndex - mlv_cache_clamp_start(video, video->cache_start_frame);
 }
 
-void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
+static void mlv_cache_ensure_window_admitted(mlvObject_t * video,
+                                             uint64_t frameIndex)
 {
     if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0) return;
-
-    if (!mlv_cache_lifecycle_enter(video)) return;
-    if (!isMlvActive(video) || mlvCacheShouldStop(video) || getMlvRawCacheLimitFrames(video) == 0)
-    {
-        mlv_cache_lifecycle_leave(video);
-        return;
-    }
 
     pthread_mutex_lock( &video->g_mutexFind );
     int in_window = mlv_frame_in_cache_window(video, frameIndex);
@@ -329,7 +323,6 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     pthread_mutex_unlock( &video->g_mutexFind );
     if (in_window)
     {
-        mlv_cache_lifecycle_leave(video);
         return;
     }
 
@@ -367,6 +360,12 @@ void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
     {
         add_mlv_cache_thread(video);
     }
+}
+
+void mlv_cache_ensure_window(mlvObject_t * video, uint64_t frameIndex)
+{
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
+    mlv_cache_ensure_window_admitted(video, frameIndex);
     mlv_cache_lifecycle_leave(video);
 }
 
@@ -375,11 +374,13 @@ void mlv_cache_request_playback_preroll(mlvObject_t * video,
                                         uint64_t lastFrameInclusive,
                                         uint64_t lookaheadFrames)
 {
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
     if (!isMlvActive(video)
         || mlvCacheShouldStop(video)
         || getMlvRawCacheLimitFrames(video) == 0
         || getMlvFrames(video) == 0)
     {
+        mlv_cache_lifecycle_leave(video);
         return;
     }
 
@@ -395,7 +396,7 @@ void mlv_cache_request_playback_preroll(mlvObject_t * video,
         targetFrame = currentFrame + MIN(lookaheadFrames, remaining);
     }
 
-    mlv_cache_ensure_window(video, targetFrame);
+    mlv_cache_ensure_window_admitted(video, targetFrame);
 
     uint64_t requestFrame = 0;
     int haveRequest = 0;
@@ -449,19 +450,28 @@ void mlv_cache_request_playback_preroll(mlvObject_t * video,
             add_mlv_cache_thread(video);
         }
     }
-}
-
-void resetMlvCache(mlvObject_t * video)
-{
-    resetMlvCachedFrame(video);
-    invalidateMlvProcessedPreviewCache(video);
-    mark_mlv_uncached(video);
+    mlv_cache_lifecycle_leave(video);
 }
 
 static void mark_mlv_uncached_locked(mlvObject_t * video);
+
+void resetMlvCache(mlvObject_t * video)
+{
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
+    resetMlvCachedFrame(video);
+    invalidateMlvProcessedPreviewCache(video);
+    pthread_mutex_lock( &video->g_mutexFind );
+    mark_mlv_uncached_locked(video);
+    pthread_mutex_unlock( &video->g_mutexFind );
+    mlv_cache_lifecycle_leave(video);
+}
+
 static int mlv_cache_quiesce_workers(mlvObject_t * video);
 static void mlv_cache_restart_workers_if_needed(mlvObject_t * video, int restart);
 static void mlv_cache_pause_lifecycle_for_testing(void);
+static void set_mlv_raw_cache_limit_megabytes_admitted(mlvObject_t * video,
+                                                        uint64_t megaByteLimit,
+                                                        int force_running);
 
 void disableMlvCaching(mlvObject_t * video)
 {
@@ -496,11 +506,11 @@ void disableMlvCaching(mlvObject_t * video)
 
 void enableMlvCaching(mlvObject_t * video)
 {
-    if (!video) return;
-    /* The setter owns the serialized resize.  Make the requested final state
-     * running before entry so it restores workers after publication. */
-    mlvCacheSetStop(video, 0);
-    setMlvRawCacheLimitMegaBytes(video, video->cache_limit_mb);
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
+    set_mlv_raw_cache_limit_megabytes_admitted(video,
+                                                video->cache_limit_mb,
+                                                1);
+    mlv_cache_lifecycle_leave(video);
 }
 
 /* Hmmmm, did anyone need 2 ways of doing this? */
@@ -615,15 +625,13 @@ static void mlv_cache_restart_workers_if_needed(mlvObject_t * video, int restart
         add_mlv_cache_thread(video);
 }
 
-/* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
-void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
+static void set_mlv_raw_cache_limit_megabytes_admitted(mlvObject_t * video,
+                                                        uint64_t megaByteLimit,
+                                                        int force_running)
 {
     uint64_t frame_pix = 0;
     uint64_t frame_size = 0;
-    if (!video || megaByteLimit > UINT64_MAX / (1u << 20))
-    {
-        return;
-    }
+    if (megaByteLimit > UINT64_MAX / (1u << 20)) return;
     const uint64_t bytes_limit = megaByteLimit * (1u << 20);
     if (!isMlvActive(video))
     {
@@ -635,11 +643,11 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
         return;
     const uint64_t frame_limit = MIN(bytes_limit / frame_size, getMlvFrames(video));
 
-    if (!mlv_cache_lifecycle_enter(video)) return;
-    if (!isMlvActive(video))
+    if (force_running)
     {
-        mlv_cache_lifecycle_leave(video);
-        return;
+        pthread_mutex_lock(&video->g_mutexCount);
+        video->stop_caching = 0;
+        pthread_mutex_unlock(&video->g_mutexCount);
     }
     const int has_caching = mlv_cache_quiesce_workers(video);
     mlv_cache_pause_lifecycle_for_testing();
@@ -650,31 +658,37 @@ void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
                                          frame_pix,
                                          frame_size);
     mlv_cache_restart_workers_if_needed(video, has_caching);
+}
+
+/* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
+void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
+{
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
+    set_mlv_raw_cache_limit_megabytes_admitted(video, megaByteLimit, 0);
     mlv_cache_lifecycle_leave(video);
 }
 
 /* Not recommended */
 void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
 {
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
     uint64_t frame_pix = 0;
     uint64_t frame_size = 0;
     if (!isMlvActive(video)
         || !mlv_cache_checked_frame_layout(video, &frame_pix, &frame_size))
     {
+        mlv_cache_lifecycle_leave(video);
         return;
     }
     const uint64_t frame_limit = MIN(frameLimit, getMlvFrames(video));
     if (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit)
-        return;
-    const uint64_t bytes_limit = frame_size * frame_limit;
-    const uint64_t mbyte_limit = bytes_limit / (1u << 20);
-
-    if (!mlv_cache_lifecycle_enter(video)) return;
-    if (!isMlvActive(video))
     {
         mlv_cache_lifecycle_leave(video);
         return;
     }
+    const uint64_t bytes_limit = frame_size * frame_limit;
+    const uint64_t mbyte_limit = bytes_limit / (1u << 20);
+
     const int has_caching = mlv_cache_quiesce_workers(video);
     mlv_cache_pause_lifecycle_for_testing();
     (void)mlv_cache_resize_transactional(video,
@@ -690,9 +704,11 @@ void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
 /* Marks all frames as not cached */
 void mark_mlv_uncached(mlvObject_t * video)
 {
+    if (!video || !mlv_cache_lifecycle_enter(video)) return;
     pthread_mutex_lock( &video->g_mutexFind );
     mark_mlv_uncached_locked(video);
     pthread_mutex_unlock( &video->g_mutexFind );
+    mlv_cache_lifecycle_leave(video);
 }
 
 /* Clears cache by freeing then reallocating (RAM usage down until frames written) */
@@ -920,10 +936,16 @@ void an_mlv_cache_thread(mlvObject_t * video)
 
 /* Add as many of these as you want :) */
 static int g_mlv_cache_allocation_failure_for_testing = 0;
+static int g_mlv_cache_raw_acquisition_failure_for_testing = 0;
 
 void mlvCacheSetAllocationFailureForTesting(int enabled)
 {
     g_mlv_cache_allocation_failure_for_testing = enabled != 0;
+}
+
+void mlvCacheSetRawAcquisitionFailureForTesting(int enabled)
+{
+    g_mlv_cache_raw_acquisition_failure_for_testing = enabled != 0;
 }
 
 static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claimed)
@@ -1066,9 +1088,10 @@ static void run_mlv_cache_thread(mlvObject_t * video, int counter_already_claime
 }
 
 /* Gets a freshly debayered frame every time ( temp memory should be Width * Height * sizeof(float) ) */
-static int get_mlv_raw_frame_float_isolated_analysis(mlvObject_t * video,
-                                                     uint64_t frame_index,
-                                                     float * output_frame)
+static int get_mlv_raw_frame_float_checked(mlvObject_t * video,
+                                           uint64_t frame_index,
+                                           float * output_frame,
+                                           int isolated_analysis)
 {
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
@@ -1076,7 +1099,11 @@ static int get_mlv_raw_frame_float_isolated_analysis(mlvObject_t * video,
     uint16_t * raw_frame_u16 = (uint16_t *)output_frame;
     int bit_shift = 0;
 
-    if (getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift))
+    const int raw_failed = g_mlv_cache_raw_acquisition_failure_for_testing
+        || (isolated_analysis
+            ? getMlvRawFrameProcessedUint16Direct(video, frame_index, raw_frame_u16, &bit_shift)
+            : getMlvRawFrameProcessedUint16(video, frame_index, raw_frame_u16, &bit_shift));
+    if (raw_failed)
     {
         memset(output_frame, 0, frame_pixels * sizeof(float));
         return 1;
@@ -1150,18 +1177,17 @@ static int get_mlv_raw_frame_debayered_checked( mlvObject_t * video,
         return 1;
     }
 
-    /* Get the raw data in B&W */
-    if (isolated_analysis)
+    /* Get the raw data in B&W and preserve acquisition failure as status.
+     * The public void wrapper historically zero-fills on failure, which is
+     * not sufficient for a cache publisher: AMaZE can successfully debayer
+     * zeros and make a failed decode look cacheable. */
+    if (get_mlv_raw_frame_float_checked(video,
+                                        frame_index,
+                                        temp_memory,
+                                        isolated_analysis))
     {
-        if (get_mlv_raw_frame_float_isolated_analysis(video, frame_index, temp_memory))
-        {
-            memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
-            return 0;
-        }
-    }
-    else
-    {
-        getMlvRawFrameFloat(video, frame_index, temp_memory);
+        memset(output_frame, 0, frame_pixels * 3u * sizeof(uint16_t));
+        return 0;
     }
 
     wb_convert_info_t wb_info;
