@@ -6837,13 +6837,13 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
     if( options.rawCacheMB > 0 )
     {
         setMlvCpuCores( m_pMlvObject, std::max( 1, options.cacheCpuCores ) );
-        m_pMlvObject->stop_caching = 0;
+        mlvCacheSetStop( m_pMlvObject, 0 );
         setMlvRawCacheLimitMegaBytes( m_pMlvObject, options.rawCacheMB );
     }
     else
     {
         setMlvCpuCores( m_pMlvObject, 1 );
-        m_pMlvObject->stop_caching = 1;
+        mlvCacheSetStop( m_pMlvObject, 1 );
         setMlvRawCacheLimitMegaBytes( m_pMlvObject, 0 );
     }
 
@@ -8079,7 +8079,7 @@ int MainWindow::runHeadlessPlaybackProfile(const PlaybackProfileOptions & option
         playbackDebayerEffective == QStringLiteral("amaze-cached")
         && m_pMlvObject
         && getMlvRawCacheLimitMegaBytes( m_pMlvObject ) > 0
-        && m_pMlvObject->stop_caching == 0;
+        && !mlvCacheShouldStop( m_pMlvObject );
 
     metadata.insert( QStringLiteral("playback_debayer_request"),
                      QString::fromLatin1(
@@ -25878,7 +25878,7 @@ bool MainWindow::primePlaybackCacheOnPlayStart( void )
 {
     if( !m_fileLoaded || !m_pMlvObject ) return false;
     if( playback_start_preroll_disabled_by_environment() ) return false;
-    if( m_pMlvObject->stop_caching
+    if( mlvCacheShouldStop( m_pMlvObject )
      || getMlvRawCacheLimitFrames( m_pMlvObject ) == 0 ) return false;
 
     int currentFrame = ui->horizontalSliderPosition->value();

@@ -6,7 +6,8 @@
 
 #define getMlvRawCacheLimitMegaBytes(video) (video)->cache_limit_mb
 #define getMlvRawCacheLimitFrames(video) (video)->cache_limit_frames
-#define isMlvObjectCaching(video) (video)->cache_thread_count
+int mlvCacheWorkerCount(mlvObject_t * video);
+#define isMlvObjectCaching(video) mlvCacheWorkerCount(video)
 /* And here's an UNUSED (at this moment) macrofuntion - ignored */
 #define setMlvCacheStartFrame(video, startFrame) (video)->cache_start_frame = (startFrame)
 

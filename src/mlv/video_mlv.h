@@ -318,6 +318,8 @@ void mlvCacheSetAllocationFailureForTesting(int enabled);
 
 /* Test-only barrier for validating the async launch/count lifetime contract. */
 void mlvCacheSetWorkerStartPauseForTesting(int enabled);
+void mlvCacheSetWorkerBeforePublishPauseForTesting(int enabled);
+int mlvCacheWorkerBeforePublishPausedForTesting(void);
 
 /* Test-only ordinal fault injection for cache resize allocations. */
 void mlvCacheSetResizeAllocationFailureForTesting(int allocation_index);
@@ -340,8 +342,11 @@ void mlv_cache_request_playback_preroll(mlvObject_t * video,
 /* Returns 1 on success, or 0 if all are cached */
 int find_mlv_frame_to_cache(mlvObject_t * video, uint64_t *index); /* Outputs to *index */
 
-/* Adds one thread, active total can be checked in mlvObject->cache_thread_count */
+/* Adds one thread; query the active total through mlvCacheWorkerCount(). */
 void add_mlv_cache_thread(mlvObject_t * video);
+int mlvCacheWorkerCount(mlvObject_t * video);
+int mlvCacheShouldStop(mlvObject_t * video);
+void mlvCacheSetStop(mlvObject_t * video, int stop);
 
 /* OLD DEPRACTEDFSDJKHJKLAJSKDLJ KLSDJKL AJSD LKSAJDLKSAJDLK DKJS */
 void cache_mlv_frames(mlvObject_t * video);

@@ -5869,6 +5869,7 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     int width = getMlvWidth(video);
     int height = getMlvHeight(video);
     if (!outputFrame || width <= 0 || height <= 0
+        || frameIndex >= getMlvFrames(video)
         || (size_t)width > SIZE_MAX / (size_t)height) {
         return;
     }
@@ -5881,71 +5882,79 @@ void getMlvRawFrameDebayered(mlvObject_t * video, uint64_t frameIndex, uint16_t 
     mlv_reset_last_raw_stage_telemetry();
     resetMlvLastDebayerStageMilliseconds();
     mlv_cache_ensure_window(video, frameIndex);
+    int copied_from_cache = 0;
+    int cache_state = MLV_FRAME_NOT_CACHED;
+    pthread_mutex_lock(&video->g_mutexFind);
     int cache_window_active = mlv_frame_in_cache_window(video, frameIndex);
-
-    /* If frame was requested last time and is sitting in the "current" frame cache */
-    if ( video->cached_frames[frameIndex] == MLV_FRAME_NOT_CACHED
-         && video->current_cached_frame_active 
-         && video->current_cached_frame == frameIndex )
+    cache_state = video->cached_frames[frameIndex];
+    if (cache_state == MLV_FRAME_NOT_CACHED
+        && video->current_cached_frame_active
+        && video->current_cached_frame == frameIndex)
     {
         memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
+        copied_from_cache = 1;
     }
-    /* Is this next bit even readable? */
-    else switch (video->cached_frames[frameIndex])
+    else if (cache_state == MLV_FRAME_IS_CACHED && cache_window_active)
     {
-        case MLV_FRAME_IS_CACHED:
+        memcpy(outputFrame,
+               video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)],
+               frame_size);
+        copied_from_cache = 1;
+    }
+    else
+    {
+        if (cache_state == MLV_FRAME_IS_CACHED)
         {
-            if (cache_window_active)
-            {
-                memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
-                break;
-            }
             video->cached_frames[frameIndex] = MLV_FRAME_NOT_CACHED;
-            /* fall through */
+            cache_state = MLV_FRAME_NOT_CACHED;
         }
+        if (cache_state == MLV_FRAME_NOT_CACHED && cache_window_active)
+            video->cache_next = frameIndex;
+    }
+    pthread_mutex_unlock(&video->g_mutexFind);
+    if (copied_from_cache) return;
 
-        case MLV_FRAME_NOT_CACHED:
+    if (doesMlvAlwaysUseAmaze(video) && isMlvObjectCaching(video))
+    {
+        while (isMlvObjectCaching(video))
         {
-            /* If it is within the cache range, request for it to be cached */
-            if (cache_window_active)
+            pthread_mutex_lock(&video->g_mutexFind);
+            cache_window_active = mlv_frame_in_cache_window(video, frameIndex);
+            cache_state = video->cached_frames[frameIndex];
+            if (cache_state == MLV_FRAME_IS_CACHED && cache_window_active)
             {
-                video->cache_next = frameIndex;
+                memcpy(outputFrame,
+                       video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)],
+                       frame_size);
+                copied_from_cache = 1;
             }
-            /* fall through */
-        }
-
-        case MLV_FRAME_BEING_CACHED:
-        {
-            if (doesMlvAlwaysUseAmaze(video) && isMlvObjectCaching(video))
-            {
-                while (video->cached_frames[frameIndex] != MLV_FRAME_IS_CACHED) usleep(100);
-                if (mlv_frame_in_cache_window(video, frameIndex))
-                {
-                    memcpy(outputFrame, video->rgb_raw_frames[mlv_cache_slot_for_frame(video, frameIndex)], frame_size);
-                    break;
-                }
-            }
-
-            float * raw_frame = mlv_ensure_float_buffer(&video->raw_debayer_temp_frame,
-                                                        &video->raw_debayer_temp_frame_pixels,
-                                                        pixels_count);
-            uint16_t * current_frame = mlv_ensure_u16_buffer(&video->rgb_raw_current_frame,
-                                                             &video->rgb_raw_current_frame_words,
-                                                             pixels_count * 3);
-            if (!raw_frame || !current_frame)
-            {
-                memset(outputFrame, 0, frame_size);
-                video->current_cached_frame_active = 0;
-                break;
-            }
-
-            get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, current_frame, doesMlvAlwaysUseAmaze(video));
-            memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
-            video->current_cached_frame_active = 1;
-            video->current_cached_frame = frameIndex;
-            break;
+            pthread_mutex_unlock(&video->g_mutexFind);
+            if (copied_from_cache) return;
+            usleep(100);
         }
     }
+
+    float * raw_frame = mlv_ensure_float_buffer(&video->raw_debayer_temp_frame,
+                                                &video->raw_debayer_temp_frame_pixels,
+                                                pixels_count);
+    uint16_t * current_frame = mlv_ensure_u16_buffer(&video->rgb_raw_current_frame,
+                                                     &video->rgb_raw_current_frame_words,
+                                                     pixels_count * 3);
+    if (!raw_frame || !current_frame)
+    {
+        memset(outputFrame, 0, frame_size);
+        pthread_mutex_lock(&video->g_mutexFind);
+        video->current_cached_frame_active = 0;
+        pthread_mutex_unlock(&video->g_mutexFind);
+        return;
+    }
+
+    get_mlv_raw_frame_debayered(video, frameIndex, raw_frame, current_frame, doesMlvAlwaysUseAmaze(video));
+    pthread_mutex_lock(&video->g_mutexFind);
+    memcpy(outputFrame, video->rgb_raw_current_frame, frame_size);
+    video->current_cached_frame_active = 1;
+    video->current_cached_frame = frameIndex;
+    pthread_mutex_unlock(&video->g_mutexFind);
 }
 
 static void mlv_compute_desired_processing_bw_levels(mlvObject_t * video,
@@ -8078,8 +8087,8 @@ void freeMlvObject(mlvObject_t * video)
     isMlvActive(video) = 0;
 
     /* Stop caching and make sure using silly sleep trick */
-    video->stop_caching = 1;
-    while (video->cache_thread_count) usleep(100);
+    mlvCacheSetStop(video, 1);
+    while (mlvCacheWorkerCount(video)) usleep(100);
 
     pthread_mutex_lock(&video->processed8_prefetch_mutex);
     video->processed8_prefetch_stop = 1;
@@ -9290,7 +9299,7 @@ short_cut:
     isMlvActive(video) = 5;
 
     /* Start caching unless it was disabled already */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
     {
         for (int i = 0; i < video->cpu_cores; ++i)
         {
@@ -9656,7 +9665,7 @@ int openDngFolderClip(mlvObject_t * video, char * dirPath, int open_mode, char *
     isMlvActive(video) = 1;
 
     /* Start caching unless it was disabled already. */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
     {
         for (int i = 0; i < video->cpu_cores; ++i)
         {
@@ -10081,7 +10090,7 @@ preview_out:
     isMlvActive(video) = 1;
 
     /* Start caching unless it was disabled already */
-    if (!video->stop_caching && (open_mode != MLV_OPEN_PREVIEW))
+    if (!mlvCacheShouldStop(video) && (open_mode != MLV_OPEN_PREVIEW))
     {
         for (int i = 0; i < video->cpu_cores; ++i)
         {

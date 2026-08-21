@@ -18,6 +18,7 @@ extern "C" {
 #include "../../src/batch/ReceiptLoader.h"
 #include "../../platform/qt/DualIsoPatternMapping.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -6276,12 +6277,12 @@ TEST(DualIsoPipeline, CacheAmazeAllocationFailureBalancesWorkerCount)
     QString error;
     ASSERT_TRUE(fixture.openTinyDualIso(&error));
     ASSERT_TRUE(error.isEmpty());
-    const int initial_worker_count = fixture.video()->cache_thread_count;
+    const int initial_worker_count = mlvCacheWorkerCount(fixture.video());
 
     mlvCacheSetAllocationFailureForTesting(1);
     an_mlv_cache_thread(fixture.video());
 
-    ASSERT_EQ(initial_worker_count, fixture.video()->cache_thread_count);
+    ASSERT_EQ(initial_worker_count, mlvCacheWorkerCount(fixture.video()));
 }
 
 TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
@@ -6299,15 +6300,15 @@ TEST(DualIsoPipeline, CacheAmazeDemosaicFailureExitsWithoutHotRetry)
     ASSERT_TRUE(fixture.openTinyDualIso(&error));
     ASSERT_TRUE(error.isEmpty());
     setMlvRawCacheLimitFrames(fixture.video(), 1);
-    fixture.video()->stop_caching = 0;
+    mlvCacheSetStop(fixture.video(), 0);
     amazeDemosaicSetAllocationFailureForTesting(1);
 
     an_mlv_cache_thread(fixture.video());
 
-    ASSERT_EQ(0, fixture.video()->cache_thread_count);
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
     ASSERT_EQ(static_cast<unsigned int>(MLV_FRAME_NOT_CACHED),
               static_cast<unsigned int>(fixture.video()->cached_frames[0]));
-    fixture.video()->stop_caching = 1;
+    mlvCacheSetStop(fixture.video(), 1);
 }
 
 TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
@@ -6324,24 +6325,20 @@ TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
     QString error;
     ASSERT_TRUE(fixture.openTinyDualIso(&error));
     ASSERT_TRUE(error.isEmpty());
-    fixture.video()->stop_caching = 0;
+    mlvCacheSetStop(fixture.video(), 0);
     mlvCacheSetWorkerStartPauseForTesting(1);
 
     add_mlv_cache_thread(fixture.video());
 
-    pthread_mutex_lock(&fixture.video()->g_mutexCount);
-    const int reserved_worker_count = fixture.video()->cache_thread_count;
-    pthread_mutex_unlock(&fixture.video()->g_mutexCount);
+    const int reserved_worker_count = mlvCacheWorkerCount(fixture.video());
     ASSERT_EQ(1, reserved_worker_count);
 
-    fixture.video()->stop_caching = 1;
+    mlvCacheSetStop(fixture.video(), 1);
     mlvCacheSetWorkerStartPauseForTesting(0);
     bool stopped = false;
     for (int attempt = 0; attempt < 5000; ++attempt)
     {
-        pthread_mutex_lock(&fixture.video()->g_mutexCount);
-        stopped = fixture.video()->cache_thread_count == 0;
-        pthread_mutex_unlock(&fixture.video()->g_mutexCount);
+        stopped = mlvCacheWorkerCount(fixture.video()) == 0;
         if (stopped) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -6382,6 +6379,116 @@ TEST(DualIsoPipeline, CacheResizeAllocationFailurePreservesPublishedState)
     clear_mlv_cache(fixture.video());
     ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
     ASSERT_TRUE(original_frames == fixture.video()->rgb_raw_frames);
+}
+
+TEST(DualIsoPipeline, DefaultCachePolicySurvivesInactiveInitialization)
+{
+    mlvObject_t * video = initMlvObject();
+    ASSERT_TRUE(video != nullptr);
+    ASSERT_EQ(static_cast<uint64_t>(290), getMlvRawCacheLimitMegaBytes(video));
+    ASSERT_EQ(static_cast<uint64_t>(290) << 20, video->cache_limit_bytes);
+    freeMlvObject(video);
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    ASSERT_EQ(static_cast<uint64_t>(290),
+              getMlvRawCacheLimitMegaBytes(fixture.video()));
+}
+
+TEST(DualIsoPipeline, CacheClearWaitsForPendingWorkerBeforeReplacement)
+{
+    struct ScopedCacheWorkerPauseReset
+    {
+        ~ScopedCacheWorkerPauseReset()
+        {
+            mlvCacheSetWorkerStartPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerStartPauseForTesting(1);
+    add_mlv_cache_thread(fixture.video());
+    ASSERT_EQ(1, mlvCacheWorkerCount(fixture.video()));
+
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_mlv_cache(fixture.video());
+        clear_finished.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT_TRUE(!clear_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+
+    mlvCacheSetWorkerStartPauseForTesting(0);
+    clear_thread.join();
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_TRUE(original_block != fixture.video()->cache_memory_block);
+    ASSERT_TRUE(mlvCacheShouldStop(fixture.video()));
+}
+
+TEST(DualIsoPipeline, CacheClearWaitsForWorkerPastGenerationCheck)
+{
+    struct ScopedCachePublishPauseReset
+    {
+        ~ScopedCachePublishPauseReset()
+        {
+            mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    mlvCacheSetStop(fixture.video(), 1);
+    while (mlvCacheWorkerCount(fixture.video()))
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(1);
+    mlvCacheSetStop(fixture.video(), 0);
+    add_mlv_cache_thread(fixture.video());
+    bool reached_publish_boundary = false;
+    for (int attempt = 0; attempt < 10000; ++attempt)
+    {
+        reached_publish_boundary =
+            mlvCacheWorkerBeforePublishPausedForTesting() != 0;
+        if (reached_publish_boundary) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(reached_publish_boundary);
+    ASSERT_EQ(1, mlvCacheWorkerCount(fixture.video()));
+
+    /* Quiesce without requesting a restart.  The worker already owns a pointer
+     * into the old block, so clear must retain that block until it exits. */
+    mlvCacheSetStop(fixture.video(), 1);
+    std::atomic<bool> clear_finished{false};
+    std::thread clear_thread([&]() {
+        clear_mlv_cache(fixture.video());
+        clear_finished.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ASSERT_TRUE(!clear_finished.load(std::memory_order_acquire));
+    ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+
+    mlvCacheSetWorkerBeforePublishPauseForTesting(0);
+    clear_thread.join();
+    ASSERT_TRUE(clear_finished.load(std::memory_order_acquire));
+    ASSERT_EQ(0, mlvCacheWorkerCount(fixture.video()));
+    ASSERT_TRUE(original_block != fixture.video()->cache_memory_block);
 }
 
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
