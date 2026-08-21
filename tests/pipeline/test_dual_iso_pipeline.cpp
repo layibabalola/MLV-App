@@ -6348,6 +6348,42 @@ TEST(DualIsoPipeline, CacheWorkerClaimsLifetimeBeforeAsyncStart)
     ASSERT_TRUE(stopped);
 }
 
+TEST(DualIsoPipeline, CacheResizeAllocationFailurePreservesPublishedState)
+{
+    struct ScopedCacheResizeFailureReset
+    {
+        ~ScopedCacheResizeFailureReset()
+        {
+            mlvCacheSetResizeAllocationFailureForTesting(-1);
+        }
+    } reset;
+
+    MlvPipelineFixture fixture;
+    QString error;
+    ASSERT_TRUE(fixture.openTinyDualIso(&error));
+    ASSERT_TRUE(error.isEmpty());
+    setMlvRawCacheLimitFrames(fixture.video(), 1);
+    uint16_t * const original_block = fixture.video()->cache_memory_block;
+    uint16_t ** const original_frames = fixture.video()->rgb_raw_frames;
+    const uint64_t original_frame_limit = fixture.video()->cache_limit_frames;
+    const uint64_t original_byte_limit = fixture.video()->cache_limit_bytes;
+
+    for (int allocation_index = 0; allocation_index < 2; ++allocation_index)
+    {
+        mlvCacheSetResizeAllocationFailureForTesting(allocation_index);
+        setMlvRawCacheLimitFrames(fixture.video(), 2);
+        ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+        ASSERT_TRUE(original_frames == fixture.video()->rgb_raw_frames);
+        ASSERT_EQ(original_frame_limit, fixture.video()->cache_limit_frames);
+        ASSERT_EQ(original_byte_limit, fixture.video()->cache_limit_bytes);
+    }
+
+    mlvCacheSetResizeAllocationFailureForTesting(0);
+    clear_mlv_cache(fixture.video());
+    ASSERT_TRUE(original_block == fixture.video()->cache_memory_block);
+    ASSERT_TRUE(original_frames == fixture.video()->rgb_raw_frames);
+}
+
 TEST(DualIsoPipeline, SparseNoiseWindowUsesFiniteFallbackAcrossPublicPaths)
 {
     ScopedDualIsoPhaseEnv phase_env;

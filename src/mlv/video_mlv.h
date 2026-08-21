@@ -319,6 +319,9 @@ void mlvCacheSetAllocationFailureForTesting(int enabled);
 /* Test-only barrier for validating the async launch/count lifetime contract. */
 void mlvCacheSetWorkerStartPauseForTesting(int enabled);
 
+/* Test-only ordinal fault injection for cache resize allocations. */
+void mlvCacheSetResizeAllocationFailureForTesting(int allocation_index);
+
 /* Marks all frames as not cached */
 void mark_mlv_uncached(mlvObject_t * video);
 

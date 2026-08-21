@@ -388,8 +388,12 @@ void disableMlvCaching(mlvObject_t * video)
     while (isMlvObjectCaching(video)) usleep(100);
     /* Remove the memory (it's a tradition in MLV App libraries to leave a couple of bytes) */
     mark_mlv_uncached(video);
-    free(video->cache_memory_block);
-    video->cache_memory_block = malloc(2);
+    uint16_t * replacement = (uint16_t *)malloc(2);
+    if (replacement)
+    {
+        free(video->cache_memory_block);
+        video->cache_memory_block = replacement;
+    }
 }
 
 void enableMlvCaching(mlvObject_t * video)
@@ -401,100 +405,155 @@ void enableMlvCaching(mlvObject_t * video)
 
 /* Hmmmm, did anyone need 2 ways of doing this? */
 
+static int g_mlv_cache_resize_allocation_failure_for_testing = -1;
+
+void mlvCacheSetResizeAllocationFailureForTesting(int allocation_index)
+{
+    g_mlv_cache_resize_allocation_failure_for_testing = allocation_index;
+}
+
+static int mlv_cache_checked_frame_layout(mlvObject_t * video,
+                                          uint64_t * frame_pixels,
+                                          uint64_t * frame_size)
+{
+    if (!video || !frame_pixels || !frame_size)
+        return 0;
+    const int width = getMlvWidth(video);
+    const int height = getMlvHeight(video);
+    if (width <= 0 || height <= 0)
+        return 0;
+    const uint64_t checked_width = (uint64_t)width;
+    const uint64_t checked_height = (uint64_t)height;
+    if (checked_width > UINT64_MAX / checked_height)
+        return 0;
+    const uint64_t pixels = checked_width * checked_height;
+    if (pixels > UINT64_MAX / 3u)
+        return 0;
+    const uint64_t rgb_pixels = pixels * 3u;
+    if (rgb_pixels > UINT64_MAX / sizeof(uint16_t))
+        return 0;
+    *frame_pixels = rgb_pixels;
+    *frame_size = rgb_pixels * sizeof(uint16_t);
+    return 1;
+}
+
+static int mlv_cache_resize_transactional(mlvObject_t * video,
+                                          uint64_t frame_limit,
+                                          uint64_t cache_limit_bytes,
+                                          uint64_t cache_limit_mb,
+                                          uint64_t frame_pixels,
+                                          uint64_t frame_size)
+{
+    if (!video
+        || frame_limit > SIZE_MAX / sizeof(uint16_t *)
+        || (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit))
+    {
+        return 0;
+    }
+    const uint64_t block_bytes_u64 = frame_size * frame_limit;
+    if (block_bytes_u64 > SIZE_MAX)
+        return 0;
+    const size_t block_bytes = block_bytes_u64 ? (size_t)block_bytes_u64 : 2u;
+    const size_t pointer_bytes = frame_limit
+        ? (size_t)frame_limit * sizeof(uint16_t *)
+        : sizeof(uint16_t *);
+
+    uint16_t * replacement_block =
+        g_mlv_cache_resize_allocation_failure_for_testing == 0
+        ? NULL
+        : (uint16_t *)malloc(block_bytes);
+    uint16_t ** replacement_frames =
+        g_mlv_cache_resize_allocation_failure_for_testing == 1
+        ? NULL
+        : (uint16_t **)malloc(pointer_bytes);
+    if (!replacement_block || !replacement_frames)
+    {
+        free(replacement_block);
+        free(replacement_frames);
+        return 0;
+    }
+    for (uint64_t i = 0; i < frame_limit; ++i)
+        replacement_frames[i] = replacement_block + (size_t)(frame_pixels * i);
+
+    free(video->cache_memory_block);
+    free(video->rgb_raw_frames);
+    video->cache_memory_block = replacement_block;
+    video->rgb_raw_frames = replacement_frames;
+    video->cache_limit_frames = frame_limit;
+    video->cache_limit_bytes = cache_limit_bytes;
+    video->cache_limit_mb = cache_limit_mb;
+    mark_mlv_uncached(video);
+    return 1;
+}
+
+static void mlv_cache_restart_workers_if_needed(mlvObject_t * video, int restart)
+{
+    if (!restart) return;
+    video->stop_caching = 0;
+    for (int i = 0; i < video->cpu_cores; ++i)
+        add_mlv_cache_thread(video);
+}
+
 /* What I call MegaBytes is actually MebiBytes! I'm so upset to find that out :( */
 void setMlvRawCacheLimitMegaBytes(mlvObject_t * video, uint64_t megaByteLimit)
 {
-    uint64_t frame_pix   = (uint64_t)getMlvWidth(video) * (uint64_t)getMlvHeight(video) * 3u;
-    uint64_t frame_size  = frame_pix * sizeof(uint16_t);
-    uint64_t bytes_limit = megaByteLimit * (1 << 20);
-
-    video->cache_limit_mb = megaByteLimit;
-    video->cache_limit_bytes = bytes_limit;
-
-    /* Protection against zero division, cuz that causes "Floating point exception: 8"... 
-     * ...LOL there's not even a floating point in sight */
-    if (isMlvActive(video) && frame_size != 0)
+    uint64_t frame_pix = 0;
+    uint64_t frame_size = 0;
+    if (!isMlvActive(video)
+        || !mlv_cache_checked_frame_layout(video, &frame_pix, &frame_size)
+        || megaByteLimit > UINT64_MAX / (1u << 20))
     {
-        uint64_t cache_whole = frame_size * getMlvFrames(video);
-        uint64_t frame_limit = MIN(bytes_limit, cache_whole) / frame_size;
-
-        video->cache_limit_frames = frame_limit;
-
-        DEBUG( printf("\nEnough memory allowed to cache %i frames (%i MiB)\n\n", (int)frame_limit, (int)megaByteLimit); )
-
-        /* Stop all cache for a bit */
-        int has_caching = 0;
-        if (!video->stop_caching || isMlvObjectCaching(video))
-        {
-            has_caching = 1;
-            video->stop_caching = 1;
-            while (video->cache_thread_count) usleep(100);
-        }
-
-        /* Resize cache block - to maximum allowed or enough to fit whole clip if it is smaller */
-        video->cache_memory_block = realloc(video->cache_memory_block, MIN(bytes_limit, cache_whole));
-        /* Array of frame pointers within the memory block */
-        video->rgb_raw_frames = realloc(video->rgb_raw_frames, frame_limit * sizeof(uint16_t *));
-        for (uint64_t i = 0; i < getMlvRawCacheLimitFrames(video); ++i) video->rgb_raw_frames[i] = video->cache_memory_block + (frame_pix * i);
-
-        /* Restart caching if it had caching before */
-        if (has_caching)
-        {
-            video->stop_caching = 0;
-            /* Begin updating cached frames */
-            for (int i = 0; i < video->cpu_cores; ++i)
-            {
-                add_mlv_cache_thread(video);
-            }
-        }
+        return;
     }
+    const uint64_t bytes_limit = megaByteLimit * (1u << 20);
+    const uint64_t frame_limit = MIN(bytes_limit / frame_size, getMlvFrames(video));
 
-    /* No else - if video is not active we won't waste RAM */
+    int has_caching = 0;
+    if (!video->stop_caching || isMlvObjectCaching(video))
+    {
+        has_caching = 1;
+        video->stop_caching = 1;
+        while (video->cache_thread_count) usleep(100);
+    }
+    (void)mlv_cache_resize_transactional(video,
+                                         frame_limit,
+                                         bytes_limit,
+                                         megaByteLimit,
+                                         frame_pix,
+                                         frame_size);
+    mlv_cache_restart_workers_if_needed(video, has_caching);
 }
 
 /* Not recommended */
 void setMlvRawCacheLimitFrames(mlvObject_t * video, uint64_t frameLimit)
 {
-    uint64_t frame_pix   = (uint64_t)getMlvWidth(video) * (uint64_t)getMlvHeight(video) * 3u;
-    uint64_t frame_size  = frame_pix * sizeof(uint16_t);
-
-    /* Do only if clip is loaded */
-    if (isMlvActive(video) && frame_size != 0)
+    uint64_t frame_pix = 0;
+    uint64_t frame_size = 0;
+    if (!isMlvActive(video)
+        || !mlv_cache_checked_frame_layout(video, &frame_pix, &frame_size))
     {
-        uint64_t bytes_limit = frame_size * frameLimit;
-        uint64_t mbyte_limit = bytes_limit / (1 << 20);
-        uint64_t cache_whole = frame_size * getMlvFrames(video);
-
-        video->cache_limit_bytes = bytes_limit;
-        video->cache_limit_mb = mbyte_limit;
-        video->cache_limit_frames = frameLimit;
-
-        /* Stop all cache for a bit */
-        int has_caching = 0;
-        if (!video->stop_caching || isMlvObjectCaching(video))
-        {
-            has_caching = 1;
-            video->stop_caching = 1;
-            while (video->cache_thread_count) usleep(100);
-        }
-
-        /* Resize cache block - to maximum allowed or enough to fit whole clip if it is smaller */
-        video->cache_memory_block = realloc(video->cache_memory_block, MIN(bytes_limit, cache_whole));
-        /* Array of frame pointers within the memory block */
-        video->rgb_raw_frames = realloc(video->rgb_raw_frames, frameLimit * sizeof(uint16_t *));
-        for (uint64_t i = 0; i < getMlvRawCacheLimitFrames(video); ++i) video->rgb_raw_frames[i] = video->cache_memory_block + (frame_pix * i);
-
-        /* Restart caching if it had caching before */
-        if (has_caching)
-        {
-            video->stop_caching = 0;
-            /* Begin updating cached frames */
-            for (int i = 0; i < video->cpu_cores; ++i)
-            {
-                add_mlv_cache_thread(video);
-            }
-        }
+        return;
     }
+    const uint64_t frame_limit = MIN(frameLimit, getMlvFrames(video));
+    if (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit)
+        return;
+    const uint64_t bytes_limit = frame_size * frame_limit;
+    const uint64_t mbyte_limit = bytes_limit / (1u << 20);
+
+    int has_caching = 0;
+    if (!video->stop_caching || isMlvObjectCaching(video))
+    {
+        has_caching = 1;
+        video->stop_caching = 1;
+        while (video->cache_thread_count) usleep(100);
+    }
+    (void)mlv_cache_resize_transactional(video,
+                                         frame_limit,
+                                         bytes_limit,
+                                         mbyte_limit,
+                                         frame_pix,
+                                         frame_size);
+    mlv_cache_restart_workers_if_needed(video, has_caching);
 }
 
 /* Marks all frames as not cached */
@@ -515,8 +574,29 @@ void mark_mlv_uncached(mlvObject_t * video)
 void clear_mlv_cache(mlvObject_t * video)
 {
     mark_mlv_uncached(video);
-    free(video->cache_memory_block);
-    video->cache_memory_block = malloc(video->cache_limit_bytes);
+    uint64_t frame_pixels = 0;
+    uint64_t frame_size = 0;
+    const uint64_t frame_limit = MIN(video->cache_limit_frames, getMlvFrames(video));
+    if (!mlv_cache_checked_frame_layout(video, &frame_pixels, &frame_size)
+        || (frame_limit != 0 && frame_size > UINT64_MAX / frame_limit))
+    {
+        return;
+    }
+    const uint64_t block_bytes_u64 = frame_size * frame_limit;
+    if (block_bytes_u64 > SIZE_MAX)
+        return;
+    const size_t bytes = block_bytes_u64 ? (size_t)block_bytes_u64 : 2u;
+    uint16_t * replacement =
+        g_mlv_cache_resize_allocation_failure_for_testing == 0
+        ? NULL
+        : (uint16_t *)malloc(bytes);
+    if (replacement)
+    {
+        free(video->cache_memory_block);
+        video->cache_memory_block = replacement;
+        for (uint64_t i = 0; i < frame_limit; ++i)
+            video->rgb_raw_frames[i] = replacement + (size_t)(frame_pixels * i);
+    }
 }
 
 /* Returns 1 on success, or 0 if all are cached */
