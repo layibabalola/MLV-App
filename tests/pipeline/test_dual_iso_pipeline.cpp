@@ -6790,6 +6790,7 @@ TEST(DualIsoPipeline, CacheEnableCommitsRunningStateOnlyAfterMaterialization)
     ASSERT_TRUE(getMlvRawCacheLimitFrames(fixture.video()) > 0);
     uint16_t * const running_block = fixture.video()->cache_memory_block;
     uint8_t * const running_frames = fixture.video()->cached_frames;
+    uint16_t ** const running_rgb_frames = fixture.video()->rgb_raw_frames;
     const uint64_t running_limit = getMlvRawCacheLimitFrames(fixture.video());
     const uint64_t running_bytes = fixture.video()->cache_limit_bytes;
     const uint64_t running_mb = getMlvRawCacheLimitMegaBytes(fixture.video());
@@ -6800,6 +6801,7 @@ TEST(DualIsoPipeline, CacheEnableCommitsRunningStateOnlyAfterMaterialization)
         ASSERT_TRUE(!mlvCacheShouldStop(fixture.video()));
         ASSERT_TRUE(running_block == fixture.video()->cache_memory_block);
         ASSERT_TRUE(running_frames == fixture.video()->cached_frames);
+        ASSERT_TRUE(running_rgb_frames == fixture.video()->rgb_raw_frames);
         ASSERT_EQ(running_limit, getMlvRawCacheLimitFrames(fixture.video()));
         ASSERT_EQ(running_bytes, fixture.video()->cache_limit_bytes);
         ASSERT_EQ(running_mb, getMlvRawCacheLimitMegaBytes(fixture.video()));
@@ -6943,7 +6945,14 @@ TEST(DualIsoPipeline, CacheTeardownWaitsForAdmittedLifecycleTransaction)
         std::this_thread::yield();
     for (int attempt = 0; attempt < 10000 && !mlvCacheLifecyclePausedForTesting(); ++attempt)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    ASSERT_TRUE(mlvCacheLifecyclePausedForTesting());
+    const bool lifecycle_paused = mlvCacheLifecyclePausedForTesting();
+    if (!lifecycle_paused)
+    {
+        mlvCacheSetLifecyclePauseForTesting(0);
+        clear_thread.join();
+        freeMlvObject(video);
+    }
+    ASSERT_TRUE(lifecycle_paused);
 
     std::atomic<bool> free_started{false};
     std::atomic<bool> free_finished{false};
