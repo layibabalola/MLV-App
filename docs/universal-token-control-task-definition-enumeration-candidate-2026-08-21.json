@@ -1,0 +1,404 @@
+{
+  "schema": "mlv-app-universal-token-control-task-definition-enumeration-candidate/v1",
+  "status": "POINT_IN_TIME_TASK_DEFINITION_RECONCILIATION_ZERO_AUTHORITY",
+  "projectId": "mlv-app",
+  "baseCandidate": {
+    "commit": "06ea3ea5eb1329f59d2e9fdf474485c30b0cc651",
+    "tree": "4b903e38de6d5572bcbc2387ef4031ecb4e0ad9a",
+    "parent": "38ed4bbf9068cac80140297c74facdf522577704",
+    "r35Artifact": {
+      "path": "docs/universal-token-control-launcher-action-graph-census-candidate-2026-08-20.json",
+      "gitBlobOid": "ba0e476429dbf0aad33ea2b96b76986f394673de",
+      "bytes": 21007,
+      "sha256": "52AEF218AC9657F381F9166675722A2083FE525D1B09F4FFB03FDF96F5D4A506"
+    },
+    "r36Artifact": {
+      "path": "docs/universal-token-control-machine-observation-candidate-2026-08-20.json",
+      "gitBlobOid": "ce8fbe6260ef3e491e4916f6b2e8a50a4a0ccae5",
+      "bytes": 10262,
+      "sha256": "A597694E7121C72100654E5085DFEC789290C24DB76E797D7BEAA88F40BF45B3"
+    }
+  },
+  "machineInputs": [
+    {
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\SCHEDULED-TASK-REGISTRY.md",
+      "bytes": 26988,
+      "sha256": "57F0198F462D1CA2E6C3130D4255C6ACFBD762A9448BF4E3AE03623D69BFC3BB",
+      "role": "MACHINE_TASK_PURPOSE_AND_OWNERSHIP_REGISTRY"
+    },
+    {
+      "path": "C:\\Users\\obabalola\\.claude\\machine\\audit-scheduled-tasks.ps1",
+      "bytes": 22496,
+      "sha256": "0BB0CA5A7CB23B71BC309F8005E11C8ACD692A7FEA203DD75C57B2CF9B8979C6",
+      "role": "READ_ONLY_TASK_CENSUS_AUDITOR"
+    }
+  ],
+  "observationBoundary": {
+    "capturedUtc": "2026-08-21T11:24:08.7011238+00:00",
+    "machine": "ULTRA-MAGNUS",
+    "query": "Get-ScheduledTask excluding TaskPath \\Microsoft\\*; Export-ScheduledTask for every result",
+    "relevantSelector": "case-insensitive match of mlv, agent-bridge, or G:\\Temp\\mlv-gpu-profile over task id, action fields, and exported XML",
+    "nonMicrosoftTaskCount": 41,
+    "readableDefinitionCount": 41,
+    "unreadableDefinitionCount": 0,
+    "definitionTuplePreimage": "ordinal taskId TAB UTF8-export-bytes TAB uppercase-SHA256, joined with LF and no trailing LF",
+    "definitionTuplePreimageBytes": 4129,
+    "definitionTupleDigest": "22A5615946247FC65FF031FE3463BD3195C91160DB074C2BCD779EDD5F4B7ECE",
+    "relevantDefinitionCount": 6,
+    "taskDefinitionInventoryCompleteForQuery": true,
+    "launcherInventoryComplete": false,
+    "actionGraphComplete": false,
+    "semanticCompletenessClaimed": false,
+    "pointInTimeOnly": true
+  },
+  "operationalLogBoundary": {
+    "channel": "Microsoft-Windows-TaskScheduler/Operational",
+    "totalEvents": 19088,
+    "firstRecordId": 1761911,
+    "lastRecordId": 1780998,
+    "firstUtc": "2026-08-19T01:07:47.9226063Z",
+    "lastUtc": "2026-08-21T11:24:01.6051565Z",
+    "rollingBuffer": true,
+    "outsideWindowAbsenceProven": false
+  },
+  "relevantDefinitions": [
+    {
+      "taskId": "\\MlvGpuParityAgent",
+      "definition": {
+        "bytes": 1303,
+        "sha256": "91833005A0AFFF7A5614067FC8539762C2F5F7101908524DC71DA5F2FC03EAD2",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Disabled",
+      "enabled": false,
+      "lastTaskResult": 0,
+      "missedRuns": 0,
+      "actions": [
+        {
+          "execute": "powershell",
+          "arguments": "-NoProfile -ExecutionPolicy Bypass -File G:\\Temp\\mlv-gpu-profile\\um-console-agent-bootstrap.ps1",
+          "workingDirectory": ""
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskTimeTrigger",
+          "enabled": true,
+          "startBoundary": "2026-07-06T00:00:00",
+          "repetitionInterval": "",
+          "repetitionDuration": ""
+        }
+      ],
+      "history": {
+        "eventCount": 0,
+        "eventIdCounts": [],
+        "event201ResultCodeZeroCount": 0,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": null,
+        "lastRecordId": null,
+        "firstUtc": null,
+        "lastUtc": null
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_RETIRED_ONE_SHOT_NOT_R35_MLV_APP_EDGE"
+    },
+    {
+      "taskId": "\\MlvGpuParityAgentOnLogon",
+      "definition": {
+        "bytes": 1282,
+        "sha256": "47C18DE51283142281132A24DD04ABD2A249323361E8EFCCE79738557BFA67A5",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Ready",
+      "enabled": true,
+      "lastTaskResult": 0,
+      "missedRuns": 0,
+      "actions": [
+        {
+          "execute": "powershell",
+          "arguments": "-NoProfile -ExecutionPolicy Bypass -File G:\\Temp\\mlv-gpu-profile\\um-console-agent-bootstrap.ps1",
+          "workingDirectory": ""
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskLogonTrigger",
+          "enabled": true,
+          "startBoundary": "2026-06-16T23:30:00",
+          "repetitionInterval": "",
+          "repetitionDuration": ""
+        }
+      ],
+      "history": {
+        "eventCount": 0,
+        "eventIdCounts": [],
+        "event201ResultCodeZeroCount": 0,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": null,
+        "lastRecordId": null,
+        "firstUtc": null,
+        "lastUtc": null
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_LOGON_BOOTSTRAP_NOT_R35_MLV_APP_EDGE"
+    },
+    {
+      "taskId": "\\MlvGpuProfileAgent",
+      "definition": {
+        "bytes": 1356,
+        "sha256": "F063CF17A657ABD9FF90E31CC8722F2C78FE02BFEA65E08A5FB0136BF2C27A40",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Disabled",
+      "enabled": false,
+      "lastTaskResult": 267014,
+      "missedRuns": 0,
+      "actions": [
+        {
+          "execute": "\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"",
+          "arguments": "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"G:\\Temp\\mlv-gpu-profile\\agent\\ultra-magnus-agent.ps1\"",
+          "workingDirectory": ""
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskLogonTrigger",
+          "enabled": true,
+          "startBoundary": "2026-07-01T07:18:00",
+          "repetitionInterval": "",
+          "repetitionDuration": ""
+        }
+      ],
+      "history": {
+        "eventCount": 0,
+        "eventIdCounts": [],
+        "event201ResultCodeZeroCount": 0,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": null,
+        "lastRecordId": null,
+        "firstUtc": null,
+        "lastUtc": null
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_SUPERSEDED_V1_NOT_R35_MLV_APP_EDGE"
+    },
+    {
+      "taskId": "\\MlvGpuProfileAgentV2",
+      "definition": {
+        "bytes": 1595,
+        "sha256": "4329E7BD0225D4FA0696D6A8409FD17863FD1CD771A4D08221758D56727F9E93",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Running",
+      "enabled": true,
+      "lastTaskResult": 267009,
+      "missedRuns": 0,
+      "actions": [
+        {
+          "execute": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+          "arguments": "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File \"G:\\Temp\\mlv-gpu-profile\\agent\\ultra-magnus-agent.ps1\"",
+          "workingDirectory": "G:\\Temp\\mlv-gpu-profile\\agent"
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskLogonTrigger",
+          "enabled": true,
+          "startBoundary": "",
+          "repetitionInterval": "",
+          "repetitionDuration": ""
+        }
+      ],
+      "history": {
+        "eventCount": 0,
+        "eventIdCounts": [],
+        "event201ResultCodeZeroCount": 0,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": null,
+        "lastRecordId": null,
+        "firstUtc": null,
+        "lastUtc": null
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_RESIDENT_AGENT_NOT_R35_MLV_APP_EDGE"
+    },
+    {
+      "taskId": "\\MlvGpuProfileAgentWatchdog",
+      "definition": {
+        "bytes": 1442,
+        "sha256": "04CBF66D76A308BB61AEA423D465266AD14997866149DD8BDF1C0749A45664C0",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Disabled",
+      "enabled": false,
+      "lastTaskResult": 0,
+      "missedRuns": 4245,
+      "actions": [
+        {
+          "execute": "\"c:\\program files\\powershell\\7\\pwsh.exe\"",
+          "arguments": "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"G:\\Temp\\mlv-gpu-profile\\agent\\um-agent-watchdog.ps1\"",
+          "workingDirectory": ""
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskTimeTrigger",
+          "enabled": true,
+          "startBoundary": "2026-07-10T14:00:00",
+          "repetitionInterval": "PT10M",
+          "repetitionDuration": ""
+        }
+      ],
+      "history": {
+        "eventCount": 0,
+        "eventIdCounts": [],
+        "event201ResultCodeZeroCount": 0,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": null,
+        "lastRecordId": null,
+        "firstUtc": null,
+        "lastUtc": null
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_SUPERSEDED_WATCHDOG_NOT_R35_MLV_APP_EDGE"
+    },
+    {
+      "taskId": "\\MlvGpuProfileAgentWatchdogV2",
+      "definition": {
+        "bytes": 1934,
+        "sha256": "139EEE446D29FFF021A96495F12B35F3ACB3906F7A4C96255AF8C49129710979",
+        "readOutcome": "READ_EXPORTED_HASHED"
+      },
+      "state": "Ready",
+      "enabled": true,
+      "lastTaskResult": 0,
+      "missedRuns": 0,
+      "actions": [
+        {
+          "execute": "wscript.exe",
+          "arguments": "\"G:\\Temp\\mlv-gpu-profile\\agent\\run-hidden.vbs\" /wait \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"G:\\Temp\\mlv-gpu-profile\\agent\\watch-ultra-magnus-agent.ps1\" -Root \"G:\\Temp\\mlv-gpu-profile\\agent\" -AgentScript \"G:\\Temp\\mlv-gpu-profile\\agent\\ultra-magnus-agent.ps1\" -TaskName \"MlvGpuProfileAgentV2\" -Restart",
+          "workingDirectory": ""
+        }
+      ],
+      "triggers": [
+        {
+          "cimClass": "MSFT_TaskTimeTrigger",
+          "enabled": true,
+          "startBoundary": "2026-07-22T18:03:59-05:00",
+          "repetitionInterval": "PT5M",
+          "repetitionDuration": "P3650D"
+        }
+      ],
+      "history": {
+        "eventCount": 4200,
+        "eventIdCounts": [
+          { "eventId": 100, "count": 700 },
+          { "eventId": 102, "count": 700 },
+          { "eventId": 107, "count": 700 },
+          { "eventId": 129, "count": 700 },
+          { "eventId": 200, "count": 700 },
+          { "eventId": 201, "count": 700 }
+        ],
+        "event201ResultCodeZeroCount": 700,
+        "event201NonzeroOrMissingResultCount": 0,
+        "firstRecordId": 1761918,
+        "lastRecordId": 1780998,
+        "firstUtc": "2026-08-19T01:08:59.4081914Z",
+        "lastUtc": "2026-08-21T11:24:01.6051565Z"
+      },
+      "reconciliation": "SEPARATE_MLV_GPU_BENCH_WATCHDOG_NOT_R35_MLV_APP_EDGE"
+    }
+  ],
+  "r35EdgeReconciliation": [
+    {
+      "edgeIds": ["EDGE-01", "EDGE-02", "EDGE-03", "EDGE-04"],
+      "reportedTask": "MLV-LaneIgnitionWatchdog",
+      "exactDefinitionMatchCount": 0,
+      "substringDefinitionMatchCount": 0,
+      "outcome": "NOT_PRESENT_IN_COMPLETE_41_DEFINITION_QUERY_AT_CAPTURE",
+      "absenceScope": "POINT_IN_TIME_TASK_DEFINITION_QUERY_ONLY",
+      "globalAbsenceCredit": false
+    },
+    {
+      "edgeIds": ["EDGE-05", "EDGE-06"],
+      "reportedTask": "mlv-app-dual-lane-codex-liveness",
+      "exactDefinitionMatchCount": 0,
+      "substringDefinitionMatchCount": 0,
+      "outcome": "NOT_A_WINDOWS_TASK_IN_COMPLETE_41_DEFINITION_QUERY_AT_CAPTURE",
+      "absenceScope": "CODEX_AUTOMATION_DEFINITION_NOT_ENUMERATED_HERE",
+      "globalAbsenceCredit": false
+    },
+    {
+      "edgeIds": ["EDGE-07", "EDGE-08"],
+      "reportedTask": "APP_STORE_WAKE_AND_MIRROR_FAMILIES",
+      "exactDefinitionMatchCount": 0,
+      "substringDefinitionMatchCount": 0,
+      "outcome": "NO_CURRENT_WINDOWS_TASK_DEFINITION_MATCH_AT_CAPTURE",
+      "absenceScope": "RETIRED_RECEIPTS_NOT_IMPORTED",
+      "globalAbsenceCredit": false
+    },
+    {
+      "edgeIds": ["EDGE-09", "EDGE-10", "EDGE-11", "EDGE-12", "EDGE-13", "EDGE-14", "EDGE-15", "EDGE-16", "EDGE-17", "EDGE-18"],
+      "reportedTask": null,
+      "exactDefinitionMatchCount": 0,
+      "substringDefinitionMatchCount": 0,
+      "outcome": "TRACKED_OR_MUTABLE_NON_SCHEDULER_EDGES_OUTSIDE_THIS_QUERY",
+      "absenceScope": "NO_ABSENCE_OR_COMPLETENESS_CREDIT",
+      "globalAbsenceCredit": false
+    }
+  ],
+  "closedFinding": {
+    "finding": "All six current MLV-named or MLV-targeting Windows task definitions belong to the separately registered MLV GPU profile bench; none is the R35 MLV-App lane watchdog, Codex automation, retired app-store family, tracked watcher, direct provider, or direct turn-start edge.",
+    "currentWindowsTaskDefinitionGapClosed": true,
+    "currentWindowsTaskHistoryGapClosedForRelevantDefinitions": true,
+    "mlvAppUniversalControlInstalled": false,
+    "currentClosedGateProofCredited": false,
+    "projectOwnerDispositionPublished": false,
+    "adoptionCredit": false
+  },
+  "uncreditedProofs": [
+    "CURRENT_CODEX_AUTOMATION_DEFINITIONS_AND_EXECUTOR_INTERNAL_CHAIN",
+    "RETIRED_APP_STORE_WAKE_AND_MIRROR_RECEIPTS",
+    "CURRENT_SERVICES_STARTUP_FOLDERS_RUN_KEYS_AND_ALTERNATE_USER_PROFILES",
+    "CURRENT_MUTABLE_WATCHER_CONFIG_AND_SHARED_AGENT_BRIDGE_STATE",
+    "UNTRACKED_IGNORED_AND_DIRECT_CLI_LAUNCHERS",
+    "COMPLETE_LAUNCHER_INVENTORY",
+    "COMPLETE_ACTION_GRAPH",
+    "EXACT_MODEL_EFFORT_ROLE_BINDING",
+    "QUALITY_EQUIVALENCE",
+    "FUNCTIONALITY_EQUIVALENCE",
+    "CURRENT_CLOSED_GATE_PROOF",
+    "INSTALLATION",
+    "RUNTIME_ACTIVATION",
+    "PROJECT_OWNER_DISPOSITION",
+    "ADOPTION"
+  ],
+  "authority": {
+    "projectAdoption": false,
+    "fleetAdoption": false,
+    "dispositionCredit": false,
+    "installation": false,
+    "runtimeActivation": false,
+    "providerInvocation": false,
+    "authenticationAction": false,
+    "processSpawnResumeKill": false,
+    "schedulerOrTaskMutation": false,
+    "automationMutation": false,
+    "launcherMutation": false,
+    "automaticGateMutation": false,
+    "canaryCredit": false,
+    "mergeLandingPushRelease": false,
+    "qualityCredit": false,
+    "functionalityCredit": false,
+    "completenessCredit": false,
+    "absenceCredit": false
+  },
+  "nextLawfulStep": {
+    "kind": "PROJECT_OWNED_EXACT_CLOSED_SUPERVISOR_AND_REQUEST_ENVELOPE_SOURCE_CANDIDATE",
+    "scope": "Implement a tracked, fail-closed MLV-App supervisor/request envelope for the accepted R35 direct-turn and provider edges, binding exact model, effort, role, subject tuples, one-use authorization, and CLOSED-by-default behavior without installing or invoking it.",
+    "requiredOutput": "Forward-only tracked source, provider-free hostile controls, exact rollback/install design, semanticCompletenessClaimed=false, and every authority/adoption/runtime credit false pending independent review and a separate install transaction.",
+    "forbiddenActions": [
+      "PROVIDER_OR_AUTH_INVOCATION",
+      "PROCESS_SPAWN_RESUME_OR_KILL",
+      "TASK_AUTOMATION_LAUNCHER_OR_GATE_MUTATION",
+      "LEASE_PACKET_QUEUE_OR_RUNTIME_MUTATION",
+      "MACHINE_FILE_MUTATION",
+      "ADOPTION_INSTALLATION_CANARY_OR_DISPOSITION_CREDIT"
+    ]
+  }
+}
